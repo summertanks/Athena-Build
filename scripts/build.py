@@ -1,9 +1,14 @@
 # (C) Athena Linux Project
+import bz2
+import gzip
 import re
 import argparse
 import json
 
 from collections import Counter
+from pathlib import Path
+
+from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
@@ -19,11 +24,125 @@ import configparser
 consolidated_source = 0
 
 
-def download_source(file_list, download_dir, download_size, total_download_progress, download_progress):
-    base_url = "http://deb.debian.org/debian/"
+def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
+    total_size = 0
+    cache_files = {}
+
+    base_url = 'http://' + baseurl + '/' + baseid + '/dists/' + basecodename
+    basefilename = baseurl + '_' + baseid + '_dists_' + basecodename
+
+    release_url = base_url + '/InRelease'
+    release_file = os.path.join(dir_cache, basefilename + '_InRelease')
+
+    try:
+        response = requests.head(release_url)
+        file_size = int(response.headers.get('content-length', 0))
+        total_size += file_size
+
+        ctask = cache_progress.add_task("Building Cache     ", total=total_size)
+
+        response = requests.get(release_url, stream=True)
+        if response.status_code == 200:
+            with open(release_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        f.write(chunk)
+                        cache_progress.update(ctask, advance=len(chunk))
+        else:
+            cache_progress.log(f"Error Downloading {base_url}")
+            exit(1)
+    except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+        print(f"Error connecting to {release_url}: {e}")
+
+    # sequence is Packages, Translation & Sources
+    cache_source = [base_url + '/main/binary-' + arch + '/Packages.gz',
+                    base_url + '/main/i18n/Translation-en.bz2',
+                    base_url + '/main/source/Sources.gz']
+
+    cache_filename = ['main/binary-' + arch + '/Packages',
+                      'main/i18n/Translation-en',
+                      'main/source/Sources']
+
+    cache_destination = [os.path.join(dir_cache, basefilename + '_main_binary-' + arch + '_Packages.gz'),
+                         os.path.join(dir_cache, basefilename + '_main_i18n_Translation-en.bz2'),
+                         os.path.join(dir_cache, basefilename + '_main_source_Sources.gz')]
+
+    md5 = []
+
+    try:
+        with open(release_file, 'r') as f:
+            contents = f.read()
+            for file in cache_filename:
+                re_pattern = r' ([a-f0-9]{32}) (\S+) ' + file + '$'
+                match = re.search(re_pattern, contents, re.MULTILINE)
+                if match:
+                    md5.append(match.group(1))
+                else:
+                    cache_progress.log(f"Error finding hash for {file}")
+                    exit(1)
+    except (FileNotFoundError, PermissionError) as e:
+        print(f"Error: {e}")
+        exit(1)
+
+    for file in cache_destination:
+        base = os.path.splitext(file)[0]
+        if os.path.isfile(base):
+            # Open the file and calculate the MD5 hash
+            with open(base, 'rb') as f:
+                fdata = f.read()
+                md5_check = hashlib.md5(fdata).hexdigest()
+        else:
+            md5_check = ''
+
+        index = cache_destination.index(file)
+        if md5[index] != md5_check:
+            try:
+                response = requests.head(cache_source[index])
+                file_size = int(response.headers.get('content-length', 0))
+                total_size += file_size
+                cache_progress.update(ctask, total=total_size)
+                response = requests.get(cache_source[index], stream=True)
+                if response.status_code == 200:
+                    with open(cache_destination[index], 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=1024):
+                            if chunk:
+                                f.write(chunk)
+                                cache_progress.update(ctask, advance=len(chunk))
+                else:
+                    cache_progress.log(f"Error Downloading {cache_source[index]}")
+                    exit(1)
+            except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+                print(f"Error connecting to {cache_source[index]}: {e}")
+
+            base, ext = os.path.splitext(file)
+            if ext == '.gz':
+                with gzip.open(file, 'rb') as f_in:
+                    with open(base, 'wb') as f_out:
+                        f_out.write(f_in.read())
+            elif ext == '.bz2':
+                with bz2.BZ2File(file, 'rb') as f_in:
+                    with open(base, 'wb') as f_out:
+                        f_out.write(f_in.read())
+            else:
+                continue
+
+        cache_files[os.path.basename(cache_filename[index])] = base
+
+    return cache_files
+
+
+def download_source(file_list,
+                    download_dir,
+                    download_size,
+                    baseurl,
+                    baseid,
+                    total_download_progress,
+                    download_progress):
+    # base_url = "http://deb.debian.org/debian/"
+    base_url = 'http://' + baseurl + '/' + baseid + '/'
     total_files = len(file_list)
 
-    ttask = total_download_progress.add_task("Total Completed    ", total=total_files)
+    ttask = total_download_progress.add_task("Total Files        ", total=total_files)
     ftask = download_progress.add_task("Downloaded         ", total=download_size)
 
     while not download_progress.finished:
@@ -228,43 +347,46 @@ def main():
 
     parser = argparse.ArgumentParser(description='Dependency Parser - Athena Linux')
     parser.add_argument('--config-file', type=str, help='Specify Configs File', required=True)
-
-    parser.add_argument('--depends-file', type=str, help='Specify Depends File', required=True)
     parser.add_argument('--pkg-list', type=str, help='Specify Required Pkg File', required=True)
-    parser.add_argument('--source-file', type=str, help='Specify Source File', required=True)
-    parser.add_argument('--output-file', type=str, help='Output File', required=True)
-    parser.add_argument('--download-dir', type=str, help='Dir to download source files', required=True)
+    parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=True)
 
     args = parser.parse_args()
+    working_dir = os.path.abspath(args.working_dir)
 
-    config_parser.read(args.config_file)
+    config_path = os.path.join(working_dir, args.config_file)
+    pkglist_path = os.path.join(working_dir, args.pkg_list)
 
     try:
-        with open(args.depends_file, 'r') as f:
-            contents = f.read()
-            package_record = contents.split('\n\n')
-    except (FileNotFoundError, PermissionError) as e:
-        print(f"Error: {e}")
+        config_parser.read(config_path)
+
+        arch = config_parser.get('Build', 'ARCH')
+        baseurl = config_parser.get('Base', 'baseurl')
+        basecodename = config_parser.get('Base', 'BASECODENAME')
+        baseid = config_parser.get('Base', 'BASEID')
+        baseversion = config_parser.get('Base', 'BASEVERSION')
+        build_codename = config_parser.get('Build', 'CODENAME')
+        build_version = config_parser.get('Build', 'VERSION')
+
+        dir_download = os.path.join(working_dir, config_parser.get('Directories', 'Download'))
+        dir_log = os.path.join(working_dir, config_parser.get('Directories', 'Log'))
+        dir_cache = os.path.join(working_dir, config_parser.get('Directories', 'Cache'))
+        dir_temp = os.path.join(working_dir, config_parser.get('Directories', 'Temp'))
+
+    except configparser.Error as e:
+        print(f"Athena Linux: Config Parser Error: {e}")
         exit(1)
 
     try:
-        with open(args.pkg_list, 'r') as f:
+        with open(pkglist_path, 'r') as f:
             contents = f.read()
             required_package = contents.split('\n')
     except (FileNotFoundError, PermissionError) as e:
         print(f"Error: {e}")
         exit(1)
 
-    try:
-        with open(args.source_file, 'r') as f:
-            contents = f.read()
-            source_records = contents.split('\n\n')
-    except (FileNotFoundError, PermissionError) as e:
-        print(f"Error: {e}")
-        exit(1)
-
     # Setting up Progress Meter
-    task_description = ["Parse Dependencies ",
+    task_description = ["Build Cache        ",
+                        "Parse Dependencies ",
                         "Multidep Check     ",
                         "Identifying Source ",
                         "Downloading Source ",
@@ -273,6 +395,7 @@ def main():
 
     overall_progress = Progress(TextColumn("Step {task.completed} of {task.total} - {task.description}"),
                                 TaskProgressColumn())
+    cache_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     dependency_progress = Progress(TextColumn("{task.description} {task.total}"), TimeElapsedColumn(), SpinnerColumn())
     source_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
     total_download_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(),
@@ -283,6 +406,7 @@ def main():
     overall_task = overall_progress.add_task("All Jobs", total=len(task_description))
 
     progress_group = Group(Panel(Group(
+        cache_progress,
         dependency_progress,
         source_progress,
         total_download_progress,
@@ -292,8 +416,36 @@ def main():
     with Live(progress_group, refresh_per_second=1) as live:
         while not overall_progress.finished:
             live.console.print("[white]Starting Source Build System for Athena Linux...")
-            # Step I - Parse Dependencies
+            live.console.print("Building for ...")
+            live.console.print(f"\t Arch\t\t\t{arch}")
+            live.console.print(f"\t Parent Distribution\t{basecodename} {baseversion}")
+            live.console.print(f"\t Build Distribution\t{build_codename} {build_version}")
+
+            # Step I - Building Cache
             overall_progress.update(overall_task, description=task_description[0], completed=1)
+            cache_files = build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress)
+
+            package_file = cache_files['Packages']
+            source_file = cache_files['Sources']
+
+            try:
+                with open(package_file, 'r') as f:
+                    contents = f.read()
+                    package_record = contents.split('\n\n')
+            except (FileNotFoundError, PermissionError) as e:
+                print(f"Error: {e}")
+                exit(1)
+
+            try:
+                with open(source_file, 'r') as f:
+                    contents = f.read()
+                    source_records = contents.split('\n\n')
+            except (FileNotFoundError, PermissionError) as e:
+                print(f"Error: {e}")
+                exit(1)
+
+            # Step II - Parse Dependencies
+            overall_progress.update(overall_task, description=task_description[1], completed=2)
             dependency_task = dependency_progress.add_task(task_description[0])
 
             for pkg in required_package:
@@ -316,7 +468,7 @@ def main():
                 live.console.print("Dependency Not Parsed: ", k)
 
             # Step - II Check multipackage dependency
-            overall_progress.update(overall_task, description=task_description[1], completed=2)
+            overall_progress.update(overall_task, description=task_description[2], completed=3)
             source_task = source_progress.add_task(task_description[2])
 
             for section in multi_dep:
@@ -331,7 +483,7 @@ def main():
             live.console.print("Multi Dep Check... Done")
 
             # Step - III Source Code
-            overall_progress.update(overall_task, description=task_description[2], completed=3)
+            overall_progress.update(overall_task, description=task_description[3], completed=4)
             live.console.print("Source requested for : ", len(source_packages), " packages")
             live.console.print("Consolidated Source: ", consolidated_source)
 
@@ -355,7 +507,7 @@ def main():
             live.console.print("Build Dependency required ", len(required_builddep), '/', len(builddep))
 
             try:
-                with open('dep.list', 'w') as f:
+                with open(dir_temp + '/dep.list', 'w') as f:
                     for dep in required_builddep:
                         f.write(dep + ' ')
             except (FileNotFoundError, PermissionError) as e:
@@ -363,23 +515,29 @@ def main():
                 exit(1)
 
             # Step - IV Download Code
-            overall_progress.update(overall_task, description=task_description[3], completed=4)
+            overall_progress.update(overall_task, description=task_description[4], completed=5)
             live.console.print("Total File Selected are :", len(file_list))
             live.console.print("Total Download is about ", round(download_size / (1024 * 1024)), "MB")
             live.console.print("Starting Downloads...")
 
-            download_source(file_list, args.download_dir, download_size, total_download_progress, download_progress)
+            download_source(file_list,
+                            dir_download,
+                            download_size,
+                            baseurl,
+                            baseid,
+                            total_download_progress,
+                            download_progress)
 
             try:
-                with open(args.output_file, 'w') as f:
+                with open(dir_temp + '/filelist.txt', 'w') as f:
                     f.write(json.dumps(file_list))
             except (FileNotFoundError, PermissionError) as e:
                 print(f"Error: {e}")
                 exit(1)
 
             # Step - V Expanding the Source Packages
-            overall_progress.update(overall_task, description=task_description[4], completed=5)
-            with open("logfile.log", "w") as logfile:
+            overall_progress.update(overall_task, description=task_description[5], completed=6)
+            with open(dir_log + '/logfile.log', "w") as logfile:
                 dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
                 debsource_task = debsource_progress.add_task(task_description[4], total=len(dsc_files))
                 for file in dsc_files:
@@ -391,7 +549,7 @@ def main():
                     debsource_progress.advance(debsource_task)
 
             # Mark everything as completed
-            overall_progress.update(overall_task, description=task_description[5], completed=6)
+            overall_progress.update(overall_task, description=task_description[6], completed=7)
 
 
 # Main function
