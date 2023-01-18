@@ -23,17 +23,26 @@ import configparser
 consolidated_source = 0
 
 
-def download_file(url: str, filename: str, progressbar: Progress, task) -> None:
-    """Download fine and updates progressbar in incremental manner.
-            Args:
-                url (str): url to download file from, protocol is prepended
-                filename: (str): Filename to save to, location should be writable
-                progressbar: (rich.Progress): Progressbar to update
-                task: (rich.task_id): task for the progressbar
+class BaseDistribution:
+    def __init__(self, url: str, id: str, codename: str, version: str, arch: str):
+        self.url = url
+        self.id = id
+        self.codename = codename
+        self.version = version
+        self.arch = arch
 
-            Returns:
-                None
-            """
+
+def download_file(url: str, filename: str, progressbar: Progress, task) -> None:
+    """Download file and updates progressbar in incremental manner.
+        Args:
+            url (str): url to download file from, protocol is prepended
+            filename: (str): Filename to save to, location should be writable
+            progressbar: (rich.Progress): Progressbar to update
+            task: (rich.task_id): task for the progressbar
+
+        Returns:
+            None
+    """
     total_size = progressbar.tasks[task].total
     try:
         response = requests.head(url)
@@ -57,13 +66,24 @@ def download_file(url: str, filename: str, progressbar: Progress, task) -> None:
         exit(1)
 
 
-def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
+def build_cache(base: BaseDistribution, dir_cache: str, cache_progress: Progress) -> dict[str, str]:
+    """Download file and updates progressbar in incremental manner.
+        Args:
+            base (BaseDistribution): details of the system being derived from
+            dir_cache: (str): Dir where cache files are to be downloaded
+            cache_progress: (rich.Progress): Progressbar to update
+
+        Returns:
+            None
+    """
     total_size = 0
     cache_files = {}
 
-    base_url = 'http://' + baseurl + '/' + baseid + '/dists/' + basecodename
-    basefilename = baseurl + '_' + baseid + '_dists_' + basecodename
+    # TODO: Support https
+    base_url = 'http://' + base.url + '/' + base.id + '/dists/' + base.codename
+    basefilename = base.url + '_' + base.id + '_dists_' + base.codename
 
+    # Default release file
     release_url = base_url + '/InRelease'
     release_file = os.path.join(dir_cache, basefilename + '_InRelease')
 
@@ -75,15 +95,16 @@ def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
 
     # sequence is Packages, Translation & Sources
     # you change it you break it
-    cache_source = [base_url + '/main/binary-' + arch + '/Packages.gz',
+    # TODO: Enable to be configurable, should not hardcode
+    cache_source = [base_url + '/main/binary-' + base.arch + '/Packages.gz',
                     base_url + '/main/i18n/Translation-en.bz2',
                     base_url + '/main/source/Sources.gz']
 
-    cache_filename = ['main/binary-' + arch + '/Packages',
+    cache_filename = ['main/binary-' + base.arch + '/Packages',
                       'main/i18n/Translation-en',
                       'main/source/Sources']
 
-    cache_destination = [os.path.join(dir_cache, basefilename + '_main_binary-' + arch + '_Packages.gz'),
+    cache_destination = [os.path.join(dir_cache, basefilename + '_main_binary-' + base.arch + '_Packages.gz'),
                          os.path.join(dir_cache, basefilename + '_main_i18n_Translation-en.bz2'),
                          os.path.join(dir_cache, basefilename + '_main_source_Sources.gz')]
 
@@ -382,6 +403,8 @@ def main():
         build_codename = config_parser.get('Build', 'CODENAME')
         build_version = config_parser.get('Build', 'VERSION')
 
+        base_distribution = BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
+
         dir_download = os.path.join(working_dir, config_parser.get('Directories', 'Download'))
         dir_log = os.path.join(working_dir, config_parser.get('Directories', 'Log'))
         dir_cache = os.path.join(working_dir, config_parser.get('Directories', 'Cache'))
@@ -419,8 +442,6 @@ def main():
     download_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     debsource_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
 
-    overall_task = overall_progress.add_task("All Jobs", total=len(task_description))
-
     progress_group = Group(Panel(Group(
         cache_progress,
         dependency_progress,
@@ -430,156 +451,156 @@ def main():
         debsource_progress), title="Progress", title_align="left"), overall_progress)
 
     with Live(progress_group, refresh_per_second=1) as live:
-        while not overall_progress.finished:
-            live.console.print("[white]Starting Source Build System for Athena Linux...")
-            live.console.print("Building for ...")
-            live.console.print(f"\t Arch\t\t\t{arch}")
-            live.console.print(f"\t Parent Distribution\t{basecodename} {baseversion}")
-            live.console.print(f"\t Build Distribution\t{build_codename} {build_version}")
+        live.console.print("[white]Starting Source Build System for Athena Linux...")
+        live.console.print("Building for ...")
+        live.console.print(f"\t Arch\t\t\t{arch}")
+        live.console.print(f"\t Parent Distribution\t{basecodename} {baseversion}")
+        live.console.print(f"\t Build Distribution\t{build_codename} {build_version}")
+        overall_task = overall_progress.add_task("All Jobs", total=len(task_description))
 
-            # Step I - Building Cache
-            overall_progress.update(overall_task, description=task_description[0], completed=1)
-            cache_files = build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress)
+        # Step I - Building Cache
+        overall_progress.update(overall_task, description=task_description[0])
+        cache_files = build_cache(base_distribution, dir_cache, cache_progress)
 
-            package_file = cache_files['Packages']
-            source_file = cache_files['Sources']
+        package_file = cache_files['Packages']
+        source_file = cache_files['Sources']
 
-            try:
-                with open(package_file, 'r') as f:
-                    contents = f.read()
-                    package_record = contents.split('\n\n')
-            except (FileNotFoundError, PermissionError) as e:
-                print(f"Error: {e}")
-                exit(1)
+        try:
+            with open(package_file, 'r') as f:
+                contents = f.read()
+                package_record = contents.split('\n\n')
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
 
-            try:
-                with open(source_file, 'r') as f:
-                    contents = f.read()
-                    source_records = contents.split('\n\n')
-            except (FileNotFoundError, PermissionError) as e:
-                print(f"Error: {e}")
-                exit(1)
+        try:
+            with open(source_file, 'r') as f:
+                contents = f.read()
+                source_records = contents.split('\n\n')
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
 
-            exit(0)
+        overall_progress.advance(overall_task)
 
-            # Step II - Parse Dependencies
-            overall_progress.update(overall_task, description=task_description[1], completed=2)
-            dependency_task = dependency_progress.add_task(task_description[1])
+        # Step II - Parse Dependencies
+        overall_progress.update(overall_task, description=task_description[1])
+        dependency_task = dependency_progress.add_task(task_description[1])
 
-            for pkg in required_package:
-                if pkg and not pkg.startswith('#') and not pkg.isspace():
-                    if pkg not in selected_packages:
-                        selected_packages[pkg] = -1
-                        parse_dependencies(package_record,
-                                           selected_packages,
-                                           pkg,
-                                           source_packages,
-                                           multi_dep,
-                                           dependency_progress,
-                                           dependency_task)
-                        # required_package[pkg] = selected_packages[pkg]
-            dependency_progress.update(dependency_task, total=len(selected_packages), completed=len(selected_packages))
+        for pkg in required_package:
+            if pkg and not pkg.startswith('#') and not pkg.isspace():
+                if pkg not in selected_packages:
+                    selected_packages[pkg] = -1
+                    parse_dependencies(package_record,
+                                       selected_packages,
+                                       pkg,
+                                       source_packages,
+                                       multi_dep,
+                                       dependency_progress,
+                                       dependency_task)
+                    # required_package[pkg] = selected_packages[pkg]
+        dependency_progress.update(dependency_task, total=len(selected_packages), completed=len(selected_packages))
 
-            live.console.print("Total Packages Selected are :", len(selected_packages))
-            _pkg = [k for k, v in selected_packages.items() if v == -1]
-            for k in _pkg:
-                live.console.print("Dependency Not Parsed: ", k)
+        live.console.print("Total Packages Selected are :", len(selected_packages))
+        _pkg = [k for k, v in selected_packages.items() if v == -1]
+        for k in _pkg:
+            live.console.print("Dependency Not Parsed: ", k)
 
-            # Step - II Check multipackage dependency
-            overall_progress.update(overall_task, description=task_description[2], completed=3)
-            source_task = source_progress.add_task(task_description[2])
+        # Step - II Check multipackage dependency
+        overall_progress.update(overall_task, description=task_description[2], completed=3)
+        source_task = source_progress.add_task(task_description[2])
 
-            for section in multi_dep:
-                found = False
-                for pkgs in section:
-                    arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?', pkgs)
-                    dep_package_name = arr.group(1)
-                    if dep_package_name in selected_packages:
-                        found = True
-                if not found:
-                    live.console.print(f"dependency unresolved between {section}")
-            live.console.print("Multi Dep Check... Done")
+        for section in multi_dep:
+            found = False
+            for pkgs in section:
+                arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?', pkgs)
+                dep_package_name = arr.group(1)
+                if dep_package_name in selected_packages:
+                    found = True
+            if not found:
+                live.console.print(f"dependency unresolved between {section}")
+        live.console.print("Multi Dep Check... Done")
 
-            # Step - III Source Code
-            overall_progress.update(overall_task, description=task_description[3], completed=4)
-            live.console.print("Source requested for : ", len(source_packages), " packages")
-            live.console.print("Consolidated Source: ", consolidated_source)
+        # Step - III Source Code
+        overall_progress.update(overall_task, description=task_description[3], completed=4)
+        live.console.print("Source requested for : ", len(source_packages), " packages")
+        live.console.print("Consolidated Source: ", consolidated_source)
 
-            download_size = parse_sources(source_records,
-                                          source_packages,
-                                          file_list,
-                                          builddep,
-                                          source_progress,
-                                          source_task)
+        download_size = parse_sources(source_records,
+                                      source_packages,
+                                      file_list,
+                                      builddep,
+                                      source_progress,
+                                      source_task)
 
-            _pkg = [k for k, v in source_packages.items() if v == -1]
-            for k in _pkg:
-                live.console.print("Source not found for :", k)
+        _pkg = [k for k, v in source_packages.items() if v == -1]
+        for k in _pkg:
+            live.console.print("Source not found for :", k)
 
-            result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
-            for line in result:
-                match = re.match(r'^ii\s+([^\s:]+)', line)
-                if match:
-                    installed_packages.append(match.group(1))
-            required_builddep = [item for item in builddep if item not in installed_packages]
-            live.console.print("Build Dependency required ", len(required_builddep), '/', len(builddep))
-            if len(required_builddep):
-                live.console.print("[green]WARNING: There are pending Build Dependencies, Manual check is required")
-            try:
-                with open(dir_temp + '/dep.list', 'w') as f:
-                    for dep in required_builddep:
-                        f.write(dep + ' ')
-            except (FileNotFoundError, PermissionError) as e:
-                print(f"Error: {e}")
-                exit(1)
+        result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
+        for line in result:
+            match = re.match(r'^ii\s+([^\s:]+)', line)
+            if match:
+                installed_packages.append(match.group(1))
+        required_builddep = [item for item in builddep if item not in installed_packages]
+        live.console.print("Build Dependency required ", len(required_builddep), '/', len(builddep))
+        if len(required_builddep):
+            live.console.print("[green]WARNING: There are pending Build Dependencies, Manual check is required")
+        try:
+            with open(dir_temp + '/dep.list', 'w') as f:
+                for dep in required_builddep:
+                    f.write(dep + ' ')
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
 
-            # Step - IV Download Code
-            overall_progress.update(overall_task, description=task_description[4], completed=5)
-            live.console.print("Total File Selected are :", len(file_list))
-            live.console.print("Total Download is about ", round(download_size / (1024 * 1024)), "MB")
-            live.console.print("Starting Downloads...")
+        # Step - IV Download Code
+        overall_progress.update(overall_task, description=task_description[4], completed=5)
+        live.console.print("Total File Selected are :", len(file_list))
+        live.console.print("Total Download is about ", round(download_size / (1024 * 1024)), "MB")
+        live.console.print("Starting Downloads...")
 
-            download_source(file_list,
-                            dir_download,
-                            download_size,
-                            baseurl,
-                            baseid,
-                            total_download_progress,
-                            download_progress)
+        download_source(file_list,
+                        dir_download,
+                        download_size,
+                        baseurl,
+                        baseid,
+                        total_download_progress,
+                        download_progress)
 
-            try:
-                with open(dir_temp + '/filelist.txt', 'w') as f:
-                    f.write(json.dumps(file_list))
-            except (FileNotFoundError, PermissionError) as e:
-                print(f"Error: {e}")
-                exit(1)
+        try:
+            with open(dir_temp + '/filelist.txt', 'w') as f:
+                f.write(json.dumps(file_list))
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
 
-            # Step - V Expanding the Source Packages
-            folder_list = []
-            overall_progress.update(overall_task, description=task_description[5], completed=6)
-            try:
-                with open(dir_log + '/logfile.log', "w") as logfile:
-                    dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
-                    debsource_task = debsource_progress.add_task(task_description[5], total=len(dsc_files))
-                    for file in dsc_files:
-                        folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
-                        folder_list.append(folder_name)
-                        dsc_file = os.path.join(dir_download, file)
-                        process = subprocess.Popen(
-                            ["dpkg-source", "-x", dsc_file, folder_name], stdout=logfile, stderr=logfile)
-                        process.wait()
-                        debsource_progress.advance(debsource_task)
+        # Step - V Expanding the Source Packages
+        folder_list = []
+        overall_progress.update(overall_task, description=task_description[5], completed=6)
+        try:
+            with open(dir_log + '/logfile.log', "w") as logfile:
+                dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
+                debsource_task = debsource_progress.add_task(task_description[5], total=len(dsc_files))
+                for file in dsc_files:
+                    folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
+                    folder_list.append(folder_name)
+                    dsc_file = os.path.join(dir_download, file)
+                    process = subprocess.Popen(
+                        ["dpkg-source", "-x", dsc_file, folder_name], stdout=logfile, stderr=logfile)
+                    process.wait()
+                    debsource_progress.advance(debsource_task)
 
-                with open(dir_temp + '/source_folder.list', 'w') as f:
-                    for folder in folder_list:
-                        f.write(folder + '\n')
+            with open(dir_temp + '/source_folder.list', 'w') as f:
+                for folder in folder_list:
+                    f.write(folder + '\n')
 
-            except (FileNotFoundError, PermissionError) as e:
-                print(f"Error: {e}")
-                exit(1)
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
 
-            # Mark everything as completed
-            overall_progress.update(overall_task, description=task_description[6], completed=7)
+        # Mark everything as completed
+        overall_progress.update(overall_task, description=task_description[6], completed=7)
 
 
 # Main function
