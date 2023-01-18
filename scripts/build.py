@@ -6,13 +6,12 @@ import argparse
 import json
 
 from collections import Counter
-from pathlib import Path
 
 from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TransferSpeedColumn, TextColumn, BarColumn, \
+from rich.progress import Task, Progress, SpinnerColumn, TimeElapsedColumn, TransferSpeedColumn, TextColumn, BarColumn, \
     TaskProgressColumn, MofNCompleteColumn, DownloadColumn
 
 import requests
@@ -22,6 +21,40 @@ import subprocess
 import configparser
 
 consolidated_source = 0
+
+
+def download_file(url: str, filename: str, progressbar: Progress, task) -> None:
+    """Download fine and updates progressbar in incremental manner.
+            Args:
+                url (str): url to download file from, protocol is prepended
+                filename: (str): Filename to save to, location should be writable
+                progressbar: (rich.Progress): Progressbar to update
+                task: (rich.task_id): task for the progressbar
+
+            Returns:
+                None
+            """
+    total_size = progressbar.tasks[task].total
+    try:
+        response = requests.head(url)
+        file_size = int(response.headers.get('content-length', 0))
+        total_size += file_size
+
+        progressbar.update(task, total=total_size)
+
+        response = requests.get(url, stream=True)
+        if response.status_code == 200:
+            with open(filename, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        f.write(chunk)
+                        progressbar.update(task, advance=len(chunk))
+        else:
+            progressbar.log(f"Error Downloading {url}")
+            exit(1)
+    except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+        print(f"Error connecting to {url}: {e}")
+        exit(1)
 
 
 def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
@@ -34,27 +67,14 @@ def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
     release_url = base_url + '/InRelease'
     release_file = os.path.join(dir_cache, basefilename + '_InRelease')
 
-    try:
-        response = requests.head(release_url)
-        file_size = int(response.headers.get('content-length', 0))
-        total_size += file_size
+    c_task = cache_progress.add_task("Building Cache".ljust(20, ' '), total=1)
 
-        ctask = cache_progress.add_task("Building Cache     ", total=total_size)
-
-        response = requests.get(release_url, stream=True)
-        if response.status_code == 200:
-            with open(release_file, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024):
-                    if chunk:
-                        f.write(chunk)
-                        cache_progress.update(ctask, advance=len(chunk))
-        else:
-            cache_progress.log(f"Error Downloading {base_url}")
-            exit(1)
-    except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-        print(f"Error connecting to {release_url}: {e}")
+    # By default download
+    # TODO: have override - offline flag
+    download_file(release_url, release_file, cache_progress, c_task)
 
     # sequence is Packages, Translation & Sources
+    # you change it you break it
     cache_source = [base_url + '/main/binary-' + arch + '/Packages.gz',
                     base_url + '/main/i18n/Translation-en.bz2',
                     base_url + '/main/source/Sources.gz']
@@ -69,10 +89,14 @@ def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
 
     md5 = []
 
+    # Extract the md5 for the files
+    # TODO: Enable Optional SHA256 also
     try:
         with open(release_file, 'r') as f:
             contents = f.read()
             for file in cache_filename:
+                #  Typical format - [space] [32 char md5 hash] [space] [file size] [space] [relative path] [eol]
+                #  35eb7de95c102ffbea4818ea91e470962ddafc97ae539384d7f95d2836d7aa2e 45534962 main/binary-amd64/Packages
                 re_pattern = r' ([a-f0-9]{32}) (\S+) ' + file + '$'
                 match = re.search(re_pattern, contents, re.MULTILINE)
                 if match:
@@ -84,7 +108,9 @@ def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
         print(f"Error: {e}")
         exit(1)
 
+    # Iterate over destination files
     for file in cache_destination:
+        # searching for the decompressed files - stripping extensions
         base = os.path.splitext(file)[0]
         if os.path.isfile(base):
             # Open the file and calculate the MD5 hash
@@ -96,24 +122,10 @@ def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
 
         index = cache_destination.index(file)
         if md5[index] != md5_check:
-            try:
-                response = requests.head(cache_source[index])
-                file_size = int(response.headers.get('content-length', 0))
-                total_size += file_size
-                cache_progress.update(ctask, total=total_size)
-                response = requests.get(cache_source[index], stream=True)
-                if response.status_code == 200:
-                    with open(cache_destination[index], 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=1024):
-                            if chunk:
-                                f.write(chunk)
-                                cache_progress.update(ctask, advance=len(chunk))
-                else:
-                    cache_progress.log(f"Error Downloading {cache_source[index]}")
-                    exit(1)
-            except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-                print(f"Error connecting to {cache_source[index]}: {e}")
+            # download given file to location
+            download_file(cache_source[index], cache_destination[index], cache_progress, c_task)
 
+            # decompress file based on extension
             base, ext = os.path.splitext(file)
             if ext == '.gz':
                 with gzip.open(file, 'rb') as f_in:
@@ -124,8 +136,11 @@ def build_cache(baseurl, baseid, basecodename, arch, dir_cache, cache_progress):
                     with open(base, 'wb') as f_out:
                         f_out.write(f_in.read())
             else:
+                # if no ext leave as such
+                # TODO: check if other extensions are required to be supported
                 continue
 
+        # List of cache files are in the sequence specified earlier
         cache_files[os.path.basename(cache_filename[index])] = base
 
     return cache_files
@@ -142,8 +157,8 @@ def download_source(file_list,
     base_url = 'http://' + baseurl + '/' + baseid + '/'
     total_files = len(file_list)
 
-    ttask = total_download_progress.add_task("Total Files        ", total=total_files)
-    ftask = download_progress.add_task("Downloaded         ", total=download_size)
+    t_task = total_download_progress.add_task("Total Files".ljust(20, ' '), total=total_files)
+    f_task = download_progress.add_task("Downloaded".ljust(20, ' '), total=download_size)
 
     while not download_progress.finished:
         for file_name, data in file_list.items():
@@ -169,12 +184,12 @@ def download_source(file_list,
                         for chunk in response.iter_content(chunk_size=1024):
                             if chunk:
                                 f.write(chunk)
-                                download_progress.update(ftask, advance=len(chunk))
+                                download_progress.update(f_task, advance=len(chunk))
                 else:
                     download_progress.log(f"Error Downloading {url}")
             else:
-                download_progress.update(ftask, advance=int(size))
-            total_download_progress.update(ttask, advance=1.0)
+                download_progress.update(f_task, advance=int(size))
+            total_download_progress.update(t_task, advance=1.0)
 
 
 def parse_sources(source_records,
@@ -445,6 +460,8 @@ def main():
                 print(f"Error: {e}")
                 exit(1)
 
+            exit(0)
+
             # Step II - Parse Dependencies
             overall_progress.update(overall_task, description=task_description[1], completed=2)
             dependency_task = dependency_progress.add_task(task_description[1])
@@ -547,7 +564,7 @@ def main():
                     for file in dsc_files:
                         folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
                         folder_list.append(folder_name)
-                        dsc_file = os.path.join(dir_download,  file)
+                        dsc_file = os.path.join(dir_download, file)
                         process = subprocess.Popen(
                             ["dpkg-source", "-x", dsc_file, folder_name], stdout=logfile, stderr=logfile)
                         process.wait()
