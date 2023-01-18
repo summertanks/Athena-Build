@@ -371,6 +371,7 @@ def main():
         dir_log = os.path.join(working_dir, config_parser.get('Directories', 'Log'))
         dir_cache = os.path.join(working_dir, config_parser.get('Directories', 'Cache'))
         dir_temp = os.path.join(working_dir, config_parser.get('Directories', 'Temp'))
+        dir_source = os.path.join(working_dir, config_parser.get('Directories', 'Source'))
 
     except configparser.Error as e:
         print(f"Athena Linux: Config Parser Error: {e}")
@@ -446,7 +447,7 @@ def main():
 
             # Step II - Parse Dependencies
             overall_progress.update(overall_task, description=task_description[1], completed=2)
-            dependency_task = dependency_progress.add_task(task_description[0])
+            dependency_task = dependency_progress.add_task(task_description[1])
 
             for pkg in required_package:
                 if pkg and not pkg.startswith('#') and not pkg.isspace():
@@ -500,12 +501,13 @@ def main():
 
             result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
             for line in result:
-                match = re.match(r'^ii\s+(\S+)', line)
+                match = re.match(r'^ii\s+([^\s:]+)', line)
                 if match:
                     installed_packages.append(match.group(1))
             required_builddep = [item for item in builddep if item not in installed_packages]
             live.console.print("Build Dependency required ", len(required_builddep), '/', len(builddep))
-
+            if len(required_builddep):
+                live.console.print("[green]WARNING: There are pending Build Dependencies, Manual check is required")
             try:
                 with open(dir_temp + '/dep.list', 'w') as f:
                     for dep in required_builddep:
@@ -536,17 +538,28 @@ def main():
                 exit(1)
 
             # Step - V Expanding the Source Packages
+            folder_list = []
             overall_progress.update(overall_task, description=task_description[5], completed=6)
-            with open(dir_log + '/logfile.log', "w") as logfile:
-                dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
-                debsource_task = debsource_progress.add_task(task_description[4], total=len(dsc_files))
-                for file in dsc_files:
-                    folder_name = 'source' + '/' + os.path.splitext(file)[0]
-                    dsc_file = args.download_dir + '/' + file
-                    process = subprocess.Popen(
-                        ["dpkg-source", "-x", dsc_file, folder_name], stdout=logfile, stderr=logfile)
-                    process.wait()
-                    debsource_progress.advance(debsource_task)
+            try:
+                with open(dir_log + '/logfile.log', "w") as logfile:
+                    dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
+                    debsource_task = debsource_progress.add_task(task_description[5], total=len(dsc_files))
+                    for file in dsc_files:
+                        folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
+                        folder_list.append(folder_name)
+                        dsc_file = os.path.join(dir_download,  file)
+                        process = subprocess.Popen(
+                            ["dpkg-source", "-x", dsc_file, folder_name], stdout=logfile, stderr=logfile)
+                        process.wait()
+                        debsource_progress.advance(debsource_task)
+
+                with open(dir_temp + '/source_folder.list', 'w') as f:
+                    for folder in folder_list:
+                        f.write(folder + '\n')
+
+            except (FileNotFoundError, PermissionError) as e:
+                print(f"Error: {e}")
+                exit(1)
 
             # Mark everything as completed
             overall_progress.update(overall_task, description=task_description[6], completed=7)

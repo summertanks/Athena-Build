@@ -1,5 +1,4 @@
 # Graphic Base System#
-xfce4
 
 # Bootloader
 grub-efi-amd64
@@ -83,10 +82,3 @@ media-types
 dconf-gsettings-backend
 gpgv2
 
-# Fonts
-# font package that contains the DejaVu font family
-fonts-dejavu-core
-# Vera font family, which is a high-quality font that is designed to be easy to read on screen
-ttf-bitstream-vera
-# Liberation font family, which are designed to be metrically compatible with the fonts used by Microsoft Windows and Office
-fonts-liberation
