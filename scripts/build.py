@@ -8,7 +8,6 @@ import json
 import os
 import re
 import subprocess
-from collections import Counter
 
 import apt_pkg
 import requests
@@ -28,7 +27,7 @@ class Package:
             raise ValueError(f"Package being created with empty package name")
 
         self._name: str = name
-        self.version: str = '0'
+        self._version: str = '-1'
         self.version_constraints: {} = {}
         self._provides: {} = {}
         self._source: {} = {}
@@ -63,16 +62,16 @@ class Package:
     def provides(self) -> {}:
         return self._provides
 
-    def add_provides(self, provides_string: str):
-        if provides_string == '':
-            return
-        provides = provides_string.split(', ')
+    def add_provides(self, provides: [str]):
         for pkg in provides:
+            if pkg == '':
+                continue
+
             arr = re.search(r' *([^ ]+)(= \(([^)]+)\))?', pkg)
-            if arr.group(1) is not None:
+            if arr is not None:
                 name = arr.group(1)
             else:
-                raise ValueError(f"Incorrect Provides: {provides_string}")
+                raise ValueError(f"Incorrect Provides: {provides}")
 
             version = '0'
             if arr.group(2) is not None:
@@ -111,7 +110,7 @@ class Package:
 
     @property
     def version(self):
-        return self.version
+        return self._version
 
     @version.setter
     def version(self, version: str):
@@ -119,7 +118,7 @@ class Package:
             raise ValueError(f"Incorrect Version Format being set {version}")
 
         # Version is set even if constraints fail
-        self.version = version
+        self._version = version
 
     # TODO: Write function to check version formatting
     def check_version_format(self, version) -> bool:
@@ -127,31 +126,23 @@ class Package:
             pass
         return True
 
-    def add_version_constraint(self, version):
+    def add_version_constraint(self, version, constraint):
         # version can in the form of <constraint> <version number> or just <Version number>
         # <constraints> are in form of =, <<, >>, >=, <=
         # = and !<constraints> will be considered hard assignments
-        _version: str = ''
-        _constraint: str = ''
+        if version == '':
+            return
+        if constraint == '':
+            constraint = '='
 
-        version_strings = version.split(' ')
-        _version = version_strings[0]
+        if constraint not in {'=', '>>', '<<', '>=', '<='}:
+            raise ValueError(f"Unspecified Constraint being set {constraint}")
 
-        if len(version_strings) == 2:
-            # conditional statement present
-            _constraint = version_strings[1]
-        elif len(version_strings) == 1:
-            _constraint = '='
-        else:
-            raise ValueError(f"Version string in incorrect format {version}")
-
-        if _constraint not in {'=', '>>', '<<', '>=', '<='}:
-            raise ValueError(f"Unspecified Constraint being set {_constraint}")
-
-        if not self.check_version_format(_version):
-            raise ValueError(f"Incorrect Version Format being set {_version}")
+        if not self.check_version_format(version):
+            raise ValueError(f"Incorrect Version Format being set {version}")
         # add constraint
-        self.version_constraints[_version] = _constraint
+        # TODO: Check if different constraint is already set
+        self.version_constraints[version] = constraint
 
     def check_version(self, check_version: str) -> bool:
         # check version against the saved constraints
@@ -161,14 +152,20 @@ class Package:
         return True
 
 
-
 class BaseDistribution:
     def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
-        self.url = url
-        self.baseid = id
-        self.codename = codename
-        self.version = version
-        self.arch = arch
+        self.url: str = url
+        self.baseid: str = baseid
+        self.codename: str = codename
+        self.version: str = version
+        self.arch: str = arch
+
+
+def search(re_string: str, base_string: str):
+    _match = re.search(re_string, base_string)
+    if _match is not None:
+        return _match.group(1)
+    return ''
 
 
 def download_file(url: str, filename: str, progressbar: Progress, task) -> None:
@@ -308,11 +305,11 @@ def build_cache(base: BaseDistribution, dir_cache: str, cache_progress: Progress
 
 # Iterative Function
 def parse_dependencies(
-        package_record,
-        source_packages,
-        selected_packages,
-        required_package,
-        multi_dep,
+        package_record: list[str],
+        selected_packages: {},
+        required_package: str,
+        multi_dep: [],
+        source_packages: {},
         dependency_progress,
         dependency_task):
     # Package: Record is typically of the format, other records not shown
@@ -334,123 +331,88 @@ def parse_dependencies(
 
     for _package in package_record:
         # Get Package Name
-        _package_name = re.search(r'Package: ([^\n]+)', _package)
-        if _package_name is None:
-            continue
-        package_name = _package_name.group(1)
+        package_name = search(r'Package: ([^\n]+)', _package)
 
         # Dependencies are Satisfied on Provides also
-        _package_provides = re.search(r'Provides: (\S+)', _package)
-        if _package_provides is None:
-            package_provides = ""
-        else:
-            package_provides = _package_provides.group(1)
+        package_provides = search(r'Provides: (\S+)', _package).split(', ')
 
         # Check id Dependency is satisfied either through 'Package' or 'Provides'
         if required_package != package_name:
             if required_package != package_provides:
                 continue
 
-        # Get Package Version
-        _package_version = re.search(r'Version: (\S+)', _package)
-        if _package_version is not None:
-            package_version = _package_version.group(1)
+        # if not already there, also avoids separate iteration on provides
+        if selected_packages.get(package_name) is None:
+            package = Package(package_name)
+            selected_packages[package_name] = package
         else:
+            package = selected_packages[package_name]
+
+        # Incase version is set, it has already been parsed
+        if not package.version == '-1':
+            break
+
+        # Get Package Version
+        package_version = search(r'Version: (\S+)', _package)
+        if package_version == '':
             raise ValueError(f"There doesnt seem to be a Version \n {_package}")
 
         # Get source if available, else assume the source package is same as package name
         # TODO: Check if this assumption is true
-        _package_source = re.search(r'Source: (\S+)', _package)
-        if _package_source is None:
+        package_source = search(r'Source: (\S+)', _package)
+        if package_source == '':
             package_source = package_name
-        else:
-            package_source = _package_source.group(1)
 
         # Get dependency from both Depends: & Pre-Depends:
-        depends_group = re.search(r'\nDepends: ([^\n]+)', _package)
-        pre_depends_group = re.search(r'\nPre-Depends: ([^\n]+)', _package)
-        depends: str
-        if depends_group is not None:
-            depends += depends_group.group(1)
-        if pre_depends_group is not None:
-            depends += ', ' + pre_depends_group.group(1)
+        depends_group = search(r'\nDepends: ([^\n]+)', _package)
+        pre_depends_group = search(r'\nPre-Depends: ([^\n]+)', _package)
 
-        if selected_packages.get(package_name) is None:
-            package = Package(package_name)
-            package.version = package_version
-            package.add_provides(package_provides)
-            package.source = package_source
+        depends: str = ''
+        depends += depends_group
 
-            selected_packages[package_name] = package
+        # Let's stitch them together, none is mandatory
+        if depends == '':
+            depends = pre_depends_group
+        else:
+            if not pre_depends_group == '':
+                depends += ', ' + pre_depends_group
 
+        # TODO: Check for dependencies that can be satisfied by multiple packages
+        _depends = depends.split(', ')
+        for _dep in _depends:
+            multi = re.search(r'\|', _dep)
+            if multi is not None:
+                multi_dep.append(re.split(' \| ', _dep))
+                continue
 
+        package.version = package_version
+        package.source = package_source
+        package.add_provides(package_provides)
+        package.add_depends(depends)
 
-        # If Not already parsed, un-parsed packages are set as -1
-        if selected_packages.get(required_package) == -1:
-            # Mark as Parsed by setting version
-            selected_packages[required_package] = package_version
+        # Update Progress bar
+        # completed = Counter(selected_packages.values().version)[-1]
+        # dependency_progress.update(dependency_task, total=len(selected_packages), completed=completed)
 
-            # setting the same for package provides is not same as package_name
-            # Saves the situation where there is a separate iteration for 'provides'
-            if package_provides != "" and package_name != package_provides:
-                selected_packages[package_provides] = package_version
+        # skip the ones which have more than one packages satisfying dependency
+        parsed_depends = [sublist[0] for sublist in package.depends if len(sublist) == 1]
+        for _pkg in parsed_depends:
+            # _pkg is usually in [name, version, constraint] tuple format
+            dep_package_name = _pkg[0]
 
-            # Update Progress bar
-            completed = Counter(selected_packages.values())[-1]
-            dependency_progress.update(dependency_task, total=len(selected_packages), completed=completed)
-
-            # Get Source
-            # not all packages have sources ???
-            _package_source = re.search(r'Source: ([^\s]+)', _package)
-            if _package_source is None:
-                package_source = package_name
-            else:
-                package_source = _package_source.group(1)
-
-            if source_packages.get(package_source):
-                consolidated_source += 1
-            else:
-                source_packages[package_source] = -1
-
-            # Get dependency from both Depends: & Pre-Depends:
-            depends_group = re.search(r'\nDepends: ([^\n]+)', _package)
-            pre_depends_group = re.search(r'\nPre-Depends: ([^\n]+)', _package)
-
-
-            depends = []
-            if depends_group is not None:
-                depends.extend(re.split(", ", depends_group.group(1)))
-            if pre_depends_group is not None:
-                depends.extend(re.split(", ", pre_depends_group.group(1)))
-
-            # If Dependencies exist
-            if len(depends) != 0:
-                for dep in depends:
-                    # check if the package defined as ':any', assume that as no version given
-                    dep = re.sub(':any', '', dep)
-
-                    # Check for dependencies that can be satisfied by multiple packages
-                    multi = re.search(r'\|', dep)
-                    if multi is not None:
-                        multi_dep.append(re.split(' \| ', dep))
-                        continue
-
-                    arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?', dep)
-                    dep_package_name = arr.group(1)
-
-                    dep_package_version = 0
-                    if arr.group(2) is not None:
-                        dep_package_version = arr.group(3)
-                    if dep_package_name not in selected_packages:
-                        selected_packages[dep_package_name] = -1
-                        parse_dependencies(
-                            package_record,
-                            selected_packages,
-                            dep_package_name,
-                            source_packages,
-                            multi_dep,
-                            dependency_progress,
-                            dependency_task)
+            # Check if not already parsed
+            if selected_packages.get(dep_package_name) is None:
+                _package = Package(dep_package_name)
+                selected_packages[dep_package_name] = _package
+                parse_dependencies(
+                    package_record,
+                    selected_packages,
+                    dep_package_name,
+                    multi_dep,
+                    source_packages,
+                    dependency_progress,
+                    dependency_task)
+            selected_packages[dep_package_name].add_version_constraint(_pkg[1], _pkg[2])
         break
 
 
@@ -557,7 +519,8 @@ def parse_sources(source_records,
 
 
 def main():
-    selected_packages = {}
+    selected_packages = {str: Package}
+
     source_packages = {}
     multi_dep = []
     file_list = {}
@@ -681,17 +644,15 @@ def main():
         for pkg in required_packages:
             if pkg and not pkg.startswith('#') and not pkg.isspace():
                 # Skip if added from previously parsed dependency tree
-                if pkg not in selected_packages:
+                if pkg not in selected_packages.keys():
                     # remove spaces
                     pkg = pkg.strip()
-                    # Marked required but not parsed
-                    selected_packages[pkg] = -1
 
                     parse_dependencies(package_record,
-                                       source_packages,
                                        selected_packages,
                                        pkg,
                                        multi_dep,
+                                       source_packages,
                                        dependency_progress,
                                        dependency_task)
                     # required_package[pkg] = selected_packages[pkg]
