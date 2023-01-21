@@ -88,7 +88,7 @@ fi
 
 # Checking awk
 if [ -x /usr/bin/awk ]; then
-	echo Using `/usr/bin/awk -W version | head -n1`
+	echo Using `/usr/bin/awk --version | head -n1`
 else
 	echo "E: awk not found, build script will not work" > /dev/stderr
 	exit 1

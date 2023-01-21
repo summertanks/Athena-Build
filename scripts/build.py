@@ -1,32 +1,145 @@
 # (C) Athena Linux Project
-import bz2
-import gzip
-import re
 import argparse
+import bz2
+import configparser
+import gzip
+import hashlib
 import json
-
+import os
+import re
+import subprocess
 from collections import Counter
 
+import apt_pkg
+import requests
 from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import Task, Progress, SpinnerColumn, TimeElapsedColumn, TransferSpeedColumn, TextColumn, BarColumn, \
+from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TransferSpeedColumn, TextColumn, BarColumn, \
     TaskProgressColumn, MofNCompleteColumn, DownloadColumn
-
-import requests
-import os
-import hashlib
-import subprocess
-import configparser
 
 consolidated_source = 0
 
 
+class Package:
+    def __init__(self, name):
+        if name == '':
+            raise ValueError(f"Package being created with empty package name")
+
+        self._name: str = name
+        self.version: str = '0'
+        self.version_constraints: {} = {}
+        self._provides: {} = {}
+
+    def __eq__(self, other):
+        if not isinstance(other, Package):
+            raise TypeError(f"Trying to compare to a different object type {type(other)}")
+
+        if other.name == self.name:
+            return True
+
+        if other.name in self._provides:
+            return True
+
+        return False
+
+    @property
+    def provides(self) -> {}:
+        return self._provides
+
+    def add_provides(self, provides_string: str):
+        provides = provides_string.split(', ')
+        for pkg in provides:
+            arr = re.search(r' *([^ ]+)(= \(([^)]+)\))?', pkg)
+            if arr.group(1) is not None:
+                name = arr.group(1)
+            else:
+                raise ValueError(f"Incorrect Provides: {provides_string}")
+
+            version = '0'
+            if arr.group(2) is not None:
+                version = arr.group(3)
+
+            if not self.check_version_format(version):
+                raise ValueError(f"Incorrect Version Format being set {version}")
+
+            if self._provides.get(name) is None:
+                self._provides[name] = version
+            if not self._provides[name] == version:
+                raise ValueError(f"Already providing a different version {self._provides[name]} than {version}")
+
+    @property
+    def constraints_satisfied(self) -> bool:
+        # needs a version to check against
+        if self.version == '':
+            return False
+        return self.check_version(self.version)
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        raise RuntimeWarning("Cant change the name once set, will be ignored")
+
+    @property
+    def version(self):
+        return self.version
+
+    @version.setter
+    def version(self, version: str):
+        if not self.check_version_format(version):
+            raise ValueError(f"Incorrect Version Format being set {version}")
+
+        # Version is set even if constraints fail
+        self.version = version
+
+    # TODO: Write function to check version formatting
+    def check_version_format(self, version) -> bool:
+        if self.version == self.version:
+            pass
+        return True
+
+    def add_version_constraint(self, version):
+        # version can in the form of <constraint> <version number> or just <Version number>
+        # <constraints> are in form of =, <<, >>, >=, <=
+        # = and !<constraints> will be considered hard assignments
+        _version: str = ''
+        _constraint: str = ''
+
+        version_strings = version.split(' ')
+        _version = version_strings[0]
+
+        if len(version_strings) == 2:
+            # conditional statement present
+            _constraint = version_strings[1]
+        elif len(version_strings) == 1:
+            _constraint = '='
+        else:
+            raise ValueError(f"Version string in incorrect format {version}")
+
+        if _constraint not in {'=', '>>', '<<', '>=', '<='}:
+            raise ValueError(f"Unspecified Constraint being set {_constraint}")
+
+        if not self.check_version_format(_version):
+            raise ValueError(f"Incorrect Version Format being set {_version}")
+        # add constraint
+        self.version_constraints[_version] = _constraint
+
+    def check_version(self, check_version: str) -> bool:
+        # check version against the saved constraints
+        for _version, _constraint in self.version_constraints:
+            if not apt_pkg.check_dep(check_version, _constraint, _version):
+                return False
+        return True
+
+
 class BaseDistribution:
-    def __init__(self, url: str, id: str, codename: str, version: str, arch: str):
+    def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
         self.url = url
-        self.id = id
+        self.baseid = id
         self.codename = codename
         self.version = version
         self.arch = arch
@@ -80,8 +193,8 @@ def build_cache(base: BaseDistribution, dir_cache: str, cache_progress: Progress
     cache_files = {}
 
     # TODO: Support https
-    base_url = 'http://' + base.url + '/' + base.id + '/dists/' + base.codename
-    basefilename = base.url + '_' + base.id + '_dists_' + base.codename
+    base_url = 'http://' + base.url + '/' + base.baseid + '/dists/' + base.codename
+    basefilename = base.url + '_' + base.baseid + '_dists_' + base.codename
 
     # Default release file
     release_url = base_url + '/InRelease'
@@ -165,6 +278,130 @@ def build_cache(base: BaseDistribution, dir_cache: str, cache_progress: Progress
         cache_files[os.path.basename(cache_filename[index])] = base
 
     return cache_files
+
+
+# Iterative Function
+def parse_dependencies(
+        package_record,
+        source_packages,
+        selected_packages,
+        required_package,
+        multi_dep,
+        dependency_progress,
+        dependency_task):
+    # Package: Record is typically of the format, other records not shown
+    # Package: Only one package name, could contain numbers, hyphen, underscore, dot, etc.
+    # Source:  one source package, optional - version in brackets separated by space
+    # Version: single version string, may contain alphanumeric and ': - ~ . +'
+    # Provides: may provide one or more packages, package list is comma separated, may have versions in ()
+    #           versions are always preceded by '=' e.g.  (= 5.0.1~5.16.0~dfsg+~4.16.8-5)
+    # Replaces: one or more packages or even self, may include version in (), versions have prefix << >> <= >= =
+    # Breaks: one or more packages, may include version in (), versions have prefix << >> <= >= =
+    # Depends: one or more packages, may include version in (), versions have prefix << >> <= >= =
+    #          may have arch specified as name:arch e.g. gcc:amd64, python3:any
+    #          dependencies which can be satisfied by multiple packages separated by | e.g. libglu1-mesa | libglu1,
+    # Recommends:
+    # weirdest Version node-acorn (<< 6.0.2+20181021git007b08d01eff070+ds+~0.3.1+~4.0.0+~0.3.0+~5.0.0+ds+~1.6.1+ds-2~)
+
+    # has to be global since it is recursive function
+    global consolidated_source
+
+    for _package in package_record:
+        # Get Package Name
+        _package_name = re.search(r'Package: ([^\n]+)', _package)
+        if _package_name is None:
+            continue
+        package_name = _package_name.group(1)
+
+        # Dependencies are Satisfied on Provides also
+        _package_provides = re.search(r'Provides: (\S+)', _package)
+        if _package_provides is None:
+            package_provides = ""
+        else:
+            package_provides = _package_provides.group(1)
+
+        # Check id Dependency is satisfied either through 'Package' or 'Provides'
+        if required_package != package_name:
+            if required_package != package_provides:
+                continue
+
+        # Get Package Version
+        package_version = re.search(r'Version: ([^\n]+)', _package).group(1)
+
+        if selected_packages.get(package_name) is None:
+            package = Package(package_name)
+            package.version = package_version
+            if not package_provides == '':
+                package.add_provides(package_provides)
+
+            selected_packages[package_name] = package
+
+        # If Not already parsed, un-parsed packages are set as -1
+        if selected_packages.get(required_package) == -1:
+            # Mark as Parsed by setting version
+            selected_packages[required_package] = package_version
+
+            # setting the same for package provides is not same as package_name
+            # Saves the situation where there is a separate iteration for 'provides'
+            if package_provides != "" and package_name != package_provides:
+                selected_packages[package_provides] = package_version
+
+            # Update Progress bar
+            completed = Counter(selected_packages.values())[-1]
+            dependency_progress.update(dependency_task, total=len(selected_packages), completed=completed)
+
+            # Get Source
+            # not all packages have sources ???
+            _package_source = re.search(r'Source: ([^\s]+)', _package)
+            if _package_source is None:
+                package_source = package_name
+            else:
+                package_source = _package_source.group(1)
+
+            if source_packages.get(package_source):
+                consolidated_source += 1
+            else:
+                source_packages[package_source] = -1
+
+            # Get dependency from both Depends: & Pre-Depends:
+            depends_group = re.search(r'\nDepends: ([^\n]+)', _package)
+            pre_depends_group = re.search(r'\nPre-Depends: ([^\n]+)', _package)
+
+            depends = []
+            if depends_group is not None:
+                depends.extend(re.split(", ", depends_group.group(1)))
+            if pre_depends_group is not None:
+                depends.extend(re.split(", ", pre_depends_group.group(1)))
+
+            # If Dependencies exist
+            if len(depends) != 0:
+                for dep in depends:
+                    # check if the package defined as ':any', assume that as no version given
+                    dep = re.sub(':any', '', dep)
+
+                    # Check for dependencies that can be satisfied by multiple packages
+                    multi = re.search(r'\|', dep)
+                    if multi is not None:
+                        multi_dep.append(re.split(' \| ', dep))
+                        continue
+
+                    arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?', dep)
+                    dep_package_name = arr.group(1)
+
+                    dep_package_version = 0
+                    if arr.group(2) is not None:
+                        dep_package_version = arr.group(3)
+                    if dep_package_name not in selected_packages:
+                        selected_packages[dep_package_name] = -1
+                        parse_dependencies(
+                            package_record,
+                            selected_packages,
+                            dep_package_name,
+                            source_packages,
+                            multi_dep,
+                            dependency_progress,
+                            dependency_task)
+        break
 
 
 def download_source(file_list,
@@ -269,107 +506,6 @@ def parse_sources(source_records,
     return download_size
 
 
-# Iterative Function
-def parse_dependencies(
-        package_record,
-        selected_packages,
-        required_package,
-        source_packages,
-        multi_dep,
-        dependency_progress,
-        dependency_task):
-    global consolidated_source
-
-    for package in package_record:
-        # Get Package Name
-        _package_name = re.search(r'Package: ([^\n]+)', package)
-        if _package_name is None:
-            continue
-        package_name = _package_name.group(1)
-
-        # Dependencies are Satisfied on Provides also
-        _package_provides = re.search(r'Provides: ([^\s]+)', package)
-        if _package_provides is None:
-            package_provides = ""
-        else:
-            package_provides = _package_provides.group(1)
-
-        # Check id Dependency is satisfied either through 'Package' or 'Provides'
-        if required_package != package_name:
-            if required_package != package_provides:
-                continue
-
-        # Get Package Version
-        package_version = re.search(r'Version: ([^\n]+)', package).group(1)
-
-        # If Not already parsed, un-parsed packages are set as -1
-        if selected_packages.get(required_package) == -1:
-            # Mark as Parsed by setting version
-            selected_packages[required_package] = package_version
-
-            # setting the same for package provides is not same as package_name
-            # Saves the situation where there is a separate iteration for 'provides'
-            if package_provides != "" and package_name != package_provides:
-                selected_packages[package_provides] = package_version
-
-            # Update Progress bar
-            completed = Counter(selected_packages.values())[-1]
-            dependency_progress.update(dependency_task, total=len(selected_packages), completed=completed)
-
-            # Get Source
-            # not all packages have sources ???
-            _package_source = re.search(r'Source: ([^\s]+)', package)
-            if _package_source is None:
-                package_source = package_name
-            else:
-                package_source = _package_source.group(1)
-
-            if source_packages.get(package_source):
-                consolidated_source += 1
-            else:
-                source_packages[package_source] = -1
-
-            # Get dependency from both Depends: & Pre-Depends:
-            depends_group = re.search(r'\nDepends: ([^\n]+)', package)
-            pre_depends_group = re.search(r'\nPre-Depends: ([^\n]+)', package)
-
-            depends = []
-            if depends_group is not None:
-                depends.extend(re.split(", ", depends_group.group(1)))
-            if pre_depends_group is not None:
-                depends.extend(re.split(", ", pre_depends_group.group(1)))
-
-            # If Dependencies exist
-            if len(depends) != 0:
-                for dep in depends:
-                    # check if the package defined as ':any', assume that as no version given
-                    dep = re.sub(':any', '', dep)
-
-                    # Check for dependencies that can be satisfied by multiple packages
-                    multi = re.search(r'\|', dep)
-                    if multi is not None:
-                        multi_dep.append(re.split(' \| ', dep))
-                        continue
-
-                    arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?', dep)
-                    dep_package_name = arr.group(1)
-
-                    dep_package_version = 0
-                    if arr.group(2) is not None:
-                        dep_package_version = arr.group(3)
-                    if dep_package_name not in selected_packages:
-                        selected_packages[dep_package_name] = -1
-                        parse_dependencies(
-                            package_record,
-                            selected_packages,
-                            dep_package_name,
-                            source_packages,
-                            multi_dep,
-                            dependency_progress,
-                            dependency_task)
-        break
-
-
 def main():
     selected_packages = {}
     source_packages = {}
@@ -418,7 +554,7 @@ def main():
     try:
         with open(pkglist_path, 'r') as f:
             contents = f.read()
-            required_package = contents.split('\n')
+            required_packages = contents.split('\n')
     except (FileNotFoundError, PermissionError) as e:
         print(f"Error: {e}")
         exit(1)
@@ -458,13 +594,17 @@ def main():
         live.console.print(f"\t Build Distribution\t{build_codename} {build_version}")
         overall_task = overall_progress.add_task("All Jobs", total=len(task_description))
 
+        apt_pkg.init_system()
+
         # Step I - Building Cache
         overall_progress.update(overall_task, description=task_description[0])
         cache_files = build_cache(base_distribution, dir_cache, cache_progress)
 
+        # get file names from cache
         package_file = cache_files['Packages']
         source_file = cache_files['Sources']
 
+        # load data from the files
         try:
             with open(package_file, 'r') as f:
                 contents = f.read()
@@ -487,14 +627,20 @@ def main():
         overall_progress.update(overall_task, description=task_description[1])
         dependency_task = dependency_progress.add_task(task_description[1])
 
-        for pkg in required_package:
+        # Iterate through package list and identify dependencies
+        for pkg in required_packages:
             if pkg and not pkg.startswith('#') and not pkg.isspace():
+                # Skip if added from previously parsed dependency tree
                 if pkg not in selected_packages:
+                    # remove spaces
+                    pkg = pkg.strip()
+                    # Marked required but not parsed
                     selected_packages[pkg] = -1
+
                     parse_dependencies(package_record,
+                                       source_packages,
                                        selected_packages,
                                        pkg,
-                                       source_packages,
                                        multi_dep,
                                        dependency_progress,
                                        dependency_task)
