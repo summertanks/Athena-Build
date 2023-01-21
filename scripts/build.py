@@ -384,6 +384,7 @@ def parse_dependencies(
             selected_packages[package_name] = package
 
 
+
         # If Not already parsed, un-parsed packages are set as -1
         if selected_packages.get(required_package) == -1:
             # Mark as Parsed by setting version
