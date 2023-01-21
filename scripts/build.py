@@ -31,6 +31,8 @@ class Package:
         self.version: str = '0'
         self.version_constraints: {} = {}
         self._provides: {} = {}
+        self._source: {} = {}
+        self._depends: {} = {}
 
     def __eq__(self, other):
         if not isinstance(other, Package):
@@ -45,10 +47,25 @@ class Package:
         return False
 
     @property
+    def source(self):
+        return self._source
+
+    @source.setter
+    def source(self, source_string):
+        source = re.search(r'([^ ]+)(\(([^)]+)\))?', source_string)
+        if source.group(1) is not None:
+            self._source[source] = '0'
+            if source.group(2) is not None:
+                if self.check_version_format(source.group(3)):
+                    self._source[source] = source.group(3)
+
+    @property
     def provides(self) -> {}:
         return self._provides
 
     def add_provides(self, provides_string: str):
+        if provides_string == '':
+            return
         provides = provides_string.split(', ')
         for pkg in provides:
             arr = re.search(r' *([^ ]+)(= \(([^)]+)\))?', pkg)
@@ -68,6 +85,14 @@ class Package:
                 self._provides[name] = version
             if not self._provides[name] == version:
                 raise ValueError(f"Already providing a different version {self._provides[name]} than {version}")
+
+    @property
+    def depends(self):
+        return self._depends
+
+    def add_depends(self, depends_string):
+        depends = apt_pkg.parse_depends(depends_string)
+        self._depends = depends
 
     @property
     def constraints_satisfied(self) -> bool:
@@ -134,6 +159,7 @@ class Package:
             if not apt_pkg.check_dep(check_version, _constraint, _version):
                 return False
         return True
+
 
 
 class BaseDistribution:
@@ -326,15 +352,37 @@ def parse_dependencies(
                 continue
 
         # Get Package Version
-        package_version = re.search(r'Version: ([^\n]+)', _package).group(1)
+        _package_version = re.search(r'Version: (\S+)', _package)
+        if _package_version is not None:
+            package_version = _package_version.group(1)
+        else:
+            raise ValueError(f"There doesnt seem to be a Version \n {_package}")
+
+        # Get source if available, else assume the source package is same as package name
+        # TODO: Check if this assumption is true
+        _package_source = re.search(r'Source: (\S+)', _package)
+        if _package_source is None:
+            package_source = package_name
+        else:
+            package_source = _package_source.group(1)
+
+        # Get dependency from both Depends: & Pre-Depends:
+        depends_group = re.search(r'\nDepends: ([^\n]+)', _package)
+        pre_depends_group = re.search(r'\nPre-Depends: ([^\n]+)', _package)
+        depends: str
+        if depends_group is not None:
+            depends += depends_group.group(1)
+        if pre_depends_group is not None:
+            depends += ', ' + pre_depends_group.group(1)
 
         if selected_packages.get(package_name) is None:
             package = Package(package_name)
             package.version = package_version
-            if not package_provides == '':
-                package.add_provides(package_provides)
+            package.add_provides(package_provides)
+            package.source = package_source
 
             selected_packages[package_name] = package
+
 
         # If Not already parsed, un-parsed packages are set as -1
         if selected_packages.get(required_package) == -1:
@@ -366,6 +414,7 @@ def parse_dependencies(
             # Get dependency from both Depends: & Pre-Depends:
             depends_group = re.search(r'\nDepends: ([^\n]+)', _package)
             pre_depends_group = re.search(r'\nPre-Depends: ([^\n]+)', _package)
+
 
             depends = []
             if depends_group is not None:
