@@ -29,7 +29,7 @@ class Package:
         self._name: str = name
         self._version: str = '-1'
         self.version_constraints: {} = {}
-        self._provides: {} = {}
+        self._provides: [] = []
         self._source: {} = {}
         self._depends: {} = {}
 
@@ -66,24 +66,7 @@ class Package:
         for pkg in provides:
             if pkg == '':
                 continue
-
-            arr = re.search(r' *([^ ]+)(= \(([^)]+)\))?', pkg)
-            if arr is not None:
-                name = arr.group(1)
-            else:
-                raise ValueError(f"Incorrect Provides: {provides}")
-
-            version = '0'
-            if arr.group(2) is not None:
-                version = arr.group(3)
-
-            if not self.check_version_format(version):
-                raise ValueError(f"Incorrect Version Format being set {version}")
-
-            if self._provides.get(name) is None:
-                self._provides[name] = version
-            if not self._provides[name] == version:
-                raise ValueError(f"Already providing a different version {self._provides[name]} than {version}")
+            self._provides.append(pkg)
 
     @property
     def depends(self):
@@ -335,11 +318,11 @@ def parse_dependencies(
 
         # Dependencies are Satisfied on Provides also
         package_provides = search(r'Provides: ([^\n]+)', _package)
-        provides_list = [pkg[0] for pkg in apt_pkg.parse_depends(package_provides)]
+        provides_list = [pkg[0][0] for pkg in apt_pkg.parse_depends(package_provides)]
 
         # Check id Dependency is satisfied either through 'Package' or 'Provides'
         if required_package != package_name:
-            if required_package != package_provides:
+            if required_package not in provides_list:
                 continue
 
         # if not already there, also avoids separate iteration on provides
@@ -352,6 +335,12 @@ def parse_dependencies(
         # Incase version is set, it has already been parsed
         if not package.version == '-1':
             break
+
+        # Bothersome multi-provides condition,
+        # if a package is added, assume all Provides have been satisfied
+        for _pkg in provides_list:
+            if not _pkg == '':
+                selected_packages[_pkg] = package
 
         # Get Package Version
         package_version = search(r'Version: (\S+)', _package)
@@ -391,6 +380,9 @@ def parse_dependencies(
         package.add_provides(package_provides)
         package.add_depends(depends)
 
+        # Add package to source list
+        source_packages[package_name] = package_version
+
         # Update Progress bar
         completed = len([obj for obj in selected_packages.values() if not obj.version == '-1'])
         dependency_progress.update(dependency_task, total=len(selected_packages), completed=completed)
@@ -404,7 +396,6 @@ def parse_dependencies(
             # Check if not already parsed
             if selected_packages.get(dep_package_name) is None:
                 selected_packages[dep_package_name] = Package(dep_package_name)
-
                 parse_dependencies(
                     package_record,
                     selected_packages,
@@ -660,6 +651,7 @@ def main():
         dependency_progress.update(dependency_task, total=len(selected_packages), completed=len(selected_packages))
 
         live.console.print("Total Packages Selected are :", len(selected_packages))
+        live.console.print("Total Source Packages Selected are :", len(source_packages))
         not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
 
         live.console.print("Dependencies Not Parsed: ", len(not_parsed))
