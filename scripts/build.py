@@ -135,7 +135,7 @@ class Package:
         if constraint == '':
             constraint = '='
 
-        if constraint not in {'=', '>>', '<<', '>=', '<='}:
+        if constraint not in {'=', '>', '<', '>=', '<='}:
             raise ValueError(f"Unspecified Constraint being set {constraint}")
 
         if not self.check_version_format(version):
@@ -391,8 +391,8 @@ def parse_dependencies(
         package.add_depends(depends)
 
         # Update Progress bar
-        # completed = Counter(selected_packages.values().version)[-1]
-        # dependency_progress.update(dependency_task, total=len(selected_packages), completed=completed)
+        completed = len([obj for obj in selected_packages.values() if not obj.version == '-1'])
+        dependency_progress.update(dependency_task, total=len(selected_packages), completed=completed)
 
         # skip the ones which have more than one packages satisfying dependency
         parsed_depends = [sublist[0] for sublist in package.depends if len(sublist) == 1]
@@ -402,8 +402,8 @@ def parse_dependencies(
 
             # Check if not already parsed
             if selected_packages.get(dep_package_name) is None:
-                _package = Package(dep_package_name)
-                selected_packages[dep_package_name] = _package
+                selected_packages[dep_package_name] = Package(dep_package_name)
+
                 parse_dependencies(
                     package_record,
                     selected_packages,
@@ -655,13 +655,15 @@ def main():
                                        source_packages,
                                        dependency_progress,
                                        dependency_task)
-                    # required_package[pkg] = selected_packages[pkg]
+
         dependency_progress.update(dependency_task, total=len(selected_packages), completed=len(selected_packages))
 
         live.console.print("Total Packages Selected are :", len(selected_packages))
-        _pkg = [k for k, v in selected_packages.items() if v == -1]
-        for k in _pkg:
-            live.console.print("Dependency Not Parsed: ", k)
+        not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
+
+        live.console.print("Dependencies Not Parsed: ", len(not_parsed))
+        for package_name in not_parsed:
+            print(f"\t Not parsed: {package_name}")
 
         # Step - II Check multipackage dependency
         overall_progress.update(overall_task, description=task_description[2], completed=3)
