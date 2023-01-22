@@ -334,7 +334,8 @@ def parse_dependencies(
         package_name = search(r'Package: ([^\n]+)', _package)
 
         # Dependencies are Satisfied on Provides also
-        package_provides = search(r'Provides: (\S+)', _package).split(', ')
+        package_provides = search(r'Provides: ([^\n]+)', _package)
+        provides_list = [pkg[0] for pkg in apt_pkg.parse_depends(package_provides)]
 
         # Check id Dependency is satisfied either through 'Package' or 'Provides'
         if required_package != package_name:
