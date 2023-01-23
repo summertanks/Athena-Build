@@ -18,8 +18,6 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TransferSpeedColumn, TextColumn, BarColumn, \
     TaskProgressColumn, MofNCompleteColumn, DownloadColumn
 
-consolidated_source = 0
-
 
 class Package:
     def __init__(self, name):
@@ -308,9 +306,6 @@ def parse_dependencies(
     # Recommends:
     # weirdest Version node-acorn (<< 6.0.2+20181021git007b08d01eff070+ds+~0.3.1+~4.0.0+~0.3.0+~5.0.0+ds+~1.6.1+ds-2~)
 
-    # has to be global since it is recursive function
-    global consolidated_source
-
     for _package in package_record:
         # Get Package Name
         package_name = search(r'Package: ([^\n]+)', _package)
@@ -467,17 +462,15 @@ def parse_sources(source_records,
     for required_package in source_packages:
         # Search within the Source List file
         for package in source_records:
-            _package_name = re.search(r'Package: ([^\n]+)', package)
-            if _package_name is None:
-                continue
-            package_name = _package_name.group(1)
+            package_name = search(r'Package: ([^\n]+)', package)
 
             # On Match
             if package_name == required_package:
                 source_progress.advance(source_task)
                 # Get all files
-                package_version = re.search(r'Version: ([^\n]+)', package).group(1)
-                package_directory = re.search(r'Directory:\s*(.+)', package).group(1)
+                package_version = search(r'Version: ([^\n]+)', package)
+                package_directory = search(r'Directory:\s*(.+)', package)
+                # TODO: Currently using md5, should enable SHA256 also
                 files = re.findall(r'\s+([a-fA-F\d]{32})\s+(\d+)\s+(\S+)', package)
                 for file in files:
                     file_list[file[2]] = {'path': package_directory + '/' + file[2], 'size': file[1], 'md5': file[0]}
@@ -486,10 +479,10 @@ def parse_sources(source_records,
                 source_packages[package_name] = package_version
 
                 # Parse Build Depends
-                _build_depends = re.search(r'Build-Depends: ([^\n]+)', package)
-                if _build_depends is None:
+                build_depends = search(r'Build-Depends: ([^\n]+)', package)
+                if build_depends == '':
                     continue
-                build_depends = re.split(', ', _build_depends.group(1))
+                build_depends = build_depends.split(', ')
                 # Data can be of form libselinux-dev (>= 2.31) [linux-any] <!stage2>
                 # where other than package name, everything is optional
                 # We have to Initially check for package and if it matches our arch
@@ -600,7 +593,7 @@ def main():
         overall_task = overall_progress.add_task("All Jobs", total=len(task_description))
 
         apt_pkg.init_system()
-
+        # --------------------------------------------------------------------------------------------------------------
         # Step I - Building Cache
         overall_progress.update(overall_task, description=task_description[0])
         cache_files = build_cache(base_distribution, dir_cache, cache_progress)
@@ -628,6 +621,7 @@ def main():
 
         overall_progress.advance(overall_task)
 
+        # -------------------------------------------------------------------------------------------------------------
         # Step II - Parse Dependencies
         overall_progress.update(overall_task, description=task_description[1])
         dependency_task = dependency_progress.add_task(task_description[1])
@@ -658,6 +652,7 @@ def main():
         for package_name in not_parsed:
             print(f"\t Not parsed: {package_name}")
 
+        # -------------------------------------------------------------------------------------------------------------
         # Step - III Check multipackage dependency
         overall_progress.update(overall_task, description=task_description[2], completed=3)
         source_task = source_progress.add_task(task_description[2])
@@ -680,14 +675,12 @@ def main():
 
         for package in selected_packages:
             if not selected_packages[package].constraints_satisfied:
-                print(f"Version Constraint failed for {selected_packages[package].name}")
+                print(f"Version Constraint failed for {package}:{selected_packages[package].name}")
 
-        exit(0)
-
+        # -------------------------------------------------------------------------------------------------------------
         # Step - III Source Code
         overall_progress.update(overall_task, description=task_description[3], completed=4)
         live.console.print("Source requested for : ", len(source_packages), " packages")
-        live.console.print("Consolidated Source: ", consolidated_source)
 
         download_size = parse_sources(source_records,
                                       source_packages,
