@@ -51,12 +51,11 @@ class Package:
 
     @source.setter
     def source(self, source_string):
-        source = re.search(r'([^ ]+)(\(([^)]+)\))?', source_string)
-        if source.group(1) is not None:
-            self._source[source] = '0'
-            if source.group(2) is not None:
-                if self.check_version_format(source.group(3)):
-                    self._source[source] = source.group(3)
+        source_list = apt_pkg.parse_depends(source_string)
+        for source in source_list:
+            if source[0] == '':
+                continue
+            self._source[source[0]] = source[1]
 
     @property
     def provides(self) -> {}:
@@ -338,6 +337,8 @@ def parse_dependencies(
 
         # Bothersome multi-provides condition,
         # if a package is added, assume all Provides have been satisfied
+        # Problem remains that for provides - more than one package may satisfy it, cant go with first come
+        # TODO: Parse complete set and give user option to select which package option they want selected.
         for _pkg in provides_list:
             if not _pkg == '':
                 selected_packages[_pkg] = package
@@ -672,6 +673,12 @@ def main():
             if not found:
                 live.console.print(f"dependency unresolved between {section}")
         live.console.print("Multi Dep Check... Done")
+
+        for package in selected_packages.keys():
+            if not package.constraints_satisfied:
+                print(f"Version Constraint failed for {package.name}")
+
+        exit(0)
 
         # Step - III Source Code
         overall_progress.update(overall_task, description=task_description[3], completed=4)
