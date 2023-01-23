@@ -55,7 +55,7 @@ class Package:
         for source in source_list:
             if source[0] == '':
                 continue
-            self._source[source[0]] = source[1]
+            self._source[source[0][0]] = source[0][1]
 
     @property
     def provides(self) -> {}:
@@ -128,7 +128,7 @@ class Package:
 
     def check_version(self, check_version: str) -> bool:
         # check version against the saved constraints
-        for _version, _constraint in self.version_constraints:
+        for _version, _constraint in self.version_constraints.items():
             if not apt_pkg.check_dep(check_version, _constraint, _version):
                 return False
         return True
@@ -512,8 +512,7 @@ def parse_sources(source_records,
 
 
 def main():
-    selected_packages = {str: Package}
-
+    selected_packages: {str: Package} = {}
     source_packages = {}
     multi_dep = []
     file_list = {}
@@ -651,7 +650,7 @@ def main():
 
         dependency_progress.update(dependency_task, total=len(selected_packages), completed=len(selected_packages))
 
-        live.console.print("Total Packages Selected are :", len(selected_packages))
+        live.console.print("Total Dependencies Selected are :", len(selected_packages))
         live.console.print("Total Source Packages Selected are :", len(source_packages))
         not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
 
@@ -659,24 +658,29 @@ def main():
         for package_name in not_parsed:
             print(f"\t Not parsed: {package_name}")
 
-        # Step - II Check multipackage dependency
+        # Step - III Check multipackage dependency
         overall_progress.update(overall_task, description=task_description[2], completed=3)
         source_task = source_progress.add_task(task_description[2])
 
         for section in multi_dep:
             found = False
             for pkgs in section:
-                arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?', pkgs)
-                dep_package_name = arr.group(1)
-                if dep_package_name in selected_packages:
-                    found = True
+                arr = apt_pkg.parse_depends(pkgs)
+                pkg_name = arr[0][0][0]
+                if pkg_name in selected_packages:
+                    pkg_version = arr[0][0][1]
+                    pkg_constraint = arr[0][0][2]
+                    if apt_pkg.check_dep(selected_packages[pkg_name].version, pkg_constraint, pkg_version):
+                        found = True
+                    else:
+                        live.console.print(f"Alt Dependency Check - Version constraint failed for {pkg_name}")
             if not found:
                 live.console.print(f"dependency unresolved between {section}")
         live.console.print("Multi Dep Check... Done")
 
-        for package in selected_packages.keys():
-            if not package.constraints_satisfied:
-                print(f"Version Constraint failed for {package.name}")
+        for package in selected_packages:
+            if not selected_packages[package].constraints_satisfied:
+                print(f"Version Constraint failed for {selected_packages[package].name}")
 
         exit(0)
 
