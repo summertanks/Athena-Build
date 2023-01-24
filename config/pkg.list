@@ -61,7 +61,7 @@ util-linux
 xkb-data
 
 # Init System
-systemd
+systemd-sysv
 
 bash
 bsdutils

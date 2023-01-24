@@ -28,7 +28,7 @@ class Package:
         self._version: str = '-1'
         self.version_constraints: {} = {}
         self._provides: [] = []
-        self._source: {} = {}
+        self._source: () = ('', '')
         self._depends: {} = {}
 
     def __eq__(self, other):
@@ -53,7 +53,7 @@ class Package:
         for source in source_list:
             if source[0] == '':
                 continue
-            self._source[source[0][0]] = source[0][1]
+            self._source = ([source[0][0]], source[0][1])
 
     @property
     def provides(self) -> {}:
@@ -289,7 +289,6 @@ def parse_dependencies(
         selected_packages: {},
         required_package: str,
         multi_dep: [],
-        source_packages: {},
         dependency_progress,
         dependency_task):
     # Package: Record is typically of the format, other records not shown
@@ -376,9 +375,6 @@ def parse_dependencies(
         package.add_provides(package_provides)
         package.add_depends(depends)
 
-        # Add package to source list
-        source_packages[package_name] = package_version
-
         # Update Progress bar
         completed = len([obj for obj in selected_packages.values() if not obj.version == '-1'])
         dependency_progress.update(dependency_task, total=len(selected_packages), completed=completed)
@@ -397,7 +393,6 @@ def parse_dependencies(
                     selected_packages,
                     dep_package_name,
                     multi_dep,
-                    source_packages,
                     dependency_progress,
                     dependency_task)
             selected_packages[dep_package_name].add_version_constraint(_pkg[1], _pkg[2])
@@ -463,43 +458,50 @@ def parse_sources(source_records,
         # Search within the Source List file
         for package in source_records:
             package_name = search(r'Package: ([^\n]+)', package)
+            package_version = search(r'Version: ([^\n]+)', package)
 
             # On Match
             if package_name == required_package:
-                source_progress.advance(source_task)
-                # Get all files
-                package_version = search(r'Version: ([^\n]+)', package)
-                package_directory = search(r'Directory:\s*(.+)', package)
-                # TODO: Currently using md5, should enable SHA256 also
-                files = re.findall(r'\s+([a-fA-F\d]{32})\s+(\d+)\s+(\S+)', package)
-                for file in files:
-                    file_list[file[2]] = {'path': package_directory + '/' + file[2], 'size': file[1], 'md5': file[0]}
-                    download_size += int(file[1])
-                # set as package found
-                source_packages[package_name] = package_version
+                if apt_pkg.check_dep(source_packages[required_package]['version'], '=', package_version):
+                    if source_packages[required_package]['found'] == 'no':
+                        source_progress.advance(source_task)
 
-                # Parse Build Depends
-                build_depends = search(r'Build-Depends: ([^\n]+)', package)
-                if build_depends == '':
-                    continue
-                build_depends = build_depends.split(', ')
-                # Data can be of form libselinux-dev (>= 2.31) [linux-any] <!stage2>
-                # where other than package name, everything is optional
-                # We have to Initially check for package and if it matches our arch
-                # r"([^ ]+)( \([^[:digit:]]*([^)]+)\))?( \[(.+)\])?( <(.+)>)?"
-                for dep in build_depends:
-                    arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?( \[(.+)\])?(.*)', dep)
-                    if arr is not None:
-                        # we dont know which combination is valid so go iteratively
-                        builddep_package_name = arr.group(1)
-                        builddep_version = arr.group(3)
-                        builddep_arch = arr.group(5)
-                        if builddep_arch is not None:
-                            if builddep_version != 'amd64' or builddep_arch != 'linux-any':
-                                continue
-                        if builddep_package_name not in builddep:
-                            builddep.append(builddep_package_name)
-                break
+                        # Get all files
+                        package_directory = search(r'Directory:\s*(.+)', package)
+
+                        # TODO: Currently using md5, should enable SHA256 also
+                        files = re.findall(r'\s+([a-fA-F\d]{32})\s+(\d+)\s+(\S+)', package)
+                        for file in files:
+                            file_list[file[2]] = {
+                                'path': os.path.join(package_directory, file[2]), 'size': file[1], 'md5': file[0]}
+                            download_size += int(file[1])
+
+                        # set as package found
+                        source_packages[required_package]['found'] = 'yes'
+
+                        # Parse Build Depends
+                        build_depends = search(r'Build-Depends: ([^\n]+)', package)
+                        if build_depends == '':
+                            continue
+
+                        build_depends = build_depends.split(', ')
+                        # Data can be of form libselinux-dev (>= 2.31) [linux-any] <!stage2>
+                        # where other than package name, everything is optional
+                        # We have to Initially check for package and if it matches our arch
+                        # r"([^ ]+)( \([^[:digit:]]*([^)]+)\))?( \[(.+)\])?( <(.+)>)?"
+                        for dep in build_depends:
+                            arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?( \[(.+)\])?(.*)', dep)
+                            if arr is not None:
+                                # we dont know which combination is valid so go iteratively
+                                builddep_package_name = arr.group(1)
+                                builddep_version = arr.group(3)
+                                builddep_arch = arr.group(5)
+                                if builddep_arch is not None:
+                                    if builddep_version != 'amd64' or builddep_arch != 'linux-any':
+                                        continue
+                                if builddep_package_name not in builddep:
+                                    builddep.append(builddep_package_name)
+                        break
 
     return download_size
 
@@ -638,7 +640,6 @@ def main():
                                        selected_packages,
                                        pkg,
                                        multi_dep,
-                                       source_packages,
                                        dependency_progress,
                                        dependency_task)
 
@@ -680,6 +681,22 @@ def main():
         # -------------------------------------------------------------------------------------------------------------
         # Step - III Source Code
         overall_progress.update(overall_task, description=task_description[3], completed=4)
+
+        # TODO: Check for discrepancy between source version and package version???
+        for package_name in selected_packages:
+            source_version = selected_packages[package_name].source[1]
+            # Ignore where Source version is not given, it is assumed same as package version
+            if source_version == '':
+                continue
+            package_version = selected_packages[package_name].version
+            if not source_version == package_version:
+                live.console.print(f"Discrepancy between source and package version for {package_name}")
+
+        # Add package to source list
+        for package_name in selected_packages:
+            package_source = selected_packages[package_name].source[0][0]
+            package_version = selected_packages[package_name].version
+            source_packages[package_source] = {'version': package_version, 'found': 'no'}
         live.console.print("Source requested for : ", len(source_packages), " packages")
 
         download_size = parse_sources(source_records,
@@ -689,7 +706,7 @@ def main():
                                       source_progress,
                                       source_task)
 
-        _pkg = [k for k, v in source_packages.items() if v == -1]
+        _pkg = [required_package for required_package in source_packages if source_packages[required_package]['found'] == 'no']
         for k in _pkg:
             live.console.print("Source not found for :", k)
 
