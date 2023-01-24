@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 
+import apt
 import apt_pkg
 import requests
 from requests import Timeout, TooManyRedirects, HTTPError, RequestException
@@ -17,6 +18,38 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TransferSpeedColumn, TextColumn, BarColumn, \
     TaskProgressColumn, MofNCompleteColumn, DownloadColumn
+
+
+class Source:
+    def __init__(self, name, version):
+        if name == '':
+            raise ValueError(f"Package being created with empty package name")
+
+        self._name = name
+        self._version = version
+        self.found = False
+        self._alternate = []
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def version(self):
+        return self._version
+
+    def reset_version(self, version: str):
+        if not version == '':
+            raise ValueError(f"Package being set with empty version")
+        self._version = version
+
+    @property
+    def alternates(self):
+        return self._alternate
+
+    def add_alternate(self, version: str):
+        if not version == '':
+            self._alternate.append(version)
 
 
 class Package:
@@ -53,7 +86,7 @@ class Package:
         for source in source_list:
             if source[0] == '':
                 continue
-            self._source = ([source[0][0]], source[0][1])
+            self._source = (source[0][0], source[0][1])
 
     @property
     def provides(self) -> {}:
@@ -338,13 +371,13 @@ def parse_dependencies(
                 selected_packages[_pkg] = package
 
         # Get Package Version
-        package_version = search(r'Version: (\S+)', _package)
+        package_version = search(r'Version: ([^\n]+)', _package)
         if package_version == '':
             raise ValueError(f"There doesnt seem to be a Version \n {_package}")
 
         # Get source if available, else assume the source package is same as package name
         # TODO: Check if this assumption is true
-        package_source = search(r'Source: (\S+)', _package)
+        package_source = search(r'Source: ([^\n]+)', _package)
         if package_source == '':
             package_source = package_name
 
@@ -462,8 +495,8 @@ def parse_sources(source_records,
 
             # On Match
             if package_name == required_package:
-                if apt_pkg.check_dep(source_packages[required_package]['version'], '=', package_version):
-                    if source_packages[required_package]['found'] == 'no':
+                if apt_pkg.check_dep(source_packages[required_package].version, '=', package_version):
+                    if not source_packages[required_package].found:
                         source_progress.advance(source_task)
 
                         # Get all files
@@ -477,7 +510,7 @@ def parse_sources(source_records,
                             download_size += int(file[1])
 
                         # set as package found
-                        source_packages[required_package]['found'] = 'yes'
+                        source_packages[required_package].found = True
 
                         # Parse Build Depends
                         build_depends = search(r'Build-Depends: ([^\n]+)', package)
@@ -502,6 +535,9 @@ def parse_sources(source_records,
                                 if builddep_package_name not in builddep:
                                     builddep.append(builddep_package_name)
                         break
+
+                # Add in alternates
+                source_packages[required_package].add_alternate(package_version)
 
     return download_size
 
@@ -577,6 +613,7 @@ def main():
                                        MofNCompleteColumn())
     download_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     debsource_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
+
 
     progress_group = Group(Panel(Group(
         cache_progress,
@@ -679,10 +716,13 @@ def main():
                 print(f"Version Constraint failed for {package}:{selected_packages[package].name}")
 
         # -------------------------------------------------------------------------------------------------------------
-        # Step - III Source Code
+        # Step - IV Parse Source Packages
         overall_progress.update(overall_task, description=task_description[3], completed=4)
 
-        # TODO: Check for discrepancy between source version and package version???
+        # Check for discrepancy between source version and package version
+        live.console.print("Checking for discrepancy between source & "
+                           "package version. If any, source version will be used...")
+
         for package_name in selected_packages:
             source_version = selected_packages[package_name].source[1]
             # Ignore where Source version is not given, it is assumed same as package version
@@ -690,13 +730,22 @@ def main():
                 continue
             package_version = selected_packages[package_name].version
             if not source_version == package_version:
-                live.console.print(f"Discrepancy between source and package version for {package_name}")
+                live.console.print(f"\tDiscrepancy {package_name} {package_version} -> {source_version}")
 
         # Add package to source list
         for package_name in selected_packages:
-            package_source = selected_packages[package_name].source[0][0]
-            package_version = selected_packages[package_name].version
-            source_packages[package_source] = {'version': package_version, 'found': 'no'}
+            package_source = selected_packages[package_name].source[0]
+            package_version = selected_packages[package_name].source[1]
+            if package_version == '':
+                package_version = selected_packages[package_name].version
+            if package_source not in source_packages:
+                source_packages[package_source] = Source(package_source, package_version)
+            else:
+                if not source_packages[package_source].version == package_version:
+                    live.console.print(
+                        f"Multiple version of same source package being asked for {package_source} -> "
+                        f"{source_packages[package_source].version} : {package_version}")
+
         live.console.print("Source requested for : ", len(source_packages), " packages")
 
         download_size = parse_sources(source_records,
@@ -706,9 +755,32 @@ def main():
                                       source_progress,
                                       source_task)
 
-        _pkg = [required_package for required_package in source_packages if source_packages[required_package]['found'] == 'no']
-        for k in _pkg:
-            live.console.print("Source not found for :", k)
+        missing_source = [_pkg for _pkg in source_packages if not source_packages[_pkg].found]
+        for pkg in missing_source:
+            live.console.print(f"Source not found for : {source_packages[pkg].name} {source_packages[pkg].version} "
+                               f"Alternates: {source_packages[pkg].alternates}")
+            if live.console.input("Select from Alternates? if N, source package will be ignored(y/n") == 'y':
+                new_version = ''
+                while new_version not in source_packages[pkg].alternates:
+                    live.console.input(f"Enter Alt Version from {source_packages[pkg].alternates}:")
+                source_packages[pkg].reset_version(new_version)
+
+        # rerun parse_source only for the missing source
+        download_size += parse_sources(source_records,
+                                       missing_source,
+                                       file_list,
+                                       builddep,
+                                       source_progress,
+                                       source_task)
+
+        # -------------------------------------------------------------------------------------------------------------
+        # Step - V Check for source Deps
+        cache = apt.Cache()
+        cache.update()
+        cache.open()
+
+        print(cache['grub2'].is_installed)
+        exit(0)
 
         result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
         for line in result:
