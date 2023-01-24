@@ -517,23 +517,12 @@ def parse_sources(source_records,
                         if build_depends == '':
                             continue
 
-                        build_depends = build_depends.split(', ')
-                        # Data can be of form libselinux-dev (>= 2.31) [linux-any] <!stage2>
-                        # where other than package name, everything is optional
-                        # We have to Initially check for package and if it matches our arch
-                        # r"([^ ]+)( \([^[:digit:]]*([^)]+)\))?( \[(.+)\])?( <(.+)>)?"
+                        build_depends = apt_pkg.parse_src_depends(build_depends, architecture='amd64')
+                        build_depends = [dep[0][0] for dep in build_depends if not dep[0][0] == '']
                         for dep in build_depends:
-                            arr = re.search(r'([^ ]+)( \([^[:digit:]]*([^)]+)\))?( \[(.+)\])?(.*)', dep)
-                            if arr is not None:
-                                # we dont know which combination is valid so go iteratively
-                                builddep_package_name = arr.group(1)
-                                builddep_version = arr.group(3)
-                                builddep_arch = arr.group(5)
-                                if builddep_arch is not None:
-                                    if builddep_version != 'amd64' or builddep_arch != 'linux-any':
-                                        continue
-                                if builddep_package_name not in builddep:
-                                    builddep.append(builddep_package_name)
+                            if dep not in builddep:
+                                builddep.append(dep)
+
                         break
 
                 # Add in alternates
@@ -775,22 +764,20 @@ def main():
 
         # -------------------------------------------------------------------------------------------------------------
         # Step - V Check for source Deps
-        cache = apt.Cache()
-        cache.update()
-        cache.open()
-
-        print(cache['grub2'].is_installed)
-        exit(0)
 
         result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
         for line in result:
             match = re.match(r'^ii\s+([^\s:]+)', line)
             if match:
                 installed_packages.append(match.group(1))
+
         required_builddep = [item for item in builddep if item not in installed_packages]
         live.console.print("Build Dependency required ", len(required_builddep), '/', len(builddep))
         if len(required_builddep):
             live.console.print("[green]WARNING: There are pending Build Dependencies, Manual check is required")
+
+        exit(0)
+
         try:
             with open(dir_temp + '/dep.list', 'w') as f:
                 for dep in required_builddep:
