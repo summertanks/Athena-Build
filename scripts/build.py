@@ -4,12 +4,10 @@ import bz2
 import configparser
 import gzip
 import hashlib
-import json
 import os
 import re
 import subprocess
 
-import apt
 import apt_pkg
 import requests
 from requests import Timeout, TooManyRedirects, HTTPError, RequestException
@@ -18,6 +16,9 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TransferSpeedColumn, TextColumn, BarColumn, \
     TaskProgressColumn, MofNCompleteColumn, DownloadColumn
+
+
+# TODO: make all apt_pkg.parse functions arch specific
 
 
 class Source:
@@ -29,6 +30,9 @@ class Source:
         self._version = version
         self.found = False
         self._alternate = []
+
+    def __str__(self):
+        return str(f"{self._name} {self._version} {self.found} {self._alternate}")
 
     @property
     def name(self):
@@ -63,6 +67,10 @@ class Package:
         self._provides: [] = []
         self._source: () = ('', '')
         self._depends: {} = {}
+
+    def __str__(self):
+        return str(
+            f"{self._name} {self._version} {self.version_constraints} {self._provides} {self._source} {self._depends}")
 
     def __eq__(self, other):
         if not isinstance(other, Package):
@@ -258,7 +266,6 @@ def build_cache(base: BaseDistribution, dir_cache: str, cache_progress: Progress
                          os.path.join(dir_cache, basefilename + '_main_source_Sources.gz')]
 
     md5 = []
-
     # Extract the md5 for the files
     # TODO: Enable Optional SHA256 also
     try:
@@ -266,7 +273,6 @@ def build_cache(base: BaseDistribution, dir_cache: str, cache_progress: Progress
             contents = f.read()
             for file in cache_filename:
                 #  Typical format - [space] [32 char md5 hash] [space] [file size] [space] [relative path] [eol]
-                #  35eb7de95c102ffbea4818ea91e470962ddafc97ae539384d7f95d2836d7aa2e 45534962 main/binary-amd64/Packages
                 re_pattern = r' ([a-f0-9]{32}) (\S+) ' + file + '$'
                 match = re.search(re_pattern, contents, re.MULTILINE)
                 if match:
@@ -444,38 +450,30 @@ def download_source(file_list,
     total_files = len(file_list)
 
     t_task = total_download_progress.add_task("Total Files".ljust(20, ' '), total=total_files)
-    f_task = download_progress.add_task("Downloaded".ljust(20, ' '), total=download_size)
+    f_task = download_progress.add_task("Overall Download".ljust(20, ' '), total=download_size)
+    c_task = download_progress.add_task("Current Download".ljust(20, ' '), total=0)
 
-    while not download_progress.finished:
-        for file_name, data in file_list.items():
-            url = base_url + data['path']
-            size = data['size']
-            md5 = data['md5']
+    for file_name, data in file_list.items():
+        url = base_url + data['path']
+        size = data['size']
+        md5 = data['md5']
 
-            download_path = download_dir + '/' + file_name
+        download_path = os.path.join(download_dir, file_name)
 
-            if os.path.isfile(download_path):
-                # Open the file and calculate the MD5 hash
-                with open(download_path, 'rb') as f:
-                    fdata = f.read()
-                    md5_check = hashlib.md5(fdata).hexdigest()
-            else:
-                md5_check = ''
+        if os.path.isfile(download_path):
+            # Open the file and calculate the MD5 hash
+            with open(download_path, 'rb') as f:
+                fdata = f.read()
+                md5_check = hashlib.md5(fdata).hexdigest()
+        else:
+            md5_check = ''
 
-            if md5 != md5_check:
-                response = requests.head(url)
-                response = requests.get(url, stream=True)
-                if response.status_code == 200:
-                    with open(download_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=1024):
-                            if chunk:
-                                f.write(chunk)
-                                download_progress.update(f_task, advance=len(chunk))
-                else:
-                    download_progress.log(f"Error Downloading {url}")
-            else:
-                download_progress.update(f_task, advance=int(size))
-            total_download_progress.update(t_task, advance=1.0)
+        if md5 != md5_check:
+            download_file(url, download_path, download_progress, c_task)
+
+        # TODO: Verify hash and download file size
+        download_progress.advance(f_task, advance=int(size))
+        total_download_progress.advance(t_task)
 
 
 def parse_sources(source_records,
@@ -522,9 +520,7 @@ def parse_sources(source_records,
                         for dep in build_depends:
                             if dep not in builddep:
                                 builddep.append(dep)
-
                         break
-
                 # Add in alternates
                 source_packages[required_package].add_alternate(package_version)
 
@@ -603,7 +599,6 @@ def main():
     download_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     debsource_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
 
-
     progress_group = Group(Panel(Group(
         cache_progress,
         dependency_progress,
@@ -652,7 +647,7 @@ def main():
         # -------------------------------------------------------------------------------------------------------------
         # Step II - Parse Dependencies
         overall_progress.update(overall_task, description=task_description[1])
-        dependency_task = dependency_progress.add_task(task_description[1])
+        dependency_task = dependency_progress.add_task("Parsing Dependencies".ljust(20, ' '))
 
         # Iterate through package list and identify dependencies
         for pkg in required_packages:
@@ -679,10 +674,18 @@ def main():
         for package_name in not_parsed:
             print(f"\t Not parsed: {package_name}")
 
+        try:
+            with open(os.path.join(dir_log, 'selected_packages.list'), 'w') as f:
+                for pkg in selected_packages:
+                    f.write(str(selected_packages[pkg]) + '\n')
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
+
         # -------------------------------------------------------------------------------------------------------------
         # Step - III Check multipackage dependency
         overall_progress.update(overall_task, description=task_description[2], completed=3)
-        source_task = source_progress.add_task(task_description[2])
+        source_task = source_progress.add_task("Alt Dependency Check".ljust(20, ' '))
 
         for section in multi_dep:
             found = False
@@ -745,22 +748,40 @@ def main():
                                       source_task)
 
         missing_source = [_pkg for _pkg in source_packages if not source_packages[_pkg].found]
-        for pkg in missing_source:
-            live.console.print(f"Source not found for : {source_packages[pkg].name} {source_packages[pkg].version} "
-                               f"Alternates: {source_packages[pkg].alternates}")
-            if live.console.input("Select from Alternates? if N, source package will be ignored(y/n") == 'y':
-                new_version = ''
-                while new_version not in source_packages[pkg].alternates:
-                    live.console.input(f"Enter Alt Version from {source_packages[pkg].alternates}:")
-                source_packages[pkg].reset_version(new_version)
 
-        # rerun parse_source only for the missing source
-        download_size += parse_sources(source_records,
-                                       missing_source,
-                                       file_list,
-                                       builddep,
-                                       source_progress,
-                                       source_task)
+        if not len(missing_source) == 0:
+            for pkg in missing_source:
+                live.console.print(f"Source not found for : {source_packages[pkg].name} {source_packages[pkg].version} "
+                                   f"Alternates: {source_packages[pkg].alternates}")
+                if live.console.input("Select from Alternates? if N, source package will be ignored(y/n") == 'y':
+                    new_version = ''
+                    while new_version not in source_packages[pkg].alternates:
+                        live.console.input(f"Enter Alt Version from {source_packages[pkg].alternates}:")
+                    source_packages[pkg].reset_version(new_version)
+
+            # rerun parse_source only for the missing source
+            download_size += parse_sources(source_records,
+                                           missing_source,
+                                           file_list,
+                                           builddep,
+                                           source_progress,
+                                           source_task)
+
+        try:
+            with open(os.path.join(dir_log, 'source_packages.list'), 'w') as f:
+                for pkg in source_packages:
+                    f.write(str(source_packages[pkg]) + '\n')
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
+
+        try:
+            with open(os.path.join(dir_log, 'source_file.list'), 'w') as f:
+                for file in file_list:
+                    f.write(file + '\n')
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
 
         # -------------------------------------------------------------------------------------------------------------
         # Step - V Check for source Deps
@@ -776,17 +797,21 @@ def main():
         if len(required_builddep):
             live.console.print("[green]WARNING: There are pending Build Dependencies, Manual check is required")
 
-        exit(0)
-
         try:
-            with open(dir_temp + '/dep.list', 'w') as f:
-                for dep in required_builddep:
-                    f.write(dep + ' ')
+            with open(os.path.join(dir_log, 'build_dependency.list'), 'w') as f:
+                f.write("Build Dependencies:\n")
+                for pkg in builddep:
+                    f.write(pkg + ' ')
+                f.write("\nDependencies not installed:\n")
+                for pkg in required_builddep:
+                    f.write(pkg + ' ')
         except (FileNotFoundError, PermissionError) as e:
             print(f"Error: {e}")
             exit(1)
 
-        # Step - IV Download Code
+        # -------------------------------------------------------------------------------------------------------------
+        # Step - VI Download source files
+
         overall_progress.update(overall_task, description=task_description[4], completed=5)
         live.console.print("Total File Selected are :", len(file_list))
         live.console.print("Total Download is about ", round(download_size / (1024 * 1024)), "MB")
@@ -799,15 +824,10 @@ def main():
                         baseid,
                         total_download_progress,
                         download_progress)
+        exit(0)
 
-        try:
-            with open(dir_temp + '/filelist.txt', 'w') as f:
-                f.write(json.dumps(file_list))
-        except (FileNotFoundError, PermissionError) as e:
-            print(f"Error: {e}")
-            exit(1)
-
-        # Step - V Expanding the Source Packages
+        # -------------------------------------------------------------------------------------------------------------
+        # Step - VII Expanding the Source Packages
         folder_list = []
         overall_progress.update(overall_task, description=task_description[5], completed=6)
         try:
