@@ -20,8 +20,13 @@ from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TransferSp
 
 # TODO: make all apt_pkg.parse functions arch specific
 
-
 class Source:
+    """
+    Source is being used to track which packages need to be selected for satisfying the selected_package list
+    Args:
+        name: the name of the source package, once set should not be changed
+        version: version expected, maybe reset to alternates
+    """
     def __init__(self, name, version):
         if name == '':
             raise ValueError(f"Package being created with empty package name")
@@ -57,6 +62,12 @@ class Source:
 
 
 class Package:
+    """
+        Package is being used to track which packages need to be parsed for dependencies,
+        It enables, checking version constraints, version is set to -1 is it is not net parsed
+        Args:
+            name: the name of the package, once set should not be changed
+        """
     def __init__(self, name):
         if name == '':
             raise ValueError(f"Package being created with empty package name")
@@ -190,7 +201,7 @@ def search(re_string: str, base_string: str):
 
 
 def download_file(url: str, filename: str, progressbar: Progress, task) -> None:
-    """Download file and updates progressbar in incremental manner.
+    """Downloads file and updates progressbar in incremental manner.
         Args:
             url (str): url to download file from, protocol is prepended
             filename: (str): Filename to save to, location should be writable
@@ -224,7 +235,7 @@ def download_file(url: str, filename: str, progressbar: Progress, task) -> None:
 
 
 def build_cache(base: BaseDistribution, dir_cache: str, cache_progress: Progress) -> dict[str, str]:
-    """Download file and updates progressbar in incremental manner.
+    """Builds the Cache. Release file is used based on BaseDistribution defined
         Args:
             base (BaseDistribution): details of the system being derived from
             dir_cache: (str): Dir where cache files are to be downloaded
@@ -253,6 +264,7 @@ def build_cache(base: BaseDistribution, dir_cache: str, cache_progress: Progress
     # sequence is Packages, Translation & Sources
     # you change it you break it
     # TODO: Enable to be configurable, should not hardcode
+    # TODO: Use the apt_pkg functions & maybe apt_cache
     cache_source = [base_url + '/main/binary-' + base.arch + '/Packages.gz',
                     base_url + '/main/i18n/Translation-en.bz2',
                     base_url + '/main/source/Sources.gz']
@@ -330,6 +342,20 @@ def parse_dependencies(
         multi_dep: [],
         dependency_progress,
         dependency_task):
+    """Parse Dependencies for required_packages based on package_record in recursive manner
+    populates the selected_packages[] from the list and cases of Alt dependencies
+
+            Parameters:
+                package_record: Taken from the Package file
+                selected_packages: populates based on dependencies recursively
+                required_package: the package to find dependencies for
+                multi_dep: populates with packages which have alt dependencies'
+                dependency_progress: Progressbar to update
+                dependency_task: task for the progressbar
+
+            Returns:
+                None
+        """
     # Package: Record is typically of the format, other records not shown
     # Package: Only one package name, could contain numbers, hyphen, underscore, dot, etc.
     # Source:  one source package, optional - version in brackets separated by space
@@ -581,13 +607,9 @@ def main():
         exit(1)
 
     # Setting up Progress Meter
-    task_description = ["Build Cache        ",
-                        "Parse Dependencies ",
-                        "Multidep Check     ",
-                        "Identifying Source ",
-                        "Downloading Source ",
-                        "Expanding Sources  ",
-                        "Done"]
+    task_description = ["Building Cache", "Parse Dependencies", "Check Alternate dependency", "Parse Source Packages",
+                        "Source Build Dependency Check", "Download Source files", "Expanding Source Packages",
+                        "Starting Build"]
 
     overall_progress = Progress(TextColumn("Step {task.completed} of {task.total} - {task.description}"),
                                 TaskProgressColumn())
@@ -598,6 +620,7 @@ def main():
                                        MofNCompleteColumn())
     download_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     debsource_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
+    build_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
 
     progress_group = Group(Panel(Group(
         cache_progress,
@@ -605,7 +628,8 @@ def main():
         source_progress,
         total_download_progress,
         download_progress,
-        debsource_progress), title="Progress", title_align="left"), overall_progress)
+        debsource_progress,
+        build_progress), title="Progress", title_align="left"), overall_progress)
 
     with Live(progress_group, refresh_per_second=1) as live:
         live.console.print("[white]Starting Source Build System for Athena Linux...")
@@ -619,6 +643,8 @@ def main():
         # --------------------------------------------------------------------------------------------------------------
         # Step I - Building Cache
         overall_progress.update(overall_task, description=task_description[0])
+        overall_progress.advance(overall_task)
+
         cache_files = build_cache(base_distribution, dir_cache, cache_progress)
 
         # get file names from cache
@@ -642,11 +668,11 @@ def main():
             print(f"Error: {e}")
             exit(1)
 
-        overall_progress.advance(overall_task)
-
         # -------------------------------------------------------------------------------------------------------------
         # Step II - Parse Dependencies
         overall_progress.update(overall_task, description=task_description[1])
+        overall_progress.advance(overall_task)
+
         dependency_task = dependency_progress.add_task("Parsing Dependencies".ljust(20, ' '))
 
         # Iterate through package list and identify dependencies
@@ -683,8 +709,9 @@ def main():
             exit(1)
 
         # -------------------------------------------------------------------------------------------------------------
-        # Step - III Check multipackage dependency
-        overall_progress.update(overall_task, description=task_description[2], completed=3)
+        # Step - III Check Alternate dependency
+        overall_progress.update(overall_task, description=task_description[2])
+        overall_progress.advance(overall_task)
         source_task = source_progress.add_task("Alt Dependency Check".ljust(20, ' '))
 
         for section in multi_dep:
@@ -709,7 +736,8 @@ def main():
 
         # -------------------------------------------------------------------------------------------------------------
         # Step - IV Parse Source Packages
-        overall_progress.update(overall_task, description=task_description[3], completed=4)
+        overall_progress.update(overall_task, description=task_description[3])
+        overall_progress.advance(overall_task)
 
         # Check for discrepancy between source version and package version
         live.console.print("Checking for discrepancy between source & "
@@ -784,7 +812,9 @@ def main():
             exit(1)
 
         # -------------------------------------------------------------------------------------------------------------
-        # Step - V Check for source Deps
+        # Step - V Source Build Dependency Check
+        overall_progress.update(overall_task, description=task_description[4])
+        overall_progress.advance(overall_task)
 
         result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
         for line in result:
@@ -810,9 +840,10 @@ def main():
             exit(1)
 
         # -------------------------------------------------------------------------------------------------------------
-        # Step - VI Download source files
+        # Step - VI Download Source files
+        overall_progress.update(overall_task, description=task_description[5])
+        overall_progress.advance(overall_task)
 
-        overall_progress.update(overall_task, description=task_description[4], completed=5)
         live.console.print("Total File Selected are :", len(file_list))
         live.console.print("Total Download is about ", round(download_size / (1024 * 1024)), "MB")
         live.console.print("Starting Downloads...")
@@ -824,26 +855,32 @@ def main():
                         baseid,
                         total_download_progress,
                         download_progress)
-        exit(0)
 
         # -------------------------------------------------------------------------------------------------------------
         # Step - VII Expanding the Source Packages
+        overall_progress.update(overall_task, description=task_description[6])
+        overall_progress.advance(overall_task)
+
         folder_list = []
-        overall_progress.update(overall_task, description=task_description[5], completed=6)
         try:
-            with open(dir_log + '/logfile.log', "w") as logfile:
+            with open(os.path.join(dir_log, 'dpkg-source.log'), "w") as logfile:
                 dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
-                debsource_task = debsource_progress.add_task(task_description[5], total=len(dsc_files))
+                debsource_task = debsource_progress.add_task("Expanding Sources".ljust(20, ' '), total=len(dsc_files))
+                _errors = 0
                 for file in dsc_files:
                     folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
                     folder_list.append(folder_name)
                     dsc_file = os.path.join(dir_download, file)
                     process = subprocess.Popen(
                         ["dpkg-source", "-x", dsc_file, folder_name], stdout=logfile, stderr=logfile)
-                    process.wait()
-                    debsource_progress.advance(debsource_task)
+                    if process.wait():
+                        _errors += 1
 
-            with open(dir_temp + '/source_folder.list', 'w') as f:
+                    debsource_progress.advance(debsource_task)
+                if _errors:
+                    live.console.print(f"dpkg-source failed for {_errors} instances, please check dpkg-source.log")
+
+            with open(os.path.join(dir_log, 'source_folder.list'), 'w') as f:
                 for folder in folder_list:
                     f.write(folder + '\n')
 
@@ -851,8 +888,40 @@ def main():
             print(f"Error: {e}")
             exit(1)
 
+        # -------------------------------------------------------------------------------------------------------------
+        # Step - VIII Starting Build
+        overall_progress.update(overall_task, description=task_description[7])
+        overall_progress.advance(overall_task)
+
+        build_task = build_progress.add_task("Building Packages".ljust(20, ' '), total=len(folder_list))
+        live.console.print("Starting Package Build with --no-clean option...")
+
+        _errors = 0
+        with open(os.path.join(dir_log, 'dpkg-build.log'), "w") as dpkg_build_log:
+            for pkg in folder_list:
+                log_filename = os.path.join(dir_log, "build", os.path.basename(pkg) + '.log')
+                with open(log_filename, "w") as logfile:
+                    process = subprocess.Popen(
+                        ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64", "-j"],
+                        cwd=pkg, stdout=logfile, stderr=logfile)
+                    if process.wait():
+                        dpkg_build_log.write(f"{pkg}\t\t\t: FAIL")
+                        _errors += 1
+                    else:
+                        dpkg_build_log.write(f"{pkg}\t\t\t: PASS")
+                    build_progress.advance(build_task)
+
+        if _errors:
+            live.console.print(f"dpkg-buildpackage failed for {_errors} instances, "
+                               f"please check dpkg-buildpackage.log")
+
+
+
+
+
+
         # Mark everything as completed
-        overall_progress.update(overall_task, description=task_description[6], completed=7)
+        overall_progress.update(overall_task, description="Completed")
 
 
 # Main function
