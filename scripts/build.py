@@ -17,13 +17,11 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TransferSpeedColumn, TextColumn, BarColumn, \
     TaskProgressColumn, MofNCompleteColumn, DownloadColumn
 
+asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
+                '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
+                '║╠╣║╔╣║║╩╣║║║╬╚╗║╚╣║║║║║╠║╣\n' \
+                '╚╝╚╩═╩╩╩═╩╩═╩══╝╚═╩╩╩═╩═╩╩╝'
 
-asciiart_logo ='░█████╗░████████╗██╗░░██╗███████╗███╗░░██╗░█████╗░  ██╗░░░░░██╗███╗░░██╗██╗░░░██╗██╗░░██╗\n' \
-               '██╔══██╗╚══██╔══╝██║░░██║██╔════╝████╗░██║██╔══██╗  ██║░░░░░██║████╗░██║██║░░░██║╚██╗██╔╝\n'\
-               '███████║░░░██║░░░███████║█████╗░░██╔██╗██║███████║  ██║░░░░░██║██╔██╗██║██║░░░██║░╚███╔╝░\n'\
-               '██╔══██║░░░██║░░░██╔══██║██╔══╝░░██║╚████║██╔══██║  ██║░░░░░██║██║╚████║██║░░░██║░██╔██╗░\n'\
-               '██║░░██║░░░██║░░░██║░░██║███████╗██║░╚███║██║░░██║  ███████╗██║██║░╚███║╚██████╔╝██╔╝╚██╗\n'\
-               '╚═╝░░╚═╝░░░╚═╝░░░╚═╝░░╚═╝╚══════╝╚═╝░░╚══╝╚═╝░░╚═╝  ╚══════╝╚═╝╚═╝░░╚══╝░╚═════╝░╚═╝░░╚═╝\n'
 
 # TODO: make all apt_pkg.parse functions arch specific
 
@@ -34,6 +32,7 @@ class Source:
         name: the name of the source package, once set should not be changed
         version: version expected, maybe reset to alternates
     """
+
     def __init__(self, name, version):
         if name == '':
             raise ValueError(f"Package being created with empty package name")
@@ -75,6 +74,7 @@ class Package:
         Args:
             name: the name of the package, once set should not be changed
         """
+
     def __init__(self, name):
         if name == '':
             raise ValueError(f"Package being created with empty package name")
@@ -614,12 +614,11 @@ def main():
         exit(1)
 
     # Setting up Progress Meter
-    task_description = ["Building Cache", "Parse Dependencies", "Check Alternate dependency", "Parse Source Packages",
+    task_description = ["Building Cache", "Parse Dependencies", "Check Alternate Dependency", "Parse Source Packages",
                         "Source Build Dependency Check", "Download Source files", "Expanding Source Packages",
-                        "Starting Build"]
+                        "Building Packages"]
 
-    overall_progress = Progress(TextColumn("Step {task.completed} of {task.total} - {task.description}"),
-                                TaskProgressColumn())
+    overall_progress = Progress(TextColumn("Step {task.completed} of {task.total} - {task.description}"))
     cache_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     dependency_progress = Progress(TextColumn("{task.description} {task.total}"), TimeElapsedColumn(), SpinnerColumn())
     source_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
@@ -627,8 +626,8 @@ def main():
         TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(), MofNCompleteColumn())
     download_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     debsource_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
-    build_progress = Progress(
-        TextColumn("Building Packages".ljust(20, ' ')), BarColumn(), MofNCompleteColumn(), TextColumn("{task.description}"))
+    build_progress = Progress(TextColumn("Building Packages".ljust(20, ' ')),
+                              MofNCompleteColumn(), SpinnerColumn(), TextColumn("{task.description}"))
 
     progress_group = Group(Panel(Group(
         cache_progress,
@@ -919,14 +918,13 @@ def main():
                             process = subprocess.Popen(
                                 ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64", "-j"],
                                 cwd=pkg, stdout=logfile, stderr=logfile)
-                            if process.wait():
-                                dpkg_build_log.write(f"{os.path.basename(pkg)}\t\t: BUILD FAIL\n")
-                                _errors += 1
-                            else:
-                                dpkg_build_log.write(f"{os.path.basename(pkg)}\t\t: BUILD PASS\n")
-                        else:
-                            dpkg_build_log.write(f"{os.path.basename(pkg)}\t\t: DEPENDENCY CHECK FAIL\n")
-                            live.console.print(f"Dependency Check failed for {os.path.basename(pkg)}")
+                            if not process.wait():
+                                dpkg_build_log.write(f"PASS: {os.path.basename(pkg)}\n")
+                                continue
+
+                        dpkg_build_log.write(f"FAIL: {os.path.basename(pkg)}\n")
+                        live.console.print(f"Build failed for {os.path.basename(pkg)}")
+                        _errors += 1
 
                         dpkg_build_log.flush()
 
