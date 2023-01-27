@@ -18,6 +18,13 @@ from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, TransferSp
     TaskProgressColumn, MofNCompleteColumn, DownloadColumn
 
 
+asciiart_logo ='░█████╗░████████╗██╗░░██╗███████╗███╗░░██╗░█████╗░  ██╗░░░░░██╗███╗░░██╗██╗░░░██╗██╗░░██╗\n' \
+               '██╔══██╗╚══██╔══╝██║░░██║██╔════╝████╗░██║██╔══██╗  ██║░░░░░██║████╗░██║██║░░░██║╚██╗██╔╝\n'\
+               '███████║░░░██║░░░███████║█████╗░░██╔██╗██║███████║  ██║░░░░░██║██╔██╗██║██║░░░██║░╚███╔╝░\n'\
+               '██╔══██║░░░██║░░░██╔══██║██╔══╝░░██║╚████║██╔══██║  ██║░░░░░██║██║╚████║██║░░░██║░██╔██╗░\n'\
+               '██║░░██║░░░██║░░░██║░░██║███████╗██║░╚███║██║░░██║  ███████╗██║██║░╚███║╚██████╔╝██╔╝╚██╗\n'\
+               '╚═╝░░╚═╝░░░╚═╝░░░╚═╝░░╚═╝╚══════╝╚═╝░░╚══╝╚═╝░░╚═╝  ╚══════╝╚═╝╚═╝░░╚══╝░╚═════╝░╚═╝░░╚═╝\n'
+
 # TODO: make all apt_pkg.parse functions arch specific
 
 class Source:
@@ -616,11 +623,12 @@ def main():
     cache_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     dependency_progress = Progress(TextColumn("{task.description} {task.total}"), TimeElapsedColumn(), SpinnerColumn())
     source_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
-    total_download_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(),
-                                       MofNCompleteColumn())
+    total_download_progress = Progress(
+        TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(), MofNCompleteColumn())
     download_progress = Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn())
     debsource_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
-    build_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
+    build_progress = Progress(
+        TextColumn("Building Packages".ljust(20, ' ')), BarColumn(), MofNCompleteColumn(), TextColumn("{task.description}"))
 
     progress_group = Group(Panel(Group(
         cache_progress,
@@ -816,6 +824,7 @@ def main():
         overall_progress.update(overall_task, description=task_description[4])
         overall_progress.advance(overall_task)
 
+        # TODO: use dpkg-checkbuilddeps -d build-depends-string -c build-conflicts-string
         result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
         for line in result:
             match = re.match(r'^ii\s+([^\s:]+)', line)
@@ -892,33 +901,42 @@ def main():
         # Step - VIII Starting Build
         overall_progress.update(overall_task, description=task_description[7])
         overall_progress.advance(overall_task)
+        build_task = build_progress.add_task('', total=len(folder_list))
 
-        build_task = build_progress.add_task("Building Packages".ljust(20, ' '), total=len(folder_list))
         live.console.print("Starting Package Build with --no-clean option...")
 
         _errors = 0
-        with open(os.path.join(dir_log, 'dpkg-build.log'), "w") as dpkg_build_log:
-            for pkg in folder_list:
-                log_filename = os.path.join(dir_log, "build", os.path.basename(pkg) + '.log')
-                with open(log_filename, "w") as logfile:
-                    process = subprocess.Popen(
-                        ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64", "-j"],
-                        cwd=pkg, stdout=logfile, stderr=logfile)
-                    if process.wait():
-                        dpkg_build_log.write(f"{pkg}\t\t\t: FAIL")
-                        _errors += 1
-                    else:
-                        dpkg_build_log.write(f"{pkg}\t\t\t: PASS")
+        try:
+            with open(os.path.join(dir_log, 'dpkg-build.log'), "w") as dpkg_build_log:
+                for pkg in folder_list:
+                    build_progress.update(build_task, description=os.path.basename(pkg))
                     build_progress.advance(build_task)
 
-        if _errors:
-            live.console.print(f"dpkg-buildpackage failed for {_errors} instances, "
-                               f"please check dpkg-buildpackage.log")
+                    log_filename = os.path.join(dir_log, "build", os.path.basename(pkg) + '.log')
+                    with open(log_filename, "w") as logfile:
+                        process = subprocess.Popen(["dpkg-checkbuilddeps"], cwd=pkg, stdout=logfile, stderr=logfile)
+                        if not process.wait():
+                            process = subprocess.Popen(
+                                ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64", "-j"],
+                                cwd=pkg, stdout=logfile, stderr=logfile)
+                            if process.wait():
+                                dpkg_build_log.write(f"{os.path.basename(pkg)}\t\t: BUILD FAIL\n")
+                                _errors += 1
+                            else:
+                                dpkg_build_log.write(f"{os.path.basename(pkg)}\t\t: BUILD PASS\n")
+                        else:
+                            dpkg_build_log.write(f"{os.path.basename(pkg)}\t\t: DEPENDENCY CHECK FAIL\n")
+                            live.console.print(f"Dependency Check failed for {os.path.basename(pkg)}")
 
+                        dpkg_build_log.flush()
 
+            if _errors:
+                live.console.print(f"dpkg-buildpackage failed for {_errors} instances, "
+                                   f"please check dpkg-buildpackage.log")
 
-
-
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"Error: {e}")
+            exit(1)
 
         # Mark everything as completed
         overall_progress.update(overall_task, description="Completed")
@@ -926,4 +944,5 @@ def main():
 
 # Main function
 if __name__ == '__main__':
+    print(asciiart_logo)
     main()
