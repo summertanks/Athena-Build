@@ -126,17 +126,6 @@ fi
 
 python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$PWD --config-file=$CONFIG_FILE
 
-# Read the list of directories from the file
-while read -r dir; do
-  # Go to the directory
-  cd "$dir"
-  # Build and install dependencies
-
-  # Build the package for amd64 architecture
-  dpkg-buildpackage  -b -uc -us -a amd64 2>&1 | tee -a /home/harkirat/PycharmProjects/Athena-Build/log/build.log
-
-  cd -
-done < tmp/source_folder.list
 
 
 
