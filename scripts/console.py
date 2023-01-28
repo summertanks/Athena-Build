@@ -1,7 +1,7 @@
 import npyscreen
 
 
-class FormObject(npyscreen.Form):
+class FormObject(npyscreen.ActionFormV2):
     def create(self):
         self.add(npyscreen.TitleSliderPercent, accuracy=0, out_of=100, name="Slider")
         pass

@@ -11,7 +11,7 @@ DIR_IMAGE="image"
 DIR_CACHE="cache"
 DIR_DOWNLOAD="download"
 DIR_LOG="log"
-DIT_SOURCE="source"
+DIR_SOURCE="source"
 
 VERBOSE="0"
 CONFIG_FILE="config/build.conf"
@@ -102,7 +102,7 @@ mkdir -p $PWD/$DIR_REPO
 mkdir -p $PWD/$DIR_IMAGE
 mkdir -p $PWD/$DIR_CACHE
 mkdir -p $PWD/$DIR_DOWNLOAD
-mkdir -p $PWD/$DIR_CACHE
+mkdir -p $PWD/$DIR_SOURCE
 mkdir -p $PWD/$DIR_LOG/build
 
 # Checking build system
