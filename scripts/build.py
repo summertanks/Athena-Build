@@ -25,6 +25,7 @@ asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n'
 
 # TODO: make all apt_pkg.parse functions arch specific
 
+# TODO: combine the two classes Package & Source
 class Source:
     """
     Source is being used to track which packages need to be selected for satisfying the selected_package list
@@ -545,10 +546,13 @@ def parse_sources(source_records,
 
                         # Parse Build Depends
                         build_depends = search(r'Build-Depends: ([^\n]+)', package)
+                        build_depends_indep = search(r'Build-Depends-Indep: ([^\n]+)', package)
+                        build_depends += ', ' + build_depends_indep
                         if build_depends == '':
                             continue
 
                         build_depends = apt_pkg.parse_src_depends(build_depends, architecture='amd64')
+                        # TODO: cater for conditions of Alt Dependency
                         build_depends = [dep[0][0] for dep in build_depends if not dep[0][0] == '']
                         for dep in build_depends:
                             if dep not in builddep:
@@ -863,7 +867,6 @@ def main():
                         baseid,
                         total_download_progress,
                         download_progress)
-
         # -------------------------------------------------------------------------------------------------------------
         # Step - VII Expanding the Source Packages
         overall_progress.update(overall_task, description=task_description[6])
@@ -895,7 +898,6 @@ def main():
         except (FileNotFoundError, PermissionError) as e:
             print(f"Error: {e}")
             exit(1)
-
         # -------------------------------------------------------------------------------------------------------------
         # Step - VIII Starting Build
         overall_progress.update(overall_task, description=task_description[7])

@@ -103,7 +103,7 @@ mkdir -p $PWD/$DIR_IMAGE
 mkdir -p $PWD/$DIR_CACHE
 mkdir -p $PWD/$DIR_DOWNLOAD
 mkdir -p $PWD/$DIR_CACHE
-mkdir -p $PWD/$DIR_LOG
+mkdir -p $PWD/$DIR_LOG/build
 
 # Checking build system
 awk -F= '/PRETTY_NAME/ { print "Current Build System " $2 }' /etc/os-release
