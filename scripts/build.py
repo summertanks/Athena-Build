@@ -547,11 +547,17 @@ def parse_sources(source_records,
                         # Parse Build Depends
                         build_depends = search(r'Build-Depends: ([^\n]+)', package)
                         build_depends_indep = search(r'Build-Depends-Indep: ([^\n]+)', package)
-                        build_depends += ', ' + build_depends_indep
-                        if build_depends == '':
+                        build_depends_arch = search(r'Build-Depends-Arch: ([^\n]+)', package)
+
+                        depends_string = ''
+                        for dep_str in [build_depends, build_depends_indep, build_depends_arch]:
+                            if not dep_str == '':
+                                depends_string += dep_str + ', '
+
+                        if depends_string == '':
                             continue
 
-                        build_depends = apt_pkg.parse_src_depends(build_depends, architecture='amd64')
+                        build_depends = apt_pkg.parse_src_depends(depends_string, architecture='amd64')
                         # TODO: cater for conditions of Alt Dependency
                         build_depends = [dep[0][0] for dep in build_depends if not dep[0][0] == '']
                         for dep in build_depends:
@@ -632,7 +638,7 @@ def main():
     debsource_progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn())
     build_progress = Progress(TextColumn("Building Packages".ljust(20, ' ')),
                               MofNCompleteColumn(), SpinnerColumn(), TextColumn("{task.description}"))
-
+    progress_panel = Panel("Progress")
     progress_group = Group(Panel(Group(
         cache_progress,
         dependency_progress,
@@ -640,9 +646,9 @@ def main():
         total_download_progress,
         download_progress,
         debsource_progress,
-        build_progress), title="Progress", title_align="left"), overall_progress)
+        build_progress), title="Progress", title_align="left"), progress_panel, overall_progress)
 
-    with Live(progress_group, refresh_per_second=1) as live:
+    with Live(progress_group) as live:
         live.console.print("[white]Starting Source Build System for Athena Linux...")
         live.console.print("Building for ...")
         live.console.print(f"\t Arch\t\t\t{arch}")
@@ -838,6 +844,9 @@ def main():
         live.console.print("Build Dependency required ", len(required_builddep), '/', len(builddep))
         if len(required_builddep):
             live.console.print("[green]WARNING: There are pending Build Dependencies, Manual check is required")
+            ans = live.console.input("Proceed: (y/n)")
+            if not ans == 'y':
+                exit(0)
 
         try:
             with open(os.path.join(dir_log, 'build_dependency.list'), 'w') as f:
@@ -918,7 +927,7 @@ def main():
                         process = subprocess.Popen(["dpkg-checkbuilddeps"], cwd=pkg, stdout=logfile, stderr=logfile)
                         if not process.wait():
                             process = subprocess.Popen(
-                                ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64", "-j"],
+                                ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64", "-J"],
                                 cwd=pkg, stdout=logfile, stderr=logfile)
                             if not process.wait():
                                 dpkg_build_log.write(f"PASS: {os.path.basename(pkg)}\n")
