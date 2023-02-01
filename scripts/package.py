@@ -18,7 +18,10 @@ class Package:
         self.version_constraints: {} = {}
         self._provides: [] = []
         self._source: () = ('', '')
-        self._depends: {} = {}
+        self._depends: [] = []
+        self._altdepends: [] = []
+        self._breaks: [] = []
+        self._conflicts: [] = []
 
     def __str__(self):
         return str(
@@ -59,12 +62,42 @@ class Package:
             self._provides.append(pkg)
 
     @property
+    def breaks(self):
+        return self._breaks
+
+    def add_breaks(self, breaks_string: str):
+        breaks_list = apt_pkg.parse_depends(breaks_string)
+        self._breaks.extend(breaks_list)
+
+    @property
+    def conflicts(self):
+        return self._conflicts
+
+    def add_conflicts(self, conflicts_string: str):
+        conflicts_list = apt_pkg.parse_depends(conflicts_string)
+        self._conflicts.extend(conflicts_list)
+
+    @property
     def depends(self):
         return self._depends
 
-    def add_depends(self, depends_string):
-        depends = apt_pkg.parse_depends(depends_string)
-        self._depends = depends
+    def add_depends(self, depends_string: str):
+        depends_list = apt_pkg.parse_depends(depends_string)
+        parsed_depends = [sublist[0] for sublist in depends_list if len(sublist) == 1]
+        for _pkg in parsed_depends:
+            # remove duplicates
+            if _pkg not in self._depends:
+                self._depends.append(_pkg)
+
+        alt_depends = [sublist for sublist in depends_list if len(sublist) > 1]
+        for _pkg in alt_depends:
+            # remove duplicates
+            if _pkg not in self._altdepends:
+                self._altdepends.append(_pkg)
+
+    @property
+    def altdepends(self) -> []:
+        return self._altdepends
 
     @property
     def constraints_satisfied(self) -> bool:

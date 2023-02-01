@@ -68,10 +68,13 @@ def parse_dependencies(
         if not package.version == '-1':
             break
 
-        # Bothersome multi-provides condition,
-        # if a package is added, assume all Provides have been satisfied
-        # Problem remains that for provides - more than one package may satisfy it, cant go with first come first serve
-        # TODO: Parse complete set and give user option to select which package option they want selected.
+        # Problem remains - more than one package may satisfy 'provides', cant go with first come, first served
+        # TODO: allow user to select which package to select
+        alternates = find_alternate_packages(package_record, required_package)
+        if len(alternates) > 1:  # assume single matches as such have no options
+            con.print(f"{required_package} has alternate sources: {alternates}, auto selected is {package_name}")
+
+        # Bothersome multi-provides condition: if a package is added, assume all Provides have been satisfied
         for _pkg in provides_list:
             if not _pkg == '':
                 selected_packages[_pkg] = package
@@ -91,28 +94,27 @@ def parse_dependencies(
         depends_group = utils.search(r'\nDepends: ([^\n]+)', _package)
         pre_depends_group = utils.search(r'\nPre-Depends: ([^\n]+)', _package)
 
-        depends: str = ''
-        depends += depends_group
+        # Get Breaks and Conflicts
+        breaks = utils.search(r'\nBreaks: ([^\n]+)', _package)
+        conflicts = utils.search(r'\nConflicts: ([^\n]+)', _package)
 
+        depends = ''
         # Let's stitch them together, none is mandatory
-        if depends == '':
-            depends = pre_depends_group
-        else:
-            if not pre_depends_group == '':
-                depends += ', ' + pre_depends_group
-
-        # TODO: Check for dependencies that can be satisfied by multiple packages
-        _depends = depends.split(', ')
-        for _dep in _depends:
-            multi = re.search(r'\|', _dep)
-            if multi is not None:
-                multi_dep.append(re.split(' \| ', _dep))
-                continue
+        for dep_str in [depends_group, pre_depends_group]:
+            if not dep_str == '':
+                depends += dep_str + ', '
 
         package.version = package_version
         package.source = package_source
         package.add_provides(package_provides)
         package.add_depends(depends)
+        package.add_breaks(breaks)
+        package.add_conflicts(conflicts)
+
+        # Check for dependencies that can be satisfied by multiple packages
+        for altdepends in package.altdepends:
+            if altdepends not in multi_dep:
+                multi_dep.append(altdepends)
 
         # Update Progress bar
         completed = len([obj for obj in selected_packages.values() if not obj.version == '-1'])
@@ -149,6 +151,8 @@ def parse_sources(source_records,
             for package in source_records:
                 package_name = search(r'Package: ([^\n]+)', package)
                 package_version = search(r'Version: ([^\n]+)', package)
+
+                # TODO: get Build-breaks
 
                 # On Match
                 if package_name == required_package:
@@ -194,3 +198,20 @@ def parse_sources(source_records,
                     source_packages[required_package].add_alternate(package_version)
 
     return download_size
+
+
+def find_alternate_packages(package_record: list[str], provides: str) -> {str, str}:
+    alternates = {}
+    for _package in package_record:
+        # Get Package Name
+        package_name = utils.search(r'Package: ([^\n]+)', _package)
+        package_version = search(r'Version: ([^\n]+)', _package)
+
+        # Dependencies are Satisfied on provides
+        package_provides = utils.search(r'Provides: ([^\n]+)', _package)
+        provides_list = [pkg[0][0] for pkg in apt_pkg.parse_depends(package_provides)]
+
+        if provides in provides_list:
+            alternates[package_name] = package_version
+
+    return alternates

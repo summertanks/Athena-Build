@@ -103,10 +103,6 @@ def build_cache(base: BaseDistribution, dir_cache: str, con: Console, logger: Lo
     # Default release file
     release_url = base_url + '/InRelease'
     release_file = os.path.join(dir_cache, base_filename + '_InRelease')
-    logger.debug(base_url)
-    logger.debug(base_filename)
-    logger.debug(release_url)
-    logger.debug(release_file)
 
     # By default download
     # TODO: have override - offline flag
@@ -186,6 +182,7 @@ def build_cache(base: BaseDistribution, dir_cache: str, con: Console, logger: Lo
 
     return cache_files
 
+
 def main():
     selected_packages: {str: Package} = {}
     source_packages = {}
@@ -249,7 +246,7 @@ def main():
     apt_pkg.init_system()
     console = Console()
     log_format = "%(message)s"
-    logging.basicConfig(level="NOTSET", format=log_format, datefmt="[%X]", handlers=[RichHandler()])
+    logging.basicConfig(level="INFO", format=log_format, datefmt="[%X]", handlers=[RichHandler()])
     logger = logging.getLogger('rich')
 
     # --------------------------------------------------------------------------------------------------------------
@@ -261,7 +258,7 @@ def main():
 
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
-    console.rule(task_description[0])
+    console.print("Building Cache...")
     cache_files = build_cache(base_distribution, dir_cache, console, logger)
 
     # get file names from cache
@@ -270,7 +267,7 @@ def main():
 
     # load data from the files
     try:
-        logger.info(f"Reading {os.path.basename(package_file)}")
+        console.print(f"Using Package List: {os.path.basename(package_file)}")
         with open(package_file, 'r') as f:
             contents = f.read()
             package_record = contents.split('\n\n')
@@ -279,7 +276,7 @@ def main():
         exit(1)
 
     try:
-        logger.info(f"Reading {os.path.basename(source_file)}")
+        console.print(f"Using Source List: {os.path.basename(source_file)}")
         with open(source_file, 'r') as f:
             contents = f.read()
             source_records = contents.split('\n\n')
@@ -289,30 +286,55 @@ def main():
 
     # -------------------------------------------------------------------------------------------------------------
     # Step II - Parse Dependencies
-    console.rule(task_description[1])
+    console.print("Parsing Dependencies...")
 
-    # Iterate through package list and identify dependencies
     count_pkgs = 0
-    for pkg in required_packages:
-        if pkg and not pkg.startswith('#') and not pkg.isspace():
-            # Skip if added from previously parsed dependency tree
-            if pkg not in selected_packages.keys():
-                # remove spaces
-                pkg = pkg.strip()
-                count_pkgs += 1
-                # This is recursive function, status cant be created local to the function
-                with console.status('') as status:
+    # This is recursive function, status cant be created local to the function
+    with console.status('') as status:
+        # Iterate through package list and identify dependencies
+        for pkg in required_packages:
+            if pkg and not pkg.startswith('#') and not pkg.isspace():
+                # Skip if added from previously parsed dependency tree
+                if pkg not in selected_packages.keys():
+                    # remove spaces
+                    pkg = pkg.strip()
+                    count_pkgs += 1
                     data.parse_dependencies(package_record, selected_packages, pkg, multi_dep, console, status)
 
     not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
     console.print(f"Total Required Packages {count_pkgs}")
-    console.print("Total Dependencies Selected are : {len(selected_packages)}")
-    console.print("Total Source Packages Required are : {len(source_packages)}")
-    console.print("Dependencies Not Parsed: ", len(not_parsed))
+    console.print(f"Total Dependencies Selected are : {len(selected_packages)}")
+    console.print(f"Total Source Packages Required are : {len(source_packages)}")
+    console.print(f"Dependencies Not Parsed: {len(not_parsed)}")
 
     for package_name in not_parsed:
         logger.warning(f"Not parsed: {package_name}")
 
+    console.print("Checking Breaks and Conflicts...")
+    for pkg in selected_packages:
+        # Breaks will still allow to install - Warning
+        for breaks in selected_packages[pkg].breaks:
+            if breaks[0] in selected_packages:
+                pkg_name = breaks[0]
+                pkg_ver = selected_packages[pkg_name].version
+                break_version = breaks[1]
+                break_comparator = breaks[2]
+
+                if break_comparator == '' or apt_pkg.check_dep(break_version, break_comparator, pkg_ver):
+                    logger.warning(f"Package {pkg} breaks {pkg_name}")
+
+        # Conflicts will break installation - Error
+        for conflicts in selected_packages[pkg].conflicts:
+            if conflicts[0] in selected_packages:
+                pkg_name = conflicts[0]
+                pkg_ver = selected_packages[pkg_name].version
+                conflicts_version = conflicts[1]
+                conflicts_comparator = conflicts[2]
+
+                if conflicts_comparator == '' or apt_pkg.check_dep(conflicts_version, conflicts_comparator, pkg_ver):
+                    logger.error(f"Package {pkg} conflicts with {pkg_name}")
+
+    console.print("Checking Version Constraints...")
     for package in selected_packages:
         if not selected_packages[package].constraints_satisfied:
             logger.warning(f"Version Constraint failed for {package}:{selected_packages[package].name}")
@@ -327,17 +349,15 @@ def main():
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - III Check Alternate dependency
-    console.rule(task_description[2])
     console.print("Alternate Dependency Check...")
 
     for section in multi_dep:
         found = False
-        for pkgs in section:
-            arr = apt_pkg.parse_depends(pkgs)
-            pkg_name = arr[0][0][0]
+        for pkg in section:
+            pkg_name = pkg[0]
             if pkg_name in selected_packages:
-                pkg_version = arr[0][0][1]
-                pkg_constraint = arr[0][0][2]
+                pkg_version = pkg[1]
+                pkg_constraint = pkg[2]
                 if apt_pkg.check_dep(selected_packages[pkg_name].version, pkg_constraint, pkg_version):
                     found = True
                 else:
@@ -347,7 +367,7 @@ def main():
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - IV Parse Source Packages
-    console.rule(task_description[3])
+    console.print("Parsing Source Packages...")
 
     # Check for discrepancy between source version and package version
     console.print("Checking for discrepancy between source package version...")
