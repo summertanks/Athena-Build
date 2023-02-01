@@ -17,10 +17,12 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.prompt import Prompt, Confirm
 
-import data
+import package
+import source
 # Local imports
 import utils
-from data import Package
+from package import Package
+from source import Source
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
@@ -29,49 +31,6 @@ asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n'
 
 
 # TODO: make all apt_pkg.parse functions arch specific
-
-# TODO: combine the two classes Package & Source
-class Source:
-    """
-    Source is being used to track which packages need to be selected for satisfying the selected_package list
-    Args:
-        name: the name of the source package, once set should not be changed
-        version: version expected, maybe reset to alternates
-    """
-
-    def __init__(self, name, version):
-        if name == '':
-            raise ValueError(f"Package being created with empty package name")
-
-        self._name = name
-        self._version = version
-        self.found = False
-        self._alternate = []
-
-    def __str__(self):
-        return str(f"{self._name} {self._version} {self.found} {self._alternate}")
-
-    @property
-    def name(self):
-        return self._name
-
-    @property
-    def version(self):
-        return self._version
-
-    def reset_version(self, version: str):
-        if not version == '':
-            raise ValueError(f"Package being set with empty version")
-        self._version = version
-
-    @property
-    def alternates(self):
-        return self._alternate
-
-    def add_alternate(self, version: str):
-        if not version == '':
-            self._alternate.append(version)
-
 
 class BaseDistribution:
     def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
@@ -93,7 +52,6 @@ def build_cache(base: BaseDistribution, dir_cache: str, con: Console, logger: Lo
         Returns:
             dict {}:
     """
-    total_size = 0
     cache_files = {}
 
     # TODO: Support https
@@ -189,7 +147,6 @@ def main():
     multi_dep = []
     file_list = {}
     builddep = []
-    required_builddep = []
     installed_packages = []
 
     config_parser = configparser.ConfigParser()
@@ -221,7 +178,7 @@ def main():
         dir_download = os.path.join(working_dir, config_parser.get('Directories', 'Download'))
         dir_log = os.path.join(working_dir, config_parser.get('Directories', 'Log'))
         dir_cache = os.path.join(working_dir, config_parser.get('Directories', 'Cache'))
-        dir_temp = os.path.join(working_dir, config_parser.get('Directories', 'Temp'))
+        # dir_temp = os.path.join(working_dir, config_parser.get('Directories', 'Temp'))
         dir_source = os.path.join(working_dir, config_parser.get('Directories', 'Source'))
 
     except configparser.Error as e:
@@ -299,7 +256,7 @@ def main():
                     # remove spaces
                     pkg = pkg.strip()
                     count_pkgs += 1
-                    data.parse_dependencies(package_record, selected_packages, pkg, multi_dep, console, status)
+                    package.parse_dependencies(package_record, selected_packages, pkg, multi_dep, console, status)
 
     not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
     console.print(f"Total Required Packages {count_pkgs}")
@@ -335,9 +292,9 @@ def main():
                     logger.error(f"Package {pkg} conflicts with {pkg_name}")
 
     console.print("Checking Version Constraints...")
-    for package in selected_packages:
-        if not selected_packages[package].constraints_satisfied:
-            logger.warning(f"Version Constraint failed for {package}:{selected_packages[package].name}")
+    for pkg in selected_packages:
+        if not selected_packages[pkg].constraints_satisfied:
+            logger.warning(f"Version Constraint failed for {pkg}:{selected_packages[pkg].name}")
 
     try:
         with open(os.path.join(dir_log, 'selected_packages.list'), 'w') as f:
@@ -400,7 +357,7 @@ def main():
 
     console.print("Source requested for : ", len(source_packages), " packages")
 
-    download_size = data.parse_sources(source_records, source_packages, file_list, builddep, console, logger)
+    download_size = source.parse_sources(source_records, source_packages, file_list, builddep, console, logger)
 
     missing_source = [_pkg for _pkg in source_packages if not source_packages[_pkg].found]
 
@@ -413,7 +370,7 @@ def main():
                 source_packages[pkg].reset_version(new_version)
 
         # rerun parse_source only for the missing source
-        download_size += data.parse_sources(source_records, missing_source, file_list, builddep, console, logger)
+        download_size += source.parse_sources(source_records, missing_source, file_list, builddep, console, logger)
 
     try:
         with open(os.path.join(dir_log, 'source_packages.list'), 'w') as f:
