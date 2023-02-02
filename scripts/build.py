@@ -193,11 +193,6 @@ def main():
         print(f"Error: {e}")
         exit(1)
 
-    # Setting up Progress Meter
-    task_description = ["Building Cache", "Parse Dependencies", "Check Alternate Dependency", "Parse Source Packages",
-                        "Source Build Dependency Check", "Download Source files", "Expanding Source Packages",
-                        "Building Packages"]
-
     # --------------------------------------------------------------------------------------------------------------
     # Setting up common systems
     apt_pkg.init_system()
@@ -215,7 +210,7 @@ def main():
 
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
-    console.print("Building Cache...")
+    console.print("[bright_white]Building Cache...")
     cache_files = build_cache(base_distribution, dir_cache, console, logger)
 
     # get file names from cache
@@ -243,7 +238,7 @@ def main():
 
     # -------------------------------------------------------------------------------------------------------------
     # Step II - Parse Dependencies
-    console.print("Parsing Dependencies...")
+    console.print("[bright_white]Parsing Dependencies...")
 
     count_pkgs = 0
     # This is recursive function, status cant be created local to the function
@@ -256,7 +251,7 @@ def main():
                     # remove spaces
                     pkg = pkg.strip()
                     count_pkgs += 1
-                    package.parse_dependencies(package_record, selected_packages, pkg, multi_dep, console, status)
+                    package.parse_dependencies(package_record, selected_packages, pkg, console, status)
 
     not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
     console.print(f"Total Required Packages {count_pkgs}")
@@ -264,10 +259,12 @@ def main():
     console.print(f"Total Source Packages Required are : {len(source_packages)}")
     console.print(f"Dependencies Not Parsed: {len(not_parsed)}")
 
-    for package_name in not_parsed:
-        logger.warning(f"Not parsed: {package_name}")
+    for pkg_name in not_parsed:
+        logger.warning(f"Not parsed: {pkg_name}")
 
-    console.print("Checking Breaks and Conflicts...")
+    # -------------------------------------------------------------------------------------------------------------
+    # Step III - Checking Breaks and Conflicts
+    console.print("[bright_white]Checking Breaks and Conflicts...")
     for pkg in selected_packages:
         # Breaks will still allow to install - Warning
         for breaks in selected_packages[pkg].breaks:
@@ -291,7 +288,9 @@ def main():
                 if conflicts_comparator == '' or apt_pkg.check_dep(conflicts_version, conflicts_comparator, pkg_ver):
                     logger.error(f"Package {pkg} conflicts with {pkg_name}")
 
-    console.print("Checking Version Constraints...")
+    # -------------------------------------------------------------------------------------------------------------
+    # Step IV - Checking Version Constraints
+    console.print("[bright_white]Checking Version Constraints...")
     for pkg in selected_packages:
         if not selected_packages[pkg].constraints_satisfied:
             logger.warning(f"Version Constraint failed for {pkg}:{selected_packages[pkg].name}")
@@ -305,8 +304,14 @@ def main():
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - III Check Alternate dependency
-    console.print("Alternate Dependency Check...")
+    # Step - V Check Alternate dependency
+    console.print("[bright_white]Alternate Dependency Check...")
+
+    # Check for dependencies that can be satisfied by multiple packages
+    for pkg in selected_packages:
+        for altdepends in selected_packages[pkg].altdepends:
+            if altdepends not in multi_dep:
+                multi_dep.append(altdepends)
 
     for section in multi_dep:
         found = False
@@ -323,40 +328,36 @@ def main():
             logger.warning(f"dependency unresolved between {section}")
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - IV Parse Source Packages
-    console.print("Parsing Source Packages...")
+    # Step - VI Check for discrepancy between source version and package version
+    console.print("[bright_white]Checking for discrepancy between source package version...")
 
-    # Check for discrepancy between source version and package version
-    console.print("Checking for discrepancy between source package version...")
+    for pkg_name in selected_packages:
+        source_name = selected_packages[pkg_name].source[0]
+        source_version = selected_packages[pkg_name].source[1]
+        pkg_version = selected_packages[pkg_name].version
 
-    for package_name in selected_packages:
-        source_version = selected_packages[package_name].source[1]
-        # Ignore where Source version is not given, it is assumed same as package version
-        if source_version == '':
-            continue
-        package_version = selected_packages[package_name].version
-        if not source_version == package_version:
-            logger.warning(f"\tDiscrepancy {package_name} {package_version} -> {source_version}")
-            selected_packages[package_name].version = \
-                Prompt.ask("Select Version to use", choices=[package_version, source_version], default=source_version)
-
-    # Add package to source list
-    for package_name in selected_packages:
-        package_source = selected_packages[package_name].source[0]
-        package_version = selected_packages[package_name].source[1]
         # Where Source version is not given, it is assumed same as package version
-        if package_version == '':
-            package_version = selected_packages[package_name].version
-        if package_source not in source_packages:
-            source_packages[package_source] = Source(package_source, package_version)
-        else:
-            if not source_packages[package_source].version == package_version:
-                logger.warning(
-                    f"Multiple version of same source package being asked for {package_source} -> "
-                    f"{source_packages[package_source].version} : {package_version}")
+        if source_version == '':
+            source_version = pkg_version
+
+        # Add package to source list
+        if source_name not in source_packages:
+            source_packages[source_name] = Source(source_name, source_version)
+
+        if not source_version == pkg_version:
+            _version = Prompt.ask(f"Package and Source version mismatch "
+                                  f"{pkg_name}: {pkg_version} -> {source_name}: {source_version}\n"
+                                  f"Select Version to use",
+                                  choices=[source_version, pkg_version], default=source_version)
+            selected_packages[pkg_name].reset_source_version(_version)
 
     console.print("Source requested for : ", len(source_packages), " packages")
 
+    # -------------------------------------------------------------------------------------------------------------
+    # Step - VI Parse Source Packages
+    console.print("[bright_white]Parsing Source Packages...")
+
+    # Parse Sources Control file
     download_size = source.parse_sources(source_records, source_packages, file_list, builddep, console, logger)
 
     missing_source = [_pkg for _pkg in source_packages if not source_packages[_pkg].found]
@@ -389,8 +390,8 @@ def main():
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - V Source Build Dependency Check
-    console.rule(task_description[4])
+    # Step - VII Source Build Dependency Check
+    console.print("[bright_white]Source Build Dependency Check...")
 
     # TODO: use dpkg-checkbuilddeps -d build-depends-string -c build-conflicts-string
     result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
@@ -419,8 +420,8 @@ def main():
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - VI Download Source files
-    console.rule(task_description[5])
+    # Step - VIII Download Source files
+    console.print("[bright_white]Download Source files...")
 
     console.print("Total File Selected are :", len(file_list))
     console.print("Total Download is about ", round(download_size / (1024 * 1024)), "MB")
@@ -429,8 +430,8 @@ def main():
     utils.download_source(file_list, dir_download, download_size, baseurl, baseid, console, logger)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - VII Expanding the Source Packages
-    console.rule(task_description[6])
+    # Step - IX Expanding the Source Packages
+    console.print("[bright_white]Expanding the Source Packages...")
 
     folder_list = []
     try:
@@ -462,11 +463,10 @@ def main():
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - VIII Starting Build
-    console.rule(task_description[7])
+    # Step - X Starting Build
+    console.print("[bright_white]Starting Build...")
 
     console.print("Starting Package Build with --no-clean option...")
-
     _errors = 0
     _total = len(folder_list)
     _completed = 0

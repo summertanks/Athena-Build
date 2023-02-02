@@ -62,9 +62,9 @@ def parse_sources(source_records,
     with con.status('') as status:
         for required_package in source_packages:
             # Search within the Source List file
-            for package in source_records:
-                package_name = utils.search(r'Package: ([^\n]+)', package)
-                package_version = utils.search(r'Version: ([^\n]+)', package)
+            for pkg in source_records:
+                package_name = utils.search(r'Package: ([^\n]+)', pkg)
+                package_version = utils.search(r'Version: ([^\n]+)', pkg)
 
                 # TODO: get Build-breaks
 
@@ -76,10 +76,10 @@ def parse_sources(source_records,
                             status.update(f'Parsing Source Packages: {completed}/{total}')
 
                             # Get all files
-                            package_directory = utils.search(r'Directory:\s*(.+)', package)
+                            package_directory = utils.search(r'Directory:\s*(.+)', pkg)
 
                             # TODO: Currently using md5, should enable SHA256 also
-                            files = re.findall(r'\s+([a-fA-F\d]{32})\s+(\d+)\s+(\S+)', package)
+                            files = re.findall(r'\s+([a-fA-F\d]{32})\s+(\d+)\s+(\S+)', pkg)
                             for file in files:
                                 file_list[file[2]] = {
                                     'path': os.path.join(package_directory, file[2]), 'size': file[1], 'md5': file[0]}
@@ -89,9 +89,9 @@ def parse_sources(source_records,
                             source_packages[required_package].found = True
 
                             # Parse Build Depends
-                            build_depends = utils.search(r'Build-Depends: ([^\n]+)', package)
-                            build_depends_indep = utils.search(r'Build-Depends-Indep: ([^\n]+)', package)
-                            build_depends_arch = utils.search(r'Build-Depends-Arch: ([^\n]+)', package)
+                            build_depends = utils.search(r'Build-Depends: ([^\n]+)', pkg)
+                            build_depends_indep = utils.search(r'Build-Depends-Indep: ([^\n]+)', pkg)
+                            build_depends_arch = utils.search(r'Build-Depends-Arch: ([^\n]+)', pkg)
 
                             depends_string = ''
                             for dep_str in [build_depends, build_depends_indep, build_depends_arch]:
@@ -107,6 +107,9 @@ def parse_sources(source_records,
                             for dep in build_depends:
                                 if dep not in builddep:
                                     builddep.append(dep)
+
+                            build_conflicts = utils.search(r'Build-Conflicts: ([^\n]+)', pkg)
+
                             break
                     # Add in alternates
                     source_packages[required_package].add_alternate(package_version)

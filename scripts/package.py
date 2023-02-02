@@ -55,6 +55,9 @@ class Package:
                 continue
             self._source = (source[0][0], source[0][1])
 
+    def reset_source_version(self, version_string: str):
+        self._source = (self._source[0], version_string)
+
     @property
     def provides(self) -> {}:
         return self._provides
@@ -164,7 +167,6 @@ def parse_dependencies(
         package_record: list[str],
         selected_packages: {},
         required_package: str,
-        multi_dep: [],
         con: Console,
         status: Console.status):
     """Parse Dependencies for required_packages based on package_record in recursive manner
@@ -174,7 +176,6 @@ def parse_dependencies(
                 package_record: Taken from the Package file
                 selected_packages: populates based on dependencies recursively
                 required_package: the package to find dependencies for
-                multi_dep: populates with packages which have alt dependencies'
                 con: Console
                 status: for status update
 
@@ -259,25 +260,19 @@ def parse_dependencies(
         package.add_breaks(breaks)
         package.add_conflicts(conflicts)
 
-        # Check for dependencies that can be satisfied by multiple packages
-        for altdepends in package.altdepends:
-            if altdepends not in multi_dep:
-                multi_dep.append(altdepends)
-
         # Update Progress bar
         completed = len([obj for obj in selected_packages.values() if not obj.version == '-1'])
         status.update(f"Selected {completed} Packages")
 
-        # skip the ones which have more than one packages satisfying dependency
-        parsed_depends = [sublist[0] for sublist in package.depends if len(sublist) == 1]
-        for _pkg in parsed_depends:
+        # Parse dependencies
+        for _pkg in package.depends:
             # _pkg is usually in [name, version, constraint] tuple format
             dep_package_name = _pkg[0]
 
             # Check if not already parsed
             if selected_packages.get(dep_package_name) is None:
                 selected_packages[dep_package_name] = Package(dep_package_name)
-                parse_dependencies(package_record, selected_packages, dep_package_name, multi_dep, con, status)
+                parse_dependencies(package_record, selected_packages, dep_package_name, con, status)
             selected_packages[dep_package_name].add_version_constraint(_pkg[1], _pkg[2])
         break
 
