@@ -32,16 +32,7 @@ asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n'
 
 # TODO: make all apt_pkg.parse functions arch specific
 
-class BaseDistribution:
-    def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
-        self.url: str = url
-        self.baseid: str = baseid
-        self.codename: str = codename
-        self.version: str = version
-        self.arch: str = arch
-
-
-def build_cache(base: BaseDistribution, dir_cache: str, con: Console, logger: Logger) -> dict[str, str]:
+def build_cache(base: utils.BaseDistribution, dir_cache: str, con: Console, logger: Logger) -> dict[str, str]:
     """Builds the Cache. Release file is used based on BaseDistribution defined
         Args:
             base (BaseDistribution): details of the system being derived from
@@ -143,11 +134,8 @@ def build_cache(base: BaseDistribution, dir_cache: str, con: Console, logger: Lo
 
 def main():
     selected_packages: {str: Package} = {}
-    source_packages = {}
+    source_packages: {str: Source} = {}
     multi_dep = []
-    file_list = {}
-    builddep = []
-    installed_packages = []
 
     config_parser = configparser.ConfigParser()
 
@@ -173,7 +161,7 @@ def main():
         build_codename = config_parser.get('Build', 'CODENAME')
         build_version = config_parser.get('Build', 'VERSION')
 
-        base_distribution = BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
+        base_distribution = utils.BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
 
         dir_download = os.path.join(working_dir, config_parser.get('Directories', 'Download'))
         dir_log = os.path.join(working_dir, config_parser.get('Directories', 'Log'))
@@ -357,7 +345,7 @@ def main():
     console.print("[bright_white]Parsing Source Packages...")
 
     # Parse Sources Control file
-    download_size = source.parse_sources(source_records, source_packages, file_list, builddep, console, logger)
+    total_src_count, total_src_size = source.parse_sources(source_records, source_packages, console, logger)
 
     missing_source = [_pkg for _pkg in source_packages if not source_packages[_pkg].found]
 
@@ -370,7 +358,7 @@ def main():
                 source_packages[pkg].reset_version(new_version)
 
         # rerun parse_source only for the missing source
-        download_size += source.parse_sources(source_records, missing_source, file_list, builddep, console, logger)
+        source.parse_sources(source_records, missing_source, console, logger)
 
     try:
         with open(os.path.join(dir_log, 'source_packages.list'), 'w') as f:
@@ -382,8 +370,14 @@ def main():
 
     try:
         with open(os.path.join(dir_log, 'source_file.list'), 'w') as f:
-            for file in file_list:
-                f.write(file + '\n')
+            for src_pkg in source_packages:
+                if source_packages[src_pkg].found:
+                    for file in source_packages[src_pkg].files:
+                        _filename = file
+                        _filepath = source_packages[src_pkg].files[file]['path']
+                        _filesize = source_packages[src_pkg].files[file]['size']
+                        _filehash = source_packages[src_pkg].files[file]['md5']
+                        f.write(f"{_filename} {_filepath} {_filesize} {_filehash}\n")
     except (FileNotFoundError, PermissionError) as e:
         logger.exception(f"Error: {e}")
         exit(1)
@@ -393,29 +387,65 @@ def main():
     console.print("[bright_white]Source Build Dependency Check...")
 
     # TODO: use dpkg-checkbuilddeps -d build-depends-string -c build-conflicts-string
+    installed_packages = {}
     result = subprocess.run(['dpkg', '--list'], stdout=subprocess.PIPE).stdout.decode('utf-8').split('\n')
     for line in result:
-        match = re.match(r'^ii\s+([^\s:]+)', line)
+        match = re.match(r'^ii\s+(\S+)\s+(\S+)', line)
         if match:
-            installed_packages.append(match.group(1))
+            installed_packages[match.group(1)] = match.group(2)
 
-    required_builddep = [item for item in builddep if item not in installed_packages]
-    console.print("Build Dependency required ", len(required_builddep), '/', len(builddep))
+    failed_dep = ''
+    failed_dep_version = ''
+    conflicts_pkg = ''
+    for src_pkg in source_packages:
+        for dep in source_packages[src_pkg].build_depends:
+            _pkg = dep[0]
+            if _pkg not in installed_packages:
+                logger.error(f"Build Dependency failed for {src_pkg}: {_pkg} {dep[1]}")
+                failed_dep += f'{_pkg} '
+            else:
+                if not dep[2] == '':  # no comparison to do
+                    if not apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
+                        logger.error(f"Build Dependency version check failed for {src_pkg}: {_pkg} {dep[1]}")
+                        failed_dep_version += f'{_pkg} ({dep[2]} {dep[1]}) '
+
+        for dep in source_packages[src_pkg].conflicts:
+            _pkg = dep[0]
+            if _pkg in installed_packages:
+                if dep[2] == '':  # nothing to check, just installed is conflict
+                    logger.error(f"Build Dependency conflict {src_pkg}: {_pkg} {dep[1]}")
+                elif apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
+                    logger.error(f"Build Dependency conflict {src_pkg}: {_pkg} {dep[1]}")
+                    conflicts_pkg += f'{_pkg} ({dep[2]} {dep[1]}) '
+
+    # TODO: Check conflict within build dependency
+    if not failed_dep == '':
+        console.print("Build Dependency failed for ", failed_dep)
+    else:
+        console.print("PASSED: Build Dependency")
+    if not failed_dep_version == '':
+        console.print("Build Dependency version check failed for ", failed_dep_version)
+    else:
+        console.print("PASSED: Build Dependency version check")
+    if not conflicts_pkg == '':
+        console.print("Build Dependency conflict for ", conflicts_pkg)
+    else:
+        console.print("PASSED: Build Dependency Conflict")
 
     try:
         with open(os.path.join(dir_log, 'build_dependency.list'), 'w') as f:
-            f.write("Build Dependencies:\n")
-            for pkg in builddep:
-                f.write(pkg + ' ')
-            f.write("\nDependencies not installed:\n")
-            for pkg in required_builddep:
-                f.write(pkg + ' ')
+            f.write("Build Dependencies Failed:\n")
+            f.write(f"{failed_dep}\n")
+            f.write("\nDependencies Version Check Failed:\n")
+            f.write(f"{failed_dep_version}\n")
+            f.write("\nDependencies Version Check Failed:\n")
+            f.write(f"{conflicts_pkg}\n")
     except (FileNotFoundError, PermissionError) as e:
         logger.exception(f"Error: {e}")
         exit(1)
 
-    if len(required_builddep):
-        logger.error("[green]WARNING: There are pending Build Dependencies, Manual check is required")
+    if not (failed_dep == '' and failed_dep_version == '' and conflicts_pkg == ''):
+        logger.error("[green]WARNING: There are pending Build Dependencies issues, Manual check is required")
         if not Confirm.ask("Proceed: (y/n)"):
             exit(1)
 
@@ -423,11 +453,11 @@ def main():
     # Step - VIII Download Source files
     console.print("[bright_white]Download Source files...")
 
-    console.print("Total File Selected are :", len(file_list))
-    console.print("Total Download is about ", round(download_size / (1024 * 1024)), "MB")
+    console.print("Total File Selected are :", total_src_count)
+    console.print("Total Download is about ", round(total_src_size / (1024 * 1024)), "MB")
     console.print("Starting Downloads...")
 
-    utils.download_source(file_list, dir_download, download_size, baseurl, baseid, console, logger)
+    utils.download_source(source_packages, dir_download, base_distribution, console, logger)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - IX Expanding the Source Packages
@@ -437,7 +467,10 @@ def main():
     try:
         with open(os.path.join(dir_log, 'dpkg-source.log'), "w") as logfile:
             with console.status('') as status:
-                dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
+
+                dsc_files = [file['path'] for file in [selected_packages[pkg].files for pkg in selected_packages]
+                             if os.path.splitext(file[0])[1] == '.dsc']
+                # dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
                 _total = len(dsc_files)
                 _completed = 0
                 _errors = 0

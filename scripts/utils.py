@@ -7,6 +7,15 @@ from logging import Logger
 from rich.console import Console
 
 
+class BaseDistribution:
+    def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
+        self.url: str = url
+        self.baseid: str = baseid
+        self.codename: str = codename
+        self.version: str = version
+        self.arch: str = arch
+
+
 def download_file(url: str, filename: str, con: Console, logger: Logger) -> int:
     """Downloads file and updates progressbar in incremental manner.
         Args:
@@ -50,36 +59,32 @@ def download_file(url: str, filename: str, con: Console, logger: Logger) -> int:
     return file_size
 
 
-def download_source(file_list,
-                    download_dir,
-                    download_size,
-                    baseurl,
-                    baseid,
+def download_source(source_packages, dir_download, base_distribution: BaseDistribution,
                     con: Console,
                     logger: Logger):
     # base_url = "http://deb.debian.org/debian/"
-    base_url = 'http://' + baseurl + '/' + baseid + '/'
-    total_files = len(file_list)
+    base_url = 'http://' + base_distribution.url + '/' + base_distribution.baseid + '/'
 
-    for file_name, data in file_list.items():
-        url = base_url + data['path']
-        size = data['size']
-        md5 = data['md5']
+    for pkg in source_packages:
+        for file in source_packages[pkg].files:
+            url = base_url + file['path']
+            size = file['size']
+            md5 = file['md5']
 
-        download_path = os.path.join(download_dir, file_name)
+            download_path = os.path.join(dir_download, file)
+            if os.path.isfile(download_path):
+                # Open the file and calculate the MD5 hash
+                with open(download_path, 'rb') as f:
+                    fdata = f.read()
+                    md5_check = hashlib.md5(fdata).hexdigest()
+            else:
+                md5_check = ''
 
-        if os.path.isfile(download_path):
-            # Open the file and calculate the MD5 hash
-            with open(download_path, 'rb') as f:
-                fdata = f.read()
-                md5_check = hashlib.md5(fdata).hexdigest()
-        else:
-            md5_check = ''
+            if md5 != md5_check:
+                download_file(url, download_path, con, logger)
 
-        if md5 != md5_check:
-            download_file(url, download_path, con, logger)
-
-        # TODO: Verify hash and download file size
+            # TODO: Verify hash and download file size
+            pass
 
 
 def search(re_string: str, base_string: str) -> str:

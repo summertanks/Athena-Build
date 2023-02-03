@@ -21,8 +21,11 @@ class Source:
         self._name = name
         self._version = version
         self._conflicts: [] = []
-        self.found = False
+        self._files: {} = {}
         self._alternate: [] = []
+        self._build_depends: [] = []
+        self._altdepends: [] = []
+        self.found = False
 
     def __str__(self):
         return str(f"{self._name} {self._version} {self.found} {self._alternate}")
@@ -53,20 +56,58 @@ class Source:
         return self._conflicts
 
     def add_conflicts(self, conflict_string):
-        pass
+        conflict_list = apt_pkg.parse_depends(conflict_string)
+        for conflict in conflict_list:
+            if len(conflict) > 0:
+                self._conflicts.append(conflict)
+
+    @property
+    def files(self):
+        return self._files
+
+    def add_files(self, file_list, pkg_directory: str) -> tuple[int, int]:
+        file_count = 0
+        file_size = 0
+        for file in file_list:
+            if not file[2] in file_list:
+                self._files[file[2]] = {'path': os.path.join(pkg_directory, file[2]), 'size': file[1], 'md5': file[0]}
+                file_count += 1
+                file_size += int(file[1])
+
+        return file_count, file_size
+
+    @property
+    def build_depends(self):
+        return self._build_depends
+
+    def add_build_depends(self, depends_string: str):
+        depends_list = apt_pkg.parse_src_depends(depends_string)
+        parsed_depends = [sublist[0] for sublist in depends_list if len(sublist) == 1]
+        for _pkg in parsed_depends:
+            # remove duplicates
+            if _pkg not in self._build_depends:
+                self._build_depends.append(_pkg)
+
+        alt_depends = [sublist for sublist in depends_list if len(sublist) > 1]
+        for _pkg in alt_depends:
+            # remove duplicates
+            if _pkg not in self._altdepends:
+                self._altdepends.append(_pkg)
+
+    @property
+    def altdepends(self) -> []:
+        return self._altdepends
 
 
 def parse_sources(source_records,
                   source_packages,
-                  file_list,
-                  builddep,
                   con,
-                  logger):
-    download_size = 0
-
+                  logger) -> tuple[int, int]:
     # Iterate over Packages for which Source package is required
     total = len(source_packages)
     completed = 0
+    total_files = 0
+    total_size = 0
     with con.status('') as status:
         for required_package in source_packages:
             # Search within the Source List file
@@ -88,10 +129,14 @@ def parse_sources(source_records,
 
                             # TODO: Currently using md5, should enable SHA256 also
                             files = re.findall(r'\s+([a-fA-F\d]{32})\s+(\d+)\s+(\S+)', pkg)
-                            for file in files:
-                                file_list[file[2]] = {
-                                    'path': os.path.join(package_directory, file[2]), 'size': file[1], 'md5': file[0]}
-                                download_size += int(file[1])
+                            count, size = source_packages[required_package].add_files(files, package_directory)
+                            total_files += count
+                            total_size += size
+
+                            # for file in files:
+                            #    file_list[file[2]] = {
+                            #        'path': os.path.join(package_directory, file[2]), 'size': file[1], 'md5': file[0]}
+                            #    download_size += int(file[1])
 
                             # set as package found
                             source_packages[required_package].found = True
@@ -106,20 +151,20 @@ def parse_sources(source_records,
                                 if not dep_str == '':
                                     depends_string += dep_str + ', '
 
-                            if depends_string == '':
-                                continue
-
-                            build_depends = apt_pkg.parse_src_depends(depends_string, architecture='amd64')
-                            # TODO: cater for conditions of Alt Dependency
-                            build_depends = [dep[0][0] for dep in build_depends if not dep[0][0] == '']
-                            for dep in build_depends:
-                                if dep not in builddep:
-                                    builddep.append(dep)
+                            if not depends_string == '':
+                                source_packages[required_package].add_build_depends(depends_string)
+                                # build_depends = apt_pkg.parse_src_depends(depends_string, architecture='amd64')
+                                # TODO: cater for conditions of Alt Dependency
+                                # build_depends = [dep[0][0] for dep in build_depends if not dep[0][0] == '']
+                                # for dep in build_depends:
+                                #    if dep not in builddep:
+                                #        builddep.append(dep)
 
                             build_conflicts = utils.search(r'Build-Conflicts: ([^\n]+)', pkg)
+                            source_packages[required_package].add_conflicts(build_conflicts)
 
                             break
+
                     # Add in alternates
                     source_packages[required_package].add_alternate(package_version)
-
-    return download_size
+    return total_files, total_size
