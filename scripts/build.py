@@ -456,7 +456,6 @@ def main():
     console.print("Total File Selected are :", total_src_count)
     console.print("Total Download is about ", round(total_src_size / (1024 * 1024)), "MB")
     console.print("Starting Downloads...")
-
     utils.download_source(source_packages, dir_download, base_distribution, console, logger)
 
     # -------------------------------------------------------------------------------------------------------------
