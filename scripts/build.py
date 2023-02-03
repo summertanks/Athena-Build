@@ -256,7 +256,6 @@ def main():
     not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
     console.print(f"Total Required Packages {count_pkgs}")
     console.print(f"Total Dependencies Selected are : {len(selected_packages)}")
-    console.print(f"Total Source Packages Required are : {len(source_packages)}")
     console.print(f"Dependencies Not Parsed: {len(not_parsed)}")
 
     for pkg_name in not_parsed:
@@ -402,10 +401,6 @@ def main():
 
     required_builddep = [item for item in builddep if item not in installed_packages]
     console.print("Build Dependency required ", len(required_builddep), '/', len(builddep))
-    if len(required_builddep):
-        logger.error("[green]WARNING: There are pending Build Dependencies, Manual check is required")
-        if not Confirm.ask("Proceed: (y/n)"):
-            exit(0)
 
     try:
         with open(os.path.join(dir_log, 'build_dependency.list'), 'w') as f:
@@ -418,6 +413,11 @@ def main():
     except (FileNotFoundError, PermissionError) as e:
         logger.exception(f"Error: {e}")
         exit(1)
+
+    if len(required_builddep):
+        logger.error("[green]WARNING: There are pending Build Dependencies, Manual check is required")
+        if not Confirm.ask("Proceed: (y/n)"):
+            exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - VIII Download Source files

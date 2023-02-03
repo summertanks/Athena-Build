@@ -20,8 +20,9 @@ class Source:
 
         self._name = name
         self._version = version
+        self._conflicts: [] = []
         self.found = False
-        self._alternate = []
+        self._alternate: [] = []
 
     def __str__(self):
         return str(f"{self._name} {self._version} {self.found} {self._alternate}")
@@ -46,6 +47,13 @@ class Source:
     def add_alternate(self, version: str):
         if not version == '':
             self._alternate.append(version)
+
+    @property
+    def conflicts(self):
+        return self._conflicts
+
+    def add_conflicts(self, conflict_string):
+        pass
 
 
 def parse_sources(source_records,
@@ -115,5 +123,3 @@ def parse_sources(source_records,
                     source_packages[required_package].add_alternate(package_version)
 
     return download_size
-
-
