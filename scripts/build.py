@@ -398,7 +398,7 @@ def main():
         for dep in source_packages[src_pkg].build_depends:
             _pkg = dep[0]
             if _pkg not in installed_packages:
-                logger.error(f"Build Dependency failed for {src_pkg}: {_pkg} {dep[1]}")
+                # logger.error(f"Build Dependency failed for {src_pkg}: {_pkg} {dep[1]}")
                 failed_dep += f'{_pkg} '
             else:
                 if not dep[2] == '':  # no comparison to do
@@ -411,6 +411,7 @@ def main():
             if _pkg in installed_packages:
                 if dep[2] == '':  # nothing to check, just installed is conflict
                     logger.error(f"Build Dependency conflict {src_pkg}: {_pkg} {dep[1]}")
+                    conflicts_pkg += f'{_pkg} ({dep[2]} {dep[1]}) '
                 elif apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
                     logger.error(f"Build Dependency conflict {src_pkg}: {_pkg} {dep[1]}")
                     conflicts_pkg += f'{_pkg} ({dep[2]} {dep[1]}) '
