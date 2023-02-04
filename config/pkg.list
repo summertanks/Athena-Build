@@ -1,5 +1,5 @@
 # Graphic Base System#
-xfce4
+ubuntu-desktop-minimal
 
 # Bootloader
 grub-efi-amd64
@@ -22,8 +22,8 @@ init
 adduser
 # apt: Advanced Packaging Tool
 apt
-# debian-archive-keyring : GnuPG archive keys of the Debian archive
-debian-archive-keyring
+# debian-archive-keyring : GnuPG archive keys of the Debian archive - not for ubuntu
+# debian-archive-keyring
 # debconf: Debian configuration management system
 debconf
 # e2fslibs: ext2 filesystem libraries
@@ -81,9 +81,21 @@ dpkg
 debconf
 media-types
 dconf-gsettings-backend
-gpgv2
+# gpgv2 - for debian
+gpgv
 
 # fonts
 fonts-dejavu-core
-ttf-bitstream-vera
+#ttf-bitstream-vera
 fonts-liberation2
+
+# ubuntu specific
+logind
+ubuntu-mono
+libjack-jackd2-0
+hunspell-en-us
+unity-scopes-json-def
+gnome-terminal
+xorg-driver-input
+bsdmainutils
+console-setup-linux
