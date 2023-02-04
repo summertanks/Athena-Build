@@ -276,6 +276,11 @@ def parse_dependencies(
             selected_packages[dep_package_name].add_version_constraint(_pkg[1], _pkg[2])
         break
 
+    # Went through the complete control file, couldn't find required_package
+    if required_package not in selected_packages:
+        # Added it to track
+        selected_packages[required_package] = Package(required_package)
+
 
 def find_alternate_packages(package_record: list[str], provides: str) -> {str, str}:
     alternates = {}
