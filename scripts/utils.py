@@ -67,9 +67,9 @@ def download_source(source_packages, dir_download, base_distribution: BaseDistri
 
     for pkg in source_packages:
         for file in source_packages[pkg].files:
-            url = base_url + file['path']
-            size = file['size']
-            md5 = file['md5']
+            url = base_url + source_packages[pkg].files[file]['path']
+            size = source_packages[pkg].files[file]['size']
+            md5 = source_packages[pkg].files[file]['md5']
 
             download_path = os.path.join(dir_download, file)
             if os.path.isfile(download_path):

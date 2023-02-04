@@ -133,11 +133,6 @@ def parse_sources(source_records,
                             total_files += count
                             total_size += size
 
-                            # for file in files:
-                            #    file_list[file[2]] = {
-                            #        'path': os.path.join(package_directory, file[2]), 'size': file[1], 'md5': file[0]}
-                            #    download_size += int(file[1])
-
                             # set as package found
                             source_packages[required_package].found = True
 
@@ -153,12 +148,6 @@ def parse_sources(source_records,
 
                             if not depends_string == '':
                                 source_packages[required_package].add_build_depends(depends_string)
-                                # build_depends = apt_pkg.parse_src_depends(depends_string, architecture='amd64')
-                                # TODO: cater for conditions of Alt Dependency
-                                # build_depends = [dep[0][0] for dep in build_depends if not dep[0][0] == '']
-                                # for dep in build_depends:
-                                #    if dep not in builddep:
-                                #        builddep.append(dep)
 
                             build_conflicts = utils.search(r'Build-Conflicts: ([^\n]+)', pkg)
                             source_packages[required_package].add_conflicts(build_conflicts)
