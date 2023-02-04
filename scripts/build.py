@@ -462,7 +462,7 @@ def main():
     # Step - IX Expanding the Source Packages
     console.print("[bright_white]Expanding the Source Packages...")
 
-    folder_list = []
+    folder_list = {}
     dsc_files = []
     try:
         with open(os.path.join(dir_log, 'dpkg-source.log'), "w") as logfile:
@@ -473,8 +473,7 @@ def main():
                         if os.path.splitext(file)[1] == '.dsc':
                             dsc_files.append(file)
                             folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
-                            folder_list.append(folder_name)
-
+                            folder_list[file] = folder_name
 
                 # dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
                 _total = len(dsc_files)
@@ -483,8 +482,9 @@ def main():
                 for file in dsc_files:
                     _completed += 1
                     status.update(f"{_completed}/{_total} Expanding Source Package {file}")
-                    folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
-                    folder_list.append(folder_name)
+                    # folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
+                    folder_name = folder_list[file]
+                    # folder_list.append(folder_name)
                     dsc_file = os.path.join(dir_download, file)
                     process = subprocess.Popen(
                         ["dpkg-source", "-x", dsc_file, folder_name], stdout=logfile, stderr=logfile)
@@ -495,7 +495,7 @@ def main():
 
         with open(os.path.join(dir_log, 'source_folder.list'), 'w') as f:
             for folder in folder_list:
-                f.write(folder + '\n')
+                f.write(f"{folder} {folder_list[folder]} \n")
 
     except (FileNotFoundError, PermissionError) as e:
         logger.exception(f"Error: {e}")
@@ -513,23 +513,25 @@ def main():
     try:
         with open(os.path.join(dir_log, 'dpkg-build.log'), "w") as dpkg_build_log:
             with console.status('') as status:
-                for pkg in folder_list:
+                for dsc_file in dsc_files:
                     _completed += 1
-                    status.update(f"{_completed}/{_total} - Building {pkg}")
+                    folder_name = os.path.basename(folder_list[dsc_file])
+                    status.update(f"{_completed}/{_total} - Building {folder_name}")
 
-                    log_filename = os.path.join(dir_log, "build", os.path.basename(pkg) + '.log')
+                    log_filename = os.path.join(dir_log, "build", folder_name + '.log')
                     with open(log_filename, "w") as logfile:
-                        process = subprocess.Popen(["dpkg-checkbuilddeps"], cwd=pkg, stdout=logfile, stderr=logfile)
+                        process = subprocess.Popen(["dpkg-checkbuilddeps"],
+                                                   cwd=folder_list[dsc_file], stdout=logfile, stderr=logfile)
                         if not process.wait():
                             process = subprocess.Popen(
                                 ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64", "-J"],
-                                cwd=pkg, stdout=logfile, stderr=logfile)
+                                cwd=folder_list[dsc_file], stdout=logfile, stderr=logfile)
                             if not process.wait():
-                                dpkg_build_log.write(f"PASS: {os.path.basename(pkg)}\n")
+                                dpkg_build_log.write(f"PASS: {folder_name}\n")
                                 continue
 
-                        dpkg_build_log.write(f"FAIL: {os.path.basename(pkg)}\n")
-                        logger.error(f"Build failed for {os.path.basename(pkg)}")
+                        dpkg_build_log.write(f"FAIL: {os.path.basename(folder_name)}\n")
+                        logger.error(f"Build failed for {os.path.basename(folder_name)}")
                         _errors += 1
 
                         dpkg_build_log.flush()
