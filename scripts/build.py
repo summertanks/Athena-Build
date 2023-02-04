@@ -445,7 +445,7 @@ def main():
         exit(1)
 
     if not (failed_dep == '' and failed_dep_version == '' and conflicts_pkg == ''):
-        logger.error("[green]WARNING: There are pending Build Dependencies issues, Manual check is required")
+        logger.error("There are pending Build Dependencies issues, Manual check is required")
         if not Confirm.ask("Proceed: (y/n)"):
             exit(1)
 
@@ -463,12 +463,19 @@ def main():
     console.print("[bright_white]Expanding the Source Packages...")
 
     folder_list = []
+    dsc_files = []
     try:
         with open(os.path.join(dir_log, 'dpkg-source.log'), "w") as logfile:
             with console.status('') as status:
 
-                dsc_files = [file['path'] for file in [selected_packages[pkg].files for pkg in selected_packages]
-                             if os.path.splitext(file[0])[1] == '.dsc']
+                for pkg in source_packages:
+                    for file in source_packages[pkg].files:
+                        if os.path.splitext(file)[1] == '.dsc':
+                            dsc_files.append(file)
+                            folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
+                            folder_list.append(folder_name)
+
+
                 # dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
                 _total = len(dsc_files)
                 _completed = 0
