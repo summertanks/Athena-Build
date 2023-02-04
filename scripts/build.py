@@ -63,15 +63,12 @@ def build_cache(base: utils.BaseDistribution, dir_cache: str, con: Console, logg
     # TODO: Enable to be configurable, should not hardcode
     # TODO: Use the apt_pkg functions & maybe apt_cache
     cache_source = [base_url + '/main/binary-' + base.arch + '/Packages.gz',
-                    base_url + '/main/i18n/Translation-en.bz2',
                     base_url + '/main/source/Sources.gz']
 
     cache_filename = ['main/binary-' + base.arch + '/Packages',
-                      'main/i18n/Translation-en',
                       'main/source/Sources']
 
     cache_destination = [os.path.join(dir_cache, base_filename + '_main_binary-' + base.arch + '_Packages.gz'),
-                         os.path.join(dir_cache, base_filename + '_main_i18n_Translation-en.bz2'),
                          os.path.join(dir_cache, base_filename + '_main_source_Sources.gz')]
 
     md5 = []
@@ -82,7 +79,7 @@ def build_cache(base: utils.BaseDistribution, dir_cache: str, con: Console, logg
             contents = f.read()
             for file in cache_filename:
                 #  Typical format - [space] [32 char md5 hash] [space] [file size] [space] [relative path] [eol]
-                re_pattern = r' ([a-f0-9]{32}) (\S+) ' + file + '$'
+                re_pattern = r' ([a-f0-9]{32})\s+([^\s]+)\s+' + file + '$'
                 match = re.search(re_pattern, contents, re.MULTILINE)
                 if match:
                     md5.append(match.group(1))
