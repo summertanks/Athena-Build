@@ -399,7 +399,8 @@ def main():
             _pkg = dep[0]
             if _pkg not in installed_packages:
                 # logger.error(f"Build Dependency failed for {src_pkg}: {_pkg} {dep[1]}")
-                failed_dep += f'{_pkg} '
+                if not re.search(r"\b{}\b".format(_pkg), failed_dep):
+                    failed_dep += f'{_pkg} '
             else:
                 if not dep[2] == '':  # no comparison to do
                     if not apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
