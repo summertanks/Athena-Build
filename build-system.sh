@@ -11,7 +11,7 @@ DIR_IMAGE="image"
 DIR_CACHE="cache"
 DIR_DOWNLOAD="download"
 DIR_LOG="log"
-DIT_SOURCE="source"
+DIR_SOURCE="source"
 
 VERBOSE="0"
 CONFIG_FILE="config/build.conf"
@@ -88,7 +88,7 @@ fi
 
 # Checking awk
 if [ -x /usr/bin/awk ]; then
-	echo Using `/usr/bin/awk -W version | head -n1`
+	echo Using `/usr/bin/awk --version | head -n1`
 else
 	echo "E: awk not found, build script will not work" > /dev/stderr
 	exit 1
@@ -102,8 +102,8 @@ mkdir -p $PWD/$DIR_REPO
 mkdir -p $PWD/$DIR_IMAGE
 mkdir -p $PWD/$DIR_CACHE
 mkdir -p $PWD/$DIR_DOWNLOAD
-mkdir -p $PWD/$DIR_CACHE
-mkdir -p $PWD/$DIR_LOG
+mkdir -p $PWD/$DIR_SOURCE
+mkdir -p $PWD/$DIR_LOG/build
 
 # Checking build system
 awk -F= '/PRETTY_NAME/ { print "Current Build System " $2 }' /etc/os-release
@@ -126,17 +126,6 @@ fi
 
 python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$PWD --config-file=$CONFIG_FILE
 
-# Read the list of directories from the file
-while read -r dir; do
-  # Go to the directory
-  cd "$dir"
-  # Build and install dependencies
-
-  # Build the package for amd64 architecture
-  dpkg-buildpackage  -b -uc -us -a amd64 2>&1 | tee -a /home/harkirat/PycharmProjects/Athena-Build/log/build.log
-
-  cd -
-done < tmp/source_folder.list
 
 
 
