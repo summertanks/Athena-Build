@@ -392,7 +392,7 @@ def main():
             package_version = match.group(2)
             installed_packages[package_name] = package_version
 
-    failed_dep = ''
+    failed_dep = []
     failed_dep_version = ''
     conflicts_pkg = ''
     build_alt_dep = []
@@ -402,8 +402,8 @@ def main():
         for dep in source_packages[src_pkg].build_depends:
             _pkg = dep[0]
             if _pkg not in installed_packages:
-                if not re.search(r"\b{}\b".format(_pkg), failed_dep):
-                    failed_dep += f'{_pkg} '
+                if _pkg not in failed_dep:
+                    failed_dep.append(_pkg)
             else:
                 if not dep[2] == '':  # no comparison to do
                     if not apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
@@ -436,7 +436,7 @@ def main():
 
     # TODO: Check conflict within build dependency
     if not failed_dep == '':
-        console.print("Build Dependency failed for ", failed_dep)
+        console.print("Build Dependency failed for ", ' '.join(failed_dep))
     else:
         console.print("PASSED: Build Dependency")
     if not failed_dep_version == '':
@@ -456,7 +456,7 @@ def main():
     try:
         with open(os.path.join(dir_log, 'build_dependency.list'), 'w') as f:
             f.write("Build Dependencies Failed:\n")
-            f.write(f"{failed_dep}\n")
+            f.write(f"{' '.join(failed_dep)}\n")
             f.write("\nDependencies Version Check Failed:\n")
             f.write(f"{failed_dep_version}\n")
             f.write("\nDependencies Version Check Failed:\n")
@@ -468,8 +468,7 @@ def main():
         exit(1)
 
     if not (failed_dep == '' and failed_dep_version == '' and conflicts_pkg == ''):
-        logger.error("There are pending Build Dependencies issues, Manual check is required")
-        if not Confirm.ask("Proceed: (y/n)"):
+        if not Confirm.ask("There are pending Build Dependencies issues, Manual check is required. Proceed: (y/n)"):
             exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
