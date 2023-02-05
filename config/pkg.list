@@ -1,5 +1,6 @@
 # Graphic Base System#
 gnome-terminal
+gnome-shell-common
 
 # Bootloader
 grub-efi-amd64
@@ -87,3 +88,4 @@ gpgv2
 fonts-dejavu-core
 ttf-bitstream-vera
 fonts-liberation2
+
