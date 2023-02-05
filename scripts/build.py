@@ -468,7 +468,7 @@ def main():
         exit(1)
 
     if not (failed_dep == '' and failed_dep_version == '' and conflicts_pkg == ''):
-        if not Confirm.ask("There are pending Build Dependencies issues, Manual check is required. Proceed: (y/n)"):
+        if not Confirm.ask("There are pending Build Dependencies issues, Manual check required. Proceed", default=True):
             exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
@@ -513,7 +513,7 @@ def main():
                     if process.wait():
                         _errors += 1
                 if _errors:
-                    logger.error(f"dpkg-source failed for {_errors} instances, please check dpkg-source.log")
+                    console.print(f"dpkg-source failed for {_errors} instances, please check dpkg-source.log")
 
         with open(os.path.join(dir_log, 'source_folder.list'), 'w') as f:
             for folder in folder_list:
@@ -525,7 +525,7 @@ def main():
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - X Starting Build
-    if not Confirm.ask("Proceed with Build: (y/n)", default=True):
+    if not Confirm.ask("Proceed with Build ", default=True):
         exit(1)
 
     console.print("[bright_white]Starting Build...")
