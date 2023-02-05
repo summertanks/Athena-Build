@@ -56,7 +56,7 @@ class Source:
         return self._conflicts
 
     def add_conflicts(self, conflict_string):
-        conflict_list = apt_pkg.parse_depends(conflict_string)
+        conflict_list = apt_pkg.parse_depends(conflict_string, architecture='amd64')
         for conflict in conflict_list:
             if len(conflict) > 0:
                 self._conflicts.append(conflict)
@@ -81,7 +81,7 @@ class Source:
         return self._build_depends
 
     def add_build_depends(self, depends_string: str):
-        depends_list = apt_pkg.parse_src_depends(depends_string)
+        depends_list = apt_pkg.parse_src_depends(depends_string, architecture='amd64')
         parsed_depends = [sublist[0] for sublist in depends_list if len(sublist) == 1]
         for _pkg in parsed_depends:
             # remove duplicates
