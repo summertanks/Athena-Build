@@ -329,11 +329,9 @@ def main():
             source_packages[source_name] = Source(source_name, source_version)
 
         if not source_version == pkg_version:
-            _version = Prompt.ask(f"Package and Source version mismatch "
-                                  f"{pkg_name}: {pkg_version} -> {source_name}: {source_version}\n"
-                                  f"Select Version to use",
-                                  choices=[source_version, pkg_version], default=source_version)
-            selected_packages[pkg_name].reset_source_version(_version)
+            console.print(f"Package and Source version mismatch "
+                          f"{pkg_name}: {pkg_version} -> {source_name}: {source_version} Using {source_version}")
+            selected_packages[pkg_name].reset_source_version(source_version)
 
     console.print("Source requested for : ", len(source_packages), " packages")
 
@@ -389,16 +387,21 @@ def main():
     for line in result:
         match = re.match(r'^ii\s+(\S+)\s+(\S+)', line)
         if match:
-            installed_packages[match.group(1)] = match.group(2)
+            # TODO: strip the arch string ':amd64' if exists
+            package_name = match.group(1).split(':')[0]
+            package_version = match.group(2)
+            installed_packages[package_name] = package_version
 
     failed_dep = ''
     failed_dep_version = ''
     conflicts_pkg = ''
+    build_alt_dep = []
+
     for src_pkg in source_packages:
+        # Check - if build dependency is installed, and installed package is right version
         for dep in source_packages[src_pkg].build_depends:
             _pkg = dep[0]
             if _pkg not in installed_packages:
-                # logger.error(f"Build Dependency failed for {src_pkg}: {_pkg} {dep[1]}")
                 if not re.search(r"\b{}\b".format(_pkg), failed_dep):
                     failed_dep += f'{_pkg} '
             else:
@@ -407,15 +410,29 @@ def main():
                         logger.error(f"Build Dependency version check failed for {src_pkg}: {_pkg} {dep[1]}")
                         failed_dep_version += f'{_pkg} ({dep[2]} {dep[1]}) '
 
+        # Check - if conflict is installed, and installed package matches conflict version
         for dep in source_packages[src_pkg].conflicts:
             _pkg = dep[0]
             if _pkg in installed_packages:
-                if dep[2] == '':  # nothing to check, just installed is conflict
+                if dep[2] == '' or apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
                     logger.error(f"Build Dependency conflict {src_pkg}: {_pkg} {dep[1]}")
                     conflicts_pkg += f'{_pkg} ({dep[2]} {dep[1]}) '
-                elif apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
-                    logger.error(f"Build Dependency conflict {src_pkg}: {_pkg} {dep[1]}")
-                    conflicts_pkg += f'{_pkg} ({dep[2]} {dep[1]}) '
+
+        # Check from alternates if at least one package is installed
+        for section in source_packages[src_pkg].altdepends:
+            found = False
+            for dep in section:
+                pkg_name = dep[0]
+                if pkg_name in installed_packages:
+                    pkg_version = dep[1]
+                    pkg_constraint = dep[2]
+                    if apt_pkg.check_dep(installed_packages[pkg_name], pkg_constraint, pkg_version):
+                        found = True
+                    else:
+                        logger.warning(f"Alt Build Dependency Check - Version constraint failed for {pkg_name}")
+            if not found:
+                if section not in build_alt_dep:
+                    build_alt_dep.append(section)
 
     # TODO: Check conflict within build dependency
     if not failed_dep == '':
@@ -430,6 +447,11 @@ def main():
         console.print("Build Dependency conflict for ", conflicts_pkg)
     else:
         console.print("PASSED: Build Dependency Conflict")
+    if len(build_alt_dep):
+        for section in build_alt_dep:
+            logger.warning(f"Build dependency unresolved between {section}")
+    else:
+        console.print("PASSED: Build Alt Dependency Check")
 
     try:
         with open(os.path.join(dir_log, 'build_dependency.list'), 'w') as f:
@@ -439,6 +461,8 @@ def main():
             f.write(f"{failed_dep_version}\n")
             f.write("\nDependencies Version Check Failed:\n")
             f.write(f"{conflicts_pkg}\n")
+            f.write("\nAlt Dependencies Check Failed:\n")
+            f.write(f"{str(build_alt_dep)}\n")
     except (FileNotFoundError, PermissionError) as e:
         logger.exception(f"Error: {e}")
         exit(1)
@@ -530,7 +554,7 @@ def main():
                                 continue
 
                         dpkg_build_log.write(f"FAIL: {os.path.basename(folder_name)}\n")
-                        logger.error(f"Build failed for {os.path.basename(folder_name)}")
+                        console.print(f"Build failed for {os.path.basename(folder_name)}")
                         _errors += 1
 
                         dpkg_build_log.flush()
