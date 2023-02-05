@@ -526,6 +526,9 @@ def main():
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - X Starting Build
+    if not Confirm.ask("Proceed with Build: (y/n)", default=True):
+        exit(1)
+
     console.print("[bright_white]Starting Build...")
 
     console.print("Starting Package Build with --no-clean option...")
