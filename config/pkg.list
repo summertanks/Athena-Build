@@ -1,6 +1,25 @@
 # Graphic Base System#
+gnome-session
+gnome-shell
 gnome-terminal
 gnome-shell-common
+gnome-control-center
+gnome-icon-theme
+gdm3
+
+# browser
+firefox-esr
+ca-certificates
+
+# Linux kernel
+linux-image-amd64
+
+# Alt Dependency
+libjack-jackd2-0
+gir1.2-gdkpixbuf-2.0
+ocl-icd-libopencl1
+musescore-general-soundfont-lossless
+hunspell-en-us
 
 # Bootloader
 grub-efi-amd64
@@ -83,6 +102,8 @@ debconf
 media-types
 dconf-gsettings-backend
 gpgv2
+initramfs-tools
+
 
 # fonts
 fonts-dejavu-core

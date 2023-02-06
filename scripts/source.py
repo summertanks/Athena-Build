@@ -56,7 +56,7 @@ class Source:
         return self._conflicts
 
     def add_conflicts(self, conflict_string):
-        conflict_list = apt_pkg.parse_depends(conflict_string, architecture='amd64')
+        conflict_list = apt_pkg.parse_src_depends(conflict_string, architecture='amd64')
         for conflict in conflict_list:
             if len(conflict) > 0:
                 self._conflicts.append(conflict)
