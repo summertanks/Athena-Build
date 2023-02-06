@@ -320,6 +320,10 @@ def main():
         source_version = selected_packages[pkg_name].source[1]
         pkg_version = selected_packages[pkg_name].version
 
+        if pkg_version == '-1':
+            logger.error(f"Skipping Package {pkg_name}, package wasn't parsed")
+            continue
+
         # Where Source version is not given, it is assumed same as package version
         if source_version == '':
             source_version = pkg_version
@@ -329,8 +333,8 @@ def main():
             source_packages[source_name] = Source(source_name, source_version)
 
         if not source_version == pkg_version:
-            console.print(f"Package and Source version mismatch "
-                          f"{pkg_name}: {pkg_version} -> {source_name}: {source_version} Using {source_version}")
+            logger.info(f"Package and Source version mismatch "
+                           f"{pkg_name}: {pkg_version} -> {source_name}: {source_version} Using {source_version}")
             selected_packages[pkg_name].reset_source_version(source_version)
 
     console.print("Source requested for : ", len(source_packages), " packages")
@@ -549,7 +553,7 @@ def main():
                                                    cwd=folder_list[dsc_file], stdout=logfile, stderr=logfile)
                         if not process.wait():
                             process = subprocess.Popen(
-                                ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64", "-J"],
+                                ["dpkg-buildpackage", "-b", "-uc", "-us", "-nc", "-a", "amd64"],
                                 cwd=folder_list[dsc_file], stdout=logfile, stderr=logfile)
                             if not process.wait():
                                 dpkg_build_log.write(f"PASS: {folder_name}\n")
