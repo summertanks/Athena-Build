@@ -1,10 +1,40 @@
 import hashlib
 import logging
 import os
+import pathlib
 import re
+import configparser
 from logging import Logger
 
 from rich.console import Console
+
+
+class DirectoryListing:
+    def __init__(self,
+                 working_dir: str,
+                 config_parser: configparser):
+
+        self.cwd = os.path.abspath(working_dir)
+        try:
+            self.dir_download = os.path.join(self.cwd, config_parser.get('Directories', 'Download'))
+            self.dir_log = os.path.join(self.cwd, config_parser.get('Directories', 'Log'))
+            self.dir_cache = os.path.join(self.cwd, config_parser.get('Directories', 'Cache'))
+            self.dir_temp = os.path.join(self.cwd, config_parser.get('Directories', 'Temp'))
+            self.dir_source = os.path.join(self.cwd, config_parser.get('Directories', 'Source'))
+        except configparser.Error as e:
+            print(f"Athena Linux: Config Parser Error: {e}")
+            exit(1)
+
+        try:
+            os.access(self.cwd, os.W_OK)
+            pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_log ).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
+        except PermissionError as e:
+            print(f"Athena Linux: Insufficient permissions in the working directory: {e}")
+            exit(1)
 
 
 class BaseDistribution:

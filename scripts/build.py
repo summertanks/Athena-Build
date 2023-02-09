@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import subprocess
+import cache
 from logging import Logger
 
 import apt_pkg
@@ -160,6 +161,7 @@ def main():
 
         base_distribution = utils.BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
 
+        dir_list = utils.DirectoryListing(working_dir, config_parser)
         dir_download = os.path.join(working_dir, config_parser.get('Directories', 'Download'))
         dir_log = os.path.join(working_dir, config_parser.get('Directories', 'Log'))
         dir_cache = os.path.join(working_dir, config_parser.get('Directories', 'Cache'))
@@ -196,7 +198,7 @@ def main():
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
     console.print("[bright_white]Building Cache...")
-    cache_files = build_cache(base_distribution, dir_cache, console, logger)
+    cache_files = cache.build_cache(base_distribution, dir_cache, console, logger)
 
     # get file names from cache
     package_file = cache_files['Packages']
