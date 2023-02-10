@@ -5,6 +5,7 @@ import os
 import pathlib
 import sqlite3
 from sqlite3 import Connection
+from urllib.parse import urlsplit
 
 import apt_pkg
 
@@ -42,7 +43,7 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str, con, logger) -> di
     release_file = os.path.join(cache_dir, apt_pkg.uri_to_filename(release_url))
 
     # By default, download
-    if utils.download_file(release_url, release_file, con, logger) <= 0:
+    if utils.download_file(release_url, release_file) <= 0:
         exit(1)
 
     try:
@@ -72,7 +73,7 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str, con, logger) -> di
         with open(release_file, 'r') as fh:
             rel = Release(fh)
             for _file in control_files:
-                _md5 = [line['md5'] for line in rel['MD5Dum'] if line['name'] == _file]
+                _md5 = [line['md5'] for line in rel['MD5Sum'] if line['name'] == _file]
                 if _md5 is None:
                     raise Exception(f"File ({_file})not found in release file")
                 md5.append(hash)
@@ -95,7 +96,7 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str, con, logger) -> di
         index = cache_destination.index(_file)
         if md5[index] != md5_check:
             # download given file to location
-            if (utils.download_file(cache_source[index], cache_destination[index], con, logger)) <= 0:
+            if (utils.download_file(cache_source[index], cache_destination[index])) <= 0:
                 exit(1)
 
             # decompress file based on extension
@@ -114,6 +115,6 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str, con, logger) -> di
                 continue
 
         # List of cache files are in the sequence specified earlier
-        cache_files[os.path.basename(cache_destination[index])] = base
+        cache_files[urlsplit(control_files[index]).path.split('/')[-1]] = base
 
     return cache_files
