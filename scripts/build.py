@@ -23,6 +23,7 @@ import source
 # Local imports
 import utils
 from package import Package
+from scripts import buildsystem
 from source import Source
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
@@ -195,6 +196,7 @@ def main():
     console.print(f"\t Parent Distribution\t{basecodename} {baseversion}")
     console.print(f"\t Build Distribution\t{build_codename} {build_version}")
 
+    buildsystem.container_execute(dir_list)
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
     console.print("[bright_white]Building Cache...")
