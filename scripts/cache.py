@@ -2,9 +2,6 @@ import bz2
 import gzip
 import hashlib
 import os
-import pathlib
-import sqlite3
-from sqlite3 import Connection
 from urllib.parse import urlsplit
 
 import apt_pkg
@@ -23,7 +20,7 @@ class Cache:
     pass
 
 
-def build_cache(base: utils.BaseDistribution, cache_dir: str, con, logger) -> dict[str, str]:
+def build_cache(base: utils.BaseDistribution, cache_dir: str) -> dict[str, str]:
     """Builds the Cache. Release file is used based on BaseDistribution defined
         Args:
             base (BaseDistribution): details of the system being derived from
@@ -33,7 +30,6 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str, con, logger) -> di
             dict {}:
     """
     cache_files = {}
-    force_rebuild = False
 
     # TODO: Support https
     base_url = 'http://' + base.url + '/' + base.baseid + '/dists/' + base.codename
@@ -53,8 +49,6 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str, con, logger) -> di
     except (FileNotFoundError, PermissionError) as e:
         Print(f"Athena Linux Error: {e}")
         exit(1)
-
-    conn = None
 
     # sequence is Packages & Sources, you change it you break it
     # TODO: currently, only for main, add for update & security repo too

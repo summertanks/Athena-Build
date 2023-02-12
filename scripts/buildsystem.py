@@ -9,41 +9,72 @@
 # apt-get update
 # apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 # usermod -aG docker $USER
-
-from scripts.utils import DirectoryListing
+import docker
+from docker import errors
+from utils import DirectoryListing
 
 Print = print
 
 
-def container_execute(dir_list: DirectoryListing):
-    import docker
-    from docker import errors
-    try:
-        client = docker.from_env()
+class BuildContainer:
 
-        # Build an image from a Dockerfile
-        image, build_logs = client.images.build(path=dir_list.dir_build, tag='master_image', nocache=True)
-        for chunk in build_logs:
-            if 'stream' in chunk:
-                for line in chunk['stream'].splitlines():
-                    Print(line)
+    def __init__(self, dir_list: DirectoryListing):
+        import os
+        self.build_path = dir_list.dir_repo
+        self.src_path = dir_list.dir_download
+        self.log_path = os.path.join(dir_list.dir_log, 'build')
+        self.conf_path = dir_list.dir_config
 
-        client.images.get("master_image").save("master_image.tar")
-        container = client.containers.run("master_image", command="python custom_script.py", detach=True,
-                                          volumes={'$PWD': {'bind': '/build', 'mode': 'rw'}})
-        with open("output.txt", "w") as f:
+        try:
+            self.client = docker.from_env()
+            # Confirm function
+            self.client.ping()
+
+            # Build an image from a Dockerfile
+            try:
+                image = self.client.images.get("athenalinux:build")
+                Print("Docker Build Environment already prepared...")
+            except docker.errors.ImageNotFound as e:
+                Print("Building Docker Environment...")
+                image, build_logs = self.client.images.build(path=dir_list.dir_config, tag='athenalinux:build',
+                                                             nocache=True, rm=True)
+                for chunk in build_logs:
+                    if 'stream' in chunk:
+                        for line in chunk['stream'].splitlines():
+                            pass
+                            # Print(line)
+
+            self.image = image
+
+        except docker.errors.APIError as e:
+            Print(f"Athena Linux Docker: Error{e}")
+            exit(1)
+
+    def container_execute(self, command: str):
+
+        try:
+            # client.images.get("master_image").save("master_image.tar")
+            cmd_str = 'mkdir /build; cd /source; ls -al; apt -y install debhelper-compat zlib1g-dev mawk;' \
+                      ' dpkg-source -x libpng1.6_1.6.37-3.dsc /build/libpng; cd /build/libpng; dpkg-checkbuilddeps;' \
+                      ' dpkg-buildpackage -a amd64 -us -uc -J; cd /build; cp *.deb /source/'
+            container = self.client.containers.run("athenabuild", command=f"/bin/bash -c '{cmd_str}'",
+                                                   detach=True, auto_remove=False,
+                                                   volumes={self.src_path: {'bind': '/source', 'mode': 'rw'}})
             for line in container.logs(stream=True):
-                f.write(line.decode("utf-8"))
+                Print(line.decode("utf-8"), end="")
 
-        # Copy the file from the container to the host file system
-        container.copy("/output.txt")
+            # for line in container.logs(stream=True):
+            #    Print(line.decode("utf-8"))
 
-        # Save the file to the host file system
-        with open("output.txt", "wb") as f:
-            f.write(container.get_archive("/output.txt")[0])
+            # Copy the file from the container to the host file system
+            # container.copy("/output.txt")
 
-        container.stop()
-        container.remove()
-    except docker.errors.APIError as e:
-        Print(f"Athena Linux Docker: Error{e}")
-
+            # Save the file to the host file system
+            # with open("output.txt", "wb") as f:
+            #    f.write(container.get_archive("/output.txt")[0])
+            container.wait()
+            container.stop()
+            container.remove()
+        except docker.errors.APIError as e:
+            Print(f"Athena Linux Docker: Error{e}")
+            exit(1)
