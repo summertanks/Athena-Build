@@ -45,7 +45,6 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str) -> dict[str, str]:
     try:
         with open(release_file) as fh:
             rel = Release(fh)
-            Print('\tOrigin: {Origin}\n\tCodename: {Codename}\n\tVersion: {Version}\n\tDate: {Date}'.format_map(rel))
     except (FileNotFoundError, PermissionError) as e:
         Print(f"Athena Linux Error: {e}")
         exit(1)
@@ -110,5 +109,6 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str) -> dict[str, str]:
 
         # List of cache files are in the sequence specified earlier
         cache_files[urlsplit(control_files[index]).path.split('/')[-1]] = base
-
+    Print("Using Release File")
+    Print('\tOrigin: {Origin}\n\tCodename: {Codename}\n\tVersion: {Version}\n\tDate: {Date}'.format_map(rel))
     return cache_files

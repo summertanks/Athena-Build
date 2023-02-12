@@ -34,12 +34,12 @@ class BuildContainer:
             # Build an image from a Dockerfile
             try:
                 image = self.client.images.get("athenalinux:build")
-                Print("Docker Build Environment already prepared...")
+                Print(f"Using Athena Linux Image - {image.tags}")
             except docker.errors.ImageNotFound as e:
-                Print("Building Docker Environment...")
+                Print("Image not found, Building AthenaLinux Image...")
                 image, build_logs = self.client.images.build(path=dir_list.dir_config, tag='athenalinux:build',
                                                              nocache=True, rm=True)
-                Print(f"Docker Environment Built - {image.tags}")
+                Print(f"Athena Linux Image Built - {image.tags}")
                 try:
                     with open(os.path.join(self.log_path, 'docker_build.log'), 'w') as fh:
                         for chunk in build_logs:

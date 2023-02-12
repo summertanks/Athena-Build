@@ -14,17 +14,17 @@ from rich.prompt import Prompt, Confirm
 
 import package
 import source
+
 # Local imports
 import utils
-from package import Package
 import buildsystem
+from package import Package
 from source import Source
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
                 '║╠╣║╔╣║║╩╣║║║╬╚╗║╚╣║║║║║╠║╣\n' \
                 '╚╝╚╩═╩╩╩═╩╩═╩══╝╚═╩╩╩═╩═╩╩╝'
-
 
 # TODO: make all apt_pkg.parse functions arch specific
 
@@ -64,14 +64,6 @@ def main():
         print(f"Athena Linux: Config Parser Error: {e}")
         exit(1)
 
-    try:
-        with open(pkglist_path, 'r') as f:
-            contents = f.read()
-            required_packages = contents.split('\n')
-    except (FileNotFoundError, PermissionError) as e:
-        print(f"Error: {e}")
-        exit(1)
-
     # --------------------------------------------------------------------------------------------------------------
     # Setting up common systems
     apt_pkg.init_system()
@@ -93,7 +85,7 @@ def main():
     # build_container.container_execute("")
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
-    console.print("[bright_white]Building Cache...")
+    Print("Building Cache...")
     cache_files = cache.build_cache(base_distribution, dir_list.dir_cache)
 
     # get file names from cache
@@ -101,48 +93,34 @@ def main():
     source_file = cache_files['Sources']
 
     # load data from the files
-    try:
-        console.print(f"Using Package List: {os.path.basename(package_file)}")
-        with open(package_file, 'r') as f:
-            contents = f.read()
-            package_record = contents.split('\n\n')
-    except (FileNotFoundError, PermissionError) as e:
-        Print(f"Error: {e}")
-        exit(1)
-
-    try:
-        console.print(f"Using Source List: {os.path.basename(source_file)}")
-        with open(source_file, 'r') as f:
-            contents = f.read()
-            source_records = contents.split('\n\n')
-    except (FileNotFoundError, PermissionError) as e:
-        Print(f"Error: {e}")
-        exit(1)
+    Print("Loading Control Files...")
+    package_record = utils.readfile(package_file).split('\n\n')
+    source_records = utils.readfile(source_file).split('\n\n')
+    required_packages_list = utils.readfile(pkglist_path).split('\n')
 
     # -------------------------------------------------------------------------------------------------------------
     # Step II - Parse Dependencies
-    console.print("[bright_white]Parsing Dependencies...")
+    console.print("Parsing Dependencies...")
+    required_packages = []
+    for pkg in required_packages_list:
+        if pkg and not pkg.startswith('#') and not pkg.isspace():
+            required_packages.append(pkg.strip())
+    Print(f"Total Required Packages {len(required_packages)}")
 
-    count_pkgs = 0
     # This is recursive function, status cant be created local to the function
     with console.status('') as status:
         # Iterate through package list and identify dependencies
         for pkg in required_packages:
-            if pkg and not pkg.startswith('#') and not pkg.isspace():
-                # Skip if added from previously parsed dependency tree
-                if pkg not in selected_packages.keys():
-                    # remove spaces
-                    pkg = pkg.strip()
-                    count_pkgs += 1
-                    package.parse_dependencies(package_record, selected_packages, pkg, console, status)
+            if pkg not in selected_packages.keys():
+                package.parse_dependencies(package_record, selected_packages, pkg, console, status)
 
     not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
-    console.print(f"Total Required Packages {count_pkgs}")
     console.print(f"Total Dependencies Selected are : {len(selected_packages)}")
     console.print(f"Dependencies Not Parsed: {len(not_parsed)}")
 
     for pkg_name in not_parsed:
         Print(f"Not parsed: {pkg_name}")
+        exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step III - Checking Breaks and Conflicts
