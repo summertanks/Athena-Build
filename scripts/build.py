@@ -3,7 +3,6 @@
 # External imports
 import argparse
 import configparser
-import logging
 import os
 import re
 import subprocess
@@ -11,7 +10,6 @@ import cache
 
 import apt_pkg
 from rich.console import Console
-from rich.logging import RichHandler
 from rich.prompt import Prompt, Confirm
 
 import package
@@ -62,15 +60,6 @@ def main():
         build_codename = config_parser.get('Build', 'CODENAME')
         build_version = config_parser.get('Build', 'VERSION')
 
-        base_distribution = utils.BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
-
-        dir_list = utils.DirectoryListing(working_dir, config_parser)
-        dir_download = os.path.join(working_dir, config_parser.get('Directories', 'Download'))
-        dir_log = os.path.join(working_dir, config_parser.get('Directories', 'Log'))
-        dir_cache = os.path.join(working_dir, config_parser.get('Directories', 'Cache'))
-        # dir_temp = os.path.join(working_dir, config_parser.get('Directories', 'Temp'))
-        dir_source = os.path.join(working_dir, config_parser.get('Directories', 'Source'))
-
     except configparser.Error as e:
         print(f"Athena Linux: Config Parser Error: {e}")
         exit(1)
@@ -87,23 +76,25 @@ def main():
     # Setting up common systems
     apt_pkg.init_system()
     console = Console()
-    log_format = "%(message)s"
-    logging.basicConfig(level="INFO", format=log_format, datefmt="[%X]", handlers=[RichHandler()])
-    logger = logging.getLogger('rich')
+    dir_list = utils.DirectoryListing(working_dir, config_parser)
+    base_distribution = utils.BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
+    # log_format = "%(message)s"
+    # logging.basicConfig(level="INFO", format=log_format, datefmt="[%X]", handlers=[RichHandler()])
+    # logger = logging.getLogger('rich')
 
     # --------------------------------------------------------------------------------------------------------------
-    console.print("[white]Starting Source Build System for Athena Linux...")
-    console.print("Building for ...")
-    console.print(f"\t Arch\t\t\t{arch}")
-    console.print(f"\t Parent Distribution\t{basecodename} {baseversion}")
-    console.print(f"\t Build Distribution\t{build_codename} {build_version}")
+    Print("Starting Source Build System for Athena Linux...")
+    Print("Building for ...")
+    Print(f"\t Arch\t\t\t{arch}")
+    Print(f"\t Parent Distribution\t{basecodename} {baseversion}")
+    Print(f"\t Build Distribution\t{build_codename} {build_version}")
 
     build_container = buildsystem.BuildContainer(dir_list)
-    build_container.container_execute("")
+    # build_container.container_execute("")
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
     console.print("[bright_white]Building Cache...")
-    cache_files = cache.build_cache(base_distribution, dir_cache)
+    cache_files = cache.build_cache(base_distribution, dir_list.dir_cache)
 
     # get file names from cache
     package_file = cache_files['Packages']
@@ -116,7 +107,7 @@ def main():
             contents = f.read()
             package_record = contents.split('\n\n')
     except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
+        Print(f"Error: {e}")
         exit(1)
 
     try:
@@ -125,7 +116,7 @@ def main():
             contents = f.read()
             source_records = contents.split('\n\n')
     except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
+        Print(f"Error: {e}")
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
@@ -151,7 +142,7 @@ def main():
     console.print(f"Dependencies Not Parsed: {len(not_parsed)}")
 
     for pkg_name in not_parsed:
-        logger.warning(f"Not parsed: {pkg_name}")
+        Print(f"Not parsed: {pkg_name}")
 
     # -------------------------------------------------------------------------------------------------------------
     # Step III - Checking Breaks and Conflicts
@@ -166,7 +157,7 @@ def main():
                 break_comparator = breaks[2]
 
                 if break_comparator == '' or apt_pkg.check_dep(break_version, break_comparator, pkg_ver):
-                    logger.warning(f"Package {pkg} breaks {pkg_name}")
+                    Print(f"Package {pkg} breaks {pkg_name}")
 
         # Conflicts will break installation - Error
         for conflicts in selected_packages[pkg].conflicts:
@@ -177,21 +168,21 @@ def main():
                 conflicts_comparator = conflicts[2]
 
                 if conflicts_comparator == '' or apt_pkg.check_dep(conflicts_version, conflicts_comparator, pkg_ver):
-                    logger.error(f"Package {pkg} conflicts with {pkg_name}")
+                    Print(f"Package {pkg} conflicts with {pkg_name}")
 
     # -------------------------------------------------------------------------------------------------------------
     # Step IV - Checking Version Constraints
     console.print("[bright_white]Checking Version Constraints...")
     for pkg in selected_packages:
         if not selected_packages[pkg].constraints_satisfied:
-            logger.warning(f"Version Constraint failed for {pkg}:{selected_packages[pkg].name}")
+            Print(f"Version Constraint failed for {pkg}:{selected_packages[pkg].name}")
 
     try:
-        with open(os.path.join(dir_log, 'selected_packages.list'), 'w') as f:
+        with open(os.path.join(dir_list.dir_log, 'selected_packages.list'), 'w') as f:
             for pkg in selected_packages:
                 f.write(str(selected_packages[pkg]) + '\n')
     except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
+        Print(f"Error: {e}")
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
@@ -214,9 +205,9 @@ def main():
                 if apt_pkg.check_dep(selected_packages[pkg_name].version, pkg_constraint, pkg_version):
                     found = True
                 else:
-                    logger.warning(f"Alt Dependency Check - Version constraint failed for {pkg_name}")
+                    Print(f"Alt Dependency Check - Version constraint failed for {pkg_name}")
         if not found:
-            logger.warning(f"dependency unresolved between {section}")
+            Print(f"dependency unresolved between {section}")
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - VI Check for discrepancy between source version and package version
@@ -228,7 +219,7 @@ def main():
         pkg_version = selected_packages[pkg_name].version
 
         if pkg_version == '-1':
-            logger.error(f"Skipping Package {pkg_name}, package wasn't parsed")
+            Print(f"Skipping Package {pkg_name}, package wasn't parsed")
             continue
 
         # Where Source version is not given, it is assumed same as package version
@@ -240,8 +231,8 @@ def main():
             source_packages[source_name] = Source(source_name, source_version)
 
         if not source_version == pkg_version:
-            logger.info(f"Package and Source version mismatch "
-                        f"{pkg_name}: {pkg_version} -> {source_name}: {source_version} Using {source_version}")
+            Print(f"Package and Source version mismatch "
+                  f"{pkg_name}: {pkg_version} -> {source_name}: {source_version} Using {source_version}")
             selected_packages[pkg_name].reset_source_version(source_version)
 
     console.print("Source requested for : ", len(source_packages), " packages")
@@ -251,7 +242,7 @@ def main():
     console.print("[bright_white]Parsing Source Packages...")
 
     # Parse Sources Control file
-    total_src_count, total_src_size = source.parse_sources(source_records, source_packages, console, logger)
+    total_src_count, total_src_size = source.parse_sources(source_records, source_packages)
 
     missing_source = [_pkg for _pkg in source_packages if not source_packages[_pkg].found]
 
@@ -264,18 +255,18 @@ def main():
                 source_packages[pkg].reset_version(new_version)
 
         # rerun parse_source only for the missing source
-        source.parse_sources(source_records, missing_source, console, logger)
+        source.parse_sources(source_records, missing_source)
 
     try:
-        with open(os.path.join(dir_log, 'source_packages.list'), 'w') as f:
+        with open(os.path.join(dir_list.dir_log, 'source_packages.list'), 'w') as f:
             for pkg in source_packages:
                 f.write(str(source_packages[pkg]) + '\n')
     except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
+        Print(f"Error: {e}")
         exit(1)
 
     try:
-        with open(os.path.join(dir_log, 'source_file.list'), 'w') as f:
+        with open(os.path.join(dir_list.dir_log, 'source_file.list'), 'w') as f:
             for src_pkg in source_packages:
                 if source_packages[src_pkg].found:
                     for file in source_packages[src_pkg].files:
@@ -285,7 +276,7 @@ def main():
                         _filehash = source_packages[src_pkg].files[file]['md5']
                         f.write(f"{_filename} {_filepath} {_filesize} {_filehash}\n")
     except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
+        Print(f"Error: {e}")
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
@@ -318,7 +309,7 @@ def main():
             else:
                 if not dep[2] == '':  # no comparison to do
                     if not apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
-                        logger.error(f"Build Dependency version check failed for {src_pkg}: {_pkg} {dep[1]}")
+                        Print(f"Build Dependency version check failed for {src_pkg}: {_pkg} {dep[1]}")
                         failed_dep_version += f'{_pkg} ({dep[2]} {dep[1]}) '
 
         # Check - if conflict is installed, and installed package matches conflict version
@@ -326,7 +317,7 @@ def main():
             _pkg = dep[0]
             if _pkg in installed_packages:
                 if dep[2] == '' or apt_pkg.check_dep(installed_packages[_pkg], dep[2], dep[1]):
-                    logger.error(f"Build Dependency conflict {src_pkg}: {_pkg} {dep[1]}")
+                    Print(f"Build Dependency conflict {src_pkg}: {_pkg} {dep[1]}")
                     conflicts_pkg += f'{_pkg} ({dep[2]} {dep[1]}) '
 
         # Check from alternates if at least one package is installed
@@ -340,7 +331,7 @@ def main():
                     if apt_pkg.check_dep(installed_packages[pkg_name], pkg_constraint, pkg_version):
                         found = True
                     else:
-                        logger.warning(f"Alt Build Dependency Check - Version constraint failed for {pkg_name}")
+                        Print(f"Alt Build Dependency Check - Version constraint failed for {pkg_name}")
             if not found:
                 if section not in build_alt_dep:
                     build_alt_dep.append(section)
@@ -360,12 +351,12 @@ def main():
         console.print("PASSED: Build Dependency Conflict")
     if len(build_alt_dep):
         for section in build_alt_dep:
-            logger.warning(f"Build dependency unresolved between {section}")
+            Print(f"Build dependency unresolved between {section}")
     else:
         console.print("PASSED: Build Alt Dependency Check")
 
     try:
-        with open(os.path.join(dir_log, 'build_dependency.list'), 'w') as f:
+        with open(os.path.join(dir_list.dir_log, 'build_dependency.list'), 'w') as f:
             f.write("Build Dependencies Failed:\n")
             f.write(f"{' '.join(failed_dep)}\n")
             f.write("\nDependencies Version Check Failed:\n")
@@ -375,7 +366,7 @@ def main():
             f.write("\nAlt Dependencies Check Failed:\n")
             f.write(f"{str(build_alt_dep)}\n")
     except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
+        Print(f"Error: {e}")
         exit(1)
 
     if not (failed_dep == '' and failed_dep_version == '' and conflicts_pkg == ''):
@@ -389,7 +380,7 @@ def main():
     console.print("Total File Selected are :", total_src_count)
     console.print("Total Download is about ", round(total_src_size / (1024 * 1024)), "MB")
     console.print("Starting Downloads...")
-    utils.download_source(source_packages, dir_download, base_distribution)
+    utils.download_source(source_packages, dir_list.dir_download, base_distribution)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - IX Expanding the Source Packages
@@ -398,14 +389,14 @@ def main():
     folder_list = {}
     dsc_files = []
     try:
-        with open(os.path.join(dir_log, 'dpkg-source.log'), "w") as logfile:
+        with open(os.path.join(dir_list.dir_log, 'dpkg-source.log'), "w") as logfile:
             with console.status('') as status:
 
                 for pkg in source_packages:
                     for file in source_packages[pkg].files:
                         if os.path.splitext(file)[1] == '.dsc':
                             dsc_files.append(file)
-                            folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
+                            folder_name = os.path.join(dir_list.dir_source, os.path.splitext(file)[0])
                             folder_list[file] = folder_name
 
                 # dsc_files = [file[0] for file in file_list.items() if os.path.splitext(file[0])[1] == '.dsc']
@@ -418,7 +409,7 @@ def main():
                     # folder_name = os.path.join(dir_source, os.path.splitext(file)[0])
                     folder_name = folder_list[file]
                     # folder_list.append(folder_name)
-                    dsc_file = os.path.join(dir_download, file)
+                    dsc_file = os.path.join(dir_list.dir_download, file)
                     process = subprocess.Popen(
                         ["dpkg-source", "-x", dsc_file, folder_name], stdout=logfile, stderr=logfile)
                     if process.wait():
@@ -426,12 +417,12 @@ def main():
                 if _errors:
                     console.print(f"dpkg-source failed for {_errors} instances, please check dpkg-source.log")
 
-        with open(os.path.join(dir_log, 'source_folder.list'), 'w') as f:
+        with open(os.path.join(dir_list.dir_log, 'source_folder.list'), 'w') as f:
             for folder in folder_list:
                 f.write(f"{folder} {folder_list[folder]} \n")
 
     except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
+        Print(f"Error: {e}")
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
@@ -447,14 +438,14 @@ def main():
     _completed = 0
 
     try:
-        with open(os.path.join(dir_log, 'dpkg-build.log'), "w") as dpkg_build_log:
+        with open(os.path.join(dir_list.dir_log, 'dpkg-build.log'), "w") as dpkg_build_log:
             with console.status('') as status:
                 for dsc_file in dsc_files:
                     _completed += 1
                     folder_name = os.path.basename(folder_list[dsc_file])
                     status.update(f"{_completed}/{_total} - Building {folder_name}")
 
-                    log_filename = os.path.join(dir_log, "build", folder_name + '.log')
+                    log_filename = os.path.join(dir_list.dir_log, "build", folder_name + '.log')
                     with open(log_filename, "w") as logfile:
                         process = subprocess.Popen(["dpkg-checkbuilddeps"],
                                                    cwd=folder_list[dsc_file], stdout=logfile, stderr=logfile)
@@ -478,7 +469,7 @@ def main():
             console.print("Completed Build")
 
     except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
+        Print(f"Error: {e}")
         exit(1)
 
 
