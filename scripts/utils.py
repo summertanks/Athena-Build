@@ -143,3 +143,13 @@ def get_md5(filepath: str) -> str:
             md5_check = hashlib.md5(fdata).hexdigest()
 
     return md5_check
+
+
+def readfile(filename: str) -> str:
+    try:
+        with open(filename, 'r') as f:
+            contents = f.read()
+            return contents
+    except (FileNotFoundError, PermissionError) as e:
+        Print(f"Error: {e}")
+        exit(1)
