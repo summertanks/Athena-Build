@@ -2,16 +2,12 @@
 
 # External imports
 import argparse
-import bz2
 import configparser
-import gzip
-import hashlib
 import logging
 import os
 import re
 import subprocess
 import cache
-from logging import Logger
 
 import apt_pkg
 from rich.console import Console
@@ -23,7 +19,7 @@ import source
 # Local imports
 import utils
 from package import Package
-from scripts import buildsystem
+import buildsystem
 from source import Source
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
@@ -34,101 +30,7 @@ asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n'
 
 # TODO: make all apt_pkg.parse functions arch specific
 
-def build_cache(base: utils.BaseDistribution, dir_cache: str, con: Console, logger: Logger) -> dict[str, str]:
-    """Builds the Cache. Release file is used based on BaseDistribution defined
-        Args:
-            base (BaseDistribution): details of the system being derived from
-            dir_cache (str): Dir where cache files are to be downloaded
-            con (Console): default output
-            logger (Logger): logger
-
-        Returns:
-            dict {}:
-    """
-    cache_files = {}
-
-    # TODO: Support https
-    base_url = 'http://' + base.url + '/' + base.baseid + '/dists/' + base.codename
-    base_filename = base.url + '_' + base.baseid + '_dists_' + base.codename
-
-    # Default release file
-    release_url = base_url + '/InRelease'
-    release_file = os.path.join(dir_cache, base_filename + '_InRelease')
-
-    # By default download
-    # TODO: have override - offline flag
-    if utils.download_file(release_url, release_file, con, logger) <= 0:
-        exit(1)
-
-    # sequence is Packages, Translation & Sources
-    # you change it you break it
-    # TODO: Enable to be configurable, should not hardcode
-    # TODO: Use the apt_pkg functions & maybe apt_cache
-    cache_source = [base_url + '/main/binary-' + base.arch + '/Packages.gz',
-                    base_url + '/main/source/Sources.gz']
-
-    cache_filename = ['main/binary-' + base.arch + '/Packages',
-                      'main/source/Sources']
-
-    cache_destination = [os.path.join(dir_cache, base_filename + '_main_binary-' + base.arch + '_Packages.gz'),
-                         os.path.join(dir_cache, base_filename + '_main_source_Sources.gz')]
-
-    md5 = []
-    # Extract the md5 for the files
-    # TODO: Enable Optional SHA256 also
-    try:
-        with open(release_file, 'r') as f:
-            contents = f.read()
-            for file in cache_filename:
-                #  Typical format - [space] [32 char md5 hash] [space] [file size] [space] [relative path] [eol]
-                re_pattern = r' ([a-f0-9]{32})\s+([^\s]+)\s+' + file + '$'
-                match = re.search(re_pattern, contents, re.MULTILINE)
-                if match:
-                    md5.append(match.group(1))
-                else:
-                    logger.critical(f"Error finding hash for {file}")
-                    exit(1)
-    except (FileNotFoundError, PermissionError) as e:
-        logger.exception(f"Error: {e}")
-        exit(1)
-
-    # Iterate over destination files
-    for file in cache_destination:
-        # searching for the decompressed files - stripping extensions
-        base = os.path.splitext(file)[0]
-        if os.path.isfile(base):
-            # Open the file and calculate the MD5 hash
-            with open(base, 'rb') as f:
-                fdata = f.read()
-                md5_check = hashlib.md5(fdata).hexdigest()
-        else:
-            md5_check = ''
-
-        index = cache_destination.index(file)
-        if md5[index] != md5_check:
-            # download given file to location
-            if (utils.download_file(cache_source[index], cache_destination[index], con, logger)) <= 0:
-                exit(1)
-
-            # decompress file based on extension
-            base, ext = os.path.splitext(file)
-            if ext == '.gz':
-                with gzip.open(file, 'rb') as f_in:
-                    with open(base, 'wb') as f_out:
-                        f_out.write(f_in.read())
-            elif ext == '.bz2':
-                with bz2.BZ2File(file, 'rb') as f_in:
-                    with open(base, 'wb') as f_out:
-                        f_out.write(f_in.read())
-            else:
-                # if no ext leave as such
-                # TODO: check if other extensions are required to be supported
-                continue
-
-        # List of cache files are in the sequence specified earlier
-        cache_files[os.path.basename(cache_filename[index])] = base
-
-    return cache_files
+Print = print
 
 
 def main():
@@ -196,11 +98,12 @@ def main():
     console.print(f"\t Parent Distribution\t{basecodename} {baseversion}")
     console.print(f"\t Build Distribution\t{build_codename} {build_version}")
 
-    buildsystem.container_execute(dir_list)
+    build_container = buildsystem.BuildContainer(dir_list)
+    build_container.container_execute("")
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
     console.print("[bright_white]Building Cache...")
-    cache_files = cache.build_cache(base_distribution, dir_cache, console, logger)
+    cache_files = cache.build_cache(base_distribution, dir_cache)
 
     # get file names from cache
     package_file = cache_files['Packages']
@@ -338,7 +241,7 @@ def main():
 
         if not source_version == pkg_version:
             logger.info(f"Package and Source version mismatch "
-                           f"{pkg_name}: {pkg_version} -> {source_name}: {source_version} Using {source_version}")
+                        f"{pkg_name}: {pkg_version} -> {source_name}: {source_version} Using {source_version}")
             selected_packages[pkg_name].reset_source_version(source_version)
 
     console.print("Source requested for : ", len(source_packages), " packages")
@@ -486,7 +389,7 @@ def main():
     console.print("Total File Selected are :", total_src_count)
     console.print("Total Download is about ", round(total_src_size / (1024 * 1024)), "MB")
     console.print("Starting Downloads...")
-    utils.download_source(source_packages, dir_download, base_distribution, console, logger)
+    utils.download_source(source_packages, dir_download, base_distribution)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - IX Expanding the Source Packages
