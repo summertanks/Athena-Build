@@ -111,7 +111,7 @@ def main():
     with console.status('') as status:
         # Iterate through package list and identify dependencies
         for pkg in required_packages:
-            if pkg not in selected_packages.keys():
+            if pkg not in selected_packages:
                 package.parse_dependencies(package_record, selected_packages, pkg, console, status)
 
     not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
