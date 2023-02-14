@@ -2,10 +2,12 @@ import apt_pkg
 import deb822
 from apt_pkg import Package
 from rich.console import Console
+from rich.prompt import Prompt
 
 import utils
 from utils import search
 
+Print = print
 
 class Package:
     """
@@ -300,47 +302,212 @@ def find_alternate_packages(package_record: list[str], provides: str) -> {str, s
 
     return alternates
 
+
 class DependencyTree:
-    def __init__(self, pkg_filename: str, src_filename: str):
+    class Package:
+        def __init__(self, section: str):
+
+            self.__dict = {}
+            self.__keys = OrderedSet()
+            self.__parsed = None
+
+            # Avoiding empty conditions
+            if section.strip() == '':
+                raise ValueError("ERROR: Attempting to create Package with empty section")
+
+            # Save content for reference
+            self._raw = section
+
+            # Parse as DEB822 file
+            _lines = section.split('\n')
+
+            current_field = None
+            for _line in _lines:
+                _line = _line.strip()
+
+                # Should not happen, sections are supposed to already be split '\n\n' and no line with spaces
+                if not _line:
+                    raise ValueError("ERROR: Attempting to create Package with malformed section")
+
+                if _line.startswith(' '):
+                    # This line is a continuation of the previous field
+                    self[current_field] += _line[1:]
+                else:
+                    # This line starts a new field
+                    current_field, value = _line.split(':', 1)
+                    self[current_field.strip()] = value.strip()
+
+        def __iter__(self):
+            for key in self.__keys:
+                yield str(key)
+
+        def __len__(self):
+            return len(self.__keys)
+
+        def __setitem__(self, key, value):
+            self.__keys.add(key)
+            self.__dict[key] = value
+
+        def __getitem__(self, key):
+            try:
+                value = self.__dict[key]
+            except KeyError:
+                if self.__parsed is not None and key in self.__keys:
+                    value = self.__parsed[key]
+                else:
+                    raise
+
+        def __delitem__(self, key):
+            self.__keys.remove(key)
+            try:
+                del self.__dict[key]
+            except KeyError:
+                # If we got this far, the key was in self.__keys, so it must have
+                # only been in the self.__parsed dict.
+                pass
+
+        def __contains__(self, key):
+            return key in self.__keys
+
+    def __init__(self, pkg_filename: str, src_filename: str, select_recommended: bool):
         self._pkg_filename = pkg_filename
         self._src_filename = src_filename
+        self._recommended = select_recommended
+
         self.package_record = utils.readfile(self._pkg_filename).split('\n\n')
         self.source_records = utils.readfile(self._src_filename).split('\n\n')
         self.selected_pkgs: {} = {}
+        self.alternate_pkgs: {} = {}
         self.required_pkgs: [] = []
 
     def parse_dependency(self, required_pkg: str):
-        from debian.deb822 import Deb822, Packages, Sources
-        _provide_candidates = []
-        _pkg_candidates = []
-        # iterate through the package records
-        for _pkg_record in self.package_record:
-            _pkg = Packages(_pkg_record)
-            # search for packages
-            if required_pkg in _pkg['Package']:
-                _pkg_candidates.append(_pkg)
-            elif 'Provides' in _pkg and required_pkg in _pkg['Provides']:
-                _provide_candidates.append(_pkg)
+        from debian.deb822 import Packages
 
-        # check if we have candidates
-        if len(_provide_candidates) == 0 and len(_pkg_candidates) == 0:
-            raise ValueError(f"Package could not be Parsed: {required_pkg}")
+        if required_pkg not in self.selected_pkgs:
+            _provide_candidates = []
+            _pkg_candidates = []
+            _selected_pkg: Packages
 
-        # TODO: required package should be a tuple (name, version), version can be with constraint
-        #  for multiple packages, we should be able select the right version,
-        #  if not give user option of selecting the right version
+            # TODO: enable required package to specify version also
 
-class PackageRecords():
-    homepage: str
-    short_desc: str
-    long_desc: str
-    source_pkg: str
-    source_ver: str
-    record: str
-    filename: str
-    md5_hash: str
-    sha1_hash: str
-    sha256_hash: str
-    hashes: []
+            # iterate through the package records
+            for _pkg_record in self.package_record:
+                _pkg = Packages(_pkg_record)
+                # search for packages
+                if required_pkg in _pkg['Package']:
+                    _pkg_candidates.append(_pkg)
+                elif 'Provides' in _pkg and required_pkg in _pkg['Provides']:
+                    _provide_candidates.append(_pkg)
+
+            # Case - I  : No match for Package or Provides - Raise Value Error
+            if len(_provide_candidates) == 0 and len(_pkg_candidates) == 0:
+                raise ValueError(f"Package could not be found: {required_pkg}")
+
+            # Case - II : One or more Package, One or more Provides - Unknown condition, currently raise error
+            elif len(_provide_candidates) > 0 and len(_pkg_candidates) > 0:
+                raise ValueError(f"Exact package could not selected: {required_pkg}")
+
+            # Case - III: No Package, One Provides - "Selecting <Package> for <Provides> - Proceed with Package
+            elif len(_provide_candidates) == 1 and len(_pkg_candidates) == 0:
+                Print(f"Note: Selecting {_provide_candidates[0]['Package']} for {required_pkg}")
+                _selected_pkg = _provide_candidates[0]
+
+            # Case - IV : No Package, Multiple Provides (different Packages) - Ask User to manually select
+            # TODO: Look forward, see if required package list already solves the problem
+            elif len(_provide_candidates) > 1 and len(_pkg_candidates) == 0:
+                _options = [_pkg['Package'] for _pkg in _provide_candidates]
+                _pkg = Prompt.ask(f"Multiple provides for {required_pkg}, select Package", choices=_options)
+                _index = _options.index(_pkg)
+                _selected_pkg = _provide_candidates[_index]
+
+            # Case - V  : Multiple Package, No Provides - Select based on version, if still more than one, ask user
+            elif len(_provide_candidates) == 0 and len(_pkg_candidates) > 1:
+                _options = [_pkg['Version'] for _pkg in _pkg_candidates]
+                _pkg = Prompt.ask(f"Multiple Package for {required_pkg}, select Version", choices=_options)
+                _index = _options.index(_pkg)
+                _selected_pkg = _pkg_candidates[_index]
+
+            # Case - VI : One Package, No Provides - Simplest, move ahead parsing the given package
+            elif len(_provide_candidates) == 0 and len(_pkg_candidates) == 1:
+                _selected_pkg = _pkg_candidates[0]
+
+            else:   # Do not know how we got here
+                raise ValueError(f"Unknown Error in Parsing dependencies: {required_pkg}")
+
+            # We have the selected package in _selected_pkg, adding to internal list
+            self.selected_pkgs[_selected_pkg['Package']] = _selected_pkg
+
+            # Get list from depends and pre-depends
+            _depends = []
+            _depends += [l for l in _selected_pkg.relations['depends'] if len(l) == 1]
+            _depends += [l for l in _selected_pkg.relations['pre-depends'] if len(l) == 1]
+
+            # check if we should include recommended packages
+            if self._recommended:
+                _depends += [l for l in _selected_pkg.relations['recommends'] if len(l) == 1]
+
+            # add alternate package list
+            self.alternate_pkgs += [l for l in _selected_pkg.relations['depends'] if len(l) > 1]
+            self.alternate_pkgs += [l for l in _selected_pkg.relations['pre-depends'] if len(l) > 1]
+
+            # recursively
+            for _pkg in _depends:
+                self.parse_dependency(_pkg['name'])
+
+    def check_alternates(self):
+        pass
 
 
+class OrderedSet(object):
+    """A set-like object that preserves order when iterating over it
+
+    We use this to keep track of keys in Deb822Dict, because it's much faster
+    to look up if a key is in a set than in a list.
+    """
+
+    def __init__(self, iterable=None):
+        # type: (Optional[Iterable[str]]) -> None
+        self.__set = set()  # type: Set[str]
+        self.__order = []   # type: List[str]
+        if iterable is None:
+            iterable = []
+        for item in iterable:
+            self.add(item)
+
+    def add(self, item):
+        # type: (str) -> None
+        if item not in self:
+            # set.add will raise TypeError if something's unhashable, so we
+            # don't have to handle that ourselves
+            self.__set.add(item)
+            self.__order.append(item)
+
+    def remove(self, item):
+        # type: (str) -> None
+        # set.remove will raise KeyError, so we don't need to handle that
+        # ourselves
+        self.__set.remove(item)
+        self.__order.remove(item)
+
+    def __iter__(self):
+        # type: () -> Iterator[str]
+        # Return an iterator of items in the order they were added
+        return iter(self.__order)
+
+    def __len__(self):
+        # type: () -> int
+        return len(self.__order)
+
+    def __contains__(self, item):
+        # type: (str) -> bool
+        # This is what makes OrderedSet faster than using a list to keep track
+        # of keys.  Lookup in a set is O(1) instead of O(n) for a list.
+        return item in self.__set
+
+    # ### list-like methods
+    append = add
+
+    def extend(self, iterable):
+        # type: (List[str]) -> None
+        for item in iterable:
+            self.add(item)
