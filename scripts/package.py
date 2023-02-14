@@ -1,4 +1,6 @@
 import apt_pkg
+import deb822
+from apt_pkg import Package
 from rich.console import Console
 
 import utils
@@ -297,3 +299,48 @@ def find_alternate_packages(package_record: list[str], provides: str) -> {str, s
             alternates[package_name] = package_version
 
     return alternates
+
+class DependencyTree:
+    def __init__(self, pkg_filename: str, src_filename: str):
+        self._pkg_filename = pkg_filename
+        self._src_filename = src_filename
+        self.package_record = utils.readfile(self._pkg_filename).split('\n\n')
+        self.source_records = utils.readfile(self._src_filename).split('\n\n')
+        self.selected_pkgs: {} = {}
+        self.required_pkgs: [] = []
+
+    def parse_dependency(self, required_pkg: str):
+        from debian.deb822 import Deb822, Packages, Sources
+        _provide_candidates = []
+        _pkg_candidates = []
+        # iterate through the package records
+        for _pkg_record in self.package_record:
+            _pkg = Packages(_pkg_record)
+            # search for packages
+            if required_pkg in _pkg['Package']:
+                _pkg_candidates.append(_pkg)
+            elif 'Provides' in _pkg and required_pkg in _pkg['Provides']:
+                _provide_candidates.append(_pkg)
+
+        # check if we have candidates
+        if len(_provide_candidates) == 0 and len(_pkg_candidates) == 0:
+            raise ValueError(f"Package could not be Parsed: {required_pkg}")
+
+        # TODO: required package should be a tuple (name, version), version can be with constraint
+        #  for multiple packages, we should be able select the right version,
+        #  if not give user option of selecting the right version
+
+class PackageRecords():
+    homepage: str
+    short_desc: str
+    long_desc: str
+    source_pkg: str
+    source_ver: str
+    record: str
+    filename: str
+    md5_hash: str
+    sha1_hash: str
+    sha256_hash: str
+    hashes: []
+
+
