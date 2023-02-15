@@ -1,6 +1,4 @@
 import apt_pkg
-import deb822
-from apt_pkg import Package
 from rich.console import Console
 from rich.prompt import Prompt
 
@@ -9,7 +7,8 @@ from utils import search
 
 Print = print
 
-class Package:
+
+class Packages:
     """
         Package is being used to track which packages need to be parsed for dependencies,
         It enables, checking version constraints, version is set to -1 is it is not net parsed
@@ -36,7 +35,7 @@ class Package:
             f"{self._name} {self._version} {self.version_constraints} {self._provides} {self._source} {self._depends}")
 
     def __eq__(self, other):
-        if not isinstance(other, Package):
+        if not isinstance(other, Packages):
             raise TypeError(f"Trying to compare to a different object type {type(other)}")
 
         if other.name == self.name:
@@ -212,7 +211,7 @@ def parse_dependencies(
 
         # if not already there, also avoids separate iteration on provides
         if selected_packages.get(package_name) is None:
-            package = Package(package_name)
+            package = Packages(package_name)
             selected_packages[package_name] = package
         else:
             package = selected_packages[package_name]
@@ -275,7 +274,7 @@ def parse_dependencies(
 
             # Check if not already parsed
             if selected_packages.get(dep_package_name) is None:
-                selected_packages[dep_package_name] = Package(dep_package_name)
+                selected_packages[dep_package_name] = Packages(dep_package_name)
                 parse_dependencies(package_record, selected_packages, dep_package_name, con, status)
             selected_packages[dep_package_name].add_version_constraint(_pkg[1], _pkg[2])
         break
@@ -283,7 +282,7 @@ def parse_dependencies(
     # Went through the complete control file, couldn't find required_package
     if required_package not in selected_packages:
         # Added it to track
-        selected_packages[required_package] = Package(required_package)
+        selected_packages[required_package] = Packages(required_package)
 
 
 def find_alternate_packages(package_record: list[str], provides: str) -> {str, str}:
@@ -303,75 +302,105 @@ def find_alternate_packages(package_record: list[str], provides: str) -> {str, s
     return alternates
 
 
-class DependencyTree:
-    class Package:
-        def __init__(self, section: str):
+class MutableClass:
+    def __init__(self):
+        self.__dict = {}
+        self.__keys = OrderedSet()
 
-            self.__dict = {}
-            self.__keys = OrderedSet()
-            self.__parsed = None
+    def __iter__(self):
+        for key in self.__keys:
+            yield str(key)
 
-            # Avoiding empty conditions
-            if section.strip() == '':
-                raise ValueError("ERROR: Attempting to create Package with empty section")
+    def __len__(self):
+        return len(self.__keys)
 
-            # Save content for reference
-            self._raw = section
+    def __setitem__(self, key, value):
+        self.__keys.add(key)
+        self.__dict[key] = value
 
-            # Parse as DEB822 file
-            _lines = section.split('\n')
+    def __getitem__(self, key):
+        try:
+            value = self.__dict[key]
+        except KeyError:
+            value = ''
+        return value
 
-            current_field = None
-            for _line in _lines:
-                _line = _line.strip()
+    def __delitem__(self, key):
+        self.__keys.remove(key)
+        try:
+            del self.__dict[key]
+        except KeyError:
+            pass
 
-                # Should not happen, sections are supposed to already be split '\n\n' and no line with spaces
-                if not _line:
-                    raise ValueError("ERROR: Attempting to create Package with malformed section")
+    def __contains__(self, key):
+        return key in self.__keys
 
-                if _line.startswith(' '):
-                    # This line is a continuation of the previous field
-                    self[current_field] += _line[1:]
-                else:
-                    # This line starts a new field
-                    current_field, value = _line.split(':', 1)
-                    self[current_field.strip()] = value.strip()
 
-        def __iter__(self):
-            for key in self.__keys:
-                yield str(key)
+class DEB822file(MutableClass):
+    """DEB822 - Superclass to parse Deb822 Control files.
+                This is Not a full-fledged RFC822 implementation,
+                bare minimum to parse the Release, Package, Source & DSC file"""
 
-        def __len__(self):
-            return len(self.__keys)
+    def __init__(self, section: str):
 
-        def __setitem__(self, key, value):
-            self.__keys.add(key)
-            self.__dict[key] = value
+        super().__init__()
 
-        def __getitem__(self, key):
-            try:
-                value = self.__dict[key]
-            except KeyError:
-                if self.__parsed is not None and key in self.__keys:
-                    value = self.__parsed[key]
-                else:
+        # Save content for reference
+        self._raw = section
+
+        # Parse as DEB822 file
+        _lines = section.split('\n')
+
+        current_field = None
+        for _line in _lines:
+            _line = _line.strip()
+
+            # Should not happen, sections are supposed to already be split '\n\n' and no line with spaces
+            if not _line:
+                raise ValueError("ERROR: Attempting to create class with malformed section")
+
+            if _line.startswith(' '):
+                if current_field is None:
                     raise
+                # This line is a continuation of the previous field
+                self[current_field] += _line[1:]
+            else:
+                # This line starts a new field
+                current_field, value = _line.split(':', 1)
+                self[current_field.strip()] = value.strip()
 
-        def __delitem__(self, key):
-            self.__keys.remove(key)
-            try:
-                del self.__dict[key]
-            except KeyError:
-                # If we got this far, the key was in self.__keys, so it must have
-                # only been in the self.__parsed dict.
-                pass
 
-        def __contains__(self, key):
-            return key in self.__keys
+class Package(DEB822file):
+    def __init__(self, section: str, arch: str):
 
-    def __init__(self, pkg_filename: str, src_filename: str, select_recommended: bool):
+        self.source = ''
+        self.source_version = ''
+
+        self.package = ''
+        self.version = ''
+
+        self.relations = {}
+        super().__init__(section)
+
+        self.package = self['Package']
+        self.version = self['Version']
+
+        if self['Source'] == '':
+            self.source = self.package
+            self.source_version = self.version
+        else:
+            _source = self['Source']
+            _source = apt_pkg.parse_depends(_source)
+            self.source = _source[0][0]
+            self.source_version = _source[0][1]
+
+
+class DependencyTree:
+
+    def __init__(self, pkg_filename: str, src_filename: str, select_recommended: bool, arch: str):
         self._pkg_filename = pkg_filename
         self._src_filename = src_filename
+        self.arch = arch
         self._recommended = select_recommended
 
         self.package_record = utils.readfile(self._pkg_filename).split('\n\n')
@@ -381,18 +410,17 @@ class DependencyTree:
         self.required_pkgs: [] = []
 
     def parse_dependency(self, required_pkg: str):
-        from debian.deb822 import Packages
 
         if required_pkg not in self.selected_pkgs:
             _provide_candidates = []
             _pkg_candidates = []
-            _selected_pkg: Packages
+            _selected_pkg: Package
 
             # TODO: enable required package to specify version also
 
             # iterate through the package records
             for _pkg_record in self.package_record:
-                _pkg = Packages(_pkg_record)
+                _pkg = Package(_pkg_record, self.arch)
                 # search for packages
                 if required_pkg in _pkg['Package']:
                     _pkg_candidates.append(_pkg)
@@ -431,7 +459,7 @@ class DependencyTree:
             elif len(_provide_candidates) == 0 and len(_pkg_candidates) == 1:
                 _selected_pkg = _pkg_candidates[0]
 
-            else:   # Do not know how we got here
+            else:  # Do not know how we got here
                 raise ValueError(f"Unknown Error in Parsing dependencies: {required_pkg}")
 
             # We have the selected package in _selected_pkg, adding to internal list
@@ -459,55 +487,43 @@ class DependencyTree:
 
 
 class OrderedSet(object):
-    """A set-like object that preserves order when iterating over it
-
-    We use this to keep track of keys in Deb822Dict, because it's much faster
-    to look up if a key is in a set than in a list.
+    """OrderedSet - Reused from debian.DEB822
+                    Set is faster than list
     """
 
-    def __init__(self, iterable=None):
-        # type: (Optional[Iterable[str]]) -> None
-        self.__set = set()  # type: Set[str]
-        self.__order = []   # type: List[str]
+    def __init__(self, iterable: [str] = None):
+        self.__set: set[str] = set()
+        self.__order: [str] = []
         if iterable is None:
             iterable = []
         for item in iterable:
             self.add(item)
 
     def add(self, item):
-        # type: (str) -> None
+        # item is assumed hashable, otherwise set() will auto raise error
         if item not in self:
-            # set.add will raise TypeError if something's unhashable, so we
-            # don't have to handle that ourselves
             self.__set.add(item)
             self.__order.append(item)
 
-    def remove(self, item):
-        # type: (str) -> None
-        # set.remove will raise KeyError, so we don't need to handle that
-        # ourselves
+    def remove(self, item: str):
+        # assumed to exist, set.remove will else raise KeyError
         self.__set.remove(item)
         self.__order.remove(item)
 
-    def __iter__(self):
-        # type: () -> Iterator[str]
+    def __iter__(self) -> iter:
         # Return an iterator of items in the order they were added
         return iter(self.__order)
 
-    def __len__(self):
-        # type: () -> int
+    def __len__(self) -> int:
         return len(self.__order)
 
-    def __contains__(self, item):
-        # type: (str) -> bool
-        # This is what makes OrderedSet faster than using a list to keep track
-        # of keys.  Lookup in a set is O(1) instead of O(n) for a list.
+    def __contains__(self, item) -> bool:
+        # Lookup in a set is O(1) instead of O(n) for a list.
         return item in self.__set
 
     # ### list-like methods
     append = add
 
     def extend(self, iterable):
-        # type: (List[str]) -> None
         for item in iterable:
             self.add(item)
