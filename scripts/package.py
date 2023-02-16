@@ -1,3 +1,5 @@
+import re
+
 import apt_pkg
 from rich.console import Console
 from rich.prompt import Prompt
@@ -346,24 +348,23 @@ class DEB822file(MutableClass):
         super().__init__()
 
         # Save content for reference
-        self._raw = section
+        self.__raw = section
 
         # Parse as DEB822 file
         _lines = section.split('\n')
 
         current_field = None
         for _line in _lines:
-            _line = _line.strip()
 
             # Should not happen, sections are supposed to already be split '\n\n' and no line with spaces
-            if not _line:
+            if _line.strip() == '':
                 raise ValueError("ERROR: Attempting to create class with malformed section")
 
             if _line.startswith(' '):
                 if current_field is None:
                     raise
                 # This line is a continuation of the previous field
-                self[current_field] += _line[1:]
+                self[current_field] += _line
             else:
                 # This line starts a new field
                 current_field, value = _line.split(':', 1)
@@ -373,41 +374,132 @@ class DEB822file(MutableClass):
 class Package(DEB822file):
     def __init__(self, section: str, arch: str):
 
-        self.source = ''
-        self.source_version = ''
+        self.__version_constraints: {} = {}
+
+        self.source: str = ''
+        self.source_version: str = ''
 
         self.package = ''
         self.version = ''
 
-        self.relations = {}
+        self.depends = self.alt_depends = []
+        self.conflicts = []
+        self.breaks = []
+        self.recommends = self.alt_recommends = []
+
         super().__init__(section)
+
+        # Setting Values post calling super()
+        if arch not in ['amd64']:
+            raise ValueError(f"Current Architecture '{arch}' is not supported")
+        self.arch: str = arch
+
+        assert 'Package' in self, "Malformed Package, No Package Name"
+        assert 'Version' in self, "Malformed Package, No Version Given"
+        assert not self['Package'] == '', "Malformed Package, No Package Name"
+        assert not self['Version'] == '', "Malformed Package, No Version Given"
 
         self.package = self['Package']
         self.version = self['Version']
 
-        if self['Source'] == '':
-            self.source = self.package
-            self.source_version = self.version
-        else:
-            _source = self['Source']
-            _source = apt_pkg.parse_depends(_source)
-            self.source = _source[0][0]
-            self.source_version = _source[0][1]
+        # Setting default as Source name and version is same as package
+        self.source = self.package
+        self.source_version = self.version
+
+        # Get source data
+        if 'Source' in self:
+            if not self['Source'] == '':
+                _source = self['Source']
+                _source_group = re.search(r'^(\S+)(?:\s+\((\S+)\))?$', _source)
+                assert _source_group.group(1) is not None, "Malformed Source Name"
+                self.source = _source_group.group(1)
+                if _source_group.group(2) is not None:
+                    self.source_version = _source_group.group(2)
+
+        _depends_list = []
+        if 'Depends' in self:
+            _depends_list = apt_pkg.parse_depends(self['Depends'], strip_multi_arch=True, architecture=self.arch)
+        if 'Pre-Depends' in self:
+            _depends_list += apt_pkg.parse_depends(self['Pre-Depends'], strip_multi_arch=True, architecture=self.arch)
+
+        self.depends = [sublist[0] for sublist in _depends_list if len(sublist) == 1]
+        self.alt_depends = [sublist for sublist in _depends_list if len(sublist) > 1]
+
+        if 'Breaks' in self:
+            self.breaks = apt_pkg.parse_depends(self['Breaks'], strip_multi_arch=True, architecture=self.arch)
+
+        if 'Conflicts' in self:
+            self.conflicts = apt_pkg.parse_depends(self['Conflicts'], strip_multi_arch=True, architecture=self.arch)
+
+        if 'Recommends' in self:
+            _recommends = apt_pkg.parse_depends(self['Recommends'], strip_multi_arch=True, architecture=self.arch)
+            self.recommends = [_pkg for _pkg in _recommends if len(_pkg) == 1]
+            self.alt_recommends = [_pkg for _pkg in _recommends if len(_pkg) > 1]
+
+    @property
+    def constraints_satisfied(self) -> bool:
+        # needs a version to check against
+        assert 'Version' in self, "Malformed Package, No Version Given"
+
+        # check version against the saved constraints
+        for _version, _constraint in self.__version_constraints.items():
+            if not apt_pkg.check_dep(self.version, _constraint, _version):
+                return False
+        return True
+
+    def add_version_constraint(self, version, constraint):
+        # version can in the form of <constraint> <version number> or just <Version number>
+        # <constraints> are in form of =, <<, >>, >=, <=
+        # = and !<constraints> will be considered hard assignments
+        if version == '':
+            return
+        if constraint == '':
+            constraint = '='
+
+        if constraint not in ['=', '>', '<', '>=', '<=', '>>', '<<']:
+            raise ValueError(f"Unspecified Constraint being set {constraint}")
+
+        # Add constraint - Check if different constraint is already set
+        if version in self.__version_constraints:
+            Print(f"WARNING: For {self.package} version constraint for {version} already set to "
+                  f"{self.__version_constraints[version]}, being reset to {constraint}")
+        self.__version_constraints[version] = constraint
+
+    def provides(self, pkg_name: str) -> bool:
+        """
+        Checks if the current package provides the given package name
+        Args:
+            pkg_name: the package name to check for
+
+        Returns:
+            bool:
+        """
+        assert 'Package' in self, "Malformed Package, No Package Name"
+
+        if 'Provides' not in self:
+            return pkg_name == self['Package']
+
+        _provides = apt_pkg.parse_depends(self['Provides'], strip_multi_arch=True, architecture=self.arch)
+        for _pkg in _provides:
+            if pkg_name == _pkg[0]:
+                return True
+        return False
 
 
 class DependencyTree:
 
     def __init__(self, pkg_filename: str, src_filename: str, select_recommended: bool, arch: str):
-        self._pkg_filename = pkg_filename
-        self._src_filename = src_filename
-        self.arch = arch
-        self._recommended = select_recommended
+        self.__pkg_filename = pkg_filename
+        self.__src_filename = src_filename
+        self.__recommended = select_recommended
 
-        self.package_record = utils.readfile(self._pkg_filename).split('\n\n')
-        self.source_records = utils.readfile(self._src_filename).split('\n\n')
+        self.package_record = utils.readfile(self.__pkg_filename).split('\n\n')
+        self.source_records = utils.readfile(self.__src_filename).split('\n\n')
         self.selected_pkgs: {} = {}
         self.alternate_pkgs: {} = {}
         self.required_pkgs: [] = []
+
+        self.arch = arch
 
     def parse_dependency(self, required_pkg: str):
 
@@ -420,11 +512,13 @@ class DependencyTree:
 
             # iterate through the package records
             for _pkg_record in self.package_record:
+                if _pkg_record.strip() == '':
+                    continue
                 _pkg = Package(_pkg_record, self.arch)
                 # search for packages
-                if required_pkg in _pkg['Package']:
+                if required_pkg == _pkg.package:
                     _pkg_candidates.append(_pkg)
-                elif 'Provides' in _pkg and required_pkg in _pkg['Provides']:
+                elif _pkg.provides(required_pkg):
                     _provide_candidates.append(_pkg)
 
             # Case - I  : No match for Package or Provides - Raise Value Error
@@ -465,25 +559,17 @@ class DependencyTree:
             # We have the selected package in _selected_pkg, adding to internal list
             self.selected_pkgs[_selected_pkg['Package']] = _selected_pkg
 
-            # Get list from depends and pre-depends
-            _depends = []
-            _depends += [l for l in _selected_pkg.relations['depends'] if len(l) == 1]
-            _depends += [l for l in _selected_pkg.relations['pre-depends'] if len(l) == 1]
+            # list packages to get dependencies for
+            _depends = _selected_pkg.depends
 
             # check if we should include recommended packages
-            if self._recommended:
-                _depends += [l for l in _selected_pkg.relations['recommends'] if len(l) == 1]
-
-            # add alternate package list
-            self.alternate_pkgs += [l for l in _selected_pkg.relations['depends'] if len(l) > 1]
-            self.alternate_pkgs += [l for l in _selected_pkg.relations['pre-depends'] if len(l) > 1]
+            if self.__recommended:
+                _depends += _selected_pkg.recommends
 
             # recursively
             for _pkg in _depends:
-                self.parse_dependency(_pkg['name'])
-
-    def check_alternates(self):
-        pass
+                self.parse_dependency(_pkg[0])
+                self.selected_pkgs[_pkg[0]].add_version_constraint(_pkg[1], _pkg[2])
 
 
 class OrderedSet(object):

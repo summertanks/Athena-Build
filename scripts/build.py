@@ -70,6 +70,7 @@ def main():
     console = Console()
     dir_list = utils.DirectoryListing(working_dir, config_parser)
     base_distribution = utils.BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
+
     # log_format = "%(message)s"
     # logging.basicConfig(level="INFO", format=log_format, datefmt="[%X]", handlers=[RichHandler()])
     # logger = logging.getLogger('rich')
@@ -91,7 +92,8 @@ def main():
     # get file names from cache
     package_file = cache_files['Packages']
     source_file = cache_files['Sources']
-
+    dependency_tree = package.DependencyTree(package_file, source_file,
+                                             select_recommended=False, arch=base_distribution.arch)
     # load data from the files
     Print("Loading Control Files...")
     package_record = utils.readfile(package_file).split('\n\n')
@@ -112,7 +114,8 @@ def main():
         # Iterate through package list and identify dependencies
         for pkg in required_packages:
             if pkg not in selected_packages:
-                package.parse_dependencies(package_record, selected_packages, pkg, console, status)
+                dependency_tree.parse_dependency(pkg)
+                # package.parse_dependencies(package_record, selected_packages, pkg, console, status)
 
     not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
     console.print(f"Total Dependencies Selected are : {len(selected_packages)}")
