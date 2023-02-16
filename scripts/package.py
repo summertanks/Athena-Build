@@ -410,6 +410,7 @@ class Package(DEB822file):
         if 'Source' in self:
             if not self['Source'] == '':
                 _source = self['Source']
+                # version shown is without constraints, cant use apt_pkg - parse_depends(...) or parse_sec_depends(...)
                 _source_group = re.search(r'^(\S+)(?:\s+\((\S+)\))?$', _source)
                 assert _source_group.group(1) is not None, "Malformed Source Name"
                 self.source = _source_group.group(1)
@@ -460,7 +461,8 @@ class Package(DEB822file):
             raise ValueError(f"Unspecified Constraint being set {constraint}")
 
         # Add constraint - Check if different constraint is already set
-        if version in self.__version_constraints:
+        # TODO: More fine grained check, e.g more constraining one selected, eg if both contain '=' => select '='; ...
+        if version in self.__version_constraints and not self.__version_constraints[version] == constraint:
             Print(f"WARNING: For {self.package} version constraint for {version} already set to "
                   f"{self.__version_constraints[version]}, being reset to {constraint}")
         self.__version_constraints[version] = constraint
@@ -501,7 +503,7 @@ class DependencyTree:
 
         self.arch = arch
 
-    def parse_dependency(self, required_pkg: str):
+    def parse_dependency(self, required_pkg: str, status):
 
         if required_pkg not in self.selected_pkgs:
             _provide_candidates = []
@@ -568,7 +570,8 @@ class DependencyTree:
 
             # recursively
             for _pkg in _depends:
-                self.parse_dependency(_pkg[0])
+                status.update(f"Selected {len(self.selected_pkgs)} Packages")
+                self.parse_dependency(_pkg[0], status)
                 self.selected_pkgs[_pkg[0]].add_version_constraint(_pkg[1], _pkg[2])
 
 

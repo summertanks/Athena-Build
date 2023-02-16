@@ -2,6 +2,7 @@ import bz2
 import gzip
 import hashlib
 import os
+from collections import OrderedDict
 from urllib.parse import urlsplit
 
 import apt_pkg
@@ -30,10 +31,12 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str) -> dict[str, str]:
             dict {}:
     """
     cache_files = {}
+    compression = '.gz'
+    protocol = 'http://'
 
     # TODO: Support https
-    base_url = 'http://' + base.url + '/' + base.baseid + '/dists/' + base.codename
-    release_url = base_url + '/InRelease'
+    base_url = protocol + base.url + '/' + base.baseid + '/dists/' + base.codename + '/'
+    release_url = base_url + 'InRelease'
 
     # Default release file
     release_file = os.path.join(cache_dir, apt_pkg.uri_to_filename(release_url))
@@ -42,73 +45,65 @@ def build_cache(base: utils.BaseDistribution, cache_dir: str) -> dict[str, str]:
     if utils.download_file(release_url, release_file) <= 0:
         exit(1)
 
-    try:
-        with open(release_file) as fh:
-            rel = Release(fh)
-    except (FileNotFoundError, PermissionError) as e:
-        Print(f"Athena Linux Error: {e}")
-        exit(1)
-
     # sequence is Packages & Sources, you change it you break it
     # TODO: currently, only for main, add for update & security repo too
-    cache_source = [base_url + '/main/binary-' + base.arch + '/Packages.gz',
-                    base_url + '/main/source/Sources.gz']
+    control_files = OrderedDict.fromkeys(['main/binary-' + base.arch + '/Packages', 'main/source/Sources'])
 
-    control_files = ['/main/binary-' + base.arch + '/Packages', '/main/source/Sources']
+    control_files_compressed: [] = []
+    cache_source: [] = []
+    cache_destination: [] = []
 
-    cache_destination = []
-    for uri in cache_source:
-        cache_destination.append(os.path.join(cache_dir, apt_pkg.uri_to_filename(uri)))
+    for _file in control_files:
+        control_files_compressed.append(os.path.basename(apt_pkg.uri_to_filename(base_url + _file)) + compression)
+        cache_source.append(base_url + _file + compression)
+        cache_destination.append(os.path.join(cache_dir, apt_pkg.uri_to_filename(base_url + _file)))
 
-    md5 = []
     # Extract the md5 for the files, can enable Optional SHA256 also
     try:
         with open(release_file, 'r') as fh:
             rel = Release(fh)
             for _file in control_files:
-                _md5 = [line['md5'] for line in rel['MD5Sum'] if line['name'] == _file]
-                if _md5 is None:
-                    raise Exception(f"File ({_file})not found in release file")
-                md5.append(hash)
+                _md5 = [line['md5sum'] for line in rel['MD5Sum'] if line['name'] == _file]
+                assert len(_md5) != 0, f"File ({_file})not found in release file"
+                assert len(_md5) == 1, f"Multiple instances for {_file} found in release file"
+                control_files[_file] = _md5[0]
     except (Exception, FileNotFoundError, PermissionError) as e:
         Print(f"Athena Linux Error: {e}")
         exit(1)
 
-    # Iterate over destination files
+    _iter_control_file = iter(control_files)
+    # Iterate over uncompressed destination files
     for _file in cache_destination:
-        # searching for the decompressed files - stripping extensions
-        base = os.path.splitext(_file)[0]
-        if os.path.isfile(base):
-            # Open the file and calculate the MD5 hash
-            with open(base, 'rb') as f:
-                fdata = f.read()
-                md5_check = hashlib.md5(fdata).hexdigest()
-        else:
-            md5_check = ''
-
+        # get hash
+        md5_check = utils.get_md5(_file)
         index = cache_destination.index(_file)
-        if md5[index] != md5_check:
+        control_files_key = next(_iter_control_file)
+        _md5 = control_files[control_files_key]
+        if _md5 != md5_check:
             # download given file to location
-            if (utils.download_file(cache_source[index], cache_destination[index])) <= 0:
+            if (utils.download_file(cache_source[index], cache_destination[index] + compression)) <= 0:
                 exit(1)
 
             # decompress file based on extension
-            base, ext = os.path.splitext(_file)
-            if ext == '.gz':
-                with gzip.open(_file, 'rb') as f_in:
-                    with open(base, 'wb') as f_out:
+            # base = os.path.splitext(_file)[0]
+            # base, ext = os.path.splitext(_file)
+            if compression == '.gz':
+                with gzip.open(_file + compression, 'rb') as f_in:
+                    with open(_file, 'wb') as f_out:
                         f_out.write(f_in.read())
-            elif ext == '.bz2':
+            elif compression == '.bz2':
                 with bz2.BZ2File(_file, 'rb') as f_in:
-                    with open(base, 'wb') as f_out:
+                    with open(_file, 'wb') as f_out:
                         f_out.write(f_in.read())
-            else:
+            elif compression == '':
                 # if no ext leave as such
-                # TODO: check if other extensions are required to be supported
-                continue
+                pass
+                # XXX: check if other extensions are required to be supported
+            else:
+                pass
 
         # List of cache files are in the sequence specified earlier
-        cache_files[urlsplit(control_files[index]).path.split('/')[-1]] = base
+        cache_files[urlsplit(control_files_key).path.split('/')[-1]] = _file
     Print("Using Release File")
     Print('\tOrigin: {Origin}\n\tCodename: {Codename}\n\tVersion: {Version}\n\tDate: {Date}'.format_map(rel))
     return cache_files

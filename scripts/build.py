@@ -114,11 +114,11 @@ def main():
         # Iterate through package list and identify dependencies
         for pkg in required_packages:
             if pkg not in selected_packages:
-                dependency_tree.parse_dependency(pkg)
+                dependency_tree.parse_dependency(pkg, status)
                 # package.parse_dependencies(package_record, selected_packages, pkg, console, status)
 
-    not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
-    console.print(f"Total Dependencies Selected are : {len(selected_packages)}")
+    # not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
+    console.print(f"Total Dependencies Selected are : {len(dependency_tree.selected_pkgs)}")
     console.print(f"Dependencies Not Parsed: {len(not_parsed)}")
 
     for pkg_name in not_parsed:
