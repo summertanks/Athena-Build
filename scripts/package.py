@@ -1,5 +1,7 @@
-import re
+# internal modules
+import deb822
 
+import re
 import apt_pkg
 from rich.console import Console
 from rich.prompt import Prompt
@@ -304,74 +306,7 @@ def find_alternate_packages(package_record: list[str], provides: str) -> {str, s
     return alternates
 
 
-class MutableClass:
-    def __init__(self):
-        self.__dict = {}
-        self.__keys = OrderedSet()
-
-    def __iter__(self):
-        for key in self.__keys:
-            yield str(key)
-
-    def __len__(self):
-        return len(self.__keys)
-
-    def __setitem__(self, key, value):
-        self.__keys.add(key)
-        self.__dict[key] = value
-
-    def __getitem__(self, key):
-        try:
-            value = self.__dict[key]
-        except KeyError:
-            value = ''
-        return value
-
-    def __delitem__(self, key):
-        self.__keys.remove(key)
-        try:
-            del self.__dict[key]
-        except KeyError:
-            pass
-
-    def __contains__(self, key):
-        return key in self.__keys
-
-
-class DEB822file(MutableClass):
-    """DEB822 - Superclass to parse Deb822 Control files.
-                This is Not a full-fledged RFC822 implementation,
-                bare minimum to parse the Release, Package, Source & DSC file"""
-
-    def __init__(self, section: str):
-
-        super().__init__()
-
-        # Save content for reference
-        self.__raw = section
-
-        # Parse as DEB822 file
-        _lines = section.split('\n')
-
-        current_field = None
-        for _line in _lines:
-
-            # Should not happen, sections are supposed to already be split '\n\n' and no line with spaces
-            if _line.strip() == '':
-                raise ValueError("ERROR: Attempting to create class with malformed section")
-
-            if _line.startswith(' '):
-                if current_field is None:
-                    raise
-                # This line is a continuation of the previous field
-                self[current_field] += _line
-            else:
-                # This line starts a new field
-                current_field, value = _line.split(':', 1)
-                self[current_field.strip()] = value.strip()
-
-
-class Package(DEB822file):
+class Package(deb822.DEB822file):
     def __init__(self, section: str, arch: str):
 
         self.__version_constraints: {} = {}
@@ -385,6 +320,7 @@ class Package(DEB822file):
         self.depends = self.alt_depends = []
         self.conflicts = []
         self.breaks = []
+        self.provides = []
         self.recommends = self.alt_recommends = []
 
         super().__init__(section)
@@ -432,10 +368,23 @@ class Package(DEB822file):
         if 'Conflicts' in self:
             self.conflicts = apt_pkg.parse_depends(self['Conflicts'], strip_multi_arch=True, architecture=self.arch)
 
+        if 'Provides' in self:
+            self.provides = apt_pkg.parse_depends(self['Provides'], strip_multi_arch=True, architecture=self.arch)
+
         if 'Recommends' in self:
             _recommends = apt_pkg.parse_depends(self['Recommends'], strip_multi_arch=True, architecture=self.arch)
             self.recommends = [_pkg for _pkg in _recommends if len(_pkg) == 1]
             self.alt_recommends = [_pkg for _pkg in _recommends if len(_pkg) > 1]
+
+    def get_provides(self) -> []:
+        if len(self.provides) == 0:
+            return []
+
+        __provides = []
+        for __pkg in self.provides:
+            __provides.append(__pkg[0][0])
+        # __provides = [__pkg[0] for __pkg in self.provides[0]]
+        return __provides
 
     @property
     def constraints_satisfied(self) -> bool:
@@ -467,7 +416,7 @@ class Package(DEB822file):
                   f"{self.__version_constraints[version]}, being reset to {constraint}")
         self.__version_constraints[version] = constraint
 
-    def provides(self, pkg_name: str) -> bool:
+    def does_provide(self, pkg_name: str) -> bool:
         """
         Checks if the current package provides the given package name
         Args:
@@ -487,132 +436,3 @@ class Package(DEB822file):
                 return True
         return False
 
-
-class DependencyTree:
-
-    def __init__(self, pkg_filename: str, src_filename: str, select_recommended: bool, arch: str):
-        self.__pkg_filename = pkg_filename
-        self.__src_filename = src_filename
-        self.__recommended = select_recommended
-
-        self.package_record = utils.readfile(self.__pkg_filename).split('\n\n')
-        self.source_records = utils.readfile(self.__src_filename).split('\n\n')
-        self.selected_pkgs: {} = {}
-        self.alternate_pkgs: {} = {}
-        self.required_pkgs: [] = []
-
-        self.arch = arch
-
-    def parse_dependency(self, required_pkg: str, status):
-
-        if required_pkg not in self.selected_pkgs:
-            _provide_candidates = []
-            _pkg_candidates = []
-            _selected_pkg: Package
-
-            # TODO: enable required package to specify version also
-
-            # iterate through the package records
-            for _pkg_record in self.package_record:
-                if _pkg_record.strip() == '':
-                    continue
-                _pkg = Package(_pkg_record, self.arch)
-                # search for packages
-                if required_pkg == _pkg.package:
-                    _pkg_candidates.append(_pkg)
-                elif _pkg.provides(required_pkg):
-                    _provide_candidates.append(_pkg)
-
-            # Case - I  : No match for Package or Provides - Raise Value Error
-            if len(_provide_candidates) == 0 and len(_pkg_candidates) == 0:
-                raise ValueError(f"Package could not be found: {required_pkg}")
-
-            # Case - II : One or more Package, One or more Provides - Unknown condition, currently raise error
-            elif len(_provide_candidates) > 0 and len(_pkg_candidates) > 0:
-                raise ValueError(f"Exact package could not selected: {required_pkg}")
-
-            # Case - III: No Package, One Provides - "Selecting <Package> for <Provides> - Proceed with Package
-            elif len(_provide_candidates) == 1 and len(_pkg_candidates) == 0:
-                Print(f"Note: Selecting {_provide_candidates[0]['Package']} for {required_pkg}")
-                _selected_pkg = _provide_candidates[0]
-
-            # Case - IV : No Package, Multiple Provides (different Packages) - Ask User to manually select
-            # TODO: Look forward, see if required package list already solves the problem
-            elif len(_provide_candidates) > 1 and len(_pkg_candidates) == 0:
-                _options = [_pkg['Package'] for _pkg in _provide_candidates]
-                _pkg = Prompt.ask(f"Multiple provides for {required_pkg}, select Package", choices=_options)
-                _index = _options.index(_pkg)
-                _selected_pkg = _provide_candidates[_index]
-
-            # Case - V  : Multiple Package, No Provides - Select based on version, if still more than one, ask user
-            elif len(_provide_candidates) == 0 and len(_pkg_candidates) > 1:
-                _options = [_pkg['Version'] for _pkg in _pkg_candidates]
-                _pkg = Prompt.ask(f"Multiple Package for {required_pkg}, select Version", choices=_options)
-                _index = _options.index(_pkg)
-                _selected_pkg = _pkg_candidates[_index]
-
-            # Case - VI : One Package, No Provides - Simplest, move ahead parsing the given package
-            elif len(_provide_candidates) == 0 and len(_pkg_candidates) == 1:
-                _selected_pkg = _pkg_candidates[0]
-
-            else:  # Do not know how we got here
-                raise ValueError(f"Unknown Error in Parsing dependencies: {required_pkg}")
-
-            # We have the selected package in _selected_pkg, adding to internal list
-            self.selected_pkgs[_selected_pkg['Package']] = _selected_pkg
-
-            # list packages to get dependencies for
-            _depends = _selected_pkg.depends
-
-            # check if we should include recommended packages
-            if self.__recommended:
-                _depends += _selected_pkg.recommends
-
-            # recursively
-            for _pkg in _depends:
-                status.update(f"Selected {len(self.selected_pkgs)} Packages")
-                self.parse_dependency(_pkg[0], status)
-                self.selected_pkgs[_pkg[0]].add_version_constraint(_pkg[1], _pkg[2])
-
-
-class OrderedSet(object):
-    """OrderedSet - Reused from debian.DEB822
-                    Set is faster than list
-    """
-
-    def __init__(self, iterable: [str] = None):
-        self.__set: set[str] = set()
-        self.__order: [str] = []
-        if iterable is None:
-            iterable = []
-        for item in iterable:
-            self.add(item)
-
-    def add(self, item):
-        # item is assumed hashable, otherwise set() will auto raise error
-        if item not in self:
-            self.__set.add(item)
-            self.__order.append(item)
-
-    def remove(self, item: str):
-        # assumed to exist, set.remove will else raise KeyError
-        self.__set.remove(item)
-        self.__order.remove(item)
-
-    def __iter__(self) -> iter:
-        # Return an iterator of items in the order they were added
-        return iter(self.__order)
-
-    def __len__(self) -> int:
-        return len(self.__order)
-
-    def __contains__(self, item) -> bool:
-        # Lookup in a set is O(1) instead of O(n) for a list.
-        return item in self.__set
-
-    # ### list-like methods
-    append = add
-
-    def extend(self, iterable):
-        for item in iterable:
-            self.add(item)
