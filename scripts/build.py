@@ -18,8 +18,9 @@ import source
 # Local imports
 import utils
 import buildsystem
-from package import Package
-from source import Source
+import dependencytree
+import package
+import source
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
@@ -32,8 +33,8 @@ Print = print
 
 
 def main():
-    selected_packages: {str: Package} = {}
-    source_packages: {str: Source} = {}
+    selected_packages: {str: package.Package} = {}
+    source_packages: {str: source.Source} = {}
     multi_dep = []
 
     config_parser = configparser.ConfigParser()
@@ -87,13 +88,13 @@ def main():
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
     Print("Building Cache...")
-    cache_files = cache.build_cache(base_distribution, dir_list.dir_cache)
+    build_cache = cache.Cache(base_distribution, dir_list.dir_cache)
 
     # get file names from cache
-    package_file = cache_files['Packages']
-    source_file = cache_files['Sources']
-    dependency_tree = package.DependencyTree(package_file, source_file,
-                                             select_recommended=False, arch=base_distribution.arch)
+    package_file = build_cache.cache_files['Packages']
+    source_file = build_cache.cache_files['Sources']
+    dependency_tree = dependencytree.DependencyTree(package_file, source_file,
+                                                    select_recommended=False, arch=base_distribution.arch)
     # load data from the files
     Print("Loading Control Files...")
     package_record = utils.readfile(package_file).split('\n\n')
@@ -209,7 +210,7 @@ def main():
 
         # Add package to source list
         if source_name not in source_packages:
-            source_packages[source_name] = Source(source_name, source_version)
+            source_packages[source_name] = source.Source(source_name, source_version)
 
         if not source_version == pkg_version:
             Print(f"Package and Source version mismatch "
