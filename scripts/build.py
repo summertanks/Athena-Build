@@ -92,7 +92,7 @@ def main():
 
     # -------------------------------------------------------------------------------------------------------------
     # Step II - Parse Dependencies
-    console.print("Parsing Dependencies...")
+    Print("Parsing Dependencies...")
     required_packages = []
     required_packages_list = utils.readfile(pkglist_path).split('\n')
     for pkg in required_packages_list:
@@ -107,37 +107,17 @@ def main():
     for pkg in required_packages:
         dependency_tree.parse_dependency(pkg)
 
-    console.print(f"Total Dependencies Selected are : {len(dependency_tree.selected_pkgs)}")
+    Print(f"Total Dependencies Selected are : {len(dependency_tree.selected_pkgs)}")
 
     # -------------------------------------------------------------------------------------------------------------
     # Step III - Checking Breaks and Conflicts
-    console.print("[bright_white]Checking Breaks and Conflicts...")
-    for pkg in selected_packages:
-        # Breaks will still allow to install - Warning
-        for breaks in selected_packages[pkg].breaks:
-            if breaks[0] in selected_packages:
-                pkg_name = breaks[0]
-                pkg_ver = selected_packages[pkg_name].version
-                break_version = breaks[1]
-                break_comparator = breaks[2]
-
-                if break_comparator == '' or apt_pkg.check_dep(break_version, break_comparator, pkg_ver):
-                    Print(f"Package {pkg} breaks {pkg_name}")
-
-        # Conflicts will break installation - Error
-        for conflicts in selected_packages[pkg].conflicts:
-            if conflicts[0] in selected_packages:
-                pkg_name = conflicts[0]
-                pkg_ver = selected_packages[pkg_name].version
-                conflicts_version = conflicts[1]
-                conflicts_comparator = conflicts[2]
-
-                if conflicts_comparator == '' or apt_pkg.check_dep(conflicts_version, conflicts_comparator, pkg_ver):
-                    Print(f"Package {pkg} conflicts with {pkg_name}")
+    Print("Checking Breaks and Conflicts...")
+    if dependency_tree.validate_selection():
+        exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step IV - Checking Version Constraints
-    console.print("[bright_white]Checking Version Constraints...")
+    Print("Checking Version Constraints...")
     for pkg in selected_packages:
         if not selected_packages[pkg].constraints_satisfied:
             Print(f"Version Constraint failed for {pkg}:{selected_packages[pkg].name}")
