@@ -81,8 +81,10 @@ util-linux
 # xkb-data : XKB data
 xkb-data
 
+gawk
 # Init System
 systemd-sysv
+libsystemd0
 
 bash
 bsdutils
@@ -100,6 +102,7 @@ sysvinit-utils
 dpkg
 debconf
 media-types
+libavcodec58
 dconf-gsettings-backend
 gpgv2
 initramfs-tools

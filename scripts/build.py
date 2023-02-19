@@ -90,41 +90,24 @@ def main():
     Print("Building Cache...")
     build_cache = cache.Cache(base_distribution, dir_list.dir_cache)
 
-    # get file names from cache
-    package_file = build_cache.cache_files['Packages']
-    source_file = build_cache.cache_files['Sources']
-    dependency_tree = dependencytree.DependencyTree(package_file, source_file,
-                                                    select_recommended=False, arch=base_distribution.arch)
-    # load data from the files
-    Print("Loading Control Files...")
-    package_record = utils.readfile(package_file).split('\n\n')
-    source_records = utils.readfile(source_file).split('\n\n')
-    required_packages_list = utils.readfile(pkglist_path).split('\n')
-
     # -------------------------------------------------------------------------------------------------------------
     # Step II - Parse Dependencies
     console.print("Parsing Dependencies...")
     required_packages = []
+    required_packages_list = utils.readfile(pkglist_path).split('\n')
     for pkg in required_packages_list:
         if pkg and not pkg.startswith('#') and not pkg.isspace():
             required_packages.append(pkg.strip())
     Print(f"Total Required Packages {len(required_packages)}")
 
-    # This is recursive function, status cant be created local to the function
-    with console.status('') as status:
-        # Iterate through package list and identify dependencies
-        for pkg in required_packages:
-            if pkg not in selected_packages:
-                dependency_tree.parse_dependency(pkg, status)
-                # package.parse_dependencies(package_record, selected_packages, pkg, console, status)
+    dependency_tree = dependencytree.DependencyTree(
+        build_cache, select_recommended=False, arch=base_distribution.arch, lookahead=required_packages)
 
-    # not_parsed = [obj.name for obj in selected_packages.values() if obj.version == '-1']
+    # Iterate through package list and identify dependencies
+    for pkg in required_packages:
+        dependency_tree.parse_dependency(pkg)
+
     console.print(f"Total Dependencies Selected are : {len(dependency_tree.selected_pkgs)}")
-    console.print(f"Dependencies Not Parsed: {len(not_parsed)}")
-
-    for pkg_name in not_parsed:
-        Print(f"Not parsed: {pkg_name}")
-        exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step III - Checking Breaks and Conflicts
