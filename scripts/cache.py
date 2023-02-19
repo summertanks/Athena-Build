@@ -5,6 +5,7 @@ import apt_pkg
 from collections import OrderedDict
 from urllib.parse import urlsplit
 from debian.deb822 import Release
+from tqdm import tqdm
 
 # Internal
 import utils
@@ -85,8 +86,8 @@ class Cache:
             __cache_destination.append(os.path.join(self.cache_dir, apt_pkg.uri_to_filename(__base_url + _file)))
 
         # By default, download release file
-        if utils.download_file(__release_url, __release_file) <= 0:
-            exit(1)
+        # if utils.download_file(__release_url, __release_file) <= 0:
+        #    exit(1)
 
         # Extract the md5 for the files, can enable Optional SHA256 also
         try:
@@ -149,7 +150,13 @@ class Cache:
         self.__source_records = utils.readfile(self.__source_file).split('\n\n')
 
         # create a list, since we can have duplicates
+        Print("Parsing Control Files...")
+        progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
+        progress_bar = tqdm(desc=f"{'Indexing Package File'}", ncols=80, total=len(self.__package_records),
+                            bar_format=progress_format)
+
         for _pkg_record in self.__package_records:
+            progress_bar.update(1)
             if _pkg_record.strip() == '':
                 continue
             __pkg = package.Package(_pkg_record, self.base.arch)
@@ -177,4 +184,4 @@ class Cache:
     def get_provides(self, provides_name: str) -> []:
         if provides_name not in self.provides_hashtable:
             return []
-        return self.package_hashtable[provides_name]
+        return self.provides_hashtable[provides_name]
