@@ -1,10 +1,9 @@
 # Internal modules
-import utils
-import deb822
 import package
 from cache import Cache
 
 # External Modules
+import apt_pkg
 from rich.prompt import Prompt
 
 Print = print
@@ -126,8 +125,49 @@ class DependencyTree:
         for _pkg in _depends:
             _parsed_pkg = self.parse_dependency(_pkg[0])
             # add version constraints
-            # Again slightly convoluted, Between multiple package and provides, dont know which was selected.
+            # Again slightly convoluted, Between multiple package and provides, don't know which was selected.
             # Hence, expecting parse_dependency(...) to return the package selected for that required_pkg
             self.selected_pkgs[_parsed_pkg['Package']].add_version_constraint(_pkg[1], _pkg[2])
 
         return _selected_pkg
+
+    def validate_selection(self) -> bool:
+
+        # Checking breaks first
+        # When one binary package declares that it breaks another, dpkg will refuse to allow the package which
+        # declares Breaks to be unpacked unless the broken package is de-configured first, and it will refuse to
+        # allow the broken package to be reconfigured.
+
+        # Note: No comparator is absolute, just existence breaks, with Comparator checks if the comparator is satisfied
+
+        _breaks = False
+        for _pkg in self.selected_pkgs:
+            # Breaks will still allow to install - Warning
+            for breaks in self.selected_pkgs[_pkg].breaks:
+                _breaks_name = breaks[0][0]
+                if _breaks_name in self.selected_pkgs:
+                    _pkg_ver = self.selected_pkgs[_breaks_name].version
+                    _break_version = breaks[0][1]
+                    _break_comparator = breaks[0][2]
+
+                    # Check if it breaks
+                    if _break_comparator == '' or \
+                            apt_pkg.check_dep(_pkg_ver, _break_comparator, _break_version):
+                        Print(f"DEPENDENCY HELL: Package {_pkg} breaks {_breaks_name}")
+                        _breaks = True
+
+            # Conflicts will break installation - Error
+            for conflicts in self.selected_pkgs[_pkg].conflicts:
+                _conflicts_name = conflicts[0][0]
+                if _conflicts_name in self.selected_pkgs:
+                    _pkg_ver = self.selected_pkgs[_conflicts_name].version
+                    _conflict_version = conflicts[0][1]
+                    _conflict_comparator = conflicts[0][2]
+
+                    # Check if conflicts
+                    if _conflict_comparator == '' or \
+                            apt_pkg.check_dep(_pkg_ver, _conflict_comparator, _conflict_version):
+                        Print(f"DEPENDENCY HELL: Package {_pkg} conflicts with {_conflicts_name}")
+                        _breaks = True
+
+        return _breaks
