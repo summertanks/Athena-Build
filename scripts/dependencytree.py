@@ -170,4 +170,46 @@ class DependencyTree:
                         Print(f"DEPENDENCY HELL: Package {_pkg} conflicts with {_conflicts_name}")
                         _breaks = True
 
+            # Check for package version constraints collected from upstream
+            if not self.selected_pkgs[_pkg].constraints_satisfied:
+                Print(f"DEPENDENCY HELL: Package {_pkg} version constrains unsatisfied")
+                _breaks = True
+
+            # Check Alt Depends
+            for _section in self.selected_pkgs[_pkg].alt_depends:
+                _found = False
+
+                for pkg in _section:
+                    # if one has been satisfied, dont bother with others - May have to check logic holds
+                    if _found:
+                        break
+                    pkg_name = pkg[0]
+                    # Simpler is Package in Selected Package Name
+                    if pkg_name in self.selected_pkgs:
+                        pkg_version = pkg[1]
+                        pkg_constraint = pkg[2]
+                        if apt_pkg.check_dep(self.selected_pkgs[pkg_name].version, pkg_constraint, pkg_version):
+                            _found = True
+                        else:
+                            Print(f"Alt Dependency Check - Version constraint failed for {pkg_name}")
+                    else:
+                        # Lets try in Provides, little more complex
+                        _provides_options = self.__cache.get_provides(pkg_name)
+                        _pkg_names = [_pkg['Package'] for _pkg in _provides_options
+                                      if _pkg['Package'] in self.selected_pkgs]
+                        # Tricky - can be more than one package that don't conflict with each other.
+                        # e.g. awk can be provided by both mawk & gawk without conflict.
+                        if len(_pkg_names) > 0:
+                            for _pkg_name in _pkg_names:
+                                pkg_version = pkg[1]
+                                pkg_constraint = pkg[2]
+                                if apt_pkg.check_dep(self.selected_pkgs[_pkg_name].version,
+                                                     pkg_constraint, pkg_version):
+                                    _found = True
+                                else:
+                                    Print(f"Alt Dependency Check - Version constraint failed for {_pkg_name}")
+
+                if not _found:
+                    Print(f"dependency unresolved between {_section}")
+
         return _breaks

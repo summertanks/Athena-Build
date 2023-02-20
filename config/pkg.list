@@ -80,6 +80,8 @@ udev
 util-linux
 # xkb-data : XKB data
 xkb-data
+#
+dbus-session-bus
 
 gawk
 # Init System

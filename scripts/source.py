@@ -4,9 +4,10 @@ import re
 import apt_pkg
 
 import utils
+from scripts import deb822
 
 
-class Source:
+class Sources:
     """
     Source is being used to track which packages need to be selected for satisfying the selected_package list
     Args:
@@ -157,3 +158,75 @@ def parse_sources(source_records,
                     # Add in alternates
                     source_packages[required_package].add_alternate(package_version)
     return total_files, total_size
+
+class Source(deb822.DEB822file):
+
+    def __init__(self, section: str, arch: str):
+
+        self.__version_constraints: {} = {}
+
+        self.source: str = ''
+        self.source_version: str = ''
+
+        self.package = ''
+        self.version = ''
+
+        self.depends = self.alt_depends = []
+        self.conflicts = []
+        self.breaks = []
+        self.provides = []
+        self.recommends = self.alt_recommends = []
+
+        super().__init__(section)
+
+        # Setting Values post calling super()
+        if arch not in ['amd64']:
+            raise ValueError(f"Current Architecture '{arch}' is not supported")
+        self.arch: str = arch
+
+        assert 'Package' in self, "Malformed Package, No Package Name"
+        assert 'Version' in self, "Malformed Package, No Version Given"
+        assert not self['Package'] == '', "Malformed Package, No Package Name"
+        assert not self['Version'] == '', "Malformed Package, No Version Given"
+
+        self.package = self['Package']
+        self.version = self['Version']
+
+        # Setting default as Source name and version is same as package
+        self.source = self.package
+        self.source_version = self.version
+
+        # Get source data
+        if 'Source' in self:
+            if not self['Source'] == '':
+                _source = self['Source']
+                # version shown is without constraints, cant use apt_pkg - parse_depends(...) or parse_sec_depends(...)
+                _source_group = re.search(r'^(\S+)(?:\s+\((\S+)\))?$', _source)
+                assert _source_group.group(1) is not None, "Malformed Source Name"
+                self.source = _source_group.group(1)
+                if _source_group.group(2) is not None:
+                    self.source_version = _source_group.group(2)
+
+        _depends_list = []
+        if 'Depends' in self:
+            _depends_list = apt_pkg.parse_depends(self['Depends'], strip_multi_arch=True, architecture=self.arch)
+        if 'Pre-Depends' in self:
+            _depends_list += apt_pkg.parse_depends(self['Pre-Depends'], strip_multi_arch=True, architecture=self.arch)
+
+        self.depends = [sublist[0] for sublist in _depends_list if len(sublist) == 1]
+        self.alt_depends = [sublist for sublist in _depends_list if len(sublist) > 1]
+
+        if 'Breaks' in self:
+            self.breaks = apt_pkg.parse_depends(self['Breaks'], strip_multi_arch=True, architecture=self.arch)
+
+        if 'Conflicts' in self:
+            self.conflicts = apt_pkg.parse_depends(self['Conflicts'], strip_multi_arch=True, architecture=self.arch)
+
+        if 'Provides' in self:
+            self.provides = apt_pkg.parse_depends(self['Provides'], strip_multi_arch=True, architecture=self.arch)
+
+        if 'Recommends' in self:
+            _recommends = apt_pkg.parse_depends(self['Recommends'], strip_multi_arch=True, architecture=self.arch)
+            self.recommends = [_pkg for _pkg in _recommends if len(_pkg) == 1]
+            self.alt_recommends = [_pkg for _pkg in _recommends if len(_pkg) > 1]
+    pass
