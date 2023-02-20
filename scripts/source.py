@@ -159,23 +159,16 @@ def parse_sources(source_records,
                     source_packages[required_package].add_alternate(package_version)
     return total_files, total_size
 
+
 class Source(deb822.DEB822file):
 
     def __init__(self, section: str, arch: str):
 
-        self.__version_constraints: {} = {}
-
-        self.source: str = ''
-        self.source_version: str = ''
-
         self.package = ''
         self.version = ''
 
-        self.depends = self.alt_depends = []
-        self.conflicts = []
-        self.breaks = []
-        self.provides = []
-        self.recommends = self.alt_recommends = []
+        self.build_depends = []
+        self.build_conflicts = []
 
         super().__init__(section)
 
@@ -192,41 +185,7 @@ class Source(deb822.DEB822file):
         self.package = self['Package']
         self.version = self['Version']
 
-        # Setting default as Source name and version is same as package
-        self.source = self.package
-        self.source_version = self.version
-
-        # Get source data
-        if 'Source' in self:
-            if not self['Source'] == '':
-                _source = self['Source']
-                # version shown is without constraints, cant use apt_pkg - parse_depends(...) or parse_sec_depends(...)
-                _source_group = re.search(r'^(\S+)(?:\s+\((\S+)\))?$', _source)
-                assert _source_group.group(1) is not None, "Malformed Source Name"
-                self.source = _source_group.group(1)
-                if _source_group.group(2) is not None:
-                    self.source_version = _source_group.group(2)
-
         _depends_list = []
-        if 'Depends' in self:
-            _depends_list = apt_pkg.parse_depends(self['Depends'], strip_multi_arch=True, architecture=self.arch)
-        if 'Pre-Depends' in self:
-            _depends_list += apt_pkg.parse_depends(self['Pre-Depends'], strip_multi_arch=True, architecture=self.arch)
-
-        self.depends = [sublist[0] for sublist in _depends_list if len(sublist) == 1]
-        self.alt_depends = [sublist for sublist in _depends_list if len(sublist) > 1]
-
-        if 'Breaks' in self:
-            self.breaks = apt_pkg.parse_depends(self['Breaks'], strip_multi_arch=True, architecture=self.arch)
-
-        if 'Conflicts' in self:
-            self.conflicts = apt_pkg.parse_depends(self['Conflicts'], strip_multi_arch=True, architecture=self.arch)
-
-        if 'Provides' in self:
-            self.provides = apt_pkg.parse_depends(self['Provides'], strip_multi_arch=True, architecture=self.arch)
-
-        if 'Recommends' in self:
-            _recommends = apt_pkg.parse_depends(self['Recommends'], strip_multi_arch=True, architecture=self.arch)
-            self.recommends = [_pkg for _pkg in _recommends if len(_pkg) == 1]
-            self.alt_recommends = [_pkg for _pkg in _recommends if len(_pkg) > 1]
-    pass
+        _dep_string = ['Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch']
+        for _dep in _dep_string:
+            self.build_depends += apt_pkg.parse_src_depends(self[_dep], strip_multi_arch=True, architecture=self.arch)

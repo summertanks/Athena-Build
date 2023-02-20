@@ -111,7 +111,7 @@ def main():
     # -------------------------------------------------------------------------------------------------------------
     # Step III - Checking Breaks, Conflicts and version constraints
     Print("Checking Breaks and Conflicts...")
-    if dependency_tree.validate_selection():
+    if not dependency_tree.validate_selection():
         if not Confirm.ask("There are one or more dependency validation failures, Proceed?", default=True):
             exit(1)
 
@@ -125,7 +125,10 @@ def main():
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - IV Parse Source Dependencies
-    console.print("Parsing Source Packages...")
+    Print("Parsing Source Packages...")
+    if not dependency_tree.parse_sources():
+        if not Confirm.ask("There are one or more source parse failures, Proceed?", default=True):
+            exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - VI Check for discrepancy between source version and package version

@@ -10,6 +10,7 @@ from tqdm import tqdm
 # Internal
 import utils
 import package
+from scripts import source
 
 # https://github.com/romlok/python-debian/tree/master/examples
 # https://www.juliensobczak.com/inspect/2021/05/15/linux-packages-under-the-hood.html
@@ -152,11 +153,11 @@ class Cache:
         # create a list, since we can have duplicates
         Print("Parsing Control Files...")
         progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
-        progress_bar = tqdm(desc=f"{'Indexing Package File'}", ncols=80, total=len(self.__package_records),
-                            bar_format=progress_format)
+        progress_bar_pkg = tqdm(desc=f"{'Indexing Package File'}", ncols=80, total=len(self.__package_records),
+                                bar_format=progress_format)
 
         for _pkg_record in self.__package_records:
-            progress_bar.update(1)
+            progress_bar_pkg.update(1)
             if _pkg_record.strip() == '':
                 continue
             __pkg = package.Package(_pkg_record, self.base.arch)
@@ -175,6 +176,22 @@ class Cache:
                         self.provides_hashtable[__provides].append(__pkg)
                 else:
                     self.provides_hashtable[__provides] = [__pkg]
+
+        progress_bar_src = tqdm(desc=f"{'Indexing Package File'}", ncols=80, total=len(self.__source_records),
+                                bar_format=progress_format)
+
+        for _src_record in self.__source_records:
+            progress_bar_src.update(1)
+            if _src_record.strip() == '':
+                continue
+            __pkg = source.Source(_src_record, self.base.arch)
+
+            # add Package in hashtable
+            _package_name = __pkg['Package']
+            if _package_name in self.source_hashtable:
+                self.source_hashtable[_package_name].append(__pkg)
+            else:
+                self.source_hashtable[_package_name] = [__pkg]
 
     def get_packages(self, package_name: str) -> []:
         if package_name not in self.package_hashtable:
