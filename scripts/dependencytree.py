@@ -18,7 +18,8 @@ class DependencyTree:
         self.__lookahead = []
 
         self.selected_pkgs: {} = {}
-        self.selected_pkg_list: [] = []
+        self.selected_srcs: {} = {}
+        # self.selected_pkg_list: [] = []
         self.alternate_pkgs: {} = {}
         self.required_pkgs: [] = []
 
@@ -180,7 +181,7 @@ class DependencyTree:
                 _found = False
 
                 for pkg in _section:
-                    # if one has been satisfied, dont bother with others - May have to check logic holds
+                    # if one has been satisfied, don't bother with others - May have to check logic holds
                     if _found:
                         break
                     pkg_name = pkg[0]
@@ -212,4 +213,30 @@ class DependencyTree:
                 if not _found:
                     Print(f"dependency unresolved between {_section}")
 
-        return _breaks
+        return not _breaks
+
+    def parse_sources(self) -> bool:
+
+        _found = True
+
+        _src_list = [(self.selected_pkgs[_pkg].source, self.selected_pkgs[_pkg].source_version)
+                     for _pkg in self.selected_pkgs]
+        for _src in _src_list:
+            _src_name = _src[0]
+            if _src_name not in self.selected_srcs:
+                _src_version = _src[1]
+
+                _src_candidates = self.__cache.source_hashtable[_src_name]
+                # If single entry its simple
+                if len(_src_candidates) == 1:
+                    self.selected_srcs[_src[0]] = _src_candidates[0]
+                # If more than one, differentiate on version
+                else:
+                    _selected_pkg = [_pkg for _pkg in _src_candidates if _pkg.version == _src_version]
+                    if len(_selected_pkg) == 1:
+                        self.selected_srcs[_src[0]] = _selected_pkg[0]
+                    else:
+                        Print(f"ERROR: Not found source for {_src_list}")
+                        _found = False
+        Print(f"Selected {len(self.selected_srcs)} Source Package")
+        return _found
