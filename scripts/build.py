@@ -33,7 +33,6 @@ Print = print
 
 
 def main():
-    selected_packages: {str: package.Package} = {}
     source_packages: {str: source.Source} = {}
     multi_dep = []
 
@@ -110,49 +109,23 @@ def main():
     Print(f"Total Dependencies Selected are : {len(dependency_tree.selected_pkgs)}")
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step III - Checking Breaks and Conflicts
+    # Step III - Checking Breaks, Conflicts and version constraints
     Print("Checking Breaks and Conflicts...")
     if dependency_tree.validate_selection():
-        exit(1)
-
-    # -------------------------------------------------------------------------------------------------------------
-    # Step IV - Checking Version Constraints
-    Print("Checking Version Constraints...")
-    for pkg in selected_packages:
-        if not selected_packages[pkg].constraints_satisfied:
-            Print(f"Version Constraint failed for {pkg}:{selected_packages[pkg].name}")
+        if not Confirm.ask("There are one or more dependency validation failures, Proceed?", default=True):
+            exit(1)
 
     try:
         with open(os.path.join(dir_list.dir_log, 'selected_packages.list'), 'w') as f:
-            for pkg in selected_packages:
-                f.write(str(selected_packages[pkg]) + '\n')
+            for pkg in dependency_tree.selected_pkgs:
+                f.write(str(dependency_tree.selected_pkgs[pkg].raw) + '\n\n')
     except (FileNotFoundError, PermissionError) as e:
         Print(f"Error: {e}")
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - V Check Alternate dependency
-    console.print("[bright_white]Alternate Dependency Check...")
-
-    # Check for dependencies that can be satisfied by multiple packages
-    for pkg in selected_packages:
-        for altdepends in selected_packages[pkg].altdepends:
-            if altdepends not in multi_dep:
-                multi_dep.append(altdepends)
-
-    for section in multi_dep:
-        found = False
-        for pkg in section:
-            pkg_name = pkg[0]
-            if pkg_name in selected_packages:
-                pkg_version = pkg[1]
-                pkg_constraint = pkg[2]
-                if apt_pkg.check_dep(selected_packages[pkg_name].version, pkg_constraint, pkg_version):
-                    found = True
-                else:
-                    Print(f"Alt Dependency Check - Version constraint failed for {pkg_name}")
-        if not found:
-            Print(f"dependency unresolved between {section}")
+    # Step - IV Parse Source Dependencies
+    console.print("Parsing Source Packages...")
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - VI Check for discrepancy between source version and package version

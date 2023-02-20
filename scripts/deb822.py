@@ -108,3 +108,7 @@ class DEB822file(MutableClass):
                 # This line starts a new field
                 current_field, value = _line.split(':', 1)
                 self[current_field.strip()] = value.strip()
+
+    @property
+    def raw(self) -> str:
+        return self.__raw
