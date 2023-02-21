@@ -5,6 +5,7 @@ import argparse
 import configparser
 import os
 import re
+import shutil
 import subprocess
 import cache
 
@@ -33,8 +34,6 @@ Print = print
 
 
 def main():
-    source_packages: {str: source.Source} = {}
-    multi_dep = []
 
     config_parser = configparser.ConfigParser()
 
@@ -135,8 +134,8 @@ def main():
             with open(os.path.join(dir_list.dir_log, 'source_file.list'), 'w') as fb:
                 for _pkg in dependency_tree.selected_srcs:
                     fa.write(str(dependency_tree.selected_srcs[_pkg].raw) + '\n\n')
-                    for _file in _pkg.files:
-                        fb.write(f"{_file}: {_pkg.files[_file]}\n")
+                    for _file in dependency_tree.selected_srcs[_pkg].files:
+                        fb.write(f"{_file}: {dependency_tree.selected_srcs[_pkg].files[_file]}\n")
 
     except (FileNotFoundError, PermissionError) as e:
         Print(f"Error: {e}")
@@ -145,10 +144,16 @@ def main():
     # -------------------------------------------------------------------------------------------------------------
     # Step - V Download source packages
     Print("Download source packages...")
-    console.print("Total Download is about ", round(total_src_size / (1024 * 1024)), "MB")
+    _src_download_size = dependency_tree.download_size
+    Print("Total Download is about ", _src_download_size // (2**20), "MB")
+    _total, _used, _free = shutil.disk_usage(dir_list.dir_source)
+    print(f"Disk Space - Total: {_total // (2**30)}GiB, Used: {_used // (2**30)}GiB, Free: {_free // (2**30)}GiB")
     console.print("Starting Downloads...")
-    utils.download_source(source_packages, dir_list.dir_download, base_distribution)
+    _downloaded_size = utils.download_source(dependency_tree, dir_list.dir_source, base_distribution)
+    if _src_download_size != _downloaded_size:
+        Confirm.ask("Download size mismatch, continue?", default=True)
 
+    exit(0)
     # -------------------------------------------------------------------------------------------------------------
     # Step - VII Source Build Dependency Check
     console.print("[bright_white]Source Build Dependency Check...")

@@ -4,6 +4,7 @@ import pathlib
 import re
 import configparser
 
+
 Print = print
 
 
@@ -62,9 +63,6 @@ def download_file(url: str, filename: str) -> int:
     from urllib.parse import urlsplit
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 
-    file_size = 0
-    downloaded = 0
-
     name_strip = urlsplit(url).path.split('/')[-1]
     progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} ({rate_fmt}) - {desc}'
     try:
@@ -87,27 +85,68 @@ def download_file(url: str, filename: str) -> int:
     return file_size
 
 
-def download_source(source_packages, dir_download, base_distribution: BaseDistribution):
+def download_source(dependency_tree, dir_download, base_distribution: BaseDistribution):
+    import requests
+    from tqdm import tqdm
+    from urllib.parse import urljoin
+    from requests import Timeout, TooManyRedirects, HTTPError, RequestException
+
+    _downloaded_size = 0
+    _download_size = dependency_tree.download_size
+    progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} ({rate_fmt}) - {desc}'
+    progress_bar = tqdm(ncols=80, total=_download_size, bar_format=progress_format, unit='iB', unit_scale='auto')
+
     # base_url = "http://deb.debian.org/debian/"
     base_url = 'http://' + base_distribution.url + '/' + base_distribution.baseid + '/'
 
-    for pkg in source_packages:
-        for file in source_packages[pkg].files:
-            url = base_url + source_packages[pkg].files[file]['path']
-            size = source_packages[pkg].files[file]['size']
-            md5 = source_packages[pkg].files[file]['md5']
+    # build filelist to download - just for improved readability
+    _file_list = {}
+    for _pkg in dependency_tree.selected_srcs:
+        _file_list.update(dependency_tree.selected_srcs[_pkg].files)
 
-            download_path = os.path.join(dir_download, file)
-            md5_check = get_md5(download_path)
+    _index = 1
+    _total = len(_file_list)
+    Print(f"Downloading {_total} files")
+    for _file in _file_list:
+        progress_bar.set_description_str(desc=f"{_file} ({_index}/{_total})")
 
-            # download only if there is a hash mismatch
-            if md5 != md5_check:
-                download_file(url, download_path)
+        _url = urljoin(base_url, _file_list[_file]['path'])
+        _md5 = _file_list[_file]['md5']
+        _download_path = os.path.join(dir_download, _file)
+        _md5_check = get_md5(_download_path)
 
-            # Verify hash and download file size
-            md5_check = get_md5(download_path)
-            if md5 != md5_check:
-                Print(f"ERROR: Hash mismatch for {download_path}")
+        # do hash check
+        if _md5 != _md5_check:
+            # Failed - Lets download again
+            try:
+
+                response = requests.head(_url)
+                _size = int(response.headers.get('content-length', 0))
+
+                response = requests.get(_url, stream=True)
+                if response.status_code == 200:
+                    with open(_download_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=1024):
+                            if chunk:
+                                f.write(chunk)
+                                progress_bar.update(len(chunk))
+                _downloaded_size += _size
+
+            except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+                Print(f"Error connecting to {_url}: {e}")
+                continue
+
+            assert get_md5(_download_path) == _md5, f"Downloaded {_file} hash mismatch"
+
+        else:
+            _downloaded_size += int(_file_list[_file]['size'])
+
+        _index += 1
+
+    progress_bar.clear()
+    progress_bar.close()
+
+    return _downloaded_size
 
 
 def search(re_string: str, base_string: str) -> str:

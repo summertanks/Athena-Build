@@ -240,3 +240,10 @@ class DependencyTree:
                         _found = False
         Print(f"Selected {len(self.selected_srcs)} Source Package")
         return _found
+
+    @property
+    def download_size(self):
+        _download_size = 0
+        for _pkg in self.selected_srcs:
+            _download_size += self.selected_srcs[_pkg].download_size
+        return _download_size
