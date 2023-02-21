@@ -130,6 +130,14 @@ def main():
         if not Confirm.ask("There are one or more source parse failures, Proceed?", default=True):
             exit(1)
 
+    try:
+        with open(os.path.join(dir_list.dir_log, 'selected_sources.list'), 'w') as f:
+            for pkg in dependency_tree.selected_srcs:
+                f.write(str(dependency_tree.selected_srcs[pkg].raw) + '\n\n')
+    except (FileNotFoundError, PermissionError) as e:
+        Print(f"Error: {e}")
+        exit(1)
+
     # -------------------------------------------------------------------------------------------------------------
     # Step - VI Check for discrepancy between source version and package version
     console.print("[bright_white]Checking for discrepancy between source package version...")

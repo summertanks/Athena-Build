@@ -102,8 +102,8 @@ class DEB822file(MutableClass):
             if _line.startswith(' '):
                 if current_field is None:
                     raise
-                # This line is a continuation of the previous field
-                self[current_field] += _line
+                # This line is a continuation of the previous field, add '\n' if we need different fields from them
+                self[current_field] += _line + '\n'
             else:
                 # This line starts a new field
                 current_field, value = _line.split(':', 1)
