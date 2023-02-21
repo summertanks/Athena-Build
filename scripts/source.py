@@ -179,13 +179,25 @@ class Source(deb822.DEB822file):
 
         assert 'Package' in self, "Malformed Package, No Package Name"
         assert 'Version' in self, "Malformed Package, No Version Given"
+        assert 'Files' in self, "Malformed Package, No Version Given"
+        assert 'Directory' in self, "Malformed Package, No Version Given"
+
         assert not self['Package'] == '', "Malformed Package, No Package Name"
         assert not self['Version'] == '', "Malformed Package, No Version Given"
+        assert not self['Files'] == '', "Malformed Package, No Files Given"
+        assert not self['Directory'] == '', "Malformed Package, No Directory Given"
 
         self.package = self['Package']
         self.version = self['Version']
+        self.directory = self['Directory']
+        self.files: {} = {}
 
         _depends_list = []
         _dep_string = ['Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch']
         for _dep in _dep_string:
             self.build_depends += apt_pkg.parse_src_depends(self[_dep], strip_multi_arch=True, architecture=self.arch)
+
+        _files_list = self['Files'].split('\n')
+        for _file in _files_list:
+            _file = _file.split()
+            self.files[_file[2]] = {'name': _file[2], 'size': _file[1], 'md5': _file[0]}
