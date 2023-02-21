@@ -131,82 +131,23 @@ def main():
             exit(1)
 
     try:
-        with open(os.path.join(dir_list.dir_log, 'selected_sources.list'), 'w') as f:
-            for pkg in dependency_tree.selected_srcs:
-                f.write(str(dependency_tree.selected_srcs[pkg].raw) + '\n\n')
+        with open(os.path.join(dir_list.dir_log, 'selected_sources.list'), 'w') as fa:
+            with open(os.path.join(dir_list.dir_log, 'source_file.list'), 'w') as fb:
+                for _pkg in dependency_tree.selected_srcs:
+                    fa.write(str(dependency_tree.selected_srcs[_pkg].raw) + '\n\n')
+                    for _file in _pkg.files:
+                        fb.write(f"{_file}: {_pkg.files[_file]}\n")
+
     except (FileNotFoundError, PermissionError) as e:
         Print(f"Error: {e}")
         exit(1)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - VI Check for discrepancy between source version and package version
-    console.print("[bright_white]Checking for discrepancy between source package version...")
-
-    for pkg_name in selected_packages:
-        source_name = selected_packages[pkg_name].source[0]
-        source_version = selected_packages[pkg_name].source[1]
-        pkg_version = selected_packages[pkg_name].version
-
-        if pkg_version == '-1':
-            Print(f"Skipping Package {pkg_name}, package wasn't parsed")
-            continue
-
-        # Where Source version is not given, it is assumed same as package version
-        if source_version == '':
-            source_version = pkg_version
-
-        # Add package to source list
-        if source_name not in source_packages:
-            source_packages[source_name] = source.Source(source_name, source_version)
-
-        if not source_version == pkg_version:
-            Print(f"Package and Source version mismatch "
-                  f"{pkg_name}: {pkg_version} -> {source_name}: {source_version} Using {source_version}")
-            selected_packages[pkg_name].reset_source_version(source_version)
-
-    console.print("Source requested for : ", len(source_packages), " packages")
-
-    # -------------------------------------------------------------------------------------------------------------
-    # Step - VI Parse Source Packages
-    console.print("[bright_white]Parsing Source Packages...")
-
-    # Parse Sources Control file
-    total_src_count, total_src_size = source.parse_sources(source_records, source_packages)
-
-    missing_source = [_pkg for _pkg in source_packages if not source_packages[_pkg].found]
-
-    if not len(missing_source) == 0:
-        for pkg in missing_source:
-            console.print(f"Source not found for : {source_packages[pkg].name} {source_packages[pkg].version} "
-                          f"Alternates: {source_packages[pkg].alternates}")
-            if Confirm.ask("Select from Alternates? if N, source package will be ignored(y/n"):
-                new_version = Prompt.ask(f"Enter Alt Version", choices=source_packages[pkg].alternates)
-                source_packages[pkg].reset_version(new_version)
-
-        # rerun parse_source only for the missing source
-        source.parse_sources(source_records, missing_source)
-
-    try:
-        with open(os.path.join(dir_list.dir_log, 'source_packages.list'), 'w') as f:
-            for pkg in source_packages:
-                f.write(str(source_packages[pkg]) + '\n')
-    except (FileNotFoundError, PermissionError) as e:
-        Print(f"Error: {e}")
-        exit(1)
-
-    try:
-        with open(os.path.join(dir_list.dir_log, 'source_file.list'), 'w') as f:
-            for src_pkg in source_packages:
-                if source_packages[src_pkg].found:
-                    for file in source_packages[src_pkg].files:
-                        _filename = file
-                        _filepath = source_packages[src_pkg].files[file]['path']
-                        _filesize = source_packages[src_pkg].files[file]['size']
-                        _filehash = source_packages[src_pkg].files[file]['md5']
-                        f.write(f"{_filename} {_filepath} {_filesize} {_filehash}\n")
-    except (FileNotFoundError, PermissionError) as e:
-        Print(f"Error: {e}")
-        exit(1)
+    # Step - V Download source packages
+    Print("Download source packages...")
+    console.print("Total Download is about ", round(total_src_size / (1024 * 1024)), "MB")
+    console.print("Starting Downloads...")
+    utils.download_source(source_packages, dir_list.dir_download, base_distribution)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - VII Source Build Dependency Check

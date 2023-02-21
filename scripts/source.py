@@ -200,4 +200,13 @@ class Source(deb822.DEB822file):
         _files_list = self['Files'].split('\n')
         for _file in _files_list:
             _file = _file.split()
-            self.files[_file[2]] = {'name': _file[2], 'size': _file[1], 'md5': _file[0]}
+            if len(_file) == 3:
+                self.files[_file[2]] = {'path': os.path.join(self.directory, _file[2]),
+                                        'size': _file[1], 'md5': _file[0]}
+
+
+    @property
+    def download_size(self) -> int:
+        _download_size = 0
+        for
+        for _file in self.files
