@@ -4,7 +4,7 @@ import re
 import apt_pkg
 
 import utils
-from scripts import deb822
+import deb822
 
 
 class Sources:

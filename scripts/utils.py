@@ -93,8 +93,7 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
 
     _downloaded_size = 0
     _download_size = dependency_tree.download_size
-    progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} ({rate_fmt}) - {desc}'
-    progress_bar = tqdm(ncols=80, total=_download_size, bar_format=progress_format, unit='iB', unit_scale='auto')
+
 
     # base_url = "http://deb.debian.org/debian/"
     base_url = 'http://' + base_distribution.url + '/' + base_distribution.baseid + '/'
@@ -105,10 +104,13 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
         _file_list.update(dependency_tree.selected_srcs[_pkg].files)
 
     _index = 1
+    _skipped = 0
     _total = len(_file_list)
-    Print(f"Downloading {_total} files")
+
+    progress_format = '{desc} {percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} ({rate_fmt})'
+    progress_bar = tqdm(ncols=80, total=_download_size, bar_format=progress_format, unit='iB', unit_scale=True)
     for _file in _file_list:
-        progress_bar.set_description_str(desc=f"{_file} ({_index}/{_total})")
+        progress_bar.set_description_str(desc=f" ({_index}/{_total})")
 
         _url = urljoin(base_url, _file_list[_file]['path'])
         _md5 = _file_list[_file]['md5']
@@ -139,6 +141,8 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
             assert get_md5(_download_path) == _md5, f"Downloaded {_file} hash mismatch"
 
         else:
+            _skipped += 1
+            progress_bar.update(int(_file_list[_file]['size']))
             _downloaded_size += int(_file_list[_file]['size'])
 
         _index += 1
@@ -146,6 +150,7 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
     progress_bar.clear()
     progress_bar.close()
 
+    Print(f"Downloading {_total - _skipped} files, Skipped {_skipped} files")
     return _downloaded_size
 
 
