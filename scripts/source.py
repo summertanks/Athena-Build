@@ -167,8 +167,8 @@ class Source(deb822.DEB822file):
         self.package = ''
         self.version = ''
 
-        self.build_depends = []
-        self.build_conflicts = []
+        self._build_depends = []
+        self._build_conflicts = []
 
         super().__init__(section)
 
@@ -195,7 +195,7 @@ class Source(deb822.DEB822file):
         _depends_list = []
         _dep_string = ['Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch']
         for _dep in _dep_string:
-            self.build_depends += apt_pkg.parse_src_depends(self[_dep], strip_multi_arch=True, architecture=self.arch)
+            self._build_depends += apt_pkg.parse_src_depends(self[_dep], strip_multi_arch=True, architecture=self.arch)
 
         _files_list = self['Files'].split('\n')
         for _file in _files_list:
@@ -210,3 +210,15 @@ class Source(deb822.DEB822file):
         for _file in self.files:
             _download_size += int(self.files[_file]['size'])
         return _download_size
+
+    @property
+    def build_depends(self) -> str:
+        _dep_str = ''
+        for _dep in self._build_depends:
+            if len(_dep) == 1:
+                _dep_str += _dep[0][0] + ' '
+            else:
+                # let's select the first dep
+                _dep_str += _dep[0][0][0] + ' '
+
+        return _dep_str

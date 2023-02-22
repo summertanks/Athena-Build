@@ -9,8 +9,11 @@
 # apt-get update
 # apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 # usermod -aG docker $USER
+import os
 import docker
 from docker import errors
+
+from source import Source
 from utils import DirectoryListing
 
 Print = print
@@ -19,10 +22,10 @@ Print = print
 class BuildContainer:
 
     def __init__(self, dir_list: DirectoryListing):
-        import os
         self.build_path = dir_list.dir_repo
-        self.src_path = dir_list.dir_download
+        self.src_path = dir_list.dir_source
         self.log_path = dir_list.dir_log
+        self.repo_path = dir_list.dir_repo
         self.buildlog_path = os.path.join(dir_list.dir_log, 'build')
         self.conf_path = dir_list.dir_config
 
@@ -55,28 +58,44 @@ class BuildContainer:
             Print(f"Athena Linux Docker: Error{e}")
             exit(1)
 
-    def container_execute(self, command: str):
+    def build(self, src_pkg: Source) -> bool:
+        # Check if build is already there
+
+        # list of dependencies
+        _dep_str = src_pkg.build_depends
+        # source files are usually in form of <packagename_version.extension>
+        _filename_prefix = src_pkg.package
+        # dsc file
+        _dsc_file = ''
+        try:
+            _dsc_file = [file for file in src_pkg.files if file.endswith('.dsc')][0]
+        except IndexError:
+            Print(f"DSC not found for {src_pkg.package}")
+            return False
+
+        assert _dsc_file != '', f"DSC not found for {src_pkg.package}"
+
+        cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
+                  f'apt -y install {_dep_str}; ' \
+                  f'mkdir /build; cd /build; cp /source/{_filename_prefix}* .;'  \
+                  f'dpkg-source -x {_dsc_file} /build/{_filename_prefix}; cd {_filename_prefix}; ' \
+                  f'dpkg-checkbuilddeps; dpkg-buildpackage -a amd64 -us -uc; ' \
+                  f'cd /build; cp *.deb /repo/'
 
         try:
-            cmd_str = 'mkdir /build; cd /source; ls -al; apt -y install debhelper-compat zlib1g-dev mawk;' \
-                      ' dpkg-source -x libpng1.6_1.6.37-3.dsc /build/libpng; cd /build/libpng; dpkg-checkbuilddeps;' \
-                      ' dpkg-buildpackage -a amd64 -us -uc -J; cd /build; cp *.deb /source/'
             container = self.client.containers.run("athenalinux:build", command=f"/bin/bash -c '{cmd_str}'",
                                                    detach=True, auto_remove=False,
-                                                   volumes={self.src_path: {'bind': '/source', 'mode': 'rw'}})
-            for line in container.logs(stream=True):
-                Print(line.decode("utf-8"), end="")
+                                                   volumes={self.src_path: {'bind': '/source', 'mode': 'rw'},
+                                                            self.repo_path: {'bind': '/repo', 'mode': 'rw'}})
+            with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
+                for line in container.logs(stream=True):
+                    Print(line.decode("utf-8"), end="")
+                    fh.write(line.decode("utf-8") + '\n')
 
-            # for line in container.logs(stream=True):
-            #    Print(line.decode("utf-8"))
-
-
-            # Save the file to the host file system
-            # with open("output.txt", "wb") as f:
-            #    f.write(container.get_archive("/output.txt")[0])
-            container.wait()
+            _exit_code = container.wait()['StatusCode']
             container.stop()
             container.remove()
+            return _exit_code == 0
         except docker.errors.APIError as e:
             Print(f"Athena Linux Docker: Error{e}")
             exit(1)
