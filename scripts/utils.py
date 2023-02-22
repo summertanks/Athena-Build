@@ -94,7 +94,6 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
     _downloaded_size = 0
     _download_size = dependency_tree.download_size
 
-
     # base_url = "http://deb.debian.org/debian/"
     base_url = 'http://' + base_distribution.url + '/' + base_distribution.baseid + '/'
 

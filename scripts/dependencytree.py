@@ -19,7 +19,6 @@ class DependencyTree:
 
         self.selected_pkgs: {} = {}
         self.selected_srcs: {} = {}
-        # self.selected_pkg_list: [] = []
         self.alternate_pkgs: {} = {}
         self.required_pkgs: [] = []
 
