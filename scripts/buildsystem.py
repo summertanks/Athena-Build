@@ -89,7 +89,7 @@ class BuildContainer:
                                                             self.repo_path: {'bind': '/repo', 'mode': 'rw'}})
             with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
                 for line in container.logs(stream=True):
-                    Print(line.decode("utf-8"), end="")
+                    # Print(line.decode("utf-8"), end="")
                     fh.write(line.decode("utf-8") + '\n')
 
             _exit_code = container.wait()['StatusCode']

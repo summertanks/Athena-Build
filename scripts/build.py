@@ -152,18 +152,22 @@ def main():
     # Step - X Starting Build
     Print("Starting Source Packages...")
     import tqdm
+    _failed = _success = 0
     progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
     progress_bar = tqdm.tqdm(ncols=80, total=len(dependency_tree.selected_srcs), bar_format=progress_format)
     with open(os.path.join(dir_list.dir_log, 'dpkg-build.log'), "w") as dpkg_build_log:
         for _pkg in dependency_tree.selected_srcs:
+            progress_bar.set_description_str(f"{_success}/{_failed} {_pkg}")
             progress_bar.update(1)
             _src_pkg = dependency_tree.selected_srcs[_pkg]
             _exit_code = build_container.build(_src_pkg)
             if not _exit_code:
-                Print(f"FAIL: Build Failed for {_src_pkg}")
+                # Print(f"FAIL: Build Failed for {_src_pkg}")
                 dpkg_build_log.write(f"FAIL: {_pkg}")
+                _failed += 1
             else:
                 dpkg_build_log.write(f"PASS: {_pkg}")
+                _success += 1
             dpkg_build_log.flush()
 
 
