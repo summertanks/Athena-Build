@@ -163,10 +163,10 @@ def main():
             _exit_code = build_container.build(_src_pkg)
             if not _exit_code:
                 # Print(f"FAIL: Build Failed for {_src_pkg}")
-                dpkg_build_log.write(f"FAIL: {_pkg}")
+                dpkg_build_log.write(f"FAIL: {_pkg}\n")
                 _failed += 1
             else:
-                dpkg_build_log.write(f"PASS: {_pkg}")
+                dpkg_build_log.write(f"PASS: {_pkg}\n")
                 _success += 1
             dpkg_build_log.flush()
 

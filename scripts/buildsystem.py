@@ -90,7 +90,7 @@ class BuildContainer:
             with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
                 for line in container.logs(stream=True):
                     # Print(line.decode("utf-8"), end="")
-                    fh.write(line.decode("utf-8") + '\n')
+                    fh.write(line.decode("utf-8"))
 
             _exit_code = container.wait()['StatusCode']
             container.stop()
