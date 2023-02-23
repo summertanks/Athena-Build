@@ -21,7 +21,7 @@ Print = print
 
 class BuildContainer:
 
-    def __init__(self, dir_list: DirectoryListing):
+    def __init__(self, dir_list: DirectoryListing, docker_server=None):
         self.build_path = dir_list.dir_repo
         self.src_path = dir_list.dir_source
         self.log_path = dir_list.dir_log
@@ -29,8 +29,15 @@ class BuildContainer:
         self.buildlog_path = os.path.join(dir_list.dir_log, 'build')
         self.conf_path = dir_list.dir_config
 
+        if docker_server is not None:
+            try:
+                self.client = docker.DockerClient(base_url=docker_server)
+                self.client.ping()
+            except docker.errors.APIError:
+                Print(f"Athena Linux Docker: Couldn't connect to external server, reverting to local")
+
         try:
-            self.client = docker.from_env()
+            # self.client = docker.from_env()
             # Confirm function
             self.client.ping()
 
@@ -38,7 +45,7 @@ class BuildContainer:
             try:
                 image = self.client.images.get("athenalinux:build")
                 Print(f"Using Athena Linux Image - {image.tags}")
-            except docker.errors.ImageNotFound as e:
+            except docker.errors.ImageNotFound:
                 Print("Image not found, Building AthenaLinux Image...")
                 image, build_logs = self.client.images.build(path=dir_list.dir_config, tag='athenalinux:build',
                                                              nocache=True, rm=True)
@@ -77,10 +84,13 @@ class BuildContainer:
 
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'apt -y install {_dep_str}; ' \
-                  f'mkdir /build; cd /build; cp /source/{_filename_prefix}* .;'  \
-                  f'dpkg-source -x {_dsc_file} /build/{_filename_prefix}; cd {_filename_prefix}; ' \
+                  f'su -c ' \
+                  f'" whoami; pwd; cd /home/athena; pwd; ' \
+                  f'cp /source/{_filename_prefix}* .; '  \
+                  f'dpkg-source -x {_dsc_file} {_filename_prefix}; cd {_filename_prefix}; ' \
                   f'dpkg-checkbuilddeps; dpkg-buildpackage -a amd64 -us -uc; ' \
-                  f'cd /build; cp *.deb /repo/'
+                  f'cd ..; cp *.deb /repo/; ' \
+                  f'" athena'
 
         try:
             container = self.client.containers.run("athenalinux:build", command=f"/bin/bash -c '{cmd_str}'",
