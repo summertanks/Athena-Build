@@ -67,6 +67,8 @@ class BuildContainer:
 
     def build(self, src_pkg: Source) -> bool:
         # Check if build is already there
+        if self.check_build(src_pkg):
+            return True
 
         # list of dependencies
         _dep_str = src_pkg.build_depends
@@ -86,7 +88,7 @@ class BuildContainer:
                   f'apt -y install {_dep_str}; ' \
                   f'su -c ' \
                   f'" whoami; pwd; cd /home/athena; pwd; ' \
-                  f'cp /source/{_filename_prefix}* .; '  \
+                  f'cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; cd {_filename_prefix}; ' \
                   f'dpkg-checkbuilddeps; dpkg-buildpackage -a amd64 -us -uc; ' \
                   f'cd ..; cp *.deb /repo/; ' \
@@ -109,3 +111,55 @@ class BuildContainer:
         except docker.errors.APIError as e:
             Print(f"Athena Linux Docker: Error{e}")
             exit(1)
+
+    def check_build(self, src_pkg: Source) -> bool:
+
+        for _file in src_pkg.pkgs:
+            _filename = os.path.join(self.repo_path, _file)
+            # Check is file exists first
+            if not os.path.isfile(_filename):
+                return False
+
+            if not self.is_ar_file(_filename):
+                return False
+
+        return True
+
+    @staticmethod
+    def is_ar_file(filename: str):
+        with open(filename, 'rb') as f:
+            try:
+                # Read the file header
+                header = f.read(8)
+                if header != b'!<arch>\n':
+                    return False
+
+                # Loop through the file entries
+                while True:
+                    # Read the entry header
+                    entry_header = f.read(60)
+                    if not entry_header:
+                        # End of file
+                        break
+
+                    # Parse the entry header
+                    name = entry_header[:16].decode().rstrip()
+                    if not name:
+                        # End of archive marker
+                        break
+
+                    # Read the entry content
+                    size = int(entry_header[48:58].decode().rstrip())
+                    content = f.read(size)
+                    if len(content) != size:
+                        # Entry content is incomplete
+                        break
+
+                    # Continue to the next entry
+            except Exception as e:
+                # Exception occurred while reading the file
+                print(f"Error reading file: {str(e)}")
+                return False
+
+        # If we made it here, the file is a valid ar file
+        return True
