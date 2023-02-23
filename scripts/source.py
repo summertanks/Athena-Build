@@ -215,10 +215,7 @@ class Source(deb822.DEB822file):
     def build_depends(self) -> str:
         _dep_str = ''
         for _dep in self._build_depends:
-            if len(_dep) == 1:
-                _dep_str += _dep[0][0] + ' '
-            else:
-                # let's select the first dep
-                _dep_str += _dep[0][0][0] + ' '
+            # by default select first package even for multi/alt dependencies
+            _dep_str += _dep[0][0] + ' '
 
         return _dep_str
