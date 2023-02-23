@@ -177,7 +177,7 @@ class Cache:
                 else:
                     self.provides_hashtable[__provides] = [__pkg]
 
-        progress_bar_src = tqdm(desc=f"{'Indexing Package File'}", ncols=80, total=len(self.__source_records),
+        progress_bar_src = tqdm(desc=f"{'Indexing Source File'}", ncols=80, total=len(self.__source_records),
                                 bar_format=progress_format)
 
         for _src_record in self.__source_records:
