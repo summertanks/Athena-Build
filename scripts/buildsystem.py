@@ -90,8 +90,8 @@ class BuildContainer:
                   f'" whoami; pwd; cd /home/athena; pwd; ' \
                   f'cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; cd {_filename_prefix}; ' \
-                  f'dpkg-checkbuilddeps; dpkg-buildpackage -a amd64 -us -uc; ' \
-                  f'cd ..; cp *.deb /repo/; cp *.udeb /repo/ ;' \
+                  f'dpkg-checkbuilddeps; dpkg-buildpackage -a amd64 -us -uc; cd ..;' \
+                  f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;' \
                   f'" athena'
 
         try:
