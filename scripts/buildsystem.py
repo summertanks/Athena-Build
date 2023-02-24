@@ -127,6 +127,7 @@ class BuildContainer:
 
     @staticmethod
     def is_ar_file(filename: str):
+        _filelist: [] = []
         with open(filename, 'rb') as f:
             try:
                 # Read the file header
@@ -147,13 +148,15 @@ class BuildContainer:
                     if not name:
                         # End of archive marker
                         break
+                    # Saving filenames
+                    _filelist.append(name)
 
                     # Read the entry content
                     size = int(entry_header[48:58].decode().rstrip())
                     content = f.read(size)
                     if len(content) != size:
                         # Entry content is incomplete
-                        break
+                        return False
 
                     # Continue to the next entry
             except Exception as e:
@@ -162,4 +165,10 @@ class BuildContainer:
                 return False
 
         # If we made it here, the file is a valid ar file
+        # Checking if its a valid deb file
+        _required_files = ['debian-binary', 'control.tar.xz', 'data.tar.xz']
+        for _file in _required_files:
+            if _file not in _filelist:
+                return False
+
         return True
