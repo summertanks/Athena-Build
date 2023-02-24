@@ -208,15 +208,19 @@ class Source(deb822.DEB822file):
         _pkg_list = self['Package-List'].split('\n')
         for _pkg in _pkg_list:
             _pkg = _pkg.split()
-            if len(_pkg) > 1:
+            if len(_pkg) == 0:
+                continue
+            elif len(_pkg) < 5:
+                _arch = self.arch
+            else:
                 _arch = _pkg[4].split('=')[1]
                 if self.arch in _arch or 'any' in _arch:
                     _arch = self.arch
                 elif 'all' in _arch:
                     _arch = 'all'
                 else:
-                    raise Exception(f"Unknown Architecture {_pkg[4]}")
-                self.pkgs.append(_pkg[0] + '_' + self.version + '_' + _arch + '.' + _pkg[1])
+                    continue
+            self.pkgs.append(_pkg[0] + '_' + self.version + '_' + _arch + '.' + _pkg[1])
 
     @property
     def download_size(self) -> int:
