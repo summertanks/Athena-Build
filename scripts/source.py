@@ -193,6 +193,9 @@ class Source(deb822.DEB822file):
         self.pkgs: [] = []
         self.files: {} = {}
 
+        # if self.package == 'glibc':
+        #    print('.')
+
         _depends_list = []
         _dep_string = ['Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch']
         for _dep in _dep_string:
@@ -205,6 +208,12 @@ class Source(deb822.DEB822file):
                 self.files[_file[2]] = {'path': os.path.join(self.directory, _file[2]),
                                         'size': _file[1], 'md5': _file[0]}
 
+        _version = self.version.split(':')
+        if len(_version) > 1:
+            _version = _version[1]
+        else:
+            _version = _version[0]
+
         _pkg_list = self['Package-List'].split('\n')
         for _pkg in _pkg_list:
             _pkg = _pkg.split()
@@ -214,13 +223,17 @@ class Source(deb822.DEB822file):
                 _arch = self.arch
             else:
                 _arch = _pkg[4].split('=')[1]
-                if self.arch in _arch or 'any' in _arch:
+                _arch = _arch.split(',')
+                _arch_type = [self.arch, 'any', 'linux-any', 'any-' + self.arch]
+                _selected_arch = [__arch for __arch in _arch_type if __arch in _arch]
+                if len(_selected_arch) > 0:
                     _arch = self.arch
                 elif 'all' in _arch:
                     _arch = 'all'
                 else:
+                    # not for the arch time we have
                     continue
-            self.pkgs.append(_pkg[0] + '_' + self.version + '_' + _arch + '.' + _pkg[1])
+            self.pkgs.append(_pkg[0] + '_' + _version + '_' + _arch + '.' + _pkg[1])
 
     @property
     def download_size(self) -> int:
