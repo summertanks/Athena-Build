@@ -6,6 +6,9 @@ RUN apt-get install -y \
         vim gettext debhelper texinfo groff media-types libselinux1-dev gperf libgmp3-dev \
         python3-minimal python3 dh-python python3-distutils python3-debian python3-gpg \
         apt-file autoconf autotools-dev automake gettext debhelper diffstat zip libtool po-debconf
+# TODO: add user as sudoers
+# useradd -u $UID -g $GID -G sudo -ms /bin/bash ${UNAME} && \
+#    echo "${UNAME} ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers &&
 RUN useradd athena
 RUN mkdir /home/athena
 RUN chown athena:athena -R /home/athena
