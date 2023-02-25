@@ -87,8 +87,8 @@ class BuildContainer:
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'apt -y install {_dep_str}; ' \
                   f'su -c ' \
-                  f'" set -e; set -o errexit; whoami; pwd; cd /home/athena; pwd; ' \
-                  f'cp /source/{_filename_prefix}* .; ' \
+                  f'" set -e; set -o errexit; ' \
+                  f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; cd {_filename_prefix}; ' \
                   f'dpkg-checkbuilddeps; dpkg-buildpackage -a amd64 -us -uc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;' \
