@@ -12,6 +12,7 @@ Athena Build system is(trying to be) a (mostly) hands off 'build system' to buil
 ### Packages
 
 ### Repositories
+https://help.ubuntu.com/community/Repositories
 
 Main
 The main component contains applications that are free software, can be freely redistributed and are fully supported by the Ubuntu team. This includes the most popular and most reliable open-source applications available, many of which are included by default when you install Ubuntu. Software in main includes a hand-selected list of applications that the Ubuntu developers, community and users feel are most important, and that the Ubuntu security and distribution team are willing to support. When you install software from the main component, you are assured that the software will come with security updates and that commercial technical support is available from Canonical.
