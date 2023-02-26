@@ -66,6 +66,11 @@ class BuildContainer:
             exit(1)
 
     def build(self, src_pkg: Source) -> bool:
+        # temporary skipped list, something in the compilation doesn't work
+        skip_list = ['keyutils', 'systemd', 'util-linux', 'libsoup2.4', 'libpsl', 'e2fsprogs', 'gnome-settings-daemon']
+        if src_pkg.package in skip_list:
+            return False
+
         # Check if build is already there
         if self.check_build(src_pkg):
             return True
