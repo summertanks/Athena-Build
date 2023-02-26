@@ -87,8 +87,8 @@ class Cache:
             __cache_destination.append(os.path.join(self.cache_dir, apt_pkg.uri_to_filename(__base_url + _file)))
 
         # By default, download release file
-        # if utils.download_file(__release_url, __release_file) <= 0:
-        #    exit(1)
+        if utils.download_file(__release_url, __release_file) <= 0:
+            exit(1)
 
         # Extract the md5 for the files, can enable Optional SHA256 also
         try:
