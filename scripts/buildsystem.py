@@ -68,7 +68,7 @@ class BuildContainer:
     def build(self, src_pkg: Source) -> bool:
         # temporary skipped list, something in the compilation doesn't work
         skip_list = ['keyutils', 'systemd', 'util-linux', 'libsoup2.4', 'libpsl', 'e2fsprogs', 'gnome-settings-daemon',
-                     'libgdata', 'libical3']
+                     'libgdata', 'libical3', 'mutter', 'lilv', 'procps']
 
         if src_pkg.package in skip_list:
             return False
