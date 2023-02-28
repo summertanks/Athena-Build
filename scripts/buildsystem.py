@@ -67,11 +67,14 @@ class BuildContainer:
 
     def build(self, src_pkg: Source) -> bool:
         # temporary skipped list, something in the compilation doesn't work
-        # Source is old, creating older deb than Package version
-        # skip_list = ['libsemanage', 'libxmu', 'libxxf86vm']
+        # Something wrong with the package, maybe too large?
+        skip_list = ['musescore-general-soundfont']
 
-        skip_list = ['keyutils', 'systemd', 'util-linux', 'libsoup2.4', 'libpsl', 'gnome-settings-daemon',
-                     'libgdata', 'libical3', 'lilv', 'procps', 'mutter', 'libcap-ng']
+        # requires interactive console
+        skip_list += ['mutter']
+
+        skip_list += ['keyutils', 'systemd', 'libsoup2.4', 'libpsl', 'gnome-settings-daemon',
+                     'libgdata', 'libical3', 'lilv', 'procps']
 
         if src_pkg.package in skip_list:
             return False
