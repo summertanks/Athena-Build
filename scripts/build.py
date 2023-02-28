@@ -146,7 +146,7 @@ def main():
     # -------------------------------------------------------------------------------------------------------------
     # Step - VII Source Build Dependency Check
     Print("Creating Build System...")
-    build_container = buildsystem.BuildContainer(dir_list, '')
+    build_container = buildsystem.BuildContainer(dir_list)
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - X Starting Build

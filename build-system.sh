@@ -112,7 +112,6 @@ BUILD_ID=$(awk -F= '/^ID/ { print $2 }' /etc/os-release)
 echo Build Flavour $BUILD_ID
 if [[ $BUILD_ID != "debian" ]]; then
 	echo "E: Not using Debian to build, not tested, will likely fail"
-	exit 1
 fi
 
 # Load basic config

@@ -2,7 +2,7 @@
 # apt-get remove docker docker-engine docker.io containerd runc
 # apt-get install ca-certificates curl gnupg lsb-release
 # mkdir -m 0755 -p /etc/apt/keyrings
-# curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+# curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 # echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg]
 # https://download.docker.com/linux/debian $(lsb_release -cs) stable" |
 # sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
@@ -37,7 +37,7 @@ class BuildContainer:
                 Print(f"Athena Linux Docker: Couldn't connect to external server, reverting to local")
 
         try:
-            # self.client = docker.from_env()
+            self.client = docker.from_env()
             # Confirm function
             self.client.ping()
 
@@ -67,8 +67,11 @@ class BuildContainer:
 
     def build(self, src_pkg: Source) -> bool:
         # temporary skipped list, something in the compilation doesn't work
-        skip_list = ['keyutils', 'systemd', 'util-linux', 'libsoup2.4', 'libpsl', 'e2fsprogs', 'gnome-settings-daemon',
-                     'libgdata', 'libical3', 'mutter', 'lilv', 'procps']
+        # Source is old, creating older deb than Package version
+        # skip_list = ['libsemanage', 'libxmu', 'libxxf86vm']
+
+        skip_list = ['keyutils', 'systemd', 'util-linux', 'libsoup2.4', 'libpsl', 'gnome-settings-daemon',
+                     'libgdata', 'libical3', 'lilv', 'procps', 'mutter', 'libcap-ng']
 
         if src_pkg.package in skip_list:
             return False
