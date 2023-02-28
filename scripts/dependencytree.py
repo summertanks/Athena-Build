@@ -1,4 +1,6 @@
 # Internal modules
+import os.path
+
 import package
 from cache import Cache
 
@@ -215,11 +217,12 @@ class DependencyTree:
         return not _breaks
 
     def parse_sources(self) -> bool:
+        import re
 
         _found = True
-
-        _src_list = [(self.selected_pkgs[_pkg].source, self.selected_pkgs[_pkg].source_version)
-                     for _pkg in self.selected_pkgs]
+        _src_list = [(self.selected_pkgs[_pkg].source,
+                      self.selected_pkgs[_pkg].source_version,
+                      self.selected_pkgs[_pkg]) for _pkg in self.selected_pkgs]
         for _src in _src_list:
             _src_name = _src[0]
             if _src_name not in self.selected_srcs:
@@ -228,15 +231,65 @@ class DependencyTree:
                 _src_candidates = self.__cache.source_hashtable[_src_name]
                 # If single entry its simple
                 if len(_src_candidates) == 1:
-                    self.selected_srcs[_src[0]] = _src_candidates[0]
+                    self.selected_srcs[_src_name] = _src_candidates[0]
                 # If more than one, differentiate on version
                 else:
                     _selected_pkg = [_pkg for _pkg in _src_candidates if _pkg.version == _src_version]
                     if len(_selected_pkg) == 1:
-                        self.selected_srcs[_src[0]] = _selected_pkg[0]
+                        self.selected_srcs[_src_name] = _selected_pkg[0]
                     else:
                         Print(f"ERROR: Not found source for {_src_list}")
                         _found = False
+
+            # ideally the following should have been sufficient
+            # self.selected_srcs[_src_name].pkgs.append(os.path.basename(self.selected_pkgs[_pkg_name]['Filename']))
+            # but there are some +deb11ux issues that are not getting addressed
+            _pkg_list = self.selected_srcs[_src_name]['Package-List'].split('\n')
+            for _pkg in _pkg_list:
+                _pkg = _pkg.split()
+
+                # empty - Skip
+                if len(_pkg) == 0:
+                    continue
+
+                # Check if the Package matches
+                if _pkg[0] != _src[2]['Package']:
+                    continue
+
+                # No arch info - assume it's the same as self.arch (by virtue of control file architecture)
+                if len(_pkg) < 5:
+                    _arch = self.arch
+
+                # Select from the list
+                else:
+                    _arch = _pkg[4].split('=')[1]
+                    _arch = _arch.split(',')
+                    _arch_type = [self.arch, 'any', 'linux-any', 'any-' + self.arch]
+                    _selected_arch = [__arch for __arch in _arch_type if __arch in _arch]
+                    if len(_selected_arch) > 0:
+                        _arch = self.arch
+                    elif 'all' in _arch:
+                        _arch = 'all'
+                    else:
+                        # not for the arch we need, skip
+                        continue
+
+                _version = _src[2].version.split(':')
+                if len(_version) > 1:
+                    _version = _version[1]
+                else:
+                    _version = _version[0]
+
+                # stripping build revisions, because these do not reflect on source code builds
+                _version = re.sub(r"\+b\d+$", "", _version)
+
+                # Now that the arch has been established,
+                self.selected_srcs[_src_name].pkgs.append(
+                    _src[2]['Package'] + '_' + _version + '_' + _arch + '.' + _pkg[1])
+
+                # If we are we matched, there should be another match withing the same package list, lets break
+                break
+
         Print(f"Selected {len(self.selected_srcs)} Source Package")
         return _found
 
