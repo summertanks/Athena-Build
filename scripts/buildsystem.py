@@ -72,10 +72,10 @@ class BuildContainer:
         skip_list = []
 
         # Something wrong with the package, file extensions wrong
-        skip_list = ['musescore-general-soundfont', ]
+        # skip_list = ['musescore-general-soundfont' ]
 
-        # requires interactive console
-        skip_list += ['mutter']
+        # requires interactive console - package dialog
+        skip_list += ['mutter', 'gnome-settings-daemon']
 
         # No TTY found
         skip_list += ['procps']
@@ -83,7 +83,10 @@ class BuildContainer:
         # Package Build Failures
         skip_list += ['lilv', 'keyutils', 'libical3']
         # 'libgdata'
-        skip_list += [ 'systemd', 'libsoup2.4', 'libpsl', 'gnome-settings-daemon']
+        skip_list += [ 'systemd', 'libsoup2.4', 'libpsl']
+
+        if src_pkg.package == 'gnome-settings-daemon':
+            pass
 
         if src_pkg.package in skip_list:
             return False
@@ -180,6 +183,10 @@ class BuildContainer:
                     if len(content) != size:
                         # Entry content is incomplete
                         return False
+
+                    # Check for entry alignment
+                    if f.tell() % 2 != 0:
+                        f.seek(1, os.SEEK_CUR)
 
         # Continue to the next entry
         except Exception as e:
