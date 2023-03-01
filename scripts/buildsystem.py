@@ -72,15 +72,15 @@ class BuildContainer:
         skip_list = []
 
         # requires interactive console - package dialog
-        skip_list += ['mutter']
+        # skip_list += ['mutter']
 
         # No TTY found
-        skip_list += ['procps']
+        # skip_list += ['procps']
 
         # Package Build Failures
-        skip_list += ['lilv', 'keyutils', 'libical3']
+        # skip_list += ['lilv', 'keyutils', 'libical3']
         # 'libgdata'
-        skip_list += [ 'systemd', 'libsoup2.4', 'libpsl']
+        # skip_list += [ 'systemd', 'libsoup2.4', 'libpsl']
 
         if src_pkg.package == 'gnome-settings-daemon':
             pass
