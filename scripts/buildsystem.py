@@ -71,11 +71,8 @@ class BuildContainer:
         # temporary skipped list, something in the compilation doesn't work
         skip_list = []
 
-        # Something wrong with the package, file extensions wrong
-        # skip_list = ['musescore-general-soundfont' ]
-
         # requires interactive console - package dialog
-        skip_list += ['mutter', 'gnome-settings-daemon']
+        skip_list += ['mutter']
 
         # No TTY found
         skip_list += ['procps']
