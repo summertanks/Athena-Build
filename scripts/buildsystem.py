@@ -10,6 +10,8 @@
 # apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 # usermod -aG docker $USER
 import os
+import struct
+
 import docker
 from docker import errors
 
@@ -67,14 +69,21 @@ class BuildContainer:
 
     def build(self, src_pkg: Source) -> bool:
         # temporary skipped list, something in the compilation doesn't work
-        # Something wrong with the package, maybe too large?
-        skip_list = ['musescore-general-soundfont']
+        skip_list = []
+
+        # Something wrong with the package, file extensions wrong
+        skip_list = ['musescore-general-soundfont', ]
 
         # requires interactive console
         skip_list += ['mutter']
 
-        skip_list += ['keyutils', 'systemd', 'libsoup2.4', 'libpsl', 'gnome-settings-daemon',
-                     'libgdata', 'libical3', 'lilv', 'procps']
+        # No TTY found
+        skip_list += ['procps']
+
+        # Package Build Failures
+        skip_list += ['lilv', 'keyutils', 'libical3']
+        # 'libgdata'
+        skip_list += [ 'systemd', 'libsoup2.4', 'libpsl', 'gnome-settings-daemon']
 
         if src_pkg.package in skip_list:
             return False
@@ -140,9 +149,10 @@ class BuildContainer:
 
     @staticmethod
     def is_ar_file(filename: str):
+
         _filelist: [] = []
-        with open(filename, 'rb') as f:
-            try:
+        try:
+            with open(filename, 'rb') as f:
                 # Read the file header
                 header = f.read(8)
                 if header != b'!<arch>\n':
@@ -165,23 +175,36 @@ class BuildContainer:
                     _filelist.append(name)
 
                     # Read the entry content
-                    size = int(entry_header[48:58].decode().rstrip())
+                    size = int(entry_header[48:58].decode().rstrip(), 10)
                     content = f.read(size)
                     if len(content) != size:
                         # Entry content is incomplete
                         return False
 
-                    # Continue to the next entry
-            except Exception as e:
-                # Exception occurred while reading the file
-                print(f"Error reading file: {str(e)}")
-                return False
+        # Continue to the next entry
+        except Exception as e:
+            # Exception occurred while reading the file
+            print(f"Error reading file: {str(e)}")
+            return False
 
         # If we made it here, the file is a valid ar file
-        # Checking if its a valid deb file
-        _required_files = ['debian-binary', 'control.tar.xz', 'data.tar.xz']
+        # Checking if it's a valid deb file
+        _compressions = ['.xz', '.gz', '.bz2', '.lmza', '.zst']
+        _required_files = ['control.tar', 'data.tar']
+
+        _parsed_filelist = {}
+        for _file in _filelist:
+            _filename, _ext = os.path.splitext(_file)
+            _parsed_filelist[_filename] = _ext
+
+        # No compression/ extension
+        if 'debian-binary' not in _parsed_filelist:
+            return False
+
         for _file in _required_files:
-            if _file not in _filelist:
+            if _file not in _parsed_filelist:
+                return False
+            if _parsed_filelist[_file] not in _compressions:
                 return False
 
         return True
