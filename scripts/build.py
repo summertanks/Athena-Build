@@ -52,6 +52,8 @@ def main():
         build_codename = config_parser.get('Build', 'CODENAME')
         build_version = config_parser.get('Build', 'VERSION')
 
+        skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
+
     except configparser.Error as e:
         print(f"Athena Linux: Config Parser Error: {e}")
         exit(1)
@@ -119,6 +121,11 @@ def main():
         if not Confirm.ask("There are one or more source parse failures, Proceed?", default=True):
             exit(1)
 
+    # patch to not run tests
+    for _pkg in skip_build_test:
+        if _pkg in dependency_tree.selected_srcs:
+            dependency_tree.selected_srcs[_pkg].skip_test = True
+
     try:
         with open(os.path.join(dir_list.dir_log, 'selected_sources.list'), 'w') as fa:
             with open(os.path.join(dir_list.dir_log, 'source_file.list'), 'w') as fb:
@@ -154,6 +161,7 @@ def main():
     import tqdm
     _failed = _success = 0
     progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
+
     progress_bar = tqdm.tqdm(ncols=80, total=len(dependency_tree.selected_srcs), bar_format=progress_format)
     with open(os.path.join(dir_list.dir_log, 'dpkg-build.log'), "w") as dpkg_build_log:
         for _pkg in dependency_tree.selected_srcs:
@@ -162,13 +170,17 @@ def main():
             _src_pkg = dependency_tree.selected_srcs[_pkg]
             _exit_code = build_container.build(_src_pkg)
             if not _exit_code:
-                # Print(f"FAIL: Build Failed for {_src_pkg}")
                 dpkg_build_log.write(f"FAIL: {_pkg}\n")
                 _failed += 1
             else:
                 dpkg_build_log.write(f"PASS: {_pkg}\n")
                 _success += 1
             dpkg_build_log.flush()
+
+    Print(f"WARNING: build tests skipped for : {skip_build_test}")
+    if _failed > 0:
+        if not Confirm.ask("There are one or more source build failures, Proceed?", default=True):
+            exit(1)
 
 
 # Main function

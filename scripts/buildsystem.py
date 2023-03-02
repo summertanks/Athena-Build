@@ -70,19 +70,9 @@ class BuildContainer:
     def build(self, src_pkg: Source) -> bool:
         # temporary skipped list, something in the compilation doesn't work
         skip_list = []
+        test_list = []
 
-        # requires interactive console - package dialog
-        # skip_list += ['mutter']
-
-        # No TTY found
-        # skip_list += ['procps']
-
-        # Package Build Failures
-        # skip_list += ['lilv', 'keyutils', 'libical3']
-        # 'libgdata'
-        # skip_list += [ 'systemd', 'libsoup2.4', 'libpsl']
-
-        if src_pkg.package == 'gnome-settings-daemon':
+        if src_pkg.package in test_list:
             pass
 
         if src_pkg.package in skip_list:
@@ -106,13 +96,16 @@ class BuildContainer:
 
         assert _dsc_file != '', f"DSC not found for {src_pkg.package}"
 
+        skip_build_test = ''
+        if src_pkg.skip_test:
+            skip_build_test = 'DEB_BUILD_OPTIONS="nocheck" '
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'apt -y install {_dep_str}; ' \
                   f'su -c ' \
                   f'" set -e; set -o errexit; ' \
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; cd {_filename_prefix}; ' \
-                  f'dpkg-checkbuilddeps; dpkg-buildpackage -a amd64 -us -uc; cd ..;' \
+                  f'dpkg-checkbuilddeps; {skip_build_test} dpkg-buildpackage -a amd64 -us -uc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;' \
                   f'" athena'
 
