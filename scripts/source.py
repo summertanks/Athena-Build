@@ -38,6 +38,7 @@ class Source(deb822.DEB822file):
         self.directory = self['Directory']
         self.pkgs: [] = []
         self.files: {} = {}
+        self.skip_test = False
 
         # if self.package == 'glibc':
         #    print('.')
