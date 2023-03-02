@@ -99,6 +99,9 @@ class BuildContainer:
         skip_build_test = ''
         if src_pkg.skip_test:
             skip_build_test = 'DEB_BUILD_OPTIONS="nocheck" '
+
+        # TODO: Apply Build Patches
+
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'apt -y install {_dep_str}; ' \
                   f'su -c ' \
