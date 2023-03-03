@@ -37,6 +37,8 @@ class DirectoryListing:
             pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_repo).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_patch).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(os.path.join(self.dir_patch, 'empty')).mkdir(parents=True, exist_ok=True)
         except PermissionError as e:
             Print(f"Athena Linux: Insufficient permissions in the working directory: {e}")
             exit(1)

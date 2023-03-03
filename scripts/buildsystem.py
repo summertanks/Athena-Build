@@ -113,13 +113,15 @@ class BuildContainer:
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;' \
 
         try:
-            pkg_patch_path = os.path.join(self.patch_path, src_pkg.package, src_pkg.version)
-            # pkg_patch_path = os.path.join(pkg_patch_path, src_pkg.version)
+            src_patch_path = os.path.join(self.patch_path, src_pkg.package, src_pkg.version)
+            if not os.path.exists(src_patch_path):
+                src_patch_path = os.path.join(self.patch_path, 'empty')
+
             container = self.client.containers.run("athenalinux:build", command=f"/bin/bash -c '{cmd_str}'",
                                                    detach=True, auto_remove=False,
                                                    volumes={self.src_path: {'bind': '/source', 'mode': 'rw'},
                                                             self.repo_path: {'bind': '/repo', 'mode': 'rw'},
-                                                            pkg_patch_path: {'bind': '/patch', 'mode': 'rw'}})
+                                                            src_patch_path: {'bind': '/patch', 'mode': 'rw'}})
 
             with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
                 for line in container.logs(stream=True):
