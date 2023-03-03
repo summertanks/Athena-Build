@@ -3,7 +3,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update
 RUN apt-get install -y  \
-        net-tools iputils-ping util-linux quilt \
+        net-tools iputils-ping util-linux \
         bc bison build-essential cpio flex  libncurses-dev libssl-dev ca-certificates less sudo keyboard-configuration \
         vim gettext debhelper texinfo groff media-types libselinux1-dev gperf libgmp3-dev procps\
         python3-minimal python3 dh-python python3-distutils python3-debian python3-gpg \

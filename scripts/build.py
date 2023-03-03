@@ -185,6 +185,7 @@ def main():
                 dpkg_build_log.write(f"PASS: {_pkg}\n")
                 _success += 1
             dpkg_build_log.flush()
+    progress_bar.set_description_str(f"{_success}/{_failed}")
     progress_bar.close()
 
     Print(f"WARNING: build tests skipped for : {skip_build_test}")
