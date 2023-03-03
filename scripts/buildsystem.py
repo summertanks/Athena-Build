@@ -10,7 +10,6 @@
 # apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 # usermod -aG docker $USER
 import os
-import struct
 
 import docker
 from docker import errors
