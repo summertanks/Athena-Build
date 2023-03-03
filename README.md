@@ -31,4 +31,31 @@ The multiverse component contains software that is not free, which means the lic
 ### Stiched together
 
 
+## Building Image
 
+### Intro
+
+...
+
+### Source Code Patching
+Using quilt to create patches. can use standard diff also. Mostly templates are nice in quilt. While we would have prefered to use quilt natively for applying patch too but that requires the patch file being in the tarball, else a lot of 'fuzz' errors. So to apply patching still using standard 'patch'.
+
+Creating patch file involves > expand source > define patch file in quilt > make changes > refresh quilt > edit header (template, optional) > save patch
+```
+dpkg-source -x package_version.dsc
+cd package-version
+quilt new xxxx-description.patch
+...
+# make the changes
+...
+quilt refresh xxxx-description.patch
+cp debian/patch/xxxx-description.patch <patch dir>/package/version/xxxx-description.patch
+```
+
+if you want to apply the same on expanded source package
+```
+patch -p1 < <patch dir>/package/version/xxxx-description.patch
+```
+
+The patch file numbering is four digit, preferably start from 9001 for simplicity sake
+The patch folder will have folder for each source package 'name' and sub folders for respective versions. each patch is version specific and saved in that version folder.
