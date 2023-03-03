@@ -39,6 +39,7 @@ class Source(deb822.DEB822file):
         self.pkgs: [] = []
         self.files: {} = {}
         self.skip_test = False
+        self.patch_list = []
 
         # if self.package == 'glibc':
         #    print('.')

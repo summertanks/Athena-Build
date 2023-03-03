@@ -30,6 +30,7 @@ class BuildContainer:
         self.repo_path = dir_list.dir_repo
         self.buildlog_path = os.path.join(dir_list.dir_log, 'build')
         self.conf_path = dir_list.dir_config
+        self.patch_path = dir_list.dir_patch
 
         if docker_server is not None:
             try:
@@ -101,22 +102,25 @@ class BuildContainer:
             skip_build_test = 'DEB_BUILD_OPTIONS="nocheck" '
 
         # TODO: Apply Build Patches
-
+        patch_list = ' '.join(src_pkg.patch_list)
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
-                  f'apt -y install {_dep_str}; ' \
-                  f'su -c ' \
-                  f'" set -e; set -o errexit; ' \
+                  f'sudo apt -y install {_dep_str}; ' \
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
-                  f'dpkg-source -x {_dsc_file} {_filename_prefix}; cd {_filename_prefix}; ' \
+                  f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
+                  f'cd {_filename_prefix}; ' \
+                  f'for PATCH in {patch_list}; do patch -p1 < /patch/"$PATCH"; done; ' \
                   f'dpkg-checkbuilddeps; {skip_build_test} dpkg-buildpackage -a amd64 -us -uc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;' \
-                  f'" athena'
 
         try:
+            pkg_patch_path = os.path.join(self.patch_path, src_pkg.package, src_pkg.version)
+            # pkg_patch_path = os.path.join(pkg_patch_path, src_pkg.version)
             container = self.client.containers.run("athenalinux:build", command=f"/bin/bash -c '{cmd_str}'",
                                                    detach=True, auto_remove=False,
                                                    volumes={self.src_path: {'bind': '/source', 'mode': 'rw'},
-                                                            self.repo_path: {'bind': '/repo', 'mode': 'rw'}})
+                                                            self.repo_path: {'bind': '/repo', 'mode': 'rw'},
+                                                            pkg_patch_path: {'bind': '/patch', 'mode': 'rw'}})
+
             with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
                 for line in container.logs(stream=True):
                     # Print(line.decode("utf-8"), end="")

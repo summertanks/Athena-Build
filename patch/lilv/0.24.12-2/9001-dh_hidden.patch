@@ -1,0 +1,22 @@
+Description: Fixing dh_missing error on build
+Author: Harkirat S Virk, harkiratsvirk@gmail.com
+Origin: upstream
+Bug: Not Validated
+Forwarded: no
+Reviewed-by: None
+Last-Update: 2023-03-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+Index: lilv-0.24.12/debian/rules
+===================================================================
+--- lilv-0.24.12.orig/debian/rules
++++ lilv-0.24.12/debian/rules
+@@ -34,5 +34,8 @@ override_dh_auto_clean:
+ 	rm -rf build .waf*
+ 	dh_auto_clean
+ 
++override_dh_missing:
++
++
+ override_dh_installchangelogs:
+ 	dh_installchangelogs NEWS
