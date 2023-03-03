@@ -3,7 +3,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update
 RUN apt-get install -y  \
-        net-tools iputils-ping util-linux \
+        net-tools iputils-ping util-linux quilt \
         bc bison build-essential cpio flex  libncurses-dev libssl-dev ca-certificates less sudo keyboard-configuration \
         vim gettext debhelper texinfo groff media-types libselinux1-dev gperf libgmp3-dev procps\
         python3-minimal python3 dh-python python3-distutils python3-debian python3-gpg \
@@ -13,6 +13,6 @@ RUN echo 'net.ipv6.conf.all.disable_ipv6=0' >> /etc/sysctl.conf
 RUN echo 'net.ipv6.conf.default.disable_ipv6=0' >> /etc/sysctl.conf
 RUN echo 'net.ipv6.conf.lo.disable_ipv6=0' >> /etc/sysctl.conf
 
-
 RUN useradd -G sudo -ms /bin/bash athena
 RUN echo 'athena ALL=(ALL) NOPASSWD:ALL' >>  /etc/sudoers
+USER athena

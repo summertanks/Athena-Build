@@ -121,10 +121,19 @@ def main():
         if not Confirm.ask("There are one or more source parse failures, Proceed?", default=True):
             exit(1)
 
-    # patch to not run tests
+    # patch to not run build tests
     for _pkg in skip_build_test:
         if _pkg in dependency_tree.selected_srcs:
             dependency_tree.selected_srcs[_pkg].skip_test = True
+
+    # iterate over packages as see if we have any patches on our end
+    for _pkg in dependency_tree.selected_srcs:
+        _patch_path = os.path.join(dir_list.dir_patch, _pkg)
+        _patch_path = os.path.join(_patch_path, dependency_tree.selected_srcs[_pkg].version)
+        if os.path.exists(_patch_path):
+            _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
+            _sorted_patch_files = sorted(_patch_files, key=lambda x: x[:5])
+            dependency_tree.selected_srcs[_pkg].patch_list = _sorted_patch_files
 
     try:
         with open(os.path.join(dir_list.dir_log, 'selected_sources.list'), 'w') as fa:
@@ -176,11 +185,13 @@ def main():
                 dpkg_build_log.write(f"PASS: {_pkg}\n")
                 _success += 1
             dpkg_build_log.flush()
+    progress_bar.close()
 
     Print(f"WARNING: build tests skipped for : {skip_build_test}")
     if _failed > 0:
         if not Confirm.ask("There are one or more source build failures, Proceed?", default=True):
             exit(1)
+
 
 
 # Main function
