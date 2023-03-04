@@ -5,7 +5,7 @@
 - Give process transperancy and readability
 
 # Athena-Build
-![example workflow](https://github.com/summertanks/docs/actions/workflows/main.yml/badge.svg)
+![example workflow]([https://github.com/summertanks/stars/badge.svg](https://github-profile-summary-cards.vercel.app/api/cards/profile-details?username={summertanks}))
 
 
 ## Introduction
