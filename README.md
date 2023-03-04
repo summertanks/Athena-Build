@@ -1,8 +1,8 @@
-### Features
+## Features
 - Building Debian Distribution from source
 - Support for Patching at Source, Pre-Install and Post-Install
 - Modular Installation System
-- Give process transperancy and readability
+- Give process transparency and readability
 
 # Athena-Build
 
@@ -20,13 +20,14 @@ The genesis of this project came from the conversation - while the Linux ecosyst
 ### Linux
 The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a clone of UNIX operating system called 'Minix' and was supposed to be compatible to ***System V***. 
 
-Accordingly, We ended up with the Ver 0.1 of the **Linux Kernel**. Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brough the application stack that gave Linux Kernel purpose, and hence was born the Linux Distribution, or more colloquially just called **Linux OS**. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amougst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution'
+Accordingly, We ended up with the Ver 0.1 of the **Linux Kernel**. Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brought the application stack that gave Linux Kernel purpose, and hence was born the Linux Distribution, or more colloquially just called **Linux OS**. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution'
 
 The first Linux distribution, called "Softlanding Linux System" (SLS), was released by 1992. and within the next three years we saw the advent of Slackware, Red Hat and Debian. The rest as they say is history.
 
 PS: Red Hat vs Debian - Red Hat was founded with the goal of creating a commercial distribution of Linux that could be sold and supported. Red Hat's approach was to take the existing Linux codebase, add value in the form of support, services, and tools, and sell it to enterprise customers. On the other hand, Debian was founded  with the goal of creating a community-driven Linux distribution that was completely free, open-source and built from scratch, with a focus on stability, security, and ease of use. 
 
 ### 'Linux OS'
+A Linux distribution is a complete operating system package that includes the Linux kernel, system utilities, applications, and software libraries, along with a package management system and other tools for managing and configuring the system. A Linux distribution is typically designed and packaged by a community or organization, and is intended to provide a complete, ready-to-use operating system that can be installed and configured on a variety of hardware platforms.
 
 ### Packages
 
@@ -34,7 +35,6 @@ PS: Red Hat vs Debian - Red Hat was founded with the goal of creating a commerci
 
 Debian's package repositories are organized into several official repositories, including "main", "contrib", and "non-free", as well as a "backports" repository for newer software versions. The "main" repository contains packages that are completely free and open-source, while the "contrib" and "non-free" repositories contain packages that may have non-free or proprietary components. 
 
-https://help.ubuntu.com/community/Repositories
 
 
 ### RHEL/Debian/Ubuntu
