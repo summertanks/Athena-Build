@@ -1,7 +1,19 @@
+###Features
+- Building Debian Distribution from source
+- Support for Patching at Source, Pre-Install and Post-Install
+- Modular Installation System
+- Give process transperancy and readability
+
+**Table of Contents**
+
+[TOCM]
+
+[TOC]
+
 # Athena-Build
 
 ## Introduction
-Athena Build system is(trying to be) a (mostly) hands off 'build system' to build and install custom Linux distribution.
+Athena Build system is(trying to be) a (mostly) hands off 'build system' to build and install custom Debian Linux distribution. The distinction is that  sources are build rather than using 
 
 ## Background
 
