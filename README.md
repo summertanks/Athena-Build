@@ -20,7 +20,7 @@ The genesis of this project came from the conversation - while the Linux ecosyst
 ### Linux
 The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a clone of UNIX operating system called 'Minix' and was supposed to be compatible to ***System V***. 
 
-Accordingly, We ended up with the Ver 0.1 of the **Linux Kernel**. Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brough the application stack that gave Linux Kernel purpose, and hence was born the Linux based OS, or more colloquially just called **Linux OS** 
+Accordingly, We ended up with the Ver 0.1 of the **Linux Kernel**. Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brough the application stack that gave Linux Kernel purpose, and hence was born the Linux based OS, or more colloquially just called **Linux OS**. The conversation of distinction between 'Linux based OS' and 'Linux OS' is a petridish for violence amougst geeks, but for the purpose of this project lets assert debian == 'Linux based OS'
 
 PS: System V is a version of the Unix operating system that was developed by AT&T in the late 1970s and early 1980s. It was one of the most widely used versions of Unix and included many important features such as the System V init system. 
 
