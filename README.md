@@ -20,16 +20,27 @@ The genesis of this project came from the conversation - while the Linux ecosyst
 ### Linux
 The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a clone of UNIX operating system called 'Minix' and was supposed to be compatible to ***System V***. 
 
-Accordingly, We ended up with the Ver 0.1 of the **Linux Kernel**. Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brought the application stack that gave Linux Kernel purpose, and hence was born the Linux Distribution, or more colloquially just called **Linux OS**. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution'
+Accordingly, We ended up with the Ver 0.1 of the **Linux Kernel**. Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brought the application stack that gave Linux Kernel purpose, and hence was born the Linux Distribution, or more colloquially just called **Linux Distribution**. The conversation of distinction between 'Linux Distribution' and 'Linux OS' is a petridish for violence amongst geeks, but for the purpose of this project lets assert debian is a 'Linux Distribution' and stay away from the phrase OS as puch as possible.
 
 The first Linux distribution, called "Softlanding Linux System" (SLS), was released by 1992. and within the next three years we saw the advent of Slackware, Red Hat and Debian. The rest as they say is history.
 
 PS: Red Hat vs Debian - Red Hat was founded with the goal of creating a commercial distribution of Linux that could be sold and supported. Red Hat's approach was to take the existing Linux codebase, add value in the form of support, services, and tools, and sell it to enterprise customers. On the other hand, Debian was founded  with the goal of creating a community-driven Linux distribution that was completely free, open-source and built from scratch, with a focus on stability, security, and ease of use. 
 
-### 'Linux OS'
-A Linux distribution is a complete operating system package that includes the Linux kernel, system utilities, applications, and software libraries, along with a package management system and other tools for managing and configuring the system. A Linux distribution is typically designed and packaged by a community or organization, and is intended to provide a complete, ready-to-use operating system that can be installed and configured on a variety of hardware platforms.
+We are currently only looking at Debian & Debian based distributions
 
-### Packages
+### Linux Distribution
+A Linux distribution is a complete set of packages included (but not limited to) the Linux kernel, system utilities, applications, and software libraries, along with a package management system and other tools for managing and configuring the system. A Linux distribution is typically designed and packaged by a community or organization, and is intended to provide a complete, ready-to-use OS that can be installed and configured on a variety of hardware platforms.
+
+### Packages and Package Manager
+In a Linux distribution, a package is akin to SKU (Stock Kepping Unit) of software that can be installed and managed by the operating system's package manager. A package may include one or more applications, libraries, along with configuration files required to run the software on the system. 
+
+The packages may intrensicly also define other packages as dependencies and it is usually the package manager which checks to ensure that all required dependencies are present and installs any missing dependencies as needed. THe package manager abstracts away the complexity of installing, managing, updating, and removing software packages.
+
+Packages in a Linux distribution may be maintained by the distribution's own developers or by third-party contributors. In this context Debian. They (Debian) identify application, wrap the application's build system to produce the installables as a package construct, i.e. deb - debian package file, test it, patch it, abd publish it in a repository.
+
+Dpkg is a low-level package manager that is used by the Debian and Ubuntu distributions. It is responsible for managing the installation and removal of individual software packages on a system. Dpkg works by maintaining a database of installed packages and their dependencies, and it uses this information to ensure that all required packages are present and properly configured when a package is installed.
+
+Apt, or Advanced Package Tool, is a higher-level package manager that builds on top of dpkg. It is used to manage the entire software repository for a distribution, including all official packages and any third-party repositories that have been added. Apt provides a more user-friendly interface than dpkg, with features such as automatic dependency resolution, automatic package updating, and easy installation of packages from remote repositories.
 
 ### Repositories
 
