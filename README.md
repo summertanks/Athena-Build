@@ -5,6 +5,8 @@
 - Give process transperancy and readability
 
 # Athena-Build
+![example workflow](https://github.com/summertanks/docs/actions/workflows/main.yml/badge.svg)
+
 
 ## Introduction
 Athena Build system is(trying to be) a (mostly) hands off 'build system' to build and install custom Debian Linux distribution. The distinction is that  sources are build rather than using the prepared packages. It is aimed to be the more transperent and flexiable version of debbootstrap and live-build.
