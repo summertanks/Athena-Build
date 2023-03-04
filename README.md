@@ -7,18 +7,23 @@
 # Athena-Build
 
 ## Introduction
-Athena Build system is(trying to be) a (mostly) hands off 'build system' to build and install custom Debian Linux distribution. The distinction is that  sources are build rather than using the prepared packages. It is aimed to be the more transperent and flexiable version of debbootstrap and live-build.
+Athena Build system is(trying to be) a (mostly) hands off 'build system' to build and install custom Debian Linux distribution. The distinction is that  sources are built rather than using the prepared packages. It is aimed to be the more transparent and flexible version of debbootstrap and live-build.
 
-The gensis of this peoject came from the conversation - while the Linux ecosystem as part of the FOSS world, but as the platform matured, can we really build the solution from source? As the build systems are becoming more complex, sparcly documented and obfuscated (personal opinion).
+The genesis of this project came from the conversation - while the Linux ecosystem as part of the FOSS world, but as the platform matured, can we really build the solution from source? As the build systems are becoming more complex, sparsely documented and obfuscated (personal opinion).
 
 ## FYI
  - This will be a maturing solution and not immediately suitable to building production system. Currently, best used for tinkering.
- - Can this be faster, YES. Is it worth making it faster (e.g. shifting to C, trading space with time, etc.) No
+ - Can this be faster, YES. Is it worth making it faster (e.g. shifting to C, trading space with time, etc.) NO
  - It is NOT currently (or ever may be) supported by any of Debian Linux Houses (e.g. debian, ubuntu, etc)
  - Does it have Bugs - YES / MANY, please reach out to me and lets fix what you find.
 
 ### Linux
-The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons) a clone of UNIX operating system called 'Minix' and was supposed to be compatable to System V. System V is a version of the Unix operating system that was developed by AT&T in the late 1970s and early 1980s. It was one of the most widely used versions of Unix and included many important features such as the System V init system. We ended up writing the the Ver 0.1 of the **Linux Kernel**
+The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a clone of UNIX operating system called 'Minix' and was supposed to be compatible to ***System V***. 
+
+Accordingly, We ended up with the Ver 0.1 of the **Linux Kernel**. Unfortunately, the Kernel had no application ecosystem to run as remained as such an essential cog in a non-existing ecosystem. Then came along Richard Stallman and GNU and gave it purpose. They brough the application stack that gave Linux Kernel purpose, and hence was born the Linux based OS, or more colloquially just called **Linux OS** 
+
+PS: System V is a version of the Unix operating system that was developed by AT&T in the late 1970s and early 1980s. It was one of the most widely used versions of Unix and included many important features such as the System V init system. 
+
 
 
 ### 'Linux OS'
