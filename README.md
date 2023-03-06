@@ -67,8 +67,10 @@ Creating patch file involves > expand source > define patch file in quilt > make
 dpkg-source -x package_version.dsc
 cd package-version
 quilt new xxxx-description.patch
+quilt header -e --dep3 
 ...
 # make the changes
+# the -e edits the header in $EDITOR
 ...
 quilt refresh xxxx-description.patch
 cp debian/patch/xxxx-description.patch <patch dir>/package/version/xxxx-description.patch
