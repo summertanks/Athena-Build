@@ -80,20 +80,38 @@ def main():
     Print("Building Cache...")
     build_cache = cache.Cache(base_distribution, dir_list.dir_cache)
 
+    # Special case - if gcc-10 already selected
+    gcc_versions = [pkg for pkg in build_cache.required if pkg.startswith('gcc-')]
+    latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(num) for num in x.split('-')[1].split('.')))[-1:]
+    latest_gcc = set(latest_gcc_versions)
+    build_cache.required = [pkg for pkg in build_cache.required if not pkg.startswith('gcc-') or pkg in latest_gcc]
+
+    Print(f"Required Package Count : {len(build_cache.required)}")
+
     # -------------------------------------------------------------------------------------------------------------
     # Step II - Parse Dependencies
-    Print("Parsing Dependencies...")
-    required_packages = []
+
+    Print("Preparing Parsing Tree...")
+    dependency_tree = dependencytree.DependencyTree(build_cache, select_recommended=False, arch=base_distribution.arch)
+
+    Print("Parsing Dependencies for 'required'...")
+    required_packages = build_cache.required
+    dependency_tree.add_lookahead(required_packages)
+    for pkg in required_packages:
+        dependency_tree.parse_dependency(pkg)
+    Print(f"Dependencies Selected for 'required' : {len(dependency_tree.selected_pkgs)}")
+
+    Print(f"Parsing {args.pkg_list}...")
     required_packages_list = utils.readfile(pkglist_path).split('\n')
     for pkg in required_packages_list:
         if pkg and not pkg.startswith('#') and not pkg.isspace():
-            required_packages.append(pkg.strip())
-    Print(f"Total Required Packages {len(required_packages)}")
-
-    dependency_tree = dependencytree.DependencyTree(
-        build_cache, select_recommended=False, arch=base_distribution.arch, lookahead=required_packages)
+            pkg = pkg.strip()
+            if pkg not in required_packages:
+                required_packages.append(pkg)
+    Print(f"Total Selected Packages {len(required_packages)}")
 
     # Iterate through package list and identify dependencies
+    dependency_tree.add_lookahead(required_packages)
     for pkg in required_packages:
         dependency_tree.parse_dependency(pkg)
 
@@ -192,7 +210,6 @@ def main():
     if _failed > 0:
         if not Confirm.ask("There are one or more source build failures, Proceed?", default=True):
             exit(1)
-
 
 
 # Main function

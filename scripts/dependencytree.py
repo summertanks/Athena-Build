@@ -22,11 +22,17 @@ class DependencyTree:
         self.selected_pkgs: {} = {}
         self.selected_srcs: {} = {}
         self.alternate_pkgs: {} = {}
-        self.required_pkgs: [] = []
-
         self.arch = arch
+
         if lookahead is not None:
             self.__lookahead = lookahead
+
+    def add_lookahead(self, lookahead: []):
+        for _pkg in lookahead:
+            if _pkg and not _pkg.isspace():
+                _pkg = _pkg.strip()
+                if _pkg not in self.__lookahead:
+                    self.__lookahead.append(_pkg)
 
     def parse_dependency(self, required_pkg: str) -> package.Package:
 
