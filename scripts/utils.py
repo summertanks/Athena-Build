@@ -24,6 +24,8 @@ class DirectoryListing:
             self.dir_repo = os.path.join(self.cwd, config_parser.get('Directories', 'Repo'))
             self.dir_config = os.path.join(self.cwd, config_parser.get('Directories', 'Config'))
             self.dir_patch = os.path.join(self.cwd, config_parser.get('Directories', 'Patch'))
+            self.dir_image = os.path.join(self.cwd, config_parser.get('Directories', 'Image'))
+            self.dir_chroot = os.path.join(self.cwd, config_parser.get('Directories', 'Chroot'))
         except configparser.Error as e:
             Print(f"Athena Linux: Config Parser Error: {e}")
             exit(1)
@@ -39,6 +41,9 @@ class DirectoryListing:
             pathlib.Path(self.dir_patch).mkdir(parents=True, exist_ok=True)
             pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
             pathlib.Path(os.path.join(self.dir_patch, 'empty')).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
+
         except PermissionError as e:
             Print(f"Athena Linux: Insufficient permissions in the working directory: {e}")
             exit(1)
