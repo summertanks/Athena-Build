@@ -25,8 +25,16 @@ class BuildSystem:
         from tqdm import tqdm
 
         _chroot = self.__dir_chroot
-        _dpkg_install_cmd = ''
-        _dpkg_configure_cmd = f'PKG_ROOT={_chroot} dpkg --root={_chroot}  --instdir={_chroot} ' \
+
+        # Setting environment variables
+        env_vars = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "DPKG_ROOT": _chroot}
+
+        # Setting up basic command structure
+        _dpkg_install_cmd = f'fakeroot dpkg --root={_chroot} --instdir={_chroot} ' \
+                            f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --no-triggers --unpack '
+
+        _dpkg_configure_cmd = f'fakeroot dpkg --root={_chroot}  --instdir={_chroot} ' \
                               '--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --configure --pending'
 
         # Check if directory empty
@@ -34,8 +42,8 @@ class BuildSystem:
             Print(f"WARNING: Chroot folder {os.path.basename(self.__dir_chroot)} not empty")
 
         # First install required
-        _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs]
-        #             if self.__dependencytree.selected_pkgs[_pkg].required]
+        _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
+                     if self.__dependencytree.selected_pkgs[_pkg].required]
 
         # Get file list
         _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename']) for _pkg in _pkg_list]
@@ -65,12 +73,12 @@ class BuildSystem:
                     progress_bar.update(1)
 
                     # un-archiving package
-                    result = subprocess.run(["dpkg-deb", "-x", _file_path, self.__dir_chroot],
-                                            capture_output=True, text=True)
+                    result = subprocess.run([_dpkg_install_cmd, _file_path],
+                                            capture_output=True, text=True, env=env_vars)
                     fh.write(result.stdout)
 
         except (FileNotFoundError, PermissionError) as e:
             Print(f"Error: {e}")
             exit(1)
-
+        progress_bar.clear()
         return True
