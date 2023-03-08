@@ -14,6 +14,7 @@ from rich.prompt import Confirm
 import utils
 import buildcontainer
 import dependencytree
+import buildsystem
 
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
@@ -101,6 +102,10 @@ def main():
         dependency_tree.parse_dependency(pkg)
     Print(f"Dependencies Selected for 'required' : {len(dependency_tree.selected_pkgs)}")
 
+    # Cheeky but works, ideally, parsing should have identified and marked required and their dependencies as required
+    for _pkg in dependency_tree.selected_pkgs:
+        dependency_tree.selected_pkgs[_pkg].required = True
+
     Print(f"Parsing {args.pkg_list}...")
     required_packages_list = utils.readfile(pkglist_path).split('\n')
     for pkg in required_packages_list:
@@ -178,12 +183,12 @@ def main():
         Confirm.ask("Download size mismatch, continue?", default=True)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - VII Source Build Dependency Check
+    # Step - VI Source Build Dependency Check
     Print("Creating Build System...")
     build_container = buildcontainer.BuildContainer(dir_list)
 
     # -------------------------------------------------------------------------------------------------------------
-    # Step - X Starting Build
+    # Step - VII Starting Source Build
     Print("Starting Source Packages...")
     import tqdm
     _failed = _success = 0
@@ -210,6 +215,14 @@ def main():
     if _failed > 0:
         if not Confirm.ask("There are one or more source build failures, Proceed?", default=True):
             exit(1)
+
+    # -------------------------------------------------------------------------------------------------------------
+    # Step - VII Building chroot environment
+    Print("Building chroot environment...")
+    build_system = buildsystem.BuildSystem(dependency_tree, dir_list)
+    if not build_system.build_chroot():
+        Print("ERROR: Building chroot failed...")
+        exit(1)
 
 
 # Main function
