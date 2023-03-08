@@ -4,7 +4,6 @@ import pathlib
 import re
 import configparser
 
-
 Print = print
 
 
@@ -205,3 +204,24 @@ def readfile(filename: str) -> str:
     except (FileNotFoundError, PermissionError) as e:
         Print(f"Error: {e}")
         exit(1)
+
+
+def create_folders(folder_structure: str):
+    # split the folder structure string into individual path components
+    components = folder_structure.split('/')
+
+    # iterate over the path components and create the directories
+    path = '/'
+    try:
+        for component in components:
+            if '{' in component:
+                # expand the braces and create directories for each combination
+                subcomponents = component.strip('{}').split(',')
+                for subcomponent in subcomponents:
+                    new_path = os.path.join(path, subcomponent)
+                    os.makedirs(new_path, exist_ok=True)
+            else:
+                # add the component to the current path
+                path = os.path.join(path, component)
+    except Exception as e:
+        Print(f"Failed to build folder structure {e}")
