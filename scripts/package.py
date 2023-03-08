@@ -34,6 +34,10 @@ class Package(deb822.DEB822file):
         self.provides = []
         self.recommends = self.alt_recommends = []
 
+        # Not necessarily aligned to 'Priority' field,
+        # this will also be set for those packages that 'required' depends on.
+        self.required = False
+
         super().__init__(section)
 
         # Setting Values post calling super()

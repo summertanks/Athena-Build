@@ -179,6 +179,7 @@ class Cache:
                     self.provides_hashtable[__provides] = [__pkg]
 
             # build the required(s) list
+            # TODO: check for architecture too
             if __pkg['Priority'] == 'required':
                 assert _package_name not in self.required, f"Multiple versions of required Package {_package_name}"
                 self.required.append(_package_name)

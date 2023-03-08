@@ -83,3 +83,20 @@ patch -p1 < <patch dir>/package/version/xxxx-description.patch
 
 The patch file numbering is four digit, preferably start from 9001 for simplicity sake
 The patch folder will have folder for each source package 'name' and sub folders for respective versions. each patch is version specific and saved in that version folder.
+
+## Misc
+
+### Installing Docker
+
+Installing docker manually, the distribution repo packages are old.
+Everything under superuser
+```commandline
+apt-get remove docker docker-engine docker.io containerd runc
+apt-get install ca-certificates curl gnupg lsb-release
+mkdir -m 0755 -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" |  tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt-get update
+apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+usermod -aG docker $USER
+```
