@@ -1,5 +1,10 @@
 # External
 import os
+import shlex
+import subprocess
+import re
+from tqdm import tqdm
+from rich.prompt import Confirm, Prompt
 
 # Internal
 import dependencytree
@@ -20,9 +25,6 @@ class BuildSystem:
             assert os.path.exists(_dir), f"Missing essential folder {_dir}"
 
     def build_chroot(self) -> bool:
-        import subprocess
-        import re
-        from tqdm import tqdm
 
         _chroot = self.__dir_chroot
 
@@ -30,12 +32,23 @@ class BuildSystem:
         env_vars = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                     "DPKG_ROOT": _chroot}
 
+        # sudo dpkg --root=/home/harkirat/PycharmProjects/Athena-Build/buildroot
+        # --instdir=/home/harkirat/PycharmProjects/Athena-Build/buildroot
+        # --admindir=/home/harkirat/PycharmProjects/Athena-Build/buildroot/var/lib/dpkg
+        # --force-script-chrootless -D1 --configure coreutils
+        #
+        # sudo dpkg --root=/home/harkirat/PycharmProjects/Athena-Build/buildroot
+        # --instdir=/home/harkirat/PycharmProjects/Athena-Build/buildroot
+        # --admindir=/home/harkirat/PycharmProjects/Athena-Build/buildroot/var/lib/dpkg
+        # --force-script-chrootless --no-triggers -D1 --unpack repo/diffutils_3.7-5_amd64.deb
         # Setting up basic command structure
-        _dpkg_install_cmd = f'fakeroot dpkg --root={_chroot} --instdir={_chroot} ' \
+        _dpkg_install_cmd = f'sudo -S dpkg --root={_chroot} --instdir={_chroot} ' \
                             f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --no-triggers --unpack '
 
-        _dpkg_configure_cmd = f'fakeroot dpkg --root={_chroot}  --instdir={_chroot} ' \
-                              '--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --configure --pending'
+        _dpkg_configure_cmd = f'sudo dpkg --root={_chroot}  --instdir={_chroot} ' \
+                              f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --configure --pending'
+
+        _dpkg_install_cmd = shlex.split(_dpkg_install_cmd)
 
         # Check if directory empty
         if len(os.listdir(self.__dir_chroot)) != 0:
@@ -47,6 +60,10 @@ class BuildSystem:
 
         # Get file list
         _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename']) for _pkg in _pkg_list]
+
+        # Need Password
+        Print("This needs to run as superuser, current user needs to be un sudoers file")
+        __password = Prompt.ask("Please enter password", password=True)
 
         # Check if it has been built
         progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
@@ -73,8 +90,9 @@ class BuildSystem:
                     progress_bar.update(1)
 
                     # un-archiving package
-                    result = subprocess.run([_dpkg_install_cmd, _file_path],
-                                            capture_output=True, text=True, env=env_vars)
+                    _cmd = _dpkg_install_cmd
+                    _cmd.append(_file_path)
+                    result = subprocess.run(_cmd, input=__password, capture_output=True, text=True, env=env_vars)
                     fh.write(result.stdout)
 
         except (FileNotFoundError, PermissionError) as e:
