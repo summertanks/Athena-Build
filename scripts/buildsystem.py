@@ -39,13 +39,14 @@ class BuildSystem:
 
         _chroot = self.__dir_chroot
 
-        # setting up folder structure
+        # setting up folder structure (mess the man(1..8)
         # ref: https://www.linuxfromscratch.org/lfs/view/development/chapter07/creatingdirs.html
-        dir_structure = [r'/{boot,home,mnt,opt,srv}', r'/etc/{opt,sysconfig}', r'/lib/firmware',
-                         r'/media/{floppy,cdrom}', r'/usr/{,local/}{include,src}', r'/usr/local/{bin,lib,sbin}',
-                         r'/usr/{,local/}share/{color,dict,doc,info,locale,man}',
-                         r'/usr/{,local/}share/{misc,terminfo,zoneinfo}', r'/usr/{,local/}share/man/',
-                         r'/var/{cache,local,log,mail,opt,spool}', r'/var/lib/{color,misc,locate}']
+        dir_structure = ['/{boot,home,mnt,opt,srv,sys,proc,dev}', '/etc/{opt,sysconfig}', '/lib/{firmware}',
+                         '/media/{floppy,cdrom}', '/usr/{local,include,src,share}',
+                         '/usr/local/{bin,lib,sbin,include,src,share}',
+                         '/usr/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
+                         '/usr/local/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
+                         '/var/{cache,local,log,mail,opt,spool}', '/var/lib/{color,misc,locate}']
 
         for _dir in dir_structure:
             utils.create_folders(self.__dir_chroot + _dir)
@@ -72,7 +73,7 @@ class BuildSystem:
         # --force-script-chrootless --no-triggers -D1 --unpack repo/diffutils_3.7-5_amd64.deb
         # Setting up basic command structure
         _dpkg_install_cmd = f'sudo -S dpkg --root={_chroot} --instdir={_chroot} ' \
-                            f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --no-triggers --unpack '
+                            f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless -D1 --no-triggers --unpack '
 
         _dpkg_configure_cmd = f'sudo dpkg --root={_chroot}  --instdir={_chroot} ' \
                               f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --configure --pending'
@@ -84,7 +85,7 @@ class BuildSystem:
                      if self.__dependencytree.selected_pkgs[_pkg].required]
 
         # Get file list
-        _file_list = ''
+        _file_list = []
         _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename']) for _pkg in _pkg_list]
         for _file in _deb_list:
             # stripping build revisions, because these do not reflect on source code builds
@@ -100,7 +101,7 @@ class BuildSystem:
 
             _file_path = os.path.join(self.__dir_repo, _file)
             assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
-            _file_list += _file_path + ' '
+            _file_list.append(os.path.join(self.__dir_repo, _file))
 
         # Check if it has been built
         progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
@@ -110,7 +111,7 @@ class BuildSystem:
             with open(os.path.join(self.__dir_log, 'dpkg-deb.log'), 'w') as fh:
 
                 # un-archiving package
-                _dpkg_install_cmd.append(_file_list)
+                _dpkg_install_cmd.extend(_file_list)
                 _proc = subprocess.run(_dpkg_install_cmd, input=self.__password, capture_output=True, text=True)
                 fh.write(_proc.stdout)
 
