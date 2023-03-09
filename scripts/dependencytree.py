@@ -132,6 +132,14 @@ class DependencyTree:
         # recursively
         for _pkg in _depends:
             _parsed_pkg = self.parse_dependency(_pkg[0])
+
+            # add forward dependency
+            if _parsed_pkg.package not in _selected_pkg.depends_on:
+                _selected_pkg.depends_on.append(_parsed_pkg.package)
+            # add reverse dependency
+            if _selected_pkg.package not in _parsed_pkg.depended_by:
+                _parsed_pkg.depended_by.append(_selected_pkg.package)
+
             # add version constraints
             # Again slightly convoluted, Between multiple package and provides, don't know which was selected.
             # Hence, expecting parse_dependency(...) to return the package selected for that required_pkg

@@ -28,11 +28,18 @@ class Package(deb822.DEB822file):
         self.package = ''
         self.version = ''
 
-        self.depends = self.alt_depends = []
+        self.depends = []
+        self.alt_depends = []
         self.conflicts = []
         self.breaks = []
         self.provides = []
-        self.recommends = self.alt_recommends = []
+        self.recommends = []
+        self.alt_recommends = []
+        self.installed = False
+        self.configured = False
+
+        self.depends_on = []
+        self.depended_by = []
 
         # Not necessarily aligned to 'Priority' field,
         # this will also be set for those packages that 'required' depends on.
