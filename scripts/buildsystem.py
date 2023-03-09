@@ -77,7 +77,7 @@ class BuildSystem:
 
         _dpkg_configure_cmd = f'sudo dpkg --root={_chroot}  --instdir={_chroot} ' \
                               f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --configure --pending'
-
+        print(_dpkg_install_cmd)
         _dpkg_install_cmd = shlex.split(_dpkg_install_cmd)
 
         # First install required
@@ -103,6 +103,8 @@ class BuildSystem:
             assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
             _file_list.append(os.path.join(self.__dir_repo, _file))
 
+        print(_file_list)
+        exit(0)
         # Check if it has been built
         progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
         progress_bar = tqdm(desc=f'', ncols=80, total=len(_deb_list), bar_format=progress_format)
