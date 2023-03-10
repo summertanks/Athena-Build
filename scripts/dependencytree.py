@@ -125,6 +125,20 @@ class DependencyTree:
         # list packages to get dependencies for
         _depends = _selected_pkg.depends
 
+        # Slightly more tricky how to handle alt_depends
+        _alt_depends = _selected_pkg.alt_depends
+        for _alt in _alt_depends:
+            # Check if one of them already in out selected list
+            _selected_alt_pkg = [_pkg for _pkg in _alt if _pkg[0] in self.selected_pkgs]
+            if len(_selected_alt_pkg) > 0:
+                # if one or more select first - arbitrary decision
+                _depends += {_selected_alt_pkg[0]}
+                # on to the next
+                continue
+            else:
+                # Again arbitrary decision picking the first but documentation supports the idea
+                _depends += {_alt[0]}
+
         # check if we should include recommended packages
         if self.__recommended:
             _depends += _selected_pkg.recommends
