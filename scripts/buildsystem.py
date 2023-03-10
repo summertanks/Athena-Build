@@ -109,14 +109,14 @@ class BuildSystem:
                     _cmd = _dpkg_install_cmd
                     _cmd.extend(_file_list)
                     _proc = subprocess.run(_dpkg_install_cmd, input=self.__password, capture_output=True, text=True)
-                    fh.write(_proc.stderr)
+                    fh.write(_proc.stdout)
                     fh.flush()
 
                     # run configure
                     _cmd = _dpkg_configure_cmd
                     _cmd.extend(_set)
                     _proc = subprocess.run(_dpkg_configure_cmd, input=self.__password, capture_output=True, text=True)
-                    fh.write(_proc.stderr)
+                    fh.write(_proc.stdout)
                     fh.flush()
 
         except (FileNotFoundError, PermissionError) as e:
