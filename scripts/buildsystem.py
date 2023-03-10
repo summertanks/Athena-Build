@@ -72,11 +72,11 @@ class BuildSystem:
         # --admindir=/home/harkirat/PycharmProjects/Athena-Build/buildroot/var/lib/dpkg
         # --force-script-chrootless --no-triggers -D1 --unpack repo/diffutils_3.7-5_amd64.deb
         # Setting up basic command structure
-        _dpkg_install_cmd = f'sudo -S dpkg --root={_chroot} --instdir={_chroot} ' \
-                            f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless -D1 --no-triggers --unpack '
+        _dpkg_install_cmd = f'sudo -S dpkg --root={_chroot} --instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
+                            f'--force-script-chrootless --no-triggers --unpack'
 
-        _dpkg_configure_cmd = f'sudo dpkg --root={_chroot}  --instdir={_chroot} ' \
-                              f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --configure --no-triggers'
+        _dpkg_configure_cmd = f'sudo -S dpkg --root={_chroot} --instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
+                              f'--force-script-chrootless --force-confdef --force-confnew --configure --no-triggers'
 
         # making them suitable for sysprocess.run
         _dpkg_install_cmd = shlex.split(_dpkg_install_cmd)
@@ -88,6 +88,7 @@ class BuildSystem:
 
         # Lets setup default installation list, also the known circular dependency
         libc_list = ['gcc-10-base', 'libc6', 'libgcc-s1', 'libcrypt1']
+        installed_list = []
         installation_sequence = [libc_list] + self.get_install_sequence(_pkg_list, libc_list)
 
         # Get file list
@@ -106,18 +107,23 @@ class BuildSystem:
                         _file_list.append(os.path.join(self.__dir_repo, _file))
 
                     # run unpack
-                    _cmd = _dpkg_install_cmd
-                    _cmd.extend(_file_list)
-                    _proc = subprocess.run(_dpkg_install_cmd, input=self.__password, capture_output=True, text=True)
+                    _cmd = _dpkg_install_cmd + _file_list
+                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True)
                     fh.write(_proc.stdout)
-                    fh.flush()
+                    if _proc.stderr != "":
+                        Print(f'Error: Failed unpacking set - {_set} : {_proc.stderr}')
+                        # return False
 
                     # run configure
-                    _cmd = _dpkg_configure_cmd
-                    _cmd.extend(_set)
-                    _proc = subprocess.run(_dpkg_configure_cmd, input=self.__password, capture_output=True, text=True)
+                    _cmd = _dpkg_configure_cmd + _set
+                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True)
                     fh.write(_proc.stdout)
-                    fh.flush()
+                    if _proc.stderr != "":
+                        Print(f'Error: Failed configuring set - {_set} : {_proc.stderr}')
+                        # return False
+
+                    # update install list
+                    installed_list += _set
 
         except (FileNotFoundError, PermissionError) as e:
             Print(f"Error: {e}")
