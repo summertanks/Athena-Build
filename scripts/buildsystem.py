@@ -30,7 +30,7 @@ class BuildSystem:
                   f" may end up with corrupted system. Delete manually if not certain")
 
         # Need Password
-        Print("This needs to run as superuser, current user needs to be un sudoers file")
+        Print("This needs to run as superuser, current user needs to be in sudoers group")
         self.__password = Prompt.ask("Please enter password", password=True)
         _proc = subprocess.run(['sudo', '-v'], input=self.__password, capture_output=True, text=True)
         assert _proc.returncode == 0, f"ERROR: Incorrect password or user not in sudoers file, {_proc.stdout}"
@@ -76,49 +76,108 @@ class BuildSystem:
                             f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless -D1 --no-triggers --unpack '
 
         _dpkg_configure_cmd = f'sudo dpkg --root={_chroot}  --instdir={_chroot} ' \
-                              f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --configure --pending'
-        print(_dpkg_install_cmd)
+                              f'--admindir={_chroot}/var/lib/dpkg --force-script-chrootless --configure --no-triggers'
+
+        # making them suitable for sysprocess.run
         _dpkg_install_cmd = shlex.split(_dpkg_install_cmd)
+        _dpkg_configure_cmd = shlex.split(_dpkg_configure_cmd)
 
         # First install required
         _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
                      if self.__dependencytree.selected_pkgs[_pkg].required]
 
+        # Lets setup default installation list, also the known circular dependency
+        libc_list = ['gcc-10-base', 'libc6', 'libgcc-s1', 'libcrypt1']
+        installation_sequence = [libc_list] + self.get_install_sequence(_pkg_list, libc_list)
+
         # Get file list
-        _file_list = []
-        _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename']) for _pkg in _pkg_list]
-        for _file in _deb_list:
-            # stripping build revisions, because these do not reflect on source code builds
-            _name, _ext = os.path.splitext(_file)
-            _name = _name.split('_')
-            assert len(_name) == 3, f"Incorrectly formatted package name {_file}"
-            _pkg_name = _name[0]
-            _version = _name[1]
-            _arch = _name[2]
-
-            _version = re.sub(r"\+b\d+$", "", _version)
-            _file = _pkg_name + '_' + _version + '_' + _arch + _ext
-
-            _file_path = os.path.join(self.__dir_repo, _file)
-            assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
-            _file_list.append(os.path.join(self.__dir_repo, _file))
-
-        print(_file_list)
-        exit(0)
-        # Check if it has been built
-        progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
-        progress_bar = tqdm(desc=f'', ncols=80, total=len(_deb_list), bar_format=progress_format)
-
         try:
             with open(os.path.join(self.__dir_log, 'dpkg-deb.log'), 'w') as fh:
+                for _set in installation_sequence:
+                    _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename'])
+                                 for _pkg in _set]
 
-                # un-archiving package
-                _dpkg_install_cmd.extend(_file_list)
-                _proc = subprocess.run(_dpkg_install_cmd, input=self.__password, capture_output=True, text=True)
-                fh.write(_proc.stdout)
+                    _file_list = []
+                    for _file in _deb_list:
+                        # stripping build revisions, because these do not reflect on source code builds
+                        _file = self.strip_build_version(_file)
+                        _file_path = os.path.join(self.__dir_repo, _file)
+                        assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
+                        _file_list.append(os.path.join(self.__dir_repo, _file))
+
+                    # run unpack
+                    _cmd = _dpkg_install_cmd
+                    _cmd.extend(_file_list)
+                    _proc = subprocess.run(_dpkg_install_cmd, input=self.__password, capture_output=True, text=True)
+                    fh.write(_proc.stderr)
+                    fh.flush()
+
+                    # run configure
+                    _cmd = _dpkg_configure_cmd
+                    _cmd.extend(_set)
+                    _proc = subprocess.run(_dpkg_configure_cmd, input=self.__password, capture_output=True, text=True)
+                    fh.write(_proc.stderr)
+                    fh.flush()
 
         except (FileNotFoundError, PermissionError) as e:
             Print(f"Error: {e}")
             exit(1)
-        progress_bar.clear()
         return True
+
+    def get_install_sequence(self, selected_pkgs: [], installed_pkgs: []) -> []:
+        sequence = []
+        collection = []
+        # let's first build dependency tree for each package
+        for _pkg in selected_pkgs:
+            # build tree and add root node
+            tree = utils.Tree()
+            tree.add_node(_pkg)
+
+            # Add to collection
+            collection.append(tree)
+
+            # just add leaves
+            leaves = self.__dependencytree.selected_pkgs[_pkg].depends_on
+            for leaf in leaves:
+                tree.add_node(leaf, tree.root.value)
+
+        # first parse installed packages, remove those dependencies
+        for _pkg in installed_pkgs:
+            for _tree in collection:
+                if _tree.find_node(_pkg):
+                    _tree.delete_node(_pkg)
+
+        while True:
+            sub_sequence = []
+            pkg_list = [_tree.root.value for _tree in collection if _tree.is_childless and not _tree.is_empty]
+            # anything to process this iteration
+            if not len(pkg_list):
+                if len([_tree.root for _tree in collection if _tree.is_childless and not _tree.is_empty]):
+                    # Something was not addressed, maybe circular dependency?
+                    raise ValueError(f"Packages exist which dont have dependencies fulfilled {collection}")
+                # No packages left to process
+                break
+
+            for _pkg in pkg_list:
+                for _tree in collection:
+                    if _tree.find_node(_pkg):
+                        _tree.delete_node(_pkg)
+                sub_sequence.append(_pkg)
+
+            sequence.append(sub_sequence)
+
+        return sequence
+
+    @staticmethod
+    def strip_build_version(file: str) -> str:
+        # stripping build revisions, because these do not reflect on source code builds
+        _name, _ext = os.path.splitext(file)
+        _name = _name.split('_')
+        assert len(_name) == 3, f"Incorrectly formatted package name {file}"
+        _pkg_name = _name[0]
+        _version = _name[1]
+        _arch = _name[2]
+
+        _version = re.sub(r"\+b\d+$", "", _version)
+        file = _pkg_name + '_' + _version + '_' + _arch + _ext
+        return file
