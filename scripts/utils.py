@@ -225,3 +225,86 @@ def create_folders(folder_structure: str):
                 path = os.path.join(path, component)
     except Exception as e:
         Print(f"Failed to build folder structure {e}")
+
+
+class Node:
+    def __init__(self, value):
+        self.value = value
+        self.children = []
+
+    def add_child(self, child):
+        self.children.append(child)
+
+    def remove_child(self, child):
+        self.children.remove(child)
+
+
+class Tree:
+    def __init__(self):
+        self.root = None
+
+    def add_node(self, value, parent_value=None):
+        node = Node(value)
+        if parent_value is None:
+            if self.root is None:
+                self.root = node
+            else:
+                raise ValueError("Cannot add root node as it already exists")
+        else:
+            parent_node = self.find_node(parent_value)
+            if parent_node is None:
+                raise ValueError("Parent node does not exist")
+            parent_node.add_child(node)
+        return node
+
+    def delete_node(self, value):
+        node = self.find_node(value)
+        if node is None:
+            raise ValueError("Node does not exist")
+        parent = self.find_parent_node(value)
+        if parent is not None:
+            parent.remove_child(node)
+        else:
+            self.root = None
+
+    def find_node(self, value):
+        return self._find_node_helper(self.root, value)
+
+    def _find_node_helper(self, node, value):
+        if node is None:
+            return None
+        if node.value == value:
+            return node
+        for child in node.children:
+            result = self._find_node_helper(child, value)
+            if result is not None:
+                return result
+        return None
+
+    def find_parent_node(self, value):
+        return self._find_parent_node_helper(None, self.root, value)
+
+    def _find_parent_node_helper(self, parent, node, value):
+        if node is None:
+            return None
+        if node.value == value:
+            return parent
+        for child in node.children:
+            result = self._find_parent_node_helper(node, child, value)
+            if result is not None:
+                return result
+        return None
+
+    def size(self) -> int:
+        return len(self.root.children)
+
+    @property
+    def is_childless(self) -> bool:
+        if not self.root:
+            return True
+        return len(self.root.children) == 0
+
+    @property
+    def is_empty(self) -> bool:
+        return self.root is None
+
