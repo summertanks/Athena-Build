@@ -32,7 +32,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-echo -e "${IWhite}Athena Linux Build Check${Color_Off}"
+echo -e "Athena Linux Build System Check..."
 
 # Parsing args
 ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list,verbose' -- "$@") || exit

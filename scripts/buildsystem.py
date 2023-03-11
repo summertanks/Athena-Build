@@ -21,74 +21,67 @@ class BuildSystem:
         self.__dir_repo = dir_list.dir_repo
         self.__dir_log = dir_list.dir_log
 
+        # Sanity Check - Just making sure folders exist, typically created by utils.DirectoryListing
         for _dir in [self.__dir_chroot, self.__dir_image, self.__dir_repo]:
             assert os.path.exists(_dir), f"Missing essential folder {_dir}"
 
-        # Check if directory empty
+        # Check if directory empty, if there are files from previous install the results will vary significantly
         if len(os.listdir(self.__dir_chroot)) != 0:
             Print(f"WARNING: Chroot folder '{os.path.basename(self.__dir_chroot)}' not empty,"
                   f" may end up with corrupted system. Delete manually if not certain")
 
-        # Need Password
+        # Need Password for sudo,
         Print("This needs to run as superuser, current user needs to be in sudoers group")
         self.__password = Prompt.ask("Please enter password", password=True)
+        # Checking if password is valid
         _proc = subprocess.run(['sudo', '-v'], input=self.__password, capture_output=True, text=True)
         assert _proc.returncode == 0, f"ERROR: Incorrect password or user not in sudoers file, {_proc.stdout}"
 
-    def build_chroot(self) -> bool:
+        # Create Directory Structure
+        self.build_chroot_directories()
 
+        # Run pre-Install
+        self.pre_install()
+
+    def build_chroot(self) -> bool:
         _chroot = self.__dir_chroot
 
-        # setting up folder structure (mess the man(1..8)
-        # ref: https://www.linuxfromscratch.org/lfs/view/development/chapter07/creatingdirs.html
-        dir_structure = ['/{boot,home,mnt,opt,srv,sys,proc,dev}', '/etc/{opt,sysconfig}', '/lib/{firmware}',
-                         '/media/{floppy,cdrom}', '/usr/{local,include,src,share}',
-                         '/usr/local/{bin,lib,sbin,include,src,share}',
-                         '/usr/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
-                         '/usr/local/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
-                         '/var/{cache,local,log,mail,opt,spool}', '/var/lib/{color,misc,locate}']
+        # Setting environment variables, though may not be required
+        os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        os.environ['DPKG_ROOT'] = _chroot
 
-        for _dir in dir_structure:
-            utils.create_folders(self.__dir_chroot + _dir)
-
-        misc_structure = [f'sudo ln -sfv {self.__dir_chroot}/run {self.__dir_chroot}/var/run',
-                          f'sudo ln -sfv {self.__dir_chroot}/run/lock {self.__dir_chroot}/var/lock',
-                          f'sudo install -dv -m 0750 {self.__dir_chroot}/root',
-                          f'sudo install -dv -m 1777 {self.__dir_chroot}/tmp {self.__dir_chroot}/var/tmp']
-        for _cmd in misc_structure:
-            _proc = subprocess.run(shlex.split(_cmd), input=self.__password, capture_output=True, text=True)
-            assert _proc.returncode == 0, f"ERROR: Failed executing {_cmd}, {_proc.stdout}"
-
-        # Setting environment variables
-        env_vars = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "DPKG_ROOT": _chroot}
-
-        # sudo dpkg --root=/home/harkirat/PycharmProjects/Athena-Build/buildroot
-        # --instdir=/home/harkirat/PycharmProjects/Athena-Build/buildroot
-        # --admindir=/home/harkirat/PycharmProjects/Athena-Build/buildroot/var/lib/dpkg
-        # --force-script-chrootless -D1 --configure coreutils
-        #
-        # sudo dpkg --root=/home/harkirat/PycharmProjects/Athena-Build/buildroot
-        # --instdir=/home/harkirat/PycharmProjects/Athena-Build/buildroot
-        # --admindir=/home/harkirat/PycharmProjects/Athena-Build/buildroot/var/lib/dpkg
-        # --force-script-chrootless --no-triggers -D1 --unpack repo/diffutils_3.7-5_amd64.deb
-        # Setting up basic command structure
-        _dpkg_install_cmd = f'sudo -S dpkg --root={_chroot} --instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
+        # dpkg command to install package in chroot directory, something are required and something may not be,
+        # e.g. --root with --instdir & --admindir or --instdir with --force-script-chrootless
+        # TODO: verify for both unpack and configure the exact commands
+        _dpkg_unpack_cmd = f'sudo -S dpkg --root={_chroot} ' \
+                            f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
                             f'--force-script-chrootless --no-triggers --unpack'
 
-        _dpkg_configure_cmd = f'sudo -S dpkg --root={_chroot} --instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
+        # dpkg command to configure package in chroot directory.
+        _dpkg_configure_cmd = f'sudo -S dpkg --root={_chroot} ' \
+                              f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
                               f'--force-script-chrootless --force-confdef --force-confnew --configure --no-triggers'
 
         # making them suitable for sysprocess.run
-        _dpkg_install_cmd = shlex.split(_dpkg_install_cmd)
+        _dpkg_unpack_cmd = shlex.split(_dpkg_unpack_cmd)
         _dpkg_configure_cmd = shlex.split(_dpkg_configure_cmd)
 
-        # First install required
+        # First install required - it is the easiest (and most predictable) the handle
         _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
                      if self.__dependencytree.selected_pkgs[_pkg].required]
 
         # Lets setup default installation list, also the known circular dependency
         libc_list = ['gcc-10-base', 'libc6', 'libgcc-s1', 'libcrypt1']
         installed_list = []
+
+        # build installation sequence -
+        # since we are using dpkg and not apt, it is up to us to make sure that pre-requisites (Depends) and
+        # especially (Pre-Depends) are already unpacked. it gets more tricky since Pre-Depends need also to be
+        # configured before package is unpacked (and thus the distinction between 'Depends' and 'Pre-Depends')
+
+        # installation sequence is a list of lists, where each list is a block of independent packages
+        # which have prerequisites satisfied
+        # this will fail in circular dependencies. Hence, calling it with assumption libc_list is already installed
         installation_sequence = [libc_list] + self.get_install_sequence(_pkg_list, libc_list)
 
         # Get file list
@@ -107,18 +100,18 @@ class BuildSystem:
                         _file_list.append(os.path.join(self.__dir_repo, _file))
 
                     # run unpack
-                    _cmd = _dpkg_install_cmd + _file_list
-                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True)
+                    _cmd = _dpkg_unpack_cmd + _file_list
+                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
                     fh.write(_proc.stdout)
-                    if _proc.stderr != "":
+                    if _proc.returncode != 0:
                         Print(f'Error: Failed unpacking set - {_set} : {_proc.stderr}')
                         # return False
 
                     # run configure
                     _cmd = _dpkg_configure_cmd + _set
-                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True)
+                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
                     fh.write(_proc.stdout)
-                    if _proc.stderr != "":
+                    if _proc.returncode != 0:
                         Print(f'Error: Failed configuring set - {_set} : {_proc.stderr}')
                         # return False
 
@@ -174,6 +167,37 @@ class BuildSystem:
 
         return sequence
 
+    def build_chroot_directories(self):
+        """
+        Function creates the standard directory structure expected on GNU (Debian) Linux
+        ref: https://www.linuxfromscratch.org/lfs/view/development/chapter07/creatingdirs.html
+
+        Not all directories done though, less the man(1..8)
+
+        will raise 'assert' if there are failures
+        """
+
+        # TODO: build man(1..8)
+        dir_structure = ['/{boot,home,mnt,opt,srv,sys,proc,dev}', '/etc/{opt,sysconfig}', '/lib/{firmware}',
+                         '/media/{floppy,cdrom}', '/usr/{local,include,src,share}',
+                         '/usr/local/{bin,lib,sbin,include,src,share}',
+                         '/usr/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
+                         '/usr/local/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
+                         '/var/{cache,local,log,mail,opt,spool}', '/var/lib/{color,misc,locate}']
+
+        for _dir in dir_structure:
+            utils.create_folders(self.__dir_chroot + _dir)
+
+        misc_structure = [f'sudo ln -sfv {self.__dir_chroot}/run {self.__dir_chroot}/var/run',
+                          f'sudo ln -sfv {self.__dir_chroot}/run/lock {self.__dir_chroot}/var/lock',
+                          f'sudo install -dv -m 0750 {self.__dir_chroot}/root',
+                          f'sudo install -dv -m 1777 {self.__dir_chroot}/tmp {self.__dir_chroot}/var/tmp']
+
+        for _cmd in misc_structure:
+            _proc = subprocess.run(shlex.split(_cmd), input=self.__password, capture_output=True, text=True)
+            assert _proc.returncode == 0, f"ERROR: Failed executing {_cmd}, {_proc.stdout}"
+
+
     @staticmethod
     def strip_build_version(file: str) -> str:
         # stripping build revisions, because these do not reflect on source code builds
@@ -187,3 +211,6 @@ class BuildSystem:
         _version = re.sub(r"\+b\d+$", "", _version)
         file = _pkg_name + '_' + _version + '_' + _arch + _ext
         return file
+
+    def pre_install(self):
+        pass
