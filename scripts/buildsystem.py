@@ -44,6 +44,11 @@ class BuildSystem:
         self.pre_install()
 
     def build_chroot(self) -> bool:
+        """
+        This builds the chroot environment with the selected packages in dependency tree
+        Returns:
+        boot: True on success, False otherwise
+        """
         _chroot = self.__dir_chroot
 
         # Setting environment variables, though may not be required
@@ -54,15 +59,15 @@ class BuildSystem:
         # e.g. --root with --instdir & --admindir or --instdir with --force-script-chrootless
         # TODO: verify for both unpack and configure the exact commands
         _dpkg_unpack_cmd = f'sudo -S dpkg --root={_chroot} ' \
-                            f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
-                            f'--force-script-chrootless --no-triggers --unpack'
+                           f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
+                           f'--force-script-chrootless --no-triggers --unpack'
 
-        # dpkg command to configure package in chroot directory.
+        # dpkg command to configure package in chroot directory - this should not be interactive but that doesn't work
         _dpkg_configure_cmd = f'sudo -S dpkg --root={_chroot} ' \
                               f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
                               f'--force-script-chrootless --force-confdef --force-confnew --configure --no-triggers'
 
-        # making them suitable for sysprocess.run
+        # making them suitable for subprocess.run
         _dpkg_unpack_cmd = shlex.split(_dpkg_unpack_cmd)
         _dpkg_configure_cmd = shlex.split(_dpkg_configure_cmd)
 
@@ -87,7 +92,9 @@ class BuildSystem:
         # Get file list
         try:
             with open(os.path.join(self.__dir_log, 'dpkg-deb.log'), 'w') as fh:
+                # Iterate per installation set - each are internally independent and (Pre)Depends satisfied
                 for _set in installation_sequence:
+                    # Find all package filenames - these are specific to selected packages, cant be taken from source
                     _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename'])
                                  for _pkg in _set]
 
@@ -96,8 +103,12 @@ class BuildSystem:
                         # stripping build revisions, because these do not reflect on source code builds
                         _file = self.strip_build_version(_file)
                         _file_path = os.path.join(self.__dir_repo, _file)
+
+                        # confirm the source has been built and deb package is available in repo
                         assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
                         _file_list.append(os.path.join(self.__dir_repo, _file))
+
+                    fh.write(f'Installing package set {" ".join(_set)}\n')
 
                     # run unpack
                     _cmd = _dpkg_unpack_cmd + _file_list
@@ -105,6 +116,7 @@ class BuildSystem:
                     fh.write(_proc.stdout)
                     if _proc.returncode != 0:
                         Print(f'Error: Failed unpacking set - {_set} : {_proc.stderr}')
+                        fh.write(_proc.stderr)
                         # return False
 
                     # run configure
@@ -113,6 +125,7 @@ class BuildSystem:
                     fh.write(_proc.stdout)
                     if _proc.returncode != 0:
                         Print(f'Error: Failed configuring set - {_set} : {_proc.stderr}')
+                        fh.write(_proc.stderr)
                         # return False
 
                     # update install list
@@ -196,7 +209,6 @@ class BuildSystem:
         for _cmd in misc_structure:
             _proc = subprocess.run(shlex.split(_cmd), input=self.__password, capture_output=True, text=True)
             assert _proc.returncode == 0, f"ERROR: Failed executing {_cmd}, {_proc.stdout}"
-
 
     @staticmethod
     def strip_build_version(file: str) -> str:
