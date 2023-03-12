@@ -6,8 +6,6 @@ import subprocess
 import re
 from rich.prompt import Confirm, Prompt
 
-
-
 # Internal
 import dependencytree
 import utils
@@ -53,28 +51,6 @@ class BuildSystem:
         """
         _chroot = self.__dir_chroot
 
-        # Setting environment variables, though may not be required
-        os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-        os.environ['DPKG_ROOT'] = _chroot
-        os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
-        os.environ['DEBCONF_NONINTERACTIVE_SEEN'] = 'true'
-
-        # dpkg command to install package in chroot directory, something are required and something may not be,
-        # e.g. --root with --instdir & --admindir or --instdir with --force-script-chrootless
-        # TODO: verify for both unpack and configure the exact commands
-        _dpkg_unpack_cmd = f'sudo -S dpkg --root={_chroot} ' \
-                           f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
-                           f'--force-script-chrootless --no-triggers --unpack'
-
-        # dpkg command to configure package in chroot directory - this should not be interactive but that doesn't work
-        _dpkg_configure_cmd = f'sudo -S dpkg --root={_chroot} ' \
-                              f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
-                              f'--force-script-chrootless --force-confdef --force-confnew --configure --no-triggers'
-
-        # making them suitable for subprocess.run
-        _dpkg_unpack_cmd = shlex.split(_dpkg_unpack_cmd)
-        _dpkg_configure_cmd = shlex.split(_dpkg_configure_cmd)
-
         # First install 'required' - it is the easiest (and most predictable) the handle
         _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
                      if self.__dependencytree.selected_pkgs[_pkg].required]
@@ -93,84 +69,20 @@ class BuildSystem:
         # this will fail in circular dependencies. Hence, calling it with assumption libc_list is already installed
         installation_sequence = [libc_list] + self.get_install_sequence(_pkg_list, libc_list)
 
-        # Get file list
-        try:
-            with open(os.path.join(self.__dir_log, 'dpkg-deb.log'), 'w') as fh:
-                Print(f"Installing {len(_pkg_list)} 'required' packages in {len(installation_sequence)} iterations")
-                # Iterate per installation set - each are internally independent and (Pre)Depends satisfied
-                for _set in installation_sequence:
-                    # Find all package filenames - these are specific to selected packages, cant be taken from source
-                    _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename'])
-                                 for _pkg in _set]
+        Print(f"Installing {len(_pkg_list)} 'required' packages in {len(installation_sequence)} iterations")
+        installed_list += self.install_packages(installation_sequence, 'chroot-required.log')
 
-                    _file_list = []
-                    for _file in _deb_list:
-                        # stripping build revisions, because these do not reflect on source code builds
-                        _file = self.strip_build_version(_file)
-                        _file_path = os.path.join(self.__dir_repo, _file)
+        # Starting the remaining Installation, this required preparing of the chroot system
+        # selecting the not 'required' packages now
+        _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
+                     if not self.__dependencytree.selected_pkgs[_pkg].required]
+        # New installation sequence based on packages installed
+        installation_sequence = self.get_install_sequence(_pkg_list, installed_list)
 
-                        # confirm the source has been built and deb package is available in repo
-                        assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
-                        _file_list.append(os.path.join(self.__dir_repo, _file))
+        # Install
+        Print(f"Installing {len(_pkg_list)} 'other' packages in {len(installation_sequence)} iterations")
+        installed_list += self.install_packages(installation_sequence, 'chroot-others.log')
 
-                    fh.write(f'Installing package set {" ".join(_set)}\n')
-
-                    # run unpack
-                    _cmd = _dpkg_unpack_cmd + _file_list
-                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
-                    fh.write(_proc.stdout)
-                    if _proc.returncode != 0:
-                        Print(f'Error: Failed unpacking set - {_set} : {_proc.stderr}')
-                        fh.write(_proc.stderr)
-                        # return False
-
-                    # run configure
-                    _cmd = _dpkg_configure_cmd + _set
-                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
-                    fh.write(_proc.stdout)
-                    if _proc.returncode != 0:
-                        Print(f'Error: Failed configuring set - {_set} : {_proc.stderr}')
-                        fh.write(_proc.stderr)
-                        # return False
-
-                    # update install list
-                    installed_list += _set
-
-                # Starting the remaining Installation
-                # copy deb files to archive directory in chroot system and preparing the system to run apt
-                _archive_dir = os.path.join(self.__dir_chroot, 'var/cache/apt/archives/')
-                pathlib.Path(_archive_dir).mkdir(parents=True, exist_ok=True)
-
-                # selecting the not 'required' packages now
-                _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename'])
-                             for _pkg in self.__dependencytree.selected_pkgs
-                             if not self.__dependencytree.selected_pkgs[_pkg].required]
-
-                Print(f"Preparing to install remaining {len(_deb_list)} files")
-
-                Print(f"Copying files to destination folder...")
-                _file_list = []
-                for _file in _deb_list:
-                    # stripping build revisions, because these do not reflect on source code builds
-                    _file = self.strip_build_version(_file)
-                    _file_path = os.path.join(self.__dir_repo, _file)
-
-                    # confirm the source has been built and deb package is available in repo
-                    assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
-                    _file_list.append(os.path.join(self.__dir_repo, _file))
-
-                # copy
-                _cmd = ['sudo', '-S', 'cp'] + _file_list + [_archive_dir]
-                _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
-                fh.write(_proc.stdout)
-                if _proc.returncode != 0:
-                    Print(f'Error: Failed copying file : {_proc.stderr}')
-                    fh.write(_proc.stderr)
-                    # return False
-
-        except (FileNotFoundError, PermissionError) as e:
-            Print(f"Error: {e}")
-            exit(1)
         return True
 
     def get_install_sequence(self, selected_pkgs: [], installed_pkgs: []) -> []:
@@ -260,6 +172,78 @@ class BuildSystem:
         _version = re.sub(r"\+b\d+$", "", _version)
         file = _pkg_name + '_' + _version + '_' + _arch + _ext
         return file
+
+    def install_packages(self, installation_sequence: [], log_file: str):
+        _chroot = self.__dir_chroot
+        installed_list = []
+
+        try:
+            with open(os.path.join(self.__dir_log, log_file), 'w') as fh:
+                # Setting environment variables, though may not be required
+                os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+                os.environ['DPKG_ROOT'] = _chroot
+                os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
+                os.environ['DEBCONF_NONINTERACTIVE_SEEN'] = 'true'
+
+                # dpkg command to install package in chroot directory, something are required and something may not be,
+                # e.g. --root with --instdir & --admindir or --instdir with --force-script-chrootless
+                # TODO: verify for both unpack and configure the exact commands
+                _dpkg_unpack_cmd = f'sudo -S dpkg --root={_chroot} ' \
+                                   f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
+                                   f'--force-script-chrootless --no-triggers --unpack'
+
+                # dpkg command to configure package in chroot directory - doesn't work
+                _dpkg_configure_cmd = f'sudo -S dpkg --root={_chroot} ' \
+                                      f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
+                                      f'--force-script-chrootless --force-confdef --force-confnew ' \
+                                      f'--configure --no-triggers'
+
+                # making them suitable for subprocess.run
+                _dpkg_unpack_cmd = shlex.split(_dpkg_unpack_cmd)
+                _dpkg_configure_cmd = shlex.split(_dpkg_configure_cmd)
+
+                # Iterate per installation set - each are internally independent and (Pre)Depends satisfied
+                for _set in installation_sequence:
+                    # Find all package filenames - these are specific to selected packages, cant be taken from source
+                    _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename'])
+                                 for _pkg in _set]
+
+                    _file_list = []
+                    for _file in _deb_list:
+                        # stripping build revisions, because these do not reflect on source code builds
+                        _file = self.strip_build_version(_file)
+                        _file_path = os.path.join(self.__dir_repo, _file)
+
+                        # confirm the source has been built and deb package is available in repo
+                        assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
+                        _file_list.append(os.path.join(self.__dir_repo, _file))
+
+                    fh.write(f'Installing package set {" ".join(_set)}\n')
+
+                    # run unpack
+                    _cmd = _dpkg_unpack_cmd + _file_list
+                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
+                    fh.write(_proc.stdout)
+                    if _proc.returncode != 0:
+                        Print(f'Error: Failed unpacking set - {_set} : {_proc.stderr}')
+                        fh.write(_proc.stderr)
+
+                    # run configure
+                    _cmd = _dpkg_configure_cmd + _set
+                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
+                    fh.write(_proc.stdout)
+                    if _proc.returncode != 0:
+                        Print(f'Error: Failed configuring set - {_set} : {_proc.stderr}')
+                        fh.write(_proc.stderr)
+
+                    # update install list
+                    installed_list += _set
+
+        except (FileNotFoundError, PermissionError) as e:
+            Print(f"Error: {e}")
+            exit(1)
+
+        return installed_list
 
     def pre_install(self):
         pass
