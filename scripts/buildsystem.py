@@ -81,7 +81,7 @@ class BuildSystem:
 
         # Install
         Print(f"Installing {len(_pkg_list)} 'other' packages in {len(installation_sequence)} iterations")
-        installed_list += self.install_packages(installation_sequence, 'chroot-others.log')
+        # installed_list += self.install_packages(installation_sequence, 'chroot-others.log')
 
         return True
 
