@@ -1,10 +1,12 @@
 # External
 import os
+import pathlib
 import shlex
 import subprocess
 import re
-from tqdm import tqdm
 from rich.prompt import Confirm, Prompt
+
+
 
 # Internal
 import dependencytree
@@ -54,6 +56,8 @@ class BuildSystem:
         # Setting environment variables, though may not be required
         os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
         os.environ['DPKG_ROOT'] = _chroot
+        os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
+        os.environ['DEBCONF_NONINTERACTIVE_SEEN'] = 'true'
 
         # dpkg command to install package in chroot directory, something are required and something may not be,
         # e.g. --root with --instdir & --admindir or --instdir with --force-script-chrootless
@@ -71,7 +75,7 @@ class BuildSystem:
         _dpkg_unpack_cmd = shlex.split(_dpkg_unpack_cmd)
         _dpkg_configure_cmd = shlex.split(_dpkg_configure_cmd)
 
-        # First install required - it is the easiest (and most predictable) the handle
+        # First install 'required' - it is the easiest (and most predictable) the handle
         _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
                      if self.__dependencytree.selected_pkgs[_pkg].required]
 
@@ -92,6 +96,7 @@ class BuildSystem:
         # Get file list
         try:
             with open(os.path.join(self.__dir_log, 'dpkg-deb.log'), 'w') as fh:
+                Print(f"Installing {len(_pkg_list)} 'required' packages in {len(installation_sequence)} iterations")
                 # Iterate per installation set - each are internally independent and (Pre)Depends satisfied
                 for _set in installation_sequence:
                     # Find all package filenames - these are specific to selected packages, cant be taken from source
@@ -130,6 +135,38 @@ class BuildSystem:
 
                     # update install list
                     installed_list += _set
+
+                # Starting the remaining Installation
+                # copy deb files to archive directory in chroot system and preparing the system to run apt
+                _archive_dir = os.path.join(self.__dir_chroot, 'var/cache/apt/archives/')
+                pathlib.Path(_archive_dir).mkdir(parents=True, exist_ok=True)
+
+                # selecting the not 'required' packages now
+                _deb_list = [os.path.basename(self.__dependencytree.selected_pkgs[_pkg]['Filename'])
+                             for _pkg in self.__dependencytree.selected_pkgs
+                             if not self.__dependencytree.selected_pkgs[_pkg].required]
+
+                Print(f"Preparing to install remaining {len(_deb_list)} files")
+
+                Print(f"Copying files to destination folder...")
+                _file_list = []
+                for _file in _deb_list:
+                    # stripping build revisions, because these do not reflect on source code builds
+                    _file = self.strip_build_version(_file)
+                    _file_path = os.path.join(self.__dir_repo, _file)
+
+                    # confirm the source has been built and deb package is available in repo
+                    assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
+                    _file_list.append(os.path.join(self.__dir_repo, _file))
+
+                # copy
+                _cmd = ['sudo', '-S', 'cp'] + _file_list + [_archive_dir]
+                _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
+                fh.write(_proc.stdout)
+                if _proc.returncode != 0:
+                    Print(f'Error: Failed copying file : {_proc.stderr}')
+                    fh.write(_proc.stderr)
+                    # return False
 
         except (FileNotFoundError, PermissionError) as e:
             Print(f"Error: {e}")
