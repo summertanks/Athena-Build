@@ -25,6 +25,12 @@ class DirectoryListing:
             self.dir_patch = os.path.join(self.cwd, config_parser.get('Directories', 'Patch'))
             self.dir_image = os.path.join(self.cwd, config_parser.get('Directories', 'Image'))
             self.dir_chroot = os.path.join(self.cwd, config_parser.get('Directories', 'Chroot'))
+
+            self.dir_patch_source = os.path.join(self.dir_patch, 'source')
+            self.dir_patch_preinstall = os.path.join(self.dir_patch, 'pre-install')
+            self.dir_patch_postinstall = os.path.join(self.dir_patch, 'post-install')
+            self.dir_patch_empty = os.path.join(self.dir_patch, 'empty')
+
         except configparser.Error as e:
             Print(f"Athena Linux: Config Parser Error: {e}")
             exit(1)
@@ -33,13 +39,19 @@ class DirectoryListing:
             os.access(self.cwd, os.W_OK)
             pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
+
             pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_repo).mkdir(parents=True, exist_ok=True)
+
             pathlib.Path(self.dir_patch).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(os.path.join(self.dir_patch, 'empty')).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_patch_empty).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_patch_source).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_patch_preinstall).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_patch_postinstall).mkdir(parents=True, exist_ok=True)
+
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
 

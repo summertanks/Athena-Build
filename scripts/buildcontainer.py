@@ -19,7 +19,10 @@ class BuildContainer:
         self.repo_path = dir_list.dir_repo
         self.buildlog_path = os.path.join(dir_list.dir_log, 'build')
         self.conf_path = dir_list.dir_config
-        self.patch_path = dir_list.dir_patch
+
+        # specific for source patch directory
+        self.patch_path = dir_list.dir_patch_source
+        self.patch_empty = dir_list.dir_patch_empty
 
         if docker_server is not None:
             try:
@@ -104,7 +107,7 @@ class BuildContainer:
         try:
             src_patch_path = os.path.join(self.patch_path, src_pkg.package, src_pkg.version)
             if not os.path.exists(src_patch_path):
-                src_patch_path = os.path.join(self.patch_path, 'empty')
+                src_patch_path = self.patch_empty
 
             container = self.client.containers.run("athenalinux:build", command=f"/bin/bash -c '{cmd_str}'",
                                                    detach=True, auto_remove=False,
