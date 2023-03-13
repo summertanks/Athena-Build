@@ -20,6 +20,8 @@ class BuildSystem:
         self.__dir_chroot = dir_list.dir_chroot
         self.__dir_repo = dir_list.dir_repo
         self.__dir_log = dir_list.dir_log
+        self.__dir_preinstall_patch = dir_list.dir_patch_preinstall
+        self.__dir_postinstall_patch = dir_list.dir_patch_postinstall
 
         # Sanity Check - Just making sure folders exist, typically created by utils.DirectoryListing
         for _dir in [self.__dir_chroot, self.__dir_image, self.__dir_repo]:
@@ -246,4 +248,28 @@ class BuildSystem:
         return installed_list
 
     def pre_install(self):
-        pass
+        for root, dirs, files in os.walk(self.__dir_preinstall_patch):
+
+            if len(files) == 0:
+                continue
+
+            # reached the list of files, here on three steps will be taken
+            # use relative path and create if not existing in chroot dir
+            chroot_relative_dir = root.replace(self.__dir_preinstall_patch, self.__dir_chroot)
+            pathlib.Path(chroot_relative_dir).mkdir(parents=True, exist_ok=True)
+
+            for _file in files:
+                _orig_file = os.path.join(root, _file)
+                if os.path.splitext(_file) != '.patch':
+                    # non patch files (any other extension) are copied into that folder
+                    _proc = subprocess.run(['sudo', '-S', 'cp', _orig_file, chroot_relative_dir],
+                                           input=self.__password, capture_output=True, text=True, env=os.environ)
+                    if _proc.returncode != 0:
+                        Print(f'Error: Failed copying file - {_file} : {_proc.stderr}')
+                else:
+                    # patch files (.patch extension) are applied to that folder
+                    # TODO: Test
+                    _proc = subprocess.run(['patch', '-p1', '<', _orig_file], cwd=chroot_relative_dir,
+                                           input=self.__password, capture_output=True, text=True, env=os.environ)
+                    if _proc.returncode != 0:
+                        Print(f'Error: Failed Patching file - {_file} : {_proc.stderr}')
