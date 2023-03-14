@@ -41,9 +41,10 @@ class Package(deb822.DEB822file):
         self.depends_on = []
         self.depended_by = []
 
-        # Not necessarily aligned to 'Priority' field,
-        # this will also be set for those packages that 'required' depends on.
-        self.required = False
+        # Not necessarily aligned to 'Priority' field, default set to 'Priority' field, may change later
+        # this will be set to the highest priority of those packages that depends on them.
+        # e.g. if 'required' package has a dependency, they will be 'required' too
+        self.priority = ''
 
         super().__init__(section)
 
@@ -59,6 +60,7 @@ class Package(deb822.DEB822file):
 
         self.package = self['Package']
         self.version = self['Version']
+        self.priority = self['Priority']
 
         # Setting default as Source name and version is same as package
         self.source = self.package

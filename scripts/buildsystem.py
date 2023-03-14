@@ -55,7 +55,7 @@ class BuildSystem:
 
         # First install 'required' - it is the easiest (and most predictable) the handle
         _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
-                     if self.__dependencytree.selected_pkgs[_pkg].required]
+                     if self.__dependencytree.selected_pkgs[_pkg].priority == 'required']
 
         # Lets setup default installation list, also the known circular dependency
         libc_list = ['gcc-10-base', 'libc6', 'libgcc-s1', 'libcrypt1']
@@ -75,15 +75,15 @@ class BuildSystem:
         installed_list += self.install_packages(installation_sequence, 'chroot-required.log')
 
         # Starting the remaining Installation, this required preparing of the chroot system
-        # selecting the not 'required' packages now
+        # selecting the not 'important' packages now
         _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
-                     if not self.__dependencytree.selected_pkgs[_pkg].required]
+                     if not self.__dependencytree.selected_pkgs[_pkg].priority == 'important']
         # New installation sequence based on packages installed
         installation_sequence = self.get_install_sequence(_pkg_list, installed_list)
 
         # Install
-        Print(f"Installing {len(_pkg_list)} 'other' packages in {len(installation_sequence)} iterations")
-        # installed_list += self.install_packages(installation_sequence, 'chroot-others.log')
+        Print(f"Installing {len(_pkg_list)} 'important' packages in {len(installation_sequence)} iterations")
+        # installed_list += self.install_packages(installation_sequence, 'chroot-important.log')
 
         return True
 
@@ -182,6 +182,7 @@ class BuildSystem:
         try:
             with open(os.path.join(self.__dir_log, log_file), 'w') as fh:
                 # Setting environment variables, though may not be required
+                # non-interactive not working for some reason, currently brute forcing by pre-placing the debconf config
                 os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
                 os.environ['DPKG_ROOT'] = _chroot
                 os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
@@ -273,3 +274,6 @@ class BuildSystem:
                                            input=self.__password, capture_output=True, text=True, env=os.environ)
                     if _proc.returncode != 0:
                         Print(f'Error: Failed Patching file - {_file} : {_proc.stderr}')
+
+    def generate_system_configs(self):
+        pass
