@@ -81,30 +81,45 @@ def main():
     Print("Building Cache...")
     build_cache = cache.Cache(base_distribution, dir_list.dir_cache)
 
-    # Special case - if gcc-10 already selected
+    # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
     gcc_versions = [pkg for pkg in build_cache.required if pkg.startswith('gcc-')]
     latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(num) for num in x.split('-')[1].split('.')))[-1:]
     latest_gcc = set(latest_gcc_versions)
     build_cache.required = [pkg for pkg in build_cache.required if not pkg.startswith('gcc-') or pkg in latest_gcc]
 
     Print(f"Required Package Count : {len(build_cache.required)}")
-
+    Print(f"Important Package Count : {len(build_cache.important)}")
     # -------------------------------------------------------------------------------------------------------------
     # Step II - Parse Dependencies
 
     Print("Preparing Parsing Tree...")
     dependency_tree = dependencytree.DependencyTree(build_cache, select_recommended=False, arch=base_distribution.arch)
 
-    Print("Parsing Dependencies for 'required'...")
     required_packages = build_cache.required
     dependency_tree.add_lookahead(required_packages)
     for pkg in required_packages:
         dependency_tree.parse_dependency(pkg)
-    Print(f"Dependencies Selected for 'required' : {len(dependency_tree.selected_pkgs)}")
+    __num_required = len(dependency_tree.selected_pkgs)
+    Print(f"Dependencies Selected for 'required' : {__num_required}")
 
     # Cheeky but works, ideally, parsing should have identified and marked required and their dependencies as required
     for _pkg in dependency_tree.selected_pkgs:
-        dependency_tree.selected_pkgs[_pkg].required = True
+        dependency_tree.selected_pkgs[_pkg].priority = 'required'
+
+    # Adding 'important' packages too, not really mandatory for a bare-bones system but too much manual intervention
+    # if these packages are not installed. if stable, we may look at a skimmed down manual list
+    important_packages = build_cache.important
+    # Option to manually add additional packages we think are important, e.g. dialog
+    important_packages.extend(['dialog'])
+    dependency_tree.add_lookahead(important_packages)
+    for pkg in important_packages:
+        dependency_tree.parse_dependency(pkg)
+    Print(f"Dependencies Selected for 'important' : {len(dependency_tree.selected_pkgs) - __num_required}")
+
+    # Similar to 'required', just that if it is not 'required' has to be important
+    for _pkg in dependency_tree.selected_pkgs:
+        if not dependency_tree.selected_pkgs[_pkg].priority == 'required':
+            dependency_tree.selected_pkgs[_pkg].priority = 'important'
 
     Print(f"Parsing {args.pkg_list}...")
     required_packages_list = utils.readfile(pkglist_path).split('\n')

@@ -65,6 +65,7 @@ class Cache:
         self.provides_hashtable = {}
         self.source_hashtable = {}
         self.required = []
+        self.important = []
 
         # Download files
         self.__get_files()
@@ -180,9 +181,14 @@ class Cache:
 
             # build the required(s) list
             # TODO: check for architecture too
-            if __pkg['Priority'] == 'required':
+            if __pkg.priority == 'required':
                 assert _package_name not in self.required, f"Multiple versions of required Package {_package_name}"
                 self.required.append(_package_name)
+
+            # Build the 'important' list
+            if __pkg.priority == 'important':
+                assert _package_name not in self.required, f"Multiple versions of important Package {_package_name}"
+                self.important.append(_package_name)
 
         progress_bar_src = tqdm(desc=f"{'Indexing Source File'}", ncols=80, total=len(self.__source_records),
                                 bar_format=progress_format)
