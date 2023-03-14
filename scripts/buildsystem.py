@@ -77,13 +77,13 @@ class BuildSystem:
         # Starting the remaining Installation, this required preparing of the chroot system
         # selecting the not 'important' packages now
         _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
-                     if not self.__dependencytree.selected_pkgs[_pkg].priority == 'important']
+                     if self.__dependencytree.selected_pkgs[_pkg].priority == 'important']
         # New installation sequence based on packages installed
         installation_sequence = self.get_install_sequence(_pkg_list, installed_list)
 
         # Install
         Print(f"Installing {len(_pkg_list)} 'important' packages in {len(installation_sequence)} iterations")
-        # installed_list += self.install_packages(installation_sequence, 'chroot-important.log')
+        installed_list += self.install_packages(installation_sequence, 'chroot-important.log')
 
         return True
 
@@ -151,15 +151,6 @@ class BuildSystem:
 
         for _dir in dir_structure:
             utils.create_folders(self.__dir_chroot + _dir)
-
-        misc_structure = [f'sudo ln -sfv {self.__dir_chroot}/run {self.__dir_chroot}/var/run',
-                          f'sudo ln -sfv {self.__dir_chroot}/run/lock {self.__dir_chroot}/var/lock',
-                          f'sudo install -dv -m 0750 {self.__dir_chroot}/root',
-                          f'sudo install -dv -m 1777 {self.__dir_chroot}/tmp {self.__dir_chroot}/var/tmp']
-
-        for _cmd in misc_structure:
-            _proc = subprocess.run(shlex.split(_cmd), input=self.__password, capture_output=True, text=True)
-            assert _proc.returncode == 0, f"ERROR: Failed executing {_cmd}, {_proc.stdout}"
 
     @staticmethod
     def strip_build_version(file: str) -> str:
@@ -249,6 +240,9 @@ class BuildSystem:
         return installed_list
 
     def pre_install(self):
+        # Two parts here - copy files and then run commands
+        # TODO: Let it load from file rather than hard coding it, risk of something malicious coming in though
+        # Parse files to copy
         for root, dirs, files in os.walk(self.__dir_preinstall_patch):
 
             if len(files) == 0:
@@ -262,6 +256,7 @@ class BuildSystem:
             for _file in files:
                 _orig_file = os.path.join(root, _file)
                 if os.path.splitext(_file) != '.patch':
+                    # this won't give right permissions, not all cases will package correct permissions
                     # non patch files (any other extension) are copied into that folder
                     _proc = subprocess.run(['sudo', '-S', 'cp', _orig_file, chroot_relative_dir],
                                            input=self.__password, capture_output=True, text=True, env=os.environ)
@@ -274,6 +269,21 @@ class BuildSystem:
                                            input=self.__password, capture_output=True, text=True, env=os.environ)
                     if _proc.returncode != 0:
                         Print(f'Error: Failed Patching file - {_file} : {_proc.stderr}')
+
+        # Parse commands to execute, since nothing else has been till now, it is usually used to set right permission
+        cmd_list = [f'sudo ln -sfv {self.__dir_chroot}/run {self.__dir_chroot}/var/run',
+                    f'sudo ln -sfv {self.__dir_chroot}/run/lock {self.__dir_chroot}/var/lock',
+                    f'sudo install -dv -m 0750 {self.__dir_chroot}/root',
+                    f'sudo install -dv -m 1777 {self.__dir_chroot}/tmp {self.__dir_chroot}/var/tmp',
+                    f'sudo chgrp -v utmp {self.__dir_chroot}/var/log/lastlog',
+                    f'sudo chmod -v 664 {self.__dir_chroot}/var/log/lastlog',
+                    f'sudo chmod -v 600 {self.__dir_chroot}/var/log/btmp',
+                    f'sudo chmod -R 755 {self.__dir_chroot}/etc/'
+                    ]
+
+        for _cmd in cmd_list:
+            _proc = subprocess.run(shlex.split(_cmd), input=self.__password, capture_output=True, text=True)
+            assert _proc.returncode == 0, f"ERROR: Failed executing {_cmd}, {_proc.stdout}"
 
     def generate_system_configs(self):
         pass
