@@ -69,7 +69,7 @@ cd package-version
 quilt new xxxx-description.patch
 quilt header -e --dep3 
 ...
-# make the changes
+# make the changes, use quilt edit file
 # the -e edits the header in $EDITOR
 ...
 quilt refresh xxxx-description.patch
