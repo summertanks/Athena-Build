@@ -140,6 +140,7 @@ class BuildSystem:
 
         will raise 'assert' if there are failures
         """
+        # TODO: This should be a built from a conf file which list folders, owners and their permissions
 
         # TODO: build man(1..8)
         dir_structure = ['/{boot,home,mnt,opt,srv,sys,proc,dev}', '/etc/{opt,sysconfig}', '/lib/{firmware}',
@@ -184,12 +185,12 @@ class BuildSystem:
                 # TODO: verify for both unpack and configure the exact commands
                 _dpkg_unpack_cmd = f'sudo -S dpkg --root={_chroot} ' \
                                    f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
-                                   f'--force-script-chrootless --no-triggers --unpack'
+                                   f'--force-script-chrootless -D1 --no-triggers --unpack'
 
                 # dpkg command to configure package in chroot directory - doesn't work
                 _dpkg_configure_cmd = f'sudo -S dpkg --root={_chroot} ' \
                                       f'--instdir={_chroot} --admindir={_chroot}/var/lib/dpkg ' \
-                                      f'--force-script-chrootless --force-confdef --force-confnew ' \
+                                      f'--force-script-chrootless -D1 --force-confdef --force-confnew ' \
                                       f'--configure --no-triggers'
 
                 # making them suitable for subprocess.run

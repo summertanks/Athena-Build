@@ -166,7 +166,7 @@ def main():
 
     # iterate over packages as see if we have any patches on our end
     for _pkg in dependency_tree.selected_srcs:
-        _patch_path = os.path.join(dir_list.dir_patch, _pkg)
+        _patch_path = os.path.join(dir_list.dir_patch_source, _pkg)
         _patch_path = os.path.join(_patch_path, dependency_tree.selected_srcs[_pkg].version)
         if os.path.exists(_patch_path):
             _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]

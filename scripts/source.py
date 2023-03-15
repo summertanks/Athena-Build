@@ -61,7 +61,6 @@ class Source(deb822.DEB822file):
         # Package-List may have additional information e.g. 'udeb' tag which is not there in package
         # Lets only select the package-files that the Package actually needs, the others produced are optional
 
-
     @property
     def download_size(self) -> int:
         _download_size = 0

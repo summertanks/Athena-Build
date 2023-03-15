@@ -1,0 +1,25 @@
+Description: Reverting change of Pre-Depends to Recommended
+ Original code for some reason changed the Pre-Depends debfonf to Recommended, this
+ is causing issues in installation. Reverting the change in overrides_dh_installdebconf 
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Reviewed-by: TBR
+Last-Update: 2023-03-15
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+Index: base-passwd-3.5.51/debian/rules
+===================================================================
+--- base-passwd-3.5.51.orig/debian/rules
++++ base-passwd-3.5.51/debian/rules
+@@ -7,12 +7,7 @@ export DEB_CFLAGS_MAINT_APPEND := -Wall
+ 
+ override_dh_installdebconf:
+ 	touch debian/base-passwd.substvars
+-	mv debian/base-passwd.substvars debian/base-passwd.substvars.real
+ 	dh_installdebconf
+-	sed 's/^misc:Depends=/misc:Recommends=/' \
+-		debian/base-passwd.substvars \
+-		>debian/base-passwd.substvars.real
+-	mv debian/base-passwd.substvars.real debian/base-passwd.substvars
+ 
+ override_dh_shlibdeps:
+ 	dh_shlibdeps -- -dPre-Depends
