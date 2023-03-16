@@ -13,6 +13,12 @@ class Tui:
         # collection of tabs
         self.__tabs = {}
 
+        # footer
+        self.__footer = None
+        self.__tab_name_str = ''
+        self.__selected_tab = ''
+        self.__tab_tooltip = "Use Alt + Tab to select Tabs, alternatively use Alt + Tab Number"
+
         # let's set up the curses default window
         self.stdscr = curses.initscr()
 
@@ -67,15 +73,21 @@ class Tui:
 
         self.__resizeTab__()
 
-        # creating basic tabs
-        self.__addTab__("footer", self.__footer_coordinates)
-        self.addTab("console")
-        self.addTab("log")
+        # creating footer, Cant create tab before that
+        self.__footer = curses.newwin(self.__footer_coordinates[0], self.__footer_coordinates[1],
+                                      self.__footer_coordinates[2], self.__footer_coordinates[3])
 
         # Validation
         assert self.__footer_height >= 3, 'TUI: Malformed Footer Size'
-        assert len([__tab for __tab in self.__tabs if __tab in ['footer', 'console', 'log']]) == 3,\
+        assert len([__tab for __tab in self.__tabs if __tab in ['footer', 'console', 'log']]) == 3, \
             'TUI: Mandatory tabs missing'
+        assert self.__footer is not None, "TUI: Footer not defined"
+
+        # creating basic tabs
+        self.addTab("console")
+        self.addTab("log")
+
+
 
         # share functions
         self.refresh = self.stdscr.refresh
@@ -90,9 +102,19 @@ class Tui:
                                      self.__resolution['y'] - self.__footer_height, 0)
 
     def __addTab__(self, name: str, coordinates: ()):
-
         if name is not '':
-            self.__tabs['name'] = curses.newwin(coordinates[0], coordinates[1], coordinates[2], coordinates[3])
+            self.__tab_name_str = ''
+            self.__tabs[name] = curses.newwin(coordinates[0], coordinates[1], coordinates[2], coordinates[3])
+            for __name in self.__tabs:
+                self.__tab_name_str += ' | ' + __name + ' | '
+
+            # trim
+            self.__tab_name_str = 'Tabs:' + self.__tab_name_str[:self.__resolution['x'] - len(self.__tab_tooltip) - 10]
+
+            # print tab list & tooltip
+            self.__footer.addstr( 1, 0, self.__tab_name_str)
+            self.__footer.addstr(1, self.__resolution['x'] - len(self.__tab_tooltip), self.__tab_tooltip)
+
 
     def addTab(self, name: str):
         self.__addTab__(name, self.__tab_coordinates)
