@@ -12,11 +12,11 @@ class Tui:
     def __init__(self):
         # collection of tabs
         self.__tabs = {}
+        self.__selected_tab = None
 
         # footer
         self.__footer = None
         self.__tab_name_str = ''
-        self.__selected_tab = ''
         self.__tab_tooltip = "Use Alt + Tab to select Tabs, alternatively use Alt + Tab Number"
 
         # let's set up the curses default window
@@ -115,9 +115,43 @@ class Tui:
             self.__footer.addstr( 1, 0, self.__tab_name_str)
             self.__footer.addstr(1, self.__resolution['x'] - len(self.__tab_tooltip), self.__tab_tooltip)
 
-
     def addTab(self, name: str):
         self.__addTab__(name, self.__tab_coordinates)
 
+    def enableTab(self, name):
+        # Set current Tab based on name, provided it is valid
+        if name in self.__tabs:
+            self.__selected_tab = self.__tabs[name]
+            self.__selected_tab.activate()
 
+    def render(self):
+        # main loop
+        while True:
+            # get input
+            c = self.__footer.getch()
+            if c != -1:
+                if c == ord('\t') and curses.KEY_ALTDOWN:
+                    # switch to next tab on Alt+Tab
+                    self.tabs[self.active_tab_index].deactivate()
+                    self.active_tab_index = (self.active_tab_index + 1) % len(self.tabs)
+                    self.tabs[self.active_tab_index].activate()
+                else:
+                    self.input_win.addch(chr(c))
+                    self.input_win.refresh()
+            else:
+                curses.napms(10)  # wait 10ms to avoid 100% CPU usage
 
+            # process input
+            cmd = self.input_win.instr(0, 2).strip()
+            if cmd:
+                if cmd == 'exit':
+                    break
+                else:
+                    # run command and display output in active tab
+                    output_win = self.tabs[self.active_tab_index].window
+                    output_win.addstr('> ' + cmd + '\n')
+                    output_win.addstr('output goes here\n')
+                    output_win.refresh()
+
+        # clean up
+        curses.endwin()
