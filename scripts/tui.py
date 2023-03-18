@@ -100,6 +100,7 @@ class Tui:
     def __refresh__(self):
         # print tab list & tooltip
         self.__footer.erase()
+        self.__footer.bkgd(curses.color_pair(self.COLOR_REVERSE))
         self.__footer.box()
         self.__footer.addstr(2, 2, self.__tab_name_str)
         self.__footer.addstr(2, self.__resolution['x'] - len(self.__tab_tooltip) - 2, self.__tab_tooltip)
