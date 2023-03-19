@@ -10,7 +10,7 @@ from curses import wrapper
 class Tui:
 
     def __init__(self):
-        # collection of tabs
+        # collection of tabs - tuple of name, window, buffer, cursor position
         self.__tabs = {}
         self.__tab_index = []
         self.__selected_tab = None
@@ -85,8 +85,8 @@ class Tui:
         assert self.__footer is not None, "TUI: Footer not defined"
 
         # creating basic tabs
-        self.addTab("console")
-        self.addTab("log")
+        self.addtab("console")
+        self.addtab("log")
 
         # refresh
         self.__refresh__()
@@ -141,12 +141,14 @@ class Tui:
 
         # END ncurses shutdown/de-initialization...
 
-
-    def addTab(self, name: str):
+    def addtab(self, name: str):
         if name != '':
             self.__tab_name_str = ''
-            self.__tabs[name] = curses.newwin(self.__tab_coordinates['h'], self.__tab_coordinates['w'],
-                                              self.__tab_coordinates['y'], self.__tab_coordinates['x'])
+            # Tab is a tuple of name, window, buffer, cursor position
+            self.__tabs[name] = {'win': curses.newwin(self.__tab_coordinates['h'], self.__tab_coordinates['w'],
+                                                      self.__tab_coordinates['y'], self.__tab_coordinates['x']),
+                                 'buffer': '', 'cursor': 0}
+
             self.__tab_index.append(self.__tabs[name])
 
             for __name in self.__tabs:
@@ -191,6 +193,7 @@ class Tui:
 
         # clean up
         self.__shutdown__()
+
 
 # Main function
 if __name__ == '__main__':
