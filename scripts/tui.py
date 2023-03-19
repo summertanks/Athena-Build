@@ -8,17 +8,17 @@ from curses import wrapper
 
 
 class Tui:
+    BOX_WIDTH = 1
 
     def __init__(self):
         # collection of tabs - tuple of name, window, buffer, cursor position
         self.__tabs = {}
-        self.__tab_index = []
-        self.__selected_tab = None
+
+        # this is just to make tab switching easier, reflects the same as __tabs
+        self.__tabindex = []
 
         # footer
         self.__footer = None
-        self.__tab_name_str = ''
-        self.__tab_tooltip = "Use Alt + Tab to select Tabs, alternatively use Alt + Tab Number"
 
         # Commands
         self.__cmd_current = ''
@@ -89,26 +89,61 @@ class Tui:
         self.addtab("log")
 
         # refresh
+        self.__activate__('console')
         self.__refresh__()
 
         # Validation
         assert len([__tab for __tab in self.__tabs if __tab in ['console', 'log']]) == 2, 'TUI: Mandatory tabs missing'
+        assert len([self.__tabs[tab] for tab in self.__tabs if self.__tabs[tab]['selected']]) == 1, \
+            'TUI: Tab not activated correctly'
 
-        self.__tabs['console'].addstr("Initialising TUI environment")
+        self.__log__('INFO', "Initialising TUI environment")
         pass
 
     def __refresh__(self):
+        __tab_tooltip = "Use Alt + Tab Number to select Tabs"
+        __tab_prefix = 'Tabs:'
+
         # print tab list & tooltip
         self.__footer.erase()
         self.__footer.bkgd(curses.color_pair(self.COLOR_REVERSE))
         self.__footer.box()
-        self.__footer.addstr(2, 2, self.__tab_name_str)
-        self.__footer.addstr(2, self.__resolution['x'] - len(self.__tab_tooltip) - 2, self.__tab_tooltip)
-        self.__footer.addstr(1, 1, '>' + self.__cmd_current)
+        self.__footer.addstr(2, self.__resolution['x'] - len(__tab_tooltip) - self.BOX_WIDTH, __tab_tooltip)
+        self.__footer.addstr(1, self.BOX_WIDTH, '>' + self.__cmd_current)
+
+        # we should have written till
+        self.__footer.addstr(2, self.BOX_WIDTH, __tab_prefix)
+        __index = self.BOX_WIDTH + len(__tab_prefix)
+
+        for tab in self.__tabs:
+            label = ' | ' + tab + ' | '
+            if self.__tabs[tab]['selected']:
+                self.__footer.addstr(2, __index, label, curses.A_REVERSE)
+            else:
+                self.__footer.addstr(2, __index, label)
+            __index += len(label)
+
         self.__footer.refresh()
 
-        for __tab in self.__tab_index:
-            __tab.refresh()
+        # printing the Active tab only
+        active_tab = [self.__tabs[tab] for tab in self.__tabs if self.__tabs[tab]['selected']]
+        assert len(active_tab) == 1, 'TUI: More than one tab active'
+        active_tab = active_tab[0]
+
+        buffer = active_tab['buffer']
+        window = active_tab['win']
+        window.erase()
+        for line in buffer:
+            window.addstr(line)
+        window.refresh()
+
+    def __activate__(self, name):
+        assert name in self.__tabs, 'TUI: Activating non available Tab'
+
+        for tab in self.__tabs:
+            self.__tabs[tab]['selected'] = False
+
+        self.__tabs[name]['selected'] = True
 
     def __resizeScreen__(self):
         # calculate layout (width, height, origin y, origin x) with origin on top left corner
@@ -119,7 +154,7 @@ class Tui:
         self.__refresh__()
 
     def __executecmd__(self, cmd):
-        self.__tabs['console'].addstr(cmd + '\n')
+        self.Print(cmd + '\n')
         pass
 
     def __shutdown__(self):
@@ -142,20 +177,17 @@ class Tui:
         # END ncurses shutdown/de-initialization...
 
     def addtab(self, name: str):
+        # Strip whitespaces
+        name = name.strip()
+
+        # Should not already exist
+        assert name not in self.__tabs, f'TUI: Attempted creating tab with name "{name}" which already exists'
+
         if name != '':
-            self.__tab_name_str = ''
-            # Tab is a tuple of name, window, buffer, cursor position
+            # Tab is a tuple of name, window, buffer, cursor position, and selected state
             self.__tabs[name] = {'win': curses.newwin(self.__tab_coordinates['h'], self.__tab_coordinates['w'],
                                                       self.__tab_coordinates['y'], self.__tab_coordinates['x']),
-                                 'buffer': '', 'cursor': 0}
-
-            self.__tab_index.append(self.__tabs[name])
-
-            for __name in self.__tabs:
-                self.__tab_name_str += ' | ' + __name + ' | '
-
-            # trim
-            self.__tab_name_str = 'Tabs:' + self.__tab_name_str[:self.__resolution['x'] - len(self.__tab_tooltip) - 10]
+                                 'buffer': [], 'cursor': 0, 'selected': True}
 
     def enableTab(self, name):
         # Set current Tab based on name, provided it is valid
@@ -193,6 +225,16 @@ class Tui:
 
         # clean up
         self.__shutdown__()
+
+    def __log__(self, severity, message):
+        logger = self.__tabs['log']
+        logger['buffer'].append(message)
+        self.__refresh__()
+
+    def Print(self, message):
+        console = self.__tabs['console']
+        console['buffer'].append(message)
+        self.__refresh__()
 
 
 # Main function
