@@ -5,7 +5,7 @@
 
 import curses
 from curses import wrapper
-
+from collections import OrderedDict
 
 class Tui:
     BOX_WIDTH = 1
@@ -47,6 +47,7 @@ class Tui:
         # Set color pairs
         # TODO: load from tui.conf else use defaults
         self.__bgColor = curses.COLOR_BLACK
+        self.__bgFooter = curses.COLOR_BLUE
         self.__fgColor = curses.COLOR_WHITE
         self.__warningColor = curses.COLOR_YELLOW
         self.__errorColor = curses.COLOR_RED
@@ -57,11 +58,13 @@ class Tui:
         self.COLOR_WARNING = 3
         self.COLOR_ERROR = 4
         self.COLOR_HIGHLIGHT = 5
+        self.COLOR_FOOTER = 6
         curses.init_pair(self.COLOR_NORMAL, self.__fgColor, self.__bgColor)
         curses.init_pair(self.COLOR_REVERSE, self.__bgColor, self.__fgColor)
         curses.init_pair(self.COLOR_WARNING, self.__warningColor, self.__bgColor)
         curses.init_pair(self.COLOR_ERROR, self.__errorColor, self.__bgColor)
         curses.init_pair(self.COLOR_HIGHLIGHT, self.__highlightColor, self.__bgColor)
+        curses.init_pair(self.COLOR_FOOTER, self.__fgColor, self.__bgFooter)
 
         # set minimum to 80x25 screen, if lesser better to print weird rather than bad calculations
         self.__resolution = {'x': max(curses.COLS, 80), 'y': max(curses.LINES, 25)}
@@ -101,7 +104,7 @@ class Tui:
         pass
 
     def __refresh__(self):
-        __tab_tooltip = "Use Alt + Tab Number to select Tabs"
+        __tab_tooltip = "Use Tab Number to rotate through Tabs"
         __tab_prefix = 'Tabs:'
 
         # print tab list & tooltip
@@ -144,6 +147,7 @@ class Tui:
             self.__tabs[tab]['selected'] = False
 
         self.__tabs[name]['selected'] = True
+        self.__refresh__()
 
     def __resizeScreen__(self):
         # calculate layout (width, height, origin y, origin x) with origin on top left corner
@@ -189,11 +193,22 @@ class Tui:
                                                       self.__tab_coordinates['y'], self.__tab_coordinates['x']),
                                  'buffer': [], 'cursor': 0, 'selected': True}
 
-    def enableTab(self, name):
+    def enabletab(self, name):
         # Set current Tab based on name, provided it is valid
         if name in self.__tabs:
-            self.__selected_tab = self.__tabs[name]
-            self.__selected_tab.activate()
+            self.__activate__(name)
+
+    def enable_next_tab(self):
+        # dict are not sorted, so there is no order.
+        active_tab = [tab for tab in self.__tabs if self.__tabs[tab]['selected']]
+        assert len(active_tab) == 1, 'TUI: More than one tab active'
+        tab_list = list(self.__tabs)
+        try:
+            next_tab = tab_list[tab_list.index(active_tab[0]) + 1]
+        except (ValueError, IndexError):
+            next_tab = tab_list[0]
+
+        self.__activate__(next_tab)
 
     def run(self):
         __quit = False
@@ -202,11 +217,9 @@ class Tui:
             # get input
             c = self.__footer.getch()
             if c != -1:
-                if c == ord('\t') and curses.KEY_ALTDOWN:
-                    # switch to next Tab on Alt+Tab
-                    self.__tab_index[self.__selected_tab].deactivate()
-                    self.__selected_tab = (self.__selected_tab + 1) % len(self.__tab_index)
-                    self.__tab_index[self.__selected_tab].activate()
+                if c == ord('\t'):
+                    # switch to next Tab on Alt
+                    self.enable_next_tab()
                 elif c == ord('\n'):
                     # Command has been completed
                     # Special Case
