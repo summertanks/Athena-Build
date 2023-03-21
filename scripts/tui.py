@@ -4,11 +4,15 @@
 #  This is free software, and you are welcome to redistribute it under certain conditions; see COPYING for details.
 
 import curses
-from curses import wrapper
-from collections import OrderedDict
+from curses.textpad import Textbox, rectangle
+
 
 class Tui:
     BOX_WIDTH = 1
+
+    SEVERITY_ERROR = 1
+    SEVERITY_WARNING = 2
+    SEVERITY_INFO = 3
 
     def __init__(self):
         # collection of tabs - tuple of name, window, buffer, cursor position
@@ -91,17 +95,16 @@ class Tui:
         self.addtab("console")
         self.addtab("log")
 
-        # refresh
+        # set the default tab
         self.__activate__('console')
-        self.__refresh__()
 
         # Validation
         assert len([__tab for __tab in self.__tabs if __tab in ['console', 'log']]) == 2, 'TUI: Mandatory tabs missing'
         assert len([self.__tabs[tab] for tab in self.__tabs if self.__tabs[tab]['selected']]) == 1, \
             'TUI: Tab not activated correctly'
 
-        self.__log__('INFO', "Initialising TUI environment")
-        pass
+        self.__log__(self.SEVERITY_INFO, "Initialising TUI environment")
+        self.__refresh__()
 
     def __refresh__(self):
         __tab_tooltip = "Use Tab Number to rotate through Tabs"
@@ -109,7 +112,7 @@ class Tui:
 
         # print tab list & tooltip
         self.__footer.erase()
-        self.__footer.bkgd(curses.color_pair(self.COLOR_REVERSE))
+        self.__footer.bkgd(curses.color_pair(self.COLOR_FOOTER))
         self.__footer.box()
         self.__footer.addstr(2, self.__resolution['x'] - len(__tab_tooltip) - self.BOX_WIDTH, __tab_tooltip)
         self.__footer.addstr(1, self.BOX_WIDTH, '>' + self.__cmd_current)
@@ -129,16 +132,21 @@ class Tui:
         self.__footer.refresh()
 
         # printing the Active tab only
-        active_tab = [self.__tabs[tab] for tab in self.__tabs if self.__tabs[tab]['selected']]
-        assert len(active_tab) == 1, 'TUI: More than one tab active'
-        active_tab = active_tab[0]
+        active_tab = self.__activetab__
 
         buffer = active_tab['buffer']
         window = active_tab['win']
         window.erase()
         for line in buffer:
-            window.addstr(line)
+            window.addstr(line[0], line[1])
         window.refresh()
+
+    @property
+    def __activetab__(self) -> {}:
+        active_tab = [self.__tabs[tab] for tab in self.__tabs if self.__tabs[tab]['selected']]
+        assert len(active_tab) == 1, 'TUI: Active State for tabs inconsistent'
+        active_tab = active_tab[0]
+        return active_tab
 
     def __activate__(self, name):
         assert name in self.__tabs, 'TUI: Activating non available Tab'
@@ -158,7 +166,7 @@ class Tui:
         self.__refresh__()
 
     def __executecmd__(self, cmd):
-        self.Print(cmd + '\n')
+        self.print(f'Executed command "{cmd}"\n')
         pass
 
     def __shutdown__(self):
@@ -192,6 +200,8 @@ class Tui:
             self.__tabs[name] = {'win': curses.newwin(self.__tab_coordinates['h'], self.__tab_coordinates['w'],
                                                       self.__tab_coordinates['y'], self.__tab_coordinates['x']),
                                  'buffer': [], 'cursor': 0, 'selected': True}
+            # #nabling Scrolling
+            self.__tabs[name]['win'].scrollok(True)
 
     def enabletab(self, name):
         # Set current Tab based on name, provided it is valid
@@ -215,23 +225,34 @@ class Tui:
         # main loop
         while not __quit:
             # get input
-            c = self.__footer.getch()
+            c = self.stdscr.getkey()
+            activetab = self.__activetab__['win']
             if c != -1:
-                if c == ord('\t'):
+                if c == 'KEY_UP':
+                    activetab.scroll(-1)
+                    self.__refresh__()
+                elif c == 'KEY_DOWN':
+                    activetab.scroll(1)
+                    self.__refresh__()
+                elif c == '\t':
                     # switch to next Tab on Alt
                     self.enable_next_tab()
-                elif c == ord('\n'):
+                    continue
+                elif c == '\n':
                     # Command has been completed
                     # Special Case
                     if self.__cmd_current.strip() in ['quit', 'exit', 'q']:
                         __quit = True
                         continue
-                    self.__executecmd__(self.__cmd_current)
+                    self.print(self.__cmd_current + '\n', curses.color_pair(self.COLOR_HIGHLIGHT))
                     self.__cmd_history.append(self.__cmd_current)
+                    self.__executecmd__(self.__cmd_current)
                     self.__cmd_current = ''
                     self.__refresh__()
+
+
                 else:
-                    self.__cmd_current += chr(c)
+                    self.__cmd_current += c
                     self.__refresh__()
             else:
                 curses.napms(10)  # wait 10ms to avoid 100% CPU usage
@@ -240,13 +261,26 @@ class Tui:
         self.__shutdown__()
 
     def __log__(self, severity, message):
+        assert(severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
+            f'TUI: Incorrect Severity {severity} defined'
+
+        attribute = curses.color_pair(self.COLOR_NORMAL)
+        if severity == self.SEVERITY_ERROR:
+            attribute = curses.color_pair(self.COLOR_ERROR)
+        elif severity == self.SEVERITY_WARNING:
+            attribute = curses.color_pair(self.COLOR_WARNING)
+
         logger = self.__tabs['log']
-        logger['buffer'].append(message)
+        logger['buffer'].append((message, attribute))
         self.__refresh__()
 
-    def Print(self, message):
+    def print(self, message, attribute=None):
+
+        if attribute is None:
+            attribute = curses.color_pair(self.COLOR_NORMAL)
         console = self.__tabs['console']
-        console['buffer'].append(message)
+
+        console['buffer'].append((message, attribute))
         self.__refresh__()
 
 
