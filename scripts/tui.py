@@ -27,6 +27,7 @@ class Tui:
         # Commands
         self.__cmd_current = ''
         self.__cmd_history = []
+        self.__registered_cmd = {}
 
         # let's set up the curses default window
         self.stdscr = curses.initscr()
@@ -105,6 +106,9 @@ class Tui:
 
         self.__log__(self.SEVERITY_INFO, "Initialising TUI environment")
         self.__refresh__()
+        self.stdscr.refresh()
+
+        self.register_command('clear', self.clear)
 
     def __refresh__(self):
         __tab_tooltip = "Use Tab Number to rotate through Tabs"
@@ -136,10 +140,14 @@ class Tui:
 
         buffer = active_tab['buffer']
         window = active_tab['win']
+        cursor = min(active_tab['cursor'], len(buffer))
+        # cursor = min(cursor)
         window.erase()
-        for line in buffer:
+        for i in range(cursor):
+            line = buffer[i]
             window.addstr(line[0], line[1])
         window.refresh()
+
 
     @property
     def __activetab__(self) -> {}:
@@ -166,7 +174,22 @@ class Tui:
         self.__refresh__()
 
     def __executecmd__(self, cmd):
-        self.print(f'Executed command "{cmd}"\n')
+        self.INFO(f'Executed command "{cmd}"\n')
+        cmd_parts = cmd.split()
+        if len(cmd_parts) > 0:
+            function_name = cmd_parts[0]
+            function_args  = cmd_parts[1:]
+            if function_name not in self.__registered_cmd:
+                self.ERROR(f'Command {function_name} not registered')
+                return
+
+            function = self.__registered_cmd[function_name]
+            try:
+                function(*function_args)
+            except:
+                self.ERROR(f"Error: {function_name} takes {function.__code__.co_argcount} "
+                           f"arguments but {len(function_args)} were given")
+
         pass
 
     def __shutdown__(self):
@@ -221,18 +244,21 @@ class Tui:
         self.__activate__(next_tab)
 
     def run(self):
+        self.__refresh__()
+
         __quit = False
         # main loop
         while not __quit:
             # get input
             c = self.stdscr.getkey()
-            activetab = self.__activetab__['win']
+            activetab = self.__activetab__
             if c != -1:
                 if c == 'KEY_UP':
-                    activetab.scroll(-1)
-                    self.__refresh__()
+                    if activetab['cursor'] > self.__tab_coordinates['h']:
+                        activetab['cursor'] -= 1
+                        self.__refresh__()
                 elif c == 'KEY_DOWN':
-                    activetab.scroll(1)
+                    activetab['cursor'] = min(len(activetab['buffer']), activetab['cursor'] + 1)
                     self.__refresh__()
                 elif c == '\t':
                     # switch to next Tab on Alt
@@ -240,16 +266,16 @@ class Tui:
                     continue
                 elif c == '\n':
                     # Command has been completed
-                    # Special Case
-                    if self.__cmd_current.strip() in ['quit', 'exit', 'q']:
-                        __quit = True
-                        continue
-                    self.print(self.__cmd_current + '\n', curses.color_pair(self.COLOR_HIGHLIGHT))
-                    self.__cmd_history.append(self.__cmd_current)
-                    self.__executecmd__(self.__cmd_current)
+                    if not self.__cmd_current.strip() == '':
+                        # Special Case
+                        if self.__cmd_current.strip() in ['quit', 'exit', 'q']:
+                            __quit = True
+                            continue
+                        self.print(self.__cmd_current + '\n', curses.color_pair(self.COLOR_HIGHLIGHT))
+                        self.__cmd_history.append(self.__cmd_current)
+                        self.__executecmd__(self.__cmd_current)
                     self.__cmd_current = ''
                     self.__refresh__()
-
 
                 else:
                     self.__cmd_current += c
@@ -272,7 +298,17 @@ class Tui:
 
         logger = self.__tabs['log']
         logger['buffer'].append((message, attribute))
+        logger['cursor'] = len(logger['buffer'])
         self.__refresh__()
+
+    def INFO(self, message):
+        self.__log__(self.SEVERITY_INFO, message)
+
+    def WARNING(self, message):
+        self.__log__(self.SEVERITY_WARNING, message)
+
+    def ERROR(self, message):
+        self.__log__(self.SEVERITY_ERROR, message)
 
     def print(self, message, attribute=None):
 
@@ -281,10 +317,33 @@ class Tui:
         console = self.__tabs['console']
 
         console['buffer'].append((message, attribute))
+        console['cursor'] = len(console['buffer'])
         self.__refresh__()
+
+    def clear(self, name):
+        if name == 'all':
+            for tab in self.__tabs:
+                self.__tabs[tab]['buffer'] = []
+                self.__tabs[tab]['cursor'] = 0
+        elif name in self.__tabs:
+            self.__tabs[name]['buffer'] = []
+            self.__tabs[name]['cursor'] = 0
+        else:
+            self.ERROR(f'Attempted to clear non-existent tab {name}')
+
+    def register_command(self, command_name: str, function):
+        if command_name.strip() == '':
+            self.ERROR('Registering Empty Command')
+            return
+        elif command_name in self.__registered_cmd:
+            self.INFO(f'Registering duplicate command {command_name}, Ignored')
+            return
+        else:
+            self.__registered_cmd[command_name] = function
 
 
 # Main function
 if __name__ == '__main__':
     tui = Tui()
+
     tui.run()
