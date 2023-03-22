@@ -174,21 +174,21 @@ class Tui:
         self.__refresh__()
 
     def __executecmd__(self, cmd):
-        self.INFO(f'Executed command "{cmd}"\n')
+        self.INFO(f'Executing "{cmd}"')
         cmd_parts = cmd.split()
         if len(cmd_parts) > 0:
             function_name = cmd_parts[0]
             function_args  = cmd_parts[1:]
             if function_name not in self.__registered_cmd:
-                self.ERROR(f'Command {function_name} not registered')
+                self.print(f'Command {function_name} not found')
                 return
 
-            function = self.__registered_cmd[function_name]
+            function = self.__registered_cmd[function_name][0]
             try:
                 function(*function_args)
-            except:
-                self.ERROR(f"Error: {function_name} takes {function.__code__.co_argcount} "
-                           f"arguments but {len(function_args)} were given")
+            except TypeError as e:
+                self.ERROR(f"Error: {e}")
+                self.print(f"Error: {e}")
 
         pass
 
@@ -271,7 +271,7 @@ class Tui:
                         if self.__cmd_current.strip() in ['quit', 'exit', 'q']:
                             __quit = True
                             continue
-                        self.print(self.__cmd_current + '\n', curses.color_pair(self.COLOR_HIGHLIGHT))
+                        self.print(self.__cmd_current, curses.color_pair(self.COLOR_HIGHLIGHT))
                         self.__cmd_history.append(self.__cmd_current)
                         self.__executecmd__(self.__cmd_current)
                     self.__cmd_current = ''
@@ -297,7 +297,7 @@ class Tui:
             attribute = curses.color_pair(self.COLOR_WARNING)
 
         logger = self.__tabs['log']
-        logger['buffer'].append((message, attribute))
+        logger['buffer'].append((message + '\n', attribute))
         logger['cursor'] = len(logger['buffer'])
         self.__refresh__()
 
@@ -316,7 +316,7 @@ class Tui:
             attribute = curses.color_pair(self.COLOR_NORMAL)
         console = self.__tabs['console']
 
-        console['buffer'].append((message, attribute))
+        console['buffer'].append((message + '\n', attribute))
         console['cursor'] = len(console['buffer'])
         self.__refresh__()
 
@@ -331,7 +331,7 @@ class Tui:
         else:
             self.ERROR(f'Attempted to clear non-existent tab {name}')
 
-    def register_command(self, command_name: str, function):
+    def register_command(self, command_name: str, function, tooltip = ''):
         if command_name.strip() == '':
             self.ERROR('Registering Empty Command')
             return
@@ -339,7 +339,7 @@ class Tui:
             self.INFO(f'Registering duplicate command {command_name}, Ignored')
             return
         else:
-            self.__registered_cmd[command_name] = function
+            self.__registered_cmd[command_name] = (function, tooltip)
 
 
 # Main function
