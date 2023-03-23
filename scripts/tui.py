@@ -4,7 +4,8 @@
 #  This is free software, and you are welcome to redistribute it under certain conditions; see COPYING for details.
 
 import curses
-from curses.textpad import Textbox, rectangle
+import psutil
+import dialog
 
 
 class Tui:
@@ -14,7 +15,23 @@ class Tui:
     SEVERITY_WARNING = 2
     SEVERITY_INFO = 3
 
-    def __init__(self):
+    COLOR_NORMAL = 1
+    COLOR_REVERSE = 2
+    COLOR_WARNING = 3
+    COLOR_ERROR = 4
+    COLOR_HIGHLIGHT = 5
+    COLOR_FOOTER = 6
+
+    bgColor = curses.COLOR_BLACK
+    bgFooter = curses.COLOR_BLUE
+    fgColor = curses.COLOR_WHITE
+    warningColor = curses.COLOR_YELLOW
+    errorColor = curses.COLOR_RED
+    highlightColor = curses.COLOR_GREEN
+
+    def __init__(self, banner: str):
+
+        self.__banner = banner
         # collection of tabs - tuple of name, window, buffer, cursor position
         self.__tabs = {}
 
@@ -49,27 +66,18 @@ class Tui:
         # currently only for default window
         self.stdscr.keypad(True)
 
+        self.__dialog = dialog.Dialog(dialog='dialog')
+        self.__dialog.add_persistent_args(["--stdout"])
+
         # Set color pairs
         # TODO: load from tui.conf else use defaults
-        self.__bgColor = curses.COLOR_BLACK
-        self.__bgFooter = curses.COLOR_BLUE
-        self.__fgColor = curses.COLOR_WHITE
-        self.__warningColor = curses.COLOR_YELLOW
-        self.__errorColor = curses.COLOR_RED
-        self.__highlightColor = curses.COLOR_GREEN
 
-        self.COLOR_NORMAL = 1
-        self.COLOR_REVERSE = 2
-        self.COLOR_WARNING = 3
-        self.COLOR_ERROR = 4
-        self.COLOR_HIGHLIGHT = 5
-        self.COLOR_FOOTER = 6
-        curses.init_pair(self.COLOR_NORMAL, self.__fgColor, self.__bgColor)
-        curses.init_pair(self.COLOR_REVERSE, self.__bgColor, self.__fgColor)
-        curses.init_pair(self.COLOR_WARNING, self.__warningColor, self.__bgColor)
-        curses.init_pair(self.COLOR_ERROR, self.__errorColor, self.__bgColor)
-        curses.init_pair(self.COLOR_HIGHLIGHT, self.__highlightColor, self.__bgColor)
-        curses.init_pair(self.COLOR_FOOTER, self.__fgColor, self.__bgFooter)
+        curses.init_pair(self.COLOR_NORMAL, self.fgColor, self.bgColor)
+        curses.init_pair(self.COLOR_REVERSE, self.bgColor, self.fgColor)
+        curses.init_pair(self.COLOR_WARNING, self.warningColor, self.bgColor)
+        curses.init_pair(self.COLOR_ERROR, self.errorColor, self.bgColor)
+        curses.init_pair(self.COLOR_HIGHLIGHT, self.highlightColor, self.bgColor)
+        curses.init_pair(self.COLOR_FOOTER, self.fgColor, self.bgFooter)
 
         # set minimum to 80x25 screen, if lesser better to print weird rather than bad calculations
         self.__resolution = {'x': max(curses.COLS, 80), 'y': max(curses.LINES, 25)}
@@ -106,35 +114,40 @@ class Tui:
 
         self.__log__(self.SEVERITY_INFO, "Initialising TUI environment")
         self.__refresh__()
+        self.stdscr.nodelay(True)
         self.stdscr.refresh()
 
         self.register_command('clear', self.clear)
 
-    def __refresh__(self):
-        __tab_tooltip = "Use Tab Number to rotate through Tabs"
-        __tab_prefix = 'Tabs:'
+    def __refreshfooter__(self):
+        tab_tooltip = "Use Tab Number to rotate through Tabs"
+        tab_prefix = 'Tabs:'
+        tab_psutil = self.__psutil__
 
         # print tab list & tooltip
         self.__footer.erase()
         self.__footer.bkgd(curses.color_pair(self.COLOR_FOOTER))
         self.__footer.box()
-        self.__footer.addstr(2, self.__resolution['x'] - len(__tab_tooltip) - self.BOX_WIDTH, __tab_tooltip)
-        self.__footer.addstr(1, self.BOX_WIDTH, '>' + self.__cmd_current)
+        self.__footer.addstr(2, self.__resolution['x'] - len(tab_tooltip) - self.BOX_WIDTH, tab_tooltip)
+        self.__footer.addstr(3, self.__resolution['x'] - len(tab_psutil) - self.BOX_WIDTH, tab_psutil, curses.A_BOLD)
+        self.__footer.addstr(1, self.BOX_WIDTH, '$ ' + self.__cmd_current)
+        self.__footer.addstr(3, self.BOX_WIDTH, self.__banner, curses.A_BOLD)
 
         # we should have written till
-        self.__footer.addstr(2, self.BOX_WIDTH, __tab_prefix)
-        __index = self.BOX_WIDTH + len(__tab_prefix)
+        self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
+        index = self.BOX_WIDTH + len(tab_prefix)
 
         for tab in self.__tabs:
             label = ' | ' + tab + ' | '
             if self.__tabs[tab]['selected']:
-                self.__footer.addstr(2, __index, label, curses.A_REVERSE)
+                self.__footer.addstr(2, index, label, curses.A_REVERSE)
             else:
-                self.__footer.addstr(2, __index, label)
-            __index += len(label)
+                self.__footer.addstr(2, index, label)
+            index += len(label)
 
         self.__footer.refresh()
 
+    def __refreshtab__(self):
         # printing the Active tab only
         active_tab = self.__activetab__
 
@@ -148,6 +161,10 @@ class Tui:
             window.addstr(line[0], line[1])
         window.refresh()
 
+    def __refresh__(self):
+        self.__refreshfooter__()
+        self.__refreshtab__()
+        self.stdscr.refresh()
 
     @property
     def __activetab__(self) -> {}:
@@ -155,6 +172,23 @@ class Tui:
         assert len(active_tab) == 1, 'TUI: Active State for tabs inconsistent'
         active_tab = active_tab[0]
         return active_tab
+
+    @property
+    def __psutil__(self) -> str:
+        # Get CPU usage as a percentage
+        cpu_percent = psutil.cpu_percent()
+
+        # Get memory usage statistics
+        mem = psutil.virtual_memory()
+        mem_percent = mem.percent
+
+        # Get disk usage statistics
+        disk = psutil.disk_usage('/')
+        disk_percent = disk.percent
+
+        # String for results
+        state = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
+        return state
 
     def __activate__(self, name):
         assert name in self.__tabs, 'TUI: Activating non available Tab'
@@ -178,7 +212,7 @@ class Tui:
         cmd_parts = cmd.split()
         if len(cmd_parts) > 0:
             function_name = cmd_parts[0]
-            function_args  = cmd_parts[1:]
+            function_args = cmd_parts[1:]
             if function_name not in self.__registered_cmd:
                 self.print(f'Command {function_name} not found')
                 return
@@ -191,6 +225,21 @@ class Tui:
                 self.print(f"Error: {e}")
 
         pass
+
+    def __log__(self, severity, message):
+        assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
+            f'TUI: Incorrect Severity {severity} defined'
+
+        attribute = curses.color_pair(self.COLOR_NORMAL)
+        if severity == self.SEVERITY_ERROR:
+            attribute = curses.color_pair(self.COLOR_ERROR)
+        elif severity == self.SEVERITY_WARNING:
+            attribute = curses.color_pair(self.COLOR_WARNING)
+
+        logger = self.__tabs['log']
+        logger['buffer'].append((message + '\n', attribute))
+        logger['cursor'] = len(logger['buffer'])
+        self.__refresh__()
 
     def __shutdown__(self):
         # BEGIN ncurses shutdown/de-initialization...
@@ -250,15 +299,22 @@ class Tui:
         # main loop
         while not __quit:
             # get input
-            c = self.stdscr.getkey()
+            try:
+                c = self.stdscr.getkey()
+            except curses.error:
+                c = None
+
             activetab = self.__activetab__
-            if c != -1:
+            if c is not None:
                 if c == 'KEY_UP':
                     if activetab['cursor'] > self.__tab_coordinates['h']:
                         activetab['cursor'] -= 1
                         self.__refresh__()
                 elif c == 'KEY_DOWN':
                     activetab['cursor'] = min(len(activetab['buffer']), activetab['cursor'] + 1)
+                    self.__refresh__()
+                elif c == 'KEY_BACKSPACE':
+                    self.__cmd_current = self.__cmd_current[:-1]
                     self.__refresh__()
                 elif c == '\t':
                     # switch to next Tab on Alt
@@ -269,37 +325,34 @@ class Tui:
                     if not self.__cmd_current.strip() == '':
                         # Special Case
                         if self.__cmd_current.strip() in ['quit', 'exit', 'q']:
-                            __quit = True
+                            original_settings = curses.curs_set(0)
+                            code = self.__dialog.yesno("Do you want to exit")
+                            curses.curs_set(original_settings)
+                            if code == 'ok':
+                                __quit = True
+                            else:
+                                self.__cmd_current = ''
+                                self.__refresh__()
                             continue
-                        self.print(self.__cmd_current, curses.color_pair(self.COLOR_HIGHLIGHT))
-                        self.__cmd_history.append(self.__cmd_current)
-                        self.__executecmd__(self.__cmd_current)
+                        else:
+                            self.print(self.__cmd_current, curses.color_pair(self.COLOR_HIGHLIGHT))
+                            self.__cmd_history.append(self.__cmd_current)
+                            self.__executecmd__(self.__cmd_current)
                     self.__cmd_current = ''
                     self.__refresh__()
 
+                # Simple hack - if it is longer than a char it is a special key string
+                elif len(c) > 1:
+                    continue
                 else:
                     self.__cmd_current += c
                     self.__refresh__()
             else:
                 curses.napms(10)  # wait 10ms to avoid 100% CPU usage
+                self.__refreshfooter__()
 
         # clean up
         self.__shutdown__()
-
-    def __log__(self, severity, message):
-        assert(severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
-            f'TUI: Incorrect Severity {severity} defined'
-
-        attribute = curses.color_pair(self.COLOR_NORMAL)
-        if severity == self.SEVERITY_ERROR:
-            attribute = curses.color_pair(self.COLOR_ERROR)
-        elif severity == self.SEVERITY_WARNING:
-            attribute = curses.color_pair(self.COLOR_WARNING)
-
-        logger = self.__tabs['log']
-        logger['buffer'].append((message + '\n', attribute))
-        logger['cursor'] = len(logger['buffer'])
-        self.__refresh__()
 
     def INFO(self, message):
         self.__log__(self.SEVERITY_INFO, message)
@@ -331,7 +384,7 @@ class Tui:
         else:
             self.ERROR(f'Attempted to clear non-existent tab {name}')
 
-    def register_command(self, command_name: str, function, tooltip = ''):
+    def register_command(self, command_name: str, function, tooltip=''):
         if command_name.strip() == '':
             self.ERROR('Registering Empty Command')
             return
@@ -342,8 +395,8 @@ class Tui:
             self.__registered_cmd[command_name] = (function, tooltip)
 
 
+
 # Main function
 if __name__ == '__main__':
-    tui = Tui()
-
+    tui = Tui("Athena Build Environment v0.1")
     tui.run()
