@@ -4,12 +4,38 @@
 #  This is free software, and you are welcome to redistribute it under certain conditions; see COPYING for details.
 
 import curses
+import signal
+
 import psutil
 import dialog
+import threading
+
+
+class Lockable:
+    def __init__(self, var_type):
+
+        self.__lock = threading.Lock()
+        self.__var = var_type()
+
+    @property
+    def value(self):
+        with self.__lock:
+            return self.__var
+
+    @value.setter
+    def value(self, var):
+        assert isinstance(self.__var, type(var)), 'Lockable object cannot be recast'
+        with self.__lock:
+            self.__var = var
 
 
 class Tui:
     BOX_WIDTH = 1
+
+    PROMPT_YESNO = 1
+    PROMPT_INPUT = 2
+    PROMPT_OPTIONS = 3
+    PROMPT_PASSWORD = 4
 
     SEVERITY_ERROR = 1
     SEVERITY_WARNING = 2
@@ -22,6 +48,11 @@ class Tui:
     COLOR_HIGHLIGHT = 5
     COLOR_FOOTER = 6
 
+    CMD_MODE_DISABLE = 1
+    CMD_MODE_NORMAL = 2
+    CMD_MODE_PROMPT = 3
+    CMD_MODE_PASSWORD = 4
+
     bgColor = curses.COLOR_BLACK
     bgFooter = curses.COLOR_BLUE
     fgColor = curses.COLOR_WHITE
@@ -32,6 +63,13 @@ class Tui:
     def __init__(self, banner: str):
 
         self.__banner = banner
+
+        # Enable Locks
+        self.__locks = {}
+
+        self.__psutil = Lockable(str)
+        threading.Thread(target=self.__res_util, daemon=True).start()
+
         # collection of tabs - tuple of name, window, buffer, cursor position
         self.__tabs = {}
 
@@ -45,29 +83,15 @@ class Tui:
         self.__cmd_current = ''
         self.__cmd_history = []
         self.__registered_cmd = {}
+        self.__cmd_mode = self.CMD_MODE_NORMAL
 
         # let's set up the curses default window
         self.stdscr = curses.initscr()
 
-        # disable echos
-        curses.noecho()
-
-        # Enter non-blocking or cbreak mode
-        curses.cbreak()
-
-        # Turn off blinking cursor
-        curses.curs_set(False)
-
-        # Enable color if we can
-        if curses.has_colors():
-            curses.start_color()
-
-        # Enable the keypad - also permits decoding of multibyte key sequences,
-        # currently only for default window
-        self.stdscr.keypad(True)
+        self.__setup__()
 
         self.__dialog = dialog.Dialog(dialog='dialog')
-        self.__dialog.add_persistent_args(["--stdout"])
+        self.__dialog.add_persistent_args(["--stdout", "--erase-on-exit"])
 
         # Set color pairs
         # TODO: load from tui.conf else use defaults
@@ -117,12 +141,15 @@ class Tui:
         self.stdscr.nodelay(True)
         self.stdscr.refresh()
 
+        # Register the signal handler for SIGINT (Ctrl+C)
+        signal.signal(signal.SIGINT, self.__shutdown__())
+
         self.register_command('clear', self.clear)
 
     def __refreshfooter__(self):
-        tab_tooltip = "Use Tab Number to rotate through Tabs"
+        tab_tooltip = "Use Tab to rotate through Tabs"
         tab_prefix = 'Tabs:'
-        tab_psutil = self.__psutil__
+        tab_psutil = self.__psutil.value
 
         # print tab list & tooltip
         self.__footer.erase()
@@ -173,22 +200,25 @@ class Tui:
         active_tab = active_tab[0]
         return active_tab
 
-    @property
-    def __psutil__(self) -> str:
-        # Get CPU usage as a percentage
-        cpu_percent = psutil.cpu_percent()
+    def __res_util(self):
+        while True:
+            if '__psutil' not in self.__locks:
+                self.__locks['__psutil'] = threading.Lock()
 
-        # Get memory usage statistics
-        mem = psutil.virtual_memory()
-        mem_percent = mem.percent
+            # Get CPU usage as a percentage
+            cpu_percent = psutil.cpu_percent(interval=2)
 
-        # Get disk usage statistics
-        disk = psutil.disk_usage('/')
-        disk_percent = disk.percent
+            # Get memory usage statistics
+            mem = psutil.virtual_memory()
+            mem_percent = mem.percent
 
-        # String for results
-        state = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
-        return state
+            # Get disk usage statistics
+            disk = psutil.disk_usage('/')
+            disk_percent = disk.percent
+
+            # String for results
+            # with self.__locks['__psutil']:
+            self.__psutil.value = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
 
     def __activate__(self, name):
         assert name in self.__tabs, 'TUI: Activating non available Tab'
@@ -221,7 +251,6 @@ class Tui:
             try:
                 function(*function_args)
             except TypeError as e:
-                self.ERROR(f"Error: {e}")
                 self.print(f"Error: {e}")
 
         pass
@@ -259,6 +288,27 @@ class Tui:
         curses.endwin()
 
         # END ncurses shutdown/de-initialization...
+
+    def __setup__(self):
+        # BEGIN ncurses startup/initialization...
+
+        # disable echos
+        curses.noecho()
+
+        # Enter non-blocking or cbreak mode
+        curses.cbreak()
+
+        # Turn off blinking cursor
+        curses.curs_set(False)
+
+        # Enable color if we can
+        if curses.has_colors():
+            curses.start_color()
+
+        # Enable the keypad - also permits decoding of multibyte key sequences,
+        self.stdscr.keypad(True)
+
+        # END ncurses startup/initialization...
 
     def addtab(self, name: str):
         # Strip whitespaces
@@ -320,30 +370,28 @@ class Tui:
                     # switch to next Tab on Alt
                     self.enable_next_tab()
                     continue
+
+                # Simple hack - if it is longer than a char it is a special key string
+                elif len(c) > 1:
+                    continue
+
+                # Newline recieved, based on data input mode the dispatch sequence is identified
                 elif c == '\n':
                     # Command has been completed
                     if not self.__cmd_current.strip() == '':
                         # Special Case
                         if self.__cmd_current.strip() in ['quit', 'exit', 'q']:
-                            original_settings = curses.curs_set(0)
-                            code = self.__dialog.yesno("Do you want to exit")
-                            curses.curs_set(original_settings)
-                            if code == 'ok':
-                                __quit = True
-                            else:
-                                self.__cmd_current = ''
-                                self.__refresh__()
+                            __quit = True
                             continue
                         else:
+                            self.__cmd_mode = self.CMD_MODE_DISABLE
                             self.print(self.__cmd_current, curses.color_pair(self.COLOR_HIGHLIGHT))
                             self.__cmd_history.append(self.__cmd_current)
                             self.__executecmd__(self.__cmd_current)
+                            self.__cmd_mode = self.CMD_MODE_NORMAL
                     self.__cmd_current = ''
                     self.__refresh__()
 
-                # Simple hack - if it is longer than a char it is a special key string
-                elif len(c) > 1:
-                    continue
                 else:
                     self.__cmd_current += c
                     self.__refresh__()
@@ -382,7 +430,7 @@ class Tui:
             self.__tabs[name]['buffer'] = []
             self.__tabs[name]['cursor'] = 0
         else:
-            self.ERROR(f'Attempted to clear non-existent tab {name}')
+            self.print(f'Attempted to clear non-existent tab {name}')
 
     def register_command(self, command_name: str, function, tooltip=''):
         if command_name.strip() == '':
@@ -394,6 +442,11 @@ class Tui:
         else:
             self.__registered_cmd[command_name] = (function, tooltip)
 
+    def prompt(self, prompt_type, message, options) -> str:
+        assert prompt_type in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT], \
+            f'TUI: Unknown prompt type given'
+
+        pass
 
 
 # Main function
