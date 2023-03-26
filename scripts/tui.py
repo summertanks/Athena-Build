@@ -7,13 +7,12 @@ import curses
 import signal
 
 import psutil
-import dialog
+import queue
 import threading
 
 
 class Lockable:
     def __init__(self, var_type):
-
         self.__lock = threading.Lock()
         self.__var = var_type()
 
@@ -60,23 +59,22 @@ class Tui:
     errorColor = curses.COLOR_RED
     highlightColor = curses.COLOR_GREEN
 
+    PROMPT = '$ '
+
     def __init__(self, banner: str):
 
-        self.__banner = banner
+        # Banner String, needs to be trimmed
+        banner_trim = 30
+        self.__banner = banner[:banner_trim]
 
-        # Enable Locks
-        self.__locks = {}
-
+        # Set up the for running the __res_util as a parallel thread
         self.__psutil = Lockable(str)
         threading.Thread(target=self.__res_util, daemon=True).start()
 
         # collection of tabs - tuple of name, window, buffer, cursor position
         self.__tabs = {}
 
-        # this is just to make tab switching easier, reflects the same as __tabs
-        self.__tabindex = []
-
-        # footer
+        # footer defined separately
         self.__footer = None
 
         # Commands
@@ -85,23 +83,13 @@ class Tui:
         self.__registered_cmd = {}
         self.__cmd_mode = self.CMD_MODE_NORMAL
 
+        # setting up dispatch queue for handling keystrokes
+        self.__dispatch_queue = queue.Queue
+
         # let's set up the curses default window
         self.stdscr = curses.initscr()
 
         self.__setup__()
-
-        self.__dialog = dialog.Dialog(dialog='dialog')
-        self.__dialog.add_persistent_args(["--stdout", "--erase-on-exit"])
-
-        # Set color pairs
-        # TODO: load from tui.conf else use defaults
-
-        curses.init_pair(self.COLOR_NORMAL, self.fgColor, self.bgColor)
-        curses.init_pair(self.COLOR_REVERSE, self.bgColor, self.fgColor)
-        curses.init_pair(self.COLOR_WARNING, self.warningColor, self.bgColor)
-        curses.init_pair(self.COLOR_ERROR, self.errorColor, self.bgColor)
-        curses.init_pair(self.COLOR_HIGHLIGHT, self.highlightColor, self.bgColor)
-        curses.init_pair(self.COLOR_FOOTER, self.fgColor, self.bgFooter)
 
         # set minimum to 80x25 screen, if lesser better to print weird rather than bad calculations
         self.__resolution = {'x': max(curses.COLS, 80), 'y': max(curses.LINES, 25)}
@@ -142,7 +130,7 @@ class Tui:
         self.stdscr.refresh()
 
         # Register the signal handler for SIGINT (Ctrl+C)
-        signal.signal(signal.SIGINT, self.__shutdown__())
+        signal.signal(signal.SIGINT, self.__shutdown__)
 
         self.register_command('clear', self.clear)
 
@@ -157,8 +145,21 @@ class Tui:
         self.__footer.box()
         self.__footer.addstr(2, self.__resolution['x'] - len(tab_tooltip) - self.BOX_WIDTH, tab_tooltip)
         self.__footer.addstr(3, self.__resolution['x'] - len(tab_psutil) - self.BOX_WIDTH, tab_psutil, curses.A_BOLD)
-        self.__footer.addstr(1, self.BOX_WIDTH, '$ ' + self.__cmd_current)
+
         self.__footer.addstr(3, self.BOX_WIDTH, self.__banner, curses.A_BOLD)
+
+        assert self.__cmd_mode in \
+               [self.CMD_MODE_PROMPT, self.CMD_MODE_NORMAL, self.CMD_MODE_DISABLE, self.CMD_MODE_PASSWORD], \
+            'TUI: Incorrect __current_mode defined'
+
+        if self.__cmd_mode == self.CMD_MODE_DISABLE:
+            self.__footer.addstr(1, self.BOX_WIDTH, '(Command under Progress)', curses.A_ITALIC)
+        elif self.__cmd_mode == self.CMD_MODE_NORMAL:
+            self.__footer.addstr(1, self.BOX_WIDTH, self.PROMPT + self.__cmd_current)
+        elif self.__cmd_mode == self.CMD_MODE_PROMPT:
+            pass
+        else:  # CMD_MODE_PASSWORD = 4
+            pass
 
         # we should have written till
         self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
@@ -181,14 +182,14 @@ class Tui:
         buffer = active_tab['buffer']
         window = active_tab['win']
         cursor = min(active_tab['cursor'], len(buffer))
-        # cursor = min(cursor)
         window.erase()
         for i in range(cursor):
             line = buffer[i]
             window.addstr(line[0], line[1])
         window.refresh()
 
-    def __refresh__(self):
+    def __refresh__(self, force=False):
+
         self.__refreshfooter__()
         self.__refreshtab__()
         self.stdscr.refresh()
@@ -202,9 +203,6 @@ class Tui:
 
     def __res_util(self):
         while True:
-            if '__psutil' not in self.__locks:
-                self.__locks['__psutil'] = threading.Lock()
-
             # Get CPU usage as a percentage
             cpu_percent = psutil.cpu_percent(interval=2)
 
@@ -217,7 +215,6 @@ class Tui:
             disk_percent = disk.percent
 
             # String for results
-            # with self.__locks['__psutil']:
             self.__psutil.value = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
 
     def __activate__(self, name):
@@ -308,7 +305,26 @@ class Tui:
         # Enable the keypad - also permits decoding of multibyte key sequences,
         self.stdscr.keypad(True)
 
+        # Set color pairs
+        # TODO: load from tui.conf else use defaults
+
+        curses.init_pair(self.COLOR_NORMAL, self.fgColor, self.bgColor)
+        curses.init_pair(self.COLOR_REVERSE, self.bgColor, self.fgColor)
+        curses.init_pair(self.COLOR_WARNING, self.warningColor, self.bgColor)
+        curses.init_pair(self.COLOR_ERROR, self.errorColor, self.bgColor)
+        curses.init_pair(self.COLOR_HIGHLIGHT, self.highlightColor, self.bgColor)
+        curses.init_pair(self.COLOR_FOOTER, self.fgColor, self.bgFooter)
+
         # END ncurses startup/initialization...
+
+    def __register_handler(self, function):
+        pass
+
+    def __deregister_handler(self, function):
+        pass
+
+    def __dispatch_key__(self, char):
+        pass
 
     def addtab(self, name: str):
         # Strip whitespaces
@@ -446,7 +462,9 @@ class Tui:
         assert prompt_type in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT], \
             f'TUI: Unknown prompt type given'
 
-        pass
+        self.__cmd_current = message + ' (y/n)'
+        self.stdscr.touchwin()
+        return ''
 
 
 # Main function
