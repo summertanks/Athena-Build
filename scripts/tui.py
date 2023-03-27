@@ -59,7 +59,7 @@ class Tui:
     errorColor = curses.COLOR_RED
     highlightColor = curses.COLOR_GREEN
 
-    PROMPT = '$ '
+    CMD_PROMPT = '$ '
 
     def __init__(self, banner: str):
 
@@ -82,6 +82,7 @@ class Tui:
         self.__cmd_history = []
         self.__registered_cmd = {}
         self.__cmd_mode = self.CMD_MODE_NORMAL
+        self.__prompt_str = ''
 
         # setting up dispatch queue for handling keystrokes
         self.__dispatch_queue = queue.Queue
@@ -133,6 +134,7 @@ class Tui:
         signal.signal(signal.SIGINT, self.__shutdown__)
 
         self.register_command('clear', self.clear)
+        self.register_command('wait', self.wait)
 
     def __refreshfooter__(self):
         tab_tooltip = "Use Tab to rotate through Tabs"
@@ -155,11 +157,11 @@ class Tui:
         if self.__cmd_mode == self.CMD_MODE_DISABLE:
             self.__footer.addstr(1, self.BOX_WIDTH, '(Command under Progress)', curses.A_ITALIC)
         elif self.__cmd_mode == self.CMD_MODE_NORMAL:
-            self.__footer.addstr(1, self.BOX_WIDTH, self.PROMPT + self.__cmd_current)
+            self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + self.__cmd_current)
         elif self.__cmd_mode == self.CMD_MODE_PROMPT:
-            pass
+            self.__footer.addstr(1, self.BOX_WIDTH, self.__prompt_str + self.__cmd_current)
         else:  # CMD_MODE_PASSWORD = 4
-            pass
+            self.__footer.addstr(1, self.BOX_WIDTH, self.__prompt_str + '*' * len(self.__cmd_current))
 
         # we should have written till
         self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
@@ -235,6 +237,7 @@ class Tui:
         self.__refresh__()
 
     def __executecmd__(self, cmd):
+
         self.INFO(f'Executing "{cmd}"')
         cmd_parts = cmd.split()
         if len(cmd_parts) > 0:
@@ -243,14 +246,20 @@ class Tui:
             if function_name not in self.__registered_cmd:
                 self.print(f'Command {function_name} not found')
                 return
-
-            function = self.__registered_cmd[function_name][0]
             try:
-                function(*function_args)
-            except TypeError as e:
+                threading.Thread(target=self.__exec_thread__, args=(function_name, function_args)).start()
+            except threading.ThreadError as e:
                 self.print(f"Error: {e}")
+                self.ERROR(f"Error: {e}")
 
-        pass
+    def __exec_thread__(self, function_name, function_args):
+        self.__cmd_mode = self.CMD_MODE_DISABLE
+        function = self.__registered_cmd[function_name][0]
+        try:
+            function(*function_args)
+        except TypeError as e:
+            self.print(f"Error: {e}")
+        # self.__cmd_mode = self.CMD_MODE_NORMAL
 
     def __log__(self, severity, message):
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
@@ -391,7 +400,7 @@ class Tui:
                 elif len(c) > 1:
                     continue
 
-                # Newline recieved, based on data input mode the dispatch sequence is identified
+                # Newline received, based on data input mode the dispatch sequence is identified
                 elif c == '\n':
                     # Command has been completed
                     if not self.__cmd_current.strip() == '':
@@ -400,11 +409,9 @@ class Tui:
                             __quit = True
                             continue
                         else:
-                            self.__cmd_mode = self.CMD_MODE_DISABLE
                             self.print(self.__cmd_current, curses.color_pair(self.COLOR_HIGHLIGHT))
                             self.__cmd_history.append(self.__cmd_current)
                             self.__executecmd__(self.__cmd_current)
-                            self.__cmd_mode = self.CMD_MODE_NORMAL
                     self.__cmd_current = ''
                     self.__refresh__()
 
@@ -447,6 +454,10 @@ class Tui:
             self.__tabs[name]['cursor'] = 0
         else:
             self.print(f'Attempted to clear non-existent tab {name}')
+
+    @staticmethod
+    def wait(self, duration=1000):
+        curses.napms(duration)
 
     def register_command(self, command_name: str, function, tooltip=''):
         if command_name.strip() == '':
