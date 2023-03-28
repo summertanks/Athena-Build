@@ -84,9 +84,11 @@ class Tui:
         self.__registered_cmd = {}
         self.__cmd_mode = self.CMD_MODE_NORMAL
         self.__prompt_str = ''
+        self.__prompt_lock = threading.Lock()
 
         # setting up dispatch queue for handling keystrokes
-        self.__dispatch_queue = queue.Queue
+        self.__dispatch_queue = queue.LifoQueue()
+        self.__input_queue = queue.LifoQueue()
 
         # let's set up the curses default window
         self.stdscr = curses.initscr()
@@ -461,10 +463,6 @@ class Tui:
         else:
             self.print(f'Attempted to clear non-existent tab {name}')
 
-    @staticmethod
-    def wait(self, duration=1000):
-        sleep(10)
-
     def register_command(self, command_name: str, function, tooltip=''):
         if command_name.strip() == '':
             self.ERROR('Registering Empty Command')
@@ -479,10 +477,38 @@ class Tui:
         assert prompt_type in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT], \
             f'TUI: Unknown prompt type given'
 
-        answer = ''
-        while True
-        return ''
+        with self.__prompt_lock:
+            old_prompt = self.CMD_PROMPT
+            self.CMD_PROMPT = message
 
+            answer = ''
+            while True:
+                condition = threading.Condition()
+                self.__dispatch_queue.put(condition)
+
+                condition.wait()
+                try:
+                    answer = self.__input_queue.get()
+                except queue.Empty:
+                    self.ERROR('TUI: Condition called but nothing in Input Stack')
+
+                if prompt_type == self.PROMPT_OPTIONS and answer not in options:
+                    self.print('TUI Prompt: Only answers within the option provided are permitted')
+                    continue
+
+                if prompt_type == self.PROMPT_YESNO and answer not in ['y', 'Y', 'n', 'N', 'yes', 'Yes', 'no', 'No']:
+                    self.print('TUI Prompt: Only answers related to yes/no are permitted')
+                    continue
+
+                break
+
+            self.CMD_PROMPT = old_prompt
+
+        return answer
+
+    @staticmethod
+    def wait(self, duration=1000):
+        sleep(10)
 
 # Main function
 if __name__ == '__main__':
