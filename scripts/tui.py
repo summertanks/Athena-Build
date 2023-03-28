@@ -5,6 +5,7 @@
 
 import curses
 import signal
+from time import sleep
 
 import psutil
 import queue
@@ -259,7 +260,7 @@ class Tui:
             function(*function_args)
         except TypeError as e:
             self.print(f"Error: {e}")
-        # self.__cmd_mode = self.CMD_MODE_NORMAL
+        self.__cmd_mode = self.CMD_MODE_NORMAL
 
     def __log__(self, severity, message):
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
@@ -397,11 +398,16 @@ class Tui:
                     continue
 
                 # Simple hack - if it is longer than a char it is a special key string
-                elif len(c) > 1:
+                if len(c) > 1:
+                    continue
+
+                # here onwards we are processing keys outside control keys
+                # if mode is disabled don't process any keys
+                if self.__cmd_mode == self.CMD_MODE_DISABLE:
                     continue
 
                 # Newline received, based on data input mode the dispatch sequence is identified
-                elif c == '\n':
+                if c == '\n':
                     # Command has been completed
                     if not self.__cmd_current.strip() == '':
                         # Special Case
@@ -457,7 +463,7 @@ class Tui:
 
     @staticmethod
     def wait(self, duration=1000):
-        curses.napms(duration)
+        sleep(10)
 
     def register_command(self, command_name: str, function, tooltip=''):
         if command_name.strip() == '':
@@ -473,8 +479,8 @@ class Tui:
         assert prompt_type in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT], \
             f'TUI: Unknown prompt type given'
 
-        self.__cmd_current = message + ' (y/n)'
-        self.stdscr.touchwin()
+        answer = ''
+        while True
         return ''
 
 
