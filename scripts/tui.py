@@ -85,6 +85,7 @@ class Tui:
         self.__cmd_mode = self.CMD_MODE_NORMAL
         self.__prompt_str = ''
         self.__prompt_lock = threading.Lock()
+        self.__shell_lock = threading.Lock()
 
         # setting up dispatch queue for handling keystrokes
         self.__dispatch_queue = queue.LifoQueue()
@@ -138,6 +139,9 @@ class Tui:
 
         self.register_command('clear', self.clear)
         self.register_command('wait', self.wait)
+
+        # start the command
+        threading.Thread(target=self.shell, daemon=True).start()
 
     def __refreshfooter__(self):
         tab_tooltip = "Use Tab to rotate through Tabs"
@@ -238,31 +242,6 @@ class Tui:
         self.__footer_coordinates = {'h': self.__footer_height, 'w': self.__resolution['x'],
                                      'y': self.__resolution['y'] - self.__footer_height, 'x': 0}
         self.__refresh__()
-
-    def __executecmd__(self, cmd):
-
-        self.INFO(f'Executing "{cmd}"')
-        cmd_parts = cmd.split()
-        if len(cmd_parts) > 0:
-            function_name = cmd_parts[0]
-            function_args = cmd_parts[1:]
-            if function_name not in self.__registered_cmd:
-                self.print(f'Command {function_name} not found')
-                return
-            try:
-                threading.Thread(target=self.__exec_thread__, args=(function_name, function_args)).start()
-            except threading.ThreadError as e:
-                self.print(f"Error: {e}")
-                self.ERROR(f"Error: {e}")
-
-    def __exec_thread__(self, function_name, function_args):
-        self.__cmd_mode = self.CMD_MODE_DISABLE
-        function = self.__registered_cmd[function_name][0]
-        try:
-            function(*function_args)
-        except TypeError as e:
-            self.print(f"Error: {e}")
-        self.__cmd_mode = self.CMD_MODE_NORMAL
 
     def __log__(self, severity, message):
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
@@ -417,9 +396,17 @@ class Tui:
                             __quit = True
                             continue
                         else:
-                            self.print(self.__cmd_current, curses.color_pair(self.COLOR_HIGHLIGHT))
+                            self.__input_queue.put(self.__cmd_current)
                             self.__cmd_history.append(self.__cmd_current)
-                            self.__executecmd__(self.__cmd_current)
+                            try:
+                                condition = self.__dispatch_queue.get()
+                            except queue.Empty:
+                                self.ERROR('TUI: Nothing in dispatch queue')
+                                continue
+
+                            with condition:
+                                condition.notify()
+
                     self.__cmd_current = ''
                     self.__refresh__()
 
@@ -473,6 +460,69 @@ class Tui:
         else:
             self.__registered_cmd[command_name] = (function, tooltip)
 
+    def __executecmd__(self, cmd):
+
+        self.INFO(f'Executing "{cmd}"')
+        cmd_parts = cmd.split()
+        if len(cmd_parts) > 0:
+            function_name = cmd_parts[0]
+            function_args = cmd_parts[1:]
+            if function_name not in self.__registered_cmd:
+                self.print(f'Command {function_name} not found')
+                return
+            try:
+                threading.Thread(target=self.__exec_thread__, args=(function_name, function_args)).start()
+            except threading.ThreadError as e:
+                self.print(f"Error: {e}")
+                self.ERROR(f"Error: {e}")
+
+    def __exec_thread__(self, function_name, function_args):
+
+        function = self.__registered_cmd[function_name][0]
+        try:
+            function(*function_args)
+        except TypeError as e:
+            self.print(f"Error: {e}")
+
+    def shell(self):
+        with self.__shell_lock:
+
+            while True:
+                self.CMD_PROMPT = '$ '
+
+                condition = threading.Condition()
+                self.__dispatch_queue.put(condition)
+
+                with condition:
+                    condition.wait()
+
+                try:
+                    command = self.__input_queue.get()
+                except queue.Empty:
+                    self.ERROR('TUI: Condition called but nothing in Input Stack')
+                    continue
+
+                self.print(command, curses.color_pair(self.COLOR_HIGHLIGHT))
+
+                self.CMD_PROMPT = '(command under progress)'
+                self.INFO(f'Executing "{command}"')
+
+                cmd_parts = command.split()
+                if len(cmd_parts) > 0:
+                    function_name = cmd_parts[0]
+                    function_args = cmd_parts[1:]
+
+                    if function_name not in self.__registered_cmd:
+                        self.print(f'Command {function_name} not found')
+                        continue
+
+                    function = self.__registered_cmd[function_name][0]
+                    try:
+                        function(*function_args)
+                    except TypeError as e:
+                        self.print(f"Error: {e}")
+                        self.ERROR(f"Error: {e}")
+
     def prompt(self, prompt_type, message, options) -> str:
         assert prompt_type in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT], \
             f'TUI: Unknown prompt type given'
@@ -509,6 +559,7 @@ class Tui:
     @staticmethod
     def wait(self, duration=1000):
         sleep(10)
+
 
 # Main function
 if __name__ == '__main__':
