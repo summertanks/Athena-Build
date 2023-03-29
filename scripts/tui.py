@@ -32,6 +32,9 @@ class Lockable:
 class Tui:
     BOX_WIDTH = 1
 
+    SPINNER_START = 1
+    SPINNER_STOP = 2
+
     PROMPT_YESNO = 1
     PROMPT_INPUT = 2
     PROMPT_OPTIONS = 3
@@ -48,8 +51,8 @@ class Tui:
     COLOR_HIGHLIGHT = 5
     COLOR_FOOTER = 6
 
-    CMD_MODE_NORMAL = 2
-    CMD_MODE_PASSWORD = 4
+    CMD_MODE_NORMAL = 1
+    CMD_MODE_PASSWORD = 1
 
     bgColor = curses.COLOR_BLACK
     bgFooter = curses.COLOR_BLUE
@@ -536,6 +539,10 @@ class Tui:
             self.CMD_PROMPT = old_prompt
 
         return answer
+
+    def spinner(self, mode):
+        assert mode in [self.SPINNER_START, self.SPINNER_STOP], 'TUI: Incorrect Spinner mode given'
+
 
     @staticmethod
     def wait(self, duration=1000):
