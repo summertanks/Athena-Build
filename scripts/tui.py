@@ -48,9 +48,7 @@ class Tui:
     COLOR_HIGHLIGHT = 5
     COLOR_FOOTER = 6
 
-    CMD_MODE_DISABLE = 1
     CMD_MODE_NORMAL = 2
-    CMD_MODE_PROMPT = 3
     CMD_MODE_PASSWORD = 4
 
     bgColor = curses.COLOR_BLACK
@@ -84,8 +82,12 @@ class Tui:
         self.__registered_cmd = {}
         self.__cmd_mode = self.CMD_MODE_NORMAL
         self.__prompt_str = ''
+
         self.__prompt_lock = threading.Lock()
         self.__shell_lock = threading.Lock()
+        self.__print_lock = threading.Lock()
+        self.__refresh_lock = threading.Lock()
+        self.__log_lock = threading.Lock()
 
         # setting up dispatch queue for handling keystrokes
         self.__dispatch_queue = queue.LifoQueue()
@@ -139,6 +141,7 @@ class Tui:
 
         self.register_command('clear', self.clear)
         self.register_command('wait', self.wait)
+        self.register_command('demo', self.demo)
 
         # start the command
         threading.Thread(target=self.shell, daemon=True).start()
@@ -157,18 +160,13 @@ class Tui:
 
         self.__footer.addstr(3, self.BOX_WIDTH, self.__banner, curses.A_BOLD)
 
-        assert self.__cmd_mode in \
-               [self.CMD_MODE_PROMPT, self.CMD_MODE_NORMAL, self.CMD_MODE_DISABLE, self.CMD_MODE_PASSWORD], \
+        assert self.__cmd_mode in [self.CMD_MODE_NORMAL, self.CMD_MODE_PASSWORD], \
             'TUI: Incorrect __current_mode defined'
 
-        if self.__cmd_mode == self.CMD_MODE_DISABLE:
-            self.__footer.addstr(1, self.BOX_WIDTH, '(Command under Progress)', curses.A_ITALIC)
-        elif self.__cmd_mode == self.CMD_MODE_NORMAL:
-            self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + self.__cmd_current)
-        elif self.__cmd_mode == self.CMD_MODE_PROMPT:
-            self.__footer.addstr(1, self.BOX_WIDTH, self.__prompt_str + self.__cmd_current)
-        else:  # CMD_MODE_PASSWORD = 4
-            self.__footer.addstr(1, self.BOX_WIDTH, self.__prompt_str + '*' * len(self.__cmd_current))
+        if self.__cmd_mode == self.CMD_MODE_NORMAL:
+            self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ' ' + self.__cmd_current)
+        else:  # CMD_MODE_PASSWORD
+            self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ' ' + '*' * len(self.__cmd_current))
 
         # we should have written till
         self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
@@ -198,10 +196,10 @@ class Tui:
         window.refresh()
 
     def __refresh__(self, force=False):
-
-        self.__refreshfooter__()
-        self.__refreshtab__()
-        self.stdscr.refresh()
+        with self.__refresh_lock:
+            self.__refreshfooter__()
+            self.__refreshtab__()
+            self.stdscr.refresh()
 
     @property
     def __activetab__(self) -> {}:
@@ -247,16 +245,16 @@ class Tui:
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
             f'TUI: Incorrect Severity {severity} defined'
 
-        attribute = curses.color_pair(self.COLOR_NORMAL)
-        if severity == self.SEVERITY_ERROR:
-            attribute = curses.color_pair(self.COLOR_ERROR)
-        elif severity == self.SEVERITY_WARNING:
-            attribute = curses.color_pair(self.COLOR_WARNING)
+        with self.__log_lock:
+            attribute = curses.color_pair(self.COLOR_NORMAL)
+            if severity == self.SEVERITY_ERROR:
+                attribute = curses.color_pair(self.COLOR_ERROR)
+            elif severity == self.SEVERITY_WARNING:
+                attribute = curses.color_pair(self.COLOR_WARNING)
 
-        logger = self.__tabs['log']
-        logger['buffer'].append((message + '\n', attribute))
-        logger['cursor'] = len(logger['buffer'])
-        self.__refresh__()
+            logger = self.__tabs['log']
+            logger['buffer'].append((message + '\n', attribute))
+            logger['cursor'] = len(logger['buffer'])
 
     def __shutdown__(self):
         # BEGIN ncurses shutdown/de-initialization...
@@ -308,15 +306,6 @@ class Tui:
 
         # END ncurses startup/initialization...
 
-    def __register_handler(self, function):
-        pass
-
-    def __deregister_handler(self, function):
-        pass
-
-    def __dispatch_key__(self, char):
-        pass
-
     def addtab(self, name: str):
         # Strip whitespaces
         name = name.strip()
@@ -350,11 +339,11 @@ class Tui:
         self.__activate__(next_tab)
 
     def run(self):
-        self.__refresh__()
-
         __quit = False
         # main loop
         while not __quit:
+            self.__refresh__()
+
             # get input
             try:
                 c = self.stdscr.getkey()
@@ -366,13 +355,13 @@ class Tui:
                 if c == 'KEY_UP':
                     if activetab['cursor'] > self.__tab_coordinates['h']:
                         activetab['cursor'] -= 1
-                        self.__refresh__()
+                        continue
                 elif c == 'KEY_DOWN':
                     activetab['cursor'] = min(len(activetab['buffer']), activetab['cursor'] + 1)
-                    self.__refresh__()
+                    continue
                 elif c == 'KEY_BACKSPACE':
                     self.__cmd_current = self.__cmd_current[:-1]
-                    self.__refresh__()
+                    continue
                 elif c == '\t':
                     # switch to next Tab on Alt
                     self.enable_next_tab()
@@ -383,8 +372,8 @@ class Tui:
                     continue
 
                 # here onwards we are processing keys outside control keys
-                # if mode is disabled don't process any keys
-                if self.__cmd_mode == self.CMD_MODE_DISABLE:
+                # if nothing is waiting in queue don't process any keys
+                if self.__dispatch_queue.empty():
                     continue
 
                 # Newline received, based on data input mode the dispatch sequence is identified
@@ -408,14 +397,12 @@ class Tui:
                                 condition.notify()
 
                     self.__cmd_current = ''
-                    self.__refresh__()
 
                 else:
                     self.__cmd_current += c
-                    self.__refresh__()
+
             else:
                 curses.napms(10)  # wait 10ms to avoid 100% CPU usage
-                self.__refreshfooter__()
 
         # clean up
         self.__shutdown__()
@@ -431,13 +418,13 @@ class Tui:
 
     def print(self, message, attribute=None):
 
-        if attribute is None:
-            attribute = curses.color_pair(self.COLOR_NORMAL)
-        console = self.__tabs['console']
+        with self.__print_lock:
+            if attribute is None:
+                attribute = curses.color_pair(self.COLOR_NORMAL)
+            console = self.__tabs['console']
 
-        console['buffer'].append((message + '\n', attribute))
-        console['cursor'] = len(console['buffer'])
-        self.__refresh__()
+            console['buffer'].append((message + '\n', attribute))
+            console['cursor'] = len(console['buffer'])
 
     def clear(self, name):
         if name == 'all':
@@ -460,35 +447,11 @@ class Tui:
         else:
             self.__registered_cmd[command_name] = (function, tooltip)
 
-    def __executecmd__(self, cmd):
-
-        self.INFO(f'Executing "{cmd}"')
-        cmd_parts = cmd.split()
-        if len(cmd_parts) > 0:
-            function_name = cmd_parts[0]
-            function_args = cmd_parts[1:]
-            if function_name not in self.__registered_cmd:
-                self.print(f'Command {function_name} not found')
-                return
-            try:
-                threading.Thread(target=self.__exec_thread__, args=(function_name, function_args)).start()
-            except threading.ThreadError as e:
-                self.print(f"Error: {e}")
-                self.ERROR(f"Error: {e}")
-
-    def __exec_thread__(self, function_name, function_args):
-
-        function = self.__registered_cmd[function_name][0]
-        try:
-            function(*function_args)
-        except TypeError as e:
-            self.print(f"Error: {e}")
-
     def shell(self):
         with self.__shell_lock:
 
             while True:
-                self.CMD_PROMPT = '$ '
+                self.CMD_PROMPT = '$'
 
                 condition = threading.Condition()
                 self.__dispatch_queue.put(condition)
@@ -523,20 +486,33 @@ class Tui:
                         self.print(f"Error: {e}")
                         self.ERROR(f"Error: {e}")
 
-    def prompt(self, prompt_type, message, options) -> str:
+    def prompt(self, prompt_type, message, options=[]) -> str:
         assert prompt_type in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT], \
             f'TUI: Unknown prompt type given'
+
+        if prompt_type == self.PROMPT_OPTIONS:
+            assert len(options) > 0, 'Prompt type PROMPT_OPTIONS called without options'
 
         with self.__prompt_lock:
             old_prompt = self.CMD_PROMPT
             self.CMD_PROMPT = message
+
+            if prompt_type == self.PROMPT_YESNO:
+                self.CMD_PROMPT += ' (y/n):'
+            elif prompt_type == self.PROMPT_OPTIONS:
+                self.CMD_PROMPT += str(options)
 
             answer = ''
             while True:
                 condition = threading.Condition()
                 self.__dispatch_queue.put(condition)
 
-                condition.wait()
+                if prompt_type == self.PROMPT_PASSWORD:
+                    self.__cmd_mode = self.CMD_MODE_PASSWORD
+
+                with condition:
+                    condition.wait()
+
                 try:
                     answer = self.__input_queue.get()
                 except queue.Empty:
@@ -552,6 +528,11 @@ class Tui:
 
                 break
 
+            if prompt_type == self.PROMPT_PASSWORD:
+                self.__cmd_mode = self.CMD_MODE_NORMAL
+                self.print(self.CMD_PROMPT + ' ' + '*' * len(answer))
+            else:
+                self.print(self.CMD_PROMPT + ' ' + answer)
             self.CMD_PROMPT = old_prompt
 
         return answer
@@ -559,6 +540,12 @@ class Tui:
     @staticmethod
     def wait(self, duration=1000):
         sleep(10)
+
+    def demo(self):
+        self.prompt(self.PROMPT_YESNO, 'Do You want to exit')
+        self.prompt(self.PROMPT_INPUT, 'Do you want to exit?')
+        self.prompt(self.PROMPT_OPTIONS, 'Do you want to exit?', ['yes', 'no'])
+        self.prompt(self.PROMPT_PASSWORD, 'Enter Password to exit')
 
 
 # Main function
