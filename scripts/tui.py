@@ -5,6 +5,8 @@
 
 import curses
 import signal
+import time
+from math import floor
 from time import sleep
 
 import psutil
@@ -91,10 +93,14 @@ class Tui:
         self.__print_lock = threading.Lock()
         self.__refresh_lock = threading.Lock()
         self.__log_lock = threading.Lock()
+        self.__widget_lock = threading.Lock()
 
         # setting up dispatch queue for handling keystrokes
         self.__dispatch_queue = queue.LifoQueue()
         self.__input_queue = queue.LifoQueue()
+
+        # For running list of widget
+        self.__widget = {}
 
         # let's set up the curses default window
         self.stdscr = curses.initscr()
@@ -196,6 +202,12 @@ class Tui:
         for i in range(cursor):
             line = buffer[i]
             window.addstr(line[0], line[1])
+
+        with self.__widget_lock:
+            for widget in self.__widget:
+                line = self.__widget[widget]
+                window.addstr(line[0], line[1])
+
         window.refresh()
 
     def __refresh__(self, force=False):
@@ -540,9 +552,60 @@ class Tui:
 
         return answer
 
-    def spinner(self, mode):
+    def spinner(self):
+        class __ProgressBar:
+            RUNNING = 1
+            PAUSED = 2
+            STOPPED = 3
+
+
+            def __init__(self, message, itr_label='it/s', scale_factor='', ):
+                self.__label = message[:20]
+                self.__value = 0
+                self.__max = 100
+                self.__rate = 0
+                self.itr_label = itr_label[:6]
+
+                self.__time = time.time_ns()
+                self.__state = self.RUNNING
+
+                if scale_factor not in ['', 'K', 'M', 'G']:
+                    scale_factor = ''
+
+                self.scale_factor = scale_factor
+
+            def __str__(self):
+                completed = floor((self.__value / self.__max) * 100)
+                remaining = 100 - completed
+                string = self.__label + '[' + '#' * completed + '-' + '] ' + '(' + self.__value + '/' + self.__max + ')'
+                return
+
+            def step(self, value=1):
+                # don't react on stopped
+                if self.__state != self.RUNNING:
+                    return
+
+                self.__value += value
+                if self.__value >= self.__max:
+                    self.__value = self.__max
+
+                self.__rate = (self.__value / (time.time_ns() - self.__time)) * (10 ^ -9)
+
+            def max(self, value=100):
+                if not value > 0:
+                    value = 100
+
+                self.__max = value
+                self.step(0)
+
+            def label(self, message):
+                self.__label = message
+
+
         assert mode in [self.SPINNER_START, self.SPINNER_STOP], 'TUI: Incorrect Spinner mode given'
 
+    def persistent(self):
+        pass
 
     @staticmethod
     def wait(self, duration=1000):
