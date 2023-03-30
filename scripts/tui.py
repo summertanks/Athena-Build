@@ -14,6 +14,82 @@ import queue
 import threading
 
 
+class __ProgressBar:
+    RUNNING = 1
+    PAUSED = 2
+    STOPPED = 3
+
+    def __init__(self, message, itr_label='it/s', scale_factor='', bar_width=40):
+        self.__label = message[:20]
+        self.__value = 0
+        self.__max = 100
+        self.__rate = 0
+        self.__itr_label = itr_label[:6]
+
+        self.__time = time.time_ns()
+        self.__state = self.RUNNING
+
+        if scale_factor not in ['', 'K', 'M', 'G']:
+            scale_factor = ''
+        self.__scale_factor = scale_factor
+
+        if bar_width < 40:
+            bar_width = 40
+        elif bar_width > 60:
+            bar_width = 60
+        self.__bar_width = bar_width
+
+    def __str__(self):
+
+        completed = floor((self.__value / self.__max) * self.__bar_width)
+        remaining = self.__bar_width - completed
+        string = self.__label + '[' + '#' * completed + '-' * remaining + '] '
+        string += '(' + str(self.__value) + '/' + str(self.__max) + ')'
+
+        factor = 1
+        if self.__scale_factor == 'K':
+            factor = 1024
+        elif self.__scale_factor == 'M':
+            factor = 1024 * 1024
+        elif self.__scale_factor == 'G':
+            factor = 1024 * 1024 * 1024
+
+        rate = round(self.__rate / factor, 2)
+
+        string += str(rate) + self.__scale_factor + self.__itr_label
+
+        return
+
+    def step(self, value=1):
+        # don't react on stopped
+        if self.__state != self.RUNNING:
+            return
+
+        self.__value += value
+        if self.__value >= self.__max:
+            self.__value = self.__max
+
+        self.__rate = (self.__value / (time.time_ns() - self.__time)) * (10 ^ -9)
+
+    def max(self, value=100):
+        if not value > 0:
+            value = 100
+
+        self.__max = value
+        self.step(0)
+
+    def label(self, message):
+        self.__label = message
+
+    def close(self):
+        pass
+
+    def reset(self):
+        self.__value = 0
+        self.__time = time.time_ns()
+        self.__rate = 0
+
+
 class Lockable:
     def __init__(self, var_type):
         self.__lock = threading.Lock()
@@ -552,59 +628,12 @@ class Tui:
 
         return answer
 
-    def spinner(self):
-        class __ProgressBar:
-            RUNNING = 1
-            PAUSED = 2
-            STOPPED = 3
-
-
-            def __init__(self, message, itr_label='it/s', scale_factor='', ):
-                self.__label = message[:20]
-                self.__value = 0
-                self.__max = 100
-                self.__rate = 0
-                self.itr_label = itr_label[:6]
-
-                self.__time = time.time_ns()
-                self.__state = self.RUNNING
-
-                if scale_factor not in ['', 'K', 'M', 'G']:
-                    scale_factor = ''
-
-                self.scale_factor = scale_factor
-
-            def __str__(self):
-                completed = floor((self.__value / self.__max) * 100)
-                remaining = 100 - completed
-                string = self.__label + '[' + '#' * completed + '-' + '] ' + '(' + self.__value + '/' + self.__max + ')'
-                return
-
-            def step(self, value=1):
-                # don't react on stopped
-                if self.__state != self.RUNNING:
-                    return
-
-                self.__value += value
-                if self.__value >= self.__max:
-                    self.__value = self.__max
-
-                self.__rate = (self.__value / (time.time_ns() - self.__time)) * (10 ^ -9)
-
-            def max(self, value=100):
-                if not value > 0:
-                    value = 100
-
-                self.__max = value
-                self.step(0)
-
-            def label(self, message):
-                self.__label = message
-
-
+    def spinner(self, mode):
         assert mode in [self.SPINNER_START, self.SPINNER_STOP], 'TUI: Incorrect Spinner mode given'
+        pass
 
-    def persistent(self):
+    def progressbar(self):
+
         pass
 
     @staticmethod
@@ -616,6 +645,7 @@ class Tui:
         self.prompt(self.PROMPT_INPUT, 'Do you want to exit?')
         self.prompt(self.PROMPT_OPTIONS, 'Do you want to exit?', ['yes', 'no'])
         self.prompt(self.PROMPT_PASSWORD, 'Enter Password to exit')
+
 
 
 # Main function
