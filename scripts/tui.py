@@ -290,6 +290,7 @@ class Tui:
             self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ' ' + self.__cmd_current)
         else:  # CMD_MODE_PASSWORD
             self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ': ' + '*' * len(self.__cmd_current))
+        self.__footer.addstr('_', curses.A_BLINK)
 
         # we should have written till
         self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
