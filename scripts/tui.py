@@ -7,8 +7,6 @@ import curses
 import signal
 import time
 from math import floor
-from time import sleep
-
 import psutil
 import queue
 import threading
@@ -32,6 +30,37 @@ class Lockable:
 
 
 class Tui:
+
+    class __Spinner:
+
+        # Can pick more from
+        # https://stackoverflow.com/questions/2685435/cooler-ascii-spinners
+        ASCII_CHAR = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
+
+        def __init__(self, message):
+            self.__message = message[:70]
+            self.__lock = threading.Lock()
+            self.__position = 0
+            self.__running = True
+
+            threading.Thread(target=self.__step__, daemon=True).start()
+
+        def __step__(self):
+            while self.__running:
+                time.sleep(0.1)
+                with self.__lock:
+                    self.__position = (self.__position + 1) % len(self.ASCII_CHAR)
+
+        def done(self):
+            self.__running = False
+
+        def message(self) -> str:
+            return self.__message
+
+        def __str__(self) -> str:
+            with self.__lock:
+                return self.__message + ' ' + self.ASCII_CHAR[self.__position]
+
     class __ProgressBar:
         RUNNING = 1
         PAUSED = 2
@@ -140,7 +169,7 @@ class Tui:
     COLOR_FOOTER = 6
 
     CMD_MODE_NORMAL = 1
-    CMD_MODE_PASSWORD = 1
+    CMD_MODE_PASSWORD = 2
 
     bgColor = curses.COLOR_BLACK
     bgFooter = curses.COLOR_BLUE
@@ -235,7 +264,6 @@ class Tui:
         signal.signal(signal.SIGINT, self.__shutdown__)
 
         self.register_command('clear', self.clear)
-        self.register_command('wait', self.wait)
         self.register_command('demo', self.demo)
 
         # start the command
@@ -261,7 +289,7 @@ class Tui:
         if self.__cmd_mode == self.CMD_MODE_NORMAL:
             self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ' ' + self.__cmd_current)
         else:  # CMD_MODE_PASSWORD
-            self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ' ' + '*' * len(self.__cmd_current))
+            self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ': ' + '*' * len(self.__cmd_current))
 
         # we should have written till
         self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
@@ -291,12 +319,14 @@ class Tui:
 
         with self.__widget_lock:
             for widget in self.__widget:
-                line = str(self.__widget[widget])
+                line = str(self.__widget[widget]) + '\n'
                 window.addstr(line, curses.A_BOLD)
 
         window.refresh()
 
     def __refresh__(self, force=False):
+        if force:
+            self.stdscr.touchwin()
         with self.__refresh_lock:
             self.__refreshfooter__()
             self.__refreshtab__()
@@ -503,7 +533,7 @@ class Tui:
                     self.__cmd_current += c
 
             else:
-                curses.napms(10)  # wait 10ms to avoid 100% CPU usage
+                curses.napms(1)  # wait 10ms to avoid 100% CPU usage
 
         # clean up
         self.__shutdown__()
@@ -641,9 +671,20 @@ class Tui:
 
         return answer
 
-    def spinner(self, mode):
-        assert mode in [self.SPINNER_START, self.SPINNER_STOP], 'TUI: Incorrect Spinner mode given'
-        pass
+    def spinner(self, message) -> int:
+        spin = Tui.__Spinner(message)
+        widget_id = spin.__hash__()
+        with self.__widget_lock:
+            self.__widget[widget_id] = spin
+        return widget_id
+
+    def s_stop(self, widget_id: int):
+        with self.__widget_lock:
+            if widget_id not in self.__widget:
+                self.print(f'TUI: No Widget by id {widget_id}')
+                return
+            self.print(self.__widget[widget_id].message() + '... Done')
+            self.__widget.pop(widget_id)
 
     def progressbar(self, message, itr_label='it/s', scale_factor='', bar_width=40, maxvalue=None) -> int:
         bar = Tui.__ProgressBar(message, itr_label, scale_factor, bar_width)
@@ -671,20 +712,18 @@ class Tui:
             self.print(str(self.__widget[widget_id]))
             self.__widget.pop(widget_id)
 
-    @staticmethod
-    def wait(self, duration=1000):
-        sleep(10)
-
     def demo(self):
         # self.prompt(self.PROMPT_YESNO, 'Do You want to exit')
         # self.prompt(self.PROMPT_INPUT, 'Do you want to exit?')
         # self.prompt(self.PROMPT_OPTIONS, 'Do you want to exit?', ['yes', 'no'])
         # self.prompt(self.PROMPT_PASSWORD, 'Enter Password to exit')
-        bar = self.progressbar('Some Work', maxvalue=100000)
+        spin = self.spinner('Starting Progress Bar')
+        bar = self.progressbar('Some Work', maxvalue=100)
         for i in range(100):
-            self.p_step(bar, value=1000)
-            curses.napms(1)
+            self.p_step(bar, value=1)
+            curses.napms(100)
         self.p_close(bar)
+        self.s_stop(spin)
 
 
 # Main function
