@@ -714,16 +714,20 @@ class Tui:
             self.__widget.pop(widget_id)
 
     def demo(self):
-        # self.prompt(self.PROMPT_YESNO, 'Do You want to exit')
-        # self.prompt(self.PROMPT_INPUT, 'Do you want to exit?')
-        # self.prompt(self.PROMPT_OPTIONS, 'Do you want to exit?', ['yes', 'no'])
-        # self.prompt(self.PROMPT_PASSWORD, 'Enter Password to exit')
-        spin = self.spinner('Starting Progress Bar')
-        bar = self.progressbar('Some Work', maxvalue=100)
+
+        spin = self.spinner('Starting Demo')
+        self.prompt(self.PROMPT_YESNO, 'This is YES NO prompt')
+        self.prompt(self.PROMPT_INPUT, 'This accepts Input string')
+        self.prompt(self.PROMPT_OPTIONS, 'This allows you to select from options', ['yes', 'no'])
+        self.prompt(self.PROMPT_PASSWORD, 'This accepts masked input')
+
+        bar = self.progressbar('Progress Bar Demo', maxvalue=100)
+
         for i in range(100):
             self.p_step(bar, value=1)
             curses.napms(100)
         self.p_close(bar)
+
         self.s_stop(spin)
 
 
