@@ -202,6 +202,7 @@ class Tui:
         self.__registered_cmd = {}
         self.__cmd_mode = self.CMD_MODE_NORMAL
         self.__prompt_str = ''
+        self.__cmd_cursor = 0
 
         self.__prompt_lock = threading.Lock()
         self.__shell_lock = threading.Lock()
@@ -286,10 +287,30 @@ class Tui:
         assert self.__cmd_mode in [self.CMD_MODE_NORMAL, self.CMD_MODE_PASSWORD], \
             'TUI: Incorrect __current_mode defined'
 
+        # Displaying scrollable commandline
+        # Usable space = screen width - 2 * BOX_WIDTH
+        # Layout < [Box Width] [PROMPT] [One Spaces] [CMD] >
+        # Less command prompt should be trimmed to 50% of the available space
+        # Remain Command should be scrollable, cursor position defines from where the command is printed
+
+        width = self.__resolution['x'] - 2 * self.BOX_WIDTH
+
+        # Trim to maximum length of 50% width
+        cmd_prompt = self.CMD_PROMPT[:floor(width/2)]
+
+        # Available width - less length of cmd prompt and two (one for seperator, and another cursor)
+        width = width - len(cmd_prompt) - 2
+
+        # build cmd
         if self.__cmd_mode == self.CMD_MODE_NORMAL:
-            self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ' ' + self.__cmd_current)
+            cmd = self.__cmd_current
         else:  # CMD_MODE_PASSWORD
-            self.__footer.addstr(1, self.BOX_WIDTH, self.CMD_PROMPT + ': ' + '*' * len(self.__cmd_current))
+            cmd = '*' * len(self.__cmd_current)
+
+        cmd = cmd[self.__cmd_cursor:width + self.__cmd_cursor]
+
+        command_string = cmd_prompt + ' ' + cmd
+        self.__footer.addstr(1, self.BOX_WIDTH, command_string)
         self.__footer.addstr('_', curses.A_BLINK)
 
         # we should have written till
@@ -484,16 +505,34 @@ class Tui:
 
             activetab = self.__activetab__
             if c is not None:
+
                 if c == 'KEY_UP':
                     if activetab['cursor'] > self.__tab_coordinates['h']:
                         activetab['cursor'] -= 1
                         continue
+
                 elif c == 'KEY_DOWN':
                     activetab['cursor'] = min(len(activetab['buffer']), activetab['cursor'] + 1)
                     continue
+
+                elif c == 'KEY_RIGHT':
+                    width = self.__resolution['x'] - 2 * self.BOX_WIDTH
+                    width = width - len(self.CMD_PROMPT[:floor(width/2)]) - 2
+                    # Only if the input is greater than the available space is cursor position relevant
+                    if len(self.__cmd_current) > width:
+                        if self.__cmd_cursor < len(self.__cmd_current) - width:
+                            self.__cmd_cursor += 1
+
+                elif c == 'KEY_LEFT':
+                    if self.__cmd_cursor > 0:
+                        self.__cmd_cursor -= 1
+
                 elif c == 'KEY_BACKSPACE':
                     self.__cmd_current = self.__cmd_current[:-1]
+                    if self.__cmd_cursor > 0:
+                        self.__cmd_cursor -= 1
                     continue
+
                 elif c == '\t':
                     # switch to next Tab on Alt
                     self.enable_next_tab()
@@ -529,9 +568,16 @@ class Tui:
                                 condition.notify()
 
                     self.__cmd_current = ''
+                    self.__cmd_cursor = 0
 
                 else:
                     self.__cmd_current += c
+                    width = self.__resolution['x'] - 2 * self.BOX_WIDTH
+                    width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
+                    # Only if the input is greater than the available space is cursor position relevant
+                    if len(self.__cmd_current) > width:
+                        if self.__cmd_cursor < len(self.__cmd_current) - width:
+                            self.__cmd_cursor += 1
 
             else:
                 curses.napms(1)  # wait 10ms to avoid 100% CPU usage
