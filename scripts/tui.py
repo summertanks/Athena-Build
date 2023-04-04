@@ -3,33 +3,78 @@
 #  This program comes with ABSOLUTELY NO WARRANTY; for details see COPYING.
 #  This is free software, and you are welcome to redistribute it under certain conditions; see COPYING for details.
 
+"""
+The tui module sets up the curses interface for executing commands for Athena-Build System.
+Simplest use is to create an instance of Tui and call run() on it. Only create one instance of Tui in an application
+
+The base tui only enable commands 'demo', 'clear' & 'quit'. For additional commands please register functions with
+register(function name, callable function)
+"""
+
 import curses
 import signal
 import time
-from math import floor
 import psutil
 import queue
 import threading
+from math import floor
 
 
-class Lockable:
-    def __init__(self, var_type):
-        self.__lock = threading.Lock()
-        self.__var = var_type()
-
-    @property
-    def value(self):
-        with self.__lock:
-            return self.__var
-
-    @value.setter
-    def value(self, var):
-        assert isinstance(self.__var, type(var)), 'Lockable object cannot be recast'
-        with self.__lock:
-            self.__var = var
-
-
+# TODO: make class single instance only
 class Tui:
+    """Tui Class
+    The tui class provides a basic curses based interface. The interface has two parts - console & shell (footer)
+    The console ha seen divided into to tabs - one for console output typically written by the print function and second
+    is the log tab, written to by the __log__ function. Separate error, warning & info functions are provided for ease.
+
+    The user can execute 'registered' functions by their designated moniker. e.g. tui.register('clear', self._clear)
+    will enable the user to call the self._clear() function using the command 'clear'. Any additional command line
+    parameters provided will automatically be passed to the function (without sanity check)
+
+    Args:
+        banner(str): Accepts a  string which it prints in the bottom of the footer, may be trimmed based on screen size
+
+    Attributes:
+        _banner(str): stores the banner on instance creation. Cannot be changed later
+        _psutil(__Lockable): Maintains the current string description of resource utilisation, atomic is used correctly
+        __tabs({}): collection of tabs - tuple of name, window, buffer, cursor position
+        __footer(curses.newwin): holds curses window for the static portion of the tui which includes commandline shell
+
+        __cmd_current(str): current command being typed by the user, could be for prompt or shell.
+        __cmd_history([str]): list holds all previous commands executed
+        __registered_cmd({}): array of commands registered, indexed by commands and the corresponding function
+        __cmd_mode: defines the current mode the keystrokes are to be displayed CMD_MODE_NORMAL or CMD_MODE_PASSWORD
+        __prompt_str(str): Holds the descriptor string prompt functions are called with
+        __cmd_cursor(int): cursor position for shell/prompt incase it exceeds screen width
+
+        __prompt_lock, __shell_lock, __print_lock, __refresh_lock, __log_lock, __widget_lock(threading.Lock) : enables
+            atomic functions on these sections
+
+        __dispatch_queue(queue.LifoQueue): dispatch queue for handling keystrokes
+        __input_queue(queue.LifoQueue): waiting queue for user inputs
+
+        __widget({}): For running list of widget, progressbar, spinner, etc.
+
+        _stdscr: holding instance of curses.initscr
+
+        self.__setup__()
+    Examples:
+    """
+    class __Lockable:
+        def __init__(self, var_type):
+            self.__lock = threading.Lock()
+            self.__var = var_type()
+
+        @property
+        def value(self):
+            with self.__lock:
+                return self.__var
+
+        @value.setter
+        def value(self, var):
+            assert isinstance(self.__var, type(var)), 'Lockable object cannot be recast'
+            with self.__lock:
+                self.__var = var
 
     class __Spinner:
 
@@ -181,13 +226,23 @@ class Tui:
     CMD_PROMPT = '$ '
 
     def __init__(self, banner: str):
+        """
+        Initialises instance of Tui, involving
+            - Setting up internal parameters
+            - sets up curses, including checking resolution
+            - Creating instances of Tabs & footer (curses.window)
+            - registers internal commands, e.g. clear, demo etc.
+            - kicks off the shell thread (also thread for getting system utilisation)
+        Args:
+            banner: accepts str which will be printed in the footer
+        """
 
-        # Banner String, needs to be trimmed
+        # Banner String, needs to be trimmed, currently static
         banner_trim = 30
-        self.__banner = banner[:banner_trim]
+        self._banner = banner[:banner_trim]
 
         # Set up the for running the __res_util as a parallel thread
-        self.__psutil = Lockable(str)
+        self._psutil = self.__Lockable(str)
         threading.Thread(target=self.__res_util, daemon=True).start()
 
         # collection of tabs - tuple of name, window, buffer, cursor position
@@ -219,7 +274,7 @@ class Tui:
         self.__widget = {}
 
         # let's set up the curses default window
-        self.stdscr = curses.initscr()
+        self._stdscr = curses.initscr()
 
         self.__setup__()
 
@@ -258,8 +313,8 @@ class Tui:
 
         self.__log__(self.SEVERITY_INFO, "Initialising TUI environment")
         self.__refresh__()
-        self.stdscr.nodelay(True)
-        self.stdscr.refresh()
+        self._stdscr.nodelay(True)
+        self._stdscr.refresh()
 
         # Register the signal handler for SIGINT (Ctrl+C)
         signal.signal(signal.SIGINT, self.__shutdown__)
@@ -273,7 +328,7 @@ class Tui:
     def __refreshfooter__(self):
         tab_tooltip = "Use Tab to rotate through Tabs"
         tab_prefix = 'Tabs:'
-        tab_psutil = self.__psutil.value
+        tab_psutil = self._psutil.value
 
         # print tab list & tooltip
         self.__footer.erase()
@@ -282,7 +337,7 @@ class Tui:
         self.__footer.addstr(2, self.__resolution['x'] - len(tab_tooltip) - self.BOX_WIDTH, tab_tooltip)
         self.__footer.addstr(3, self.__resolution['x'] - len(tab_psutil) - self.BOX_WIDTH, tab_psutil, curses.A_BOLD)
 
-        self.__footer.addstr(3, self.BOX_WIDTH, self.__banner, curses.A_BOLD)
+        self.__footer.addstr(3, self.BOX_WIDTH, self._banner, curses.A_BOLD)
 
         assert self.__cmd_mode in [self.CMD_MODE_NORMAL, self.CMD_MODE_PASSWORD], \
             'TUI: Incorrect __current_mode defined'
@@ -296,7 +351,7 @@ class Tui:
         width = self.__resolution['x'] - 2 * self.BOX_WIDTH
 
         # Trim to maximum length of 50% width
-        cmd_prompt = self.CMD_PROMPT[:floor(width/2)]
+        cmd_prompt = self.CMD_PROMPT[:floor(width / 2)]
 
         # Available width - less length of cmd prompt and two (one for seperator, and another cursor)
         width = width - len(cmd_prompt) - 2
@@ -311,7 +366,7 @@ class Tui:
 
         command_string = cmd_prompt + ' ' + cmd
         self.__footer.addstr(1, self.BOX_WIDTH, command_string)
-        self.__footer.addstr('_', curses.A_BLINK)
+        self.__footer.addstr('_', curses.A_BLINK | curses.A_BOLD)
 
         # we should have written till
         self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
@@ -348,11 +403,11 @@ class Tui:
 
     def __refresh__(self, force=False):
         if force:
-            self.stdscr.touchwin()
+            self._stdscr.touchwin()
         with self.__refresh_lock:
             self.__refreshfooter__()
             self.__refreshtab__()
-            self.stdscr.refresh()
+            self._stdscr.refresh()
 
     @property
     def __activetab__(self) -> {}:
@@ -375,7 +430,7 @@ class Tui:
             disk_percent = disk.percent
 
             # String for results
-            self.__psutil.value = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
+            self._psutil.value = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
 
     def __activate__(self, name):
         assert name in self.__tabs, 'TUI: Activating non available Tab'
@@ -421,7 +476,7 @@ class Tui:
         curses.curs_set(True)
 
         # Turn off the keypad...
-        self.stdscr.keypad(False)
+        self._stdscr.keypad(False)
 
         # Restore Terminal to original state.
         curses.endwin()
@@ -445,7 +500,7 @@ class Tui:
             curses.start_color()
 
         # Enable the keypad - also permits decoding of multibyte key sequences,
-        self.stdscr.keypad(True)
+        self._stdscr.keypad(True)
 
         # Set color pairs
         # TODO: load from tui.conf else use defaults
@@ -499,7 +554,7 @@ class Tui:
 
             # get input
             try:
-                c = self.stdscr.getkey()
+                c = self._stdscr.getkey()
             except curses.error:
                 c = None
 
@@ -517,7 +572,7 @@ class Tui:
 
                 elif c == 'KEY_RIGHT':
                     width = self.__resolution['x'] - 2 * self.BOX_WIDTH
-                    width = width - len(self.CMD_PROMPT[:floor(width/2)]) - 2
+                    width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
                     if len(self.__cmd_current) > width:
                         if self.__cmd_cursor < len(self.__cmd_current) - width:
@@ -639,6 +694,7 @@ class Tui:
 
                 try:
                     command = self.__input_queue.get()
+                    command = command.strip()
                 except queue.Empty:
                     self.ERROR('TUI: Condition called but nothing in Input Stack')
                     continue
