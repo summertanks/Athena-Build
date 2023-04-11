@@ -37,11 +37,10 @@ class Tui:
     Attributes:
         _banner(str): stores the banner on instance creation. Cannot be changed later
         _psutil(__Lockable): Maintains the current string description of resource utilisation, atomic is used correctly
-        __tabs({}): collection of tabs - tuple of name, window, buffer, cursor position
+        _tabs({}): collection of tabs - tuple of name, window, buffer, cursor position
         __footer(curses.newwin): holds curses window for the static portion of the tui which includes commandline shell
 
-        __cmd_current(str): current command being typed by the user, could be for prompt or shell.
-        __cmd_history([str]): list holds all previous commands executed
+
         __registered_cmd({}): array of commands registered, indexed by commands and the corresponding function
         __cmd_mode: defines the current mode the keystrokes are to be displayed CMD_MODE_NORMAL or CMD_MODE_PASSWORD
         __prompt_str(str): Holds the descriptor string prompt functions are called with
@@ -60,6 +59,7 @@ class Tui:
         self.__setup__()
     Examples:
     """
+
     class __Lockable:
         def __init__(self, var_type):
             self.__lock = threading.Lock()
@@ -192,6 +192,52 @@ class Tui:
             self.__value = 0
             self.__time = time.time_ns()
 
+    class __Commands:
+        """ Holding class related to command(s)
+        Attributes:
+            current(str): current command being typed by the user, could be for prompt or shell.
+            history([str]): list holds all previous commands executed
+        """
+        CMD_MODE_NORMAL = 1
+        CMD_MODE_PASSWORD = 2
+
+        def __init__(self, instance):
+            """
+            Basic Init
+            Args:
+                instance: Accepts the instance of Tui class to call logging related functions
+            """
+            # let's not pass something else
+            assert isinstance(instance, Tui)
+
+            self.tui = instance
+            self.current = ''
+            self.history = []
+            self._registered = {}
+            self.mode = self.CMD_MODE_NORMAL
+            self.prompt = ''
+            self.cursor = 0
+
+        def register_command(self, command_name: str, function, tooltip=''):
+            if command_name.strip() == '':
+                self.tui.ERROR('Registering Empty Command')
+                return
+            elif command_name in self._registered:
+                self.tui.INFO(f'Registering duplicate command {command_name}, Ignored')
+                return
+            else:
+                self._registered[command_name] = (function, tooltip)
+
+        def get_command(self, command_name: str):
+            command_name = command_name.strip()
+            if not command_name:
+                return None
+
+            if command_name not in self._registered:
+                return None
+
+            return self._registered[command_name][0]
+
     BOX_WIDTH = 1
 
     SPINNER_START = 1
@@ -243,20 +289,18 @@ class Tui:
 
         # Set up the for running the __res_util as a parallel thread
         self._psutil = self.__Lockable(str)
-        threading.Thread(target=self.__res_util, daemon=True).start()
+        threading.Thread(target=self._res_util, daemon=True).start()
 
         # collection of tabs - tuple of name, window, buffer, cursor position
-        self.__tabs = {}
+        self._tabs = {}
 
         # footer defined separately
         self.__footer = None
 
         # Commands
-        self.__cmd_current = ''
-        self.__cmd_history = []
-        self.__registered_cmd = {}
+        self._cmd = self.__Commands(self)
         self.__cmd_mode = self.CMD_MODE_NORMAL
-        self.__prompt_str = ''
+        # self.__prompt_str = ''
         self.__cmd_cursor = 0
 
         self.__prompt_lock = threading.Lock()
@@ -307,8 +351,8 @@ class Tui:
         self.__activate__('console')
 
         # Validation
-        assert len([__tab for __tab in self.__tabs if __tab in ['console', 'log']]) == 2, 'TUI: Mandatory tabs missing'
-        assert len([self.__tabs[tab] for tab in self.__tabs if self.__tabs[tab]['selected']]) == 1, \
+        assert len([__tab for __tab in self._tabs if __tab in ['console', 'log']]) == 2, 'TUI: Mandatory tabs missing'
+        assert len([self._tabs[tab] for tab in self._tabs if self._tabs[tab]['selected']]) == 1, \
             'TUI: Tab not activated correctly'
 
         self.__log__(self.SEVERITY_INFO, "Initialising TUI environment")
@@ -319,8 +363,9 @@ class Tui:
         # Register the signal handler for SIGINT (Ctrl+C)
         signal.signal(signal.SIGINT, self.__shutdown__)
 
-        self.register_command('clear', self.clear)
-        self.register_command('demo', self.demo)
+        self._cmd.register_command('clear', self.clear)
+        self._cmd.register_command('demo', self.demo)
+        self._cmd.register_command('history', self.history)
 
         # start the command
         threading.Thread(target=self.shell, daemon=True).start()
@@ -358,9 +403,9 @@ class Tui:
 
         # build cmd
         if self.__cmd_mode == self.CMD_MODE_NORMAL:
-            cmd = self.__cmd_current
+            cmd = self._cmd.current
         else:  # CMD_MODE_PASSWORD
-            cmd = '*' * len(self.__cmd_current)
+            cmd = '*' * len(self._cmd.current)
 
         cmd = cmd[self.__cmd_cursor:width + self.__cmd_cursor]
 
@@ -372,9 +417,9 @@ class Tui:
         self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
         index = self.BOX_WIDTH + len(tab_prefix)
 
-        for tab in self.__tabs:
+        for tab in self._tabs:
             label = ' | ' + tab + ' | '
-            if self.__tabs[tab]['selected']:
+            if self._tabs[tab]['selected']:
                 self.__footer.addstr(2, index, label, curses.A_REVERSE)
             else:
                 self.__footer.addstr(2, index, label)
@@ -411,12 +456,12 @@ class Tui:
 
     @property
     def __activetab__(self) -> {}:
-        active_tab = [self.__tabs[tab] for tab in self.__tabs if self.__tabs[tab]['selected']]
+        active_tab = [self._tabs[tab] for tab in self._tabs if self._tabs[tab]['selected']]
         assert len(active_tab) == 1, 'TUI: Active State for tabs inconsistent'
         active_tab = active_tab[0]
         return active_tab
 
-    def __res_util(self):
+    def _res_util(self):
         while True:
             # Get CPU usage as a percentage
             cpu_percent = psutil.cpu_percent(interval=2)
@@ -433,12 +478,12 @@ class Tui:
             self._psutil.value = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
 
     def __activate__(self, name):
-        assert name in self.__tabs, 'TUI: Activating non available Tab'
+        assert name in self._tabs, 'TUI: Activating non available Tab'
 
-        for tab in self.__tabs:
-            self.__tabs[tab]['selected'] = False
+        for tab in self._tabs:
+            self._tabs[tab]['selected'] = False
 
-        self.__tabs[name]['selected'] = True
+        self._tabs[name]['selected'] = True
         self.__refresh__()
 
     def __resizeScreen__(self):
@@ -460,7 +505,7 @@ class Tui:
             elif severity == self.SEVERITY_WARNING:
                 attribute = curses.color_pair(self.COLOR_WARNING)
 
-            logger = self.__tabs['log']
+            logger = self._tabs['log']
             logger['buffer'].append((message + '\n', attribute))
             logger['cursor'] = len(logger['buffer'])
 
@@ -519,26 +564,26 @@ class Tui:
         name = name.strip()
 
         # Should not already exist
-        assert name not in self.__tabs, f'TUI: Attempted creating tab with name "{name}" which already exists'
+        assert name not in self._tabs, f'TUI: Attempted creating tab with name "{name}" which already exists'
 
         if name != '':
             # Tab is a tuple of name, window, buffer, cursor position, and selected state
-            self.__tabs[name] = {'win': curses.newwin(self.__tab_coordinates['h'], self.__tab_coordinates['w'],
-                                                      self.__tab_coordinates['y'], self.__tab_coordinates['x']),
-                                 'buffer': [], 'cursor': 0, 'selected': True}
+            self._tabs[name] = {'win': curses.newwin(self.__tab_coordinates['h'], self.__tab_coordinates['w'],
+                                                     self.__tab_coordinates['y'], self.__tab_coordinates['x']),
+                                'buffer': [], 'cursor': 0, 'selected': True}
             # #nabling Scrolling
-            self.__tabs[name]['win'].scrollok(True)
+            self._tabs[name]['win'].scrollok(True)
 
     def enabletab(self, name):
         # Set current Tab based on name, provided it is valid
-        if name in self.__tabs:
+        if name in self._tabs:
             self.__activate__(name)
 
     def enable_next_tab(self):
         # dict are not sorted, so there is no order.
-        active_tab = [tab for tab in self.__tabs if self.__tabs[tab]['selected']]
+        active_tab = [tab for tab in self._tabs if self._tabs[tab]['selected']]
         assert len(active_tab) == 1, 'TUI: More than one tab active'
-        tab_list = list(self.__tabs)
+        tab_list = list(self._tabs)
         try:
             next_tab = tab_list[tab_list.index(active_tab[0]) + 1]
         except (ValueError, IndexError):
@@ -574,8 +619,8 @@ class Tui:
                     width = self.__resolution['x'] - 2 * self.BOX_WIDTH
                     width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
-                    if len(self.__cmd_current) > width:
-                        if self.__cmd_cursor < len(self.__cmd_current) - width:
+                    if len(self._cmd.current) > width:
+                        if self.__cmd_cursor < len(self._cmd.current) - width:
                             self.__cmd_cursor += 1
 
                 elif c == 'KEY_LEFT':
@@ -583,7 +628,7 @@ class Tui:
                         self.__cmd_cursor -= 1
 
                 elif c == 'KEY_BACKSPACE':
-                    self.__cmd_current = self.__cmd_current[:-1]
+                    self._cmd.current = self._cmd.current[:-1]
                     if self.__cmd_cursor > 0:
                         self.__cmd_cursor -= 1
                     continue
@@ -605,14 +650,14 @@ class Tui:
                 # Newline received, based on data input mode the dispatch sequence is identified
                 if c == '\n':
                     # Command has been completed
-                    if not self.__cmd_current.strip() == '':
+                    if not self._cmd.current.strip() == '':
                         # Special Case
-                        if self.__cmd_current.strip() in ['quit', 'exit', 'q']:
+                        if self._cmd.current.strip() in ['quit', 'exit', 'q']:
                             __quit = True
                             continue
                         else:
-                            self.__input_queue.put(self.__cmd_current)
-                            self.__cmd_history.append(self.__cmd_current)
+                            self.__input_queue.put(self._cmd.current)
+                            self._cmd.history.append(self._cmd.current)
                             try:
                                 condition = self.__dispatch_queue.get()
                             except queue.Empty:
@@ -622,20 +667,20 @@ class Tui:
                             with condition:
                                 condition.notify()
 
-                    self.__cmd_current = ''
+                    self._cmd.current = ''
                     self.__cmd_cursor = 0
 
                 else:
-                    self.__cmd_current += c
+                    self._cmd.current = ''.join([self._cmd.current, c])
                     width = self.__resolution['x'] - 2 * self.BOX_WIDTH
                     width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
-                    if len(self.__cmd_current) > width:
-                        if self.__cmd_cursor < len(self.__cmd_current) - width:
+                    if len(self._cmd.current) > width:
+                        if self.__cmd_cursor < len(self._cmd.current) - width:
                             self.__cmd_cursor += 1
 
             else:
-                curses.napms(1)  # wait 10ms to avoid 100% CPU usage
+                curses.napms(1)  # wait 1ms to avoid 100% CPU usage
 
         # clean up
         self.__shutdown__()
@@ -654,31 +699,26 @@ class Tui:
         with self.__print_lock:
             if attribute is None:
                 attribute = curses.color_pair(self.COLOR_NORMAL)
-            console = self.__tabs['console']
+            console = self._tabs['console']
 
             console['buffer'].append((message + '\n', attribute))
             console['cursor'] = len(console['buffer'])
 
     def clear(self, name):
         if name == 'all':
-            for tab in self.__tabs:
-                self.__tabs[tab]['buffer'] = []
-                self.__tabs[tab]['cursor'] = 0
-        elif name in self.__tabs:
-            self.__tabs[name]['buffer'] = []
-            self.__tabs[name]['cursor'] = 0
+            for tab in self._tabs:
+                self._tabs[tab]['buffer'] = []
+                self._tabs[tab]['cursor'] = 0
+        elif name in self._tabs:
+            self._tabs[name]['buffer'] = []
+            self._tabs[name]['cursor'] = 0
         else:
             self.print(f'Attempted to clear non-existent tab {name}')
 
-    def register_command(self, command_name: str, function, tooltip=''):
-        if command_name.strip() == '':
-            self.ERROR('Registering Empty Command')
-            return
-        elif command_name in self.__registered_cmd:
-            self.INFO(f'Registering duplicate command {command_name}, Ignored')
-            return
-        else:
-            self.__registered_cmd[command_name] = (function, tooltip)
+    def history(self):
+        # The last command will be 'history'
+        for cmd in self._cmd.history[:-1]:
+            self.print(cmd)
 
     def shell(self):
         with self.__shell_lock:
@@ -709,11 +749,12 @@ class Tui:
                     function_name = cmd_parts[0]
                     function_args = cmd_parts[1:]
 
-                    if function_name not in self.__registered_cmd:
+                    function = self._cmd.get_command(function_name)
+
+                    if not function:
                         self.print(f'Command {function_name} not found')
                         continue
 
-                    function = self.__registered_cmd[function_name][0]
                     try:
                         function(*function_args)
                     except TypeError as e:
