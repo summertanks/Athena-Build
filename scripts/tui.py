@@ -120,19 +120,24 @@ class Tui:
               _state: current state of the progress bar
               _time: used for calculating the progres rate, initialised with progress bar is created
               _scale_factor: factor for the rate calculation - K, M, G. if None, it auto-scales.
-              _bar_width: width of the progress bar - between 10 & 40 characters
+              _bar_width: width of the progress bar - minimum 10 characters, it the length is too much,
+                        it is likely to run across the screen.
         """
 
         RUNNING = 1
         PAUSED = 2
         STOPPED = 3
 
-        def __init__(self, message: str, itr_label: str = 'it/s',
-                     scale_factor=int | None, bar_width: int = 40, fmt: str = ''):
+        def __init__(self, message: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor=int | None,
+                     maxvalue: int = 100, fmt: str = ''):
 
             self._label = message[:20]
             self._value = 0
-            self._max = 100
+
+            if not maxvalue:
+                maxvalue = 100
+            self._max = maxvalue
+
             self._itr_label = itr_label[:6]
             self._state = self.RUNNING
 
@@ -189,22 +194,11 @@ class Tui:
             rate = round(rate / factor, 2)
             rate_str = str(rate) + scale_factor + self._itr_label
 
-            # max str length -> label (20) + bar(40 + 03) + count(value count + 3) + iterator suffix(06)
-            # for minimum screen size of 80 character wide that allows 4 character width for value & total
-
             # default '{percentage:3.0f}%[{bar:30}]{value}/{total} - {label}'
-            string = self._fmt.format(percentage=percentage,
-                                     bar=bar,
-                                     value=self._value,
-                                     total=self._max,
-                                     label=self._label,
-                                     rate=rate_str)
+            progress_string = self._fmt.format(percentage=percentage, bar=bar, value=self._value,
+                                               total=self._max, label=self._label, rate=rate_str)
 
-            # string = self._label + '[' + '#' * bar_completed + '-' * bar_remaining + '] '
-            # string += '(' + str(self._value) + '/' + str(self._max) + ')'
-            # string += str(rate) + scale_factor + self._itr_label
-
-            return string
+            return progress_string
 
         def step(self, value=1):
             # don't react on stopped
@@ -752,7 +746,7 @@ class Tui:
                             continue
                         else:
                             self.__input_queue.put(self.__cmd.current)
-                            self.__cmd._history.append(self.__cmd.current)
+                            self.__cmd.add_history(self.__cmd.current)
                             try:
                                 condition = self.__dispatch_queue.get()
                             except queue.Empty:
@@ -925,8 +919,10 @@ class Tui:
             self.print(self.__widget[widget_id].message() + '... Done')
             self.__widget.pop(widget_id)
 
-    def progressbar(self, message, itr_label='it/s', scale_factor='', bar_width=40, maxvalue=None) -> int:
-        bar = Tui.__ProgressBar(message, itr_label, scale_factor, bar_width)
+    def progressbar(self, message, itr_label='it/s', bar_width: int = 40, scale_factor=None | int,
+                    maxvalue: int = 100, fmt: str = '', ) -> int:
+
+        bar = Tui.__ProgressBar(message, itr_label, bar_width, scale_factor, maxvalue, fmt)
         if maxvalue and maxvalue > 0:
             bar.max(maxvalue)
         widget_id = bar.__hash__()
