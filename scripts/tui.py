@@ -107,42 +107,66 @@ class Tui:
                 return self.__message + ' ' + self.ASCII_CHAR[self.__position]
 
     class __ProgressBar:
+        """ Internal Class for Progressbar
+        Progress bar is in form of
+            Progress Bar Demo[########################################] (100/100)9.88it/s
+                <label>                         <bar>                 (<Value>/<Total>) <rate><itr_format>
+
+        Attributes:
+              _label(str): The string printed before the bar, will be trimmed to maximum of 20 characters
+              _value(int): current value of progress bar
+              _max(int): maximum value of the progress bar
+              _itr_label(str): the suffix for rate count, trimmed in 6 characters
+              _state: current state of the progress bar
+              _time: used for calculating the progres rate, initialised with progress bar is created
+              _scale_factor: factor for the rate calculation - K, M, G. if None, it auto-scales.
+              _bar_width: width of the progress bar - between 10 & 40 characters
+        """
+
         RUNNING = 1
         PAUSED = 2
         STOPPED = 3
 
         def __init__(self, message, itr_label='it/s', scale_factor=None, bar_width=40):
-            self.__label = message[:20]
-            self.__value = 0
-            self.__max = 100
-            self.__itr_label = itr_label[:6]
+            self._label = message[:20]
+            self._value = 0
+            self._max = 100
+            self._itr_label = itr_label[:6]
+            self._state = self.RUNNING
 
-            self.__time = time.time_ns()
-            self.__state = self.RUNNING
+            self._time = time.time_ns()
 
             if scale_factor not in [None, 'K', 'M', 'G']:
                 scale_factor = None
-            self.__scale_factor = scale_factor
+            self._scale_factor = scale_factor
 
-            if bar_width < 40:
+            if bar_width < 10:
+                bar_width = 10
+            elif bar_width > 40:
                 bar_width = 40
-            elif bar_width > 60:
-                bar_width = 60
-            self.__bar_width = bar_width
+            self._bar_width = bar_width
+
+        def set_format(self, format_str: str):
+            pass
+
 
         def __str__(self) -> str:
+            """Returns the string representative the current state of the progress bar"""
+            completed = floor((self._value / self._max) * self._bar_width)
+            remaining = self._bar_width - completed
 
-            completed = floor((self.__value / self.__max) * self.__bar_width)
-            remaining = self.__bar_width - completed
-            string = self.__label + '[' + '#' * completed + '-' * remaining + '] '
-            string += '(' + str(self.__value) + '/' + str(self.__max) + ')'
-            delta = int(time.time_ns() - self.__time)
-            rate = (self.__value / delta) * 10e8
+            # max str length -> label (20) + bar(40 + 03) + count(value count + 3) + iterator suffix(06)
+            # for minimum screen size of 80 character wide that allows 4 character width for value & total
+            string = self._label + '[' + '#' * completed + '-' * remaining + '] '
+            string += '(' + str(self._value) + '/' + str(self._max) + ')'
+
+            delta = int(time.time_ns() - self._time)
+            rate = (self._value / delta) * 10e8
 
             factor = 1
             scale_factor = ''
             # if None, Autoscale
-            if self.__scale_factor is None:
+            if self._scale_factor is None:
                 if rate > 10e3 * 2:
                     scale_factor = 'K'
                 if rate > 10e6 * 2:
@@ -150,7 +174,7 @@ class Tui:
                 if rate > 10e9 * 2:
                     scale_factor = 'G'
             else:
-                scale_factor = self.__scale_factor
+                scale_factor = self._scale_factor
 
             if scale_factor == 'K':
                 factor = 10e3
@@ -161,36 +185,36 @@ class Tui:
 
             rate = round(rate / factor, 2)
 
-            string += str(rate) + scale_factor + self.__itr_label
+            string += str(rate) + scale_factor + self._itr_label
 
             return string
 
         def step(self, value=1):
             # don't react on stopped
-            if self.__state != self.RUNNING:
+            if self._state != self.RUNNING:
                 return
 
-            self.__value += value
-            if self.__value >= self.__max:
-                self.__value = self.__max
-                self.__state = self.STOPPED
+            self._value += value
+            if self._value >= self._max:
+                self._value = self._max
+                self._state = self.STOPPED
 
         def max(self, value=None):
             if not value:
                 value = 100
 
-            self.__max = value
+            self._max = value
             # self.step(0)
 
         def label(self, message):
-            self.__label = message
+            self._label = message
 
         def close(self):
             pass
 
         def reset(self):
-            self.__value = 0
-            self.__time = time.time_ns()
+            self._value = 0
+            self._time = time.time_ns()
 
     class __Commands:
         """ Internal class related to command(s)
