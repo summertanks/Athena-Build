@@ -193,7 +193,7 @@ class Tui:
             self.__time = time.time_ns()
 
     class __Commands:
-        """ Holding class related to command(s)
+        """ Internal class related to command(s)
         Attributes:
             current(str): current command being typed by the user, could be for prompt or shell.
             prompt(str): the prompt shown before uer input
@@ -225,6 +225,7 @@ class Tui:
             self._cursor = 0
 
         def register_command(self, command_name: str, function, tooltip=''):
+            """Registers command - command_name invokes function"""
             if command_name.strip() == '':
                 self.tui.ERROR('Registering Empty Command')
                 return
@@ -235,6 +236,7 @@ class Tui:
                 self._registered[command_name] = (function, tooltip)
 
         def get_command(self, command_name: str):
+            """Returns corresponding function registered against given command_name"""
             command_name = command_name.strip()
             if not command_name:
                 return None
@@ -245,33 +247,42 @@ class Tui:
             return self._registered[command_name][0]
 
         def inc_cursor(self):
+            """Increment cursor position"""
             self._cursor = self._cursor + 1
 
         def dec_cursor(self):
+            """Decrement cursor position"""
             if self._cursor > 0:
                 self._cursor = self._cursor - 1
 
         def reset_cursor(self):
+            """Reset cursor position to 0"""
             self._cursor = 0
 
         @property
         def cursor(self) -> int:
+            """return cursor position"""
             return self._cursor
 
         def set_mask_mode(self):
+            """Set Mode to masked"""
             self._mode = self.CMD_MODE_PASSWORD
 
         def reset_mask_mode(self):
+            """Reset mode to normal"""
             self._mode = self.CMD_MODE_NORMAL
 
         def is_masked(self):
+            """Return mask state"""
             return self._mode
 
         @property
         def history(self) -> []:
+            """Return list of commands"""
             return self._history
 
         def add_history(self, command: str):
+            """Add command to history"""
             command = command.strip()
             if command:
                 self._history.append(command)
