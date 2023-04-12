@@ -127,7 +127,9 @@ class Tui:
         PAUSED = 2
         STOPPED = 3
 
-        def __init__(self, message, itr_label='it/s', scale_factor=None, bar_width=40):
+        def __init__(self, message: str, itr_label: str = 'it/s',
+                     scale_factor=int | None, bar_width: int = 40, fmt: str = ''):
+
             self._label = message[:20]
             self._value = 0
             self._max = 100
@@ -146,25 +148,26 @@ class Tui:
                 bar_width = 40
             self._bar_width = bar_width
 
-        def set_format(self, format_str: str):
-            pass
-
+            if not fmt:
+                self._fmt = '{percentage:3.0f}%[{bar:30}]{value}/{total} - {label}'
 
         def __str__(self) -> str:
             """Returns the string representative the current state of the progress bar"""
-            completed = floor((self._value / self._max) * self._bar_width)
-            remaining = self._bar_width - completed
-
-            # max str length -> label (20) + bar(40 + 03) + count(value count + 3) + iterator suffix(06)
-            # for minimum screen size of 80 character wide that allows 4 character width for value & total
-            string = self._label + '[' + '#' * completed + '-' * remaining + '] '
-            string += '(' + str(self._value) + '/' + str(self._max) + ')'
+            percentage = (self._value / self._max) * 100
+            bar_completed = floor((self._value / self._max) * self._bar_width)
+            bar_remaining = self._bar_width - bar_completed
+            bar = '#' * bar_completed + '-' * bar_remaining
 
             delta = int(time.time_ns() - self._time)
+            # Avoid Div by Zero
+            if not delta:
+                delta = 1
             rate = (self._value / delta) * 10e8
 
+            # auto-scale
             factor = 1
             scale_factor = ''
+
             # if None, Autoscale
             if self._scale_factor is None:
                 if rate > 10e3 * 2:
@@ -184,8 +187,22 @@ class Tui:
                 factor = 10e9
 
             rate = round(rate / factor, 2)
+            rate_str = str(rate) + scale_factor + self._itr_label
 
-            string += str(rate) + scale_factor + self._itr_label
+            # max str length -> label (20) + bar(40 + 03) + count(value count + 3) + iterator suffix(06)
+            # for minimum screen size of 80 character wide that allows 4 character width for value & total
+
+            # default '{percentage:3.0f}%[{bar:30}]{value}/{total} - {label}'
+            string = self._fmt.format(percentage=percentage,
+                                     bar=bar,
+                                     value=self._value,
+                                     total=self._max,
+                                     label=self._label,
+                                     rate=rate_str)
+
+            # string = self._label + '[' + '#' * bar_completed + '-' * bar_remaining + '] '
+            # string += '(' + str(self._value) + '/' + str(self._max) + ')'
+            # string += str(rate) + scale_factor + self._itr_label
 
             return string
 
