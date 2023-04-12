@@ -196,10 +196,15 @@ class Tui:
         """ Holding class related to command(s)
         Attributes:
             current(str): current command being typed by the user, could be for prompt or shell.
-            history([str]): list holds all previous commands executed
+            prompt(str): the prompt shown before uer input
+
+            _history([str]): list holds all previous commands executed
+            _registered({}): array of registered commands where key is command and value is the function being invoked
+            _mode(bool) : sets whether input should be in clear or masked, e.g. for passwords
+            _cursor(int): reference for where to print input from if the input exceed screen width
         """
-        CMD_MODE_NORMAL = 1
-        CMD_MODE_PASSWORD = 2
+        CMD_MODE_NORMAL = False
+        CMD_MODE_PASSWORD = True
 
         def __init__(self, instance):
             """
@@ -212,11 +217,12 @@ class Tui:
 
             self.tui = instance
             self.current = ''
-            self.history = []
-            self._registered = {}
-            self.mode = self.CMD_MODE_NORMAL
             self.prompt = ''
-            self.cursor = 0
+
+            self._history = []
+            self._registered = {}
+            self._mode = self.CMD_MODE_NORMAL
+            self._cursor = 0
 
         def register_command(self, command_name: str, function, tooltip=''):
             if command_name.strip() == '':
@@ -237,6 +243,38 @@ class Tui:
                 return None
 
             return self._registered[command_name][0]
+
+        def inc_cursor(self):
+            self._cursor = self._cursor + 1
+
+        def dec_cursor(self):
+            if self._cursor > 0:
+                self._cursor = self._cursor - 1
+
+        def reset_cursor(self):
+            self._cursor = 0
+
+        @property
+        def cursor(self) -> int:
+            return self._cursor
+
+        def set_mask_mode(self):
+            self._mode = self.CMD_MODE_PASSWORD
+
+        def reset_mask_mode(self):
+            self._mode = self.CMD_MODE_NORMAL
+
+        def is_masked(self):
+            return self._mode
+
+        @property
+        def history(self) -> []:
+            return self._history
+
+        def add_history(self, command: str):
+            command = command.strip()
+            if command:
+                self._history.append(command)
 
     BOX_WIDTH = 1
 
@@ -298,10 +336,9 @@ class Tui:
         self.__footer = None
 
         # Commands
-        self._cmd = self.__Commands(self)
-        self.__cmd_mode = self.CMD_MODE_NORMAL
-        # self.__prompt_str = ''
-        self.__cmd_cursor = 0
+        self.__cmd = self.__Commands(self)
+        self.__cmd.reset_mask_mode()
+        self.__cmd.reset_cursor()
 
         self.__prompt_lock = threading.Lock()
         self.__shell_lock = threading.Lock()
@@ -319,8 +356,8 @@ class Tui:
 
         # let's set up the curses default window
         self._stdscr = curses.initscr()
-
-        self.__setup__()
+        self._is_setup = False
+        self._setup()
 
         # set minimum to 80x25 screen, if lesser better to print weird rather than bad calculations
         self.__resolution = {'x': max(curses.COLS, 80), 'y': max(curses.LINES, 25)}
@@ -361,11 +398,11 @@ class Tui:
         self._stdscr.refresh()
 
         # Register the signal handler for SIGINT (Ctrl+C)
-        signal.signal(signal.SIGINT, self.__shutdown__)
+        signal.signal(signal.SIGINT, self._shutdown)
 
-        self._cmd.register_command('clear', self.clear)
-        self._cmd.register_command('demo', self.demo)
-        self._cmd.register_command('history', self.history)
+        self.__cmd.register_command('clear', self.clear)
+        self.__cmd.register_command('demo', self.demo)
+        self.__cmd.register_command('history', self.history)
 
         # start the command
         threading.Thread(target=self.shell, daemon=True).start()
@@ -384,9 +421,6 @@ class Tui:
 
         self.__footer.addstr(3, self.BOX_WIDTH, self._banner, curses.A_BOLD)
 
-        assert self.__cmd_mode in [self.CMD_MODE_NORMAL, self.CMD_MODE_PASSWORD], \
-            'TUI: Incorrect __current_mode defined'
-
         # Displaying scrollable commandline
         # Usable space = screen width - 2 * BOX_WIDTH
         # Layout < [Box Width] [PROMPT] [One Spaces] [CMD] >
@@ -402,12 +436,12 @@ class Tui:
         width = width - len(cmd_prompt) - 2
 
         # build cmd
-        if self.__cmd_mode == self.CMD_MODE_NORMAL:
-            cmd = self._cmd.current
+        if not self.__cmd.is_masked():
+            cmd = self.__cmd.current
         else:  # CMD_MODE_PASSWORD
-            cmd = '*' * len(self._cmd.current)
+            cmd = '*' * len(self.__cmd.current)
 
-        cmd = cmd[self.__cmd_cursor:width + self.__cmd_cursor]
+        cmd = cmd[self.__cmd.cursor:width + self.__cmd.cursor]
 
         command_string = cmd_prompt + ' ' + cmd
         self.__footer.addstr(1, self.BOX_WIDTH, command_string)
@@ -509,7 +543,11 @@ class Tui:
             logger['buffer'].append((message + '\n', attribute))
             logger['cursor'] = len(logger['buffer'])
 
-    def __shutdown__(self):
+    def _shutdown(self):
+        # if not previously setup - skip
+        if not self._is_setup:
+            return
+
         # BEGIN ncurses shutdown/de-initialization...
         # Turn off cbreak mode...
         curses.nocbreak()
@@ -527,8 +565,13 @@ class Tui:
         curses.endwin()
 
         # END ncurses shutdown/de-initialization...
+        self._is_setup = False
 
-    def __setup__(self):
+    def _setup(self):
+        # if already setup dont execute again
+        if self._is_setup:
+            return
+
         # BEGIN ncurses startup/initialization...
 
         # disable echos
@@ -558,6 +601,7 @@ class Tui:
         curses.init_pair(self.COLOR_FOOTER, self.fgColor, self.bgFooter)
 
         # END ncurses startup/initialization...
+        self._is_setup = True
 
     def addtab(self, name: str):
         # Strip whitespaces
@@ -619,18 +663,17 @@ class Tui:
                     width = self.__resolution['x'] - 2 * self.BOX_WIDTH
                     width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
-                    if len(self._cmd.current) > width:
-                        if self.__cmd_cursor < len(self._cmd.current) - width:
-                            self.__cmd_cursor += 1
+                    if len(self.__cmd.current) > width:
+                        if self.__cmd.cursor < len(self.__cmd.current) - width:
+                            self.__cmd.inc_cursor()
 
                 elif c == 'KEY_LEFT':
-                    if self.__cmd_cursor > 0:
-                        self.__cmd_cursor -= 1
+                    self.__cmd.dec_cursor()
 
                 elif c == 'KEY_BACKSPACE':
-                    self._cmd.current = self._cmd.current[:-1]
-                    if self.__cmd_cursor > 0:
-                        self.__cmd_cursor -= 1
+                    self.__cmd.current = self.__cmd.current[:-1]
+                    if self.__cmd.cursor > 0:
+                        self.__cmd.dec_cursor()
                     continue
 
                 elif c == '\t':
@@ -650,14 +693,14 @@ class Tui:
                 # Newline received, based on data input mode the dispatch sequence is identified
                 if c == '\n':
                     # Command has been completed
-                    if not self._cmd.current.strip() == '':
+                    if not self.__cmd.current.strip() == '':
                         # Special Case
-                        if self._cmd.current.strip() in ['quit', 'exit', 'q']:
+                        if self.__cmd.current.strip() in ['quit', 'exit', 'q']:
                             __quit = True
                             continue
                         else:
-                            self.__input_queue.put(self._cmd.current)
-                            self._cmd.history.append(self._cmd.current)
+                            self.__input_queue.put(self.__cmd.current)
+                            self.__cmd._history.append(self.__cmd.current)
                             try:
                                 condition = self.__dispatch_queue.get()
                             except queue.Empty:
@@ -667,23 +710,23 @@ class Tui:
                             with condition:
                                 condition.notify()
 
-                    self._cmd.current = ''
-                    self.__cmd_cursor = 0
+                    self.__cmd.current = ''
+                    self.__cmd.reset_cursor()
 
                 else:
-                    self._cmd.current = ''.join([self._cmd.current, c])
+                    self.__cmd.current = ''.join([self.__cmd.current, c])
                     width = self.__resolution['x'] - 2 * self.BOX_WIDTH
                     width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
-                    if len(self._cmd.current) > width:
-                        if self.__cmd_cursor < len(self._cmd.current) - width:
-                            self.__cmd_cursor += 1
+                    if len(self.__cmd.current) > width:
+                        if self.__cmd.cursor < len(self.__cmd.current) - width:
+                            self.__cmd.inc_cursor()
 
             else:
                 curses.napms(1)  # wait 1ms to avoid 100% CPU usage
 
         # clean up
-        self.__shutdown__()
+        self._shutdown()
 
     def INFO(self, message):
         self.__log__(self.SEVERITY_INFO, message)
@@ -717,7 +760,7 @@ class Tui:
 
     def history(self):
         # The last command will be 'history'
-        for cmd in self._cmd.history[:-1]:
+        for cmd in self.__cmd.history[:-1]:
             self.print(cmd)
 
     def shell(self):
@@ -749,7 +792,7 @@ class Tui:
                     function_name = cmd_parts[0]
                     function_args = cmd_parts[1:]
 
-                    function = self._cmd.get_command(function_name)
+                    function = self.__cmd.get_command(function_name)
 
                     if not function:
                         self.print(f'Command {function_name} not found')
@@ -786,7 +829,7 @@ class Tui:
                 self.__dispatch_queue.put(condition)
 
                 if prompt_type == self.PROMPT_PASSWORD:
-                    self.__cmd_mode = self.CMD_MODE_PASSWORD
+                    self.__cmd.set_mask_mode()
 
                 with condition:
                     condition.wait()
@@ -807,7 +850,7 @@ class Tui:
                 break
 
             if prompt_type == self.PROMPT_PASSWORD:
-                self.__cmd_mode = self.CMD_MODE_NORMAL
+                self.__cmd.reset_mask_mode()
                 self.print(self.CMD_PROMPT + ' ' + '*' * len(answer))
             else:
                 self.print(self.CMD_PROMPT + ' ' + answer)
