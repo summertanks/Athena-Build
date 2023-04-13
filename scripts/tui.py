@@ -40,12 +40,6 @@ class Tui:
         _tabs({}): collection of tabs - tuple of name, window, buffer, cursor position
         __footer(curses.newwin): holds curses window for the static portion of the tui which includes commandline shell
 
-
-        __registered_cmd({}): array of commands registered, indexed by commands and the corresponding function
-        __cmd_mode: defines the current mode the keystrokes are to be displayed CMD_MODE_NORMAL or CMD_MODE_PASSWORD
-        __prompt_str(str): Holds the descriptor string prompt functions are called with
-        __cmd_cursor(int): cursor position for shell/prompt incase it exceeds screen width
-
         __prompt_lock, __shell_lock, __print_lock, __refresh_lock, __log_lock, __widget_lock(threading.Lock) : enables
             atomic functions on these sections
 
@@ -154,7 +148,7 @@ class Tui:
             self._bar_width = bar_width
 
             if not fmt:
-                self._fmt = '{percentage:3.0f}%[{bar:30}]{value}/{total} - {label}'
+                self._fmt = '{percentage:3.0f}%[{bar}]{value}/{total} : {rate} - {label}'
 
         def __str__(self) -> str:
             """Returns the string representative the current state of the progress bar"""
@@ -194,13 +188,14 @@ class Tui:
             rate = round(rate / factor, 2)
             rate_str = str(rate) + scale_factor + self._itr_label
 
-            # default '{percentage:3.0f}%[{bar:30}]{value}/{total} - {label}'
+            # default '{percentage:3.0f}%[{bar}]{value}/{total} : {rate} - {label}'
             progress_string = self._fmt.format(percentage=percentage, bar=bar, value=self._value,
                                                total=self._max, label=self._label, rate=rate_str)
 
             return progress_string
 
         def step(self, value=1):
+            """Increase the value count by specified number, default being 1"""
             # don't react on stopped
             if self._state != self.RUNNING:
                 return
@@ -210,20 +205,22 @@ class Tui:
                 self._value = self._max
                 self._state = self.STOPPED
 
-        def max(self, value=None):
+        def set_max(self, value: int = 100):
+            """Set/reset max value of bar"""
             if not value:
                 value = 100
-
             self._max = value
-            # self.step(0)
 
-        def label(self, message):
-            self._label = message
+        def label(self, message: str):
+            """Set the progress bar label"""
+            self._label = message.strip()
 
         def close(self):
-            pass
+            """To close actions on progress bar """
+            self._state = self.STOPPED
 
         def reset(self):
+            """Resets the timer for rate calculation"""
             self._value = 0
             self._time = time.time_ns()
 
@@ -924,7 +921,7 @@ class Tui:
 
         bar = Tui.__ProgressBar(message, itr_label, bar_width, scale_factor, maxvalue, fmt)
         if maxvalue and maxvalue > 0:
-            bar.max(maxvalue)
+            bar.set_max(maxvalue)
         widget_id = bar.__hash__()
         with self.__widget_lock:
             self.__widget[widget_id] = bar
