@@ -71,6 +71,11 @@ class Tui:
                 self.__var = var
 
     class __Spinner:
+        """ Internal class for Spinner
+        Presents a spinner with given character sequence
+        Attributes:
+
+        """
 
         # Can pick more from
         # https://stackoverflow.com/questions/2685435/cooler-ascii-spinners
@@ -122,10 +127,17 @@ class Tui:
         PAUSED = 2
         STOPPED = 3
 
-        def __init__(self, message: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor=int | None,
+        def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor=str | None,
                      maxvalue: int = 100, fmt: str = ''):
+            """Initializes the instance of Progres bar
+            Args:
+                label(str): the label to be printed as per bar format
+                itr_label(str): the suffix for the rate, may be prefixed with scale factor
+                bar_width(int): the width of the bar portion only, [...] for example are not included in this sizing
+                scale_factor(str): option between None (autoscale), 'K', 'M' & 'G' and scales the rate accordingly.
+            """
 
-            self._label = message[:20]
+            self._label = label[:20]
             self._value = 0
 
             if not maxvalue:
@@ -916,16 +928,16 @@ class Tui:
             self.print(self.__widget[widget_id].message() + '... Done')
             self.__widget.pop(widget_id)
 
-    def progressbar(self, message, itr_label='it/s', bar_width: int = 40, scale_factor=None | int,
-                    maxvalue: int = 100, fmt: str = '', ) -> int:
+    def progressbar(self, label, itr_label='it/s', bar_width: int = 40, scale_factor: str = str | None,
+                    maxvalue: int = 100, fmt: str = '', ) -> __ProgressBar:
 
-        bar = Tui.__ProgressBar(message, itr_label, bar_width, scale_factor, maxvalue, fmt)
-        if maxvalue and maxvalue > 0:
-            bar.set_max(maxvalue)
+        bar = Tui.__ProgressBar(label, itr_label, bar_width, scale_factor, maxvalue, fmt)
+
         widget_id = bar.__hash__()
         with self.__widget_lock:
             self.__widget[widget_id] = bar
-        return widget_id
+
+        return bar
 
     def p_step(self, widget_id: int, value: int = 1):
         with self.__widget_lock:
@@ -936,7 +948,9 @@ class Tui:
             bar = self.__widget[widget_id]
             bar.step(value)
 
-    def p_close(self, widget_id: int):
+    def p_close(self, bar: __ProgressBar):
+        bar.close()
+        widget_id = bar.__hash__()
         with self.__widget_lock:
             if widget_id not in self.__widget:
                 self.print(f'TUI: No Widget by id {widget_id}')
@@ -955,7 +969,7 @@ class Tui:
         bar = self.progressbar('Progress Bar Demo', maxvalue=100)
 
         for i in range(100):
-            self.p_step(bar, value=1)
+            bar.step(value=1)
             curses.napms(100)
         self.p_close(bar)
 
