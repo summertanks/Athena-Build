@@ -74,7 +74,10 @@ class Tui:
         """ Internal class for Spinner
         Presents a spinner with given character sequence
         Attributes:
-
+            _message(str): the message printed as action of spinner, trimmed to 70 characters
+            _lock: threading lock to keep changes atomic
+            _position(int): index in character array presenting position of the spinner
+            _running(bool): maintains running state of the Spinner
         """
 
         # Can pick more from
@@ -82,28 +85,33 @@ class Tui:
         ASCII_CHAR = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
 
         def __init__(self, message):
-            self.__message = message[:70]
-            self.__lock = threading.Lock()
-            self.__position = 0
-            self.__running = True
+            self._message: str = message[:70]
+            self._lock = threading.Lock()
+            self._position: int = 0
+            self._running = True
 
-            threading.Thread(target=self.__step__, daemon=True).start()
+            # starts the threat which survives till the spinner is running
+            threading.Thread(target=self._step, daemon=True).start()
 
-        def __step__(self):
-            while self.__running:
+        def _step(self):
+            """Continuous thread which updates the suffix character till _running is true"""
+            while self._running:
                 time.sleep(0.1)
-                with self.__lock:
-                    self.__position = (self.__position + 1) % len(self.ASCII_CHAR)
+                with self._lock:
+                    self._position = (self._position + 1) % len(self.ASCII_CHAR)
 
         def done(self):
-            self.__running = False
+            """Stopping the Spinner"""
+            self._running = False
 
+        @property
         def message(self) -> str:
-            return self.__message
+            return self._message
 
         def __str__(self) -> str:
-            with self.__lock:
-                return self.__message + ' ' + self.ASCII_CHAR[self.__position]
+            """Return str description of Spinner"""
+            with self._lock:
+                return self._message + ' ' + self.ASCII_CHAR[self._position]
 
     class __ProgressBar:
         """ Internal Class for Progressbar
@@ -913,19 +921,21 @@ class Tui:
 
         return answer
 
-    def spinner(self, message) -> int:
+    def spinner(self, message) -> __Spinner:
         spin = Tui.__Spinner(message)
         widget_id = spin.__hash__()
         with self.__widget_lock:
             self.__widget[widget_id] = spin
-        return widget_id
+        return spin
 
-    def s_stop(self, widget_id: int):
+    def s_stop(self, spin: __Spinner):
+        spin.done()
+        widget_id = spin.__hash__()
         with self.__widget_lock:
             if widget_id not in self.__widget:
                 self.print(f'TUI: No Widget by id {widget_id}')
                 return
-            self.print(self.__widget[widget_id].message() + '... Done')
+            self.print(spin.message + '... Done')
             self.__widget.pop(widget_id)
 
     def progressbar(self, label, itr_label='it/s', bar_width: int = 40, scale_factor: str = str | None,
