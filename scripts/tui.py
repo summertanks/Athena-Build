@@ -43,10 +43,10 @@ class Tui:
         __prompt_lock, __shell_lock, __print_lock, __refresh_lock, __log_lock, __widget_lock(threading.Lock) : enables
             atomic functions on these sections
 
-        __dispatch_queue(queue.LifoQueue): dispatch queue for handling keystrokes
-        __input_queue(queue.LifoQueue): waiting queue for user inputs
+        _dispatch_queue(queue.LifoQueue): dispatch queue for handling keystrokes
+        _input_queue(queue.LifoQueue): waiting queue for user inputs
 
-        __widget({}): For running list of widget, progressbar, spinner, etc.
+        _widget({}): For running list of widget, progressbar, spinner, etc.
 
         _stdscr: holding instance of curses.initscr
 
@@ -341,9 +341,6 @@ class Tui:
 
     BOX_WIDTH = 1
 
-    SPINNER_START = 1
-    SPINNER_STOP = 2
-
     PROMPT_YESNO = 1
     PROMPT_INPUT = 2
     PROMPT_OPTIONS = 3
@@ -396,26 +393,26 @@ class Tui:
         self._tabs = {}
 
         # footer defined separately
-        self.__footer = None
+        self._footer = None
 
         # Commands
-        self.__cmd = self.__Commands(self)
-        self.__cmd.reset_mask_mode()
-        self.__cmd.reset_cursor()
+        self._cmd = self.__Commands(self)
+        self._cmd.reset_mask_mode()
+        self._cmd.reset_cursor()
 
-        self.__prompt_lock = threading.Lock()
-        self.__shell_lock = threading.Lock()
-        self.__print_lock = threading.Lock()
-        self.__refresh_lock = threading.Lock()
-        self.__log_lock = threading.Lock()
-        self.__widget_lock = threading.Lock()
+        self._prompt_lock = threading.Lock()
+        self._shell_lock = threading.Lock()
+        self._print_lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
+        self._log_lock = threading.Lock()
+        self._widget_lock = threading.Lock()
 
         # setting up dispatch queue for handling keystrokes
-        self.__dispatch_queue = queue.LifoQueue()
-        self.__input_queue = queue.LifoQueue()
+        self._dispatch_queue = queue.LifoQueue()
+        self._input_queue = queue.LifoQueue()
 
         # For running list of widget
-        self.__widget = {}
+        self._widget = {}
 
         # let's set up the curses default window
         self._stdscr = curses.initscr()
@@ -423,66 +420,67 @@ class Tui:
         self._setup()
 
         # set minimum to 80x25 screen, if lesser better to print weird rather than bad calculations
-        self.__resolution = {'x': max(curses.COLS, 80), 'y': max(curses.LINES, 25)}
+        self._resolution = {'x': max(curses.COLS, 80), 'y': max(curses.LINES, 25)}
 
         # Set footer bar size, typically its one for tabs, one for prompt, one for application info,
         # and one each side for the box
-        self.__footer_height = 5
+        self._footer_height = 5
 
         # calculate layout (width, height, origin y, origin x) with origin on top left corner
-        self.__tab_coordinates = {'h': self.__resolution['y'] - self.__footer_height, 'w': self.__resolution['x'],
-                                  'y': 0, 'x': 0}
-        self.__footer_coordinates = {'h': self.__footer_height, 'w': self.__resolution['x'],
-                                     'y': self.__resolution['y'] - self.__footer_height, 'x': 0}
+        self._tab_coordinates = {'h': self._resolution['y'] - self._footer_height, 'w': self._resolution['x'],
+                                 'y': 0, 'x': 0}
+        self._footer_coordinates = {'h': self._footer_height, 'w': self._resolution['x'],
+                                    'y': self._resolution['y'] - self._footer_height, 'x': 0}
 
         # creating footer, Cant create tab before that
-        self.__footer = curses.newwin(self.__footer_coordinates['h'], self.__footer_coordinates['w'],
-                                      self.__footer_coordinates['y'], self.__footer_coordinates['x'])
-
-        # Validation
-        assert self.__footer_height >= 5, 'TUI: Malformed Footer Size'
-        assert self.__footer is not None, "TUI: Footer not defined"
+        self._footer = curses.newwin(self._footer_coordinates['h'], self._footer_coordinates['w'],
+                                     self._footer_coordinates['y'], self._footer_coordinates['x'])
 
         # creating basic tabs
-        self.addtab("console")
-        self.addtab("log")
+        self._addtab("console")
+        self._addtab("log")
 
         # set the default tab
-        self.__activate__('console')
+        self._activate('console')
 
         # Validation
-        assert len([__tab for __tab in self._tabs if __tab in ['console', 'log']]) == 2, 'TUI: Mandatory tabs missing'
-        assert len([self._tabs[tab] for tab in self._tabs if self._tabs[tab]['selected']]) == 1, \
-            'TUI: Tab not activated correctly'
+        try:
+            assert self._footer_height >= 5, 'TUI: Malformed Footer Size'
+            assert self._footer is not None, 'TUI: Footer not defined'
+            assert len([tab for tab in self._tabs if tab in ['console', 'log']]) == 2, 'TUI: Mandatory tabs missing'
+            assert len([self._tabs[tab] for tab in self._tabs if self._tabs[tab]['selected']]) == 1, \
+                'TUI: Tab not activated correctly'
+        except AssertionError:
+            self._shutdown()
+            print('TUI: Setup configuration is wrong')
+            return
 
-        self.__log__(self.SEVERITY_INFO, "Initialising TUI environment")
-        self.__refresh__()
-        self._stdscr.nodelay(True)
-        self._stdscr.refresh()
+        self.INFO("Initialising TUI environment")
+        self._refresh()
 
         # Register the signal handler for SIGINT (Ctrl+C)
         signal.signal(signal.SIGINT, self._shutdown)
 
-        self.__cmd.register_command('clear', self.clear)
-        self.__cmd.register_command('demo', self.demo)
-        self.__cmd.register_command('history', self.history)
+        self._cmd.register_command('clear', self.clear)
+        self._cmd.register_command('demo', self.demo)
+        self._cmd.register_command('history', self.history)
 
         # start the command
         threading.Thread(target=self.shell, daemon=True).start()
 
-    def __refreshfooter__(self):
+    def _refreshfooter(self):
         tab_tooltip = "Use Tab to rotate through Tabs"
         tab_prefix = 'Tabs:'
         tab_psutil = self._psutil.value
 
         # print tab list & tooltip
-        self.__footer.erase()
-        self.__footer.bkgd(curses.color_pair(self.COLOR_FOOTER))
-        self.__footer.box()
-        self.__footer.addstr(2, self.__resolution['x'] - len(tab_tooltip) - self.BOX_WIDTH, tab_tooltip)
-        self.__footer.addstr(3, self.__resolution['x'] - len(tab_psutil) - self.BOX_WIDTH, tab_psutil, curses.A_BOLD)
+        self._footer.erase()
+        self._footer.bkgd(curses.color_pair(self.COLOR_FOOTER))
+        self._footer.box()
+        self._footer.addstr(2, self._resolution['x'] - len(tab_tooltip) - self.BOX_WIDTH, tab_tooltip)
+        self._footer.addstr(3, self._resolution['x'] - len(tab_psutil) - self.BOX_WIDTH, tab_psutil, curses.A_BOLD)
 
-        self.__footer.addstr(3, self.BOX_WIDTH, self._banner, curses.A_BOLD)
+        self._footer.addstr(3, self.BOX_WIDTH, self._banner, curses.A_BOLD)
 
         # Displaying scrollable commandline
         # Usable space = screen width - 2 * BOX_WIDTH
@@ -490,7 +488,7 @@ class Tui:
         # Less command prompt should be trimmed to 50% of the available space
         # Remain Command should be scrollable, cursor position defines from where the command is printed
 
-        width = self.__resolution['x'] - 2 * self.BOX_WIDTH
+        width = self._resolution['x'] - 2 * self.BOX_WIDTH
 
         # Trim to maximum length of 50% width
         cmd_prompt = self.CMD_PROMPT[:floor(width / 2)]
@@ -499,32 +497,32 @@ class Tui:
         width = width - len(cmd_prompt) - 2
 
         # build cmd
-        if not self.__cmd.is_masked():
-            cmd = self.__cmd.current
+        if not self._cmd.is_masked():
+            cmd = self._cmd.current
         else:  # CMD_MODE_PASSWORD
-            cmd = '*' * len(self.__cmd.current)
+            cmd = '*' * len(self._cmd.current)
 
-        cmd = cmd[self.__cmd.cursor:width + self.__cmd.cursor]
+        cmd = cmd[self._cmd.cursor:width + self._cmd.cursor]
 
         command_string = cmd_prompt + ' ' + cmd
-        self.__footer.addstr(1, self.BOX_WIDTH, command_string)
-        self.__footer.addstr('_', curses.A_BLINK | curses.A_BOLD)
+        self._footer.addstr(1, self.BOX_WIDTH, command_string)
+        self._footer.addstr('_', curses.A_BLINK | curses.A_BOLD)
 
         # we should have written till
-        self.__footer.addstr(2, self.BOX_WIDTH, tab_prefix)
+        self._footer.addstr(2, self.BOX_WIDTH, tab_prefix)
         index = self.BOX_WIDTH + len(tab_prefix)
 
         for tab in self._tabs:
             label = ' | ' + tab + ' | '
             if self._tabs[tab]['selected']:
-                self.__footer.addstr(2, index, label, curses.A_REVERSE)
+                self._footer.addstr(2, index, label, curses.A_REVERSE)
             else:
-                self.__footer.addstr(2, index, label)
+                self._footer.addstr(2, index, label)
             index += len(label)
 
-        self.__footer.refresh()
+        self._footer.refresh()
 
-    def __refreshtab__(self):
+    def _refreshtab(self):
         # printing the Active tab only
         active_tab = self.__activetab__
 
@@ -536,19 +534,19 @@ class Tui:
             line = buffer[i]
             window.addstr(line[0], line[1])
 
-        with self.__widget_lock:
-            for widget in self.__widget:
-                line = str(self.__widget[widget]) + '\n'
+        with self._widget_lock:
+            for widget in self._widget:
+                line = str(self._widget[widget]) + '\n'
                 window.addstr(line, curses.A_BOLD)
 
         window.refresh()
 
-    def __refresh__(self, force=False):
+    def _refresh(self, force=False):
         if force:
             self._stdscr.touchwin()
-        with self.__refresh_lock:
-            self.__refreshfooter__()
-            self.__refreshtab__()
+        with self._refresh_lock:
+            self._refreshfooter()
+            self._refreshtab()
             self._stdscr.refresh()
 
     @property
@@ -574,28 +572,28 @@ class Tui:
             # String for results
             self._psutil.value = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
 
-    def __activate__(self, name):
+    def _activate(self, name):
         assert name in self._tabs, 'TUI: Activating non available Tab'
 
         for tab in self._tabs:
             self._tabs[tab]['selected'] = False
 
         self._tabs[name]['selected'] = True
-        self.__refresh__()
+        self._refresh()
 
     def __resizeScreen__(self):
         # calculate layout (width, height, origin y, origin x) with origin on top left corner
-        self.__tab_coordinates = {'h': self.__resolution['y'] - self.__footer_height, 'w': self.__resolution['x'],
+        self._tab_coordinates = {'h': self._resolution['y'] - self._footer_height, 'w': self._resolution['x'],
                                   'y': 0, 'x': 0}
-        self.__footer_coordinates = {'h': self.__footer_height, 'w': self.__resolution['x'],
-                                     'y': self.__resolution['y'] - self.__footer_height, 'x': 0}
-        self.__refresh__()
+        self._footer_coordinates = {'h': self._footer_height, 'w': self._resolution['x'],
+                                     'y': self._resolution['y'] - self._footer_height, 'x': 0}
+        self._refresh()
 
-    def __log__(self, severity, message):
+    def _log(self, severity, message):
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
             f'TUI: Incorrect Severity {severity} defined'
 
-        with self.__log_lock:
+        with self._log_lock:
             attribute = curses.color_pair(self.COLOR_NORMAL)
             if severity == self.SEVERITY_ERROR:
                 attribute = curses.color_pair(self.COLOR_ERROR)
@@ -663,10 +661,13 @@ class Tui:
         curses.init_pair(self.COLOR_HIGHLIGHT, self.highlightColor, self.bgColor)
         curses.init_pair(self.COLOR_FOOTER, self.fgColor, self.bgFooter)
 
+        # no waiting on getch()
+        self._stdscr.nodelay(True)
+
         # END ncurses startup/initialization...
         self._is_setup = True
 
-    def addtab(self, name: str):
+    def _addtab(self, name: str):
         # Strip whitespaces
         name = name.strip()
 
@@ -675,8 +676,8 @@ class Tui:
 
         if name != '':
             # Tab is a tuple of name, window, buffer, cursor position, and selected state
-            self._tabs[name] = {'win': curses.newwin(self.__tab_coordinates['h'], self.__tab_coordinates['w'],
-                                                     self.__tab_coordinates['y'], self.__tab_coordinates['x']),
+            self._tabs[name] = {'win': curses.newwin(self._tab_coordinates['h'], self._tab_coordinates['w'],
+                                                     self._tab_coordinates['y'], self._tab_coordinates['x']),
                                 'buffer': [], 'cursor': 0, 'selected': True}
             # #nabling Scrolling
             self._tabs[name]['win'].scrollok(True)
@@ -684,7 +685,7 @@ class Tui:
     def enabletab(self, name):
         # Set current Tab based on name, provided it is valid
         if name in self._tabs:
-            self.__activate__(name)
+            self._activate(name)
 
     def enable_next_tab(self):
         # dict are not sorted, so there is no order.
@@ -696,13 +697,17 @@ class Tui:
         except (ValueError, IndexError):
             next_tab = tab_list[0]
 
-        self.__activate__(next_tab)
+        self._activate(next_tab)
 
     def run(self):
+        if not self._is_setup:
+            print("TUI: screen has not been setup properly")
+            return
+
         __quit = False
         # main loop
         while not __quit:
-            self.__refresh__()
+            self._refresh()
 
             # get input
             try:
@@ -714,7 +719,7 @@ class Tui:
             if c is not None:
 
                 if c == 'KEY_UP':
-                    if activetab['cursor'] > self.__tab_coordinates['h']:
+                    if activetab['cursor'] > self._tab_coordinates['h']:
                         activetab['cursor'] -= 1
                         continue
 
@@ -723,20 +728,20 @@ class Tui:
                     continue
 
                 elif c == 'KEY_RIGHT':
-                    width = self.__resolution['x'] - 2 * self.BOX_WIDTH
+                    width = self._resolution['x'] - 2 * self.BOX_WIDTH
                     width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
-                    if len(self.__cmd.current) > width:
-                        if self.__cmd.cursor < len(self.__cmd.current) - width:
-                            self.__cmd.inc_cursor()
+                    if len(self._cmd.current) > width:
+                        if self._cmd.cursor < len(self._cmd.current) - width:
+                            self._cmd.inc_cursor()
 
                 elif c == 'KEY_LEFT':
-                    self.__cmd.dec_cursor()
+                    self._cmd.dec_cursor()
 
                 elif c == 'KEY_BACKSPACE':
-                    self.__cmd.current = self.__cmd.current[:-1]
-                    if self.__cmd.cursor > 0:
-                        self.__cmd.dec_cursor()
+                    self._cmd.current = self._cmd.current[:-1]
+                    if self._cmd.cursor > 0:
+                        self._cmd.dec_cursor()
                     continue
 
                 elif c == '\t':
@@ -750,22 +755,22 @@ class Tui:
 
                 # here onwards we are processing keys outside control keys
                 # if nothing is waiting in queue don't process any keys
-                if self.__dispatch_queue.empty():
+                if self._dispatch_queue.empty():
                     continue
 
                 # Newline received, based on data input mode the dispatch sequence is identified
                 if c == '\n':
                     # Command has been completed
-                    if not self.__cmd.current.strip() == '':
+                    if not self._cmd.current.strip() == '':
                         # Special Case
-                        if self.__cmd.current.strip() in ['quit', 'exit', 'q']:
+                        if self._cmd.current.strip() in ['quit', 'exit', 'q']:
                             __quit = True
                             continue
                         else:
-                            self.__input_queue.put(self.__cmd.current)
-                            self.__cmd.add_history(self.__cmd.current)
+                            self._input_queue.put(self._cmd.current)
+                            self._cmd.add_history(self._cmd.current)
                             try:
-                                condition = self.__dispatch_queue.get()
+                                condition = self._dispatch_queue.get()
                             except queue.Empty:
                                 self.ERROR('TUI: Nothing in dispatch queue')
                                 continue
@@ -773,17 +778,17 @@ class Tui:
                             with condition:
                                 condition.notify()
 
-                    self.__cmd.current = ''
-                    self.__cmd.reset_cursor()
+                    self._cmd.current = ''
+                    self._cmd.reset_cursor()
 
                 else:
-                    self.__cmd.current = ''.join([self.__cmd.current, c])
-                    width = self.__resolution['x'] - 2 * self.BOX_WIDTH
+                    self._cmd.current = ''.join([self._cmd.current, c])
+                    width = self._resolution['x'] - 2 * self.BOX_WIDTH
                     width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
-                    if len(self.__cmd.current) > width:
-                        if self.__cmd.cursor < len(self.__cmd.current) - width:
-                            self.__cmd.inc_cursor()
+                    if len(self._cmd.current) > width:
+                        if self._cmd.cursor < len(self._cmd.current) - width:
+                            self._cmd.inc_cursor()
 
             else:
                 curses.napms(1)  # wait 1ms to avoid 100% CPU usage
@@ -792,17 +797,17 @@ class Tui:
         self._shutdown()
 
     def INFO(self, message):
-        self.__log__(self.SEVERITY_INFO, message)
+        self._log(self.SEVERITY_INFO, message)
 
     def WARNING(self, message):
-        self.__log__(self.SEVERITY_WARNING, message)
+        self._log(self.SEVERITY_WARNING, message)
 
     def ERROR(self, message):
-        self.__log__(self.SEVERITY_ERROR, message)
+        self._log(self.SEVERITY_ERROR, message)
 
     def print(self, message, attribute=None):
 
-        with self.__print_lock:
+        with self._print_lock:
             if attribute is None:
                 attribute = curses.color_pair(self.COLOR_NORMAL)
             console = self._tabs['console']
@@ -823,23 +828,23 @@ class Tui:
 
     def history(self):
         # The last command will be 'history'
-        for cmd in self.__cmd.history[:-1]:
+        for cmd in self._cmd.history[:-1]:
             self.print(cmd)
 
     def shell(self):
-        with self.__shell_lock:
+        with self._shell_lock:
 
             while True:
                 self.CMD_PROMPT = '$'
 
                 condition = threading.Condition()
-                self.__dispatch_queue.put(condition)
+                self._dispatch_queue.put(condition)
 
                 with condition:
                     condition.wait()
 
                 try:
-                    command = self.__input_queue.get()
+                    command = self._input_queue.get()
                     command = command.strip()
                 except queue.Empty:
                     self.ERROR('TUI: Condition called but nothing in Input Stack')
@@ -855,7 +860,7 @@ class Tui:
                     function_name = cmd_parts[0]
                     function_args = cmd_parts[1:]
 
-                    function = self.__cmd.get_command(function_name)
+                    function = self._cmd.get_command(function_name)
 
                     if not function:
                         self.print(f'Command {function_name} not found')
@@ -877,7 +882,7 @@ class Tui:
         if prompt_type == self.PROMPT_OPTIONS:
             assert len(options) > 0, 'Prompt type PROMPT_OPTIONS called without options'
 
-        with self.__prompt_lock:
+        with self._prompt_lock:
             old_prompt = self.CMD_PROMPT
             self.CMD_PROMPT = message
 
@@ -889,16 +894,16 @@ class Tui:
             answer = ''
             while True:
                 condition = threading.Condition()
-                self.__dispatch_queue.put(condition)
+                self._dispatch_queue.put(condition)
 
                 if prompt_type == self.PROMPT_PASSWORD:
-                    self.__cmd.set_mask_mode()
+                    self._cmd.set_mask_mode()
 
                 with condition:
                     condition.wait()
 
                 try:
-                    answer = self.__input_queue.get()
+                    answer = self._input_queue.get()
                 except queue.Empty:
                     self.ERROR('TUI: Condition called but nothing in Input Stack')
 
@@ -913,7 +918,7 @@ class Tui:
                 break
 
             if prompt_type == self.PROMPT_PASSWORD:
-                self.__cmd.reset_mask_mode()
+                self._cmd.reset_mask_mode()
                 self.print(self.CMD_PROMPT + ' ' + '*' * len(answer))
             else:
                 self.print(self.CMD_PROMPT + ' ' + answer)
@@ -924,19 +929,19 @@ class Tui:
     def spinner(self, message) -> __Spinner:
         spin = Tui.__Spinner(message)
         widget_id = spin.__hash__()
-        with self.__widget_lock:
-            self.__widget[widget_id] = spin
+        with self._widget_lock:
+            self._widget[widget_id] = spin
         return spin
 
     def s_stop(self, spin: __Spinner):
         spin.done()
         widget_id = spin.__hash__()
-        with self.__widget_lock:
-            if widget_id not in self.__widget:
+        with self._widget_lock:
+            if widget_id not in self._widget:
                 self.print(f'TUI: No Widget by id {widget_id}')
                 return
             self.print(spin.message + '... Done')
-            self.__widget.pop(widget_id)
+            self._widget.pop(widget_id)
 
     def progressbar(self, label, itr_label='it/s', bar_width: int = 40, scale_factor: str = str | None,
                     maxvalue: int = 100, fmt: str = '', ) -> __ProgressBar:
@@ -944,29 +949,29 @@ class Tui:
         bar = Tui.__ProgressBar(label, itr_label, bar_width, scale_factor, maxvalue, fmt)
 
         widget_id = bar.__hash__()
-        with self.__widget_lock:
-            self.__widget[widget_id] = bar
+        with self._widget_lock:
+            self._widget[widget_id] = bar
 
         return bar
 
     def p_step(self, widget_id: int, value: int = 1):
-        with self.__widget_lock:
-            if widget_id not in self.__widget:
+        with self._widget_lock:
+            if widget_id not in self._widget:
                 self.print(f'TUI: No Widget by id {widget_id}')
                 return
 
-            bar = self.__widget[widget_id]
+            bar = self._widget[widget_id]
             bar.step(value)
 
     def p_close(self, bar: __ProgressBar):
         bar.close()
         widget_id = bar.__hash__()
-        with self.__widget_lock:
-            if widget_id not in self.__widget:
+        with self._widget_lock:
+            if widget_id not in self._widget:
                 self.print(f'TUI: No Widget by id {widget_id}')
                 return
-            self.print(str(self.__widget[widget_id]))
-            self.__widget.pop(widget_id)
+            self.print(str(self._widget[widget_id]))
+            self._widget.pop(widget_id)
 
     def demo(self):
 
