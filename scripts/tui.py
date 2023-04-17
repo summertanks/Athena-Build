@@ -450,9 +450,9 @@ class Tui:
             assert len([tab for tab in self._tabs if tab in ['console', 'log']]) == 2, 'TUI: Mandatory tabs missing'
             assert len([self._tabs[tab] for tab in self._tabs if self._tabs[tab]['selected']]) == 1, \
                 'TUI: Tab not activated correctly'
-        except AssertionError:
+        except AssertionError as e:
             self._shutdown()
-            print('TUI: Setup configuration is wrong')
+            print(f'TUI: Setup configuration is wrong: {e}')
             return
 
         self.INFO("Initialising TUI environment")
@@ -469,7 +469,9 @@ class Tui:
         threading.Thread(target=self.shell, daemon=True).start()
 
     def _refreshfooter(self):
-        tab_tooltip = "Use Tab to rotate through Tabs"
+        """_refreshfooter() - prints the footer section on each call"""
+
+        tab_tooltip = "Use Tab key to rotate through Tabs"
         tab_prefix = 'Tabs:'
         tab_psutil = self._psutil.value
 
@@ -502,18 +504,18 @@ class Tui:
         else:  # CMD_MODE_PASSWORD
             cmd = '*' * len(self._cmd.current)
 
+        # Select portion of string relative to cursor position
         cmd = cmd[self._cmd.cursor:width + self._cmd.cursor]
 
-        command_string = cmd_prompt + ' ' + cmd
+        # Print <prompt><space><strip of cmd><blinking underscore as prompt>
+        command_string = ''.join([cmd_prompt, ' ', cmd])
         self._footer.addstr(1, self.BOX_WIDTH, command_string)
         self._footer.addstr('_', curses.A_BLINK | curses.A_BOLD)
-
-        # we should have written till
         self._footer.addstr(2, self.BOX_WIDTH, tab_prefix)
         index = self.BOX_WIDTH + len(tab_prefix)
 
         for tab in self._tabs:
-            label = ' | ' + tab + ' | '
+            label = ''.join([' | ', tab, ' | '])
             if self._tabs[tab]['selected']:
                 self._footer.addstr(2, index, label, curses.A_REVERSE)
             else:
@@ -523,9 +525,13 @@ class Tui:
         self._footer.refresh()
 
     def _refreshtab(self):
-        # printing the Active tab only
-        active_tab = self.__activetab__
+        """_refreshtab() - Refresh/Re-paint the active tab"""
 
+        # printing the Active tab only
+        active_tab = self._activetab
+
+        # logic implements scrolling find minimum of curser and number of lines in buffer,
+        # to avoid it scrolling past the buffer with lines less than screen height
         buffer = active_tab['buffer']
         window = active_tab['win']
         cursor = min(active_tab['cursor'], len(buffer))
@@ -536,23 +542,30 @@ class Tui:
 
         with self._widget_lock:
             for widget in self._widget:
-                line = str(self._widget[widget]) + '\n'
+                line = ''.join([str(self._widget[widget]), '\n'])
                 window.addstr(line, curses.A_BOLD)
 
         window.refresh()
 
     def _refresh(self, force=False):
+        """_refresh() - refreshes all windows
+        Args:
+            force(bool): forces complete screen refresh
+        """
         if force:
             self._stdscr.touchwin()
         with self._refresh_lock:
             self._refreshfooter()
             self._refreshtab()
+            # not sure if this is needed, both _refreshtab & _refreshfooter calls individual window.refresh()
             self._stdscr.refresh()
 
     @property
-    def __activetab__(self) -> {}:
+    def _activetab(self) -> {}:
+        """_activetab - returns tab marked as 'selected'"""
         active_tab = [self._tabs[tab] for tab in self._tabs if self._tabs[tab]['selected']]
-        assert len(active_tab) == 1, 'TUI: Active State for tabs inconsistent'
+        if len(active_tab) != 1:
+            self.ERROR('TUI: Active State for tabs inconsistent')
         active_tab = active_tab[0]
         return active_tab
 
@@ -715,7 +728,7 @@ class Tui:
             except curses.error:
                 c = None
 
-            activetab = self.__activetab__
+            activetab = self._activetab
             if c is not None:
 
                 if c == 'KEY_UP':
