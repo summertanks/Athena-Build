@@ -38,9 +38,9 @@ class Tui:
         _banner(str): stores the banner on instance creation. Cannot be changed later
         _psutil(__Lockable): Maintains the current string description of resource utilisation, atomic is used correctly
         _tabs({}): collection of tabs - tuple of name, window, buffer, cursor position
-        __footer(curses.newwin): holds curses window for the static portion of the tui which includes commandline shell
+        _footer(curses.newwin): holds curses window for the static portion of the tui which includes commandline shell
 
-        __prompt_lock, __shell_lock, __print_lock, __refresh_lock, __log_lock, __widget_lock(threading.Lock) : enables
+        _prompt_lock, _shell_lock, _print_lock, _refresh_lock, _log_lock, _widget_lock(threading.Lock) : enables
             atomic functions on these sections
 
         _dispatch_queue(queue.LifoQueue): dispatch queue for handling keystrokes
@@ -50,7 +50,6 @@ class Tui:
 
         _stdscr: holding instance of curses.initscr
 
-        self.__setup__()
     Examples:
     """
 
@@ -615,6 +614,8 @@ class Tui:
                                     'y': self._resolution['y'] - self._footer_height, 'x': 0}
 
     def _log(self, severity, message):
+        """_log - the parent function to add text to log tab, severity determines the attribute"""
+
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
             f'TUI: Incorrect Severity {severity} defined'
 
@@ -658,6 +659,7 @@ class Tui:
             self._tabs[name]['win'].scrollok(True)
 
     def _shutdown(self):
+        """_shutdown - shuts down the curses environment"""
         # if not previously setup - skip
         if not self._is_setup:
             return
@@ -683,6 +685,8 @@ class Tui:
         # END ncurses shutdown/de-initialization...
 
     def _setup(self):
+        """_setup - initialises the curses environment"""
+
         # if already setup dont execute again
         if self._is_setup:
             return
@@ -720,21 +724,6 @@ class Tui:
 
         # END ncurses startup/initialization...
         self._is_setup = True
-
-    def _addtab(self, name: str):
-        # Strip whitespaces
-        name = name.strip()
-
-        # Should not already exist
-        assert name not in self._tabs, f'TUI: Attempted creating tab with name "{name}" which already exists'
-
-        if name != '':
-            # Tab is a tuple of name, window, buffer, cursor position, and selected state
-            self._tabs[name] = {'win': curses.newwin(self._tab_coordinates['h'], self._tab_coordinates['w'],
-                                                     self._tab_coordinates['y'], self._tab_coordinates['x']),
-                                'buffer': [], 'cursor': 0, 'selected': True}
-            # #nabling Scrolling
-            self._tabs[name]['win'].scrollok(True)
 
     def enabletab(self, name):
         # Set current Tab based on name, provided it is valid
@@ -1047,8 +1036,6 @@ class Tui:
         self.print(f'Current Directory: {cwd}')
         self.print(f'Resource: {util_str}')
         self.print(f"Screen Resolution: {self._resolution['y']}x{self._resolution['x']}")
-
-
 
     def demo(self):
 
