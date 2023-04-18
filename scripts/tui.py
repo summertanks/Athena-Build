@@ -419,18 +419,24 @@ class Tui:
         self._is_setup = False
         self._setup()
 
-        # set minimum to 80x25 screen, if lesser better to print weird rather than bad calculations
-        self._resolution = {'x': max(curses.COLS, 80), 'y': max(curses.LINES, 25)}
+        # set minimum to 80x25 screen, if lesser better to exit than print weird or bad calculations
+        if curses.COLS < 80 or curses.LINES < 25:
+            self._shutdown()
+            return
 
         # Set footer bar size, typically its one for tabs, one for prompt, one for application info,
         # and one each side for the box
         self._footer_height = 5
 
+        self._resolution = {}
+        self._resizeScreen()
+
+        # self._resolution = {'x': curses.COLS, 'y': curses.LINES}
         # calculate layout (width, height, origin y, origin x) with origin on top left corner
-        self._tab_coordinates = {'h': self._resolution['y'] - self._footer_height, 'w': self._resolution['x'],
-                                 'y': 0, 'x': 0}
-        self._footer_coordinates = {'h': self._footer_height, 'w': self._resolution['x'],
-                                    'y': self._resolution['y'] - self._footer_height, 'x': 0}
+        #self._tab_coordinates = {'h': self._resolution['y'] - self._footer_height, 'w': self._resolution['x'],
+        #                         'y': 0, 'x': 0}
+        #self._footer_coordinates = {'h': self._footer_height, 'w': self._resolution['x'],
+        #                            'y': self._resolution['y'] - self._footer_height, 'x': 0}
 
         # creating footer, Cant create tab before that
         self._footer = curses.newwin(self._footer_coordinates['h'], self._footer_coordinates['w'],
@@ -464,6 +470,7 @@ class Tui:
         self._cmd.register_command('clear', self.clear)
         self._cmd.register_command('demo', self.demo)
         self._cmd.register_command('history', self.history)
+        self._cmd.register_command('info', self.info)
 
         # start the command
         threading.Thread(target=self.shell, daemon=True).start()
@@ -552,11 +559,17 @@ class Tui:
         Args:
             force(bool): forces complete screen refresh
         """
+        if curses.is_term_resized(self._resolution['y'], self._resolution['x']):
+            self._resizeScreen()
+            force = True
+
         if force:
             self._stdscr.touchwin()
+
         with self._refresh_lock:
             self._refreshfooter()
             self._refreshtab()
+
             # not sure if this is needed, both _refreshtab & _refreshfooter calls individual window.refresh()
             self._stdscr.refresh()
 
@@ -570,8 +583,9 @@ class Tui:
         return active_tab
 
     def _res_util(self):
+        """_res_util - maintains the _psutil.value string giving the resource utilisation, will run as infinite loop """
         while True:
-            # Get CPU usage as a percentage
+            # Get CPU usage as a percentage - currently on static interval of 2 secs
             cpu_percent = psutil.cpu_percent(interval=2)
 
             # Get memory usage statistics
@@ -582,25 +596,31 @@ class Tui:
             disk = psutil.disk_usage('/')
             disk_percent = disk.percent
 
-            # String for results
+            # String for results, operation is atomic internally
             self._psutil.value = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
 
     def _activate(self, name):
-        assert name in self._tabs, 'TUI: Activating non available Tab'
+        """_activate - mark 'name' as active tab"""
+        if name not in self._tabs:
+            self.ERROR('TUI: Activating non available Tab')
+            return
 
         for tab in self._tabs:
             self._tabs[tab]['selected'] = False
 
         self._tabs[name]['selected'] = True
+
+        # forces refresh to repaint tab and footer
         self._refresh()
 
-    def __resizeScreen__(self):
-        # calculate layout (width, height, origin y, origin x) with origin on top left corner
+    def _resizeScreen(self):
+        """_resizeScreen - recalculate layout (width, height, origin y, origin x) with origin on top left corner"""
+        curses.update_lines_cols()
+        self._resolution = {'x': curses.COLS, 'y': curses.LINES}
         self._tab_coordinates = {'h': self._resolution['y'] - self._footer_height, 'w': self._resolution['x'],
-                                  'y': 0, 'x': 0}
+                                 'y': 0, 'x': 0}
         self._footer_coordinates = {'h': self._footer_height, 'w': self._resolution['x'],
-                                     'y': self._resolution['y'] - self._footer_height, 'x': 0}
-        self._refresh()
+                                    'y': self._resolution['y'] - self._footer_height, 'x': 0}
 
     def _log(self, severity, message):
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
@@ -985,6 +1005,29 @@ class Tui:
                 return
             self.print(str(self._widget[widget_id]))
             self._widget.pop(widget_id)
+
+    def info(self):
+        import platform
+        os_name = platform.system()
+        os_version = platform.release()
+
+        import os
+        cwd = os.getcwd()
+
+        import socket
+        hostname = socket.gethostname()
+
+        util_str = self._psutil.value
+
+        self.print(f'Athena Version: {self._banner}')
+        self.print(f'OS: {os_name}')
+        self.print(f'Version: {os_version}')
+        self.print(f'Hostname: {hostname}')
+        self.print(f'Current Directory: {cwd}')
+        self.print(f'Resource: {util_str}')
+        self.print(f"Screen Resolution: {self._resolution['y']}x{self._resolution['x']}")
+
+
 
     def demo(self):
 
