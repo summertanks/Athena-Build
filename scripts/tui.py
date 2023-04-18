@@ -417,6 +417,7 @@ class Tui:
         # let's set up the curses default window
         self._stdscr = curses.initscr()
         self._is_setup = False
+
         self._setup()
 
         # set minimum to 80x25 screen, if lesser better to exit than print weird or bad calculations
@@ -431,20 +432,8 @@ class Tui:
         self._resolution = {}
         self._resizeScreen()
 
-        # self._resolution = {'x': curses.COLS, 'y': curses.LINES}
-        # calculate layout (width, height, origin y, origin x) with origin on top left corner
-        #self._tab_coordinates = {'h': self._resolution['y'] - self._footer_height, 'w': self._resolution['x'],
-        #                         'y': 0, 'x': 0}
-        #self._footer_coordinates = {'h': self._footer_height, 'w': self._resolution['x'],
-        #                            'y': self._resolution['y'] - self._footer_height, 'x': 0}
-
-        # creating footer, Cant create tab before that
-        self._footer = curses.newwin(self._footer_coordinates['h'], self._footer_coordinates['w'],
-                                     self._footer_coordinates['y'], self._footer_coordinates['x'])
-
-        # creating basic tabs
-        self._addtab("console")
-        self._addtab("log")
+        # Create windows - footer and tabs
+        self._create_windows()
 
         # set the default tab
         self._activate('console')
@@ -560,7 +549,10 @@ class Tui:
             force(bool): forces complete screen refresh
         """
         if curses.is_term_resized(self._resolution['y'], self._resolution['x']):
+            self._shutdown()
+            self._setup()
             self._resizeScreen()
+            self._create_windows()
             force = True
 
         if force:
@@ -637,10 +629,40 @@ class Tui:
             logger['buffer'].append((message + '\n', attribute))
             logger['cursor'] = len(logger['buffer'])
 
+    def _create_windows(self):
+        """_build_windows - creates the _footer and _tab windows, discards old windows"""
+        # empty previous window
+        if not self._footer:
+            self._footer = None
+
+        # creating footer, Cant create tab before that
+        self._footer = curses.newwin(self._footer_coordinates['h'], self._footer_coordinates['w'],
+                                     self._footer_coordinates['y'], self._footer_coordinates['x'])
+
+        if self._tabs:
+            self._tabs.clear()
+
+        for tab_name in ['console', 'log']:
+            name = tab_name.strip()
+
+            # Should not already exist
+            if not name or name in self._tabs:
+                continue
+
+            # Tab is a tuple of name, window, buffer, cursor position, and selected state
+            self._tabs[name] = {'win': curses.newwin(self._tab_coordinates['h'], self._tab_coordinates['w'],
+                                                     self._tab_coordinates['y'], self._tab_coordinates['x']),
+                                'buffer': [], 'cursor': 0, 'selected': True}
+
+            # Enabling Scrolling
+            self._tabs[name]['win'].scrollok(True)
+
     def _shutdown(self):
         # if not previously setup - skip
         if not self._is_setup:
             return
+
+        self._is_setup = False
 
         # BEGIN ncurses shutdown/de-initialization...
         # Turn off cbreak mode...
@@ -659,7 +681,6 @@ class Tui:
         curses.endwin()
 
         # END ncurses shutdown/de-initialization...
-        self._is_setup = False
 
     def _setup(self):
         # if already setup dont execute again
