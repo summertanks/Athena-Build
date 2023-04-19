@@ -710,8 +710,6 @@ class Tui:
         self._stdscr.keypad(True)
 
         # Set color pairs
-        # TODO: load from tui.conf else use defaults
-
         curses.init_pair(self.COLOR_NORMAL, self.fgColor, self.bgColor)
         curses.init_pair(self.COLOR_REVERSE, self.bgColor, self.fgColor)
         curses.init_pair(self.COLOR_WARNING, self.warningColor, self.bgColor)
@@ -726,15 +724,20 @@ class Tui:
         self._is_setup = True
 
     def enabletab(self, name):
+        """enableTab - activate the given tab name. this is public function"""
         # Set current Tab based on name, provided it is valid
         if name in self._tabs:
             self._activate(name)
 
-    def enable_next_tab(self):
-        # dict are not sorted, so there is no order.
+    def _enable_next_tab(self):
+        """enable_next_tab: Finds and enables next tab, rotates to first if we reach the end"""
         active_tab = [tab for tab in self._tabs if self._tabs[tab]['selected']]
-        assert len(active_tab) == 1, 'TUI: More than one tab active'
+        if len(active_tab) != 1:
+            self.ERROR('TUI: More than one tab active')
+
         tab_list = list(self._tabs)
+
+        # select next tab on the dict
         try:
             next_tab = tab_list[tab_list.index(active_tab[0]) + 1]
         except (ValueError, IndexError):
@@ -743,13 +746,19 @@ class Tui:
         self._activate(next_tab)
 
     def run(self):
+        """run - The main thread which is accepting and dispatches keys"""
         if not self._is_setup:
             print("TUI: screen has not been setup properly")
             return
 
+        # maintaining internal flag to exit loop on exit
         __quit = False
+
         # main loop
         while not __quit:
+            # wait 1ms to avoid 100% CPU usage
+            curses.napms(1)
+
             self._refresh()
 
             # get input
@@ -758,18 +767,21 @@ class Tui:
             except curses.error:
                 c = None
 
-            activetab = self._activetab
             if c is not None:
 
+                activetab = self._activetab
+
+                # KEY_UP & KEY_DOWN are only for scrolling, cannot be passed to command
+                # If screen content < screen size - do not scroll
                 if c == 'KEY_UP':
                     if activetab['cursor'] > self._tab_coordinates['h']:
                         activetab['cursor'] -= 1
                         continue
-
                 elif c == 'KEY_DOWN':
                     activetab['cursor'] = min(len(activetab['buffer']), activetab['cursor'] + 1)
                     continue
 
+                # KEY_RIGHT & KEY_LEFT are only for scrolling commandline
                 elif c == 'KEY_RIGHT':
                     width = self._resolution['x'] - 2 * self.BOX_WIDTH
                     width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
@@ -777,22 +789,24 @@ class Tui:
                     if len(self._cmd.current) > width:
                         if self._cmd.cursor < len(self._cmd.current) - width:
                             self._cmd.inc_cursor()
-
                 elif c == 'KEY_LEFT':
                     self._cmd.dec_cursor()
 
+                # handler for other keys
                 elif c == 'KEY_BACKSPACE':
                     self._cmd.current = self._cmd.current[:-1]
                     if self._cmd.cursor > 0:
                         self._cmd.dec_cursor()
                     continue
 
+                # Tab key circles through available tabs
                 elif c == '\t':
-                    # switch to next Tab on Alt
-                    self.enable_next_tab()
+                    # switch to next 'Tab' on Alt
+                    self._enable_next_tab()
                     continue
 
-                # Simple hack - if it is longer than a char it is a special key string
+                # Simple hack - if it is longer than a char it is a special
+                # key string that we care not currently handling
                 if len(c) > 1:
                     continue
 
@@ -833,8 +847,6 @@ class Tui:
                         if self._cmd.cursor < len(self._cmd.current) - width:
                             self._cmd.inc_cursor()
 
-            else:
-                curses.napms(1)  # wait 1ms to avoid 100% CPU usage
 
         # clean up
         self._shutdown()
