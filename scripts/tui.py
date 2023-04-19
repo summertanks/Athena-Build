@@ -818,7 +818,7 @@ class Tui:
                 # Newline received, based on data input mode the dispatch sequence is identified
                 if c == '\n':
                     # Command has been completed
-                    if not self._cmd.current.strip() == '':
+                    if self._cmd.current.strip():
                         # Special Case
                         if self._cmd.current.strip() in ['quit', 'exit', 'q']:
                             __quit = True
@@ -838,6 +838,7 @@ class Tui:
                     self._cmd.current = ''
                     self._cmd.reset_cursor()
 
+                # if we are here, c is a valid part of the command being typed, append to it and increment the cursor
                 else:
                     self._cmd.current = ''.join([self._cmd.current, c])
                     width = self._resolution['x'] - 2 * self.BOX_WIDTH
@@ -847,8 +848,7 @@ class Tui:
                         if self._cmd.cursor < len(self._cmd.current) - width:
                             self._cmd.inc_cursor()
 
-
-        # clean up
+        # broken out of the loop - clean up
         self._shutdown()
 
     def INFO(self, message):
