@@ -852,16 +852,23 @@ class Tui:
         self._shutdown()
 
     def INFO(self, message):
+        """INFO - Prints an info severity log"""
         self._log(self.SEVERITY_INFO, message)
 
     def WARNING(self, message):
+        """INFO - Prints an warning severity log"""
         self._log(self.SEVERITY_WARNING, message)
 
     def ERROR(self, message):
+        """INFO - Prints an error severity log"""
         self._log(self.SEVERITY_ERROR, message)
 
     def print(self, message, attribute=None):
-
+        """print - prints text to console tab, this will replace the typical use of python print in code
+        Args:
+            message(str): The message to print, adds newline character on print
+            attribute: the attribute for the text, uses COLOR_NORMAL as default
+        """
         with self._print_lock:
             if attribute is None:
                 attribute = curses.color_pair(self.COLOR_NORMAL)
