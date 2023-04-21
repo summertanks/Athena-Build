@@ -874,10 +874,15 @@ class Tui:
                 attribute = curses.color_pair(self.COLOR_NORMAL)
             console = self._tabs['console']
 
-            console['buffer'].append((message + '\n', attribute))
+            console['buffer'].append((''.join([message, '\n']), attribute))
             console['cursor'] = len(console['buffer'])
 
     def clear(self, name):
+        """clear - Clear the named tab
+        Args:
+            name(str): the 'tab' to clear, all specifies all tabs
+        """
+
         if name == 'all':
             for tab in self._tabs:
                 self._tabs[tab]['buffer'] = []
@@ -889,16 +894,20 @@ class Tui:
             self.print(f'Attempted to clear non-existent tab {name}')
 
     def history(self):
-        # The last command will be 'history'
+        """history - prints list of previous commands"""
+        # The last command will be 'history' - hence skipped
         for cmd in self._cmd.history[:-1]:
             self.print(cmd)
 
     def shell(self):
+        """shell - Run as a separate thread which executes command from dispatch queue"""
         with self._shell_lock:
 
             while True:
                 self.CMD_PROMPT = '$'
 
+                # Basic approach is to push request in waiting queue,
+                # and when condition is called execute the command in the _input_queue
                 condition = threading.Condition()
                 self._dispatch_queue.put(condition)
 
@@ -914,6 +923,7 @@ class Tui:
 
                 self.print(command, curses.color_pair(self.COLOR_HIGHLIGHT))
 
+                # Do not accept commands on prompt till command is competed
                 self.CMD_PROMPT = '(command under progress)'
                 self.INFO(f'Executing "{command}"')
 
