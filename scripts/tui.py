@@ -1084,7 +1084,7 @@ class Tui:
         self.s_stop(spin)
 
 
-# Main function
+# test function - can run this file separately 
 if __name__ == '__main__':
     tui = Tui("Athena Build Environment v0.1")
     tui.run()
