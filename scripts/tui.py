@@ -14,6 +14,8 @@ register(function name, callable function)
 import curses
 import signal
 import time
+from typing import Optional
+
 import psutil
 import queue
 import threading
@@ -134,7 +136,7 @@ class Tui:
         PAUSED = 2
         STOPPED = 3
 
-        def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor=str | None,
+        def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor=Optional[str],
                      maxvalue: int = 100, fmt: str = ''):
             """Initializes the instance of Progres bar
             Args:
@@ -757,7 +759,7 @@ class Tui:
         # main loop
         while not __quit:
             # wait 1ms to avoid 100% CPU usage
-            curses.napms(1)
+            curses.napms(10)
 
             self._refresh()
 
@@ -856,7 +858,7 @@ class Tui:
         self._log(self.SEVERITY_INFO, message)
 
     def WARNING(self, message):
-        """INFO - Prints an warning severity log"""
+        """INFO - Prints a warning severity log"""
         self._log(self.SEVERITY_WARNING, message)
 
     def ERROR(self, message):
@@ -945,14 +947,31 @@ class Tui:
                         self.ERROR(f"Error: {e}")
 
     def prompt(self, prompt_type, message, options=None) -> str:
+        """prompt - gets user input and returns as string
+        Args:
+            prompt_type: defines how the prompt is shown
+            message(str): the string printed while waiting for user input
+            options([] | None): defines the set of strings to choose from if the prompt type is PROMPT_OPTIONS
+        Returns:
+            string giving out the user input
+        """
         if options is None:
             options = []
 
-        assert prompt_type in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT], \
-            f'TUI: Unknown prompt type given'
+        # Confirm valid prompt type
+        if prompt_type not in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT]:
+            self.ERROR('TUI: Unknown prompt type given')
+            return ""
 
-        if prompt_type == self.PROMPT_OPTIONS:
-            assert len(options) > 0, 'Prompt type PROMPT_OPTIONS called without options'
+        # Cannot call PROMPT_OPTIONS with no Options
+        if prompt_type == self.PROMPT_OPTIONS and len(options) > 0:
+            self.ERROR('Prompt type PROMPT_OPTIONS called without options')
+            return ""
+
+        # same technique as others
+        #   - put condition on dispatch queue
+        #   - wait for condition to be notified
+        #   - get input from queue, confirm if suitable e.g. Option/ YesNo
 
         with self._prompt_lock:
             old_prompt = self.CMD_PROMPT
@@ -968,6 +987,7 @@ class Tui:
                 condition = threading.Condition()
                 self._dispatch_queue.put(condition)
 
+                # mask mode is set for PROMPT_PASSWORD and reset when input if received
                 if prompt_type == self.PROMPT_PASSWORD:
                     self._cmd.set_mask_mode()
 
@@ -999,6 +1019,7 @@ class Tui:
         return answer
 
     def spinner(self, message) -> __Spinner:
+        """spinner - return instance of __Spinner"""
         spin = Tui.__Spinner(message)
         widget_id = spin.__hash__()
         with self._widget_lock:
@@ -1015,7 +1036,7 @@ class Tui:
             self.print(spin.message + '... Done')
             self._widget.pop(widget_id)
 
-    def progressbar(self, label, itr_label='it/s', bar_width: int = 40, scale_factor: str = str | None,
+    def progressbar(self, label, itr_label='it/s', bar_width: int = 40, scale_factor: str = Optional[str],
                     maxvalue: int = 100, fmt: str = '', ) -> __ProgressBar:
 
         bar = Tui.__ProgressBar(label, itr_label, bar_width, scale_factor, maxvalue, fmt)
