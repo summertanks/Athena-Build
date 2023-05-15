@@ -1009,6 +1009,7 @@ class Tui:
 
                 break
 
+            # for PROMPT_PASSWORD print masked content of same length else clear text
             if prompt_type == self.PROMPT_PASSWORD:
                 self._cmd.reset_mask_mode()
                 self.print(self.CMD_PROMPT + ' ' + '*' * len(answer))
@@ -1019,16 +1020,27 @@ class Tui:
         return answer
 
     def spinner(self, message) -> __Spinner:
-        """spinner - return instance of __Spinner"""
+        """spinner - return instance of __Spinner
+        Args:
+            message(str): The string to be printed before the spinner
+        Returns:
+              instance of __Spinner
+        """
         spin = Tui.__Spinner(message)
         widget_id = spin.__hash__()
+        # add it to _widget to render
         with self._widget_lock:
             self._widget[widget_id] = spin
         return spin
 
     def s_stop(self, spin: __Spinner):
+        """s_stop - stops spinner and removes from _widget list
+        Args:
+            spin(__Spinner): instance to stop
+        """
         spin.done()
         widget_id = spin.__hash__()
+        # print completion and remove from _widget list
         with self._widget_lock:
             if widget_id not in self._widget:
                 self.print(f'TUI: No Widget by id {widget_id}')
@@ -1036,9 +1048,21 @@ class Tui:
             self.print(spin.message + '... Done')
             self._widget.pop(widget_id)
 
-    def progressbar(self, label, itr_label='it/s', bar_width: int = 40, scale_factor: str = Optional[str],
+    def progressbar(self, label: str, itr_label='it/s', bar_width: int = 40, scale_factor: str = Optional[str],
                     maxvalue: int = 100, fmt: str = '', ) -> __ProgressBar:
-
+        """
+        Creates instance of progressbar and adds to _widget list to render, all actions are on the instance
+        Args:
+            label(str): the label to be printed as per bar format
+            itr_label(str): the suffix for the rate, may be prefixed with scale factor
+            bar_width(int): the width of the bar portion only, [...] for example are not included in this sizing
+            scale_factor(str): option between None (autoscale), 'K', 'M' & 'G' and scales the rate accordingly.
+            maxvalue(int): Maximum value of progressbar, bar is always created with value zero though
+            fmt: Format string for progressbar layout,
+                    default is '{percentage:3.0f}%[{bar}]{value}/{total} : {rate} - {label}'
+        Returns:
+            instance of progressbar
+        """
         bar = Tui.__ProgressBar(label, itr_label, bar_width, scale_factor, maxvalue, fmt)
 
         widget_id = bar.__hash__()
@@ -1047,16 +1071,11 @@ class Tui:
 
         return bar
 
-    def p_step(self, widget_id: int, value: int = 1):
-        with self._widget_lock:
-            if widget_id not in self._widget:
-                self.print(f'TUI: No Widget by id {widget_id}')
-                return
-
-            bar = self._widget[widget_id]
-            bar.step(value)
-
     def p_close(self, bar: __ProgressBar):
+        """p_close - mark progressbar as completed and remove from _widget list
+        Args:
+            bar(__ProgressBar): instance to close
+        """
         bar.close()
         widget_id = bar.__hash__()
         with self._widget_lock:
