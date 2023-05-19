@@ -299,6 +299,11 @@ class Tui:
 
             return self._registered[command_name][0]
 
+        def get_hints(self) -> []:
+            """gets commands and respective hints"""
+            hints = [(command_name, self._registered[command_name][1]) for command_name in self._registered]
+            return hints
+
         def inc_cursor(self):
             """Increment cursor position"""
             self._cursor = self._cursor + 1
@@ -457,10 +462,11 @@ class Tui:
         # Register the signal handler for SIGINT (Ctrl+C)
         signal.signal(signal.SIGINT, self._shutdown)
 
-        self._cmd.register_command('clear', self.clear)
-        self._cmd.register_command('demo', self.demo)
-        self._cmd.register_command('history', self.history)
-        self._cmd.register_command('info', self.info)
+        self._cmd.register_command('clear', self.clear, 'Clears console tab, alternative tab name/all can be specified')
+        self._cmd.register_command('demo', self.demo, 'Demonstrates inbuilt widgets & functions of TUI')
+        self._cmd.register_command('history', self.history, 'Lists all commands executed')
+        self._cmd.register_command('info', self.info, 'Prints system information')
+        self._cmd.register_command('help', self.help, 'Prints registered command list and hints')
 
         # start the command
         threading.Thread(target=self.shell, daemon=True).start()
@@ -1086,6 +1092,7 @@ class Tui:
             self._widget.pop(widget_id)
 
     def info(self):
+        """info - prints basic system information"""
         import platform
         os_name = platform.system()
         os_version = platform.release()
@@ -1107,7 +1114,7 @@ class Tui:
         self.print(f"Screen Resolution: {self._resolution['y']}x{self._resolution['x']}")
 
     def demo(self):
-
+        """demo - demonstrated basic prompt, spinner and progressbar functionalities"""
         spin = self.spinner('Starting Demo')
         self.prompt(self.PROMPT_YESNO, 'This is YES NO prompt')
         self.prompt(self.PROMPT_INPUT, 'This accepts Input string')
@@ -1122,6 +1129,11 @@ class Tui:
         self.p_close(bar)
 
         self.s_stop(spin)
+
+    def help(self):
+        """help - prints the registered commands and hints"""
+        for command in self._cmd.get_hints():
+            self.print(f'{command[0]}\t-\t{command[1]}')
 
 
 # test function - can run this file separately 
