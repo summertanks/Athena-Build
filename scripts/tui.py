@@ -843,21 +843,6 @@ class Tui:
                         with condition:
                             condition.notify()
 
-                        # if self._cmd.current.strip() in ['quit', 'exit', 'q']:
-                        #     __quit = True
-                        #     continue
-                        # else:
-                        #     self._input_queue.put(self._cmd.current)
-                        #     self._cmd.add_history(self._cmd.current)
-                        #     try:
-                        #         condition = self._dispatch_queue.get()
-                        #     except queue.Empty:
-                        #         self.ERROR('TUI: Nothing in dispatch queue')
-                        #         continue
-                        #
-                        #     with condition:
-                        #         condition.notify()
-
                     self._cmd.current = ''
                     self._cmd.reset_cursor()
 
@@ -1152,8 +1137,8 @@ class Tui:
 
     def exit(self, error_code: int = 0):
         """exit - helper function parent to close tui gracefully"""
-        self.print('Exiting...')
         self._quit = True
+        # Give sufficient time to run _shutdown, there is an internal napms(10)
         curses.napms(20)
         exit(error_code)
 
