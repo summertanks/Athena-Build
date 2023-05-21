@@ -15,6 +15,7 @@ import utils
 import buildcontainer
 import dependencytree
 import buildsystem
+import tui
 
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
@@ -25,22 +26,53 @@ asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n'
 # TODO: make all apt_pkg.parse functions arch specific
 
 Print = print
+Exit = None
+Prompt = None
+Spinner = None
+ProgressBar = None
 
 
-def main():
+def main(banner: str):
+    """main - the primary function being called"""
 
+    # Set up the TUI system
+    _tui = tui.Tui(banner)
+
+    # export the TUI functions
+    global Print, Prompt, Spinner, ProgressBar, Exit
+    Print = _tui.print
+    Prompt = _tui.prompt
+    Spinner = _tui.spinner
+    ProgressBar = _tui.progressbar
+    Exit = _tui.exit
+
+    # Setting up config parsers
     config_parser = configparser.ConfigParser()
 
+    # let defaults be relative to current working directory
+    working_dir = os.path.abspath(os.path.curdir)
+    config_path = os.path.join(working_dir, 'config/build.conf')
+    pkglist_path = os.path.join(working_dir, 'config/pkg.list')
+
     parser = argparse.ArgumentParser(description='Dependency Parser - Athena Linux')
-    parser.add_argument('--config-file', type=str, help='Specify Configs File', required=True)
-    parser.add_argument('--pkg-list', type=str, help='Specify Required Pkg File', required=True)
-    parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=True)
-
+    parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=True, default=working_dir)
+    parser.add_argument('--config-file', type=str, help='Specify Configs File', required=True, default=config_path)
+    parser.add_argument('--pkg-list', type=str, help='Specify Required Pkg File', required=True, default=pkglist_path)
     args = parser.parse_args()
-    working_dir = os.path.abspath(args.working_dir)
 
-    config_path = os.path.join(working_dir, args.config_file)
-    pkglist_path = os.path.join(working_dir, args.pkg_list)
+    # if dirs specified, they are not relative
+    working_dir = os.path.abspath(args.working_dir)
+    config_path = os.path.abspath(args.config_file)
+    pkglist_path = os.path.abspath(args.pkg_list)
+
+    try:
+        os.access(working_dir, os.W_OK)
+        os.access(config_path, os.W_OK)
+        os.access(pkglist_path, os.W_OK)
+    except PermissionError as e:
+        Print(f"Athena Linux: Insufficient permissions : {e}")
+        Exit(1)
+
 
     try:
         config_parser.read(config_path)
@@ -57,7 +89,7 @@ def main():
 
     except configparser.Error as e:
         print(f"Athena Linux: Config Parser Error: {e}")
-        exit(1)
+        Exit(1)
 
     # --------------------------------------------------------------------------------------------------------------
     # Setting up common systems
@@ -242,5 +274,6 @@ def main():
 
 # Main function
 if __name__ == '__main__':
+    build_banner = "Athena Build Environment v0.1"
     print(asciiart_logo)
-    main()
+    main(build_banner)
