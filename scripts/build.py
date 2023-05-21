@@ -73,10 +73,8 @@ def main(banner: str):
         Print(f"Athena Linux: Insufficient permissions : {e}")
         Exit(1)
 
-
     try:
         config_parser.read(config_path)
-
         arch = config_parser.get('Build', 'ARCH')
         baseurl = config_parser.get('Base', 'baseurl')
         basecodename = config_parser.get('Base', 'BASECODENAME')
@@ -91,9 +89,11 @@ def main(banner: str):
         print(f"Athena Linux: Config Parser Error: {e}")
         Exit(1)
 
+    # External modules initialisation
+    apt_pkg.init_system()
+
     # --------------------------------------------------------------------------------------------------------------
     # Setting up common systems
-    apt_pkg.init_system()
     dir_list = utils.DirectoryListing(working_dir, config_parser)
     base_distribution = utils.BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
 
