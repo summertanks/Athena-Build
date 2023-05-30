@@ -38,6 +38,7 @@ class Tui:
 
     Attributes:
         _banner(str): stores the banner on instance creation. Cannot be changed later
+        _quit(bool): internal flag to trigger TUI/Application Exit
         _psutil(__Lockable): Maintains the current string description of resource utilisation, atomic is used correctly
         _tabs({}): collection of tabs - tuple of name, window, buffer, cursor position
         _footer(curses.newwin): holds curses window for the static portion of the tui which includes commandline shell
@@ -401,6 +402,9 @@ class Tui:
         # footer defined separately
         self._footer = None
 
+        # internal flag to trigger TUI/Application Exit
+        self._quit = False
+
         # Commands
         self._cmd = self.__Commands(self)
         self._cmd.reset_mask_mode()
@@ -467,6 +471,7 @@ class Tui:
         self._cmd.register_command('history', self.history, 'Lists all commands executed')
         self._cmd.register_command('info', self.info, 'Prints system information')
         self._cmd.register_command('help', self.help, 'Prints registered command list and hints')
+        self._cmd.register_command('quit', self.exit, 'Closes the application')
 
         # start the command
         threading.Thread(target=self.shell, daemon=True).start()
@@ -759,12 +764,12 @@ class Tui:
             print("TUI: screen has not been setup properly")
             return
 
-        # maintaining internal flag to exit loop on exit
-        __quit = False
+        # maintaining internal flag to exit loop on true, resetting value before start
+        self._quit = False
 
         # main loop
-        while not __quit:
-            # wait 1ms to avoid 100% CPU usage
+        while not self._quit:
+            # wait 10ms to avoid 100% CPU usage
             curses.napms(10)
 
             self._refresh()
@@ -827,21 +832,16 @@ class Tui:
                 if c == '\n':
                     # Command has been completed
                     if self._cmd.current.strip():
-                        # Special Case
-                        if self._cmd.current.strip() in ['quit', 'exit', 'q']:
-                            __quit = True
+                        self._input_queue.put(self._cmd.current)
+                        self._cmd.add_history(self._cmd.current)
+                        try:
+                            condition = self._dispatch_queue.get()
+                        except queue.Empty:
+                            self.ERROR('TUI: Nothing in dispatch queue')
                             continue
-                        else:
-                            self._input_queue.put(self._cmd.current)
 
-                            try:
-                                condition = self._dispatch_queue.get()
-                            except queue.Empty:
-                                self.ERROR('TUI: Nothing in dispatch queue')
-                                continue
-
-                            with condition:
-                                condition.notify()
+                        with condition:
+                            condition.notify()
 
                     self._cmd.current = ''
                     self._cmd.reset_cursor()
@@ -930,7 +930,6 @@ class Tui:
                     continue
 
                 self.print(command, curses.color_pair(self.COLOR_HIGHLIGHT))
-                self._cmd.add_history(command)
 
                 # Do not accept commands on prompt till command is competed
                 self.CMD_PROMPT = '(command under progress)'
@@ -1135,6 +1134,13 @@ class Tui:
         """help - prints the registered commands and hints"""
         for command in self._cmd.get_hints():
             self.print(f'{command[0]}\t-\t{command[1]}')
+
+    def exit(self, error_code: int = 0):
+        """exit - helper function parent to close tui gracefully"""
+        self._quit = True
+        # Give sufficient time to run _shutdown, there is an internal napms(10)
+        curses.napms(20)
+        exit(error_code)
 
 
 # test function - can run this file separately 
