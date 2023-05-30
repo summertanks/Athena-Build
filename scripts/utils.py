@@ -4,14 +4,30 @@ import pathlib
 import re
 import configparser
 
-Print = print
+global Print, Prompt, Spinner, ProgressBar, Exit
 
 
 class DirectoryListing:
+    """
+    DirectoryListing - Enables functional directory structure
+    Attributes:
+        dir_download(str):  Location for file downloads
+        dir_log(str):       Location of log files
+        dir_cache(str):
+        dir_temp(str):
+        dir_repo(str):      Location for build packages for installation
+        dir_config(str):    Location for all config files
+        dir_patch(str):     Location of where config patches are kept, refer to build for subdirectory structure
+        dir_image(str):     Location of the output image/installation files
+        dir_chroot(str):    Location where the image is built
+        dir_patch_source(str): Location of where sourcecode patches are kept, refer to build for subdirectory structure
+        dir_patch_preinstall(str):  Patches before building chroot
+        dir_patch_postinstall(str): Patches after building chroot
+        dir_patch_empty(str):
 
-    def __init__(self,
-                 working_dir: str,
-                 config_parser: configparser):
+    """
+
+    def __init__(self, working_dir: str, config_parser: configparser):
 
         self.cwd = os.path.abspath(working_dir)
         try:
