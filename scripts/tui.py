@@ -833,7 +833,7 @@ class Tui:
                             continue
                         else:
                             self._input_queue.put(self._cmd.current)
-                            self._cmd.add_history(self._cmd.current)
+
                             try:
                                 condition = self._dispatch_queue.get()
                             except queue.Empty:
@@ -930,6 +930,7 @@ class Tui:
                     continue
 
                 self.print(command, curses.color_pair(self.COLOR_HIGHLIGHT))
+                self._cmd.add_history(command)
 
                 # Do not accept commands on prompt till command is competed
                 self.CMD_PROMPT = '(command under progress)'
