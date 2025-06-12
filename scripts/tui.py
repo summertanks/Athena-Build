@@ -14,12 +14,14 @@ register(function name, callable function)
 import curses
 import signal
 import time
-from typing import Optional
 
 import psutil
 import queue
 import threading
 from math import floor
+from queue import LifoQueue
+from typing import Optional, Any, Callable, Tuple, List, Dict
+
 
 
 # TODO: make class single instance only
@@ -57,7 +59,7 @@ class Tui:
     """
 
     class __Lockable:
-        def __init__(self, var_type):
+        def __init__(self, var_type: Any):
             self.__lock = threading.Lock()
             self.__var = var_type()
 
@@ -67,7 +69,7 @@ class Tui:
                 return self.__var
 
         @value.setter
-        def value(self, var):
+        def value(self, var: Any):
             assert isinstance(self.__var, type(var)), 'Lockable object cannot be recast'
             with self.__lock:
                 self.__var = var
@@ -86,7 +88,7 @@ class Tui:
         # https://stackoverflow.com/questions/2685435/cooler-ascii-spinners
         ASCII_CHAR = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
 
-        def __init__(self, message):
+        def __init__(self, message: str):
             self._message: str = message[:70]
             self._lock = threading.Lock()
             self._position: int = 0
@@ -137,7 +139,7 @@ class Tui:
         PAUSED = 2
         STOPPED = 3
 
-        def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor=Optional[str],
+        def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor: Optional[str] = None,
                      maxvalue: int = 100, fmt: str = ''):
             """Initializes the instance of Progres bar
             Args:
@@ -187,7 +189,7 @@ class Tui:
 
             # auto-scale
             factor = 1
-            scale_factor = ''
+            scale_factor :str = ''
 
             # if None, Autoscale
             if self._scale_factor is None:
@@ -216,7 +218,7 @@ class Tui:
 
             return progress_string
 
-        def step(self, value=1):
+        def step(self, value:int=1):
             """Increase the value count by specified number, default being 1"""
             # don't react on stopped
             if self._state != self.RUNNING:
@@ -260,7 +262,7 @@ class Tui:
         CMD_MODE_NORMAL = False
         CMD_MODE_PASSWORD = True
 
-        def __init__(self, instance):
+        def __init__(self, instance: 'Tui'):
             """
             Basic Init
             Args:
@@ -273,12 +275,13 @@ class Tui:
             self.current = ''
             self.prompt = ''
 
-            self._history = []
-            self._registered = {}
+            self._history: List[str] = []
+           
+            self._registered: Dict[str, Tuple[Callable[..., Any], str]] = {}
             self._mode = self.CMD_MODE_NORMAL
             self._cursor = 0
 
-        def register_command(self, command_name: str, function, tooltip=''):
+        def register_command(self, command_name: str, function: Callable[..., Any], tooltip: str = ''):
             """Registers command - command_name invokes function"""
             if command_name.strip() == '':
                 self.tui.ERROR('Registering Empty Command')
@@ -300,7 +303,7 @@ class Tui:
 
             return self._registered[command_name][0]
 
-        def get_hints(self) -> []:
+        def get_hints(self) -> List[Tuple[str, str]]:
             """gets commands and respective hints"""
             hints = [(command_name, self._registered[command_name][1]) for command_name in self._registered]
             return hints
@@ -336,7 +339,7 @@ class Tui:
             return self._mode
 
         @property
-        def history(self) -> []:
+        def history(self) -> List[str]:
             """Return list of commands"""
             return self._history
 
@@ -388,28 +391,7 @@ class Tui:
             banner: accepts str which will be printed in the footer
         """
 
-        # Banner String, needs to be trimmed, currently static
-        banner_trim = 30
-        self._banner = banner[:banner_trim]
-
-        # Set up the for running the __res_util as a parallel thread
-        self._psutil = self.__Lockable(str)
-        threading.Thread(target=self._res_util, daemon=True).start()
-
-        # collection of tabs - tuple of name, window, buffer, cursor position
-        self._tabs = {}
-
-        # footer defined separately
-        self._footer = None
-
-        # internal flag to trigger TUI/Application Exit
-        self._quit = False
-
-        # Commands
-        self._cmd = self.__Commands(self)
-        self._cmd.reset_mask_mode()
-        self._cmd.reset_cursor()
-
+        # Setting up thread locks
         self._prompt_lock = threading.Lock()
         self._shell_lock = threading.Lock()
         self._print_lock = threading.Lock()
@@ -418,32 +400,38 @@ class Tui:
         self._widget_lock = threading.Lock()
 
         # setting up dispatch queue for handling keystrokes
-        self._dispatch_queue = queue.LifoQueue()
-        self._input_queue = queue.LifoQueue()
+        self._dispatch_queue: LifoQueue[Any] = queue.LifoQueue()
+        self._input_queue: LifoQueue[Any] = queue.LifoQueue()
 
+        # Banner String, needs to be trimmed, currently static
+        banner_trim = 30
+        self._banner = banner[:banner_trim]
+
+        # Set up the for running the __res_util as a parallel thread
+        self._psutil = self.__Lockable(str)
+        threading.Thread(target=self._res_util, daemon=True).start()
+
+         # Tabs - tuple of name, window, buffer, cursor position
+        self._resolution = {}
+        self._tabs = {}         # predefine collection of tabs
+        self._footer = None     # footer defined separately
         # For running list of widget
         self._widget = {}
 
-        # let's set up the curses default window
-        self._stdscr = curses.initscr()
-        self._is_setup = False
-
-        self._setup()
-
-        # set minimum to 80x25 screen, if lesser better to exit than print weird or bad calculations
-        if curses.COLS < 80 or curses.LINES < 25:
-            self._shutdown()
-            return
+        # internal flag to trigger TUI/Application Exit
+        self._quit = False
 
         # Set footer bar size, typically its one for tabs, one for prompt, one for application info,
         # and one each side for the box
         self._footer_height = 5
 
-        self._resolution = {}
-        self._resizeScreen()
+        # Commands
+        self._cmd = self.__Commands(self)
+        self._cmd.reset_mask_mode()
+        self._cmd.reset_cursor()
 
-        # Create windows - footer and tabs
-        self._create_windows()
+        self._is_setup = False
+        self._setup()
 
         # set the default tab
         self._activate('console')
@@ -563,7 +551,7 @@ class Tui:
         if curses.is_term_resized(self._resolution['y'], self._resolution['x']):
             self._shutdown()
             self._setup()
-            self._resizeScreen()
+            self._calculateResolution()
             self._create_windows()
             force = True
 
@@ -574,7 +562,8 @@ class Tui:
             self._refreshfooter()
             self._refreshtab()
 
-            # not sure if this is needed, both _refreshtab & _refreshfooter calls individual window.refresh()
+            # not sure if this is needed, both _refreshtab & _refreshfooter
+            # calls individual window.refresh()
             self._stdscr.refresh()
 
     @property
@@ -617,7 +606,7 @@ class Tui:
         # forces refresh to repaint tab and footer
         self._refresh()
 
-    def _resizeScreen(self):
+    def _calculateResolution(self):
         """_resizeScreen - recalculate layout (width, height, origin y, origin x) with origin on top left corner"""
         curses.update_lines_cols()
         self._resolution = {'x': curses.COLS, 'y': curses.LINES}
@@ -626,7 +615,7 @@ class Tui:
         self._footer_coordinates = {'h': self._footer_height, 'w': self._resolution['x'],
                                     'y': self._resolution['y'] - self._footer_height, 'x': 0}
 
-    def _log(self, severity, message):
+    def _log(self, severity, message: str):
         """_log - the parent function to add text to log tab, severity determines the attribute"""
 
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
@@ -640,26 +629,30 @@ class Tui:
                 attribute = curses.color_pair(self.COLOR_WARNING)
 
             logger = self._tabs['log']
-            logger['buffer'].append((message + '\n', attribute))
+            logger['buffer'].append((message + '\   n', attribute))
             logger['cursor'] = len(logger['buffer'])
 
     def _create_windows(self):
         """_build_windows - creates the _footer and _tab windows, discards old windows"""
+
         # empty previous window
-        if not self._footer:
+        if self._footer:
             self._footer = None
+
+        if self._tabs:
+            self._tabs.clear()
+
+        self._calculateResolution()
 
         # creating footer, Cant create tab before that
         self._footer = curses.newwin(self._footer_coordinates['h'], self._footer_coordinates['w'],
                                      self._footer_coordinates['y'], self._footer_coordinates['x'])
 
-        if self._tabs:
-            self._tabs.clear()
 
         for tab_name in ['console', 'log']:
             name = tab_name.strip()
 
-            # Should not already exist
+            # Should not already exist, though we cleared tabs
             if not name or name in self._tabs:
                 continue
 
@@ -679,22 +672,25 @@ class Tui:
 
         self._is_setup = False
 
+        # empty previous window
+        if self._footer:
+            self._footer = None
+
+        if self._tabs:
+            self._tabs.clear()
+
         # BEGIN ncurses shutdown/de-initialization...
-        # Turn off cbreak mode...
-        curses.nocbreak()
-
-        # Turn echo back on.
-        curses.echo()
-
-        # Restore cursor blinking.
-        curses.curs_set(True)
+        try:
+            curses.echo()           # Turn echo back on.
+            curses.nocbreak()       # Turn off cbreak mode.
+            curses.curs_set(True)   # Restore cursor blinking.
+        except curses.error: pass
 
         # Turn off the keypad...
         self._stdscr.keypad(False)
 
         # Restore Terminal to original state.
         curses.endwin()
-
         # END ncurses shutdown/de-initialization...
 
     def _setup(self):
@@ -704,34 +700,48 @@ class Tui:
         if self._is_setup:
             return
 
+        if not hasattr(self, '_stdscr') or not self._stdscr:
+            # let's set up the curses default window
+            self._stdscr = curses.initscr()
+            curses.update_lines_cols()
+
+            # set minimum to 80x25 screen, if lesser
+            # better to exit than print weird or bad calculations
+            if curses.COLS < 80 or curses.LINES < 24:
+                print(f"TUI: Screen size ({curses.COLS} x {curses.LINES}) less than minimum")
+                return
+
         # BEGIN ncurses startup/initialization...
-
-        # disable echos
-        curses.noecho()
-
-        # Enter non-blocking or cbreak mode
-        curses.cbreak()
-
-        # Turn off blinking cursor
-        curses.curs_set(False)
+        # Disable echos & enter non-blocking cbreak mode
+        # putting try since debugger IDEs sometimes just fail
+        try:
+            curses.noecho()
+            curses.cbreak()
+            curses.curs_set(False)      # Turn off blinking cursor
+        except curses.error:
+            self._is_setup = True       # make sure that shutdown executes
+            self._shutdown()
+            return
 
         # Enable color if we can
         if curses.has_colors():
             curses.start_color()
+            # Set color pairs
+            curses.init_pair(self.COLOR_NORMAL, self.fgColor, self.bgColor)
+            curses.init_pair(self.COLOR_REVERSE, self.bgColor, self.fgColor)
+            curses.init_pair(self.COLOR_WARNING, self.warningColor, self.bgColor)
+            curses.init_pair(self.COLOR_ERROR, self.errorColor, self.bgColor)
+            curses.init_pair(self.COLOR_HIGHLIGHT, self.highlightColor, self.bgColor)
+            curses.init_pair(self.COLOR_FOOTER, self.fgColor, self.bgFooter)
 
         # Enable the keypad - also permits decoding of multibyte key sequences,
         self._stdscr.keypad(True)
 
-        # Set color pairs
-        curses.init_pair(self.COLOR_NORMAL, self.fgColor, self.bgColor)
-        curses.init_pair(self.COLOR_REVERSE, self.bgColor, self.fgColor)
-        curses.init_pair(self.COLOR_WARNING, self.warningColor, self.bgColor)
-        curses.init_pair(self.COLOR_ERROR, self.errorColor, self.bgColor)
-        curses.init_pair(self.COLOR_HIGHLIGHT, self.highlightColor, self.bgColor)
-        curses.init_pair(self.COLOR_FOOTER, self.fgColor, self.bgFooter)
-
         # no waiting on getch()
         self._stdscr.nodelay(True)
+
+        # Create windows - footer and tabs
+        self._create_windows()
 
         # END ncurses startup/initialization...
         self._is_setup = True
@@ -744,17 +754,24 @@ class Tui:
 
     def _enable_next_tab(self):
         """enable_next_tab: Finds and enables next tab, rotates to first if we reach the end"""
-        active_tab = [tab for tab in self._tabs if self._tabs[tab]['selected']]
-        if len(active_tab) != 1:
-            self.ERROR('TUI: More than one tab active')
-
         tab_list = list(self._tabs)
+        active_tab = [tab for tab in self._tabs if self._tabs[tab]['selected']]
+        next_tab = None
 
-        # select next tab on the dict
-        try:
-            next_tab = tab_list[tab_list.index(active_tab[0]) + 1]
-        except (ValueError, IndexError):
+        if len(active_tab) > 1:
+            self.ERROR('TUI: More than one tab active, picking first')
+            for tab in active_tab:
+                self._tabs[tab]['selected'] = False
             next_tab = tab_list[0]
+        elif len(active_tab) == 0:
+            next_tab = tab_list[0]
+            self.ERROR('TUI: No tab active, picking first')
+        else:
+            # select next tab on the dict
+            try:
+                next_tab = tab_list[tab_list.index(active_tab[0]) + 1]
+            except (ValueError, IndexError):
+                next_tab = tab_list[0]
 
         self._activate(next_tab)
 
@@ -764,7 +781,8 @@ class Tui:
             print("TUI: screen has not been setup properly")
             return
 
-        # maintaining internal flag to exit loop on true, resetting value before start
+        # maintaining internal flag to exit loop on true,
+        # resetting value before start
         self._quit = False
 
         # main loop
@@ -859,19 +877,19 @@ class Tui:
         # broken out of the loop - clean up
         self._shutdown()
 
-    def INFO(self, message):
+    def INFO(self, message: str):
         """INFO - Prints an info severity log"""
         self._log(self.SEVERITY_INFO, message)
 
-    def WARNING(self, message):
+    def WARNING(self, message: str):
         """INFO - Prints a warning severity log"""
         self._log(self.SEVERITY_WARNING, message)
 
-    def ERROR(self, message):
+    def ERROR(self, message: str):
         """INFO - Prints an error severity log"""
         self._log(self.SEVERITY_ERROR, message)
 
-    def print(self, message, attribute=None):
+    def print(self, message:str, attribute=None):
         """print - prints text to console tab, this will replace the typical use of python print in code
         Args:
             message(str): The message to print, adds newline character on print
@@ -969,9 +987,9 @@ class Tui:
             self.ERROR('TUI: Unknown prompt type given')
             return ""
 
-        # Cannot call PROMPT_OPTIONS with no Options
-        if prompt_type == self.PROMPT_OPTIONS and len(options) > 0:
-            self.ERROR('Prompt type PROMPT_OPTIONS called without options')
+        # Cannot call PROMPT_OPTIONS with less than two Options, nothing to choose then
+        if prompt_type == self.PROMPT_OPTIONS and len(options) < 2:
+            self.ERROR('Prompt type PROMPT_OPTIONS called without sufficient options')
             return ""
 
         # same technique as others
@@ -980,6 +998,8 @@ class Tui:
         #   - get input from queue, confirm if suitable e.g. Option/ YesNo
 
         with self._prompt_lock:
+
+            # incase there is already something on queue, LIFO
             old_prompt = self.CMD_PROMPT
             self.CMD_PROMPT = message
 
@@ -989,6 +1009,7 @@ class Tui:
                 self.CMD_PROMPT += str(options)
 
             answer = ''
+            # repeat till we have a suitable answer
             while True:
                 condition = threading.Condition()
                 self._dispatch_queue.put(condition)
@@ -997,9 +1018,11 @@ class Tui:
                 if prompt_type == self.PROMPT_PASSWORD:
                     self._cmd.set_mask_mode()
 
+                # condition is called when user has entered text
                 with condition:
                     condition.wait()
 
+                # get text entered
                 try:
                     answer = self._input_queue.get()
                 except queue.Empty:
@@ -1021,6 +1044,7 @@ class Tui:
                 self.print(self.CMD_PROMPT + ' ' + '*' * len(answer))
             else:
                 self.print(self.CMD_PROMPT + ' ' + answer)
+
             self.CMD_PROMPT = old_prompt
 
         return answer
