@@ -20,9 +20,14 @@ import queue
 import threading
 from math import floor
 from queue import LifoQueue
-from typing import Optional, Any, Callable, Tuple, List, Dict
+from typing import Optional, Any, Callable, Tuple, List, Dict, TypedDict
+from types import FrameType
 
-
+class __TabEntry(TypedDict):
+    win: curses.window
+    buffer: List[Tuple[str, int]]
+    cursor: int
+    selected: bool
 
 # TODO: make class single instance only
 class Tui:
@@ -57,7 +62,6 @@ class Tui:
 
     Examples:
     """
-
     class __Lockable:
         def __init__(self, var_type: Any):
             self.__lock = threading.Lock()
@@ -139,7 +143,7 @@ class Tui:
         PAUSED = 2
         STOPPED = 3
 
-        def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor: Optional[str] = None,
+        def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor: Optional[str] = '',
                      maxvalue: int = 100, fmt: str = ''):
             """Initializes the instance of Progres bar
             Args:
@@ -161,8 +165,8 @@ class Tui:
 
             self._time = time.time_ns()
 
-            if scale_factor not in [None, 'K', 'M', 'G']:
-                scale_factor = None
+            if scale_factor not in ['', 'K', 'M', 'G']:
+                scale_factor = ''
             self._scale_factor = scale_factor
 
             if bar_width < 10:
@@ -192,7 +196,7 @@ class Tui:
             scale_factor :str = ''
 
             # if None, Autoscale
-            if self._scale_factor is None:
+            if self._scale_factor is '':
                 if rate > 10e3 * 2:
                     scale_factor = 'K'
                 if rate > 10e6 * 2:
@@ -377,7 +381,7 @@ class Tui:
     errorColor = curses.COLOR_RED
     highlightColor = curses.COLOR_GREEN
 
-    CMD_PROMPT = '$ '
+    cmd_prompt: str = '$ '
 
     def __init__(self, banner: str):
         """
@@ -413,10 +417,11 @@ class Tui:
 
          # Tabs - tuple of name, window, buffer, cursor position
         self._resolution = {}
-        self._tabs = {}         # predefine collection of tabs
-        self._footer = None     # footer defined separately
+        self._tabs: Dict[str, __TabEntry] = {}          # predefine collection of tabs
+        self._footer: Optional[curses.window] = None    # footer defined separately
+
         # For running list of widget
-        self._widget = {}
+        self._widget: Dict[int, object] = {}
 
         # internal flag to trigger TUI/Application Exit
         self._quit = False
@@ -452,7 +457,7 @@ class Tui:
         self._refresh()
 
         # Register the signal handler for SIGINT (Ctrl+C)
-        signal.signal(signal.SIGINT, self._shutdown)
+        signal.signal(signal.SIGINT, self.sig_shutdown)
 
         self._cmd.register_command('clear', self.clear, 'Clears console tab, alternative tab name/all can be specified')
         self._cmd.register_command('demo', self.demo, 'Demonstrates inbuilt widgets & functions of TUI')
@@ -466,6 +471,9 @@ class Tui:
 
     def _refreshfooter(self):
         """_refreshfooter() - prints the footer section on each call"""
+
+        if self._footer is None:
+            return  # or handle the missing footer appropriately
 
         tab_tooltip = "Use Tab key to rotate through Tabs"
         tab_prefix = 'Tabs:'
@@ -489,7 +497,7 @@ class Tui:
         width = self._resolution['x'] - 2 * self.BOX_WIDTH
 
         # Trim to maximum length of 50% width
-        cmd_prompt = self.CMD_PROMPT[:floor(width / 2)]
+        cmd_prompt = self.cmd_prompt[:floor(width / 2)]
 
         # Available width - less length of cmd prompt and two (one for seperator, and another cursor)
         width = width - len(cmd_prompt) - 2
@@ -543,7 +551,7 @@ class Tui:
 
         window.refresh()
 
-    def _refresh(self, force=False):
+    def _refresh(self, force: bool=False):
         """_refresh() - refreshes all windows
         Args:
             force(bool): forces complete screen refresh
@@ -567,7 +575,7 @@ class Tui:
             self._stdscr.refresh()
 
     @property
-    def _activetab(self) -> {}:
+    def _activetab(self) -> __TabEntry:
         """_activetab - returns tab marked as 'selected'"""
         active_tab = [self._tabs[tab] for tab in self._tabs if self._tabs[tab]['selected']]
         if len(active_tab) != 1:
@@ -592,7 +600,7 @@ class Tui:
             # String for results, operation is atomic internally
             self._psutil.value = f'CPU: {cpu_percent}% RAM: {mem_percent}% Disk(/): {disk_percent}%'
 
-    def _activate(self, name):
+    def _activate(self, name: str):
         """_activate - mark 'name' as active tab"""
         if name not in self._tabs:
             self.ERROR('TUI: Activating non available Tab')
@@ -615,7 +623,7 @@ class Tui:
         self._footer_coordinates = {'h': self._footer_height, 'w': self._resolution['x'],
                                     'y': self._resolution['y'] - self._footer_height, 'x': 0}
 
-    def _log(self, severity, message: str):
+    def _log(self, severity: int, message: str):
         """_log - the parent function to add text to log tab, severity determines the attribute"""
 
         assert (severity in [self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO]), \
@@ -629,7 +637,7 @@ class Tui:
                 attribute = curses.color_pair(self.COLOR_WARNING)
 
             logger = self._tabs['log']
-            logger['buffer'].append((message + '\   n', attribute))
+            logger['buffer'].append((message + '\n', attribute))
             logger['cursor'] = len(logger['buffer'])
 
     def _create_windows(self):
@@ -663,6 +671,11 @@ class Tui:
 
             # Enabling Scrolling
             self._tabs[name]['win'].scrollok(True)
+
+    
+    def sig_shutdown(self, signum: int, frame: Optional[FrameType]) -> None:
+        self._shutdown
+
 
     def _shutdown(self):
         """_shutdown - shuts down the curses environment"""
@@ -746,7 +759,7 @@ class Tui:
         # END ncurses startup/initialization...
         self._is_setup = True
 
-    def enabletab(self, name):
+    def enabletab(self, name: str):
         """enableTab - activate the given tab name. this is public function"""
         # Set current Tab based on name, provided it is valid
         if name in self._tabs:
@@ -815,7 +828,7 @@ class Tui:
                 # KEY_RIGHT & KEY_LEFT are only for scrolling commandline
                 elif c == 'KEY_RIGHT':
                     width = self._resolution['x'] - 2 * self.BOX_WIDTH
-                    width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
+                    width = width - len(self.cmd_prompt[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
                     if len(self._cmd.current) > width:
                         if self._cmd.cursor < len(self._cmd.current) - width:
@@ -868,7 +881,7 @@ class Tui:
                 else:
                     self._cmd.current = ''.join([self._cmd.current, c])
                     width = self._resolution['x'] - 2 * self.BOX_WIDTH
-                    width = width - len(self.CMD_PROMPT[:floor(width / 2)]) - 2
+                    width = width - len(self.cmd_prompt[:floor(width / 2)]) - 2
                     # Only if the input is greater than the available space is cursor position relevant
                     if len(self._cmd.current) > width:
                         if self._cmd.cursor < len(self._cmd.current) - width:
@@ -889,7 +902,7 @@ class Tui:
         """INFO - Prints an error severity log"""
         self._log(self.SEVERITY_ERROR, message)
 
-    def print(self, message:str, attribute=None):
+    def print(self, message:str, attribute: Optional[int | None] = None):
         """print - prints text to console tab, this will replace the typical use of python print in code
         Args:
             message(str): The message to print, adds newline character on print
@@ -903,7 +916,7 @@ class Tui:
             console['buffer'].append((''.join([message, '\n']), attribute))
             console['cursor'] = len(console['buffer'])
 
-    def clear(self, name):
+    def clear(self, name: str):
         """clear - Clear the named tab
         Args:
             name(str): the 'tab' to clear, all specifies all tabs
@@ -930,7 +943,7 @@ class Tui:
         with self._shell_lock:
 
             while True:
-                self.CMD_PROMPT = '$'
+                self.cmd_prompt = '$'
 
                 # Basic approach is to push request in waiting queue,
                 # and when condition is called execute the command in the _input_queue
@@ -950,7 +963,7 @@ class Tui:
                 self.print(command, curses.color_pair(self.COLOR_HIGHLIGHT))
 
                 # Do not accept commands on prompt till command is competed
-                self.CMD_PROMPT = '(command under progress)'
+                self.cmd_prompt = '(command under progress)'
                 self.INFO(f'Executing "{command}"')
 
                 cmd_parts = command.split()
@@ -970,7 +983,8 @@ class Tui:
                         self.print(f"Error: {e}")
                         self.ERROR(f"Error: {e}")
 
-    def prompt(self, prompt_type, message, options=None) -> str:
+    def prompt(self, prompt_type: int, message: str, options: Optional[List[str]] = None) -> str:
+
         """prompt - gets user input and returns as string
         Args:
             prompt_type: defines how the prompt is shown
@@ -1000,13 +1014,13 @@ class Tui:
         with self._prompt_lock:
 
             # incase there is already something on queue, LIFO
-            old_prompt = self.CMD_PROMPT
-            self.CMD_PROMPT = message
+            old_prompt = self.cmd_prompt
+            self.cmd_prompt = message
 
             if prompt_type == self.PROMPT_YESNO:
-                self.CMD_PROMPT += ' (y/n):'
+                self.cmd_prompt += ' (y/n):'
             elif prompt_type == self.PROMPT_OPTIONS:
-                self.CMD_PROMPT += str(options)
+                self.cmd_prompt += str(options)
 
             answer = ''
             # repeat till we have a suitable answer
@@ -1041,15 +1055,15 @@ class Tui:
             # for PROMPT_PASSWORD print masked content of same length else clear text
             if prompt_type == self.PROMPT_PASSWORD:
                 self._cmd.reset_mask_mode()
-                self.print(self.CMD_PROMPT + ' ' + '*' * len(answer))
+                self.print(self.cmd_prompt + ' ' + '*' * len(answer))
             else:
-                self.print(self.CMD_PROMPT + ' ' + answer)
+                self.print(self.cmd_prompt + ' ' + answer)
 
-            self.CMD_PROMPT = old_prompt
+            self.cmd_prompt = old_prompt
 
         return answer
 
-    def spinner(self, message) -> __Spinner:
+    def spinner(self, message: str) -> __Spinner:
         """spinner - return instance of __Spinner
         Args:
             message(str): The string to be printed before the spinner
@@ -1078,7 +1092,7 @@ class Tui:
             self.print(spin.message + '... Done')
             self._widget.pop(widget_id)
 
-    def progressbar(self, label: str, itr_label='it/s', bar_width: int = 40, scale_factor: str = Optional[str],
+    def progressbar(self, label: str, itr_label: str='it/s', bar_width: int = 40, scale_factor: Optional[str] = '',
                     maxvalue: int = 100, fmt: str = '', ) -> __ProgressBar:
         """
         Creates instance of progressbar and adds to _widget list to render, all actions are on the instance
