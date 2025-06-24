@@ -12,6 +12,8 @@ register(function name, callable function)
 """
 
 import curses
+from curses.panel import panel
+import curses.panel
 import signal
 import time
 
@@ -23,8 +25,9 @@ from queue import LifoQueue
 from typing import Optional, Any, Callable, Tuple, List, Dict, TypedDict
 from types import FrameType
 
-class __TabEntry(TypedDict):
+class _TabEntry(TypedDict):
     win: curses.window
+    panel: panel
     buffer: List[Tuple[str, int]]
     cursor: int
     selected: bool
@@ -196,7 +199,7 @@ class Tui:
             scale_factor :str = ''
 
             # if None, Autoscale
-            if self._scale_factor is '':
+            if self._scale_factor == '':
                 if rate > 10e3 * 2:
                     scale_factor = 'K'
                 if rate > 10e6 * 2:
@@ -383,7 +386,7 @@ class Tui:
 
     cmd_prompt: str = '$ '
 
-    def __init__(self, banner: str):
+    def __init__(self, banner: str): 
         """
         Initialises instance of Tui, involving
             - Setting up internal parameters
@@ -395,6 +398,8 @@ class Tui:
             banner: accepts str which will be printed in the footer
         """
 
+        self._error_code: int = 0
+
         # Setting up thread locks
         self._prompt_lock = threading.Lock()
         self._shell_lock = threading.Lock()
@@ -402,6 +407,7 @@ class Tui:
         self._refresh_lock = threading.Lock()
         self._log_lock = threading.Lock()
         self._widget_lock = threading.Lock()
+        self._running_lock = threading.Lock()
 
         # setting up dispatch queue for handling keystrokes
         self._dispatch_queue: LifoQueue[Any] = queue.LifoQueue()
@@ -417,7 +423,7 @@ class Tui:
 
          # Tabs - tuple of name, window, buffer, cursor position
         self._resolution = {}
-        self._tabs: Dict[str, __TabEntry] = {}          # predefine collection of tabs
+        self._tabs: Dict[str, _TabEntry] = {}          # predefine collection of tabs
         self._footer: Optional[curses.window] = None    # footer defined separately
 
         # For running list of widget
@@ -437,9 +443,15 @@ class Tui:
 
         self._is_setup = False
         self._setup()
+        self._redraw()
+
+        if not self._is_setup:
+            print("Failed setting up TUI Screen\r")
+            return None
 
         # set the default tab
         self._activate('console')
+        self._stdscr.refresh()
 
         # Validation
         try:
@@ -450,14 +462,10 @@ class Tui:
                 'TUI: Tab not activated correctly'
         except AssertionError as e:
             self._shutdown()
-            print(f'TUI: Setup configuration is wrong: {e}')
+            print(f'TUI: Setup configuration is wrong: {e}\r')
             return
 
         self.INFO("Initialising TUI environment")
-        self._refresh()
-
-        # Register the signal handler for SIGINT (Ctrl+C)
-        signal.signal(signal.SIGINT, self.sig_shutdown)
 
         self._cmd.register_command('clear', self.clear, 'Clears console tab, alternative tab name/all can be specified')
         self._cmd.register_command('demo', self.demo, 'Demonstrates inbuilt widgets & functions of TUI')
@@ -526,8 +534,6 @@ class Tui:
                 self._footer.addstr(2, index, label)
             index += len(label)
 
-        self._footer.refresh()
-
     def _refreshtab(self):
         """_refreshtab() - Refresh/Re-paint the active tab"""
 
@@ -549,20 +555,15 @@ class Tui:
                 line = ''.join([str(self._widget[widget]), '\n'])
                 window.addstr(line, curses.A_BOLD)
 
-        window.refresh()
 
-    def _refresh(self, force: bool=False):
-        """_refresh() - refreshes all windows
-        Args:
-            force(bool): forces complete screen refresh
-        """
+    def _redraw(self, force: bool=False):
+        
         if curses.is_term_resized(self._resolution['y'], self._resolution['x']):
-            self._shutdown()
-            self._setup()
-            self._calculateResolution()
             self._create_windows()
-            force = True
-
+        
+        if not self._is_setup:
+            return
+        
         if force:
             self._stdscr.touchwin()
 
@@ -570,12 +571,24 @@ class Tui:
             self._refreshfooter()
             self._refreshtab()
 
-            # not sure if this is needed, both _refreshtab & _refreshfooter
-            # calls individual window.refresh()
-            self._stdscr.refresh()
+            if self._footer:
+                self._footer.refresh()
+            
+            for tab in self._tabs:
+                self._tabs[tab]['win'].refresh()
+                if self._tabs[tab]['selected']:
+                    self._tabs[tab]['panel'].show()
+                    self._tabs[tab]['panel'].top()
+                else:
+                    self._tabs[tab]['panel'].hide()
+            
+            
+            curses.panel.update_panels()
+            curses.doupdate()
+            # self._stdscr.refresh()
 
     @property
-    def _activetab(self) -> __TabEntry:
+    def _activetab(self) -> _TabEntry:
         """_activetab - returns tab marked as 'selected'"""
         active_tab = [self._tabs[tab] for tab in self._tabs if self._tabs[tab]['selected']]
         if len(active_tab) != 1:
@@ -611,8 +624,8 @@ class Tui:
 
         self._tabs[name]['selected'] = True
 
-        # forces refresh to repaint tab and footer
-        self._refresh()
+        # repaint tab and footer
+        self._redraw()
 
     def _calculateResolution(self):
         """_resizeScreen - recalculate layout (width, height, origin y, origin x) with origin on top left corner"""
@@ -639,16 +652,35 @@ class Tui:
             logger = self._tabs['log']
             logger['buffer'].append((message + '\n', attribute))
             logger['cursor'] = len(logger['buffer'])
+        
+        self._redraw()
+
+    def _create_tab(self, coordinates: dict[str, int]) -> _TabEntry:
+        win = curses.newwin(coordinates['h'], coordinates['w'],
+                            coordinates['y'], coordinates['x'])
+        
+        win_panel = curses.panel.new_panel(win)
+        
+        return {'win': win, 'panel': win_panel, 'buffer': [], 'cursor': 0, 'selected': False }
 
     def _create_windows(self):
         """_build_windows - creates the _footer and _tab windows, discards old windows"""
 
+        active_tab: list[str] | None = None
         # empty previous window
         if self._footer:
             self._footer = None
 
         if self._tabs:
+            active_tab = [key for key, tab in self._tabs.items() if tab["selected"]]
             self._tabs.clear()
+
+        curses.update_lines_cols()
+        if curses.COLS < 80 or curses.LINES < 24:
+            self.exit(1)
+            self._is_setup = False
+            print(f"TUI: Screen size ({curses.COLS} x {curses.LINES}) less than minimum\r")
+            return
 
         self._calculateResolution()
 
@@ -664,21 +696,24 @@ class Tui:
             if not name or name in self._tabs:
                 continue
 
-            # Tab is a tuple of name, window, buffer, cursor position, and selected state
-            self._tabs[name] = {'win': curses.newwin(self._tab_coordinates['h'], self._tab_coordinates['w'],
-                                                     self._tab_coordinates['y'], self._tab_coordinates['x']),
-                                'buffer': [], 'cursor': 0, 'selected': True}
+            # Tab is a tuple of name, window, panel, buffer, cursor position, and selected state
+            self._tabs[name] = self._create_tab(self._tab_coordinates)
 
             # Enabling Scrolling
             self._tabs[name]['win'].scrollok(True)
-
+        
+        if active_tab:
+            self._tabs[active_tab[0]]['selected'] = True
+        else:
+            self._tabs['console']['selected'] = True
     
     def sig_shutdown(self, signum: int, frame: Optional[FrameType]) -> None:
-        self._shutdown
+        self.exit(signum)
 
 
     def _shutdown(self):
         """_shutdown - shuts down the curses environment"""
+
         # if not previously setup - skip
         if not self._is_setup:
             return
@@ -721,7 +756,7 @@ class Tui:
             # set minimum to 80x25 screen, if lesser
             # better to exit than print weird or bad calculations
             if curses.COLS < 80 or curses.LINES < 24:
-                print(f"TUI: Screen size ({curses.COLS} x {curses.LINES}) less than minimum")
+                print(f"TUI: Screen size ({curses.COLS} x {curses.LINES}) less than minimum\r")
                 return
 
         # BEGIN ncurses startup/initialization...
@@ -788,107 +823,111 @@ class Tui:
 
         self._activate(next_tab)
 
-    def run(self):
+    def _run(self):
         """run - The main thread which is accepting and dispatches keys"""
-        if not self._is_setup:
-            print("TUI: screen has not been setup properly")
-            return
+
 
         # maintaining internal flag to exit loop on true,
         # resetting value before start
         self._quit = False
 
+        with self._running_lock:
         # main loop
-        while not self._quit:
-            # wait 10ms to avoid 100% CPU usage
-            curses.napms(10)
+            while not self._quit:
 
-            self._refresh()
+                if not self._is_setup:
+                    print("TUI: screen has not been setup properly\r")
+                    return
+        
+                # wait 10ms to avoid 100% CPU usage
+                curses.napms(10)
 
-            # get input
-            try:
-                c = self._stdscr.getkey()
-            except curses.error:
-                c = None
+                self._redraw()
 
-            if c is not None:
+                # get input
+                try:
+                    c = self._stdscr.getkey()
+                except curses.error:
+                    c = None
 
-                activetab = self._activetab
+                if c is not None:
 
-                # KEY_UP & KEY_DOWN are only for scrolling, cannot be passed to command
-                # If screen content < screen size - do not scroll
-                if c == 'KEY_UP':
-                    if activetab['cursor'] > self._tab_coordinates['h']:
-                        activetab['cursor'] -= 1
-                        continue
-                elif c == 'KEY_DOWN':
-                    activetab['cursor'] = min(len(activetab['buffer']), activetab['cursor'] + 1)
-                    continue
+                    activetab = self._activetab
 
-                # KEY_RIGHT & KEY_LEFT are only for scrolling commandline
-                elif c == 'KEY_RIGHT':
-                    width = self._resolution['x'] - 2 * self.BOX_WIDTH
-                    width = width - len(self.cmd_prompt[:floor(width / 2)]) - 2
-                    # Only if the input is greater than the available space is cursor position relevant
-                    if len(self._cmd.current) > width:
-                        if self._cmd.cursor < len(self._cmd.current) - width:
-                            self._cmd.inc_cursor()
-                elif c == 'KEY_LEFT':
-                    self._cmd.dec_cursor()
-
-                # handler for other keys
-                elif c == 'KEY_BACKSPACE':
-                    self._cmd.current = self._cmd.current[:-1]
-                    if self._cmd.cursor > 0:
-                        self._cmd.dec_cursor()
-                    continue
-
-                # Tab key circles through available tabs
-                elif c == '\t':
-                    # switch to next 'Tab' on Alt
-                    self._enable_next_tab()
-                    continue
-
-                # Simple hack - if it is longer than a char it is a special
-                # key string that we care not currently handling
-                if len(c) > 1:
-                    continue
-
-                # here onwards we are processing keys outside control keys
-                # if nothing is waiting in queue don't process any keys
-                if self._dispatch_queue.empty():
-                    continue
-
-                # Newline received, based on data input mode the dispatch sequence is identified
-                if c == '\n':
-                    # Command has been completed
-                    if self._cmd.current.strip():
-                        self._input_queue.put(self._cmd.current)
-                        self._cmd.add_history(self._cmd.current)
-                        try:
-                            condition = self._dispatch_queue.get()
-                        except queue.Empty:
-                            self.ERROR('TUI: Nothing in dispatch queue')
+                    # KEY_UP & KEY_DOWN are only for scrolling, cannot be passed to command
+                    # If screen content < screen size - do not scroll
+                    if c == 'KEY_UP':
+                        if activetab['cursor'] > self._tab_coordinates['h']:
+                            activetab['cursor'] -= 1
                             continue
+                    elif c == 'KEY_DOWN':
+                        activetab['cursor'] = min(len(activetab['buffer']), activetab['cursor'] + 1)
+                        continue
 
-                        with condition:
-                            condition.notify()
+                    # KEY_RIGHT & KEY_LEFT are only for scrolling commandline
+                    elif c == 'KEY_RIGHT':
+                        width = self._resolution['x'] - 2 * self.BOX_WIDTH
+                        width = width - len(self.cmd_prompt[:floor(width / 2)]) - 2
+                        # Only if the input is greater than the available space is cursor position relevant
+                        if len(self._cmd.current) > width:
+                            if self._cmd.cursor < len(self._cmd.current) - width:
+                                self._cmd.inc_cursor()
+                    elif c == 'KEY_LEFT':
+                        self._cmd.dec_cursor()
 
-                    self._cmd.current = ''
-                    self._cmd.reset_cursor()
+                    # handler for other keys
+                    elif c == 'KEY_BACKSPACE':
+                        self._cmd.current = self._cmd.current[:-1]
+                        if self._cmd.cursor > 0:
+                            self._cmd.dec_cursor()
+                        continue
 
-                # if we are here, c is a valid part of the command being typed, append to it and increment the cursor
-                else:
-                    self._cmd.current = ''.join([self._cmd.current, c])
-                    width = self._resolution['x'] - 2 * self.BOX_WIDTH
-                    width = width - len(self.cmd_prompt[:floor(width / 2)]) - 2
-                    # Only if the input is greater than the available space is cursor position relevant
-                    if len(self._cmd.current) > width:
-                        if self._cmd.cursor < len(self._cmd.current) - width:
-                            self._cmd.inc_cursor()
+                    # Tab key circles through available tabs
+                    elif c == '\t':
+                        # switch to next 'Tab' on Alt
+                        self._enable_next_tab()
+                        continue
 
-        # broken out of the loop - clean up
-        self._shutdown()
+                    # Simple hack - if it is longer than a char it is a special
+                    # key string that we care not currently handling
+                    if len(c) > 1:
+                        continue
+
+                    # here onwards we are processing keys outside control keys
+                    # if nothing is waiting in queue don't process any keys
+                    if self._dispatch_queue.empty():
+                        continue
+
+                    # Newline received, based on data input mode the dispatch sequence is identified
+                    if c == '\n':
+                        # Command has been completed
+                        if self._cmd.current.strip():
+                            self._input_queue.put(self._cmd.current)
+                            
+                            try:
+                                condition = self._dispatch_queue.get()
+                            except queue.Empty:
+                                self.ERROR('TUI: Nothing in dispatch queue')
+                                continue
+
+                            with condition:
+                                condition.notify()
+
+                        self._cmd.current = ''
+                        self._cmd.reset_cursor()
+
+                    # if we are here, c is a valid part of the command being typed, append to it and increment the cursor
+                    else:
+                        self._cmd.current = ''.join([self._cmd.current, c])
+                        width = self._resolution['x'] - 2 * self.BOX_WIDTH
+                        width = width - len(self.cmd_prompt[:floor(width / 2)]) - 2
+                        # Only if the input is greater than the available space is cursor position relevant
+                        if len(self._cmd.current) > width:
+                            if self._cmd.cursor < len(self._cmd.current) - width:
+                                self._cmd.inc_cursor()
+
+            # broken out of the loop - clean up
+            self._shutdown()
 
     def INFO(self, message: str):
         """INFO - Prints an info severity log"""
@@ -915,6 +954,8 @@ class Tui:
 
             console['buffer'].append((''.join([message, '\n']), attribute))
             console['cursor'] = len(console['buffer'])
+        
+        # self._redraw()
 
     def clear(self, name: str):
         """clear - Clear the named tab
@@ -965,6 +1006,7 @@ class Tui:
                 # Do not accept commands on prompt till command is competed
                 self.cmd_prompt = '(command under progress)'
                 self.INFO(f'Executing "{command}"')
+                self._cmd.add_history(command)
 
                 cmd_parts = command.split()
                 if len(cmd_parts) > 0:
@@ -1159,9 +1201,11 @@ class Tui:
         self.prompt(self.PROMPT_OPTIONS, 'This allows you to select from options', ['yes', 'no'])
         self.prompt(self.PROMPT_PASSWORD, 'This accepts masked input')
 
-        bar = self.progressbar('Progress Bar Demo', maxvalue=100)
+        bar_max: int = 100
 
-        for i in range(100):
+        bar = self.progressbar('Progress Bar Demo', maxvalue=bar_max)
+
+        for i in range(bar_max + 1):
             bar.step(value=1)
             curses.napms(100)
         self.p_close(bar)
@@ -1176,12 +1220,21 @@ class Tui:
     def exit(self, error_code: int = 0):
         """exit - helper function parent to close tui gracefully"""
         self._quit = True
+        self._error_code = error_code
         # Give sufficient time to run _shutdown, there is an internal napms(10)
         curses.napms(20)
-        exit(error_code)
+    
+    def run(self):
+        threading.Thread(target=self._run, daemon=True).start()
+        curses.napms(20)
+        with self._running_lock:
+            if self._error_code != 0:
+                print(f"Exited with error code : {self._error_code}\r\n")
 
 
 # test function - can run this file separately 
 if __name__ == '__main__':
     tui = Tui("Athena Build Environment v0.1")
+    # Register the signal handler for SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, tui.sig_shutdown)
     tui.run()

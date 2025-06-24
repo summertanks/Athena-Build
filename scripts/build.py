@@ -16,7 +16,7 @@ import buildcontainer
 import dependencytree
 import buildsystem
 import tui
-
+import signal
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
@@ -37,6 +37,9 @@ def main(banner: str):
 
     # Set up the TUI system
     _tui = tui.Tui(banner)
+
+    # Register the signal handler for SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, _tui.sig_shutdown)
 
     # export the TUI functions
     global Print, Prompt, Spinner, ProgressBar, Exit
@@ -86,7 +89,7 @@ def main(banner: str):
         skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
 
     except configparser.Error as e:
-        print(f"Athena Linux: Config Parser Error: {e}")
+        Print(f"Athena Linux: Config Parser Error: {e}")
         Exit(1)
 
     # External modules initialisation
