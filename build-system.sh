@@ -87,11 +87,35 @@ else
 fi
 
 # Checking awk
-if [ -x /usr/bin/awk ]; then
-	echo Using `/usr/bin/awk --version | head -n1`
+AWK_PATH=$(which awk 2>/dev/null)
+
+if [ -x "$AWK_PATH" ]; then
+    REAL_AWK=$(readlink -f "$AWK_PATH")
+    PACKAGE=$(dpkg -S "$REAL_AWK" 2>/dev/null | cut -d: -f1)
+
+    echo "Using $AWK_PATH -> $REAL_AWK"
+    echo "Provided by package: $PACKAGE"
+
+    case "$PACKAGE" in
+        gawk)
+            "$AWK_PATH" --version | head -n1
+            ;;
+        mawk)
+            # mawk prints version on stdin with no args
+            "$AWK_PATH" </dev/null 2>&1 | head -n1
+            ;;
+        original-awk)
+            # original-awk prints version on stderr
+            "$AWK_PATH" </dev/null 2>&1 | grep -i version | head -n1
+            ;;
+        *)
+            echo "Unknown awk variant. Attempting to detect version generically:"
+            "$AWK_PATH" --version 2>/dev/null | head -n1 || "$AWK_PATH" </dev/null 2>&1 | head -n1
+            ;;
+    esac
 else
-	echo "E: awk not found, build script will not work" > /dev/stderr
-	exit 1
+    echo "E: awk not found, build script will not work" >&2
+    exit 1
 fi
 
 # Checking build directories
@@ -122,8 +146,43 @@ else
 	echo "Using config file" $CONFIG_FILE
 fi
 
+wanted_sections=("Build" "Base" "Source")
+current_section=""
 
-python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$PWD --config-file=$CONFIG_FILE
+while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip leading/trailing whitespace
+    line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+
+    # Section headers
+    if [[ "$line" =~ ^\[(.*)\]$ ]]; then
+        section="${BASH_REMATCH[1]}"
+        if [[ " ${wanted_sections[*]} " =~ " $section " ]]; then
+            current_section="$section"
+            echo -e "\n [$current_section]"
+        else
+            current_section=""
+        fi
+        continue
+    fi
+
+    # Key = Value lines, only if in a wanted section
+    if [[ -n "$current_section" && "$line" =~ ^([^=]+)=[[:space:]]*(.*)$ ]]; then
+        key=$(echo "${BASH_REMATCH[1]}" | xargs)
+        value=$(echo "${BASH_REMATCH[2]}" | xargs)
+
+        # Remove surrounding quotes
+        value="${value%\"}"
+        value="${value#\"}"
+
+        printf "   %-20s : %s\n" "$key" "$value"
+    fi
+done < "$CONFIG_FILE"
+
+
+# python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$PWD --config-file=$CONFIG_FILE
 
 
 
