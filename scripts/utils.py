@@ -3,9 +3,133 @@ import os
 import pathlib
 import re
 import configparser
+import argparse
+
+from configparser import ConfigParser
 
 global Print, Prompt, Spinner, ProgressBar, Exit
 
+class BaseDistribution:
+    def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
+        self.url: str = url
+        self.baseid: str = baseid
+        self.codename: str = codename
+        self.version: str = version
+        self.arch: str = arch
+
+class BuildConfig:
+    arch: str
+    baseurl: str
+    basecodename: str
+    baseid: str
+    baseversion: str
+    build_codename: str
+    build_version: str
+
+    skip_build_test: list[str]
+
+    working_dir: str
+    config_path: str
+    pkglist_path: str
+
+    error_str: str
+
+    def __init__(self, config_parser: ConfigParser):
+        
+        # Set when config is validated
+        _config_valid: bool = False
+        self.error_str = ''
+
+        # let defaults be relative to current working directory
+        try:
+            self.working_dir = os.path.abspath(os.path.curdir)
+            # self.cwd = os.path.abspath(self.working_dir)
+            self.config_path = os.path.join(self.working_dir, 'config/build.conf')
+            self.pkglist_path = os.path.join(self.working_dir, 'config/pkg.list')
+        except os.error as e:
+            self.error_str = str(e)
+            return
+
+        try:
+            parser = argparse.ArgumentParser(description='Dependency Parser - Athena Linux')
+            parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=True, default=self.working_dir)
+            parser.add_argument('--config-file', type=str, help='Specify Configs File', required=True, default=self.config_path)
+            parser.add_argument('--pkg-list', type=str, help='Specify Required Pkg File', required=True, default=self.pkglist_path)
+            args = parser.parse_args()
+        except argparse.ArgumentError as e:
+            self.error_str = str(e)
+            return
+
+        # if dirs specified, they are not relative
+        try:
+            self.working_dir = os.path.abspath(args.working_dir)
+            self.config_path = os.path.abspath(args.config_file)
+            self.pkglist_path = os.path.abspath(args.pkg_list)
+        except os.error as e:
+            self.error_str = str(e)
+            return
+
+        try:
+            config_parser.read(self.config_path)
+            self.arch = config_parser.get('Build', 'ARCH')
+            self.baseurl = config_parser.get('Base', 'baseurl')
+            self.basecodename = config_parser.get('Base', 'BASECODENAME')
+            self.baseid = config_parser.get('Base', 'BASEID')
+            self.baseversion = config_parser.get('Base', 'BASEVERSION')
+            self.build_codename = config_parser.get('Build', 'CODENAME')
+            self.build_version = config_parser.get('Build', 'VERSION')
+
+            self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
+
+            self.dir_download = os.path.join(self.working_dir, config_parser.get('Directories', 'Download'))
+            self.dir_log = os.path.join(self.working_dir, config_parser.get('Directories', 'Log'))
+            self.dir_cache = os.path.join(self.working_dir, config_parser.get('Directories', 'Cache'))
+            self.dir_temp = os.path.join(self.working_dir, config_parser.get('Directories', 'Temp'))
+            self.dir_source = os.path.join(self.working_dir, config_parser.get('Directories', 'Source'))
+            self.dir_repo = os.path.join(self.working_dir, config_parser.get('Directories', 'Repo'))
+            self.dir_config = os.path.join(self.working_dir, config_parser.get('Directories', 'Config'))
+            self.dir_patch = os.path.join(self.working_dir, config_parser.get('Directories', 'Patch'))
+            self.dir_image = os.path.join(self.working_dir, config_parser.get('Directories', 'Image'))
+            self.dir_chroot = os.path.join(self.working_dir, config_parser.get('Directories', 'Chroot'))
+            
+            self.dir_patch_source = os.path.join(self.dir_patch, 'source')
+            self.dir_patch_preinstall = os.path.join(self.dir_patch, 'pre-install')
+            self.dir_patch_postinstall = os.path.join(self.dir_patch, 'post-install')
+            self.dir_patch_empty = os.path.join(self.dir_patch, 'empty')
+
+
+        except (configparser.Error, OSError) as e:
+            self.error_str = str(e)
+            return
+        
+        try:
+            os.access(self.cwd, os.W_OK)
+
+
+            pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
+
+            pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_repo).mkdir(parents=True, exist_ok=True)
+
+            pathlib.Path(self.dir_patch).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_patch_empty).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_patch_source).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_patch_preinstall).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_patch_postinstall).mkdir(parents=True, exist_ok=True)
+
+            pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
+
+        except PermissionError as e:
+            Print(f"Athena Linux: Insufficient permissions in the working directory: {e}")
+            exit(1)
+        
+        _config_valid: bool = True
+    
 
 class DirectoryListing:
     """
@@ -76,13 +200,7 @@ class DirectoryListing:
             exit(1)
 
 
-class BaseDistribution:
-    def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
-        self.url: str = url
-        self.baseid: str = baseid
-        self.codename: str = codename
-        self.version: str = version
-        self.arch: str = arch
+
 
 
 def download_file(url: str, filename: str) -> int:
