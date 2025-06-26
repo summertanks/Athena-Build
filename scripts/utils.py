@@ -34,16 +34,35 @@ class BuildConfig:
 
     error_str: str
 
-    def __init__(self, config_parser: ConfigParser):
-        
+    dir_download: str
+    dir_log: str
+    dir_cache: str
+    dir_temp: str
+    dir_source: str
+    dir_repo: str
+    dir_config: str
+    dir_patch: str
+    dir_image: str
+    dir_chroot: str
+    
+    dir_patch_source: str
+    dir_patch_preinstall: str
+    dir_patch_postinstall: str
+    dir_patch_empty: str
+
+    def __init__(self):
+
         # Set when config is validated
         _config_valid: bool = False
+
+        # Setting up config parsers
+        config_parser = configparser.ConfigParser()
+        
         self.error_str = ''
 
-        # let defaults be relative to current working directory
         try:
+            # let defaults be relative to current working directory
             self.working_dir = os.path.abspath(os.path.curdir)
-            # self.cwd = os.path.abspath(self.working_dir)
             self.config_path = os.path.join(self.working_dir, 'config/build.conf')
             self.pkglist_path = os.path.join(self.working_dir, 'config/pkg.list')
         except os.error as e:
@@ -65,7 +84,15 @@ class BuildConfig:
             self.working_dir = os.path.abspath(args.working_dir)
             self.config_path = os.path.abspath(args.config_file)
             self.pkglist_path = os.path.abspath(args.pkg_list)
-        except os.error as e:
+        except OSError as e:
+            self.error_str = str(e)
+            return
+        
+        try:
+            os.access(self.working_dir, os.W_OK)
+            os.access(self.config_path, os.W_OK)
+            os.access(self.pkglist_path, os.W_OK)
+        except OSError as e:
             self.error_str = str(e)
             return
 
@@ -103,8 +130,7 @@ class BuildConfig:
             return
         
         try:
-            os.access(self.cwd, os.W_OK)
-
+            os.access(self.working_dir, os.W_OK)
 
             pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
@@ -125,8 +151,8 @@ class BuildConfig:
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
 
         except PermissionError as e:
-            Print(f"Athena Linux: Insufficient permissions in the working directory: {e}")
-            exit(1)
+            self.error_str = str(e)
+            return
         
         _config_valid: bool = True
     
@@ -140,7 +166,7 @@ class DirectoryListing:
         dir_cache(str):
         dir_temp(str):
         dir_repo(str):      Location for build packages for installation
-        dir_config(str):    Location for all config files
+        dir_config(str):    Location for all config files            os.access(self.working_dir, os.W_OK)
         dir_patch(str):     Location of where config patches are kept, refer to build for subdirectory structure
         dir_image(str):     Location of the output image/installation files
         dir_chroot(str):    Location where the image is built
