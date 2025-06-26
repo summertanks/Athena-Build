@@ -39,50 +39,7 @@ def main(banner: str):
 
     # Config
     global build_config
-    build_config : BuildConfig
-
-    # Setting up config parsers
-    config_parser = configparser.ConfigParser()
-
-    # let defaults be relative to current working directory
-    build_config.working_dir = os.path.abspath(os.path.curdir)
-    build_config.config_path = os.path.join(build_config.working_dir, 'config/build.conf')
-    build_config.pkglist_path = os.path.join(build_config.working_dir, 'config/pkg.list')
-
-    parser = argparse.ArgumentParser(description='Dependency Parser - Athena Linux')
-    parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=True, default=working_dir)
-    parser.add_argument('--config-file', type=str, help='Specify Configs File', required=True, default=config_path)
-    parser.add_argument('--pkg-list', type=str, help='Specify Required Pkg File', required=True, default=pkglist_path)
-    args = parser.parse_args()
-
-    # if dirs specified, they are not relative
-    build_config.working_dir = os.path.abspath(args.working_dir)
-    build_config.config_path = os.path.abspath(args.config_file)
-    build_config.pkglist_path = os.path.abspath(args.pkg_list)
-
-    try:
-        os.access(build_config.working_dir, os.W_OK)
-        os.access(build_config.config_path, os.W_OK)
-        os.access(build_config.pkglist_path, os.W_OK)
-    except PermissionError as e:
-        Print(f"Athena Linux: Insufficient permissions : {e}")
-        exit(1)
-
-    try:
-        config_parser.read(build_config.config_path)
-        arch = config_parser.get('Build', 'ARCH')
-        baseurl = config_parser.get('Base', 'baseurl')
-        basecodename = config_parser.get('Base', 'BASECODENAME')
-        baseid = config_parser.get('Base', 'BASEID')
-        baseversion = config_parser.get('Base', 'BASEVERSION')
-        build_codename = config_parser.get('Build', 'CODENAME')
-        build_version = config_parser.get('Build', 'VERSION')
-
-        skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
-
-    except configparser.Error as e:
-        print(f"Athena Linux: Config Parser Error: {e}")
-        exit(1)
+    build_config : BuildConfig = BuildConfig()
     
     # Set up the TUI system
     _tui = tui.Tui(banner)
