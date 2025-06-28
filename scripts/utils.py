@@ -18,6 +18,7 @@ class BaseDistribution:
         self.arch: str = arch
 
 class BuildConfig:
+
     arch: str
     baseurl: str
     basecodename: str
@@ -28,12 +29,11 @@ class BuildConfig:
 
     skip_build_test: list[str]
 
-    working_dir: str
-    config_path: str
-    pkglist_path: str
-
     error_str: str
+    config_path: str
 
+    dir_working: str
+    dir_pkglist: str
     dir_download: str
     dir_log: str
     dir_cache: str
@@ -50,10 +50,12 @@ class BuildConfig:
     dir_patch_postinstall: str
     dir_patch_empty: str
 
+    _config_valid: bool
+    
     def __init__(self):
 
         # Set when config is validated
-        _config_valid: bool = False
+        self._config_valid: bool = False
 
         # Setting up config parsers
         config_parser = configparser.ConfigParser()
@@ -62,40 +64,29 @@ class BuildConfig:
 
         try:
             # let defaults be relative to current working directory
-            self.working_dir = os.path.abspath(os.path.curdir)
-            self.config_path = os.path.join(self.working_dir, 'config/build.conf')
-            self.pkglist_path = os.path.join(self.working_dir, 'config/pkg.list')
-        except os.error as e:
-            self.error_str = str(e)
-            return
+            working_dir = os.path.abspath(os.path.curdir)
+            config_path = os.path.join(working_dir, 'config/build.conf')
+            pkglist_path = os.path.join(working_dir, 'config/pkg.list')
 
-        try:
             parser = argparse.ArgumentParser(description='Dependency Parser - Athena Linux')
-            parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=True, default=self.working_dir)
-            parser.add_argument('--config-file', type=str, help='Specify Configs File', required=True, default=self.config_path)
-            parser.add_argument('--pkg-list', type=str, help='Specify Required Pkg File', required=True, default=self.pkglist_path)
+            parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=False, default=working_dir)
+            parser.add_argument('--config-file', type=str, help='Specify Configs File', required=False, default=config_path)
+            parser.add_argument('--pkg-list', type=str, help='Specify Required Pkg File', required=False, default=pkglist_path)
             args = parser.parse_args()
-        except argparse.ArgumentError as e:
-            self.error_str = str(e)
-            return
 
-        # if dirs specified, they are not relative
-        try:
+            # if paths are specified, they are absolute
             self.working_dir = os.path.abspath(args.working_dir)
             self.config_path = os.path.abspath(args.config_file)
             self.pkglist_path = os.path.abspath(args.pkg_list)
-        except OSError as e:
-            self.error_str = str(e)
-            return
-        
-        try:
-            os.access(self.working_dir, os.W_OK)
-            os.access(self.config_path, os.W_OK)
-            os.access(self.pkglist_path, os.W_OK)
-        except OSError as e:
+
+            # Check if the working directory and config files are writable   
+            os.access(self.config_path, os.R_OK)
+
+        except (argparse.ArgumentError, OSError) as e:
             self.error_str = str(e)
             return
 
+        # read config file
         try:
             config_parser.read(self.config_path)
             self.arch = config_parser.get('Build', 'ARCH')
@@ -108,6 +99,7 @@ class BuildConfig:
 
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
 
+            # NOTE: The directories are relative to the working directory
             self.dir_download = os.path.join(self.working_dir, config_parser.get('Directories', 'Download'))
             self.dir_log = os.path.join(self.working_dir, config_parser.get('Directories', 'Log'))
             self.dir_cache = os.path.join(self.working_dir, config_parser.get('Directories', 'Cache'))
@@ -115,15 +107,14 @@ class BuildConfig:
             self.dir_source = os.path.join(self.working_dir, config_parser.get('Directories', 'Source'))
             self.dir_repo = os.path.join(self.working_dir, config_parser.get('Directories', 'Repo'))
             self.dir_config = os.path.join(self.working_dir, config_parser.get('Directories', 'Config'))
-            self.dir_patch = os.path.join(self.working_dir, config_parser.get('Directories', 'Patch'))
             self.dir_image = os.path.join(self.working_dir, config_parser.get('Directories', 'Image'))
             self.dir_chroot = os.path.join(self.working_dir, config_parser.get('Directories', 'Chroot'))
             
+            self.dir_patch = os.path.join(self.working_dir, config_parser.get('Directories', 'Patch'))
             self.dir_patch_source = os.path.join(self.dir_patch, 'source')
             self.dir_patch_preinstall = os.path.join(self.dir_patch, 'pre-install')
             self.dir_patch_postinstall = os.path.join(self.dir_patch, 'post-install')
             self.dir_patch_empty = os.path.join(self.dir_patch, 'empty')
-
 
         except (configparser.Error, OSError) as e:
             self.error_str = str(e)
@@ -134,8 +125,7 @@ class BuildConfig:
 
             pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
-
+            
             pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
@@ -149,85 +139,44 @@ class BuildConfig:
 
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
+
+            os.access(self.dir_download, os.W_OK)
+            os.access(self.dir_log, os.W_OK)
+            os.access(self.dir_cache, os.W_OK)
+            os.access(self.dir_temp, os.W_OK)
+            os.access(self.dir_source, os.W_OK)
+            os.access(self.dir_repo, os.W_OK)
+            os.access(self.dir_patch, os.W_OK)
+            os.access(self.dir_patch_empty, os.W_OK)
+            os.access(self.dir_patch_source, os.W_OK)
+            os.access(self.dir_patch_preinstall, os.W_OK)
+            os.access(self.dir_patch_postinstall, os.W_OK)
+            os.access(self.dir_image, os.W_OK)
+            os.access(self.dir_chroot, os.W_OK)
+
+            pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
 
         except PermissionError as e:
             self.error_str = str(e)
             return
         
-        _config_valid: bool = True
+        self._config_valid = True
     
-
-class DirectoryListing:
-    """
-    DirectoryListing - Enables functional directory structure
-    Attributes:
-        dir_download(str):  Location for file downloads
-        dir_log(str):       Location of log files
-        dir_cache(str):
-        dir_temp(str):
-        dir_repo(str):      Location for build packages for installation
-        dir_config(str):    Location for all config files            os.access(self.working_dir, os.W_OK)
-        dir_patch(str):     Location of where config patches are kept, refer to build for subdirectory structure
-        dir_image(str):     Location of the output image/installation files
-        dir_chroot(str):    Location where the image is built
-        dir_patch_source(str): Location of where sourcecode patches are kept, refer to build for subdirectory structure
-        dir_patch_preinstall(str):  Patches before building chroot
-        dir_patch_postinstall(str): Patches after building chroot
-        dir_patch_empty(str):
-
-    """
-
-    def __init__(self, working_dir: str, config_parser: configparser):
-
-        self.cwd = os.path.abspath(working_dir)
-        try:
-            self.dir_download = os.path.join(self.cwd, config_parser.get('Directories', 'Download'))
-            self.dir_log = os.path.join(self.cwd, config_parser.get('Directories', 'Log'))
-            self.dir_cache = os.path.join(self.cwd, config_parser.get('Directories', 'Cache'))
-            self.dir_temp = os.path.join(self.cwd, config_parser.get('Directories', 'Temp'))
-            self.dir_source = os.path.join(self.cwd, config_parser.get('Directories', 'Source'))
-            self.dir_repo = os.path.join(self.cwd, config_parser.get('Directories', 'Repo'))
-            self.dir_config = os.path.join(self.cwd, config_parser.get('Directories', 'Config'))
-            self.dir_patch = os.path.join(self.cwd, config_parser.get('Directories', 'Patch'))
-            self.dir_image = os.path.join(self.cwd, config_parser.get('Directories', 'Image'))
-            self.dir_chroot = os.path.join(self.cwd, config_parser.get('Directories', 'Chroot'))
-
-            self.dir_patch_source = os.path.join(self.dir_patch, 'source')
-            self.dir_patch_preinstall = os.path.join(self.dir_patch, 'pre-install')
-            self.dir_patch_postinstall = os.path.join(self.dir_patch, 'post-install')
-            self.dir_patch_empty = os.path.join(self.dir_patch, 'empty')
-
-        except configparser.Error as e:
-            Print(f"Athena Linux: Config Parser Error: {e}")
-            exit(1)
-
-        try:
-            os.access(self.cwd, os.W_OK)
-            pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
-
-            pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_repo).mkdir(parents=True, exist_ok=True)
-
-            pathlib.Path(self.dir_patch).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_patch_empty).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_patch_source).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_patch_preinstall).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_patch_postinstall).mkdir(parents=True, exist_ok=True)
-
-            pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
-            pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
-
-        except PermissionError as e:
-            Print(f"Athena Linux: Insufficient permissions in the working directory: {e}")
-            exit(1)
-
-
-
-
+    @property
+    def is_valid(self) -> bool:
+        """
+        Returns:
+            bool: True if config is valid, False otherwise
+        """
+        return self._config_valid
+    
+    def error(self) -> str:
+        """
+        Returns:
+            str: Error string if config is invalid, empty string otherwise
+        """
+        return self.error_str
+    
 
 def download_file(url: str, filename: str) -> int:
     """Downloads file and updates progressbar in incremental manner.
