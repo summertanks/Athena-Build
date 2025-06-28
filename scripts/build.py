@@ -1,8 +1,7 @@
 # (C) Athena Linux Project
 
 # External imports
-import argparse
-import configparser
+
 import os
 import shutil
 import cache
@@ -13,6 +12,7 @@ from rich.prompt import Confirm
 # Local imports
 import utils
 from utils import BuildConfig
+from cache import Cache
 
 import buildcontainer
 import dependencytree
@@ -33,13 +33,13 @@ Prompt = None
 Spinner = None
 ProgressBar = None
 
+build_config: BuildConfig  # module-level variable
 
 def main(banner: str):
     """main - the primary function being called"""
 
     # Config
     global build_config
-    build_config : BuildConfig = BuildConfig()
     
     # Set up the TUI system
     _tui = tui.Tui(banner)
@@ -48,31 +48,52 @@ def main(banner: str):
     signal.signal(signal.SIGINT, _tui.sig_shutdown)
 
     # export the TUI functions
-    global Print, Prompt, Spinner, ProgressBar, Exit
+    global Print, Prompt, Spinner, ProgressBar, Pause, Exit
     Print = _tui.print
     Prompt = _tui.prompt
     Spinner = _tui.spinner
     ProgressBar = _tui.progressbar
-    Exit = _tui.exit
+    Pause = _tui.pause
+
+    # Exit function to handle cleanup and exit
+    # This function is called when the script is exiting, either normally or due to an error
+    # It ensures that the TUI is properly exited and then calls exit with the provided error code
+    # If no error code is provided, it defaults to 0 (indicating success)
+    def Exit(err_code: int = 0):
+        """Exit function to handle cleanup and exit"""
+        _tui.exit(err_code)
+        exit(err_code)
 
     # External modules initialisation
+    Print("Initialising apt_pkg...")
     apt_pkg.init_system()
+
+    Print("Parsing config...")
+    build_config = BuildConfig()
+
+    if not build_config.is_valid:
+        Print(f"Error: build configuration - {build_config.error_str}")
+        Exit(1)
+
 
     # --------------------------------------------------------------------------------------------------------------
     # Setting up common systems
-    dir_list = utils.DirectoryListing( build_config.working_dir, config_parser)
-    base_distribution = utils.BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
+    # dir_list = utils.DirectoryListing( build_config.working_dir, config_parser)
+    # base_distribution = utils.BaseDistribution(baseurl, baseid, basecodename, baseversion, arch)
 
     # log_format = "%(message)s"
     # logging.basicConfig(level="INFO", format=log_format, datefmt="[%X]", handlers=[RichHandler()])
     # logger = logging.getLogger('rich')
 
     # --------------------------------------------------------------------------------------------------------------
+    Print(asciiart_logo)
     Print("Starting Source Build System for Athena Linux...")
     Print("Building for ...")
-    Print(f"\t Arch\t\t\t{arch}")
-    Print(f"\t Parent Distribution\t{basecodename} {baseversion}")
-    Print(f"\t Build Distribution\t{build_codename} {build_version}")
+    Print(f"\t Arch\t\t\t{build_config.arch}")
+    Print(f"\t Parent Distribution\t{build_config.basecodename} {build_config.baseversion}")
+    Print(f"\t Build Distribution\t{build_config.build_codename} {build_config.build_version}")
+    _tui.run()
+    Exit(0)
 
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache

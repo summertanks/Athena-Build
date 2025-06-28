@@ -12,6 +12,8 @@ import utils
 import package
 import source
 
+from utils import BuildConfig
+
 # https://github.com/romlok/python-debian/tree/master/examples
 # https://www.juliensobczak.com/inspect/2021/05/15/linux-packages-under-the-hood.html
 
@@ -20,7 +22,15 @@ Print = print
 
 class Cache:
 
-    def __init__(self, base: utils.BaseDistribution, cache_dir: str):
+    class BaseDistribution:
+        def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
+            self.url: str = url
+            self.baseid: str = baseid
+            self.codename: str = codename
+            self.version: str = version
+            self.arch: str = arch
+
+    def __init__(self, buildconfig: BuildConfig):
         """Builds the Cache. Release file is used based on BaseDistribution defined
             Args:
                 base (BaseDistribution): details of the system being derived from
@@ -29,8 +39,10 @@ class Cache:
             Returns:
         """
 
-        self.cache_dir = cache_dir
-        self.base: utils.BaseDistribution = base
+        self.cache_dir = buildconfig.dir_cache
+        self.base = self.BaseDistribution( url=buildconfig.baseurl, baseid=buildconfig.baseid, 
+                                     codename=buildconfig.basecodename, version=buildconfig.baseversion, 
+                                     arch=buildconfig.arch)
 
         # Compression
         self.supported_compression = ['.gz', '.bz2']

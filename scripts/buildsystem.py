@@ -9,19 +9,19 @@ from rich.prompt import Confirm, Prompt
 # Internal
 import dependencytree
 import utils
-
+from utils import BuildConfig
 Print = print
 
 
 class BuildSystem:
-    def __init__(self, dependency_tree: dependencytree.DependencyTree, dir_list: utils.DirectoryListing):
+    def __init__(self, dependency_tree: dependencytree.DependencyTree, config: BuildConfig):
         self.__dependencytree = dependency_tree
-        self.__dir_image = dir_list.dir_image
-        self.__dir_chroot = dir_list.dir_chroot
-        self.__dir_repo = dir_list.dir_repo
-        self.__dir_log = dir_list.dir_log
-        self.__dir_preinstall_patch = dir_list.dir_patch_preinstall
-        self.__dir_postinstall_patch = dir_list.dir_patch_postinstall
+        self.__dir_image = config.dir_image
+        self.__dir_chroot = config.dir_chroot
+        self.__dir_repo = config.dir_repo
+        self.__dir_log = config.dir_log
+        self.__dir_preinstall_patch = config.dir_patch_preinstall
+        self.__dir_postinstall_patch = config.dir_patch_postinstall
 
         # Sanity Check - Just making sure folders exist, typically created by utils.DirectoryListing
         for _dir in [self.__dir_chroot, self.__dir_image, self.__dir_repo]:

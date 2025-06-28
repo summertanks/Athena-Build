@@ -5,24 +5,26 @@ import docker
 from docker import errors
 
 from source import Source
-from utils import DirectoryListing
+from utils import BuildConfig
 
 Print = print
 
 
 class BuildContainer:
 
-    def __init__(self, dir_list: DirectoryListing, docker_server=None):
-        self.build_path = dir_list.dir_repo
-        self.src_path = dir_list.dir_source
-        self.log_path = dir_list.dir_log
-        self.repo_path = dir_list.dir_repo
-        self.buildlog_path = os.path.join(dir_list.dir_log, 'build')
-        self.conf_path = dir_list.dir_config
+    def __init__(self, config: BuildConfig, docker_server=None):
+        
+        self.build_path = config.dir_repo
+        self.src_path = config.dir_source
+        self.log_path = config.dir_log
+        self.repo_path = config.dir_repo
+
+        self.buildlog_path = os.path.join(config.dir_log, 'build')
+        self.conf_path = config.dir_config
 
         # specific for source patch directory
-        self.patch_path = dir_list.dir_patch_source
-        self.patch_empty = dir_list.dir_patch_empty
+        self.patch_path = config.dir_patch_source
+        self.patch_empty = config.dir_patch_empty
 
         if docker_server is not None:
             try:
@@ -42,7 +44,7 @@ class BuildContainer:
                 Print(f"Using Athena Linux Image - {image.tags}")
             except docker.errors.ImageNotFound:
                 Print("Image not found, Building AthenaLinux Image...")
-                image, build_logs = self.client.images.build(path=dir_list.dir_config, tag='athenalinux:build',
+                image, build_logs = self.client.images.build(path=config.dir_config, tag='athenalinux:build',
                                                              nocache=True, rm=True)
                 Print(f"Athena Linux Image Built - {image.tags}")
                 try:

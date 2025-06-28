@@ -1025,6 +1025,33 @@ class Tui:
                         self.print(f"Error: {e}")
                         self.ERROR(f"Error: {e}")
 
+    def pause(self):
+        """pause - pauses the TUI, waits for user to press any key to continue"""
+        with self._prompt_lock:
+
+            old_prompt = self.cmd_prompt
+
+            self.cmd_prompt = 'TUI Paused, press any key to continue...'
+            
+            while True:
+
+                condition = threading.Condition()
+                self._dispatch_queue.put(condition)
+
+                # condition is called when user has entered text
+                with condition:
+                    condition.wait()
+                
+                try:
+                    self._input_queue.get()
+                except queue.Empty:
+                    self.ERROR('TUI: Condition called but nothing in Input Stack')
+
+                break
+
+            self.cmd_prompt = old_prompt
+
+
     def prompt(self, prompt_type: int, message: str, options: Optional[List[str]] = None) -> str:
 
         """prompt - gets user input and returns as string
@@ -1209,6 +1236,8 @@ class Tui:
             bar.step(value=1)
             curses.napms(100)
         self.p_close(bar)
+
+        self.pause()
 
         self.s_stop(spin)
 
