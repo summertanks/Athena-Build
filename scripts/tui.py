@@ -25,16 +25,10 @@ from queue import LifoQueue
 from typing import Optional, Any, Callable, Tuple, List, Dict, TypedDict
 from types import FrameType
 
-# global Print, Prompt, Spinner, ProgressBar, Pause, Exit
 
 Print = None
 Exit = None
 Pause = None
-Spinner = None
-ProgressBar = None
-
-
-
 
 class _TabEntry(TypedDict):
     win: curses.window
@@ -91,180 +85,6 @@ class Tui:
             assert isinstance(self.__var, type(var)), 'Lockable object cannot be recast'
             with self.__lock:
                 self.__var = var
-
-    class __Spinner:
-        """ Internal class for Spinner
-        Presents a spinner with given character sequence
-        Attributes:
-            _message(str): the message printed as action of spinner, trimmed to 70 characters
-            _lock: threading lock to keep changes atomic
-            _position(int): index in character array presenting position of the spinner
-            _running(bool): maintains running state of the Spinner
-        """
-
-        # Can pick more from
-        # https://stackoverflow.com/questions/2685435/cooler-ascii-spinners
-        ASCII_CHAR = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
-
-        def __init__(self, message: str):
-            self._message: str = message[:70]
-            self._lock = threading.Lock()
-            self._position: int = 0
-            self._running = True
-
-            # starts the threat which survives till the spinner is running
-            threading.Thread(target=self._step, daemon=True).start()
-
-        def _step(self):
-            """Continuous thread which updates the suffix character till _running is true"""
-            while self._running:
-                time.sleep(0.1)
-                with self._lock:
-                    self._position = (self._position + 1) % len(self.ASCII_CHAR)
-
-        def done(self):
-            """Stopping the Spinner"""
-            self._running = False
-
-        @property
-        def message(self) -> str:
-            return self._message
-
-        def __str__(self) -> str:
-            """Return str description of Spinner"""
-            with self._lock:
-                return self._message + ' ' + self.ASCII_CHAR[self._position]
-
-    class __ProgressBar:
-        """ Internal Class for Progressbar
-        Progress bar is in form of
-            Progress Bar Demo[########################################] (100/100)9.88it/s
-                <label>                         <bar>                 (<Value>/<Total>) <rate><itr_format>
-
-        Attributes:
-              _label(str): The string printed before the bar, will be trimmed to maximum of 20 characters
-              _value(int): current value of progress bar
-              _max(int): maximum value of the progress bar
-              _itr_label(str): the suffix for rate count, trimmed in 6 characters
-              _state: current state of the progress bar
-              _time: used for calculating the progres rate, initialised with progress bar is created
-              _scale_factor: factor for the rate calculation - K, M, G. if None, it auto-scales.
-              _bar_width: width of the progress bar - minimum 10 characters, it the length is too much,
-                        it is likely to run across the screen.
-        """
-
-        RUNNING = 1
-        PAUSED = 2
-        STOPPED = 3
-
-        def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor: Optional[str] = '',
-                     maxvalue: int = 100, fmt: str = ''):
-            """Initializes the instance of Progres bar
-            Args:
-                label(str): the label to be printed as per bar format
-                itr_label(str): the suffix for the rate, may be prefixed with scale factor
-                bar_width(int): the width of the bar portion only, [...] for example are not included in this sizing
-                scale_factor(str): option between None (autoscale), 'K', 'M' & 'G' and scales the rate accordingly.
-            """
-
-            self._label = label[:20]
-            self._value = 0
-
-            if not maxvalue:
-                maxvalue = 100
-            self._max = maxvalue
-
-            self._itr_label = itr_label[:6]
-            self._state = self.RUNNING
-
-            self._time = time.time_ns()
-
-            if scale_factor not in ['', 'K', 'M', 'G']:
-                scale_factor = ''
-            self._scale_factor = scale_factor
-
-            if bar_width < 10:
-                bar_width = 10
-            elif bar_width > 40:
-                bar_width = 40
-            self._bar_width = bar_width
-
-            if not fmt:
-                self._fmt = '{percentage:3.0f}%[{bar}]{value}/{total} : {rate} - {label}'
-
-        def __str__(self) -> str:
-            """Returns the string representative the current state of the progress bar"""
-            percentage = (self._value / self._max) * 100
-            bar_completed = floor((self._value / self._max) * self._bar_width)
-            bar_remaining = self._bar_width - bar_completed
-            bar = '#' * bar_completed + '-' * bar_remaining
-
-            delta = int(time.time_ns() - self._time)
-            # Avoid Div by Zero
-            if not delta:
-                delta = 1
-            rate = (self._value / delta) * 10e8
-
-            # auto-scale
-            factor = 1
-            scale_factor :str = ''
-
-            # if None, Autoscale
-            if self._scale_factor == '':
-                if rate > 10e3 * 2:
-                    scale_factor = 'K'
-                if rate > 10e6 * 2:
-                    scale_factor = 'M'
-                if rate > 10e9 * 2:
-                    scale_factor = 'G'
-            else:
-                scale_factor = self._scale_factor
-
-            if scale_factor == 'K':
-                factor = 10e3
-            elif scale_factor == 'M':
-                factor = 10e6
-            elif scale_factor == 'G':
-                factor = 10e9
-
-            rate = round(rate / factor, 2)
-            rate_str = str(rate) + scale_factor + self._itr_label
-
-            # default '{percentage:3.0f}%[{bar}]{value}/{total} : {rate} - {label}'
-            progress_string = self._fmt.format(percentage=percentage, bar=bar, value=self._value,
-                                               total=self._max, label=self._label, rate=rate_str)
-
-            return progress_string
-
-        def step(self, value:int=1):
-            """Increase the value count by specified number, default being 1"""
-            # don't react on stopped
-            if self._state != self.RUNNING:
-                return
-
-            self._value += value
-            if self._value >= self._max:
-                self._value = self._max
-                self._state = self.STOPPED
-
-        def set_max(self, value: int = 100):
-            """Set/reset max value of bar"""
-            if not value:
-                value = 100
-            self._max = value
-
-        def label(self, message: str):
-            """Set the progress bar label"""
-            self._label = message.strip()
-
-        def close(self):
-            """To close actions on progress bar """
-            self._state = self.STOPPED
-
-        def reset(self):
-            """Resets the timer for rate calculation"""
-            self._value = 0
-            self._time = time.time_ns()
 
     class __Commands:
         """ Internal class related to command(s)
@@ -1125,71 +945,26 @@ class Tui:
             return ""
         
         return answer
-
-    def spinner(self, message: str) -> __Spinner:
-        """spinner - return instance of __Spinner
+    
+    def add_widget(self, widget: object) -> int:
+        """add_widget - adds a widget to the _widget list, used by __Spinner and __ProgressBar
         Args:
-            message(str): The string to be printed before the spinner
-        Returns:
-              instance of __Spinner
+            widget(object): the widget to be added to the _widget list
         """
-        spin = Tui.__Spinner(message)
-        widget_id = spin.__hash__()
-        # add it to _widget to render
+        widget_id = widget.__hash__()
         with self._widget_lock:
-            self._widget[widget_id] = spin
-        return spin
-
-    def s_stop(self, spin: __Spinner):
-        """s_stop - stops spinner and removes from _widget list
+            self._widget[widget_id] = widget
+        return widget_id
+    
+    def del_widget(self, widget_id: int):
+        """del_widget - removes a widget from the _widget list
         Args:
-            spin(__Spinner): instance to stop
+            widget_id(int): the id of the widget to be removed from the _widget list
         """
-        spin.done()
-        widget_id = spin.__hash__()
-        # print completion and remove from _widget list
         with self._widget_lock:
             if widget_id not in self._widget:
                 self.print(f'TUI: No Widget by id {widget_id}')
                 return
-            self.print(spin.message + '... Done')
-            self._widget.pop(widget_id)
-
-    def progressbar(self, label: str, itr_label: str='it/s', bar_width: int = 40, scale_factor: Optional[str] = '',
-                    maxvalue: int = 100, fmt: str = '', ) -> __ProgressBar:
-        """
-        Creates instance of progressbar and adds to _widget list to render, all actions are on the instance
-        Args:
-            label(str): the label to be printed as per bar format
-            itr_label(str): the suffix for the rate, may be prefixed with scale factor
-            bar_width(int): the width of the bar portion only, [...] for example are not included in this sizing
-            scale_factor(str): option between None (autoscale), 'K', 'M' & 'G' and scales the rate accordingly.
-            maxvalue(int): Maximum value of progressbar, bar is always created with value zero though
-            fmt: Format string for progressbar layout,
-                    default is '{percentage:3.0f}%[{bar}]{value}/{total} : {rate} - {label}'
-        Returns:
-            instance of progressbar
-        """
-        bar = Tui.__ProgressBar(label, itr_label, bar_width, scale_factor, maxvalue, fmt)
-
-        widget_id = bar.__hash__()
-        with self._widget_lock:
-            self._widget[widget_id] = bar
-
-        return bar
-
-    def p_close(self, bar: __ProgressBar):
-        """p_close - mark progressbar as completed and remove from _widget list
-        Args:
-            bar(__ProgressBar): instance to close
-        """
-        bar.close()
-        widget_id = bar.__hash__()
-        with self._widget_lock:
-            if widget_id not in self._widget:
-                self.print(f'TUI: No Widget by id {widget_id}')
-                return
-            self.print(str(self._widget[widget_id]))
             self._widget.pop(widget_id)
 
     def info(self):
@@ -1216,7 +991,8 @@ class Tui:
 
     def demo(self):
         """demo - demonstrated basic prompt, spinner and progressbar functionalities"""
-        spin = self.spinner('Starting Demo')
+
+        spin = Spinner('Starting Demo')
         Prompt(PROMPT_YESNO, 'This is YES NO prompt').get_response()
         Prompt(PROMPT_INPUT, 'This accepts Input string').get_response()
         Prompt(PROMPT_OPTIONS, 'This allows you to select from options', ['yes', 'no']).get_response()
@@ -1224,16 +1000,16 @@ class Tui:
 
         bar_max: int = 100
 
-        bar = self.progressbar('Progress Bar Demo', maxvalue=bar_max)
+        bar = ProgressBar('Progress Bar Demo', maxvalue=bar_max)
 
         for i in range(bar_max + 1):
             bar.step(value=1)
-            curses.napms(100)
-        self.p_close(bar)
+            curses.napms(10)
+        bar.close(persist=True)
 
         self.pause()
 
-        self.s_stop(spin)
+        spin.done()
 
     def help(self):
         """help - prints the registered commands and hints"""
@@ -1346,6 +1122,219 @@ class Prompt:
         
         return response
 
+class ProgressBar:
+    """ Internal Class for Progressbar
+    Progress bar is in form of
+        Progress Bar Demo[########################################] (100/100)9.88it/s
+            <label>                         <bar>                 (<Value>/<Total>) <rate><itr_format>
+
+    Attributes:
+            _label(str): The string printed before the bar, will be trimmed to maximum of 20 characters
+            _value(int): current value of progress bar
+            _max(int): maximum value of the progress bar
+            _itr_label(str): the suffix for rate count, trimmed in 6 characters
+            _state: current state of the progress bar
+            _time: used for calculating the progres rate, initialised with progress bar is created
+            _scale_factor: factor for the rate calculation - K, M, G. if None, it auto-scales.
+            _bar_width: width of the progress bar - minimum 10 characters, it the length is too much,
+                    it is likely to run across the screen.
+    """
+
+    RUNNING = 1
+    PAUSED = 2
+    STOPPED = 3
+
+    _fmt:str
+    _label: str
+    _value: int
+    _max: int
+    _itr_label: str
+    _state: int
+    _time: int
+    _scale_factor: str
+    _bar_width: int
+    _widget_id: int
+
+    def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor: Optional[str] = '',
+                    maxvalue: int = 100, fmt: str = ''):
+        """Initializes the instance of Progres bar
+        Args:
+            label(str): the label to be printed as per bar format
+            itr_label(str): the suffix for the rate, may be prefixed with scale factor
+            bar_width(int): the width of the bar portion only, [...] for example are not included in this sizing
+            scale_factor(str): option between None (autoscale), 'K', 'M' & 'G' and scales the rate accordingly.
+        """
+
+        """Initializes the Prompt instance with type, message, and optional options."""
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Prompt.")
+
+        self._label = label[:20]
+        self._value = 0
+
+        if not maxvalue:
+            maxvalue = 100
+        self._max = maxvalue
+
+        self._itr_label = itr_label[:6]
+        self._state = self.RUNNING
+
+        self._time = time.time_ns()
+
+        if scale_factor not in ['', 'K', 'M', 'G']:
+            scale_factor = ''
+        self._scale_factor = scale_factor
+
+        if bar_width < 10:
+            bar_width = 10
+        elif bar_width > 40:
+            bar_width = 40
+        self._bar_width = bar_width
+
+        if not fmt:
+            self._fmt = '{percentage:3.0f}%[{bar}]{value}/{total} : {rate} - {label}'
+        
+        self._widget_id = tui_instance.add_widget(self)
+
+    def __str__(self) -> str:
+        """Returns the string representative the current state of the progress bar"""
+        percentage = (self._value / self._max) * 100
+        bar_completed = floor((self._value / self._max) * self._bar_width)
+        bar_remaining = self._bar_width - bar_completed
+        bar = '#' * bar_completed + '-' * bar_remaining
+
+        delta = int(time.time_ns() - self._time)
+        # Avoid Div by Zero
+        if not delta:
+            delta = 1
+        rate = (self._value / delta) * 10e8
+
+        # auto-scale
+        factor = 1
+        scale_factor :str = ''
+
+        # if None, Autoscale
+        if self._scale_factor == '':
+            if rate > 10e3 * 2:
+                scale_factor = 'K'
+            if rate > 10e6 * 2:
+                scale_factor = 'M'
+            if rate > 10e9 * 2:
+                scale_factor = 'G'
+        else:
+            scale_factor = self._scale_factor
+
+        if scale_factor == 'K':
+            factor = 10e3
+        elif scale_factor == 'M':
+            factor = 10e6
+        elif scale_factor == 'G':
+            factor = 10e9
+
+        rate = round(rate / factor, 2)
+        rate_str = str(rate) + scale_factor + self._itr_label
+
+        # default '{percentage:3.0f}%[{bar}]{value}/{total} : {rate} - {label}'
+        progress_string = self._fmt.format(percentage=percentage, bar=bar, value=self._value,
+                                            total=self._max, label=self._label, rate=rate_str)
+
+        return progress_string
+
+    def step(self, value:int=1):
+        """Increase the value count by specified number, default being 1"""
+        # don't react on stopped
+        if self._state != self.RUNNING:
+            return
+
+        self._value += value
+        if self._value >= self._max:
+            self._value = self._max
+            self._state = self.STOPPED
+
+    def set_max(self, value: int = 100):
+        """Set/reset max value of bar"""
+        if not value:
+            value = 100
+        self._max = value
+
+    def label(self, message: str):
+        """Set the progress bar label"""
+        self._label = message.strip()
+
+    def close(self, persist: Optional[bool] = False):
+        """To close actions on progress bar """
+        self._state = self.STOPPED
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Prompt.")
+        
+        if persist:
+            tui_instance.print(str(self))
+
+        tui_instance.del_widget(self._widget_id)
+
+    def reset(self):
+        """Resets the timer for rate calculation"""
+        self._value = 0
+        self._time = time.time_ns()
+
+class Spinner:
+    """ Internal class for Spinner
+    Presents a spinner with given character sequence
+    Attributes:
+        _message(str): the message printed as action of spinner, trimmed to 70 characters
+        _lock: threading lock to keep changes atomic
+        _position(int): index in character array presenting position of the spinner
+        _running(bool): maintains running state of the Spinner
+    """
+    _message: str
+    _lock: threading.Lock
+    _position: int
+    _running: bool
+    _widget_id: int
+
+    # Can pick more from
+    # https://stackoverflow.com/questions/2685435/cooler-ascii-spinners
+    ASCII_CHAR = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
+
+    def __init__(self, message: str):
+        
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Spinner.")  
+        
+        self._message: str = message[:70]
+        self._lock = threading.Lock()
+        self._position: int = 0
+        self._running = True
+
+        # starts the threat which survives till the spinner is running
+        threading.Thread(target=self._step, daemon=True).start()
+        self._widget_id = tui_instance.add_widget(self)
+
+    def _step(self):
+        """Continuous thread which updates the suffix character till _running is true"""
+        while self._running:
+            time.sleep(0.1)
+            with self._lock:
+                self._position = (self._position + 1) % len(self.ASCII_CHAR)
+
+    def done(self):
+        """Stopping the Spinner"""
+        self._running = False
+
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Prompt.")
+        
+        tui_instance.del_widget(self._widget_id)
+        tui_instance.print(self._message + '... Done')
+
+    @property
+    def message(self) -> str:
+        return self._message
+
+    def __str__(self) -> str:
+        """Return str description of Spinner"""
+        with self._lock:
+            return self._message + ' ' + self.ASCII_CHAR[self._position]        
 
 # test function - can run this file separately 
 if __name__ == '__main__':
