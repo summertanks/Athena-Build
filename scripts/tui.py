@@ -61,7 +61,9 @@ class Tui:
         _prompt_lock, _shell_lock, _print_lock, _refresh_lock, _log_lock, _widget_lock(threading.Lock) : enables
             atomic functions on these sections
 
-        _dispatch_queue(queue.LifoQueue): dispatch queue for handling keystrokes
+        _dispatch_queue_line(queue.LifoQueue): dispatch queue for handling text entries, e.g. command line input
+        _dispatch_queue_key (queue.LifoQueue): dispatch queue for handling keystrokes, e.g. tab, arrow keys, etc.
+
         _input_queue(queue.LifoQueue): waiting queue for user inputs
 
         _widget({}): For running list of widget, progressbar, spinner, etc.
@@ -241,7 +243,8 @@ class Tui:
         self._running_lock = threading.Lock()
 
         # setting up dispatch queue for handling keystrokes
-        self._dispatch_queue: LifoQueue[Any] = queue.LifoQueue()
+        self._dispatch_queue_line: LifoQueue[Any] = queue.LifoQueue()
+        self._dispatch_queue_key: LifoQueue[Any] = queue.LifoQueue()
         self._input_queue: LifoQueue[Any] = queue.LifoQueue()
 
         # Banner String, needs to be trimmed, currently static
@@ -724,9 +727,19 @@ class Tui:
                     if len(c) > 1:
                         continue
 
+                    # _dispatch_queue_key has priority over _dispatch_queue_line
+                    if not self._dispatch_queue_key.empty():
+                        condition = self._dispatch_queue_key.get()
+                        self._input_queue.put(c)
+
+                        with condition:
+                            condition.notify()
+                        continue
+
                     # here onwards we are processing keys outside control keys
                     # if nothing is waiting in queue don't process any keys
-                    if self._dispatch_queue.empty():
+                    if self._dispatch_queue_line.empty():
+                        self.ERROR('TUI: No input in queue, ignoring key')
                         continue
 
                     # Newline received, based on data input mode the dispatch sequence is identified
@@ -736,7 +749,7 @@ class Tui:
                             self._input_queue.put(self._cmd.current)
                             
                             try:
-                                condition = self._dispatch_queue.get()
+                                condition = self._dispatch_queue_line.get()
                             except queue.Empty:
                                 self.ERROR('TUI: Nothing in dispatch queue')
                                 continue
@@ -793,7 +806,6 @@ class Tui:
         Args:
             name(str): the 'tab' to clear, all specifies all tabs
         """
-
         if name == 'all':
             for tab in self._tabs:
                 self._tabs[tab]['buffer'] = []
@@ -820,7 +832,7 @@ class Tui:
                 # Basic approach is to push request in waiting queue,
                 # and when condition is called execute the command in the _input_queue
                 condition = threading.Condition()
-                self._dispatch_queue.put(condition)
+                self._dispatch_queue_line.put(condition)
 
                 with condition:
                     condition.wait()
@@ -867,7 +879,7 @@ class Tui:
             while True:
 
                 condition = threading.Condition()
-                self._dispatch_queue.put(condition)
+                self._dispatch_queue_line.put(condition)
 
                 # condition is called when user has entered text
                 with condition:
@@ -883,7 +895,7 @@ class Tui:
             self.cmd_prompt = old_prompt
 
 
-    def prompt(self, message: str, masked: Optional[bool] = False) -> str:
+    def prompt(self, message: str, masked: Optional[bool] = False, keymode: Optional[bool] = False) -> str:
 
         """prompt - gets user input and returns as string
         Args:
@@ -907,7 +919,12 @@ class Tui:
             
             #   put condition on dispatch queue
             condition = threading.Condition()
-            self._dispatch_queue.put(condition)
+            if keymode:
+                # if keymode is set, we will not wait for newline, but for any key
+                self._dispatch_queue_key.put(condition)
+            else:
+                # if keymode is not set, we will wait for newline
+                self._dispatch_queue_line.put(condition)
 
             # condition is called when user has entered text
             with condition:
@@ -925,27 +942,7 @@ class Tui:
             
         return answer
     
-    def add_dispatch(self, condition: threading.Condition):
-        """add_dispatch - adds a condition to the dispatch queue, used by prompt and shell
-        Args:
-            condition(threading.Condition): the condition to be added to the dispatch queue
-        """
-        self._dispatch_queue.put(condition)
-    
-    def wait_dispatch(self, condition: threading.Condition) -> str:
-        
-        with condition:
-            condition.wait()
-        
-        # get text entered
-        try:
-            answer:str = self._input_queue.get()
-        except queue.Empty:
-            self.ERROR('TUI: Condition called but nothing in Input Stack')
-            return ""
-        
-        return answer
-    
+
     def add_widget(self, widget: object) -> int:
         """add_widget - adds a widget to the _widget list, used by __Spinner and __ProgressBar
         Args:
@@ -1007,7 +1004,8 @@ class Tui:
             curses.napms(10)
         bar.close(persist=True)
 
-        self.pause()
+        Prompt(PROMPT_PAUSE, 'Press any key to continue...').get_response()
+        # self.pause()
 
         spin.done()
 
@@ -1048,6 +1046,7 @@ class Prompt:
     _type: int
     _message: str
     _response: str
+    _keymode: bool
 
     """Prompt Class
     The Prompt class is used to prompt the user for input, with options for yes/no, input, options, and password.
@@ -1079,6 +1078,8 @@ class Prompt:
             tui_instance.ERROR('Prompt type PROMPT_OPTIONS called without sufficient options')
             raise ValueError('Prompt type PROMPT_OPTIONS called without sufficient options')
         
+        self._masked = False
+        self._keymode = False
         self._type = prompt_type
         self._message = message
 
@@ -1087,10 +1088,9 @@ class Prompt:
         elif prompt_type == PROMPT_OPTIONS:
                 self._message += str(options)
         elif prompt_type == PROMPT_PAUSE:
-                self._message += ' (Press any key to continue...)'
-        else:
-            self._message = message
-        
+                self._keymode = True
+        elif prompt_type == PROMPT_PASSWORD:
+                self._masked = True
         
     def get_response(self) -> str:
         """get_response - gets user input and returns as string
@@ -1101,8 +1101,7 @@ class Prompt:
             raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Prompt.")
         
         while True:
-            masked = (self._type == PROMPT_PASSWORD)
-            response = tui_instance.prompt(self._message, masked)
+            response = tui_instance.prompt(message=self._message, masked=self._masked, keymode=self._keymode)
 
             if self._type == PROMPT_OPTIONS and response not in self._options:
                 tui_instance.print('TUI Prompt: Only answers within the option provided are permitted')
@@ -1114,8 +1113,11 @@ class Prompt:
 
             break
 
+        if self._type == PROMPT_PAUSE:
+            return ''  # For PROMPT_PAUSE return empty string
+        
         # for PROMPT_PASSWORD print masked content of same length else clear text
-        if masked:
+        if self._masked:
             tui_instance.print(self._message + ' ' + '*' * len(response))
         else:
             tui_instance.print(self._message + ' ' + response)
