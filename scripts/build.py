@@ -20,6 +20,8 @@ import buildsystem
 import tui
 import signal
 
+# from tui import Tui, Print, Prompt, Spinner, ProgressBar, Pause, Exit
+
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
                 '║╠╣║╔╣║║╩╣║║║╬╚╗║╚╣║║║║║╠║╣\n' \
@@ -27,33 +29,34 @@ asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n'
 
 # TODO: make all apt_pkg.parse functions arch specific
 
-Print = print
-Exit = None
-Prompt = None
-Spinner = None
-ProgressBar = None
+
 
 build_config: BuildConfig  # module-level variable
 
 def main(banner: str):
     """main - the primary function being called"""
+    from tui import Tui, Print, Prompt, Spinner, ProgressBar, Pause, Exit
 
     # Config
     global build_config
     
     # Set up the TUI system
-    _tui = tui.Tui(banner)
+    _tui = Tui(banner)
+    _tui.run()  # Start the TUI event loop
 
     # Register the signal handler for SIGINT (Ctrl+C)
     signal.signal(signal.SIGINT, _tui.sig_shutdown)
+    
+    import tui
+    
+    # Assign the TUI functions to the global namespace
+    tui.Print = _tui.print
+    tui.Prompt = _tui.prompt
+    tui.Spinner = _tui.spinner
+    tui.ProgressBar = _tui.progressbar
+    tui.Pause = _tui.pause
+    tui.Exit = _tui.exit
 
-    # export the TUI functions
-    global Print, Prompt, Spinner, ProgressBar, Pause, Exit
-    Print = _tui.print
-    Prompt = _tui.prompt
-    Spinner = _tui.spinner
-    ProgressBar = _tui.progressbar
-    Pause = _tui.pause
 
     # Exit function to handle cleanup and exit
     # This function is called when the script is exiting, either normally or due to an error
@@ -65,14 +68,14 @@ def main(banner: str):
         exit(err_code)
 
     # External modules initialisation
-    Print("Initialising apt_pkg...")
+    tui.Print("Initialising apt_pkg...")
     apt_pkg.init_system()
 
-    Print("Parsing config...")
+    tui.Print("Parsing config...")
     build_config = BuildConfig()
 
     if not build_config.is_valid:
-        Print(f"Error: build configuration - {build_config.error_str}")
+        tui.Print(f"Error: build configuration - {build_config.error_str}")
         Exit(1)
 
 
@@ -86,19 +89,20 @@ def main(banner: str):
     # logger = logging.getLogger('rich')
 
     # --------------------------------------------------------------------------------------------------------------
-    Print(asciiart_logo)
-    Print("Starting Source Build System for Athena Linux...")
-    Print("Building for ...")
-    Print(f"\t Arch\t\t\t{build_config.arch}")
-    Print(f"\t Parent Distribution\t{build_config.basecodename} {build_config.baseversion}")
-    Print(f"\t Build Distribution\t{build_config.build_codename} {build_config.build_version}")
-    _tui.run()
-    Exit(0)
+    tui.Print(asciiart_logo)
+    tui.Print("Starting Source Build System for Athena Linux...")
+    tui.Print("Building for ...")
+    tui.Print(f"\t Arch\t\t\t{build_config.arch}")
+    tui.Print(f"\t Parent Distribution\t{build_config.basecodename} {build_config.baseversion}")
+    tui.Print(f"\t Build Distribution\t{build_config.build_codename} {build_config.build_version}")
+
 
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
-    Print("Building Cache...")
-    build_cache = cache.Cache(base_distribution, dir_list.dir_cache)
+    tui.Print("Building Cache...")
+    build_cache = cache.Cache(build_config)
+    _tui.wait()
+    Exit(0)
 
     # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
     gcc_versions = [pkg for pkg in build_cache.required if pkg.startswith('gcc-')]
