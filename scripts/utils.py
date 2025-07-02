@@ -5,9 +5,8 @@ import re
 import configparser
 import argparse
 
-from configparser import ConfigParser
+import tui
 
-global Print, Prompt, Spinner, ProgressBar, Exit
 
 class BaseDistribution:
     def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
@@ -53,6 +52,8 @@ class BuildConfig:
     _config_valid: bool
     
     def __init__(self):
+
+        global Print, Prompt, Spinner, ProgressBar, Exit
 
         # Set when config is validated
         self._config_valid: bool = False
@@ -177,8 +178,47 @@ class BuildConfig:
         """
         return self.error_str
     
-
 def download_file(url: str, filename: str) -> int:
+    """Downloads file and updates progressbar in incremental manner.
+        Args:
+            url (str): url to download file from, protocol is prepended
+            filename (str): Filename to save to, location should be writable
+
+        Returns:
+            int: -1 for failure, file_size on success
+    """
+    import requests
+    from urllib.parse import urlsplit
+    from requests import Timeout, TooManyRedirects, HTTPError, RequestException
+
+    name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
+    
+    try:
+        response = requests.head(url)
+        file_size = int(response.headers.get('content-length', 0))
+        
+        with requests.get(url, stream=True, timeout=10) as response:
+            response.raise_for_status()
+
+            progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s', maxvalue=file_size)
+
+            with open(filename, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        progress_bar.step(len(chunk))
+
+            progress_bar.close()
+            return file_size
+
+    except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+        tui.Print(f"Error connecting to {url}: {e}")
+        return -1
+    
+    # progress_bar.close()
+    # return file_size
+
+def download_file_tqdm(url: str, filename: str) -> int:
     """Downloads file and updates progressbar in incremental manner.
         Args:
             url (str): url to download file from, protocol is prepended
@@ -207,7 +247,7 @@ def download_file(url: str, filename: str) -> int:
                         f.write(chunk)
                         progress_bar.update(len(chunk))
     except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-        Print(f"Error connecting to {url}: {e}")
+        print(f"Error connecting to {url}: {e}")
         return -1
     progress_bar.clear()
     progress_bar.close()

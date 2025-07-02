@@ -11,13 +11,16 @@ from tqdm import tqdm
 import utils
 import package
 import source
+import tui
 
+from typing import List, Dict
 from utils import BuildConfig
+
 
 # https://github.com/romlok/python-debian/tree/master/examples
 # https://www.juliensobczak.com/inspect/2021/05/15/linux-packages-under-the-hood.html
 
-Print = print
+from tui import ProgressBar, Print, Prompt, Spinner, Exit
 
 
 class Cache:
@@ -38,6 +41,10 @@ class Cache:
 
             Returns:
         """
+
+        # Set when config is validated
+        self._config_valid: bool = False
+        self.error_str = ''
 
         self.cache_dir = buildconfig.dir_cache
         self.base = self.BaseDistribution( url=buildconfig.baseurl, baseid=buildconfig.baseid, 
@@ -61,7 +68,7 @@ class Cache:
         )
 
         # Outputs file list
-        self.cache_files = {}
+        self.cache_files: Dict[str, str] = {}
 
         # InRelease info
         self.release_info = ''
@@ -80,12 +87,16 @@ class Cache:
         self.important = []
 
         # Download files
-        self.__get_files()
+        if self.__get_files() < 0:
+            return
 
         # Build Hashtable
         self.__build_cache()
 
-    def __get_files(self):
+        # Set when config is validated
+        self._config_valid: bool = True
+
+    def __get_files(self) -> int:
 
         __base_url = self.protocol + self.base.url + '/' + self.base.baseid + '/dists/' + self.base.codename + '/'
 
@@ -94,68 +105,103 @@ class Cache:
         __release_file = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(__release_url))
 
         # Setup files - Sequence is Packages & Sources, you change it you break it
-        __cache_source: [] = []
-        __cache_destination: [] = []
+        __cache_source: List[str] = []
+        __cache_destination: List[str] = []
+        
         for _file in self.control_files:
             __cache_source.append(__base_url + _file + self.compression)
             __cache_destination.append(os.path.join(self.cache_dir, apt_pkg.uri_to_filename(__base_url + _file)))
 
         # By default, download release file
         if utils.download_file(__release_url, __release_file) <= 0:
-            exit(1)
+            self.error_str = f"Error downloading release file from {__release_url}"
+            return -1
 
         # Extract the md5 for the files, can enable Optional SHA256 also
         try:
             with open(__release_file, 'r') as fh:
                 rel = Release(fh)
                 for _file in self.control_files:
+                    # Check if file is present in release file
                     _md5 = [line['md5sum'] for line in rel['MD5Sum'] if line['name'] == _file]
-                    assert len(_md5) != 0, f"File ({_file})not found in release file"
-                    assert len(_md5) == 1, f"Multiple instances for {_file} found in release file"
+                    if len(_md5) == 0:
+                        self.error_str = f"File ({_file})not found in release file"
+                        return -1
+                    
+                    # If multiple instances found, raise error
+                    if len(_md5) > 1:
+                        self.error_str = f"Multiple instances for {_file} found in release file"
+                        return -1
+
                     self.control_files[_file] = _md5[0]
+
         except (Exception, FileNotFoundError, PermissionError) as e:
-            Print(f"Athena Linux Error: {e}")
-            exit(1)
+            tui.Print(f"Athena Linux Error: {e}")
+            return -1
 
         _iter_control_file = iter(self.control_files)
+
         # Iterate over uncompressed destination files
         for _file in __cache_destination:
+            
             # get hash
             md5_check = utils.get_md5(_file)
             index = __cache_destination.index(_file)
             control_files_key = next(_iter_control_file)
             _md5 = self.control_files[control_files_key]
+            
             if _md5 != md5_check:
                 # download given file to location
                 if (utils.download_file(__cache_source[index], __cache_destination[index] + self.compression)) <= 0:
-                    exit(1)
+                    self.error_str = f"Error downloading file {__cache_source[index]}"
+                    return -1
 
                 # decompress file based on extension
                 if self.compression == '.gz':
                     with gzip.open(_file + self.compression, 'rb') as f_in:
                         with open(_file, 'wb') as f_out:
                             f_out.write(f_in.read())
+                
                 elif self.compression == '.bz2':
                     with bz2.BZ2File(_file, 'rb') as f_in:
                         with open(_file, 'wb') as f_out:
                             f_out.write(f_in.read())
+
                 elif self.compression == '':
                     # if no ext leave as such
                     pass
                     # XXX: check if other extensions are required to be supported
+
                 else:
                     pass
 
             # List of cache files are in the sequence specified earlier
             self.cache_files[urlsplit(control_files_key).path.split('/')[-1]] = _file
-        Print("Using Release File")
-        Print('\tOrigin: {Origin}\n\tCodename: {Codename}\n\tVersion: {Version}\n\tDate: {Date}'.format_map(rel))
 
-    def __build_cache(self):
-        assert 'Packages' in self.cache_files, "Missing Packages control file from cache"
-        assert 'Sources' in self.cache_files, "Missing Sources control file from cache"
-        assert self.cache_files['Packages'] != '', "Missing Packages control file from cache"
-        assert self.cache_files['Sources'] != '', "Missing Sources control file from cache"
+        tui.Print("Using Release File")
+        tui.Print('\tOrigin: {Origin}\n\tCodename: {Codename}\n\tVersion: {Version}\n\tDate: {Date}'.format_map(rel))
+
+        return 0
+
+    def __build_cache(self) -> int:
+        """Builds the cache from the control files downloaded"""
+
+        if 'Packages' not in self.cache_files:
+            self.error_str = "Missing Packages control file from cache"
+            return -1
+
+        if 'Sources' not in self.cache_files:
+            self.error_str = "Missing Sources control file from cache"
+            return -1
+        
+        if self.cache_files['Packages'] == '':
+            self.error_str = "Missing Packages control file from cache"
+            return -1
+        
+        if self.cache_files['Sources'] == '':
+            self.error_str = "Missing Sources control file from cache"
+            return -1
+        
 
         self.__package_file = self.cache_files['Packages']
         self.__source_file = self.cache_files['Sources']
@@ -165,15 +211,19 @@ class Cache:
         self.__source_records = utils.readfile(self.__source_file).split('\n\n')
 
         # create a list, since we can have duplicates
-        Print("Parsing Control Files...")
-        progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
-        progress_bar_pkg = tqdm(desc=f"{'Indexing Package File'}", ncols=80, total=len(self.__package_records),
-                                bar_format=progress_format)
+        tui.Print("Parsing Control Files...")
+        
+        # progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
+        # progress_bar_pkg = tqdm(desc=f"{'Indexing Package File'}", ncols=80, total=len(self.__package_records), bar_format=progress_format)
+        
+        progress_bar_pkg = tui.ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
 
         for _pkg_record in self.__package_records:
-            progress_bar_pkg.update(1)
+            progress_bar_pkg.step(1)
+            
             if _pkg_record.strip() == '':
                 continue
+
             __pkg = package.Package(_pkg_record, self.base.arch)
 
             # add Package in hashtable
@@ -202,11 +252,11 @@ class Cache:
                 assert _package_name not in self.required, f"Multiple versions of important Package {_package_name}"
                 self.important.append(_package_name)
 
-        progress_bar_src = tqdm(desc=f"{'Indexing Source File'}", ncols=80, total=len(self.__source_records),
-                                bar_format=progress_format)
-
+        # progress_bar_src = tqdm(desc=f"{'Indexing Source File'}", ncols=80, total=len(self.__source_records), bar_format=progress_format)
+        progress_bar_src = tui.ProgressBar(label = f"{'Indexing Source File'}", itr_label = 'rec/s', maxvalue = len(self.__source_records))
+        
         for _src_record in self.__source_records:
-            progress_bar_src.update(1)
+            progress_bar_src.step(1)
             if _src_record.strip() == '':
                 continue
             __pkg = source.Source(_src_record, self.base.arch)
