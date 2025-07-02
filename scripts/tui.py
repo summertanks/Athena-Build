@@ -25,6 +25,17 @@ from queue import LifoQueue
 from typing import Optional, Any, Callable, Tuple, List, Dict, TypedDict
 from types import FrameType
 
+# global Print, Prompt, Spinner, ProgressBar, Pause, Exit
+
+Print = None
+Exit = None
+Pause = None
+Spinner = None
+ProgressBar = None
+
+
+
+
 class _TabEntry(TypedDict):
     win: curses.window
     panel: panel
@@ -1052,84 +1063,67 @@ class Tui:
             self.cmd_prompt = old_prompt
 
 
-    def prompt(self, prompt_type: int, message: str, options: Optional[List[str]] = None) -> str:
+    def prompt(self, message: str, masked: Optional[bool] = False) -> str:
 
         """prompt - gets user input and returns as string
         Args:
-            prompt_type: defines how the prompt is shown
             message(str): the string printed while waiting for user input
-            options([] | None): defines the set of strings to choose from if the prompt type is PROMPT_OPTIONS
+            masked(bool): if True, the input is masked, e.g. for passwords
         Returns:
             string giving out the user input
         """
-        if options is None:
-            options = []
-
-        # Confirm valid prompt type
-        if prompt_type not in [self.PROMPT_YESNO, self.PROMPT_OPTIONS, self.PROMPT_PASSWORD, self.PROMPT_INPUT]:
-            self.ERROR('TUI: Unknown prompt type given')
-            return ""
-
-        # Cannot call PROMPT_OPTIONS with less than two Options, nothing to choose then
-        if prompt_type == self.PROMPT_OPTIONS and len(options) < 2:
-            self.ERROR('Prompt type PROMPT_OPTIONS called without sufficient options')
-            return ""
-
-        # same technique as others
-        #   - put condition on dispatch queue
-        #   - wait for condition to be notified
-        #   - get input from queue, confirm if suitable e.g. Option/ YesNo
+        
+        answer = ''
 
         with self._prompt_lock:
 
             # incase there is already something on queue, LIFO
             old_prompt = self.cmd_prompt
             self.cmd_prompt = message
+            
+            # mask mode is set for PROMPT_PASSWORD and reset when input if received
+            if masked:
+                self._cmd.set_mask_mode()
+            
+            #   put condition on dispatch queue
+            condition = threading.Condition()
+            self._dispatch_queue.put(condition)
 
-            if prompt_type == self.PROMPT_YESNO:
-                self.cmd_prompt += ' (y/n):'
-            elif prompt_type == self.PROMPT_OPTIONS:
-                self.cmd_prompt += str(options)
+            # condition is called when user has entered text
+            with condition:
+                condition.wait()
 
-            answer = ''
-            # repeat till we have a suitable answer
-            while True:
-                condition = threading.Condition()
-                self._dispatch_queue.put(condition)
-
-                # mask mode is set for PROMPT_PASSWORD and reset when input if received
-                if prompt_type == self.PROMPT_PASSWORD:
-                    self._cmd.set_mask_mode()
-
-                # condition is called when user has entered text
-                with condition:
-                    condition.wait()
-
-                # get text entered
-                try:
-                    answer = self._input_queue.get()
-                except queue.Empty:
-                    self.ERROR('TUI: Condition called but nothing in Input Stack')
-
-                if prompt_type == self.PROMPT_OPTIONS and answer not in options:
-                    self.print('TUI Prompt: Only answers within the option provided are permitted')
-                    continue
-
-                if prompt_type == self.PROMPT_YESNO and answer not in ['y', 'Y', 'n', 'N', 'yes', 'Yes', 'no', 'No']:
-                    self.print('TUI Prompt: Only answers related to yes/no are permitted')
-                    continue
-
-                break
-
-            # for PROMPT_PASSWORD print masked content of same length else clear text
-            if prompt_type == self.PROMPT_PASSWORD:
-                self._cmd.reset_mask_mode()
-                self.print(self.cmd_prompt + ' ' + '*' * len(answer))
-            else:
-                self.print(self.cmd_prompt + ' ' + answer)
-
+            # get text entered
+            try:
+                answer = self._input_queue.get()
+            except queue.Empty:
+                self.ERROR('TUI: Condition called but nothing in Input Stack')
+            
+            self._cmd.reset_mask_mode()
+            # reset prompt to old value
             self.cmd_prompt = old_prompt
-
+            
+        return answer
+    
+    def add_dispatch(self, condition: threading.Condition):
+        """add_dispatch - adds a condition to the dispatch queue, used by prompt and shell
+        Args:
+            condition(threading.Condition): the condition to be added to the dispatch queue
+        """
+        self._dispatch_queue.put(condition)
+    
+    def wait_dispatch(self, condition: threading.Condition) -> str:
+        
+        with condition:
+            condition.wait()
+        
+        # get text entered
+        try:
+            answer:str = self._input_queue.get()
+        except queue.Empty:
+            self.ERROR('TUI: Condition called but nothing in Input Stack')
+            return ""
+        
         return answer
 
     def spinner(self, message: str) -> __Spinner:
@@ -1223,10 +1217,10 @@ class Tui:
     def demo(self):
         """demo - demonstrated basic prompt, spinner and progressbar functionalities"""
         spin = self.spinner('Starting Demo')
-        self.prompt(self.PROMPT_YESNO, 'This is YES NO prompt')
-        self.prompt(self.PROMPT_INPUT, 'This accepts Input string')
-        self.prompt(self.PROMPT_OPTIONS, 'This allows you to select from options', ['yes', 'no'])
-        self.prompt(self.PROMPT_PASSWORD, 'This accepts masked input')
+        Prompt(PROMPT_YESNO, 'This is YES NO prompt').get_response()
+        Prompt(PROMPT_INPUT, 'This accepts Input string').get_response()
+        Prompt(PROMPT_OPTIONS, 'This allows you to select from options', ['yes', 'no']).get_response()
+        Prompt(PROMPT_PASSWORD, 'This accepts masked input').get_response()
 
         bar_max: int = 100
 
@@ -1256,14 +1250,110 @@ class Tui:
     def run(self):
         threading.Thread(target=self._run, daemon=True).start()
         curses.napms(20)
+    
+    def wait(self):
+        """wait - waits for the TUI to exit, this is a blocking call"""
         with self._running_lock:
             if self._error_code != 0:
                 print(f"Exited with error code : {self._error_code}\r\n")
 
 
+# Prompt Class Constants
+PROMPT_YESNO    = 1001
+PROMPT_INPUT    = 1002
+PROMPT_OPTIONS  = 1003
+PROMPT_PASSWORD = 1004
+PROMPT_PAUSE    = 1006
+
+tui_instance: Tui | None = None
+
+class Prompt:
+    _options: (List[str])
+    _type: int
+    _message: str
+    _response: str
+
+    """Prompt Class
+    The Prompt class is used to prompt the user for input, with options for yes/no, input, options, and password.
+    It provides a simple interface to get user input in a curses environment.
+    Attributes:
+        _type (int): The type of prompt, e.g., yes/no, input, options, password.
+        _message (str): The message to display in the prompt.
+        _options (List[str]): List of options for the prompt if applicable.
+        _response (str): The response from the user.
+    """
+    def __init__(self, prompt_type: int, message: str, options: Optional[List[str]] = None) -> None:
+        
+        """Initializes the Prompt instance with type, message, and optional options."""
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Prompt.")
+        
+        if options is None:
+            self._options = []
+        else:
+            self._options = options
+
+        # Confirm valid prompt type
+        if prompt_type not in [PROMPT_YESNO, PROMPT_OPTIONS, PROMPT_PASSWORD, PROMPT_INPUT, PROMPT_PAUSE]:
+            tui_instance.ERROR(f"Invalid prompt type: {prompt_type}")
+            raise ValueError(f"Invalid prompt type: {prompt_type}")
+
+        # Cannot call PROMPT_OPTIONS with less than two Options, nothing to choose then
+        if prompt_type == PROMPT_OPTIONS and len(self._options) < 2:
+            tui_instance.ERROR('Prompt type PROMPT_OPTIONS called without sufficient options')
+            raise ValueError('Prompt type PROMPT_OPTIONS called without sufficient options')
+        
+        self._type = prompt_type
+        self._message = message
+
+        if prompt_type == PROMPT_YESNO:
+                self._message += ' (y/n):'
+        elif prompt_type == PROMPT_OPTIONS:
+                self._message += str(options)
+        elif prompt_type == PROMPT_PAUSE:
+                self._message += ' (Press any key to continue...)'
+        else:
+            self._message = message
+        
+        
+    def get_response(self) -> str:
+        """get_response - gets user input and returns as string
+        Returns:
+            string giving out the user input
+        """
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Prompt.")
+        
+        while True:
+            masked = (self._type == PROMPT_PASSWORD)
+            response = tui_instance.prompt(self._message, masked)
+
+            if self._type == PROMPT_OPTIONS and response not in self._options:
+                tui_instance.print('TUI Prompt: Only answers within the option provided are permitted')
+                continue
+
+            if self._type == PROMPT_YESNO and response not in ['y', 'Y', 'n', 'N', 'yes', 'Yes', 'no', 'No']:
+                tui_instance.print('TUI Prompt: Only answers related to yes/no are permitted')
+                continue
+
+            break
+
+        # for PROMPT_PASSWORD print masked content of same length else clear text
+        if masked:
+            tui_instance.print(self._message + ' ' + '*' * len(response))
+        else:
+            tui_instance.print(self._message + ' ' + response)
+        
+        return response
+
+
 # test function - can run this file separately 
 if __name__ == '__main__':
+    import tui
     tui = Tui("Athena Build Environment v0.1")
+    tui_instance = tui
+
     # Register the signal handler for SIGINT (Ctrl+C)
     signal.signal(signal.SIGINT, tui.sig_shutdown)
     tui.run()
+    tui.wait()
