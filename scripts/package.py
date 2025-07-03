@@ -3,8 +3,7 @@ import deb822
 
 import re
 import apt_pkg
-
-Print = print
+import tui
 
 
 class Package(deb822.DEB822file):
@@ -136,7 +135,7 @@ class Package(deb822.DEB822file):
         # Add constraint - Check if different constraint is already set
         # TODO: More fine grained check, e.g more constraining one selected, eg if both contain '=' => select '='; ...
         if version in self.__version_constraints and not self.__version_constraints[version] == constraint:
-            Print(f"WARNING: For {self.package} version constraint for {version} already set to "
+            tui.console.print(f"WARNING: For {self.package} version constraint for {version} already set to "
                   f"{self.__version_constraints[version]}, being reset to {constraint}")
         self.__version_constraints[version] = constraint
 
