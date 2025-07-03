@@ -5,7 +5,6 @@ import apt_pkg
 from collections import OrderedDict
 from urllib.parse import urlsplit
 from debian.deb822 import Release
-from tqdm import tqdm
 
 # Internal
 import utils
@@ -20,8 +19,7 @@ from utils import BuildConfig
 # https://github.com/romlok/python-debian/tree/master/examples
 # https://www.juliensobczak.com/inspect/2021/05/15/linux-packages-under-the-hood.html
 
-from tui import ProgressBar, Print, Prompt, Spinner, Exit
-
+from tui import ProgressBar, Spinner
 
 class Cache:
 
@@ -46,6 +44,7 @@ class Cache:
         self._config_valid: bool = False
         self.error_str = ''
 
+        # Base Distribution
         self.cache_dir = buildconfig.dir_cache
         self.base = self.BaseDistribution( url=buildconfig.baseurl, baseid=buildconfig.baseid, 
                                      codename=buildconfig.basecodename, version=buildconfig.baseversion, 
@@ -136,7 +135,7 @@ class Cache:
                     self.control_files[_file] = _md5[0]
 
         except (Exception, FileNotFoundError, PermissionError) as e:
-            tui.Print(f"Athena Linux Error: {e}")
+            tui.console.print(f"Athena Linux Error: {e}")
             return -1
 
         _iter_control_file = iter(self.control_files)
@@ -178,8 +177,8 @@ class Cache:
             # List of cache files are in the sequence specified earlier
             self.cache_files[urlsplit(control_files_key).path.split('/')[-1]] = _file
 
-        tui.Print("Using Release File")
-        tui.Print('\tOrigin: {Origin}\n\tCodename: {Codename}\n\tVersion: {Version}\n\tDate: {Date}'.format_map(rel))
+        tui.console.print("Using Release File")
+        tui.console.print('\tOrigin: {Origin}\n\tCodename: {Codename}\n\tVersion: {Version}\n\tDate: {Date}'.format_map(rel))
 
         return 0
 
@@ -211,12 +210,10 @@ class Cache:
         self.__source_records = utils.readfile(self.__source_file).split('\n\n')
 
         # create a list, since we can have duplicates
-        tui.Print("Parsing Control Files...")
+        parser_spinner = Spinner("Parsing Package Files")
+        tui.console.print("Parsing Control Files...")
         
-        # progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} - {desc}'
-        # progress_bar_pkg = tqdm(desc=f"{'Indexing Package File'}", ncols=80, total=len(self.__package_records), bar_format=progress_format)
-        
-        progress_bar_pkg = tui.ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
+        progress_bar_pkg = ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
 
         for _pkg_record in self.__package_records:
             progress_bar_pkg.step(1)
@@ -251,9 +248,10 @@ class Cache:
             if __pkg.priority == 'important':
                 assert _package_name not in self.required, f"Multiple versions of important Package {_package_name}"
                 self.important.append(_package_name)
+        
+        progress_bar_pkg.close()
 
-        # progress_bar_src = tqdm(desc=f"{'Indexing Source File'}", ncols=80, total=len(self.__source_records), bar_format=progress_format)
-        progress_bar_src = tui.ProgressBar(label = f"{'Indexing Source File'}", itr_label = 'rec/s', maxvalue = len(self.__source_records))
+        progress_bar_src = ProgressBar(label = f"{'Indexing Source File'}", itr_label = 'rec/s', maxvalue = len(self.__source_records))
         
         for _src_record in self.__source_records:
             progress_bar_src.step(1)
@@ -267,6 +265,9 @@ class Cache:
                 self.source_hashtable[_package_name].append(__pkg)
             else:
                 self.source_hashtable[_package_name] = [__pkg]
+        
+        progress_bar_src.close()
+        parser_spinner.done()
 
     def get_packages(self, package_name: str) -> []:
         if package_name not in self.package_hashtable:

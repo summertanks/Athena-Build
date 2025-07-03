@@ -26,9 +26,7 @@ from typing import Optional, Any, Callable, Tuple, List, Dict, TypedDict
 from types import FrameType
 
 
-Print = None
 Exit = None
-Pause = None
 
 class _TabEntry(TypedDict):
     win: curses.window
@@ -868,32 +866,6 @@ class Tui:
                         self.print(f"Error: {e}")
                         self.ERROR(f"Error: {e}")
 
-    def pause(self):
-        """pause - pauses the TUI, waits for user to press any key to continue"""
-        with self._prompt_lock:
-
-            old_prompt = self.cmd_prompt
-
-            self.cmd_prompt = 'TUI Paused, press any key to continue...'
-            
-            while True:
-
-                condition = threading.Condition()
-                self._dispatch_queue_line.put(condition)
-
-                # condition is called when user has entered text
-                with condition:
-                    condition.wait()
-                
-                try:
-                    self._input_queue.get()
-                except queue.Empty:
-                    self.ERROR('TUI: Condition called but nothing in Input Stack')
-
-                break
-
-            self.cmd_prompt = old_prompt
-
 
     def prompt(self, message: str, masked: Optional[bool] = False, keymode: Optional[bool] = False) -> str:
 
@@ -1040,6 +1012,7 @@ PROMPT_PASSWORD = 1004
 PROMPT_PAUSE    = 1006
 
 tui_instance: Tui | None = None
+
 
 class Prompt:
     _options: (List[str])
@@ -1337,6 +1310,46 @@ class Spinner:
         """Return str description of Spinner"""
         with self._lock:
             return self._message + ' ' + self.ASCII_CHAR[self._position]        
+
+class Console:
+
+    def __init__(self):
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Console.")
+
+    def print(self, message: str, attribute: Optional[int | None] = None):
+        """print - prints text to console tab, this will replace the typical use of python print in code
+        Args:
+            message(str): The message to print, adds newline character on print
+            attribute: the attribute for the text, uses COLOR_NORMAL as default
+        """
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Console.")
+        
+        tui_instance.print(message, attribute)
+    
+    def error(self, message: str):
+        """error - prints error message to console tab"""
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Console.")
+        
+        tui_instance.ERROR(message)
+    
+    def info(self, message: str):
+        """info - prints info message to console tab"""
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Console.")
+        
+        tui_instance.INFO(message)
+    
+    def warning(self, message: str):
+        """warning - prints warning message to console tab"""
+        if tui_instance is None:
+            raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Console.")
+        
+        tui_instance.WARNING(message)
+
+console: Console
 
 # test function - can run this file separately 
 if __name__ == '__main__':

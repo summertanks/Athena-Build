@@ -6,7 +6,7 @@ import configparser
 import argparse
 
 import tui
-
+from tui import Prompt, Spinner, ProgressBar
 
 class BaseDistribution:
     def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
@@ -52,8 +52,6 @@ class BuildConfig:
     _config_valid: bool
     
     def __init__(self):
-
-        global Print, Prompt, Spinner, ProgressBar, Exit
 
         # Set when config is validated
         self._config_valid: bool = False
@@ -212,46 +210,43 @@ def download_file(url: str, filename: str) -> int:
             return file_size
 
     except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-        tui.Print(f"Error connecting to {url}: {e}")
+        tui.console.print(f"Error connecting to {url}: {e}")
         return -1
     
-    # progress_bar.close()
-    # return file_size
+# def download_file_tqdm(url: str, filename: str) -> int:
+#     """Downloads file and updates progressbar in incremental manner.
+#         Args:
+#             url (str): url to download file from, protocol is prepended
+#             filename (str): Filename to save to, location should be writable
 
-def download_file_tqdm(url: str, filename: str) -> int:
-    """Downloads file and updates progressbar in incremental manner.
-        Args:
-            url (str): url to download file from, protocol is prepended
-            filename (str): Filename to save to, location should be writable
+#         Returns:
+#             int: -1 for failure, file_size on success
+#     """
+#     import requests
+#     from tqdm import tqdm
+#     from urllib.parse import urlsplit
+#     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 
-        Returns:
-            int: -1 for failure, file_size on success
-    """
-    import requests
-    from tqdm import tqdm
-    from urllib.parse import urlsplit
-    from requests import Timeout, TooManyRedirects, HTTPError, RequestException
-
-    name_strip = urlsplit(url).path.split('/')[-1]
-    progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} ({rate_fmt}) - {desc}'
-    try:
-        response = requests.head(url)
-        file_size = int(response.headers.get('content-length', 0))
-        progress_bar = tqdm(desc=f"{name_strip.ljust(15, ' ')}", ncols=80, total=file_size,
-                            bar_format=progress_format, unit='iB', unit_scale=True, unit_divisor=1024)
-        response = requests.get(url, stream=True)
-        if response.status_code == 200:
-            with open(filename, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024):
-                    if chunk:
-                        f.write(chunk)
-                        progress_bar.update(len(chunk))
-    except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-        print(f"Error connecting to {url}: {e}")
-        return -1
-    progress_bar.clear()
-    progress_bar.close()
-    return file_size
+#     name_strip = urlsplit(url).path.split('/')[-1]
+#     progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} ({rate_fmt}) - {desc}'
+#     try:
+#         response = requests.head(url)
+#         file_size = int(response.headers.get('content-length', 0))
+#         progress_bar = tqdm(desc=f"{name_strip.ljust(15, ' ')}", ncols=80, total=file_size,
+#                             bar_format=progress_format, unit='iB', unit_scale=True, unit_divisor=1024)
+#         response = requests.get(url, stream=True)
+#         if response.status_code == 200:
+#             with open(filename, 'wb') as f:
+#                 for chunk in response.iter_content(chunk_size=1024):
+#                     if chunk:
+#                         f.write(chunk)
+#                         progress_bar.update(len(chunk))
+#     except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+#         print(f"Error connecting to {url}: {e}")
+#         return -1
+#     progress_bar.clear()
+#     progress_bar.close()
+#     return file_size
 
 
 def download_source(dependency_tree, dir_download, base_distribution: BaseDistribution):
@@ -303,7 +298,7 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
                 _downloaded_size += _size
 
             except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-                Print(f"Error connecting to {_url}: {e}")
+                tui.console.print(f"Error connecting to {_url}: {e}")
                 continue
 
             assert get_md5(_download_path) == _md5, f"Downloaded {_file} hash mismatch"
@@ -318,7 +313,7 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
     progress_bar.clear()
     progress_bar.close()
 
-    Print(f"Downloading {_total - _skipped} files, Skipped {_skipped} files")
+    tui.console.print(f"Downloading {_total - _skipped} files, Skipped {_skipped} files")
     return _downloaded_size
 
 
@@ -363,7 +358,7 @@ def readfile(filename: str) -> str:
             contents = f.read()
             return contents
     except (FileNotFoundError, PermissionError) as e:
-        Print(f"Error: {e}")
+        tui.console.print(f"Error: {e}")
         exit(1)
 
 
@@ -385,7 +380,7 @@ def create_folders(folder_structure: str):
                 # add the component to the current path
                 path = os.path.join(path, component)
     except Exception as e:
-        Print(f"Failed to build folder structure {e}")
+        tui.console.print(f"Failed to build folder structure {e}")
 
 
 class Node:

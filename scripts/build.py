@@ -17,10 +17,10 @@ from cache import Cache
 import buildcontainer
 import dependencytree
 import buildsystem
-import tui
 import signal
 
-# from tui import Tui, Print, Prompt, Spinner, ProgressBar, Pause, Exit
+
+from tui import Tui, Console, Prompt, Spinner, ProgressBar, Exit
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
@@ -29,13 +29,18 @@ asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n'
 
 # TODO: make all apt_pkg.parse functions arch specific
 
+# module-level variable
+build_config: BuildConfig
+
+# module-level variable for TUI instance
+_tui : Tui
 
 
-build_config: BuildConfig  # module-level variable
 
 def main(banner: str):
     """main - the primary function being called"""
-    from tui import Tui, Print, Prompt, Spinner, ProgressBar, Pause, Exit
+    import tui
+    from tui import Tui, Exit
 
     # Config
     global build_config
@@ -44,19 +49,16 @@ def main(banner: str):
     _tui = Tui(banner)
     _tui.run()  # Start the TUI event loop
 
+    # Set the global tui_instance to the current TUI instance
+    tui.tui_instance = _tui  
+    
     # Register the signal handler for SIGINT (Ctrl+C)
     signal.signal(signal.SIGINT, _tui.sig_shutdown)
     
-    import tui
-    
-    # Assign the TUI functions to the global namespace
-    tui.Print = _tui.print
-    tui.Prompt = _tui.prompt
-    tui.Spinner = _tui.spinner
-    tui.ProgressBar = _tui.progressbar
-    tui.Pause = _tui.pause
     tui.Exit = _tui.exit
 
+    console = Console()  # Initialize the console instance
+    tui.console = console  # Set the global console instance
 
     # Exit function to handle cleanup and exit
     # This function is called when the script is exiting, either normally or due to an error
@@ -68,14 +70,14 @@ def main(banner: str):
         exit(err_code)
 
     # External modules initialisation
-    tui.Print("Initialising apt_pkg...")
+    console.print("Initialising apt_pkg...")
     apt_pkg.init_system()
 
-    tui.Print("Parsing config...")
+    console.print("Parsing config...")
     build_config = BuildConfig()
 
     if not build_config.is_valid:
-        tui.Print(f"Error: build configuration - {build_config.error_str}")
+        console.print(f"Error: build configuration - {build_config.error_str}")
         Exit(1)
 
 
@@ -89,17 +91,17 @@ def main(banner: str):
     # logger = logging.getLogger('rich')
 
     # --------------------------------------------------------------------------------------------------------------
-    tui.Print(asciiart_logo)
-    tui.Print("Starting Source Build System for Athena Linux...")
-    tui.Print("Building for ...")
-    tui.Print(f"\t Arch\t\t\t{build_config.arch}")
-    tui.Print(f"\t Parent Distribution\t{build_config.basecodename} {build_config.baseversion}")
-    tui.Print(f"\t Build Distribution\t{build_config.build_codename} {build_config.build_version}")
+    console.print(asciiart_logo)
+    console.print("Starting Source Build System for Athena Linux...")
+    console.print("Building for ...")
+    console.print(f"\t Arch\t\t\t{build_config.arch}")
+    console.print(f"\t Parent Distribution\t{build_config.basecodename} {build_config.baseversion}")
+    console.print(f"\t Build Distribution\t{build_config.build_codename} {build_config.build_version}")
 
 
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
-    tui.Print("Building Cache...")
+    console.print("Building Cache...")
     build_cache = cache.Cache(build_config)
     _tui.wait()
     Exit(0)
