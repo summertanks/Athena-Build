@@ -276,9 +276,10 @@ class Package(Packages):
 
 class Source(Sources):
 
-    package:        str = ''
-    binary:         str = ''
-    version:        Version
+    package:    str = ''
+    binary:     str = ''
+    version:    Version
+    arch:       List[str]
 
     _build_depends = []
     _build_conflicts = []
