@@ -1,5 +1,5 @@
 # internal modules
-from debian.deb822 import Packages
+from debian.deb822 import Packages, Sources
 from debian.debian_support import Version
 
 import tui
@@ -100,8 +100,11 @@ class Package(Packages):
     depends_on:     List[str] = []
     depended_by:    List[str] = []
 
-    priority:       str  = ''   # Not necessarily aligned to 'Priority' field, 
-                                # default set to 'Priority' field, may change later
+    # Not necessarily aligned to 'Priority' field, default set to 'Priority' field, may change later
+    # this will be set to the highest priority of those packages that depends on them.
+    # e.g. if 'required' package has a dependency, they will be 'required' too
+    priority:       str  = ''
+                                
     arch:           str  = ''   # Architecture of the package, e.g. amd64, arm64, etc.
 
     installed:  bool = False  # Whether the package is installed or not
@@ -111,32 +114,43 @@ class Package(Packages):
     _pkg_valid: bool = False  # Whether the package is valid or not
 
     # List of version constraints for the package
-    _constraints: Dict[Version, VersionConstraint]  
+    _constraints: Dict[Version, VersionConstraint]
 
-    def __init__(self, section: str, arch: str):
-
+    def __eq__(self, other: object) -> bool:
         
+        if not isinstance(other, Package):
+            return NotImplemented
+        
+        return (
+            self.package == other.package and
+            self.version == other.version and
+            self.arch == other.arch
+        )
+    
+    def __hash__(self) -> int:
+        return hash((self.package, self.version, self.arch))
 
-        # Not necessarily aligned to 'Priority' field, default set to 'Priority' field, may change later
-        # this will be set to the highest priority of those packages that depends on them.
-        # e.g. if 'required' package has a dependency, they will be 'required' too
-        self.priority = ''
+    def __init__(self, section: str):
 
         super().__init__(section)
 
         # Setting Values post calling super()
-        if arch not in ['amd64']:
-            raise ValueError(f"Current Architecture '{arch}' is not supported")
-        self.arch: str = arch
-
         assert 'Package' in self, "Malformed Package, No Package Name"
         assert 'Version' in self, "Malformed Package, No Version Given"
+        assert 'Architecture' in self, "Malformed Package, No Architecture Given"
+
         assert not self['Package'] == '', "Malformed Package, No Package Name"
         assert not self['Version'] == '', "Malformed Package, No Version Given"
+        assert not self['Architecture'] == '', "Malformed Package, No Architecture Given"
 
         self.package = self['Package']
-        self.version = self['Version']
-        self.priority = self['Priority']
+        self.version = Version(self['Version'])
+        self.arch = self['Architecture']
+
+        if 'Priority' in self and self['Priority'].strip() != '':
+            self.priority = self['Priority']
+        else:
+            self.priority = 'optional'
 
         # UPDATE: source & source_version is now in superclass as properties
         # If the source package and source package version are the same as the binary package, an explicit 
@@ -260,3 +274,77 @@ class Package(Packages):
                               f"{self.package} {_constraint} vs {_old_constraint}, ignoring")
             return False
 
+class Source(Sources):
+
+    package:        str = ''
+    binary:         str = ''
+    version:        Version
+
+    _build_depends = []
+    _build_conflicts = []
+    
+    _files = []
+
+    def __init__(self, section: str):
+
+        super().__init__(section)
+
+        assert 'Package' in self, "Malformed Package, No Package Name"
+        assert 'Version' in self, "Malformed Package, No Version Given"
+        assert 'Architecture' in self, "Malformed Package, No Architecture Given"
+
+        assert 'Files' in self, "Malformed Package, No Version Given"
+        assert 'Directory' in self, "Malformed Package, No Version Given"
+
+        assert not self['Package'] == '', "Malformed Package, No Package Name"
+        assert not self['Version'] == '', "Malformed Package, No Version Given"
+        assert not self['Architecture'] == '', "Malformed Package, No Architecture Given"
+        assert not self['Files'] == '', "Malformed Package, No Files Given"
+        assert not self['Directory'] == '', "Malformed Package, No Directory Given"
+
+        self.package = self['Package']
+        self.binary = self['Binary'] if 'Binary' in self else ''
+        self.version = self['Version']
+        self.arch = self['Architecture']
+
+        self.directory = self['Directory']
+        self.pkgs: [] = []
+        self.files: {} = {}
+        self.skip_test = False
+        self.patch_list = []
+
+        # if self.package == 'glibc':
+        #    print('.')
+
+        _depends_list = []
+        _dep_string = ['Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch']
+        for _dep in _dep_string:
+            self._build_depends += apt_pkg.parse_src_depends(self[_dep], strip_multi_arch=True, architecture=self.arch)
+
+        _files_list = self['Files'].split('\n')
+        for _file in _files_list:
+            _file = _file.split()
+            if len(_file) == 3:
+                self.files[_file[2]] = {'path': os.path.join(self.directory, _file[2]),
+                                        'size': _file[1], 'md5': _file[0]}
+
+        # can be derived from Package-List field, but it is tedious - correlation for versions required
+        # One source provides multiple packages, package may have different version from the source version
+        # Package-List may have additional information e.g. 'udeb' tag which is not there in package
+        # Lets only select the package-files that the Package actually needs, the others produced are optional
+
+    @property
+    def download_size(self) -> int:
+        _download_size = 0
+        for _file in self.files:
+            _download_size += int(self.files[_file]['size'])
+        return _download_size
+
+    @property
+    def build_depends(self) -> str:
+        _dep_str = ''
+        for _dep in self._build_depends:
+            # by default select first package even for multi/alt dependencies
+            _dep_str += _dep[0][0] + ' '
+
+        return _dep_str
