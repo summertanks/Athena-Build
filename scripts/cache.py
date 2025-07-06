@@ -211,7 +211,6 @@ class Cache:
 
         # create a list, since we can have duplicates
         parser_spinner = Spinner("Parsing Package Files")
-        tui.console.print("Parsing Control Files...")
         
         progress_bar_pkg = ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
 

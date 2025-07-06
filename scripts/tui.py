@@ -970,16 +970,14 @@ class Tui:
         bar_max: int = 100
 
         bar = ProgressBar('Progress Bar Demo', maxvalue=bar_max)
-
-        for i in range(bar_max + 1):
+        while bar.value <= bar_max:
             bar.step(value=1)
             curses.napms(10)
         bar.close(persist=True)
 
         Prompt(PROMPT_PAUSE, 'Press any key to continue...').get_response()
-        # self.pause()
-
         spin.done()
+        
 
     def help(self):
         """help - prints the registered commands and hints"""
@@ -1251,6 +1249,11 @@ class ProgressBar:
         """Resets the timer for rate calculation"""
         self._value = 0
         self._time = time.time_ns()
+    
+    @property
+    def value(self) -> int:
+        """Returns the current value of the progress bar"""
+        return self._value
 
 class Spinner:
     """ Internal class for Spinner
