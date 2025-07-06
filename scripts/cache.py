@@ -12,6 +12,7 @@ import package
 import source
 import tui
 
+from package import Package
 from typing import List, Dict
 from utils import BuildConfig
 
@@ -22,6 +23,13 @@ from utils import BuildConfig
 from tui import ProgressBar, Spinner
 
 class Cache:
+
+    package_hashtable:  Dict[str, List[Package]]
+    provides_hashtable: Dict[str, List[Package]]
+    source_hashtable:   Dict[str, List[Package]]
+
+    required: List [str]
+    important: List [str]
 
     class BaseDistribution:
         def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
@@ -79,11 +87,11 @@ class Cache:
         self.__source_records = []
         self.pkg_list = []
         self.src_list = []
-        self.package_hashtable = {}
+        
         self.provides_hashtable = {}
         self.source_hashtable = {}
-        self.required = []
-        self.important = []
+        
+        
 
         # Download files
         if self.__get_files() < 0:
@@ -182,7 +190,7 @@ class Cache:
 
         return 0
 
-    def __build_cache(self) -> int:
+    def __build_cache(self, arch: str) -> int:
         """Builds the cache from the control files downloaded"""
 
         if 'Packages' not in self.cache_files:
@@ -215,37 +223,50 @@ class Cache:
         progress_bar_pkg = ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
 
         for _pkg_record in self.__package_records:
+            
             progress_bar_pkg.step(1)
             
             if _pkg_record.strip() == '':
                 continue
 
-            __pkg = package.Package(_pkg_record, self.base.arch)
+            _pkg = package.Package(_pkg_record)
+
+            # TODO: package should have the minimum fields to parse and process it
+            # if not _pkg.isValid(): continue
 
             # add Package in hashtable
-            _package_name = __pkg['Package']
-            if _package_name in self.package_hashtable:
-                self.package_hashtable[_package_name].append(__pkg)
-            else:
-                self.package_hashtable[_package_name] = [__pkg]
+            _package_name = _pkg.package
 
-            # add Provides to hashtable
-            for __provides in __pkg.get_provides():
-                if __provides in self.provides_hashtable:
-                    if __pkg not in self.provides_hashtable[__provides]:
-                        self.provides_hashtable[__provides].append(__pkg)
+            # skip arch other than selected
+            if _pkg.arch not in [arch, 'all']:
+                continue
+            
+            # Package associated with 'Package' name, 
+            # Mode than one Package could be associated by same name, e.g. different arch
+            if _package_name in self.package_hashtable:
+                self.package_hashtable[_package_name].append(_pkg)
+            else:
+                self.package_hashtable[_package_name] = [_pkg]
+
+            # Which Package provides 'package' name
+            # typically when 'package' name is different what 'provides'
+            # e.g. liba52-0.7.4-dev Provides: a52dec, a52dec-dev, liba52-dev
+            for _provides in _pkg.get_provides():
+                if _provides in self.provides_hashtable:
+                    if _pkg not in self.provides_hashtable[_provides]:
+                        self.provides_hashtable[_provides].append(_pkg)
                 else:
-                    self.provides_hashtable[__provides] = [__pkg]
+                    self.provides_hashtable[_provides] = [_pkg]
 
             # build the required(s) list
             # TODO: check for architecture too
-            if __pkg.priority == 'required':
+            if _pkg.priority == 'required':
                 assert _package_name not in self.required, f"Multiple versions of required Package {_package_name}"
                 self.required.append(_package_name)
 
             # Build the 'important' list
-            if __pkg.priority == 'important':
-                assert _package_name not in self.required, f"Multiple versions of important Package {_package_name}"
+            if _pkg.priority == 'important':
+                assert _package_name not in self.important, f"Multiple versions of important Package {_package_name}"
                 self.important.append(_package_name)
         
         progress_bar_pkg.close()
