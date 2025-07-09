@@ -5,16 +5,16 @@ import apt_pkg
 from collections import OrderedDict
 from urllib.parse import urlsplit
 from debian.deb822 import Release
-from debian.debian_support import DpkgArchTable
+from debian.debian_support import DpkgArchTable, Version
 
 # Internal
 import utils
 import package
-import source
 import tui
 
-from package import Package
+from package import Package, Source
 from typing import List, Dict
+from collections import defaultdict
 from utils import BuildConfig
 
 
@@ -26,12 +26,10 @@ from tui import ProgressBar, Spinner
 class Cache:
 
     package_hashtable:  Dict[str, List[Package]]
-    provides_hashtable: Dict[str, List[Package]]
-    source_hashtable:   Dict[str, List[Package]]
+    provides_hashtable: Dict[str, Dict[Version, List[str]]]
+    source_hashtable:   Dict[str, List[Source]]
 
-    required: List [str]
-    important: List [str]
-
+    
     _arch_table: DpkgArchTable
 
     class BaseDistribution:
@@ -88,20 +86,25 @@ class Cache:
         # Cache data
         self.__package_file = ''
         self.__source_file = ''
-        self.__package_record = []
+        self.__package_records = []
         self.__source_records = []
         self.pkg_list = []
         self.src_list = []
         
-        self.provides_hashtable = {}
-        self.source_hashtable = {}
+        self.required: List[str] = []
+        self.important: List[str] = []
+
+        
+        self.package_hashtable = defaultdict(list)  # Dict[str, List[Package]]
+        self.provides_hashtable = defaultdict(lambda: defaultdict(list))
+        self.source_hashtable = defaultdict(list) # Dict[str, List[Source]]
 
         # Download files
         if self.__get_files() < 0:
             return
 
         # Build Hashtable
-        self.__build_cache()
+        self.__build_cache(buildconfig.arch)
 
         # Set when config is validated
         self._config_valid: bool = True
@@ -135,7 +138,7 @@ class Cache:
                     # Check if file is present in release file
                     _md5 = [line['md5sum'] for line in rel['MD5Sum'] if line['name'] == _file]
                     if len(_md5) == 0:
-                        self.error_str = f"File ({_file})not found in release file"
+                        self.error_str = f"File ({_file}) not found in release file"
                         return -1
                     
                     # If multiple instances found, raise error
@@ -193,24 +196,24 @@ class Cache:
 
         return 0
 
-    def __build_cache(self, arch: str) -> int:
+    def __build_cache(self, arch: str) -> bool:
         """Builds the cache from the control files downloaded"""
 
         if 'Packages' not in self.cache_files:
             self.error_str = "Missing Packages control file from cache"
-            return -1
+            return False
 
         if 'Sources' not in self.cache_files:
             self.error_str = "Missing Sources control file from cache"
-            return -1
+            return False
         
         if self.cache_files['Packages'] == '':
             self.error_str = "Missing Packages control file from cache"
-            return -1
+            return False
         
         if self.cache_files['Sources'] == '':
             self.error_str = "Missing Sources control file from cache"
-            return -1
+            return False
         
 
         self.__package_file = self.cache_files['Packages']
@@ -224,18 +227,19 @@ class Cache:
         parser_spinner = Spinner("Parsing Package Files")
         
         progress_bar_pkg = ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
-
         for _pkg_record in self.__package_records:
             
             progress_bar_pkg.step(1)
             
-            if _pkg_record.strip() == '':
+            _pkg_record = _pkg_record.strip() 
+            
+            if not _pkg_record:
                 continue
 
             _pkg = package.Package(_pkg_record)
 
-            # TODO: package should have the minimum fields to parse and process it
-            # if not _pkg.isValid(): continue
+            if not _pkg.isvalid: 
+                continue
 
             # add Package in hashtable
             _package_name = _pkg.package
@@ -245,61 +249,62 @@ class Cache:
                 continue
             
             # Package associated with 'Package' name, 
-            # Mode than one Package could be associated by same name, e.g. different arch
-            if _package_name in self.package_hashtable:
-                tui.console.print(f"Package {_package_name} already in hashtable, skipping {_pkg}")
-                continue
-            else:
-                self.package_hashtable[_package_name] = [_pkg]
+            # Mode than one Package could be associated by same name, e.g. different version
+            self.package_hashtable[_package_name].append(_pkg)
 
             # Which Package provides 'package' name
-            # typically when 'package' name is different what 'provides'
-            # e.g. liba52-0.7.4-dev Provides: a52dec, a52dec-dev, liba52-dev
+            # get_provides() returns a list of tupple(name, version)
+            # e.g. [('acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn-bigint','1.0.0')]
+            # there can be more than one version in provided by for same package name.
             
-            for _provides in _pkg.get_provides():
-                if _provides in self.provides_hashtable:
-                    if _pkg not in self.provides_hashtable[_provides]:
-                        self.provides_hashtable[_provides].append(_pkg)
-                else:
-                    self.provides_hashtable[_provides] = [_pkg]
+            for _provided in _pkg.get_provides():
+                _provided_name = _provided[0]
+                _provided_ver = _provided[1]
+                # provides_hashtable: Dict[str, Dict[Version, List[str]]]
+                self.provides_hashtable[_provided_name][_provided_ver].append(_pkg.package)
 
             # build the required(s) list
-            # TODO: check for architecture too
             if _pkg.priority == 'required':
-                assert _package_name not in self.required, f"Multiple versions of required Package {_package_name}"
                 self.required.append(_package_name)
 
             # Build the 'important' list
             if _pkg.priority == 'important':
-                assert _package_name not in self.important, f"Multiple versions of important Package {_package_name}"
                 self.important.append(_package_name)
-        
+                
         progress_bar_pkg.close()
-
+   
         progress_bar_src = ProgressBar(label = f"{'Indexing Source File'}", itr_label = 'rec/s', maxvalue = len(self.__source_records))
-        
         for _src_record in self.__source_records:
             progress_bar_src.step(1)
+            
             if _src_record.strip() == '':
                 continue
-            __pkg = source.Source(_src_record, self.base.arch)
+            _pkg = package.Source(_src_record)
+            
+            if not _pkg.isvalid:
+                continue
 
             # add Package in hashtable
-            _package_name = __pkg['Package']
-            if _package_name in self.source_hashtable:
-                self.source_hashtable[_package_name].append(__pkg)
-            else:
-                self.source_hashtable[_package_name] = [__pkg]
-        
+            _package_name = _pkg.package
+
+            _arch_match: bool = False            
+            for _pkt_arch in _pkg.arch:
+                # Check if the package architecture matches the current architecture
+                if self._arch_table.matches_architecture(_pkt_arch, arch):
+                    _arch_match = True
+            
+            if not _arch_match:
+                continue
+            
+            self.source_hashtable[_package_name].append(_pkg) 
+
         progress_bar_src.close()
         parser_spinner.done()
+        
+        return True
 
-    def get_packages(self, package_name: str) -> []:
-        if package_name not in self.package_hashtable:
-            return []
+    def get_packages(self, package_name: str) -> List[Package]:
         return self.package_hashtable[package_name]
 
-    def get_provides(self, provides_name: str) -> []:
-        if provides_name not in self.provides_hashtable:
-            return []
+    def get_provides(self, provides_name: str) -> Dict[Version, List[str]]:
         return self.provides_hashtable[provides_name]
