@@ -5,6 +5,7 @@ import apt_pkg
 from collections import OrderedDict
 from urllib.parse import urlsplit
 from debian.deb822 import Release
+from debian.debian_support import DpkgArchTable
 
 # Internal
 import utils
@@ -31,6 +32,8 @@ class Cache:
     required: List [str]
     important: List [str]
 
+    _arch_table: DpkgArchTable
+
     class BaseDistribution:
         def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
             self.url: str = url
@@ -47,6 +50,8 @@ class Cache:
 
             Returns:
         """
+
+        self._arch_table = DpkgArchTable.load_arch_table()
 
         # Set when config is validated
         self._config_valid: bool = False
@@ -90,8 +95,6 @@ class Cache:
         
         self.provides_hashtable = {}
         self.source_hashtable = {}
-        
-        
 
         # Download files
         if self.__get_files() < 0:
@@ -237,20 +240,22 @@ class Cache:
             # add Package in hashtable
             _package_name = _pkg.package
 
-            # skip arch other than selected
-            if _pkg.arch not in [arch, 'all']:
+            # Check if the package architecture matches the current architecture
+            if self._arch_table.matches_architecture(_pkg.arch, arch) is False:
                 continue
             
             # Package associated with 'Package' name, 
             # Mode than one Package could be associated by same name, e.g. different arch
             if _package_name in self.package_hashtable:
-                self.package_hashtable[_package_name].append(_pkg)
+                tui.console.print(f"Package {_package_name} already in hashtable, skipping {_pkg}")
+                continue
             else:
                 self.package_hashtable[_package_name] = [_pkg]
 
             # Which Package provides 'package' name
             # typically when 'package' name is different what 'provides'
             # e.g. liba52-0.7.4-dev Provides: a52dec, a52dec-dev, liba52-dev
+            
             for _provides in _pkg.get_provides():
                 if _provides in self.provides_hashtable:
                     if _pkg not in self.provides_hashtable[_provides]:
