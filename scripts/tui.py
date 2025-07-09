@@ -274,6 +274,7 @@ class Tui:
         self._cmd.reset_cursor()
 
         self._is_setup = False
+        self._calculateResolution()
         self._setup()
         self._redraw()
 
@@ -1013,11 +1014,7 @@ tui_instance: Tui | None = None
 
 
 class Prompt:
-    _options: (List[str])
-    _type: int
-    _message: str
-    _response: str
-    _keymode: bool
+
 
     """Prompt Class
     The Prompt class is used to prompt the user for input, with options for yes/no, input, options, and password.
@@ -1029,6 +1026,12 @@ class Prompt:
         _response (str): The response from the user.
     """
     def __init__(self, prompt_type: int, message: str, options: Optional[List[str]] = None) -> None:
+        
+        self._options: (List[str])
+        self._type: int
+        self._message: str
+        self._response: str
+        self._keymode: bool
         
         """Initializes the Prompt instance with type, message, and optional options."""
         if tui_instance is None:
@@ -1117,16 +1120,7 @@ class ProgressBar:
     PAUSED = 2
     STOPPED = 3
 
-    _fmt:str
-    _label: str
-    _value: int
-    _max: int
-    _itr_label: str
-    _state: int
-    _time: int
-    _scale_factor: str
-    _bar_width: int
-    _widget_id: int
+
 
     def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40, scale_factor: Optional[str] = '',
                     maxvalue: int = 100, fmt: str = ''):
@@ -1137,6 +1131,17 @@ class ProgressBar:
             bar_width(int): the width of the bar portion only, [...] for example are not included in this sizing
             scale_factor(str): option between None (autoscale), 'K', 'M' & 'G' and scales the rate accordingly.
         """
+        
+        self._fmt:str
+        self._label: str
+        self._value: int
+        self._max: int
+        self._itr_label: str
+        self._state: int
+        self._time: int
+        self._scale_factor: str
+        self._bar_width: int
+        self._widget_id: int
 
         """Initializes the Prompt instance with type, message, and optional options."""
         if tui_instance is None:
@@ -1264,17 +1269,19 @@ class Spinner:
         _position(int): index in character array presenting position of the spinner
         _running(bool): maintains running state of the Spinner
     """
-    _message: str
-    _lock: threading.Lock
-    _position: int
-    _running: bool
-    _widget_id: int
+
 
     # Can pick more from
     # https://stackoverflow.com/questions/2685435/cooler-ascii-spinners
     ASCII_CHAR = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
 
     def __init__(self, message: str):
+        
+        self._message: str
+        self._lock: threading.Lock
+        self._position: int
+        self._running: bool
+        self._widget_id: int
         
         if tui_instance is None:
             raise RuntimeError("Tui instance not initialized. Please create a Tui instance before using Spinner.")  
