@@ -4,7 +4,7 @@ from debian.debian_support import Version
 
 import tui
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 class VersionConstraint:
     """
@@ -13,11 +13,17 @@ class VersionConstraint:
     <constraints> are in form of =, <<, >>, >=, <=
     = and !<constraints> will be considered hard assignments
     """
-    _version: Version
-    _constraint: str
+    
 
     def __init__(self, version: Version, constraint: str):
+        _version: Version
+        _constraint: str = ''
+
         self._version = version
+        self._constraint = constraint.strip()
+        
+        if not self._constraint:
+            self._constraint = '='
         
         if constraint not in ['=', '>', '<', '>=', '<=', '>>', '<<']:
             raise ValueError(f"Invalid operator: {constraint}")
@@ -82,40 +88,6 @@ class Package(Packages):
     # ['decoder', 'encoding', 'gpg_info', 'relations', 'source', 'source_version']
     # so we cannot use these as attributes
 
-    package:        str = ''
-    version:        Version
-
-    # 'depends', 'pre-depends', 'recommends', 'suggests', 'breaks', 'conflicts', 'provides', 'replaces', 'enhances', 'built-using']
-    depends:        List[List[Dict[str, Any]]] = []
-    pre_depends:    List[List[Dict[str, Any]]] = []  # dependencies that must be satisfied before the package can be unpacked
-    recommends:     List[List[Dict[str, Any]]] = []
-    suggests:       List[List[Dict[str, Any]]] = []
-    breaks:         List[List[Dict[str, Any]]] = []
-    conflicts:      List[List[Dict[str, Any]]] = []
-    provides:       List[List[Dict[str, Any]]] = []
-    replaces:       List[List[Dict[str, Any]]] = []
-    enhances:       List[List[Dict[str, Any]]] = []
-    built_using:    List[List[Dict[str, Any]]] = []
-
-    depends_on:     List[str] = []
-    depended_by:    List[str] = []
-
-    # Not necessarily aligned to 'Priority' field, default set to 'Priority' field, may change later
-    # this will be set to the highest priority of those packages that depends on them.
-    # e.g. if 'required' package has a dependency, they will be 'required' too
-    priority:       str  = ''
-                                
-    arch:           str  = ''   # Architecture of the package, e.g. amd64, arm64, etc.
-
-    installed:  bool = False  # Whether the package is installed or not
-    configured: bool = False  # Whether the package is configured or not
-
-    _err_str: str = ""
-    _pkg_valid: bool = False  # Whether the package is valid or not
-
-    # List of version constraints for the package
-    _constraints: Dict[Version, VersionConstraint]
-
     def __eq__(self, other: object) -> bool:
         
         if not isinstance(other, Package):
@@ -131,6 +103,45 @@ class Package(Packages):
         return hash((self.package, self.version, self.arch))
 
     def __init__(self, section: str):
+        
+        # Whether the package is valid or not, set to True if all required fields are present
+        self._isvalid: bool = False  
+        self.package:        str = ''
+        self.version:        Version
+
+        # 'depends', 'pre-depends', 'recommends', 'suggests', 'breaks', 
+        # 'conflicts', 'provides', 'replaces', 'enhances', 'built-using']
+        self.depends:        List[List[Dict[str, Any]]] = []
+
+        # dependencies that must be satisfied before the package can be unpacked
+        self.pre_depends:    List[List[Dict[str, Any]]] = []  
+        self.recommends:     List[List[Dict[str, Any]]] = []
+        self.suggests:       List[List[Dict[str, Any]]] = []
+        self.breaks:         List[List[Dict[str, Any]]] = []
+        self.conflicts:      List[List[Dict[str, Any]]] = []
+        self.provides:       List[List[Dict[str, Any]]] = []
+        self.replaces:       List[List[Dict[str, Any]]] = []
+        self.enhances:       List[List[Dict[str, Any]]] = []
+        self.built_using:    List[List[Dict[str, Any]]] = []
+
+        self.depends_on:     List[str] = []
+        self.depended_by:    List[str] = []
+
+        # Not necessarily aligned to 'Priority' field, default set to 'Priority' field, may change later
+        # this will be set to the highest priority of those packages that depends on them.
+        # e.g. if 'required' package has a dependency, they will be 'required' too
+        self.priority:       str  = ''
+                                    
+        self.arch:           str  = ''   # Architecture of the package, e.g. amd64, arm64, etc.
+
+        self.installed:  bool = False  # Whether the package is installed or not
+        self.configured: bool = False  # Whether the package is configured or not
+
+        self._err_str: str = ""
+        self._pkg_valid: bool = False  # Whether the package is valid or not
+
+        # List of version constraints for the package
+        self._constraints: Dict[Version, VersionConstraint] = []
 
         super().__init__(section)
 
@@ -183,17 +194,35 @@ class Package(Packages):
         # _depends_list = apt_pkg.parse_depends(self['Depends'], strip_multi_arch=True, architecture=self.arch)
         # self.depends = [sublist[0] for sublist in _depends_list if len(sublist) == 1]
         # self.alt_depends = [sublist for sublist in _depends_list if len(sublist) > 1]
+        
+        self._isvalid = True  
 
 
-    def get_provides(self) -> List[str]:
+    def get_provides(self) -> List[Tuple[str, Version]]:
+        
         if len(self.provides) == 0:
             return []
 
         # Provides should not have alternates, but still, we will flatten it        
-        _provides_names: List[str] = []
+        _provides_names: List[Tuple[str, Version]] = []
+
         for _grp in self.provides:
             for _dep in _grp:
-                _provides_names.append(_dep['name'])
+                if _dep['version'] is not None:
+                    # If version is specified, we will use it
+                    _version = Version(_dep['version'][1])
+                else:
+                    # If version is not specified, we will use the package version
+                    _version = self.version
+                
+                _pkg = _dep['name'].strip()
+
+                if _pkg == '':
+                    tui.console.print(f"WARNING: Empty package name in provides "
+                                      f"for {self.package} {self.version}, skipping")
+                    continue
+
+                _provides_names.append((_pkg, _version))
     
         return _provides_names
     
@@ -207,7 +236,7 @@ class Package(Packages):
             bool:
         """
         assert 'Package' in self, "Malformed Package, No Package Name"
-        return (pkg_name in self.get_provides())
+        return any(name == pkg_name for name, _ in self.get_provides())
 
     @property
     def constraints_satisfied(self) -> bool:
@@ -275,77 +304,91 @@ class Package(Packages):
             return False
 
 class Source(Sources):
-
-    package:    str = ''
-    binary:     str = ''
-    version:    Version
-    arch:       List[str]
-
-    _build_depends = []
-    _build_conflicts = []
-    
-    _files = []
+    """ Class to hold source package information.
+    Source package is the original package from which binary packages are built
+    It contains information about the source package, its version, architecture,
+    and the binary packages that are built from it.
+    """
 
     def __init__(self, section: str):
+
+        self.package:    str = ''
+        self.version:    Version
+        self.arch:       List[str]
+
+        # 'build-depends', 'build-depends-indep', 'build-depends-arch', 
+        # 'build-conflicts', 'build-conflicts-indep', 'build-conflicts-arch', 'binary'
+        self.binary:             List[List[Dict[str, Any]]]
+        self.depends:            List[List[Dict[str, Any]]]
+        self.depends_indep:      List[List[Dict[str, Any]]]
+        self.depends_arch:       List[List[Dict[str, Any]]]
+        self.conflicts:          List[List[Dict[str, Any]]]
+        self.conflicts_indep:    List[List[Dict[str, Any]]]
+        self.conflicts_arch:     List[List[Dict[str, Any]]]
+        
+        # can be derived from Package-List field, but it is tedious - correlation for versions required
+        # One source provides multiple packages, package may have different version from the source version
+        # Package-List may have additional information e.g. 'udeb' tag which is not there in package
+        # Lets only select the package-files that the Package actually needs, the others produced are optional
+        self.package_list: List[str]
+
+        self.skip_test = False
+        self.patch_list = []
 
         super().__init__(section)
 
         assert 'Package' in self, "Malformed Package, No Package Name"
         assert 'Version' in self, "Malformed Package, No Version Given"
-        assert 'Architecture' in self, "Malformed Package, No Architecture Given"
-
         assert 'Files' in self, "Malformed Package, No Version Given"
         assert 'Directory' in self, "Malformed Package, No Version Given"
 
         assert not self['Package'] == '', "Malformed Package, No Package Name"
         assert not self['Version'] == '', "Malformed Package, No Version Given"
-        assert not self['Architecture'] == '', "Malformed Package, No Architecture Given"
         assert not self['Files'] == '', "Malformed Package, No Files Given"
         assert not self['Directory'] == '', "Malformed Package, No Directory Given"
 
         self.package = self['Package']
-        self.binary = self['Binary'] if 'Binary' in self else ''
         self.version = self['Version']
-        self.arch = self['Architecture']
-
         self.directory = self['Directory']
-        self.pkgs: [] = []
-        self.files: {} = {}
-        self.skip_test = False
-        self.patch_list = []
+        self.files = self['Files']
 
-        # if self.package == 'glibc':
-        #    print('.')
+        self.binary = self.relations.get('binary', [])
 
-        _depends_list = []
-        _dep_string = ['Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch']
-        for _dep in _dep_string:
-            self._build_depends += apt_pkg.parse_src_depends(self[_dep], strip_multi_arch=True, architecture=self.arch)
+        self.depends = self.relations.get('depends', [])
+        self.depends_indep = self.relations.get('depends-indep', [])
+        self.depends_arch = self.relations.get('depends-arch', [])
+        
+        self.conflicts = self.relations.get('conflicts', [])
+        self.conflicts_indep = self.relations.get('conflicts-indep', [])
+        self.conflicts_arch = self.relations.get('conflicts-arch', [])
 
-        _files_list = self['Files'].split('\n')
-        for _file in _files_list:
-            _file = _file.split()
-            if len(_file) == 3:
-                self.files[_file[2]] = {'path': os.path.join(self.directory, _file[2]),
-                                        'size': _file[1], 'md5': _file[0]}
-
-        # can be derived from Package-List field, but it is tedious - correlation for versions required
-        # One source provides multiple packages, package may have different version from the source version
-        # Package-List may have additional information e.g. 'udeb' tag which is not there in package
-        # Lets only select the package-files that the Package actually needs, the others produced are optional
+        self.package_list = [line for line in self['package-list'].split('\n') if line.strip()]
+        
+        _arch_field = self.get('Architecture', '').strip()
+        if not _arch_field:
+            self.arch = ['any']
+        else:
+            self.arch = _arch_field.split()
 
     @property
     def download_size(self) -> int:
         _download_size = 0
         for _file in self.files:
-            _download_size += int(self.files[_file]['size'])
+            _download_size += int(_file['size'])
         return _download_size
 
-    @property
-    def build_depends(self) -> str:
-        _dep_str = ''
-        for _dep in self._build_depends:
-            # by default select first package even for multi/alt dependencies
-            _dep_str += _dep[0][0] + ' '
 
-        return _dep_str
+    def build_depends(self, arch: str) -> List[List[Dict[str, Any]]]:
+        """
+        Returns a list of tuples: (package_name, version_constraint)
+        from build-depends, build-depends-indep, and build-depends-arch.
+        """
+
+        all_deps: List[List[Dict[str, Any]]] = []
+        
+        # Combine all relevant build-depends lists
+        for _dep_group in (self.depends, self.depends_indep, self.depends_arch):
+            for _dep_package in _dep_group:
+                all_deps.append(_dep_package)
+
+        return all_deps
