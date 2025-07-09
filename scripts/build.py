@@ -103,17 +103,11 @@ def main(banner: str):
     # Step I - Building Cache
     console.print("Building Cache...")
     build_cache = Cache(build_config)
+    
     _tui.wait()
     Exit(0)
 
-    # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
-    gcc_versions = [pkg for pkg in build_cache.required if pkg.startswith('gcc-')]
-    latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(num) for num in x.split('-')[1].split('.')))[-1:]
-    latest_gcc = set(latest_gcc_versions)
-    build_cache.required = [pkg for pkg in build_cache.required if not pkg.startswith('gcc-') or pkg in latest_gcc]
 
-    Print(f"Required Package Count : {len(build_cache.required)}")
-    Print(f"Important Package Count : {len(build_cache.important)}")
     # -------------------------------------------------------------------------------------------------------------
     # Step II - Parse Dependencies
 

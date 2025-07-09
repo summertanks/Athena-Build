@@ -4,8 +4,8 @@ import os
 import docker
 from docker import errors
 
-from source import Source
 from utils import BuildConfig
+from package import Source
 
 Print = print
 
