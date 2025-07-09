@@ -301,6 +301,15 @@ class Cache:
         progress_bar_src.close()
         parser_spinner.done()
         
+        # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
+        gcc_versions = [pkg for pkg in self.required if pkg.startswith('gcc-')]
+        latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(num) for num in x.split('-')[1].split('.')))[-1:]
+        latest_gcc = set(latest_gcc_versions)
+        self.required = [pkg for pkg in self.required if not pkg.startswith('gcc-') or pkg in latest_gcc]
+
+        tui.console.print(f"Required Package Count : {len(self.required)}")
+        tui.console.print(f"Important Package Count : {len(self.important)}")
+        
         return True
 
     def get_packages(self, package_name: str) -> List[Package]:

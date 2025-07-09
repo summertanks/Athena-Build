@@ -7,6 +7,8 @@ import argparse
 
 import tui
 from tui import Prompt, Spinner, ProgressBar
+from typing import List, Optional, Any
+
 
 class BaseDistribution:
     def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
@@ -213,41 +215,6 @@ def download_file(url: str, filename: str) -> int:
         tui.console.print(f"Error connecting to {url}: {e}")
         return -1
     
-# def download_file_tqdm(url: str, filename: str) -> int:
-#     """Downloads file and updates progressbar in incremental manner.
-#         Args:
-#             url (str): url to download file from, protocol is prepended
-#             filename (str): Filename to save to, location should be writable
-
-#         Returns:
-#             int: -1 for failure, file_size on success
-#     """
-#     import requests
-#     from tqdm import tqdm
-#     from urllib.parse import urlsplit
-#     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
-
-#     name_strip = urlsplit(url).path.split('/')[-1]
-#     progress_format = '{percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} ({rate_fmt}) - {desc}'
-#     try:
-#         response = requests.head(url)
-#         file_size = int(response.headers.get('content-length', 0))
-#         progress_bar = tqdm(desc=f"{name_strip.ljust(15, ' ')}", ncols=80, total=file_size,
-#                             bar_format=progress_format, unit='iB', unit_scale=True, unit_divisor=1024)
-#         response = requests.get(url, stream=True)
-#         if response.status_code == 200:
-#             with open(filename, 'wb') as f:
-#                 for chunk in response.iter_content(chunk_size=1024):
-#                     if chunk:
-#                         f.write(chunk)
-#                         progress_bar.update(len(chunk))
-#     except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-#         print(f"Error connecting to {url}: {e}")
-#         return -1
-#     progress_bar.clear()
-#     progress_bar.close()
-#     return file_size
-
 
 def download_source(dependency_tree, dir_download, base_distribution: BaseDistribution):
     import requests
@@ -384,23 +351,65 @@ def create_folders(folder_structure: str):
 
 
 class Node:
-    def __init__(self, value):
+    def __init__(self, value: Any):
         self.value = value
-        self.children = []
+        self.children: List['Node'] = []
 
-    def add_child(self, child):
-        self.children.append(child)
+    def add_child(self, child: 'Node') -> None:
+        """Add a child node, avoiding duplicates"""
+        if child not in self.children:
+            self.children.append(child)
 
-    def remove_child(self, child):
-        self.children.remove(child)
+    def remove_child(self, child: 'Node') -> bool:
+        """Remove a child node, return True if removed, False if not found"""
+        try:
+            self.children.remove(child)
+            return True
+        except ValueError:
+            return False
+    
+    def has_child(self, child: 'Node') -> bool:
+        """Check if node has a specific child"""
+        return child in self.children
+    
+    def get_child_by_value(self, value: Any) -> Optional['Node']:
+        """Find child by value"""
+        for child in self.children:
+            if child.value == value:
+                return child
+        return None
+    
+    def is_leaf(self) -> bool:
+        """Check if node has no children"""
+        return len(self.children) == 0
+    
+    def __repr__(self) -> str:
+        return f"Node(value={self.value}, children={len(self.children)})"
+    
+    def __eq__(self, other: Any) -> bool:
+        """Enable equality comparison"""
+        if not isinstance(other, Node):
+            return False
+        return self.value == other.value
+    
+    def __hash__(self) -> int:
+        """Enable hashing for set operations"""
+        return hash(self.value)
 
+from typing import Optional, Any, List
 
 class Tree:
     def __init__(self):
-        self.root = None
+        self.root: Optional[Node] = None
 
-    def add_node(self, value, parent_value=None):
+    def add_node(self, value: Any, parent_value: Optional[Any] = None) -> Node:
+        """Add a node to the tree"""
+        # Check if node with this value already exists
+        if self.find_node(value) is not None:
+            raise ValueError(f"Node with value '{value}' already exists")
+            
         node = Node(value)
+        
         if parent_value is None:
             if self.root is None:
                 self.root = node
@@ -409,24 +418,42 @@ class Tree:
         else:
             parent_node = self.find_node(parent_value)
             if parent_node is None:
-                raise ValueError("Parent node does not exist")
+                raise ValueError(f"Parent node with value '{parent_value}' does not exist")
             parent_node.add_child(node)
+            
         return node
 
-    def delete_node(self, value):
+    def delete_node(self, value: Any) -> bool:
+        """Delete a node and handle its children"""
         node = self.find_node(value)
         if node is None:
-            raise ValueError("Node does not exist")
+            return False
+            
         parent = self.find_parent_node(value)
+        
         if parent is not None:
+            # Remove from parent
             parent.remove_child(node)
+            # Move children to parent (or could delete them - depends on use case)
+            for child in node.children:
+                parent.add_child(child)
         else:
-            self.root = None
+            # Deleting root node
+            if len(node.children) == 0:
+                self.root = None
+            elif len(node.children) == 1:
+                self.root = node.children[0]
+            else:
+                raise ValueError("Cannot delete root node with multiple children")
+        
+        return True
 
-    def find_node(self, value):
+    def find_node(self, value: Any) -> Optional[Node]:
+        """Find a node by value"""
         return self._find_node_helper(self.root, value)
 
-    def _find_node_helper(self, node, value):
+    def _find_node_helper(self, node: Optional[Node], value: Any) -> Optional[Node]:
+        """Recursive helper for finding nodes"""
         if node is None:
             return None
         if node.value == value:
@@ -437,10 +464,12 @@ class Tree:
                 return result
         return None
 
-    def find_parent_node(self, value):
+    def find_parent_node(self, value: Any) -> Optional[Node]:
+        """Find the parent of a node with given value"""
         return self._find_parent_node_helper(None, self.root, value)
 
-    def _find_parent_node_helper(self, parent, node, value):
+    def _find_parent_node_helper(self, parent: Optional[Node], node: Optional[Node], value: Any) -> Optional[Node]:
+        """Recursive helper for finding parent nodes"""
         if node is None:
             return None
         if node.value == value:
@@ -452,15 +481,93 @@ class Tree:
         return None
 
     def size(self) -> int:
-        return len(self.root.children)
+        """Return total number of nodes in the tree"""
+        return self._count_nodes(self.root)
+    
+    def _count_nodes(self, node: Optional[Node]) -> int:
+        """Recursively count all nodes"""
+        if node is None:
+            return 0
+        count = 1  # Count current node
+        for child in node.children:
+            count += self._count_nodes(child)
+        return count
+
+    def depth(self) -> int:
+        """Return the maximum depth of the tree"""
+        return self._calculate_depth(self.root)
+    
+    def _calculate_depth(self, node: Optional[Node]) -> int:
+        """Recursively calculate tree depth"""
+        if node is None:
+            return 0
+        if not node.children:
+            return 1
+        return 1 + max(self._calculate_depth(child) for child in node.children)
+
+    def get_leaves(self) -> List[Node]:
+        """Return all leaf nodes"""
+        leaves = []
+        self._collect_leaves(self.root, leaves)
+        return leaves
+    
+    def _collect_leaves(self, node: Optional[Node], leaves: List[Node]) -> None:
+        """Recursively collect leaf nodes"""
+        if node is None:
+            return
+        if node.is_leaf():
+            leaves.append(node)
+        else:
+            for child in node.children:
+                self._collect_leaves(child, leaves)
+
+    def get_path_to_node(self, value: Any) -> Optional[List[Any]]:
+        """Get path from root to node with given value"""
+        path = []
+        if self._find_path_helper(self.root, value, path):
+            return path
+        return None
+    
+    def _find_path_helper(self, node: Optional[Node], value: Any, path: List[Any]) -> bool:
+        """Recursive helper for finding path to node"""
+        if node is None:
+            return False
+        
+        path.append(node.value)
+        
+        if node.value == value:
+            return True
+        
+        for child in node.children:
+            if self._find_path_helper(child, value, path):
+                return True
+        
+        path.pop()  # Backtrack
+        return False
 
     @property
     def is_childless(self) -> bool:
+        """Check if root has no children"""
         if not self.root:
             return True
         return len(self.root.children) == 0
 
     @property
     def is_empty(self) -> bool:
+        """Check if tree is empty"""
         return self.root is None
-
+    
+    def __repr__(self) -> str:
+        return f"Tree(size={self.size()}, depth={self.depth()}, empty={self.is_empty})"
+    
+    def print_tree(self, node: Optional[Node] = None, indent: str = "") -> None:
+        """Print tree structure"""
+        if node is None:
+            node = self.root
+        if node is None:
+            print("Empty tree")
+            return
+            
+        print(f"{indent}{node.value}")
+        for child in node.children:
+            self.print_tree(child, indent + "  ")
