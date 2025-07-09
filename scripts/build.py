@@ -102,7 +102,7 @@ def main(banner: str):
     # --------------------------------------------------------------------------------------------------------------
     # Step I - Building Cache
     console.print("Building Cache...")
-    build_cache = cache.Cache(build_config)
+    build_cache = Cache(build_config)
     _tui.wait()
     Exit(0)
 

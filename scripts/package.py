@@ -16,8 +16,8 @@ class VersionConstraint:
     
 
     def __init__(self, version: Version, constraint: str):
-        _version: Version
-        _constraint: str = ''
+        self._version: Version
+        self._constraint: str
 
         self._version = version
         self._constraint = constraint.strip()
@@ -140,19 +140,22 @@ class Package(Packages):
         self._err_str: str = ""
         self._pkg_valid: bool = False  # Whether the package is valid or not
 
-        # List of version constraints for the package
-        self._constraints: Dict[Version, VersionConstraint] = []
-
-        super().__init__(section)
-
         # Setting Values post calling super()
-        assert 'Package' in self, "Malformed Package, No Package Name"
-        assert 'Version' in self, "Malformed Package, No Version Given"
-        assert 'Architecture' in self, "Malformed Package, No Architecture Given"
-
-        assert not self['Package'] == '', "Malformed Package, No Package Name"
-        assert not self['Version'] == '', "Malformed Package, No Version Given"
-        assert not self['Architecture'] == '', "Malformed Package, No Architecture Given"
+        super().__init__(section)
+        
+        # List of version constraints for the package
+        self._constraints: Dict[Version, VersionConstraint] = {}
+        
+        for _field in ['Package', 'Version', 'Architecture']:
+            if _field not in self:
+                tui.console.print(f"WARNING: Malformed package, skipping")
+                self._err_str = f"Missing field '{_field}' in package"
+                return
+            if self[_field] is None or self[_field].strip() == '':
+                tui.console.print(f"WARNING: Malformed package, skipping")
+                self._err_str = f"Empty field '{_field}' in package"
+                return
+        
 
         self.package = self['Package']
         self.version = Version(self['Version'])
@@ -197,17 +200,41 @@ class Package(Packages):
         
         self._isvalid = True  
 
+    @property
+    def isvalid(self) -> bool:
+        """
+        Returns whether the package is valid or not.
+        A package is valid if it has all the required fields and they are not empty.
+        """
+        return self._isvalid
+    
+    @property
+    def err_str(self) -> str:
+        """
+        Returns the error string if the package is not valid.
+        If the package is valid, returns an empty string.
+        """
+        return self._err_str
 
+    
     def get_provides(self) -> List[Tuple[str, Version]]:
         
         if len(self.provides) == 0:
             return []
 
-        # Provides should not have alternates, but still, we will flatten it        
+        # Provides should not have alternates
         _provides_names: List[Tuple[str, Version]] = []
+
+
+        # e.g. self.provides
+        # [{'name': 'acorn', 'archqual': None, 'version': ('=', '8.0.5+ds+~cs19.19.27-3'), 'arch': None, 'restrictions': None}]
+        # [{'name': 'node-acorn', 'archqual': None, 'version': ('=', '8.0.5'), 'arch': None, 'restrictions': None}]
+        # [{'name': 'node-acorn', 'archqual': None, 'version': ('=', '8.0.5+ds+~cs19.19.27-3'), 'arch': None, 'restrictions': None}]
+        # [{'name': 'node-acorn-bigint', 'archqual': None, 'version': ('=', '1.0.0'), 'arch': None, 'restrictions': None}]
 
         for _grp in self.provides:
             for _dep in _grp:
+                
                 if _dep['version'] is not None:
                     # If version is specified, we will use it
                     _version = Version(_dep['version'][1])
@@ -223,6 +250,9 @@ class Package(Packages):
                     continue
 
                 _provides_names.append((_pkg, _version))
+        
+        # provides a list of tupples
+        # [('acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn-bigint','1.0.0'), ]
     
         return _provides_names
     
@@ -235,15 +265,19 @@ class Package(Packages):
         Returns:
             bool:
         """
-        assert 'Package' in self, "Malformed Package, No Package Name"
+        if not self.isvalid:
+            return False
+        
         return any(name == pkg_name for name, _ in self.get_provides())
 
     @property
     def constraints_satisfied(self) -> bool:
         # needs a version to check against
-        assert 'Version' in self, "Malformed Package, No Version Given"
+        if not self.isvalid:
+            return False
 
         _satisfied = True
+        
         for _ver in self._constraints.keys():
             _constraint = self._constraints[_ver]
 
@@ -271,21 +305,26 @@ class Package(Packages):
         }
 
         if constraint == '': constraint = '='
-
-        _constraint = VersionConstraint(version, constraint)
+        
+        if constraint not in ['=', '>=', '<=', '>>', '<<']:
+            tui.console.print(f"WARNING: Invalid constraint '{constraint}' for package {self.package} "
+                              f"version {self.version}, skipping")
+            return False
 
         # If the constraint is not added yet, add it
         if version not in self._constraints:
-            self._constraints[version] = _constraint
+            self._constraints[version] = VersionConstraint(version, constraint)
             return True
         
-        _old_constraint = self._constraints[version]
+        old_constraint: str = self._constraints[version].constraint
 
         # Constraint is already there, nothing to add
-        if _old_constraint == _constraint:
+        if old_constraint == constraint:
             return True
         
-        action = constraint_action.get(_constraint.constraint, {}).get(_old_constraint.constraint, 'conflict')
+        action = constraint_action[constraint][old_constraint]
+        
+        _constraint = VersionConstraint(version, constraint)
         
         if action == 'nc':
             return True
@@ -300,7 +339,7 @@ class Package(Packages):
         
         else:
             tui.console.print(f"WARNING: Cannot resolve conflicting constraints for "
-                              f"{self.package} {_constraint} vs {_old_constraint}, ignoring")
+                              f"{self.package} {_constraint} vs {old_constraint}, ignoring")
             return False
 
 class Source(Sources):
@@ -334,21 +373,30 @@ class Source(Sources):
 
         self.skip_test = False
         self.patch_list = []
-
+        
+        # Whether the package is valid or not, set to True if all required fields are present
+        self._isvalid: bool = False 
+        
         super().__init__(section)
+        
+        for _field in ['Package', 'Version', 'Directory']:
+            if _field not in self:
+                tui.console.print(f"WARNING: Malformed package, skipping")
+                self._err_str = f"Missing field '{_field}' in package"
+                return
+            if self[_field] is None or self[_field].strip() == '':
+                tui.console.print(f"WARNING: Malformed package, skipping")
+                self._err_str = f"Empty field '{_field}' in package"
+                return
+        
+        if 'Files' not in self or self['Files'] is None:
+            tui.console.print(f"WARNING: Malformed package, skipping")
+            self._err_str = "Missing 'Files' field in package"
+            return
 
-        assert 'Package' in self, "Malformed Package, No Package Name"
-        assert 'Version' in self, "Malformed Package, No Version Given"
-        assert 'Files' in self, "Malformed Package, No Version Given"
-        assert 'Directory' in self, "Malformed Package, No Version Given"
-
-        assert not self['Package'] == '', "Malformed Package, No Package Name"
-        assert not self['Version'] == '', "Malformed Package, No Version Given"
-        assert not self['Files'] == '', "Malformed Package, No Files Given"
-        assert not self['Directory'] == '', "Malformed Package, No Directory Given"
-
+        # Setting Values post calling super()
         self.package = self['Package']
-        self.version = self['Version']
+        self.version = Version(self['Version'])
         self.directory = self['Directory']
         self.files = self['Files']
 
@@ -361,15 +409,27 @@ class Source(Sources):
         self.conflicts = self.relations.get('conflicts', [])
         self.conflicts_indep = self.relations.get('conflicts-indep', [])
         self.conflicts_arch = self.relations.get('conflicts-arch', [])
-
-        self.package_list = [line for line in self['package-list'].split('\n') if line.strip()]
         
+        _package_list = self.get('Package-List', '').strip()
+        if _package_list:
+            self.package_list = [line for line in self['package-list'].split('\n') if line.strip()]
+       
         _arch_field = self.get('Architecture', '').strip()
         if not _arch_field:
             self.arch = ['any']
         else:
             self.arch = _arch_field.split()
+        
+        self._isvalid = True  # Package is valid if all required fields are present
 
+    @property
+    def isvalid(self) -> bool:
+        """
+        Returns whether the source package is valid or not.
+        A package is valid if it has all the required fields and they are not empty.
+        """
+        return self._isvalid
+    
     @property
     def download_size(self) -> int:
         _download_size = 0
