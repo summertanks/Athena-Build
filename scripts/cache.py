@@ -1,22 +1,17 @@
-import bz2
-import gzip
+import bz2, gzip
 import os
 import apt_pkg
-from collections import OrderedDict
+
 from urllib.parse import urlsplit
 from debian.deb822 import Release
 from debian.debian_support import DpkgArchTable, Version
+from typing import List, Dict
+from collections import defaultdict, OrderedDict
 
 # Internal
-import utils
-import package
-import tui
-
-from package import Package, Source
-from typing import List, Dict
-from collections import defaultdict
-from utils import BuildConfig
-
+import utils, package, tui
+from .utils import BuildConfig
+from .package import Package, Source
 
 # https://github.com/romlok/python-debian/tree/master/examples
 # https://www.juliensobczak.com/inspect/2021/05/15/linux-packages-under-the-hood.html
@@ -302,11 +297,12 @@ class Cache:
         parser_spinner.done()
         
         # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
+        #TODO: capable of skipping non numeric version, e.g. multilib, etc.
         gcc_versions = [pkg for pkg in self.required if pkg.startswith('gcc-')]
         latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(num) for num in x.split('-')[1].split('.')))[-1:]
         latest_gcc = set(latest_gcc_versions)
         self.required = [pkg for pkg in self.required if not pkg.startswith('gcc-') or pkg in latest_gcc]
-
+        tui.console.print(f"Selected : {latest_gcc}")
         tui.console.print(f"Required Package Count : {len(self.required)}")
         tui.console.print(f"Important Package Count : {len(self.important)}")
         
