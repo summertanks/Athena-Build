@@ -28,6 +28,7 @@ import platform
 import queue
 import signal
 import socket
+import sys
 import threading
 import time
 from math import floor
@@ -104,6 +105,13 @@ class Tui:
     # ── Shell prompt strings ──────────────────────────────────────────────
     _PROMPT_IDLE = '$ '
     _PROMPT_BUSY = '[…] '
+
+    # ── Log map: severity → (tag, attr); rebuilt with colors in _setup() ──
+    _log_map: Dict[int, Tuple[str, int]] = {
+        SEVERITY_ERROR:   ('[ERROR]', curses.A_BOLD),
+        SEVERITY_WARNING: ('[WARN ]', curses.A_BOLD),
+        SEVERITY_INFO:    ('[INFO ]', curses.A_NORMAL),
+    }
 
     # =====================================================================
     # Inner helpers
@@ -212,7 +220,6 @@ class Tui:
 
         # Thread locks
         self._prompt_lock  = threading.Lock()
-        self._shell_lock   = threading.Lock()
         self._print_lock   = threading.Lock()
         self._refresh_lock = threading.Lock()
         self._log_lock     = threading.Lock()
@@ -246,23 +253,17 @@ class Tui:
         self._stdscr: curses.window
         self._setup()
 
-        if not self._is_setup:
-            print('TUI: failed to initialise screen\r')
-            return
-
-        self._activate('console')
-
-        # Post-setup sanity
         try:
-            assert self._footer is not None,    'footer window missing'
-            assert 'console' in self._tabs,     '"console" tab missing'
-            assert 'log'     in self._tabs,     '"log" tab missing'
-            active = [t for t in self._tabs if self._tabs[t]['selected']]
-            assert len(active) == 1, f'expected 1 active tab, got {len(active)}'
-        except AssertionError as exc:
+            if not self._is_setup:
+                raise RuntimeError('failed to initialise screen')
+            missing = [n for n in ('console', 'log') if n not in self._tabs]
+            if missing or self._footer is None:
+                raise RuntimeError(f'mandatory windows missing: {", ".join(missing) or "footer"}')
+            self._activate('console')
+        except Exception as exc:
             self._shutdown()
-            print(f'TUI: setup validation failed: {exc}\r')
-            return
+            print(f'TUI: fatal — {exc}\r')
+            sys.exit(1)
 
         self.INFO('TUI initialised')
 
@@ -562,6 +563,8 @@ class Tui:
 
     @property
     def _activetab(self) -> _TabEntry:
+        if not self._tabs:
+            raise RuntimeError('_activetab called with no tabs initialised')
         active = [v for v in self._tabs.values() if v['selected']]
         if len(active) == 1:
             return active[0]
@@ -570,8 +573,7 @@ class Tui:
             v['selected'] = False
         first = next(iter(self._tabs.values()))
         first['selected'] = True
-        if len(active) != 1:
-            self.ERROR(f'Tab state inconsistency ({len(active)} active) — reset to first')
+        self.ERROR(f'Tab state inconsistency ({len(active)} active) — reset to first')
         return first
 
     def _activate(self, name: str) -> None:
@@ -615,14 +617,14 @@ class Tui:
                       f'{self.MIN_COLS}×{self.MIN_LINES}\r')
                 return
 
+        self._is_setup = True   # set early so _shutdown() can clean up on any failure below
+
         try:
             curses.noecho()
             curses.cbreak()
             curses.curs_set(0)
-        except curses.error:
-            self._is_setup = True   # allow _shutdown to run cleanup
-            self._shutdown()
-            return
+        except curses.error as exc:
+            raise RuntimeError(f'failed to configure terminal: {exc}') from exc
 
         if curses.has_colors():
             curses.start_color()
@@ -634,12 +636,15 @@ class Tui:
             curses.init_pair(self.COLOR_HIGHLIGHT, self.highlight_color, self.bg_color)
             curses.init_pair(self.COLOR_FOOTER,    self.fg_color,        self.bg_footer)
             curses.init_pair(self.COLOR_INFO,      self.info_color,      self.bg_color)
+            Tui._log_map = {
+                self.SEVERITY_ERROR:   ('[ERROR]', curses.color_pair(self.COLOR_ERROR)   | curses.A_BOLD),
+                self.SEVERITY_WARNING: ('[WARN ]', curses.color_pair(self.COLOR_WARNING) | curses.A_BOLD),
+                self.SEVERITY_INFO:    ('[INFO ]', curses.color_pair(self.COLOR_INFO)),
+            }
 
         self._stdscr.keypad(True)
         self._stdscr.nodelay(True)
-
         self._create_windows()
-        self._is_setup = True
 
     def _shutdown(self) -> None:
         if not self._is_setup:
@@ -832,15 +837,12 @@ class Tui:
         assert severity in (self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO)
 
         ts = datetime.datetime.now().strftime('%H:%M:%S')
-        _map = {
-            self.SEVERITY_ERROR:   ('[ERROR]', curses.color_pair(self.COLOR_ERROR)   | curses.A_BOLD),
-            self.SEVERITY_WARNING: ('[WARN ]', curses.color_pair(self.COLOR_WARNING) | curses.A_BOLD),
-            self.SEVERITY_INFO:    ('[INFO ]', curses.color_pair(self.COLOR_INFO)),
-        }
-        tag, attr = _map[severity]
+        tag, attr = self._log_map[severity]
         line = f'[{ts}] {tag} {message}'
 
         with self._log_lock:
+            if 'log' not in self._tabs:
+                return
             log = self._tabs['log']
             log['buffer'].append((line, attr))
             log['cursor'] = len(log['buffer'])
@@ -858,6 +860,8 @@ class Tui:
     def print(self, message: str, attribute: Optional[int] = None) -> None:
         """Append *message* to the console tab buffer."""
         with self._print_lock:
+            if 'console' not in self._tabs:
+                return
             if attribute is None:
                 attribute = curses.color_pair(self.COLOR_NORMAL)
             con = self._tabs['console']
@@ -907,6 +911,8 @@ class Tui:
                 self._tabs[name]['cursor'] = 0
             else:
                 self.print(f'Unknown tab: "{name}"')
+                return
+        self._dirty = True
 
     def history(self) -> None:
         """Print command history (the current 'history' call is excluded)."""
@@ -916,9 +922,6 @@ class Tui:
 
     def info(self) -> None:
         """Print system and runtime information."""
-        import os
-        import platform
-        import socket
         self.print(f'  Application : {self._banner}')
         self.print(f'  OS          : {platform.system()} {platform.release()}')
         self.print(f'  Hostname    : {socket.gethostname()}')
@@ -935,7 +938,7 @@ class Tui:
     def demo(self) -> None:
         """Demonstrate built-in prompts, spinner, progress bar, and log severity."""
         spin = Spinner('Running demo')
-        self.print(f'  Demo info message')
+        self.print('  Demo info message')
         Prompt(PROMPT_YESNO,    'Yes / No prompt').get_response()
         Prompt(PROMPT_INPUT,    'Free-text input').get_response()
         Prompt(PROMPT_OPTIONS,  'Choose one', ['yes', 'no']).get_response()
@@ -947,7 +950,7 @@ class Tui:
             curses.napms(20)
         bar.close(persist=True)
 
-        self.print(f'  Sent log information message')
+        self.print('  Sent log information message')
         self.INFO('Demo info message — everything is fine')
         self.WARNING('Demo warning message — something to watch')
         self.ERROR('Demo error message — something went very wrong')
@@ -1000,41 +1003,40 @@ class Tui:
 
     def shell(self) -> None:
         """Command-dispatch loop.  Runs in its own daemon thread."""
-        with self._shell_lock:
-            while True:
-                self.cmd_prompt = self._PROMPT_IDLE
+        while True:
+            self.cmd_prompt = self._PROMPT_IDLE
 
-                cond = threading.Condition()
-                self._dispatch_line.put(cond)
-                with cond:
-                    cond.wait()
+            cond = threading.Condition()
+            self._dispatch_line.put(cond)
+            with cond:
+                cond.wait()
 
-                try:
-                    command = self._input_queue.get_nowait()
-                except queue.Empty:
-                    self.ERROR('shell: notified but input queue is empty')
-                    continue
+            try:
+                command = self._input_queue.get_nowait()
+            except queue.Empty:
+                self.ERROR('shell: notified but input queue is empty')
+                continue
 
-                command = command.strip()
-                if not command:
-                    continue
+            command = command.strip()
+            if not command:
+                continue
 
-                self.print(f'  {command}', curses.color_pair(self.COLOR_HIGHLIGHT))
-                self.cmd_prompt = self._PROMPT_BUSY
-                self.INFO(f'Executing: {command}')
-                self._cmd.add_history(command)
+            self.print(f'  {command}', curses.color_pair(self.COLOR_HIGHLIGHT))
+            self.cmd_prompt = self._PROMPT_BUSY
+            self.INFO(f'Executing: {command}')
+            self._cmd.add_history(command)
 
-                parts = command.split()
-                fn    = self._cmd.get(parts[0])
-                if fn is None:
-                    self.print(f'  Unknown command: "{parts[0]}"  — type "help" for a list')
-                    continue
+            parts = command.split()
+            fn    = self._cmd.get(parts[0])
+            if fn is None:
+                self.print(f'  Unknown command: "{parts[0]}"  — type "help" for a list')
+                continue
 
-                try:
-                    fn(*parts[1:])
-                except TypeError as exc:
-                    self.print(f'  Error: {exc}')
-                    self.ERROR(str(exc))
+            try:
+                fn(*parts[1:])
+            except TypeError as exc:
+                self.print(f'  Error: {exc}')
+                self.ERROR(str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -1195,6 +1197,16 @@ class ProgressBar:
         self._value = min(self._value + value, self._max)
         if self._value >= self._max:
             self._state = self.STOPPED
+
+    def pause(self) -> None:
+        """Pause the bar — step() calls are ignored until resume()."""
+        if self._state == self.RUNNING:
+            self._state = self.PAUSED
+
+    def resume(self) -> None:
+        """Resume a paused bar."""
+        if self._state == self.PAUSED:
+            self._state = self.RUNNING
 
     def set_max(self, value: int) -> None:
         self._max = max(1, value)
