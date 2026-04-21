@@ -1,0 +1,13 @@
+# Python package requirements
+# Format: import_name   install_name
+# Lines starting with # are ignored
+
+psutil        psutil
+requests      requests
+apt_pkg       python3-apt
+rich          rich
+debian        python3-debian
+gnupg         python-gnupg
+docker        docker
+apt           python3-apt
+aptsources    python3-apt

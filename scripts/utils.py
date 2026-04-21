@@ -5,6 +5,7 @@ import re
 import configparser
 import argparse
 
+import requests
 import tui
 from tui import Prompt, Spinner, ProgressBar
 from typing import List, Optional, Any
@@ -80,8 +81,8 @@ class BuildConfig:
             self.config_path = os.path.abspath(args.config_file)
             self.pkglist_path = os.path.abspath(args.pkg_list)
 
-            # Check if the working directory and config files are writable   
-            os.access(self.config_path, os.R_OK)
+            if not os.access(self.config_path, os.R_OK):
+                raise PermissionError(f'Config file is not readable: {self.config_path}')
 
         except (argparse.ArgumentError, OSError) as e:
             self.error_str = str(e)
@@ -122,7 +123,8 @@ class BuildConfig:
             return
         
         try:
-            os.access(self.working_dir, os.W_OK)
+            if not os.access(self.working_dir, os.W_OK):
+                raise PermissionError(f'Working directory is not writable: {self.working_dir}')
 
             pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
@@ -141,19 +143,14 @@ class BuildConfig:
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
 
-            os.access(self.dir_download, os.W_OK)
-            os.access(self.dir_log, os.W_OK)
-            os.access(self.dir_cache, os.W_OK)
-            os.access(self.dir_temp, os.W_OK)
-            os.access(self.dir_source, os.W_OK)
-            os.access(self.dir_repo, os.W_OK)
-            os.access(self.dir_patch, os.W_OK)
-            os.access(self.dir_patch_empty, os.W_OK)
-            os.access(self.dir_patch_source, os.W_OK)
-            os.access(self.dir_patch_preinstall, os.W_OK)
-            os.access(self.dir_patch_postinstall, os.W_OK)
-            os.access(self.dir_image, os.W_OK)
-            os.access(self.dir_chroot, os.W_OK)
+            for _dir in (
+                self.dir_download, self.dir_log, self.dir_cache, self.dir_temp,
+                self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
+                self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
+                self.dir_image, self.dir_chroot,
+            ):
+                if not os.access(_dir, os.W_OK):
+                    raise PermissionError(f'Build directory is not writable: {_dir}')
 
             pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
 
@@ -180,27 +177,25 @@ class BuildConfig:
     
 def download_file(url: str, filename: str) -> int:
     """Downloads file and updates progressbar in incremental manner.
-        Args:
-            url (str): url to download file from, protocol is prepended
-            filename (str): Filename to save a review of your code and especially the constraint_action lookup table logic:to, location should be writable
 
-        Returns:
-            int: -1 for failure, file_size on success
+    Args:
+        url: URL to download from.
+        filename: Local path to write to; location must be writable.
+
+    Returns:
+        File size in bytes on success, -1 on failure.
     """
-    import requests
     from urllib.parse import urlsplit
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 
     name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
-    
+
     try:
-        response = requests.head(url)
-        file_size = int(response.headers.get('content-length', 0))
-        
         with requests.get(url, stream=True, timeout=10) as response:
             response.raise_for_status()
+            file_size = int(response.headers.get('content-length', 0))
 
-            progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s', maxvalue=file_size)
+            progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s', maxvalue=max(1, file_size))
 
             with open(filename, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
@@ -217,15 +212,12 @@ def download_file(url: str, filename: str) -> int:
     
 
 def download_source(dependency_tree, dir_download, base_distribution: BaseDistribution):
-    import requests
-    from tqdm import tqdm
     from urllib.parse import urljoin
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 
     _downloaded_size = 0
     _download_size = dependency_tree.download_size
 
-    # base_url = "http://deb.debian.org/debian/"
     base_url = 'http://' + base_distribution.url + '/' + base_distribution.baseid + '/'
 
     # build filelist to download - just for improved readability
@@ -237,48 +229,44 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
     _skipped = 0
     _total = len(_file_list)
 
-    progress_format = '{desc} {percentage:3.0f}%[{bar:30}]{n_fmt}/{total_fmt} ({rate_fmt})'
-    progress_bar = tqdm(ncols=80, total=_download_size, bar_format=progress_format, unit='iB', unit_scale=True)
+    progress_bar = ProgressBar(label='Downloading', itr_label='B/s', maxvalue=max(1, _download_size))
     for _file in _file_list:
-        progress_bar.set_description_str(desc=f" ({_index}/{_total})")
+        progress_bar.label(f'({_index}/{_total}) {_file[:20]}')
 
         _url = urljoin(base_url, _file_list[_file]['path'])
-        _md5 = _file_list[_file]['md5']
+        _sha256 = _file_list[_file]['sha256']
         _download_path = os.path.join(dir_download, _file)
-        _md5_check = get_md5(_download_path)
 
-        # do hash check
-        if _md5 != _md5_check:
-            # Failed - Lets download again
+        if get_sha256(_download_path) != _sha256:
             try:
-
                 response = requests.head(_url)
                 _size = int(response.headers.get('content-length', 0))
 
-                response = requests.get(_url, stream=True)
+                response = requests.get(_url, stream=True, timeout=30)
                 if response.status_code == 200:
                     with open(_download_path, 'wb') as f:
                         for chunk in response.iter_content(chunk_size=1024):
                             if chunk:
                                 f.write(chunk)
-                                progress_bar.update(len(chunk))
+                                progress_bar.step(len(chunk))
                 _downloaded_size += _size
 
             except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
                 tui.console.print(f"Error connecting to {_url}: {e}")
                 continue
 
-            assert get_md5(_download_path) == _md5, f"Downloaded {_file} hash mismatch"
+            if get_sha256(_download_path) != _sha256:
+                tui.console.error(f"Hash mismatch for {_file} — download may be corrupt")
+                continue
 
         else:
             _skipped += 1
-            progress_bar.update(int(_file_list[_file]['size']))
+            progress_bar.step(int(_file_list[_file]['size']))
             _downloaded_size += int(_file_list[_file]['size'])
 
         _index += 1
 
-    progress_bar.clear()
-    progress_bar.close()
+    progress_bar.close(persist=True)
 
     tui.console.print(f"Downloading {_total - _skipped} files, Skipped {_skipped} files")
     return _downloaded_size
@@ -309,27 +297,44 @@ def get_md5(filepath: str) -> str:
     Returns:
         str: md5
     """
-    md5_check = ''
-    if os.path.isfile(filepath):
-        # Open the file and calculate the MD5 hash
-        with open(filepath, 'rb') as f:
-            fdata = f.read()
-            md5_check = hashlib.md5(fdata).hexdigest()
+    if not os.path.isfile(filepath):
+        return ''
+    h = hashlib.md5()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
 
-    return md5_check
+
+def get_sha256(filepath: str) -> str:
+    """
+    Calculate the SHA256 hash of a file.
+    Args:
+        filepath: The file to hash
+    Returns:
+        str: hex digest, or empty string if file does not exist
+    """
+    if not os.path.isfile(filepath):
+        return ''
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def readfile(filename: str) -> str:
     try:
         with open(filename, 'r') as f:
-            contents = f.read()
-            return contents
+            return f.read()
     except (FileNotFoundError, PermissionError) as e:
-        tui.console.print(f"Error: {e}")
-        exit(1)
+        raise OSError(f'Cannot read file {filename}: {e}') from e
 
 
 def create_folders(folder_structure: str):
+    if not os.path.isabs(folder_structure):
+        raise ValueError(f'create_folders requires an absolute path, got: {folder_structure!r}')
+
     # split the folder structure string into individual path components
     components = folder_structure.split('/')
 
@@ -344,8 +349,8 @@ def create_folders(folder_structure: str):
                     new_path = os.path.join(path, subcomponent)
                     os.makedirs(new_path, exist_ok=True)
             else:
-                # add the component to the current path
                 path = os.path.join(path, component)
+                os.makedirs(path, exist_ok=True)
     except Exception as e:
         tui.console.print(f"Failed to build folder structure {e}")
 
@@ -395,8 +400,6 @@ class Node:
     def __hash__(self) -> int:
         """Enable hashing for set operations"""
         return hash(self.value)
-
-from typing import Optional, Any, List
 
 class Tree:
     def __init__(self):
@@ -565,9 +568,9 @@ class Tree:
         if node is None:
             node = self.root
         if node is None:
-            print("Empty tree")
+            tui.console.print("Empty tree")
             return
-            
-        print(f"{indent}{node.value}")
+
+        tui.console.print(f"{indent}{node.value}")
         for child in node.children:
             self.print_tree(child, indent + "  ")

@@ -24,9 +24,8 @@ usage() { \
         echo -e "\t -v|--verbose : Set verbosity high"; \
 }
 
-PWD=$(pwd)
+BUILD_DIR=$(pwd)
 
-set -e
 # enable common error handling options
 set -o errexit
 set -o nounset
@@ -35,7 +34,7 @@ set -o pipefail
 echo -e "Athena Linux Build System Check..."
 
 # Parsing args
-ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list,verbose' -- "$@") || exit
+ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose' -- "$@") || exit
 eval "set -- $ARGS"
 
 while true; do
@@ -47,7 +46,7 @@ while true; do
 			CONFIG_FILE=$2;
 			shift 2;;
 		(-p|--pkg-list)
-			PACKAGE_FILE=$2;
+			PKG_REQ_FILE=$2;
 			shift 2;;
 		(-h|--help)
 			usage;
@@ -78,6 +77,14 @@ echo Using `/usr/bin/gunzip  --version | head -n1`
 # python version
 echo Using `/usr/bin/python3  --version | head -n1`
 
+# checking docker
+if [ -x "$(which docker 2>/dev/null)" ]; then
+    echo Using `docker --version`
+else
+    echo "E: docker not found, build system requires docker" >&2
+    exit 1
+fi
+
 # checking wget
 if [ -x /usr/bin/wget ]; then
         echo Using `/usr/bin/wget --version | head -n1`
@@ -93,26 +100,21 @@ if [ -x "$AWK_PATH" ]; then
     REAL_AWK=$(readlink -f "$AWK_PATH")
     PACKAGE=$(dpkg -S "$REAL_AWK" 2>/dev/null | cut -d: -f1)
 
-    echo "Using $AWK_PATH -> $REAL_AWK"
-    echo "Provided by package: $PACKAGE"
-
     case "$PACKAGE" in
         gawk)
-            "$AWK_PATH" --version | head -n1
+            AWK_VERSION=$("$AWK_PATH" --version | head -n1)
             ;;
         mawk)
-            # mawk prints version on stdin with no args
-            "$AWK_PATH" </dev/null 2>&1 | head -n1
+            AWK_VERSION=$("$AWK_PATH" -W version 2>&1 | head -n1)
             ;;
         original-awk)
-            # original-awk prints version on stderr
-            "$AWK_PATH" </dev/null 2>&1 | grep -i version | head -n1
+            AWK_VERSION=$("$AWK_PATH" 2>&1 | grep -i version | head -n1)
             ;;
         *)
-            echo "Unknown awk variant. Attempting to detect version generically:"
-            "$AWK_PATH" --version 2>/dev/null | head -n1 || "$AWK_PATH" </dev/null 2>&1 | head -n1
+            AWK_VERSION=$("$AWK_PATH" --version 2>/dev/null | head -n1 || echo "version unknown")
             ;;
     esac
+    echo "Using awk: $PACKAGE — $AWK_VERSION"
 else
     echo "E: awk not found, build script will not work" >&2
     exit 1
@@ -120,14 +122,14 @@ fi
 
 # Checking build directories
 echo "Checking Build Directories (everything is relative to the script path)"
-mkdir -p $PWD/$DIR_TMP
-mkdir -p $PWD/$DIR_PKG
-mkdir -p $PWD/$DIR_REPO
-mkdir -p $PWD/$DIR_IMAGE
-mkdir -p $PWD/$DIR_CACHE
-mkdir -p $PWD/$DIR_DOWNLOAD
-mkdir -p $PWD/$DIR_SOURCE
-mkdir -p $PWD/$DIR_LOG/build
+mkdir -p $BUILD_DIR/$DIR_TMP
+mkdir -p $BUILD_DIR/$DIR_PKG
+mkdir -p $BUILD_DIR/$DIR_REPO
+mkdir -p $BUILD_DIR/$DIR_IMAGE
+mkdir -p $BUILD_DIR/$DIR_CACHE
+mkdir -p $BUILD_DIR/$DIR_DOWNLOAD
+mkdir -p $BUILD_DIR/$DIR_SOURCE
+mkdir -p $BUILD_DIR/$DIR_LOG/build
 
 # Checking build system
 awk -F= '/PRETTY_NAME/ { print "Current Build System " $2 }' /etc/os-release
@@ -182,9 +184,37 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < "$CONFIG_FILE"
 
 
-python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$PWD --config-file=$CONFIG_FILE
+# Check required Python packages
+PY_REQ_FILE="py_requirements.txt"
+if [ ! -f "$PY_REQ_FILE" ]; then
+    echo "E: Python requirements file not found: $PY_REQ_FILE" >&2
+    exit 1
+fi
 
+echo "Checking required Python packages..."
+MISSING_PKGS=()
 
+while IFS= read -r line || [[ -n "$line" ]]; do
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
 
+    import_name=$(echo "$line" | awk '{print $1}')
+    install_name=$(echo "$line" | awk '{print $2}')
 
+    if ! python3 -c "import ${import_name}" 2>/dev/null; then
+        MISSING_PKGS+=("${install_name}  (import: ${import_name})")
+    fi
+done < "$PY_REQ_FILE"
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    echo "E: Missing Python packages:" >&2
+    for pkg in "${MISSING_PKGS[@]}"; do
+        echo "   - ${pkg}" >&2
+    done
+    exit 1
+fi
+
+echo "All required Python packages found."
+
+# python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$BUILD_DIR --config-file=$CONFIG_FILE
 
