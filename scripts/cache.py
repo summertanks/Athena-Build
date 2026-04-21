@@ -1,5 +1,6 @@
 import bz2, gzip
 import os
+import shutil
 import apt_pkg
 
 from urllib.parse import urlsplit
@@ -10,8 +11,8 @@ from collections import defaultdict, OrderedDict
 
 # Internal
 import utils, package, tui
-from .utils import BuildConfig
-from .package import Package, Source
+from utils import BuildConfig
+from package import Package, Source
 
 # https://github.com/romlok/python-debian/tree/master/examples
 # https://www.juliensobczak.com/inspect/2021/05/15/linux-packages-under-the-hood.html
@@ -26,14 +27,6 @@ class Cache:
 
     
     _arch_table: DpkgArchTable
-
-    class BaseDistribution:
-        def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
-            self.url: str = url
-            self.baseid: str = baseid
-            self.codename: str = codename
-            self.version: str = version
-            self.arch: str = arch
 
     def __init__(self, buildconfig: BuildConfig):
         """Builds the Cache. Release file is used based on BaseDistribution defined
@@ -52,19 +45,21 @@ class Cache:
 
         # Base Distribution
         self.cache_dir = buildconfig.dir_cache
-        self.base = self.BaseDistribution( url=buildconfig.baseurl, baseid=buildconfig.baseid, 
-                                     codename=buildconfig.basecodename, version=buildconfig.baseversion, 
-                                     arch=buildconfig.arch)
+        self.base = utils.BaseDistribution(url=buildconfig.baseurl, baseid=buildconfig.baseid,
+                                           codename=buildconfig.basecodename, version=buildconfig.baseversion,
+                                           arch=buildconfig.arch)
 
         # Compression
         self.supported_compression = ['.gz', '.bz2']
         self.compression = '.gz'
-        assert self.compression in self.supported_compression, f"Unsupported Compression {self.compression} specified"
+        if self.compression not in self.supported_compression:
+            raise ValueError(f"Unsupported compression '{self.compression}' specified")
 
         # Protocol
         self.supported_protocol = ['http://', 'https://']
         self.protocol = 'http://'
-        assert self.protocol in self.supported_protocol, f"Unsupported Protocol {self.protocol} specified"
+        if self.protocol not in self.supported_protocol:
+            raise ValueError(f"Unsupported protocol '{self.protocol}' specified")
 
         # Control files
         # TODO: currently, only for main, add for update & security repo too
@@ -125,26 +120,29 @@ class Cache:
             self.error_str = f"Error downloading release file from {__release_url}"
             return -1
 
-        # Extract the md5 for the files, can enable Optional SHA256 also
+        # Extract the SHA256 for the files from the release file
         try:
             with open(__release_file, 'r') as fh:
                 rel = Release(fh)
                 for _file in self.control_files:
                     # Check if file is present in release file
-                    _md5 = [line['md5sum'] for line in rel['MD5Sum'] if line['name'] == _file]
-                    if len(_md5) == 0:
+                    _sha256 = [line['sha256'] for line in rel['SHA256'] if line['name'] == _file]
+                    if len(_sha256) == 0:
                         self.error_str = f"File ({_file}) not found in release file"
                         return -1
-                    
+
                     # If multiple instances found, raise error
-                    if len(_md5) > 1:
+                    if len(_sha256) > 1:
                         self.error_str = f"Multiple instances for {_file} found in release file"
                         return -1
 
-                    self.control_files[_file] = _md5[0]
+                    self.control_files[_file] = _sha256[0]
 
-        except (Exception, FileNotFoundError, PermissionError) as e:
-            tui.console.print(f"Athena Linux Error: {e}")
+        except (FileNotFoundError, PermissionError) as e:
+            tui.console.error(f"Cannot read release file: {e}")
+            return -1
+        except KeyError as e:
+            tui.console.error(f"Missing field in release file: {e}")
             return -1
 
         _iter_control_file = iter(self.control_files)
@@ -153,12 +151,12 @@ class Cache:
         for _file in __cache_destination:
             
             # get hash
-            md5_check = utils.get_md5(_file)
+            sha256_check = utils.get_sha256(_file)
             index = __cache_destination.index(_file)
             control_files_key = next(_iter_control_file)
-            _md5 = self.control_files[control_files_key]
-            
-            if _md5 != md5_check:
+            _sha256 = self.control_files[control_files_key]
+
+            if _sha256 != sha256_check:
                 # download given file to location
                 if (utils.download_file(__cache_source[index], __cache_destination[index] + self.compression)) <= 0:
                     self.error_str = f"Error downloading file {__cache_source[index]}"
@@ -168,12 +166,12 @@ class Cache:
                 if self.compression == '.gz':
                     with gzip.open(_file + self.compression, 'rb') as f_in:
                         with open(_file, 'wb') as f_out:
-                            f_out.write(f_in.read())
-                
+                            shutil.copyfileobj(f_in, f_out)
+
                 elif self.compression == '.bz2':
-                    with bz2.BZ2File(_file, 'rb') as f_in:
+                    with bz2.open(_file + self.compression, 'rb') as f_in:
                         with open(_file, 'wb') as f_out:
-                            f_out.write(f_in.read())
+                            shutil.copyfileobj(f_in, f_out)
 
                 elif self.compression == '':
                     # if no ext leave as such
@@ -297,9 +295,9 @@ class Cache:
         parser_spinner.done()
         
         # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
-        #TODO: capable of skipping non numeric version, e.g. multilib, etc.
-        gcc_versions = [pkg for pkg in self.required if pkg.startswith('gcc-')]
-        latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(num) for num in x.split('-')[1].split('.')))[-1:]
+        gcc_versions = [pkg for pkg in self.required
+                        if pkg.startswith('gcc-') and pkg.split('-')[1].isdigit()]
+        latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(n) for n in x.split('-')[1].split('.')))[-1:]
         latest_gcc = set(latest_gcc_versions)
         self.required = [pkg for pkg in self.required if not pkg.startswith('gcc-') or pkg in latest_gcc]
         tui.console.print(f"Selected : {latest_gcc}")
@@ -311,5 +309,9 @@ class Cache:
     def get_packages(self, package_name: str) -> List[Package]:
         return self.package_hashtable[package_name]
 
-    def get_provides(self, provides_name: str) -> Dict[Version, List[str]]:
-        return self.provides_hashtable[provides_name]
+    def get_provides(self, provides_name: str) -> List[Package]:
+        result: List[Package] = []
+        for _pkg_names in self.provides_hashtable[provides_name].values():
+            for _pkg_name in _pkg_names:
+                result.extend(self.package_hashtable[_pkg_name])
+        return result

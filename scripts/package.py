@@ -2,6 +2,7 @@
 from debian.deb822 import Packages, Sources
 from debian.debian_support import Version
 
+import apt_pkg
 import tui
 
 from typing import List, Dict, Any, Tuple
@@ -16,17 +17,14 @@ class VersionConstraint:
     
 
     def __init__(self, version: Version, constraint: str):
-        self._version: Version
-        self._constraint: str
-
-        self._version = version
-        self._constraint = constraint.strip()
+        self._version: Version   = version
+        self._constraint: str    = constraint.strip()
         
         if not self._constraint:
             self._constraint = '='
         
-        if constraint not in ['=', '>', '<', '>=', '<=', '>>', '<<']:
-            raise ValueError(f"Invalid operator: {constraint}")
+        if self._constraint not in ['=', '>', '<', '>=', '<=', '>>', '<<']:
+            raise ValueError(f"Invalid operator: {self._constraint}")
 
     def __repr__(self):
         return f"{self._constraint} {self._version}"
@@ -34,8 +32,6 @@ class VersionConstraint:
     def is_satisfied_by(self, candidate: Version) -> bool:
 
         if self._constraint == '=':
-            return candidate == self._version
-        elif self._constraint in ('==',):  # for compatibility
             return candidate == self._version
         elif self._constraint == '>':
             return candidate > self._version
@@ -88,41 +84,28 @@ class Package(Packages):
     # ['decoder', 'encoding', 'gpg_info', 'relations', 'source', 'source_version']
     # so we cannot use these as attributes
 
-    def __eq__(self, other: object) -> bool:
-        
-        if not isinstance(other, Package):
-            return NotImplemented
-        
-        return (
-            self.package == other.package and
-            self.version == other.version and
-            self.arch == other.arch
-        )
-    
-    def __hash__(self) -> int:
-        return hash((self.package, self.version, self.arch))
-
     def __init__(self, section: str):
         
         # Whether the package is valid or not, set to True if all required fields are present
-        self._isvalid: bool = False  
-        self.package:        str = ''
-        self.version:        Version
+        self._isvalid: bool = False
+        self.package:        str     = ''
+        self.version:        Version = Version('')
 
         # 'depends', 'pre-depends', 'recommends', 'suggests', 'breaks', 
         # 'conflicts', 'provides', 'replaces', 'enhances', 'built-using']
-        self.depends:        List[List[Dict[str, Any]]] = []
+        self.depends:        List[Tuple] = []
+        self.alt_depends:    List[List[Tuple]] = []
 
         # dependencies that must be satisfied before the package can be unpacked
-        self.pre_depends:    List[List[Dict[str, Any]]] = []  
-        self.recommends:     List[List[Dict[str, Any]]] = []
-        self.suggests:       List[List[Dict[str, Any]]] = []
-        self.breaks:         List[List[Dict[str, Any]]] = []
-        self.conflicts:      List[List[Dict[str, Any]]] = []
-        self.provides:       List[List[Dict[str, Any]]] = []
-        self.replaces:       List[List[Dict[str, Any]]] = []
-        self.enhances:       List[List[Dict[str, Any]]] = []
-        self.built_using:    List[List[Dict[str, Any]]] = []
+        self.pre_depends:    List[Tuple] = []
+        self.recommends:     List[Tuple] = []
+        self.suggests:       List[Tuple] = []
+        self.breaks:         List[List[Tuple]] = []
+        self.conflicts:      List[List[Tuple]] = []
+        self.provides:       List[List[Dict[str, Any]]] = []  # python-debian format — used by get_provides()
+        self.replaces:       List[List[Tuple]] = []
+        self.enhances:       List[List[Tuple]] = []
+        self.built_using:    List[List[Tuple]] = []
 
         self.depends_on:     List[str] = []
         self.depended_by:    List[str] = []
@@ -138,7 +121,6 @@ class Package(Packages):
         self.configured: bool = False  # Whether the package is configured or not
 
         self._err_str: str = ""
-        self._pkg_valid: bool = False  # Whether the package is valid or not
 
         # Setting Values post calling super()
         super().__init__(section)
@@ -174,31 +156,54 @@ class Package(Packages):
         # _source_group = re.search(r'^(\S+)(?:\s+\((\S+)\))?$', self['Source'].strip())
         # group[1] is the source package name, group[2] is the version if present
 
-        # ['depends', 'pre-depends', 'recommends', 'suggests', 'breaks', 'conflicts', 'provides', 'replaces', 'enhances', 'built-using']
-        self.depends = self.relations.get('depends', [])
-        self.pre_depends = self.relations.get('pre-depends', [])
-        self.recommends = self.relations.get('recommends', [])
-        self.suggests = self.relations.get('suggests', [])
-        self.breaks = self.relations.get('breaks', [])
-        self.conflicts = self.relations.get('conflicts', [])
-        self.provides = self.relations.get('provides', [])
-        self.replaces = self.relations.get('replaces', [])
-        self.enhances = self.relations.get('enhances', [])
-        self.built_using = self.relations.get('built-using', [])
-
-        # There are alternatives in above where it can be satisfied by multiple packages
-        # e.g. 
+        # --- python-debian relations format (commented out, kept for reference) ---
+        # self.depends      = self.relations.get('depends', [])
+        # self.pre_depends  = self.relations.get('pre-depends', [])
+        # self.recommends   = self.relations.get('recommends', [])
+        # self.suggests     = self.relations.get('suggests', [])
+        # self.breaks       = self.relations.get('breaks', [])
+        # self.conflicts    = self.relations.get('conflicts', [])
+        # self.provides     = self.relations.get('provides', [])
+        # self.replaces     = self.relations.get('replaces', [])
+        # self.enhances     = self.relations.get('enhances', [])
+        # self.built_using  = self.relations.get('built-using', [])
+        # e.g.
         # [{'name': 'python3', 'archqual': 'any', 'version': None, 'arch': None, 'restrictions': None}]
         # [{'name': 'make', 'archqual': None, 'version': None, 'arch': None, 'restrictions': None}]
-        # [{'name': 'gcc', 'archqual': None, 'version': ('>=', '4:4.9.1'), 'arch': None, 'restrictions': None}, 
+        # [{'name': 'gcc', 'archqual': None, 'version': ('>=', '4:4.9.1'), 'arch': None, 'restrictions': None},
         #       {'name': 'nodejs', 'archqual': None, 'version': None, 'arch': None, 'restrictions': None}]
-        # Mandatory dependencies are python3 and make, but gcc is optional and can be satisfied by nodejs
-        #
-        # _depends_list = apt_pkg.parse_depends(self['Depends'], strip_multi_arch=True, architecture=self.arch)
-        # self.depends = [sublist[0] for sublist in _depends_list if len(sublist) == 1]
-        # self.alt_depends = [sublist for sublist in _depends_list if len(sublist) > 1]
+
+        def _parse(field):
+            raw = self.get(field, '') or ''
+            return apt_pkg.parse_depends(raw, strip_multi_arch=True) if raw.strip() else []
+
+        _all_deps        = _parse('Depends')
+        self.depends     = [g[0] for g in _all_deps if len(g) == 1]
+        self.alt_depends = [g     for g in _all_deps if len(g) > 1]
+
+        self.pre_depends = [g[0] for g in _parse('Pre-Depends') if len(g) == 1]
+        self.recommends  = [g[0] for g in _parse('Recommends')  if len(g) == 1]
+        self.suggests    = [g[0] for g in _parse('Suggests')    if len(g) == 1]
+        self.breaks      = _parse('Breaks')
+        self.conflicts   = _parse('Conflicts')
+        self.provides    = self.relations.get('provides', [])   # kept as python-debian format — used by get_provides()
+        self.replaces    = _parse('Replaces')
+        self.enhances    = _parse('Enhances')
+        self.built_using = _parse('Built-Using')
         
-        self._isvalid = True  
+        self._isvalid = True
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Package):
+            return NotImplemented
+        return (
+            self.package == other.package and
+            self.version == other.version and
+            self.arch == other.arch
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.package, self.version, self.arch))
 
     @property
     def isvalid(self) -> bool:
@@ -219,7 +224,7 @@ class Package(Packages):
     
     def get_provides(self) -> List[Tuple[str, Version]]:
         
-        if len(self.provides) == 0:
+        if not self.provides:
             return []
 
         # Provides should not have alternates
@@ -236,10 +241,15 @@ class Package(Packages):
             for _dep in _grp:
                 
                 if _dep['version'] is not None:
-                    # If version is specified, we will use it
-                    _version = Version(_dep['version'][1])
+                    if _dep['version'][0] != '=':
+                        tui.console.print(
+                            f"WARNING: Provides for {self.package} has invalid operator "
+                            f"'{_dep['version'][0]}' (only '=' is allowed), ignoring version"
+                        )
+                        _version = self.version
+                    else:
+                        _version = Version(_dep['version'][1])
                 else:
-                    # If version is not specified, we will use the package version
                     _version = self.version
                 
                 _pkg = _dep['name'].strip()
@@ -351,29 +361,32 @@ class Source(Sources):
 
     def __init__(self, section: str):
 
-        self.package:    str = ''
-        self.version:    Version
-        self.arch:       List[str]
+        self.package:    str     = ''
+        self.version:    Version = Version('')
+        self.directory:  str     = ''
+        self.files:      Dict[str, Dict[str, Any]] = {}
+        self.arch:       List[str] = []
 
-        # 'build-depends', 'build-depends-indep', 'build-depends-arch', 
+        # 'build-depends', 'build-depends-indep', 'build-depends-arch',
         # 'build-conflicts', 'build-conflicts-indep', 'build-conflicts-arch', 'binary'
-        self.binary:             List[List[Dict[str, Any]]]
-        self.depends:            List[List[Dict[str, Any]]]
-        self.depends_indep:      List[List[Dict[str, Any]]]
-        self.depends_arch:       List[List[Dict[str, Any]]]
-        self.conflicts:          List[List[Dict[str, Any]]]
-        self.conflicts_indep:    List[List[Dict[str, Any]]]
-        self.conflicts_arch:     List[List[Dict[str, Any]]]
-        
+        self.binary:             List[str] = []
+        self.depends:            List[List[Dict[str, Any]]] = []
+        self.depends_indep:      List[List[Dict[str, Any]]] = []
+        self.depends_arch:       List[List[Dict[str, Any]]] = []
+        self.conflicts:          List[List[Dict[str, Any]]] = []
+        self.conflicts_indep:    List[List[Dict[str, Any]]] = []
+        self.conflicts_arch:     List[List[Dict[str, Any]]] = []
+
         # can be derived from Package-List field, but it is tedious - correlation for versions required
         # One source provides multiple packages, package may have different version from the source version
         # Package-List may have additional information e.g. 'udeb' tag which is not there in package
         # Lets only select the package-files that the Package actually needs, the others produced are optional
-        self.package_list: List[str]
+        self.package_list: List[str] = []
 
         self.skip_test = False
         self.patch_list = []
-        
+        self._err_str: str = ''
+
         # Whether the package is valid or not, set to True if all required fields are present
         self._isvalid: bool = False 
         
@@ -398,21 +411,34 @@ class Source(Sources):
         self.package = self['Package']
         self.version = Version(self['Version'])
         self.directory = self['Directory']
-        self.files = self['Files']
 
-        self.binary = self.relations.get('binary', [])
+        _sha256_map: Dict[str, str] = {}
+        for _entry in (self.get('Checksums-Sha256') or []):
+            _sha256_map[_entry['name']] = _entry['sha256']
 
-        self.depends = self.relations.get('depends', [])
-        self.depends_indep = self.relations.get('depends-indep', [])
-        self.depends_arch = self.relations.get('depends-arch', [])
-        
-        self.conflicts = self.relations.get('conflicts', [])
-        self.conflicts_indep = self.relations.get('conflicts-indep', [])
-        self.conflicts_arch = self.relations.get('conflicts-arch', [])
+        self.files: Dict[str, Dict[str, Any]] = {
+            _entry['name']: {
+                'md5':    _entry['md5sum'],
+                'sha256': _sha256_map.get(_entry['name'], ''),
+                'size':   int(_entry['size']),
+                'path':   self['Directory'].rstrip('/') + '/' + _entry['name'],
+            }
+            for _entry in self['Files']
+        }
+
+        self.binary = [p.strip() for p in self.get('Binary', '').split(',') if p.strip()]
+
+        self.depends         = self.relations.get('build-depends', [])
+        self.depends_indep   = self.relations.get('build-depends-indep', [])
+        self.depends_arch    = self.relations.get('build-depends-arch', [])
+
+        self.conflicts       = self.relations.get('build-conflicts', [])
+        self.conflicts_indep = self.relations.get('build-conflicts-indep', [])
+        self.conflicts_arch  = self.relations.get('build-conflicts-arch', [])
         
         _package_list = self.get('Package-List', '').strip()
         if _package_list:
-            self.package_list = [line for line in self['package-list'].split('\n') if line.strip()]
+            self.package_list = [line for line in _package_list.split('\n') if line.strip()]
        
         _arch_field = self.get('Architecture', '').strip()
         if not _arch_field:
@@ -429,19 +455,23 @@ class Source(Sources):
         A package is valid if it has all the required fields and they are not empty.
         """
         return self._isvalid
-    
+
+    @property
+    def err_str(self) -> str:
+        return self._err_str
+
     @property
     def download_size(self) -> int:
-        _download_size = 0
-        for _file in self.files:
-            _download_size += int(_file['size'])
-        return _download_size
+        if not self._isvalid:
+            return 0
+        return sum(f['size'] for f in self.files.values())
 
 
     def build_depends(self, arch: str) -> List[List[Dict[str, Any]]]:
         """
-        Returns a list of tuples: (package_name, version_constraint)
-        from build-depends, build-depends-indep, and build-depends-arch.
+        Returns combined build dependencies from build-depends, build-depends-indep,
+        and build-depends-arch as a list of dependency groups (each group is a list
+        of dicts with keys: name, version, arch, archqual, restrictions).
         """
 
         all_deps: List[List[Dict[str, Any]]] = []

@@ -2,13 +2,14 @@
 import os.path
 
 import package
+from package import Version
 from cache import Cache
 
 # External Modules
 import apt_pkg
 from rich.prompt import Prompt
 
-Print = print
+import tui
 
 
 class DependencyTree:
@@ -36,7 +37,8 @@ class DependencyTree:
 
     def parse_dependency(self, required_pkg: str) -> package.Package:
 
-        assert required_pkg != '', "Dependency asked for empty package name"
+        if not required_pkg:
+            raise ValueError("Dependency asked for empty package name")
 
         # Not checking for package in selected packages here - since dependency may be satisfied by provides
         # Since search is hashed, hoping another search is trivial
@@ -69,7 +71,7 @@ class DependencyTree:
         # could be as situation that the required package list may have (by mistake) two packages for same provides
         if len(_selected_pkg_lookahead) == 1:
             _selected_pkg = _selected_pkg_lookahead[0]
-            # Print(f"Lookahead Selection of {_selected_pkg['Package']} for {required_pkg}")
+            # tui.console.print(f"Lookahead Selection of {_selected_pkg['Package']} for {required_pkg}")
 
         # Case - I  : No match for Package or Provides - Raise Value Error
         elif len(_provide_candidates) == 0 and len(_pkg_candidates) == 0:
@@ -81,7 +83,7 @@ class DependencyTree:
 
         # Case - III: No Package, One Provides - "Selecting <Package> for <Provides> - Proceed with Package
         elif len(_provide_candidates) == 1 and len(_pkg_candidates) == 0:
-            Print(f"Note: Selecting {_provide_candidates[0]['Package']} for {required_pkg}")
+            tui.console.print(f"Note: Selecting {_provide_candidates[0]['Package']} for {required_pkg}")
             _selected_pkg = _provide_candidates[0]
 
         # Case - IV : One Package, No Provides - Simplest, move ahead parsing the given package
@@ -112,7 +114,7 @@ class DependencyTree:
             _pkg_name = Prompt.ask(f"Multiple provides for {required_pkg}, select Package", choices=_options)
             _index = _options.index(_pkg_name)
             if _index > len(_pkg_candidates) - 1:
-                _selected_pkg = _provide_candidates[len(_pkg_candidates) - 1]
+                _selected_pkg = _provide_candidates[_index - len(_pkg_candidates)]
             else:
                 _selected_pkg = _pkg_candidates[_index]
 
@@ -157,7 +159,8 @@ class DependencyTree:
             # add version constraints
             # Again slightly convoluted, Between multiple package and provides, don't know which was selected.
             # Hence, expecting parse_dependency(...) to return the package selected for that required_pkg
-            self.selected_pkgs[_parsed_pkg['Package']].add_version_constraint(_pkg[1], _pkg[2])
+            if _pkg[1]:
+                self.selected_pkgs[_parsed_pkg['Package']].add_constraint(Version(_pkg[1]), _pkg[2])
 
         return _selected_pkg
 
@@ -183,7 +186,7 @@ class DependencyTree:
                     # Check if it breaks
                     if _break_comparator == '' or \
                             apt_pkg.check_dep(_pkg_ver, _break_comparator, _break_version):
-                        Print(f"DEPENDENCY HELL: Package {_pkg} breaks {_breaks_name}")
+                        tui.console.print(f"DEPENDENCY HELL: Package {_pkg} breaks {_breaks_name}")
                         _breaks = True
 
             # Conflicts will break installation - Error
@@ -197,12 +200,12 @@ class DependencyTree:
                     # Check if conflicts
                     if _conflict_comparator == '' or \
                             apt_pkg.check_dep(_pkg_ver, _conflict_comparator, _conflict_version):
-                        Print(f"DEPENDENCY HELL: Package {_pkg} conflicts with {_conflicts_name}")
+                        tui.console.print(f"DEPENDENCY HELL: Package {_pkg} conflicts with {_conflicts_name}")
                         _breaks = True
 
             # Check for package version constraints collected from upstream
             if not self.selected_pkgs[_pkg].constraints_satisfied:
-                Print(f"DEPENDENCY HELL: Package {_pkg} version constrains unsatisfied")
+                tui.console.print(f"DEPENDENCY HELL: Package {_pkg} version constrains unsatisfied")
                 _breaks = True
 
             # Check Alt Depends
@@ -221,7 +224,7 @@ class DependencyTree:
                         if apt_pkg.check_dep(self.selected_pkgs[pkg_name].version, pkg_constraint, pkg_version):
                             _found = True
                         else:
-                            Print(f"Alt Dependency Check - Version constraint failed for {pkg_name}")
+                            tui.console.print(f"Alt Dependency Check - Version constraint failed for {pkg_name}")
                     else:
                         # Lets try in Provides, little more complex
                         _provides_options = self.__cache.get_provides(pkg_name)
@@ -237,10 +240,10 @@ class DependencyTree:
                                                      pkg_constraint, pkg_version):
                                     _found = True
                                 else:
-                                    Print(f"Alt Dependency Check - Version constraint failed for {_pkg_name}")
+                                    tui.console.print(f"Alt Dependency Check - Version constraint failed for {_pkg_name}")
 
                 if not _found:
-                    Print(f"dependency unresolved between {_section}")
+                    tui.console.print(f"dependency unresolved between {_section}")
 
         return not _breaks
 
@@ -256,6 +259,11 @@ class DependencyTree:
             if _src_name not in self.selected_srcs:
                 _src_version = _src[1]
 
+                if _src_name not in self.__cache.source_hashtable:
+                    tui.console.error(f"CRITICAL: Source package '{_src_name}' not found in cache — build cannot proceed")
+                    _found = False
+                    continue
+
                 _src_candidates = self.__cache.source_hashtable[_src_name]
                 # If single entry its simple
                 if len(_src_candidates) == 1:
@@ -266,13 +274,16 @@ class DependencyTree:
                     if len(_selected_pkg) == 1:
                         self.selected_srcs[_src_name] = _selected_pkg[0]
                     else:
-                        Print(f"ERROR: Not found source for {_src_list}")
+                        tui.console.error(f"Source '{_src_name}' version '{_src_version}' not found in cache")
                         _found = False
 
             # ideally the following should have been sufficient
             # self.selected_srcs[_src_name].pkgs.append(os.path.basename(self.selected_pkgs[_pkg_name]['Filename']))
             # but there are some +deb11ux issues that are not getting addressed
-            _pkg_list = self.selected_srcs[_src_name]['Package-List'].split('\n')
+            _raw_pkg_list = (self.selected_srcs[_src_name].get('Package-List') or '').strip()
+            if not _raw_pkg_list:
+                continue
+            _pkg_list = _raw_pkg_list.split('\n')
             for _pkg in _pkg_list:
                 _pkg = _pkg.split()
 
@@ -318,7 +329,7 @@ class DependencyTree:
                 # If we are we matched, there should be another match withing the same package list, lets break
                 break
 
-        Print(f"Selected {len(self.selected_srcs)} Source Package")
+        tui.console.print(f"Selected {len(self.selected_srcs)} Source Package")
         return _found
 
     @property
