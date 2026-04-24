@@ -84,8 +84,8 @@ class BuildConfig:
             if not os.access(self.config_path, os.R_OK):
                 raise PermissionError(f'Config file is not readable: {self.config_path}')
 
-        except (argparse.ArgumentError, OSError) as e:
-            self.error_str = str(e)
+        except (argparse.ArgumentError, OSError, SystemExit) as e:
+            self.error_str = f"Failed to parse arguments: {e}"
             return
 
         # read config file
@@ -154,8 +154,8 @@ class BuildConfig:
 
             pathlib.Path(os.path.join(self.dir_log, 'build')).mkdir(parents=True, exist_ok=True)
 
-        except PermissionError as e:
-            self.error_str = str(e)
+        except OSError as e:
+            self.error_str = f"Failed to prepare build directories: {e}"
             return
         
         self._config_valid = True
@@ -188,14 +188,15 @@ def download_file(url: str, filename: str) -> int:
     from urllib.parse import urlsplit
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 
-    name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
-
     try:
+        name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
+        head = requests.head(url, timeout=10)
+        file_size = int(head.headers.get('content-length', 0))
+
         with requests.get(url, stream=True, timeout=10) as response:
             response.raise_for_status()
-            file_size = int(response.headers.get('content-length', 0))
 
-            progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s', maxvalue=max(1, file_size))
+            progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s', maxvalue=file_size)
 
             with open(filename, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
@@ -207,9 +208,22 @@ def download_file(url: str, filename: str) -> int:
             return file_size
 
     except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-        tui.console.print(f"Error connecting to {url}: {e}")
+        tui.console.print(f"ERROR: download failed for {url}")
+        tui.console.error(f"download_file({url}): {e}")
         return -1
-    
+    except OSError as e:
+        tui.console.print(f"ERROR: cannot write to {filename}")
+        tui.console.error(f"download_file write {filename}: {e}")
+        return -1
+    except ValueError as e:
+        tui.console.print(f"ERROR: malformed response from {url}")
+        tui.console.error(f"download_file parse {url}: {e}")
+        return -1
+    except Exception as e:
+        tui.console.print(f"ERROR: unexpected failure downloading {url}")
+        tui.console.error(f"download_file({url}): {type(e).__name__}: {e}")
+        return -1
+
 
 def download_source(dependency_tree, dir_download, base_distribution: BaseDistribution):
     from urllib.parse import urljoin
@@ -229,9 +243,16 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
     _skipped = 0
     _total = len(_file_list)
 
-    progress_bar = ProgressBar(label='Downloading', itr_label='B/s', maxvalue=max(1, _download_size))
+    try:
+        progress_bar = ProgressBar(label='Downloading', itr_label='B/s', maxvalue=max(1, _download_size))
+    except Exception as e:
+        progress_bar = None
+        tui.console.print(f"WARNING: progress bar unavailable, continuing without it")
+        tui.console.error(f"download_source ProgressBar: {type(e).__name__}: {e}")
+
     for _file in _file_list:
-        progress_bar.label(f'({_index}/{_total}) {_file[:20]}')
+        if progress_bar is not None:
+            progress_bar.label(f'({_index}/{_total}) {_file[:20]}')
 
         _url = urljoin(base_url, _file_list[_file]['path'])
         _sha256 = _file_list[_file]['sha256']
@@ -248,25 +269,42 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
                         for chunk in response.iter_content(chunk_size=1024):
                             if chunk:
                                 f.write(chunk)
-                                progress_bar.step(len(chunk))
+                                if progress_bar is not None:
+                                    progress_bar.step(len(chunk))
                 _downloaded_size += _size
 
             except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-                tui.console.print(f"Error connecting to {_url}: {e}")
+                tui.console.print(f"ERROR: connection failed for {_url}")
+                tui.console.error(f"download_source({_url}): {e}")
+                continue
+            except OSError as e:
+                tui.console.print(f"ERROR: cannot write {_download_path}")
+                tui.console.error(f"download_source write {_download_path}: {e}")
+                continue
+            except ValueError as e:
+                tui.console.print(f"ERROR: malformed response for {_url}")
+                tui.console.error(f"download_source parse {_url}: {e}")
+                continue
+            except Exception as e:
+                tui.console.print(f"ERROR: unexpected failure for {_url}")
+                tui.console.error(f"download_source({_url}): {type(e).__name__}: {e}")
                 continue
 
             if get_sha256(_download_path) != _sha256:
-                tui.console.error(f"Hash mismatch for {_file} — download may be corrupt")
+                tui.console.print(f"ERROR: Hash mismatch for {_file} — download may be corrupt")
+                tui.console.error(f"sha256 mismatch: {_download_path} expected {_sha256}")
                 continue
 
         else:
             _skipped += 1
-            progress_bar.step(int(_file_list[_file]['size']))
+            if progress_bar is not None:
+                progress_bar.step(int(_file_list[_file]['size']))
             _downloaded_size += int(_file_list[_file]['size'])
 
         _index += 1
 
-    progress_bar.close(persist=True)
+    if progress_bar is not None:
+        progress_bar.close(persist=True)
 
     tui.console.print(f"Downloading {_total - _skipped} files, Skipped {_skipped} files")
     return _downloaded_size
@@ -299,11 +337,15 @@ def get_md5(filepath: str) -> str:
     """
     if not os.path.isfile(filepath):
         return ''
-    h = hashlib.md5()
-    with open(filepath, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            h.update(chunk)
-    return h.hexdigest()
+    try:
+        h = hashlib.md5()
+        with open(filepath, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError as e:
+        tui.console.warning(f"get_md5: cannot read {filepath}: {e}")
+        return ''
 
 
 def get_sha256(filepath: str) -> str:
@@ -316,18 +358,19 @@ def get_sha256(filepath: str) -> str:
     """
     if not os.path.isfile(filepath):
         return ''
-    h = hashlib.sha256()
-    with open(filepath, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            h.update(chunk)
-    return h.hexdigest()
+    try:
+        with open(filepath, 'rb') as f:
+            return hashlib.file_digest(f, 'sha256').hexdigest()
+    except OSError as e:
+        tui.console.warning(f"get_sha256: cannot read {filepath}: {e}")
+        return ''
 
 
 def readfile(filename: str) -> str:
     try:
         with open(filename, 'r') as f:
             return f.read()
-    except (FileNotFoundError, PermissionError) as e:
+    except OSError as e:
         raise OSError(f'Cannot read file {filename}: {e}') from e
 
 
@@ -352,7 +395,8 @@ def create_folders(folder_structure: str):
                 path = os.path.join(path, component)
                 os.makedirs(path, exist_ok=True)
     except Exception as e:
-        tui.console.print(f"Failed to build folder structure {e}")
+        tui.console.print(f"ERROR: Failed to build folder structure: {e}")
+        tui.console.error(f"create_folders({folder_structure}): {e}")
 
 
 class Node:

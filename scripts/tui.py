@@ -226,6 +226,7 @@ class Tui:
         self._widget_lock  = threading.Lock()
         self._running_lock = threading.Lock()
 
+
         # Dispatch / input queues
         self._dispatch_line: LifoQueue[Any] = queue.LifoQueue()
         self._dispatch_key:  LifoQueue[Any] = queue.LifoQueue()
@@ -247,7 +248,10 @@ class Tui:
         self.cmd_prompt: str = self._PROMPT_IDLE
 
         # Resource monitor daemon
-        threading.Thread(target=self._res_util, daemon=True).start()
+        try:
+            threading.Thread(target=self._res_util, daemon=True).start()
+        except RuntimeError as e:
+            raise RuntimeError(f'Failed to start resource monitor thread: {e}') from e
 
         # Curses init
         self._stdscr: curses.window
@@ -275,7 +279,12 @@ class Tui:
         self._cmd.register('help',    self.help,    'List registered commands')
         self._cmd.register('quit',    self.exit,    'Exit the application')
 
-        threading.Thread(target=self.shell, daemon=True).start()
+        try:
+            threading.Thread(target=self.shell, daemon=True).start()
+        except RuntimeError as e:
+            self._shutdown()
+            print(f'TUI: failed to start shell thread — {e}\r')
+            sys.exit(1)
 
     # =====================================================================
     # Low-level curses helpers
@@ -536,26 +545,29 @@ class Tui:
             return
 
         with self._refresh_lock:
-            # Blank stdscr so stale cells don't show in areas not covered by windows
-            self._stdscr.erase()
-            self._stdscr.noutrefresh()
-            self._refreshfooter()
-            self._refreshtab()
+            try:
+                # Blank stdscr so stale cells don't show in areas not covered by windows
+                self._stdscr.erase()
+                self._stdscr.noutrefresh()
+                self._refreshfooter()
+                self._refreshtab()
 
-            # footer is a plain curses.window (not wrapped in a panel),
-            # so it has no panel machinery to queue it — hence the explicit _footer.noutrefresh().
-            self._footer.noutrefresh()
+                # footer is a plain curses.window (not wrapped in a panel),
+                # so it has no panel machinery to queue it — hence the explicit _footer.noutrefresh().
+                self._footer.noutrefresh()
 
-            for tab in self._tabs.values():
-                if tab['selected']:
-                    tab['panel'].show()
-                    tab['panel'].top()
-                else:
-                    tab['panel'].hide()
+                for tab in self._tabs.values():
+                    if tab['selected']:
+                        tab['panel'].show()
+                        tab['panel'].top()
+                    else:
+                        tab['panel'].hide()
 
-            # update_panels() calls wnoutrefresh on each visible panel window
-            curses.panel.update_panels()
-            curses.doupdate()
+                # update_panels() calls wnoutrefresh on each visible panel window
+                curses.panel.update_panels()
+                curses.doupdate()
+            except curses.error:
+                pass
 
     # =====================================================================
     # Tab management
@@ -662,6 +674,11 @@ class Tui:
         try:
             self._stdscr.keypad(False)
             self._stdscr.nodelay(False)
+        except curses.error:
+            pass
+        try:
+            self._stdscr.erase()
+            self._stdscr.refresh()
         except curses.error:
             pass
         try:
@@ -823,18 +840,23 @@ class Tui:
     def _res_util(self) -> None:
         """Daemon thread: refreshes _psutil string every ~2 s."""
         while True:
-            cpu  = psutil.cpu_percent(interval=2)
-            mem  = psutil.virtual_memory().percent
-            disk = psutil.disk_usage('/').percent
-            self._psutil.value = f'CPU:{cpu:.0f}%  MEM:{mem:.0f}%  DISK:{disk:.0f}%'
-            self._dirty = True
+            try:
+                cpu  = psutil.cpu_percent(interval=2)
+                mem  = psutil.virtual_memory().percent
+                disk = psutil.disk_usage('/').percent
+                self._psutil.value = f'CPU:{cpu:.0f}%  MEM:{mem:.0f}%  DISK:{disk:.0f}%'
+                self._dirty = True
+            except Exception as e:
+                self.ERROR(f'_res_util: {type(e).__name__}: {e}')
+                time.sleep(2)
 
     # =====================================================================
     # Logging
     # =====================================================================
 
     def _log(self, severity: int, message: str) -> None:
-        assert severity in (self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO)
+        if severity not in (self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO):
+            return
 
         ts = datetime.datetime.now().strftime('%H:%M:%S')
         tag, attr = self._log_map[severity]
@@ -858,14 +880,15 @@ class Tui:
     # =====================================================================
 
     def print(self, message: str, attribute: Optional[int] = None) -> None:
-        """Append *message* to the console tab buffer."""
+        """Append *message* to the console tab buffer, splitting on newlines."""
         with self._print_lock:
             if 'console' not in self._tabs:
                 return
             if attribute is None:
                 attribute = curses.color_pair(self.COLOR_NORMAL)
             con = self._tabs['console']
-            con['buffer'].append((message + '\n', attribute))
+            for line in message.split('\n'):
+                con['buffer'].append((line, attribute))
             con['cursor'] = len(con['buffer'])
             self._dirty = True
 
@@ -938,7 +961,7 @@ class Tui:
     def demo(self) -> None:
         """Demonstrate built-in prompts, spinner, progress bar, and log severity."""
         spin = Spinner('Running demo')
-        self.print('  Demo info message')
+        self.print('Demo info message')
         Prompt(PROMPT_YESNO,    'Yes / No prompt').get_response()
         Prompt(PROMPT_INPUT,    'Free-text input').get_response()
         Prompt(PROMPT_OPTIONS,  'Choose one', ['yes', 'no']).get_response()
@@ -1034,9 +1057,9 @@ class Tui:
 
             try:
                 fn(*parts[1:])
-            except TypeError as exc:
+            except Exception as exc:
                 self.print(f'  Error: {exc}')
-                self.ERROR(str(exc))
+                self.ERROR(f'{type(exc).__name__}: {exc}')
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1334,19 @@ class Console:
 
 
 console = Console()
+
+
+def Exit(err_code: int = 0) -> None:
+    """Shut down the TUI cleanly then exit the process."""
+    if tui_instance is not None:
+        tui_instance.exit(err_code)
+    sys.exit(err_code)
+
+
+def register_command(name: str, fn, tooltip: str = '') -> None:
+    """Register a command with the TUI shell."""
+    if tui_instance is not None:
+        tui_instance.register_command(name, fn, tooltip)
 
 
 # ---------------------------------------------------------------------------

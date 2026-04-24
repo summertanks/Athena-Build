@@ -89,9 +89,9 @@ class Package(Packages):
         # Whether the package is valid or not, set to True if all required fields are present
         self._isvalid: bool = False
         self.package:        str     = ''
-        self.version:        Version = Version('')
+        self.version:        Version = Version('0')
 
-        # 'depends', 'pre-depends', 'recommends', 'suggests', 'breaks', 
+        # 'depends', 'pre-depends', 'recommends', 'suggests', 'breaks',
         # 'conflicts', 'provides', 'replaces', 'enhances', 'built-using']
         self.depends:        List[Tuple] = []
         self.alt_depends:    List[List[Tuple]] = []
@@ -129,18 +129,23 @@ class Package(Packages):
         self._constraints: Dict[Version, VersionConstraint] = {}
         
         for _field in ['Package', 'Version', 'Architecture']:
+            _pkg_name = self.get('Package', '<unknown>')
             if _field not in self:
-                tui.console.print(f"WARNING: Malformed package, skipping")
-                self._err_str = f"Missing field '{_field}' in package"
+                self._err_str = f"Missing field '{_field}' in package '{_pkg_name}'"
+                tui.console.print(f"WARNING: {self._err_str}")
                 return
             if self[_field] is None or self[_field].strip() == '':
-                tui.console.print(f"WARNING: Malformed package, skipping")
-                self._err_str = f"Empty field '{_field}' in package"
+                self._err_str = f"Empty field '{_field}' in package '{_pkg_name}'"
+                tui.console.print(f"WARNING: {self._err_str}")
                 return
-        
 
         self.package = self['Package']
-        self.version = Version(self['Version'])
+        try:
+            self.version = Version(self['Version'])
+        except (ValueError, TypeError) as e:
+            self._err_str = f"Invalid version '{self['Version']}' in package '{self.package}': {e}"
+            tui.console.print(f"WARNING: {self._err_str}")
+            return
         self.arch = self['Architecture']
 
         if 'Priority' in self and self['Priority'].strip() != '':
@@ -156,41 +161,29 @@ class Package(Packages):
         # _source_group = re.search(r'^(\S+)(?:\s+\((\S+)\))?$', self['Source'].strip())
         # group[1] is the source package name, group[2] is the version if present
 
-        # --- python-debian relations format (commented out, kept for reference) ---
-        # self.depends      = self.relations.get('depends', [])
-        # self.pre_depends  = self.relations.get('pre-depends', [])
-        # self.recommends   = self.relations.get('recommends', [])
-        # self.suggests     = self.relations.get('suggests', [])
-        # self.breaks       = self.relations.get('breaks', [])
-        # self.conflicts    = self.relations.get('conflicts', [])
-        # self.provides     = self.relations.get('provides', [])
-        # self.replaces     = self.relations.get('replaces', [])
-        # self.enhances     = self.relations.get('enhances', [])
-        # self.built_using  = self.relations.get('built-using', [])
-        # e.g.
-        # [{'name': 'python3', 'archqual': 'any', 'version': None, 'arch': None, 'restrictions': None}]
-        # [{'name': 'make', 'archqual': None, 'version': None, 'arch': None, 'restrictions': None}]
-        # [{'name': 'gcc', 'archqual': None, 'version': ('>=', '4:4.9.1'), 'arch': None, 'restrictions': None},
-        #       {'name': 'nodejs', 'archqual': None, 'version': None, 'arch': None, 'restrictions': None}]
-
         def _parse(field):
             raw = self.get(field, '') or ''
             return apt_pkg.parse_depends(raw, strip_multi_arch=True) if raw.strip() else []
 
-        _all_deps        = _parse('Depends')
-        self.depends     = [g[0] for g in _all_deps if len(g) == 1]
-        self.alt_depends = [g     for g in _all_deps if len(g) > 1]
+        try:
+            _all_deps        = _parse('Depends')
+            self.depends     = [g[0] for g in _all_deps if len(g) == 1]
+            self.alt_depends = [g     for g in _all_deps if len(g) > 1]
 
-        self.pre_depends = [g[0] for g in _parse('Pre-Depends') if len(g) == 1]
-        self.recommends  = [g[0] for g in _parse('Recommends')  if len(g) == 1]
-        self.suggests    = [g[0] for g in _parse('Suggests')    if len(g) == 1]
-        self.breaks      = _parse('Breaks')
-        self.conflicts   = _parse('Conflicts')
-        self.provides    = self.relations.get('provides', [])   # kept as python-debian format — used by get_provides()
-        self.replaces    = _parse('Replaces')
-        self.enhances    = _parse('Enhances')
-        self.built_using = _parse('Built-Using')
-        
+            self.pre_depends = [g[0] for g in _parse('Pre-Depends') if len(g) == 1]
+            self.recommends  = [g[0] for g in _parse('Recommends')  if len(g) == 1]
+            self.suggests    = [g[0] for g in _parse('Suggests')    if len(g) == 1]
+            self.breaks      = _parse('Breaks')
+            self.conflicts   = _parse('Conflicts')
+            self.provides    = _parse('Provides')
+            self.replaces    = _parse('Replaces')
+            self.enhances    = _parse('Enhances')
+            self.built_using = _parse('Built-Using')
+        except Exception as e:
+            self._err_str = f"Failed to parse dependencies for package '{self.package}': {e}"
+            tui.console.print(f"WARNING: {self._err_str}")
+            return
+
         self._isvalid = True
 
     def __eq__(self, other: object) -> bool:
@@ -231,35 +224,42 @@ class Package(Packages):
         _provides_names: List[Tuple[str, Version]] = []
 
 
-        # e.g. self.provides
-        # [{'name': 'acorn', 'archqual': None, 'version': ('=', '8.0.5+ds+~cs19.19.27-3'), 'arch': None, 'restrictions': None}]
-        # [{'name': 'node-acorn', 'archqual': None, 'version': ('=', '8.0.5'), 'arch': None, 'restrictions': None}]
-        # [{'name': 'node-acorn', 'archqual': None, 'version': ('=', '8.0.5+ds+~cs19.19.27-3'), 'arch': None, 'restrictions': None}]
-        # [{'name': 'node-acorn-bigint', 'archqual': None, 'version': ('=', '1.0.0'), 'arch': None, 'restrictions': None}]
+        # e.g. self.provides after apt_pkg.parse_depends('Provides'):
+        #   [[('acorn', '8.0.5+ds+~cs19.19.27-3', '=')]]
+        #   [[('node-acorn', '8.0.5', '=')]]
+        #   [[('node-acorn', '8.0.5+ds+~cs19.19.27-3', '=')]]
+        #   [[('node-acorn-bigint', '1.0.0', '=')]]
+        #   [[('foo', '', '')]]                           # no version
 
         for _grp in self.provides:
             for _dep in _grp:
-                
-                if _dep['version'] is not None:
-                    if _dep['version'][0] != '=':
-                        tui.console.print(
-                            f"WARNING: Provides for {self.package} has invalid operator "
-                            f"'{_dep['version'][0]}' (only '=' is allowed), ignoring version"
-                        )
-                        _version = self.version
+                try:
+                    _name = _dep[0].strip()
+                    _version_str = _dep[1]
+                    _operator = _dep[2]
+
+                    if _version_str or _operator:
+                        if _operator != '=':
+                            tui.console.print(
+                                f"WARNING: Provides for {self.package} has invalid operator "
+                                f"'{_operator}' (only '=' is allowed), ignoring version"
+                            )
+                            _version = self.version
+                        else:
+                            _version = Version(_version_str)
                     else:
-                        _version = Version(_dep['version'][1])
-                else:
-                    _version = self.version
-                
-                _pkg = _dep['name'].strip()
+                        _version = self.version
 
-                if _pkg == '':
-                    tui.console.print(f"WARNING: Empty package name in provides "
-                                      f"for {self.package} {self.version}, skipping")
+                    if _name == '':
+                        tui.console.print(f"WARNING: Empty package name in provides "
+                                          f"for {self.package} {self.version}, skipping")
+                        continue
+
+                    _provides_names.append((_name, _version))
+                except (IndexError, ValueError, AttributeError, TypeError) as e:
+                    tui.console.warning(
+                        f"Skipping malformed provides entry for '{self.package}': {e}")
                     continue
-
-                _provides_names.append((_pkg, _version))
         
         # provides a list of tupples
         # [('acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn-bigint','1.0.0'), ]
@@ -306,17 +306,21 @@ class Package(Packages):
         # xg = replace with newer
         # eq = replace with '='
         # err = error, cannot resolve
+        # '>' and '<' are deprecated aliases for '>>' and '<<' per Debian policy,
+        # but apt_pkg.parse_depends still emits them for legacy packages.
         constraint_action = {
-            '=':   {'=': 'nc', '>=': 'xg',  '<=': 'xg', '>>': 'err', '<<': 'err' },
-            '>=':  {'=': 'nc', '>=': 'nc',  '<=': 'eq', '>>': 'nc',  '<<': 'err' },
-            '<=':  {'=': 'nc', '>=': 'eq',  '<=': 'nc', '>>': 'err', '<<': 'nc'  },
-            '>>':  {'=': 'err','>=': 'xg',  '<=': 'err','>>': 'nc',  '<<': 'err' },
-            '<<':  {'=': 'err','>=': 'err', '<=': 'xg', '>>': 'err', '<<': 'nc'  },
+            '=':   {'=': 'nc', '>=': 'xg',  '<=': 'xg', '>>': 'err', '<<': 'err', '>': 'err', '<': 'err'},
+            '>=':  {'=': 'nc', '>=': 'nc',  '<=': 'eq', '>>': 'nc',  '<<': 'err', '>': 'nc',  '<': 'err'},
+            '<=':  {'=': 'nc', '>=': 'eq',  '<=': 'nc', '>>': 'err', '<<': 'nc',  '>': 'err', '<': 'nc' },
+            '>>':  {'=': 'err','>=': 'xg',  '<=': 'err','>>': 'nc',  '<<': 'err', '>': 'nc',  '<': 'err'},
+            '<<':  {'=': 'err','>=': 'err', '<=': 'xg', '>>': 'err', '<<': 'nc',  '>': 'err', '<': 'nc' },
+            '>':   {'=': 'err','>=': 'xg',  '<=': 'err','>>': 'nc',  '<<': 'err', '>': 'nc',  '<': 'err'},
+            '<':   {'=': 'err','>=': 'err', '<=': 'xg', '>>': 'err', '<<': 'nc',  '>': 'err', '<': 'nc' },
         }
 
         if constraint == '': constraint = '='
-        
-        if constraint not in ['=', '>=', '<=', '>>', '<<']:
+
+        if constraint not in ['=', '>=', '<=', '>>', '<<', '>', '<']:
             tui.console.print(f"WARNING: Invalid constraint '{constraint}' for package {self.package} "
                               f"version {self.version}, skipping")
             return False
@@ -362,7 +366,7 @@ class Source(Sources):
     def __init__(self, section: str):
 
         self.package:    str     = ''
-        self.version:    Version = Version('')
+        self.version:    Version = Version('0')
         self.directory:  str     = ''
         self.files:      Dict[str, Dict[str, Any]] = {}
         self.arch:       List[str] = []
@@ -383,6 +387,9 @@ class Source(Sources):
         # Lets only select the package-files that the Package actually needs, the others produced are optional
         self.package_list: List[str] = []
 
+        # Runtime: binary .deb filenames produced from this source (populated by DependencyTree.parse_sources)
+        self.pkgs: List[str] = []
+
         self.skip_test = False
         self.patch_list = []
         self._err_str: str = ''
@@ -393,52 +400,71 @@ class Source(Sources):
         super().__init__(section)
         
         for _field in ['Package', 'Version', 'Directory']:
+            _pkg_name = self.get('Package', '<unknown>')
             if _field not in self:
-                tui.console.print(f"WARNING: Malformed package, skipping")
-                self._err_str = f"Missing field '{_field}' in package"
+                self._err_str = f"Missing field '{_field}' in source '{_pkg_name}'"
+                tui.console.print(f"WARNING: {self._err_str}")
                 return
             if self[_field] is None or self[_field].strip() == '':
-                tui.console.print(f"WARNING: Malformed package, skipping")
-                self._err_str = f"Empty field '{_field}' in package"
+                self._err_str = f"Empty field '{_field}' in source '{_pkg_name}'"
+                tui.console.print(f"WARNING: {self._err_str}")
                 return
-        
+
         if 'Files' not in self or self['Files'] is None:
-            tui.console.print(f"WARNING: Malformed package, skipping")
-            self._err_str = "Missing 'Files' field in package"
+            _pkg_name = self.get('Package', '<unknown>')
+            self._err_str = f"Missing 'Files' field in source '{_pkg_name}'"
+            tui.console.print(f"WARNING: {self._err_str}")
             return
 
         # Setting Values post calling super()
         self.package = self['Package']
-        self.version = Version(self['Version'])
+        try:
+            self.version = Version(self['Version'])
+        except (ValueError, TypeError) as e:
+            self._err_str = f"Invalid version '{self['Version']}' in source '{self.package}': {e}"
+            tui.console.print(f"WARNING: {self._err_str}")
+            return
         self.directory = self['Directory']
 
-        _sha256_map: Dict[str, str] = {}
-        for _entry in (self.get('Checksums-Sha256') or []):
-            _sha256_map[_entry['name']] = _entry['sha256']
+        try:
+            _sha256_map: Dict[str, str] = {}
+            for _entry in (self.get('Checksums-Sha256') or []):
+                _sha256_map[_entry['name']] = _entry['sha256']
 
-        self.files: Dict[str, Dict[str, Any]] = {
-            _entry['name']: {
-                'md5':    _entry['md5sum'],
-                'sha256': _sha256_map.get(_entry['name'], ''),
-                'size':   int(_entry['size']),
-                'path':   self['Directory'].rstrip('/') + '/' + _entry['name'],
+            self.files: Dict[str, Dict[str, Any]] = {
+                _entry['name']: {
+                    'md5':    _entry['md5sum'],
+                    'sha256': _sha256_map.get(_entry['name'], ''),
+                    'size':   int(_entry['size']),
+                    'path':   self['Directory'].rstrip('/') + '/' + _entry['name'],
+                }
+                for _entry in self['Files']
             }
-            for _entry in self['Files']
-        }
+        except (KeyError, ValueError, TypeError) as e:
+            self._err_str = f"Failed to parse Files/Checksums for source '{self.package}': {e}"
+            tui.console.print(f"WARNING: {self._err_str}")
+            return
 
         self.binary = [p.strip() for p in self.get('Binary', '').split(',') if p.strip()]
 
-        self.depends         = self.relations.get('build-depends', [])
-        self.depends_indep   = self.relations.get('build-depends-indep', [])
-        self.depends_arch    = self.relations.get('build-depends-arch', [])
+        try:
+            self.depends         = self.relations.get('build-depends', [])
+            self.depends_indep   = self.relations.get('build-depends-indep', [])
+            self.depends_arch    = self.relations.get('build-depends-arch', [])
 
-        self.conflicts       = self.relations.get('build-conflicts', [])
-        self.conflicts_indep = self.relations.get('build-conflicts-indep', [])
-        self.conflicts_arch  = self.relations.get('build-conflicts-arch', [])
+            self.conflicts       = self.relations.get('build-conflicts', [])
+            self.conflicts_indep = self.relations.get('build-conflicts-indep', [])
+            self.conflicts_arch  = self.relations.get('build-conflicts-arch', [])
+        except Exception as e:
+            self._err_str = f"Failed to parse build dependencies for source '{self.package}': {e}"
+            tui.console.print(f"WARNING: {self._err_str}")
+            return
         
-        _package_list = self.get('Package-List', '').strip()
-        if _package_list:
-            self.package_list = [line for line in _package_list.split('\n') if line.strip()]
+        _raw_pkg_list = self.get('Package-List') or ''
+        if isinstance(_raw_pkg_list, list):
+            self.package_list = [str(item).strip() for item in _raw_pkg_list if str(item).strip()]
+        elif isinstance(_raw_pkg_list, str):
+            self.package_list = [line for line in _raw_pkg_list.split('\n') if line.strip()]
        
         _arch_field = self.get('Architecture', '').strip()
         if not _arch_field:
