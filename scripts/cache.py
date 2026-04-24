@@ -37,11 +37,16 @@ class Cache:
             Returns:
         """
 
-        self._arch_table = DpkgArchTable.load_arch_table()
-
         # Set when config is validated
         self._config_valid: bool = False
         self.error_str = ''
+
+        try:
+            self._arch_table = DpkgArchTable.load_arch_table()
+        except Exception as e:
+            self.error_str = f"Failed to load dpkg arch table: {e}"
+            tui.console.error(self.error_str)
+            return
 
         # Base Distribution
         self.cache_dir = buildconfig.dir_cache
@@ -53,13 +58,17 @@ class Cache:
         self.supported_compression = ['.gz', '.bz2']
         self.compression = '.gz'
         if self.compression not in self.supported_compression:
-            raise ValueError(f"Unsupported compression '{self.compression}' specified")
+            self.error_str = f"Unsupported compression '{self.compression}' specified"
+            tui.console.error(self.error_str)
+            return
 
         # Protocol
         self.supported_protocol = ['http://', 'https://']
         self.protocol = 'http://'
         if self.protocol not in self.supported_protocol:
-            raise ValueError(f"Unsupported protocol '{self.protocol}' specified")
+            self.error_str = f"Unsupported protocol '{self.protocol}' specified"
+            tui.console.error(self.error_str)
+            return
 
         # Control files
         # TODO: currently, only for main, add for update & security repo too
@@ -94,10 +103,15 @@ class Cache:
             return
 
         # Build Hashtable
-        self.__build_cache(buildconfig.arch)
+        if not self.__build_cache(buildconfig.arch):
+            return
 
         # Set when config is validated
         self._config_valid: bool = True
+
+    @property
+    def is_valid(self) -> bool:
+        return self._config_valid
 
     def __get_files(self) -> int:
 
@@ -119,6 +133,7 @@ class Cache:
         if utils.download_file(__release_url, __release_file) <= 0:
             self.error_str = f"Error downloading release file from {__release_url}"
             return -1
+        tui.console.print(f'Downloaded {__release_file}')
 
         # Extract the SHA256 for the files from the release file
         try:
@@ -138,11 +153,17 @@ class Cache:
 
                     self.control_files[_file] = _sha256[0]
 
-        except (FileNotFoundError, PermissionError) as e:
-            tui.console.error(f"Cannot read release file: {e}")
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            self.error_str = f"Cannot read release file: {e}"
+            tui.console.error(self.error_str)
             return -1
         except KeyError as e:
-            tui.console.error(f"Missing field in release file: {e}")
+            self.error_str = f"Missing field in release file: {e}"
+            tui.console.error(self.error_str)
+            return -1
+        except Exception as e:
+            self.error_str = f"Error parsing release file: {e}"
+            tui.console.error(self.error_str)
             return -1
 
         _iter_control_file = iter(self.control_files)
@@ -161,25 +182,35 @@ class Cache:
                 if (utils.download_file(__cache_source[index], __cache_destination[index] + self.compression)) <= 0:
                     self.error_str = f"Error downloading file {__cache_source[index]}"
                     return -1
+                tui.console.print(f'Downloaded {__cache_source[index]}')
 
                 # decompress file based on extension
-                if self.compression == '.gz':
-                    with gzip.open(_file + self.compression, 'rb') as f_in:
-                        with open(_file, 'wb') as f_out:
-                            shutil.copyfileobj(f_in, f_out)
+                try:
+                    if self.compression == '.gz':
+                        with gzip.open(_file + self.compression, 'rb') as f_in:
+                            with open(_file, 'wb') as f_out:
+                                shutil.copyfileobj(f_in, f_out)
 
-                elif self.compression == '.bz2':
-                    with bz2.open(_file + self.compression, 'rb') as f_in:
-                        with open(_file, 'wb') as f_out:
-                            shutil.copyfileobj(f_in, f_out)
+                    elif self.compression == '.bz2':
+                        with bz2.open(_file + self.compression, 'rb') as f_in:
+                            with open(_file, 'wb') as f_out:
+                                shutil.copyfileobj(f_in, f_out)
 
-                elif self.compression == '':
-                    # if no ext leave as such
-                    pass
-                    # XXX: check if other extensions are required to be supported
+                    elif self.compression == '':
+                        # if no ext leave as such
+                        pass
+                        # XXX: check if other extensions are required to be supported
 
-                else:
-                    pass
+                    else:
+                        self.error_str = f'Unsupported extension {self.compression}'
+                        tui.console.error(self.error_str)
+                        return -1
+                except (OSError, EOFError) as e:
+                    self.error_str = f"Failed to decompress {os.path.basename(_file)}: {e}"
+                    tui.console.error(self.error_str)
+                    return -1
+            else:
+                tui.console.print(f'Skipping download for {os.path.basename(__cache_destination[index])}')
 
             # List of cache files are in the sequence specified earlier
             self.cache_files[urlsplit(control_files_key).path.split('/')[-1]] = _file
@@ -213,35 +244,46 @@ class Cache:
         self.__source_file = self.cache_files['Sources']
 
         # load data from the files
-        self.__package_records = utils.readfile(self.__package_file).split('\n\n')
-        self.__source_records = utils.readfile(self.__source_file).split('\n\n')
+        try:
+            self.__package_records = utils.readfile(self.__package_file).split('\n\n')
+            self.__source_records = utils.readfile(self.__source_file).split('\n\n')
+        except OSError as e:
+            self.error_str = f"Failed to read cache files: {e}"
+            tui.console.error(self.error_str)
+            return False
 
         # create a list, since we can have duplicates
         parser_spinner = Spinner("Parsing Package Files")
         
         progress_bar_pkg = ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
         for _pkg_record in self.__package_records:
-            
+
             progress_bar_pkg.step(1)
-            
-            _pkg_record = _pkg_record.strip() 
-            
+
+            _pkg_record = _pkg_record.strip()
+
             if not _pkg_record:
                 continue
 
-            _pkg = package.Package(_pkg_record)
+            try:
+                _pkg = package.Package(_pkg_record)
+            except Exception as e:
+                tui.console.print(f"WARNING: Skipping malformed package record: {e}")
+                tui.console.warning(f"Record: {_pkg_record.split(chr(10))}")
+                continue
 
-            if not _pkg.isvalid: 
+            if not _pkg.isvalid:
                 continue
 
             # add Package in hashtable
             _package_name = _pkg.package
 
-            # Check if the package architecture matches the current architecture
-            if self._arch_table.matches_architecture(_pkg.arch, arch) is False:
+            # 'all' = arch-independent package; always compatible with any host arch.
+            # matches_architecture() does not handle 'all' — guard it explicitly.
+            if _pkg.arch != 'all' and self._arch_table.matches_architecture(_pkg.arch, arch) is False:
                 continue
-            
-            # Package associated with 'Package' name, 
+
+            # Package associated with 'Package' name,
             # Mode than one Package could be associated by same name, e.g. different version
             self.package_hashtable[_package_name].append(_pkg)
 
@@ -250,11 +292,14 @@ class Cache:
             # e.g. [('acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn-bigint','1.0.0')]
             # there can be more than one version in provided by for same package name.
             
-            for _provided in _pkg.get_provides():
-                _provided_name = _provided[0]
-                _provided_ver = _provided[1]
-                # provides_hashtable: Dict[str, Dict[Version, List[str]]]
-                self.provides_hashtable[_provided_name][_provided_ver].append(_pkg.package)
+            try:
+                for _provided in _pkg.get_provides():
+                    _provided_name = _provided[0]
+                    _provided_ver = _provided[1]
+                    # provides_hashtable: Dict[str, Dict[Version, List[str]]]
+                    self.provides_hashtable[_provided_name][_provided_ver].append(_pkg.package)
+            except Exception as e:
+                tui.console.warning(f"Skipping malformed provides for '{_pkg.package}': {e}")
 
             # build the required(s) list
             if _pkg.priority == 'required':
@@ -265,14 +310,22 @@ class Cache:
                 self.important.append(_package_name)
                 
         progress_bar_pkg.close()
+
+        tui.console.print(f'From {len(self.__package_records)} parsed {len(self.package_hashtable)} package records')
    
         progress_bar_src = ProgressBar(label = f"{'Indexing Source File'}", itr_label = 'rec/s', maxvalue = len(self.__source_records))
         for _src_record in self.__source_records:
             progress_bar_src.step(1)
-            
+
             if _src_record.strip() == '':
                 continue
-            _pkg = package.Source(_src_record)
+
+            try:
+                _pkg = package.Source(_src_record)
+            except Exception as e:
+                tui.console.print(f"WARNING: Skipping malformed source record: {e}")
+                tui.console.warning(f"Record: {_src_record.split(chr(10))}")
+                continue
             
             if not _pkg.isvalid:
                 continue
@@ -280,10 +333,11 @@ class Cache:
             # add Package in hashtable
             _package_name = _pkg.package
 
-            _arch_match: bool = False            
+            _arch_match: bool = False
             for _pkt_arch in _pkg.arch:
-                # Check if the package architecture matches the current architecture
-                if self._arch_table.matches_architecture(_pkt_arch, arch):
+                # 'all' and 'any' match any host arch; guard 'all' explicitly as
+                # matches_architecture() does not handle it.
+                if _pkt_arch == 'all' or self._arch_table.matches_architecture(_pkt_arch, arch):
                     _arch_match = True
             
             if not _arch_match:
