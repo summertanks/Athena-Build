@@ -107,21 +107,6 @@ def main(banner: str):
         console.print(f"\tParent Distribution\t{build_config.basecodename} {build_config.baseversion}")
         console.print(f"\tBuild Distribution\t{build_config.build_codename} {build_config.build_version}")
 
-    def cmd_print_config():
-        if not _progress_flags.config_ready:
-            console.print("  No config loaded — run 'build_config' first")
-            return
-        console.print("Build Configuration:")
-        console.print(f"    Arch                : {build_config.arch}")
-        console.print(f"    Base URL            : {build_config.baseurl}")
-        console.print(f"    Base ID             : {build_config.baseid}")
-        console.print(f"    Parent codename     : {build_config.basecodename}")
-        console.print(f"    Parent version      : {build_config.baseversion}")
-        console.print(f"    Build codename      : {build_config.build_codename}")
-        console.print(f"    Build version       : {build_config.build_version}")
-        console.print(f"    Config file         : {build_config.config_path}")
-        console.print(f"    Package list        : {build_config.pkglist_path}")
-        console.print(f"    Working dir         : {build_config.working_dir}")
 
     def cmd_build_cache():
         global build_cache
@@ -149,6 +134,7 @@ def main(banner: str):
     
     def cmd_parse_mandatory():
         global dependency_tree
+        
         if not _progress_flags.cache_ready:
             console.print("  Run 'build_cache' first")
             return
@@ -159,12 +145,14 @@ def main(banner: str):
 
         required_packages = build_cache.required
         dependency_tree.add_lookahead(required_packages)
+
         for pkg in required_packages:
             try:
                 dependency_tree.parse_dependency(pkg)
             except ValueError as e:
                 console.print(f"WARNING: cannot resolve required '{pkg}'")
                 console.error(f"parse_dependency({pkg}): {e}")
+                
         __num_required = len(dependency_tree.selected_pkgs)
         console.print(f"Dependencies Selected for 'required' : {__num_required}")
 
@@ -186,75 +174,129 @@ def main(banner: str):
             except ValueError as e:
                 console.print(f"WARNING: cannot resolve important '{pkg}'")
                 console.error(f"parse_dependency({pkg}): {e}")
+
         console.print(f"Dependencies Selected for 'important' : {len(dependency_tree.selected_pkgs) - __num_required}")
+        __num_required = len(dependency_tree.selected_pkgs)
 
         # Similar to 'required', just that if it is not 'required' has to be important
+        # Manually forcing priotity for other packages
         for _pkg in dependency_tree.selected_pkgs:
             if not dependency_tree.selected_pkgs[_pkg].priority == 'required':
                 dependency_tree.selected_pkgs[_pkg].priority = 'important'
 
+        selected_packages = list(dependency_tree.selected_pkgs.keys())
+        manual_list = []
+
         console.print(f"Parsing {build_config.pkglist_path}...")
         try:
-            required_packages_list = utils.readfile(build_config.pkglist_path).split('\n')
+            manual_packages_list = utils.readfile(build_config.pkglist_path).split('\n')
         except OSError as e:
             console.print(f"ERROR: cannot read package list {build_config.pkglist_path}")
             console.error(f"readfile({build_config.pkglist_path}): {e}")
-            required_packages_list = []
-        for pkg in required_packages_list:
+            manual_packages_list = []
+        
+        for pkg in manual_packages_list:
             if pkg and not pkg.startswith('#') and not pkg.isspace():
                 pkg = pkg.strip()
-                if pkg not in required_packages:
-                    required_packages.append(pkg)
-        console.print(f"Total Selected Packages {len(required_packages)}")
+                if pkg not in selected_packages:
+                    manual_list.append(pkg)
+        console.print(f"Manual Selected Packages {len(manual_list)}")
 
         # Iterate through package list and identify dependencies
-        dependency_tree.add_lookahead(required_packages)
-        for pkg in required_packages:
+        dependency_tree.add_lookahead(manual_list)
+        for pkg in manual_list:
             try:
                 dependency_tree.parse_dependency(pkg)
             except ValueError as e:
                 console.print(f"WARNING: cannot resolve '{pkg}'")
                 console.error(f"parse_dependency({pkg}): {e}")
 
-        console.print(f"Total Dependencies Selected are : {len(dependency_tree.selected_pkgs)}")
+        console.print(f"Dependencies for manually added packages : {len(dependency_tree.selected_pkgs) - __num_required}")
+        console.print(f"Total Selected Packages : {len(dependency_tree.selected_pkgs)}")
+
+        # -------------------------------------------------------------------------------------------------------------
+        # Step III - Checking Breaks, Conflicts and version constraints
+        console.print("Checking Breaks and Conflicts...")
+        if not dependency_tree.validate_selection():
+            _resp = Prompt(PROMPT_YESNO, "There are one or more dependency validation failures, Proceed?").get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                _progress_flags._mandatory_dep_ready = False
+                return
+
+        try:
+            with open(os.path.join(build_config.dir_log, 'selected_packages.list'), 'w') as f:
+                for pkg in dependency_tree.selected_pkgs:
+                    f.write(str(dependency_tree.selected_pkgs[pkg]) + '\n\n')
+        except OSError as e:
+            console.print(f"ERROR: cannot write selected_packages.list")
+            console.error(f"selected_packages.list write: {e}")
+            return
 
         if len(dependency_tree.selected_pkgs) > 0:
             _progress_flags._mandatory_dep_ready = True
 
-        
+    def cmd_print(category: str = ''):
+        if category not in ('config', 'required', 'important', 'selected'):
+            console.print("  Usage: print <config|required|important|selected>")
+            return
+
+        if category == 'config':
+            if not _progress_flags.config_ready:
+                console.print("  No config loaded — run 'build_config' first")
+                return
+            console.print("Build Configuration:")
+            console.print(f"    Arch                : {build_config.arch}")
+            console.print(f"    Base URL            : {build_config.baseurl}")
+            console.print(f"    Base ID             : {build_config.baseid}")
+            console.print(f"    Parent codename     : {build_config.basecodename}")
+            console.print(f"    Parent version      : {build_config.baseversion}")
+            console.print(f"    Build codename      : {build_config.build_codename}")
+            console.print(f"    Build version       : {build_config.build_version}")
+            console.print(f"    Config file         : {build_config.config_path}")
+            console.print(f"    Package list        : {build_config.pkglist_path}")
+            console.print(f"    Working dir         : {build_config.working_dir}")
+            return
+
+        if not _progress_flags.cache_ready:
+            console.print("Run 'build_cache' first")
+            return
+
+        if category == 'selected' and not _progress_flags._mandatory_dep_ready:
+            console.print("Run 'parse_mandatory' first")
+            return
+
+        if category == 'required':
+            pkgs = build_cache.required
+            console.print(f"Required packages ({len(pkgs)}):")
+            for pkg in sorted(pkgs):
+                console.print(f"  {pkg}")
+
+        elif category == 'important':
+            pkgs = build_cache.important
+            console.print(f"Important packages ({len(pkgs)}):")
+            for pkg in sorted(pkgs):
+                console.print(f"  {pkg}")
+
+        elif category == 'selected':
+            pkgs = dependency_tree.selected_pkgs
+            console.print(f"Selected packages ({len(pkgs)}):")
+            for name in sorted(pkgs.keys()):
+                console.print(f"  {name:<40} {pkgs[name].version}")
 
     # --------------------------------------------------------------------------------------------------------------
     console.print(asciiart_logo)
     console.print("Starting Source Build System for Athena Linux...")
     cmd_load_config()
 
-    tui.register_command('build_config', cmd_load_config, 'Parse build configuration')
-    tui.register_command('print_config', cmd_print_config, 'Print current build configuration')
-    tui.register_command('build_cache', cmd_build_cache, 'Build cache')
-    tui.register_command('parse_mandatory', cmd_parse_mandatory, 'Parse dependency tree for mandatory packages')
+    tui.register_command('build_config',    cmd_load_config,       'Parse build configuration')
+    tui.register_command('build_cache',     cmd_build_cache,       'Build cache')
+    tui.register_command('parse_mandatory', cmd_parse_mandatory,   'Parse dependency tree for mandatory packages')
+    tui.register_command('print',           cmd_print,             'Print info: print <config|required|important|selected>')
     
     _tui.wait()
     Exit(0)
 
-    # -------------------------------------------------------------------------------------------------------------
-    # Step III - Checking Breaks, Conflicts and version constraints
-    console.print("Checking Breaks and Conflicts...")
-    if not dependency_tree.validate_selection():
-        _resp = Prompt(PROMPT_YESNO,
-                       "There are one or more dependency validation failures, Proceed?").get_response()
-        if _resp.lower() not in ('y', 'yes'):
-            Exit(1)
-            return
-
-    try:
-        with open(os.path.join(build_config.dir_log, 'selected_packages.list'), 'w') as f:
-            for pkg in dependency_tree.selected_pkgs:
-                f.write(str(dependency_tree.selected_pkgs[pkg]) + '\n\n')
-    except OSError as e:
-        console.print(f"ERROR: cannot write selected_packages.list")
-        console.error(f"selected_packages.list write: {e}")
-        Exit(1)
-        return
+    # Step III placeholder — moved into cmd_parse_mandatory
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - IV Parse Source Dependencies
