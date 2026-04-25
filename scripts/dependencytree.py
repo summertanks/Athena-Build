@@ -213,7 +213,7 @@ class DependencyTree:
             for _break_group in self.selected_pkgs[_pkg].breaks:
                 _breaks_name = _break_group[0][0]
                 if _breaks_name in self.selected_pkgs:
-                    _pkg_ver = self.selected_pkgs[_breaks_name].version
+                    _pkg_ver = str(self.selected_pkgs[_breaks_name].version)
                     _break_version = _break_group[0][1]
                     _break_comparator = _break_group[0][2]
 
@@ -236,7 +236,7 @@ class DependencyTree:
             for _conflict_group in self.selected_pkgs[_pkg].conflicts:
                 _conflicts_name = _conflict_group[0][0]
                 if _conflicts_name in self.selected_pkgs:
-                    _pkg_ver = self.selected_pkgs[_conflicts_name].version
+                    _pkg_ver = str(self.selected_pkgs[_conflicts_name].version)
                     _conflict_version = _conflict_group[0][1]
                     _conflict_comparator = _conflict_group[0][2]
 
@@ -276,7 +276,7 @@ class DependencyTree:
                         # Empty comparator = no version constraint, name-match alone satisfies (matches Breaks/Conflicts pattern)
                         try:
                             _satisfies = (pkg_constraint == '' or
-                                          apt_pkg.check_dep(self.selected_pkgs[pkg_name].version,
+                                          apt_pkg.check_dep(str(self.selected_pkgs[pkg_name].version),
                                                             pkg_constraint, pkg_version))
                         except Exception as e:
                             tui.console.warning(f"check_dep raised for {pkg_name} "
@@ -301,7 +301,7 @@ class DependencyTree:
                                 # Empty comparator = no version constraint, name-match alone satisfies
                                 try:
                                     _satisfies = (pkg_constraint == '' or
-                                                  apt_pkg.check_dep(self.selected_pkgs[_pkg_name].version,
+                                                  apt_pkg.check_dep(str(self.selected_pkgs[_pkg_name].version),
                                                                     pkg_constraint, pkg_version))
                                 except Exception as e:
                                     tui.console.warning(f"check_dep raised for {_pkg_name} "
