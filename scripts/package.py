@@ -217,6 +217,9 @@ class Package(Packages):
     
     def get_provides(self) -> List[Tuple[str, Version]]:
         
+        if not self.isvalid:
+            return False
+        
         if not self.provides:
             return []
 
@@ -229,7 +232,7 @@ class Package(Packages):
         #   [[('node-acorn', '8.0.5', '=')]]
         #   [[('node-acorn', '8.0.5+ds+~cs19.19.27-3', '=')]]
         #   [[('node-acorn-bigint', '1.0.0', '=')]]
-        #   [[('foo', '', '')]]                           # no version
+        #   [[('foo', '', '')]] # no version
 
         for _grp in self.provides:
             for _dep in _grp:
@@ -238,27 +241,31 @@ class Package(Packages):
                     _version_str = _dep[1]
                     _operator = _dep[2]
 
-                    if _version_str or _operator:
-                        if _operator != '=':
-                            tui.console.print(
-                                f"WARNING: Provides for {self.package} has invalid operator "
-                                f"'{_operator}' (only '=' is allowed), ignoring version"
-                            )
-                            _version = self.version
-                        else:
-                            _version = Version(_version_str)
-                    else:
-                        _version = self.version
-
-                    if _name == '':
-                        tui.console.print(f"WARNING: Empty package name in provides "
-                                          f"for {self.package} {self.version}, skipping")
+                    if not _name:
+                        tui.console.print(f"WARNING: Empty package name in provides for {self.package} {self.version}, skipping")
                         continue
 
+                    # if we have either, both should be valid
+                    if _version_str or _operator:
+                        if _operator != '=':
+                            # only '=' operator is permitted for provides field
+                            tui.console.print(f"WARNING: Provides for {self.package} has invalid version operator ")
+                            _version = self.version
+                        elif not _version:
+                            # sanity check, just in case
+                            tui.console.print(f"WARNING: Provides for {self.package} has invalid version")
+                            _version = self.version
+                        else:
+                            # set version
+                            _version = Version(_version_str)
+                    else:
+                        # use host package version
+                        _version = self.version
+
                     _provides_names.append((_name, _version))
+
                 except (IndexError, ValueError, AttributeError, TypeError) as e:
-                    tui.console.warning(
-                        f"Skipping malformed provides entry for '{self.package}': {e}")
+                    tui.console.warning(f"Skipping malformed provides entry for '{self.package}': {e}")
                     continue
         
         # provides a list of tupples
