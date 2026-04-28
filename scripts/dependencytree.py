@@ -59,10 +59,16 @@ class DependencyTree:
             for _conflict_group in _selected.conflicts:
                 _conflict_name = _conflict_group[0][0]
                 if _conflict_name in self.__lookahead:
-                    tui.console.print(f"ERROR: Cannot add '{_pkg_name}' — conflicts with '{_conflict_name}' already in lookahead")
-                    tui.console.error(f"CRITICAL: add_lookahead — '{_pkg_name}' conflicts with '{_conflict_name}'")
-                    _conflict_found = True
-                    break
+                    # Only block on real-package conflicts. Provides-aliases (e.g. apt registering
+                    # 'debconf-tiny' as a virtual name) should not trigger here — those are deferred
+                    # to validate_selection() where version-aware checks run properly.
+                    _is_real = any(pkg['Package'] == _conflict_name
+                                   for pkg in self.__lookahead[_conflict_name].values())
+                    if _is_real:
+                        tui.console.print(f"ERROR: Cannot add '{_pkg_name}' — conflicts with '{_conflict_name}' already in lookahead")
+                        tui.console.error(f"CRITICAL: add_lookahead — '{_pkg_name}' conflicts with '{_conflict_name}'")
+                        _conflict_found = True
+                        break
             if _conflict_found:
                 continue
 
