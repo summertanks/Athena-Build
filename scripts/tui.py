@@ -425,7 +425,7 @@ class Tui:
             x += len(tag) + 1
 
         # ── Row 1: command input ──────────────────────────────────────────
-        prompt_max = max(2, floor(inner_w / 2))
+        prompt_max = max_x - 3   # left border (1) + right border (1) + cursor (1)
         prompt_str = self.cmd_prompt[:prompt_max]
         cmd_area_w = inner_w - len(prompt_str) - 1   # -1 for blink cursor
 
@@ -698,7 +698,7 @@ class Tui:
     def _cmd_input_width(self) -> int:
         """Characters available for command text in the footer input row."""
         inner_w    = self._resolution.get('x', 80) - 2 * self.BOX_WIDTH
-        prompt_len = len(self.cmd_prompt[:max(2, floor(inner_w / 2))])
+        prompt_len = len(self.cmd_prompt[:inner_w - 1])   # inner_w = max_x - 2, so inner_w-1 = max_x-3
         return max(1, inner_w - prompt_len - 1)   # -1 for blink cursor
 
     def _handle_key(self, c: str) -> None:
