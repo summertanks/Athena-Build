@@ -338,6 +338,8 @@ class DependencyTree:
 
         _breaks = False
         for _pkg in self.selected_pkgs:
+            if _pkg != self.selected_pkgs[_pkg]['Package']:
+                continue
             # Breaks will still allow to install - Warning
             # Debian policy forbids alternatives in Breaks, so each group has exactly one entry at [0]
             for _break_group in self.selected_pkgs[_pkg].breaks:
@@ -458,6 +460,8 @@ class DependencyTree:
         # python-debian .source / .source_version properties raise on malformed data.
         _src_list = []
         for _pkg in self.selected_pkgs:
+            if _pkg != self.selected_pkgs[_pkg]['Package']:
+                continue
             try:
                 _src_list.append((self.selected_pkgs[_pkg].source,
                                   self.selected_pkgs[_pkg].source_version,
