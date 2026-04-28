@@ -564,7 +564,7 @@ class DependencyTree:
                 # If we are we matched, there should be another match withing the same package list, lets break
                 break
 
-        tui.console.print(f"Selected {len(self.selected_srcs)} Source Package")
+        tui.console.print(f"Selected {len(self.selected_srcs)} Source Packages")
         return _found
 
     @property
