@@ -218,8 +218,8 @@ class Package(Packages):
     def get_provides(self) -> List[Tuple[str, Version]]:
         
         if not self.isvalid:
-            return False
-        
+            return []
+
         if not self.provides:
             return []
 
