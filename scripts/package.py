@@ -251,7 +251,7 @@ class Package(Packages):
                             # only '=' operator is permitted for provides field
                             tui.console.print(f"WARNING: Provides for {self.package} has invalid version operator ")
                             _version = self.version
-                        elif not _version:
+                        elif not _version_str:
                             # sanity check, just in case
                             tui.console.print(f"WARNING: Provides for {self.package} has invalid version")
                             _version = self.version
