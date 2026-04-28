@@ -48,11 +48,12 @@ class DependencyTree:
             if len(_candidates) == 1:
                 _selected = _candidates[0]
             else:
-                _options = [str(c.version) for c in _candidates]
-                _ver = Prompt(PROMPT_OPTIONS,
-                              f"Multiple versions for '{_pkg_name}', select",
-                              _options).get_response()
-                _selected = _candidates[_options.index(_ver)]
+                tui.console.print(f"Multiple versions for '{_pkg_name}':")
+                for _i, _c in enumerate(_candidates, 1):
+                    tui.console.print(f"  {_i}.  {_c.package}  ({_c.version})")
+                _options = [str(_i) for _i in range(1, len(_candidates) + 1)]
+                _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_candidates)}]", _options).get_response()
+                _selected = _candidates[int(_choice) - 1]
 
             # 3. Hard conflict check against entries already in lookahead
             _conflict_found = False
@@ -73,21 +74,26 @@ class DependencyTree:
                     # against apt 2.x. Only block if the lookahead package's version actually
                     # satisfies the conflict operator. No version string = unconditional conflict.
                     if _conflict_ver_str and _conflict_op in self._VALID_CONSTRAINTS:
-                        _triggered = False
+                        _triggered     = False
+                        _triggered_ver = None
                         for _lver in self.__lookahead[_conflict_name]:
                             try:
                                 if apt_pkg.check_dep(str(_lver), _conflict_op, _conflict_ver_str):
-                                    _triggered = True
+                                    _triggered     = True
+                                    _triggered_ver = _lver
                                     break
                             except Exception:
-                                _triggered = True  # conservative: assume conflict on parse error
+                                _triggered     = True  # conservative: assume conflict on parse error
+                                _triggered_ver = _lver
                                 break
                     else:
-                        _triggered = True   # no version constraint = unconditional conflict
+                        _triggered     = True   # no version constraint = unconditional conflict
+                        _triggered_ver = next(iter(self.__lookahead[_conflict_name]), None)
 
                     if _triggered:
-                        tui.console.print(f"ERROR: Cannot add '{_pkg_name}' — conflicts with '{_conflict_name}' already in lookahead")
-                        tui.console.error(f"CRITICAL: add_lookahead — '{_pkg_name}' conflicts with '{_conflict_name}'")
+                        _ver_info = f" ({_triggered_ver})" if _triggered_ver else ""
+                        tui.console.print(f"ERROR: Cannot add '{_pkg_name}' — conflicts with '{_conflict_name}{_ver_info}' already in lookahead")
+                        tui.console.error(f"CRITICAL: add_lookahead — '{_pkg_name}' conflicts with '{_conflict_name}{_ver_info}'")
                         _conflict_found = True
                         break
             if _conflict_found:
