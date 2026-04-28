@@ -6,7 +6,7 @@ import apt_pkg
 from urllib.parse import urlsplit
 from debian.deb822 import Release
 from debian.debian_support import DpkgArchTable, Version
-from typing import List, Dict
+from typing import List, Dict, Optional
 from collections import defaultdict, OrderedDict
 
 # Internal
@@ -21,12 +21,14 @@ from tui import ProgressBar, Spinner
 
 class Cache:
 
-    package_hashtable:  Dict[str, List[Package]]
-    provides_hashtable: Dict[str, Dict[Version, List[str]]]
+    package_hashtable:  Dict[str, Dict[Version, List[Package]]]
+    # provides_hashtable: Dict[str, Dict[Version, List[str]]]
     source_hashtable:   Dict[str, List[Source]]
 
-    
     _arch_table: DpkgArchTable
+
+    # Operators accepted by apt_pkg.check_dep; anything else defaults to '>='
+    _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
 
     def __init__(self, buildconfig: BuildConfig):
         """Builds the Cache. Release file is used based on BaseDistribution defined
@@ -94,8 +96,8 @@ class Cache:
         self.important: List[str] = []
 
         
-        self.package_hashtable = defaultdict(list)  # Dict[str, List[Package]]
-        self.provides_hashtable = defaultdict(lambda: defaultdict(list))
+        self.package_hashtable = defaultdict(lambda: defaultdict(list))
+        # self.provides_hashtable = defaultdict(lambda: defaultdict(list))
         self.source_hashtable = defaultdict(list) # Dict[str, List[Source]]
 
         # Download files
@@ -257,11 +259,9 @@ class Cache:
         
         progress_bar_pkg = ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
         for _pkg_record in self.__package_records:
-
             progress_bar_pkg.step(1)
-
+            
             _pkg_record = _pkg_record.strip()
-
             if not _pkg_record:
                 continue
 
@@ -269,35 +269,38 @@ class Cache:
                 _pkg = package.Package(_pkg_record)
             except Exception as e:
                 tui.console.print(f"WARNING: Skipping malformed package record: {e}")
-                tui.console.warning(f"Record: {_pkg_record.split(chr(10))}")
+                tui.console.warning(f"Corruption in Record: {_pkg_record.split(chr(10))}")
                 continue
 
+            # Basic sanity check
             if not _pkg.isvalid:
                 continue
-
-            # add Package in hashtable
-            _package_name = _pkg.package
 
             # 'all' = arch-independent package; always compatible with any host arch.
             # matches_architecture() does not handle 'all' — guard it explicitly.
             if _pkg.arch != 'all' and self._arch_table.matches_architecture(_pkg.arch, arch) is False:
                 continue
 
+            # add Package in hashtable
+            _package_name = _pkg.package
+            _package_ver = _pkg.version
+
             # Package associated with 'Package' name,
             # Mode than one Package could be associated by same name, e.g. different version
-            self.package_hashtable[_package_name].append(_pkg)
+            self.package_hashtable[_package_name][_package_ver].append(_pkg)
 
             # Which Package provides 'package' name
             # get_provides() returns a list of tupple(name, version)
             # e.g. [('acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn-bigint','1.0.0')]
             # there can be more than one version in provided by for same package name.
-            
             try:
                 for _provided in _pkg.get_provides():
                     _provided_name = _provided[0]
                     _provided_ver = _provided[1]
-                    # provides_hashtable: Dict[str, Dict[Version, List[str]]]
-                    self.provides_hashtable[_provided_name][_provided_ver].append(_pkg.package)
+
+                    if _provided_name != _package_name:
+                        self.package_hashtable[_provided_name][_provided_ver].append(_pkg)
+
             except Exception as e:
                 tui.console.warning(f"Skipping malformed provides for '{_pkg.package}': {e}")
 
@@ -360,12 +363,49 @@ class Cache:
         
         return True
 
-    def get_packages(self, package_name: str) -> List[Package]:
-        return self.package_hashtable[package_name]
+    def get_packages(self, package_name: str,
+                     version: Optional[Version] = None, constraint: str = '') -> List[Package]:
+        """Return packages matching name.
 
-    def get_provides(self, provides_name: str) -> List[Package]:
-        result: List[Package] = []
-        for _pkg_names in self.provides_hashtable[provides_name].values():
-            for _pkg_name in _pkg_names:
-                result.extend(self.package_hashtable[_pkg_name])
+        If version is omitted, all versions are returned.
+        If version is given without constraint, constraint defaults to '>='.
+        If both are given, only packages whose version satisfies
+        apt_pkg.check_dep(pkg_ver, constraint, version) are returned.
+        """
+        if version is None:
+            result: List[Package] = []
+            for _pkgs in self.package_hashtable[package_name].values():
+                result.extend(_pkgs)
+            return result
+
+        _constraint = constraint if constraint in self._VALID_CONSTRAINTS else '>='
+        result = []
+        for _pkg_version, _pkgs in self.package_hashtable[package_name].items():
+            try:
+                if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
+                    result.extend(_pkgs)
+            except Exception:
+                pass
         return result
+
+    # def get_provides(self, provides_name: str,
+    #                  version: Version = None, constraint: str = '') -> List[Package]:
+    #     """Return packages that provide the given virtual name.
+
+    #     Same version/constraint filtering as get_packages.
+    #     """
+    #     if version is None:
+    #         result: List[Package] = []
+    #         for _pkgs in self.package_hashtable[provides_name].values():
+    #             result.extend(_pkgs)
+    #         return result
+
+    #     _constraint = constraint if constraint in self._VALID_CONSTRAINTS else '>='
+    #     result = []
+    #     for _pkg_version, _pkgs in self.package_hashtable[provides_name].items():
+    #         try:
+    #             if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
+    #                 result.extend(_pkgs)
+    #         except Exception:
+    #             pass
+    #     return result
