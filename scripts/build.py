@@ -147,17 +147,18 @@ def main(banner: str):
         dependency_tree.add_lookahead(required_packages)
 
         for pkg in required_packages:
-            try:
-                dependency_tree.parse_dependency(pkg)
-            except ValueError as e:
+            if dependency_tree.parse_dependency(pkg) is None:
                 console.print(f"WARNING: cannot resolve required '{pkg}'")
-                console.error(f"parse_dependency({pkg}): {e}")
+                console.error(f"parse_dependency({pkg}) returned None")
                 
-        __num_required = len(dependency_tree.selected_pkgs)
+        __num_required = sum(1 for _k in dependency_tree.selected_pkgs
+                             if _k == dependency_tree.selected_pkgs[_k]['Package'])
         console.print(f"Dependencies Selected for 'required' : {__num_required}")
 
         # Cheeky but works, ideally, parsing should have identified and marked required and their dependencies as required
         for _pkg in dependency_tree.selected_pkgs:
+            if _pkg != dependency_tree.selected_pkgs[_pkg]['Package']:
+                continue
             dependency_tree.selected_pkgs[_pkg].priority = 'required'
 
         # Adding 'important' packages too, not really mandatory for a bare-bones system but too much manual intervention
@@ -169,19 +170,21 @@ def main(banner: str):
         
         dependency_tree.add_lookahead(important_packages)
         for pkg in important_packages:
-            try:
-                dependency_tree.parse_dependency(pkg)
-            except ValueError as e:
+            if dependency_tree.parse_dependency(pkg) is None:
                 console.print(f"WARNING: cannot resolve important '{pkg}'")
-                console.error(f"parse_dependency({pkg}): {e}")
+                console.error(f"parse_dependency({pkg}) returned None")
 
-        console.print(f"Dependencies Selected for 'important' : {len(dependency_tree.selected_pkgs) - __num_required}")
-        __num_required = len(dependency_tree.selected_pkgs)
+        __num_now = sum(1 for _k in dependency_tree.selected_pkgs
+                        if _k == dependency_tree.selected_pkgs[_k]['Package'])
+        console.print(f"Dependencies Selected for 'important' : {__num_now - __num_required}")
+        __num_required = __num_now
 
         # Similar to 'required', just that if it is not 'required' has to be important
         # Manually forcing priotity for other packages
         for _pkg in dependency_tree.selected_pkgs:
-            if not dependency_tree.selected_pkgs[_pkg].priority == 'required':
+            if _pkg != dependency_tree.selected_pkgs[_pkg]['Package']:
+                continue
+            if dependency_tree.selected_pkgs[_pkg].priority != 'required':
                 dependency_tree.selected_pkgs[_pkg].priority = 'important'
 
         selected_packages = list(dependency_tree.selected_pkgs.keys())
@@ -205,14 +208,14 @@ def main(banner: str):
         # Iterate through package list and identify dependencies
         dependency_tree.add_lookahead(manual_list)
         for pkg in manual_list:
-            try:
-                dependency_tree.parse_dependency(pkg)
-            except ValueError as e:
+            if dependency_tree.parse_dependency(pkg) is None:
                 console.print(f"WARNING: cannot resolve '{pkg}'")
-                console.error(f"parse_dependency({pkg}): {e}")
+                console.error(f"parse_dependency({pkg}) returned None")
 
-        console.print(f"Dependencies for manually added packages : {len(dependency_tree.selected_pkgs) - __num_required}")
-        console.print(f"Total Selected Packages : {len(dependency_tree.selected_pkgs)}")
+        __num_total = sum(1 for _k in dependency_tree.selected_pkgs
+                          if _k == dependency_tree.selected_pkgs[_k]['Package'])
+        console.print(f"Dependencies for manually added packages : {__num_total - __num_required}")
+        console.print(f"Total Selected Packages : {__num_total}")
 
         # -------------------------------------------------------------------------------------------------------------
         # Step III - Checking Breaks, Conflicts and version constraints
@@ -226,6 +229,8 @@ def main(banner: str):
         try:
             with open(os.path.join(build_config.dir_log, 'selected_packages.list'), 'w') as f:
                 for pkg in dependency_tree.selected_pkgs:
+                    if pkg != dependency_tree.selected_pkgs[pkg]['Package']:
+                        continue
                     f.write(str(dependency_tree.selected_pkgs[pkg]) + '\n\n')
         except OSError as e:
             console.print(f"ERROR: cannot write selected_packages.list")
@@ -279,9 +284,10 @@ def main(banner: str):
 
         elif category == 'selected':
             pkgs = dependency_tree.selected_pkgs
-            console.print(f"Selected packages ({len(pkgs)}):")
-            for name in sorted(pkgs.keys()):
-                console.print(f"  {name:<40} {pkgs[name].version}")
+            real_pkgs = {k: v for k, v in pkgs.items() if k == v['Package']}
+            console.print(f"Selected packages ({len(real_pkgs)}):")
+            for name in sorted(real_pkgs.keys()):
+                console.print(f"  {name:<40} {real_pkgs[name].version}")
 
     # --------------------------------------------------------------------------------------------------------------
     console.print(asciiart_logo)
