@@ -40,6 +40,7 @@ class DependencyTree:
             # 1. Verify package exists in cache
             _candidates = self.__cache.get_packages(_pkg_name)
             if not _candidates:
+                tui.console.print(f"WARNING: add_lookahead: '{_pkg_name}' not found in cache, skipping")
                 tui.console.warning(f"add_lookahead: '{_pkg_name}' not found in cache, skipping")
                 continue
 
