@@ -352,6 +352,10 @@ class Cache:
         parser_spinner.done()
         
         # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
+        # TODO: sort key x.split('-')[1] gives identical keys for gcc-10 and gcc-10-base — both yield (10,).
+        # sorted(...)[-1:] keeps only one of them (last in stable sort order), silently dropping the other
+        # from required even if it's a distinct needed package. Fix: find the max version number, then
+        # keep ALL packages whose version number matches it, not just the last sorted element.
         gcc_versions = [pkg for pkg in self.required
                         if pkg.startswith('gcc-') and pkg.split('-')[1].isdigit()]
         latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(n) for n in x.split('-')[1].split('.')))[-1:]
