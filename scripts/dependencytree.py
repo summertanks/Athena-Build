@@ -347,6 +347,12 @@ class DependencyTree:
             for _break_group in self.selected_pkgs[_pkg].breaks:
                 _breaks_name = _break_group[0][0]
                 if _breaks_name in self.selected_pkgs:
+                    # Standard Debian pattern: a package declares Provides: X and Breaks: X to
+                    # satisfy X while blocking other providers. selected_pkgs registers virtual
+                    # names pointing to the same Package object, so an identity check distinguishes
+                    # "package breaks its own alias" (false positive) from a real break.
+                    if self.selected_pkgs[_breaks_name] is self.selected_pkgs[_pkg]:
+                        continue
                     _pkg_ver = str(self.selected_pkgs[_breaks_name].version)
                     _break_version = _break_group[0][1]
                     _break_comparator = _break_group[0][2]
@@ -370,6 +376,10 @@ class DependencyTree:
             for _conflict_group in self.selected_pkgs[_pkg].conflicts:
                 _conflicts_name = _conflict_group[0][0]
                 if _conflicts_name in self.selected_pkgs:
+                    # Same Debian pattern as Breaks above: Provides: X + Conflicts: X means
+                    # "I am X and nothing else can be X". Not a real conflict with another package.
+                    if self.selected_pkgs[_conflicts_name] is self.selected_pkgs[_pkg]:
+                        continue
                     _pkg_ver = str(self.selected_pkgs[_conflicts_name].version)
                     _conflict_version = _conflict_group[0][1]
                     _conflict_comparator = _conflict_group[0][2]
