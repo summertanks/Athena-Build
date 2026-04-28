@@ -102,7 +102,7 @@ class Package(Packages):
         self.suggests:       List[Tuple] = []
         self.breaks:         List[List[Tuple]] = []
         self.conflicts:      List[List[Tuple]] = []
-        self.provides:       List[List[Dict[str, Any]]] = []  # python-debian format — used by get_provides()
+        self.provides:       List[List[Tuple]] = []
         self.replaces:       List[List[Tuple]] = []
         self.enhances:       List[List[Tuple]] = []
         self.built_using:    List[List[Tuple]] = []
@@ -234,6 +234,7 @@ class Package(Packages):
         #   [[('node-acorn-bigint', '1.0.0', '=')]]
         #   [[('foo', '', '')]] # no version
 
+        _version: Version
         for _grp in self.provides:
             for _dep in _grp:
                 try:
