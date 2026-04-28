@@ -1,6 +1,7 @@
 # Internal modules
 import re
-from typing import Dict, List
+from collections import defaultdict
+from typing import Dict, List, Optional
 
 import package
 from package import Version
@@ -19,153 +20,176 @@ class DependencyTree:
 
         self.__recommended = select_recommended
         self.__cache = cache
-        self.__lookahead: List[str] = []
+        # Dict[name_or_virtual, Dict[Version, Package]]
+        # Mirrors package_hashtable structure — multiple versions per name co-exist without overwrite
+        self.__lookahead: Dict[str, Dict[Version, package.Package]] = defaultdict(dict)
 
         self.selected_pkgs: Dict[str, package.Package] = {}
         self.selected_srcs: Dict[str, package.Source]  = {}
         self.arch = arch
 
         if lookahead is not None:
-            self.__lookahead = lookahead
+            self.add_lookahead(lookahead)
 
     def add_lookahead(self, lookahead: List[str]):
-        for _pkg in lookahead:
-            if _pkg and not _pkg.isspace():
-                _pkg = _pkg.strip()
-                if _pkg not in self.__lookahead:
-                    self.__lookahead.append(_pkg)
+        for _pkg_name in lookahead:
+            if not _pkg_name or _pkg_name.isspace():
+                continue
+            _pkg_name = _pkg_name.strip()
 
-    def parse_dependency(self, package_name: str) -> package.Package:
+            # 1. Verify package exists in cache
+            _candidates = self.__cache.get_packages(_pkg_name)
+            if not _candidates:
+                tui.console.warning(f"add_lookahead: '{_pkg_name}' not found in cache, skipping")
+                continue
 
-        if not package_name:
-            raise ValueError("Dependency asked for empty package name")
+            # 2. Select version — prompt if multiple exist
+            if len(_candidates) == 1:
+                _selected = _candidates[0]
+            else:
+                _options = [str(c.version) for c in _candidates]
+                _ver = Prompt(PROMPT_OPTIONS,
+                              f"Multiple versions for '{_pkg_name}', select",
+                              _options).get_response()
+                _selected = _candidates[_options.index(_ver)]
 
-        # Not checking for package in selected packages here - since dependency may be satisfied by provides
-        # Since search is hashed, hoping another search is trivial
-        _provide_candidates = []
-        _pkg_candidates = []
-        _selected_pkg: package.Package
+            # 3. Hard conflict check against entries already in lookahead
+            _conflict_found = False
+            for _conflict_group in _selected.conflicts:
+                _conflict_name = _conflict_group[0][0]
+                if _conflict_name in self.__lookahead:
+                    tui.console.print(f"ERROR: Cannot add '{_pkg_name}' — conflicts with '{_conflict_name}' already in lookahead")
+                    tui.console.error(f"CRITICAL: add_lookahead — '{_pkg_name}' conflicts with '{_conflict_name}'")
+                    _conflict_found = True
+                    break
+            if _conflict_found:
+                continue
 
-        # TODO: enable required package to specify version also
+            # 4. Add real name under its version; add provided virtual names under their provided version
+            self.__lookahead[_pkg_name][_selected.version] = _selected
+            for _provided_name, _provided_ver in _selected.get_provides():
+                if _provided_name != _pkg_name:
+                    self.__lookahead[_provided_name][_provided_ver] = _selected
 
-        # which package provide given package_name
-        _pkg_candidates = self.__cache.get_packages(package_name)
+    # Operators accepted by apt_pkg.check_dep for version constraint checks
+    _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
 
-        # what packages does the package_name provide
-        _provide_candidates = self.__cache.get_provides(package_name)
-
-        # Slightly more complex than it needs to be, we have to check for both package & provides
-        # Checking from Package Name
-        if package_name in self.selected_pkgs:
-            return self.selected_pkgs[package_name]
+    def parse_dependency(self, package_name: str,
+                         version: Optional[Version] = None,
+                         constraint: str = '') -> Optional[package.Package]:
         
-        # Checking Provides Name
-        for _pkg in _provide_candidates:
+        _selected_pkg: package.Package
+        # Normalise constraint — fall back to '>=' for anything unrecognised
+        _constraint = constraint if constraint in self._VALID_CONSTRAINTS else '>='
+
+        def _satisfies(pkg_ver: Version) -> bool:
+            """True if pkg_ver meets the requested version/constraint, or no version was requested."""
+            if version is None:
+                return True
+            try:
+                return apt_pkg.check_dep(str(pkg_ver), _constraint, str(version))
+            except Exception:
+                return True   # can't evaluate — assume satisfied, validate_selection will catch
+            
+        if not package_name:
+            tui.console.print("Dependency Check: Dependency asked for empty package name")
+            return None
+        
+        # Early return if already selected by name
+        if package_name in self.selected_pkgs:
+            _existing = self.selected_pkgs[package_name]
+            if _satisfies(_existing.version):
+                return _existing
+            # match but doesnt match constraint, moving ahead without it
+            tui.console.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
+            
+
+        # which package provide given package_name (pre-filtered by version if provided)
+        _pkg_candidates = self.__cache.get_packages(package_name, version, constraint)
+
+        # Early return if a candidate's real name is already in selected_pkgs
+        for _pkg in _pkg_candidates:
             if _pkg['Package'] in self.selected_pkgs:
-                # return _pkg   # Original: returned the provides candidate directly
-                return self.selected_pkgs[_pkg['Package']]  # canonical instance, safer if ever multiple
+                _existing = self.selected_pkgs[_pkg['Package']]
+                if not _satisfies(_existing.version):
+                    tui.console.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
+                return _existing
 
         # At this point, if lookahead is available use that to select packages.
-        # i.e. required_package list may clear ambiguity, but only for provides
-        # since package disambiguation withing itself will require version details
-        _selected_pkg_lookahead = [__pkg for __pkg in _pkg_candidates if __pkg['Package'] in self.__lookahead]
-        _selected_pkg_lookahead += [__pkg for __pkg in _provide_candidates if __pkg['Package'] in self.__lookahead]
+        _selected_pkg_lookahead = [pkg for pkg in _pkg_candidates if pkg['Package'] in self.__lookahead]
 
-        # Pick the name if there is ONLY ONE commonality
-        # could be as situation that the required package list may have (by mistake) two packages for same provides
+        # Case - I  : Incase one candidate and already in lookahead, simplified
         if len(_selected_pkg_lookahead) == 1:
             _selected_pkg = _selected_pkg_lookahead[0]
-            # tui.console.print(f"Lookahead Selection of {_selected_pkg['Package']} for {required_pkg}")
 
-        # Case - I  : No match for Package or Provides - Raise Value Error
-        elif len(_provide_candidates) == 0 and len(_pkg_candidates) == 0:
-            raise ValueError(f"Package could not be found: {package_name}")
-
-        # Case - II : Situation with both Multiple Package Versions and Provides. Not sure if its handleable
-        elif len(_provide_candidates) > 1 and len(_pkg_candidates) > 1:
-            raise ValueError(f"Situation with both Multiple Package Versions and Provides: {package_name}")
-
-        # Case - III: No Package, One Provides - "Selecting <Package> for <Provides> - Proceed with Package
-        elif len(_provide_candidates) == 1 and len(_pkg_candidates) == 0:
-            tui.console.print(f"Note: Selecting {_provide_candidates[0]['Package']} for {package_name}")
-            _selected_pkg = _provide_candidates[0]
-
-        # Case - IV : One Package, No Provides - Simplest, move ahead parsing the given package
-        elif len(_provide_candidates) == 0 and len(_pkg_candidates) == 1:
+        # Case - II : No match for Package or Provides - Raise Value Error
+        elif len(_pkg_candidates) == 0:
+            tui.console.print(f"Dependency Check: Cant find anything that provides: {package_name}")
+            return None
+        
+        # Case - III: One package found
+        elif len(_pkg_candidates) == 1:
             _selected_pkg = _pkg_candidates[0]
 
-        # Case -  V : Multiple Package, No Provides - Ask User to select based on version
-        elif len(_provide_candidates) == 0 and len(_pkg_candidates) > 1:
-            _options = [__pkg['Version'] for __pkg in _pkg_candidates]
-            _pkg_version = Prompt(PROMPT_OPTIONS,
-                                  f"Multiple Package for {package_name}, select Version",
-                                  _options).get_response()
-            _index = _options.index(_pkg_version)
-            _selected_pkg = _pkg_candidates[_index]
-
-        # Case - VI : No Package, Multiple Provides (different Packages) - Ask User to manually select
-        # Boundary condition - Multiple provides are from same package of different versions
-        elif len(_provide_candidates) > 1 and len(_pkg_candidates) == 0:
-            _options = [__pkg['Package'] for __pkg in _provide_candidates]
-            _pkg_name = Prompt(PROMPT_OPTIONS,
-                               f"Multiple provides for {package_name}, select Package",
-                               _options).get_response()
-            _index = _options.index(_pkg_name)
-            _selected_pkg = _provide_candidates[_index]
-
-        # Case - VII: Situation where have one or more provides and package
-        elif len(_provide_candidates) > 0 and len(_pkg_candidates) > 0:
-            # Unclear situation - show all package options to user - let them figure it out
-            _options = []
-            _options += [__pkg['Package'] for __pkg in _pkg_candidates]
-            _options += [__pkg['Package'] for __pkg in _provide_candidates]
-            _pkg_name = Prompt(PROMPT_OPTIONS,
-                               f"Multiple provides for {package_name}, select Package",
-                               _options).get_response()
-            _index = _options.index(_pkg_name)
-            if _index > len(_pkg_candidates) - 1:
-                _selected_pkg = _provide_candidates[_index - len(_pkg_candidates)]
-            else:
-                _selected_pkg = _pkg_candidates[_index]
+        # Case - IV : Multiple candidates — show numbered list, prompt for index
+        elif len(_pkg_candidates) > 1:
+            tui.console.print(f"Multiple packages satisfy '{package_name}':")
+            for _i, _pkg in enumerate(_pkg_candidates, 1):
+                tui.console.print(f"  {_i}.  {_pkg.package}  ({_pkg.version})")
+            _options = [str(_i) for _i in range(1, len(_pkg_candidates) + 1)]
+            _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_pkg_candidates)}]", _options).get_response()
+            _selected_pkg = _pkg_candidates[int(_choice) - 1]
 
         else:  # Do not know how we got here
-            raise ValueError(f"Unknown Error in Parsing dependencies: {package_name}")
+            tui.console.error(f"Unknown Error in Parsing dependencies: {package_name}")
+            return None
 
         # Insert BEFORE recursing: cycle protection. If A depends on B and B depends on A,
         # the early-return at the top of this function (checking selected_pkgs) only works
         # if A is already recorded here before parse_dependency(B) runs.
         self.selected_pkgs[_selected_pkg['Package']] = _selected_pkg
+        
+        # Also register every virtual name this package provides so that the L84 early-return
+        # catches virtual-name lookups (e.g. 'awk' → gawk_pkg) without needing the L93 loop.
+        for _provided_name, _ in _selected_pkg.get_provides():
+            self.selected_pkgs[_provided_name] = _selected_pkg
 
         # list packages to get dependencies for (copy — the loop below mutates _depends,
         # aliasing _selected_pkg.depends would corrupt the Package's stored list)
         _depends = list(_selected_pkg.depends)
+        
         # Pre-Depends must be satisfied before the package can unpack — treat same as Depends
         _depends += list(_selected_pkg.pre_depends)
 
         # Slightly more tricky how to handle alt_depends
+        # Virtual names are registered in selected_pkgs at L134-135, so the name check
+        # below covers both real packages and provides without a separate provides lookup.
         _alt_depends = _selected_pkg.alt_depends
+        
         for _alt in _alt_depends:
-            # Check if one of them already in out selected list
-            _selected_alt_pkg = [_pkg for _pkg in _alt if _pkg[0] in self.selected_pkgs]
-            if len(_selected_alt_pkg) > 0:
-                # if one or more select first - arbitrary decision
+            # Find alts already selected whose version constraint is also satisfied
+            _selected_alt_pkg = []
+            for _pkg in _alt:
+                _alt_name = _pkg[0]
+                if _alt_name not in self.selected_pkgs:
+                    continue
+                _alt_ver_str = _pkg[1]
+                if not _alt_ver_str:
+                    _selected_alt_pkg.append(_pkg)   # no version constraint — name match sufficient
+                    continue
+                _alt_op = _pkg[2] if _pkg[2] in self._VALID_CONSTRAINTS else '>='
+                try:
+                    if apt_pkg.check_dep(str(self.selected_pkgs[_alt_name].version), _alt_op, _alt_ver_str):
+                        _selected_alt_pkg.append(_pkg)
+                except Exception:
+                    _selected_alt_pkg.append(_pkg)   # can't evaluate — assume satisfied
+
+            if _selected_alt_pkg:
+                # one or more already selected and satisfying — pick first, arbitrary decision
                 _depends.append(_selected_alt_pkg[0])
-                # on to the next
                 continue
 
-            # Also check if an alt is already satisfied via provides — avoids needless recursion
-            # (e.g. 'awk | ed' where mawk is selected and provides awk)
-            _provided_alt = None
-            for _alt_tuple in _alt:
-                _providers = self.__cache.get_provides(_alt_tuple[0])
-                if any(p['Package'] in self.selected_pkgs for p in _providers):
-                    _provided_alt = _alt_tuple
-                    break
-            if _provided_alt is not None:
-                _depends.append(_provided_alt)
-                continue
-
-            # Again arbitrary decision picking the first but documentation supports the idea
+            # No alt already selected and satisfying — default to first alternative (Debian convention)
             _depends.append(_alt[0])
 
         # check if we should include recommended packages
@@ -174,13 +198,18 @@ class DependencyTree:
 
         # recursively
         for _pkg in _depends:
-            # Catch ValueError from nested parse_dependency (unfound/ambiguous/unknown cases).
-            # Skip the bad dep, keep resolving siblings — don't let one missing package kill the whole tree.
-            try:
-                _parsed_pkg = self.parse_dependency(_pkg[0])
-            except ValueError as e:
+            # Extract version info from dep tuple and build Version object safely
+            _dep_ver: Optional[Version] = None
+            if _pkg[1]:
+                try:
+                    _dep_ver = Version(_pkg[1])
+                except (ValueError, TypeError):
+                    tui.console.warning(f"Malformed version '{_pkg[1]}' in dep on '{_pkg[0]}', ignoring")
+
+            _parsed_pkg = self.parse_dependency(_pkg[0], _dep_ver, _pkg[2])
+            if _parsed_pkg is None:
                 tui.console.print(f"WARNING: unresolved dependency '{_pkg[0]}' for {_selected_pkg.package}")
-                tui.console.error(f"parse_dependency({_pkg[0]}) from {_selected_pkg.package}: {e}")
+                tui.console.warning(f"parse_dependency({_pkg[0]}) from {_selected_pkg.package} returned None")
                 continue
 
             # add forward dependency
@@ -190,12 +219,10 @@ class DependencyTree:
             if _selected_pkg.package not in _parsed_pkg.depended_by:
                 _parsed_pkg.depended_by.append(_selected_pkg.package)
 
-            # add version constraints
-            # Again slightly convoluted, Between multiple package and provides, don't know which was selected.
-            # Hence, expecting parse_dependency(...) to return the package selected for that required_pkg
-            if _pkg[1]:
+            # Record version constraint in the selected package for validate_selection
+            if _dep_ver is not None:
                 try:
-                    self.selected_pkgs[_parsed_pkg['Package']].add_constraint(Version(_pkg[1]), _pkg[2])
+                    self.selected_pkgs[_parsed_pkg['Package']].add_constraint(_dep_ver, _pkg[2])
                 except (ValueError, TypeError) as e:
                     tui.console.warning(f"Skipping invalid version constraint '{_pkg[1]}' "
                                         f"on {_parsed_pkg.package} (from {_selected_pkg.package}): {e}")
@@ -392,7 +419,7 @@ class DependencyTree:
                                                 f"({self.selected_pkgs[pkg_name].version} {pkg_constraint} {pkg_version})")
                     else:
                         # Lets try in Provides, little more complex
-                        _provides_options = self.__cache.get_provides(pkg_name)
+                        _provides_options = self.__cache.get_packages(pkg_name)
                         _pkg_names = [_pkg['Package'] for _pkg in _provides_options
                                       if _pkg['Package'] in self.selected_pkgs]
                         # Tricky - can be more than one package that don't conflict with each other.
