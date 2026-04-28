@@ -372,15 +372,18 @@ class Cache:
         If both are given, only packages whose version satisfies
         apt_pkg.check_dep(pkg_ver, constraint, version) are returned.
         """
+        # Use .get() instead of direct bracket access: package_hashtable is a defaultdict, so
+        # bracket access on a missing key silently creates an empty entry — every unresolved
+        # package name would permanently bloat the table and skew len() counts.
         if version is None:
             result: List[Package] = []
-            for _pkgs in self.package_hashtable[package_name].values():
+            for _pkgs in self.package_hashtable.get(package_name, {}).values():
                 result.extend(_pkgs)
             return result
 
         _constraint = constraint if constraint in self._VALID_CONSTRAINTS else '>='
         result = []
-        for _pkg_version, _pkgs in self.package_hashtable[package_name].items():
+        for _pkg_version, _pkgs in self.package_hashtable.get(package_name, {}).items():
             try:
                 if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
                     result.extend(_pkgs)
