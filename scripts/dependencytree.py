@@ -100,9 +100,10 @@ class DependencyTree:
             _existing = self.selected_pkgs[package_name]
             if _satisfies(_existing.version):
                 return _existing
-            # match but doesnt match constraint, moving ahead without it
+            tui.console.print(f"WARNING: '{package_name}' already selected at {_existing.version}, cannot satisfy {_constraint} {version}")
             tui.console.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
-            
+            return None
+
 
         # which package provide given package_name (pre-filtered by version if provided)
         _pkg_candidates = self.__cache.get_packages(package_name, version, constraint)
