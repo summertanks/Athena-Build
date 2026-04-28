@@ -57,14 +57,35 @@ class DependencyTree:
             # 3. Hard conflict check against entries already in lookahead
             _conflict_found = False
             for _conflict_group in _selected.conflicts:
-                _conflict_name = _conflict_group[0][0]
+                _conflict_name    = _conflict_group[0][0]
+                _conflict_ver_str = _conflict_group[0][1]
+                _conflict_op      = _conflict_group[0][2]
                 if _conflict_name in self.__lookahead:
                     # Only block on real-package conflicts. Provides-aliases (e.g. apt registering
                     # 'debconf-tiny' as a virtual name) should not trigger here — those are deferred
                     # to validate_selection() where version-aware checks run properly.
                     _is_real = any(pkg['Package'] == _conflict_name
                                    for pkg in self.__lookahead[_conflict_name].values())
-                    if _is_real:
+                    if not _is_real:
+                        continue
+
+                    # Check version constraint: e.g. Conflicts: apt (<< 0.5.4) must not fire
+                    # against apt 2.x. Only block if the lookahead package's version actually
+                    # satisfies the conflict operator. No version string = unconditional conflict.
+                    if _conflict_ver_str and _conflict_op in self._VALID_CONSTRAINTS:
+                        _triggered = False
+                        for _lver in self.__lookahead[_conflict_name]:
+                            try:
+                                if apt_pkg.check_dep(str(_lver), _conflict_op, _conflict_ver_str):
+                                    _triggered = True
+                                    break
+                            except Exception:
+                                _triggered = True  # conservative: assume conflict on parse error
+                                break
+                    else:
+                        _triggered = True   # no version constraint = unconditional conflict
+
+                    if _triggered:
                         tui.console.print(f"ERROR: Cannot add '{_pkg_name}' — conflicts with '{_conflict_name}' already in lookahead")
                         tui.console.error(f"CRITICAL: add_lookahead — '{_pkg_name}' conflicts with '{_conflict_name}'")
                         _conflict_found = True
