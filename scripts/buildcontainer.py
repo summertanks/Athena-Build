@@ -143,18 +143,12 @@ class BuildContainer:
         if src_pkg.skip_test:
             skip_build_test = 'DEB_BUILD_OPTIONS="nocheck" '
 
-        proxy_setup = ''
-        if self._apt_cache_active:
-            proxy_setup = (
-                f'echo \'Acquire::http::Proxy "http://{_APT_CACHE_NAME}:3142";\''
-                f' > /etc/apt/apt.conf.d/01proxy; '
-            )
+        proxy_opt = f'-o Acquire::http::Proxy=http://{_APT_CACHE_NAME}:3142 ' if self._apt_cache_active else ''
 
         # TODO: Apply Build Patches
         patch_list = ' '.join(src_pkg.patch_list)
-        cmd_str = f'{proxy_setup}' \
-                  f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
-                  f'sudo apt -y install {_dep_str}; ' \
+        cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
+                  f'sudo apt -y {proxy_opt}install {_dep_str}; ' \
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
                   f'cd {_filename_prefix}; ' \
