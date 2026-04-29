@@ -320,6 +320,7 @@ class Tui:
         win = curses.newwin(coords['h'], coords['w'], coords['y'], coords['x'])
         pnl = curses.panel.new_panel(win)
         win.scrollok(False)   # layout is fully manual — disable auto-scroll
+        win.bkgd(' ', curses.color_pair(self.COLOR_NORMAL))
         return {'win': win, 'panel': pnl, 'buffer': [], 'cursor': 0, 'selected': False}
 
     def _create_windows(self) -> None:
@@ -641,6 +642,9 @@ class Tui:
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
+            dark = self._detect_dark_theme()
+            self.bg_color = -1
+            self.fg_color = curses.COLOR_WHITE if dark else curses.COLOR_BLACK
             curses.init_pair(self.COLOR_NORMAL,    self.fg_color,        self.bg_color)
             curses.init_pair(self.COLOR_REVERSE,   self.bg_color,        self.fg_color)
             curses.init_pair(self.COLOR_WARNING,   self.warning_color,   self.bg_color)
@@ -836,6 +840,23 @@ class Tui:
     # =====================================================================
     # Resource monitor
     # =====================================================================
+
+    @staticmethod
+    def _detect_dark_theme() -> bool:
+        """Return True if the terminal appears to use a dark background.
+
+        Reads $COLORFGBG (set by xterm, gnome-terminal, most emulators).
+        Format is 'fg;bg' where bg < 8 indicates a dark background color.
+        Falls back to True (dark) when the variable is absent or unparseable.
+        """
+        colorfgbg = os.environ.get('COLORFGBG', '')
+        if colorfgbg:
+            try:
+                bg = int(colorfgbg.split(';')[-1])
+                return bg < 8
+            except (ValueError, IndexError):
+                pass
+        return True
 
     def _res_util(self) -> None:
         """Daemon thread: refreshes _psutil string every ~2 s."""
@@ -1203,9 +1224,17 @@ class ProgressBar:
         rate_str  = f'{rate_disp:.2f}{sf}{self._itr_label}'
         pct_str   = f'{pct * 100:5.1f}%'
 
+        if   self._max >= 1.15e9: val_sf = 'G'
+        elif self._max >= 1.15e6: val_sf = 'M'
+        elif self._max >= 1.15e3: val_sf = 'K'
+        else:                     val_sf = ''
+        val_div   = self._SCALE.get(val_sf, 1.0)
+        value_str = f'{self._value / val_div:.2f}{val_sf}' if val_sf else str(self._value)
+        total_str = f'{self._max   / val_div:.2f}{val_sf}' if val_sf else str(self._max)
+
         return self._fmt.format(
             label=self._label, bar=bar,
-            value=self._value, total=self._max,
+            value=value_str, total=total_str,
             rate=rate_str, pct=pct_str,
         )
 
@@ -1289,7 +1318,7 @@ class Spinner:
         if tui_instance is None:
             return
         tui_instance.del_widget(self._widget_id)
-        tui_instance.print(f'  {self._message} … done')
+        tui_instance.print(f'{self._message} … done')
 
     @property
     def message(self) -> str:
@@ -1297,7 +1326,7 @@ class Spinner:
 
     def __str__(self) -> str:
         with self._lock:
-            return f'  {self._message}  {self._FRAMES[self._pos]}'
+            return f'{self._message}  {self._FRAMES[self._pos]}'
 
 
 # ---------------------------------------------------------------------------
