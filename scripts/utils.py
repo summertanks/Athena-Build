@@ -30,6 +30,7 @@ class BuildConfig:
     build_version: str
 
     skip_build_test: list[str]
+    max_parallel_builds: int
 
     error_str: str
     config_path: str
@@ -100,6 +101,7 @@ class BuildConfig:
             self.build_version = config_parser.get('Build', 'VERSION')
 
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
+            self.max_parallel_builds = config_parser.getint('Build', 'MaxParallelBuilds', fallback=4)
 
             # NOTE: The directories are relative to the working directory
             self.dir_download = os.path.join(self.working_dir, config_parser.get('Directories', 'Download'))
