@@ -2,12 +2,11 @@
 import os
 
 import docker
-from docker import errors
 
 from utils import BuildConfig
 from package import Source
 
-Print = print
+import tui
 
 
 class BuildContainer:
@@ -18,6 +17,7 @@ class BuildContainer:
         self.src_path = config.dir_source
         self.log_path = config.dir_log
         self.repo_path = config.dir_repo
+        self.arch = config.arch
 
         self.buildlog_path = os.path.join(config.dir_log, 'build')
         self.conf_path = config.dir_config
@@ -26,49 +26,52 @@ class BuildContainer:
         self.patch_path = config.dir_patch_source
         self.patch_empty = config.dir_patch_empty
 
+        self.client = None
+
         if docker_server is not None:
             try:
-                self.client = docker.DockerClient(base_url=docker_server)
-                self.client.ping()
+                _client = docker.DockerClient(base_url=docker_server)
+                _client.ping()
+                self.client = _client
             except docker.errors.APIError:
-                Print(f"Athena Linux Docker: Couldn't connect to external server, reverting to local")
+                tui.console.print("Athena Linux Docker: Couldn't connect to external server, reverting to local")
+
+        if self.client is None:
+            try:
+                self.client = docker.from_env()
+                self.client.ping()
+            except docker.errors.APIError as e:
+                tui.console.error(f"Athena Linux Docker: Error {e}")
+                tui.console.print(f"Athena Linux Docker: Error {e}")
+                tui.Exit(1)
 
         try:
-            self.client = docker.from_env()
-            # Confirm function
-            self.client.ping()
-
-            # Build an image from a Dockerfile
+            image = self.client.images.get("athenalinux:build")
+            tui.console.print(f"Using Athena Linux Image - {image.tags}")
+        except docker.errors.ImageNotFound:
+            tui.console.print("Image not found, Building AthenaLinux Image...")
+            image, build_logs = self.client.images.build(path=config.dir_config, tag='athenalinux:build',
+                                                         nocache=True, rm=True)
+            tui.console.print(f"Athena Linux Image Built - {image.tags}")
             try:
-                image = self.client.images.get("athenalinux:build")
-                Print(f"Using Athena Linux Image - {image.tags}")
-            except docker.errors.ImageNotFound:
-                Print("Image not found, Building AthenaLinux Image...")
-                image, build_logs = self.client.images.build(path=config.dir_config, tag='athenalinux:build',
-                                                             nocache=True, rm=True)
-                Print(f"Athena Linux Image Built - {image.tags}")
-                try:
-                    with open(os.path.join(self.log_path, 'docker_build.log'), 'w') as fh:
-                        for chunk in build_logs:
-                            if 'stream' in chunk:
-                                for line in chunk['stream'].splitlines():
-                                    fh.write(line + '\n')
-                except (FileNotFoundError, PermissionError) as e:
-                    Print(f"Error: {e}")
-                    exit(1)
-            self.image = image
-
+                with open(os.path.join(self.log_path, 'docker_build.log'), 'w') as fh:
+                    for chunk in build_logs:
+                        if 'stream' in chunk:
+                            for line in chunk['stream'].splitlines():
+                                fh.write(line + '\n')
+            except (FileNotFoundError, PermissionError) as e:
+                tui.console.error(f"Error writing docker build log: {e}")
+                tui.console.print(f"Error writing docker build log: {e}")
+                tui.Exit(1)
         except docker.errors.APIError as e:
-            Print(f"Athena Linux Docker: Error{e}")
-            exit(1)
+            tui.console.error(f"Athena Linux Docker: Error {e}")
+            tui.console.print(f"Athena Linux Docker: Error {e}")
+            tui.Exit(1)
+
+        self.image = image
 
     def build(self, src_pkg: Source) -> bool:
-        # temporary skipped list, something in the compilation doesn't work
         skip_list = []
-        test_list = []
-
-        if src_pkg.package in test_list:
-            pass
 
         if src_pkg.package in skip_list:
             return False
@@ -78,7 +81,9 @@ class BuildContainer:
             return True
 
         # list of dependencies
-        _dep_str = src_pkg.build_depends
+        _dep_str = ' '.join(
+            grp[0]['name'] for grp in src_pkg.build_depends(self.arch) if grp
+        )
         # source files are usually in form of <packagename_version.extension>
         _filename_prefix = src_pkg.package
         # dsc file
@@ -86,10 +91,8 @@ class BuildContainer:
         try:
             _dsc_file = [file for file in src_pkg.files if file.endswith('.dsc')][0]
         except IndexError:
-            Print(f"DSC not found for {src_pkg.package}")
+            tui.console.error(f"DSC not found for {src_pkg.package}")
             return False
-
-        assert _dsc_file != '', f"DSC not found for {src_pkg.package}"
 
         skip_build_test = ''
         if src_pkg.skip_test:
@@ -107,7 +110,7 @@ class BuildContainer:
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;' \
 
         try:
-            src_patch_path = os.path.join(self.patch_path, src_pkg.package, src_pkg.version)
+            src_patch_path = os.path.join(self.patch_path, src_pkg.package, str(src_pkg.version))
             if not os.path.exists(src_patch_path):
                 src_patch_path = self.patch_empty
 
@@ -119,18 +122,20 @@ class BuildContainer:
 
             with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
                 for line in container.logs(stream=True):
-                    # Print(line.decode("utf-8"), end="")
                     fh.write(line.decode("utf-8"))
 
             _exit_code = container.wait()['StatusCode']
-            container.stop()
             container.remove()
             return _exit_code == 0
         except docker.errors.APIError as e:
-            Print(f"Athena Linux Docker: Error{e}")
-            exit(1)
+            tui.console.error(f"Athena Linux Docker: Error {e}")
+            tui.console.print(f"Athena Linux Docker: Error {e}")
+            tui.Exit(1)
 
     def check_build(self, src_pkg: Source) -> bool:
+
+        if not src_pkg.pkgs:
+            return False
 
         for _file in src_pkg.pkgs:
             _filename = os.path.join(self.repo_path, _file)
@@ -184,7 +189,7 @@ class BuildContainer:
         # Continue to the next entry
         except Exception as e:
             # Exception occurred while reading the file
-            print(f"Error reading file: {str(e)}")
+            tui.console.error(f"Error reading file: {str(e)}")
             return False
 
         # If we made it here, the file is a valid ar file
