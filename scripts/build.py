@@ -42,13 +42,15 @@ _tui : Tui
 
 class BuildFlags:
     def __init__(self):
-        self.apt_ready: bool = False  # apt_pkg.init_system() succeeded
-        self.config_ready: bool = False  # BuildConfig parsed and valid
-        self.cache_ready: bool = False  # Package/source cache built
-        self._mandatory_dep_ready: bool = False  # Mandatory dependency tree parsed
+        self.apt_ready: bool = False
+        self.config_ready: bool = False
+        self.cache_ready: bool = False
+        self.dep_check_ready: bool = False
+        self.source_ready: bool = False
+        self.download_ready: bool = False
 
     def __str__(self) -> str:
-        fields = ['apt_ready', 'config_ready', 'cache_ready', '_mandatory_dep_ready']
+        fields = ['apt_ready', 'config_ready', 'cache_ready', 'dep_check_ready', 'source_ready', 'download_ready']
         return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
 
 _progress_flags = BuildFlags()
@@ -132,13 +134,13 @@ def main(banner: str):
             return
         _progress_flags.cache_ready = True
     
-    def cmd_parse_mandatory():
+    def cmd_parse_dependency():
         global dependency_tree
         
         if not _progress_flags.cache_ready:
             console.print("  Run 'build_cache' first")
             return
-        _progress_flags._mandatory_dep_ready = False
+        _progress_flags.dep_check_ready = False
 
         console.print("Preparing Parsing Tree...")
         dependency_tree = dependencytree.DependencyTree(build_cache, select_recommended=False, arch=build_config.arch)
@@ -223,7 +225,7 @@ def main(banner: str):
         if not dependency_tree.validate_selection():
             _resp = Prompt(PROMPT_YESNO, "There are one or more dependency validation failures, Proceed?").get_response()
             if _resp.lower() not in ('y', 'yes'):
-                _progress_flags._mandatory_dep_ready = False
+                _progress_flags.dep_check_ready = False
                 return
 
         try:
@@ -238,7 +240,7 @@ def main(banner: str):
             return
 
         if len(dependency_tree.selected_pkgs) > 0:
-            _progress_flags._mandatory_dep_ready = True
+            _progress_flags.dep_check_ready = True
 
     def cmd_print(category: str = ''):
         if category not in ('config', 'required', 'important', 'selected'):
@@ -266,7 +268,7 @@ def main(banner: str):
             console.print("Run 'build_cache' first")
             return
 
-        if category == 'selected' and not _progress_flags._mandatory_dep_ready:
+        if category == 'selected' and not _progress_flags.dep_check_ready:
             console.print("Run 'parse_mandatory' first")
             return
 
@@ -289,73 +291,87 @@ def main(banner: str):
             for name in sorted(real_pkgs.keys()):
                 console.print(f"  {name:<40} {real_pkgs[name].version}")
 
+    def cmd_parse_source():
+        if not _progress_flags.dep_check_ready:
+            console.print("  Run 'parse_dependency' first")
+            return
+        _progress_flags.source_ready = False
+
+        console.print("Parsing Source Packages...")
+        if not dependency_tree.parse_sources():
+            _resp = Prompt(PROMPT_YESNO, "There are one or more source parse failures, Proceed?").get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                return
+
+        for _pkg in build_config.skip_build_test:
+            if _pkg in dependency_tree.selected_srcs:
+                dependency_tree.selected_srcs[_pkg].skip_test = True
+
+        for _pkg in dependency_tree.selected_srcs:
+            _patch_path = os.path.join(build_config.dir_patch_source, _pkg,
+                                       str(dependency_tree.selected_srcs[_pkg].version))
+            try:
+                if os.path.exists(_patch_path):
+                    _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
+                    dependency_tree.selected_srcs[_pkg].patch_list = sorted(_patch_files, key=lambda x: x[:5])
+            except OSError as e:
+                console.print(f"WARNING: cannot list patches for '{_pkg}'")
+                console.warning(f"patch discovery {_patch_path}: {e}")
+
+        try:
+            with open(os.path.join(build_config.dir_log, 'selected_sources.list'), 'w') as fa:
+                with open(os.path.join(build_config.dir_log, 'source_file.list'), 'w') as fb:
+                    for _pkg in dependency_tree.selected_srcs:
+                        fa.write(str(dependency_tree.selected_srcs[_pkg]) + '\n\n')
+                        for _file in dependency_tree.selected_srcs[_pkg].files:
+                            fb.write(f"{_file}: {dependency_tree.selected_srcs[_pkg].files[_file]}\n")
+        except OSError as e:
+            console.print(f"ERROR: cannot write source lists")
+            console.error(f"source lists write: {e}")
+            return
+
+        console.print(f"Selected {len(dependency_tree.selected_srcs)} source packages")
+        _progress_flags.source_ready = True
+
+    def cmd_source_download():
+        if not _progress_flags.source_ready:
+            console.print("  Run 'parse_sources' first")
+            return
+        _progress_flags.download_ready = False
+
+        _src_download_size = dependency_tree.download_size
+        console.print(f"Total download is about {_src_download_size // (2**20)} MB")
+
+        _total, _used, _free = shutil.disk_usage(build_config.dir_source)
+        console.print(f"Disk space — Total: {_total // (2**30)} GiB, "
+                      f"Used: {_used // (2**30)} GiB, Free: {_free // (2**30)} GiB")
+
+        console.print("Starting downloads...")
+        _downloaded_size = utils.download_source(dependency_tree, build_config.dir_source, build_cache.base)
+
+        if _src_download_size != _downloaded_size:
+            _resp = Prompt(PROMPT_YESNO, "Download size mismatch, continue?").get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                return
+
+        _progress_flags.download_ready = True
+
     # --------------------------------------------------------------------------------------------------------------
     console.print(asciiart_logo)
     console.print("Starting Source Build System for Athena Linux...")
     cmd_load_config()
 
-    tui.register_command('build_config',    cmd_load_config,       'Parse build configuration')
-    tui.register_command('build_cache',     cmd_build_cache,       'Build cache')
-    tui.register_command('parse_mandatory', cmd_parse_mandatory,   'Parse dependency tree for mandatory packages')
-    tui.register_command('print',           cmd_print,             'Print info: print <config|required|important|selected>')
+    tui.register_command('build_config',      cmd_load_config,        'Parse build configuration')
+    tui.register_command('build_cache',       cmd_build_cache,        'Build cache')
+    tui.register_command('parse_dependency',  cmd_parse_dependency,   'Parse dependency tree for selected packages')
+    tui.register_command('parse_sources',     cmd_parse_source,       'Parse source packages for selected dependencies')
+    tui.register_command('source_download',   cmd_source_download,    'Download source packages')
+    tui.register_command('print',             cmd_print,              'Print info: print <config|required|important|selected>')
     
     _tui.wait()
     Exit(0)
 
-    # Step III placeholder — moved into cmd_parse_mandatory
-
-    # -------------------------------------------------------------------------------------------------------------
-    # Step - IV Parse Source Dependencies
-    console.print("Parsing Source Packages...")
-    if not dependency_tree.parse_sources():
-        _resp = Prompt(PROMPT_YESNO,
-                       "There are one or more source parse failures, Proceed?").get_response()
-        if _resp.lower() not in ('y', 'yes'):
-            Exit(1)
-            return
-
-    # patch to not run build tests
-    for _pkg in build_config.skip_build_test:
-        if _pkg in dependency_tree.selected_srcs:
-            dependency_tree.selected_srcs[_pkg].skip_test = True
-
-    # iterate over packages as see if we have any patches on our end
-    for _pkg in dependency_tree.selected_srcs:
-        _patch_path = os.path.join(build_config.dir_patch_source, _pkg)
-        _patch_path = os.path.join(_patch_path, str(dependency_tree.selected_srcs[_pkg].version))
-        try:
-            if os.path.exists(_patch_path):
-                _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
-                _sorted_patch_files = sorted(_patch_files, key=lambda x: x[:5])
-                dependency_tree.selected_srcs[_pkg].patch_list = _sorted_patch_files
-        except OSError as e:
-            console.warning(f"Cannot list patches in {_patch_path}: {e}")
-
-    try:
-        with open(os.path.join(build_config.dir_log, 'selected_sources.list'), 'w') as fa:
-            with open(os.path.join(build_config.dir_log, 'source_file.list'), 'w') as fb:
-                for _pkg in dependency_tree.selected_srcs:
-                    fa.write(str(dependency_tree.selected_srcs[_pkg]) + '\n\n')
-                    for _file in dependency_tree.selected_srcs[_pkg].files:
-                        fb.write(f"{_file}: {dependency_tree.selected_srcs[_pkg].files[_file]}\n")
-
-    except OSError as e:
-        console.print(f"ERROR: cannot write sources lists")
-        console.error(f"sources list write: {e}")
-        Exit(1)
-        return
-
-    # -------------------------------------------------------------------------------------------------------------
-    # Step - V Download source packages
-    Print("Download source packages...")
-    _src_download_size = dependency_tree.download_size
-    Print("Total Download is about ", _src_download_size // (2**20), "MB")
-    _total, _used, _free = shutil.disk_usage(dir_list.dir_source)
-    print(f"Disk Space - Total: {_total // (2**30)}GiB, Used: {_used // (2**30)}GiB, Free: {_free // (2**30)}GiB")
-    Print("Starting Downloads...")
-    _downloaded_size = utils.download_source(dependency_tree, dir_list.dir_source, base_distribution)
-    if _src_download_size != _downloaded_size:
-        Confirm.ask("Download size mismatch, continue?", default=True)
+    # Step - V moved to cmd_source_download()
 
     # -------------------------------------------------------------------------------------------------------------
     # Step - VI Source Build Dependency Check

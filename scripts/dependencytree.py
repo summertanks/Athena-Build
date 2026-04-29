@@ -264,104 +264,6 @@ class DependencyTree:
 
         return _selected_pkg
 
-    # def resolve_dependency(self, required_pkg: str) -> package.Package:
-    #     """Rewrite of parse_dependency — same objective, more efficient structure.
-
-    #     Changes vs original:
-    #     - Early-return checked BEFORE cache lookups (avoids two hash lookups on hot path).
-    #     - 7-case if/elif chain collapsed to: empty → raise; one → auto-select; many → prompt.
-    #     - Case II (multiple versions AND multiple provides) no longer raises; falls to prompt.
-    #     - Alt-dep loop uses next() instead of explicit for/break.
-    #     - Pre-Depends included alongside Depends.
-    #     """
-
-    #     if not required_pkg:
-    #         raise ValueError("Dependency asked for empty package name")
-
-    #     # ── Phase 1: early return if already selected (skip cache on hot path) ──────
-    #     if required_pkg in self.selected_pkgs:
-    #         return self.selected_pkgs[required_pkg]
-
-    #     # ── Phase 2: cache lookup ────────────────────────────────────────────────────
-    #     _pkg_candidates     = self.__cache.get_packages(required_pkg)
-    #     _provide_candidates = self.__cache.get_provides(required_pkg)
-
-    #     # Return canonical instance if a provider is already selected
-    #     for _pkg in _provide_candidates:
-    #         if _pkg['Package'] in self.selected_pkgs:
-    #             return self.selected_pkgs[_pkg['Package']]
-
-    #     # ── Phase 3: select a candidate ──────────────────────────────────────────────
-    #     _all_candidates = _pkg_candidates + _provide_candidates
-
-    #     if not _all_candidates:
-    #         raise ValueError(f"Package could not be found: {required_pkg}")
-
-    #     # Lookahead: user-supplied list resolves ambiguity when exactly one match
-    #     _lookahead = [c for c in _all_candidates if c['Package'] in self.__lookahead]
-    #     if len(_lookahead) == 1:
-    #         _selected_pkg = _lookahead[0]
-
-    #     elif len(_all_candidates) == 1:
-    #         # Unambiguous — auto-select; note if satisfied via provides
-    #         if _all_candidates[0] in _provide_candidates:
-    #             tui.console.print(f"Note: Selecting {_all_candidates[0]['Package']} for {required_pkg}")
-    #         _selected_pkg = _all_candidates[0]
-
-    #     elif len(_pkg_candidates) > 1 and not _provide_candidates:
-    #         # Multiple versions of same package, no provides — prompt by version
-    #         _options = [c['Version'] for c in _pkg_candidates]
-    #         _choice  = Prompt(PROMPT_OPTIONS,f"Multiple versions for {required_pkg}, select", _options).get_response()
-    #         _selected_pkg = _pkg_candidates[_options.index(_choice)]
-
-    #     else:
-    #         # Multiple packages and/or provides — prompt by package name
-    #         _options = [c['Package'] for c in _all_candidates]
-    #         _choice  = Prompt(PROMPT_OPTIONS, f"Multiple matches for {required_pkg}, select package", _options).get_response()
-    #         _selected_pkg = _all_candidates[_options.index(_choice)]
-
-    #     # ── Phase 4: insert before recursing (cycle protection) ──────────────────────
-    #     self.selected_pkgs[_selected_pkg['Package']] = _selected_pkg
-
-    #     # ── Phase 5: build dependency list ───────────────────────────────────────────
-    #     # Depends + Pre-Depends (pre-depends must be satisfied before unpack)
-    #     _depends = list(_selected_pkg.depends) + list(_selected_pkg.pre_depends)
-
-    #     for _alt in _selected_pkg.alt_depends:
-    #         # Prefer an already-selected alternative (direct name match)
-    #         _choice_alt = next((d for d in _alt if d[0] in self.selected_pkgs), None)
-    #         if _choice_alt is None:
-    #             # Check if any alt is already satisfied via provides
-    #             # default: first alternative (Debian convention)
-    #             _choice_alt = next((d for d in _alt if any(p['Package'] in self.selected_pkgs for p in self.__cache.get_provides(d[0]))), _alt[0])
-    #         _depends.append(_choice_alt)
-
-    #     if self.__recommended:
-    #         _depends += _selected_pkg.recommends
-
-    #     # ── Phase 6: recurse ─────────────────────────────────────────────────────────
-    #     for _dep in _depends:
-    #         try:
-    #             _parsed = self.resolve_dependency(_dep[0])
-    #         except ValueError as e:
-    #             tui.console.print(f"WARNING: unresolved dependency '{_dep[0]}' for {_selected_pkg.package}")
-    #             tui.console.error(f"resolve_dependency({_dep[0]}) from {_selected_pkg.package}: {e}")
-    #             continue
-
-    #         if _parsed.package not in _selected_pkg.depends_on:
-    #             _selected_pkg.depends_on.append(_parsed.package)
-    #         if _selected_pkg.package not in _parsed.depended_by:
-    #             _parsed.depended_by.append(_selected_pkg.package)
-
-    #         if _dep[1]:
-    #             try:
-    #                 self.selected_pkgs[_parsed['Package']].add_constraint(Version(_dep[1]), _dep[2])
-    #             except (ValueError, TypeError) as e:
-    #                 tui.console.warning(f"Skipping invalid version constraint '{_dep[1]}' "
-    #                                     f"on {_parsed.package} (from {_selected_pkg.package}): {e}")
-
-    #     return _selected_pkg
-
     def validate_selection(self) -> bool:
 
         # Checking breaks first
@@ -532,7 +434,7 @@ class DependencyTree:
                     self.selected_srcs[_src_name] = _src_candidates[0]
                 # If more than one, differentiate on version
                 else:
-                    _selected_pkg = [_pkg for _pkg in _src_candidates if _pkg.version == _src_version]
+                    _selected_pkg = [_pkg for _pkg in _src_candidates if _pkg.version == Version(_src_version)]
                     if len(_selected_pkg) == 1:
                         self.selected_srcs[_src_name] = _selected_pkg[0]
                     else:
@@ -544,10 +446,9 @@ class DependencyTree:
             # ideally the following should have been sufficient
             # self.selected_srcs[_src_name].pkgs.append(os.path.basename(self.selected_pkgs[_pkg_name]['Filename']))
             # but there are some +deb11ux issues that are not getting addressed
-            _raw_pkg_list = (self.selected_srcs[_src_name].get('Package-List') or '').strip()
-            if not _raw_pkg_list:
+            _pkg_list = self.selected_srcs[_src_name].package_list
+            if not _pkg_list:
                 continue
-            _pkg_list = _raw_pkg_list.split('\n')
             for _pkg in _pkg_list:
                 _pkg = _pkg.split()
 
@@ -556,7 +457,7 @@ class DependencyTree:
                     continue
 
                 # Check if the Package matches
-                if _pkg[0] != _src[2]['Package']:
+                if _pkg[0] != _src[2].package:
                     continue
 
                 # Package-List fields 5+ are optional key=value pairs (arch, profile, essential, ...)
@@ -602,12 +503,12 @@ class DependencyTree:
 
                 # Now that the arch has been established,
                 self.selected_srcs[_src_name].pkgs.append(
-                    _src[2]['Package'] + '_' + _version + '_' + _arch + '.' + _pkg[1])
+                    _src[2].package + '_' + _version + '_' + _arch + '.' + _pkg[1])
 
                 # If we are we matched, there should be another match withing the same package list, lets break
                 break
 
-        tui.console.print(f"Selected {len(self.selected_srcs)} Source Packages")
+        tui.console.warning(f"parse_sources: selected {len(self.selected_srcs)} source packages")
         return _found
 
     @property
