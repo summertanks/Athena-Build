@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor
+.vscode/
+
+# Runtime outputs (generated, large)
+cache/
+source/
+download/
+log/
+image/
+buildroot/
+
+# Claude Code local settings
+.claude/
