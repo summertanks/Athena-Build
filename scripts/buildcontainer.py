@@ -1,5 +1,7 @@
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict
 
 import docker
 
@@ -9,20 +11,26 @@ from package import Source
 import tui
 
 
+_NETWORK_NAME   = 'athena-build'
+_APT_CACHE_NAME = 'athena-apt-cache'
+_APT_CACHE_IMG  = 'sameersbn/apt-cacher-ng'
+_APT_CACHE_VOL  = 'athena-apt-cache-data'
+
+
 class BuildContainer:
 
     def __init__(self, config: BuildConfig, docker_server=None):
-        
+
         self.build_path = config.dir_repo
         self.src_path = config.dir_source
         self.log_path = config.dir_log
         self.repo_path = config.dir_repo
         self.arch = config.arch
+        self._max_parallel = config.max_parallel_builds
 
         self.buildlog_path = os.path.join(config.dir_log, 'build')
         self.conf_path = config.dir_config
 
-        # specific for source patch directory
         self.patch_path = config.dir_patch_source
         self.patch_empty = config.dir_patch_empty
 
@@ -70,23 +78,60 @@ class BuildContainer:
 
         self.image = image
 
+        self._ensure_network()
+        self._apt_cache_active = self._ensure_apt_cache()
+
+    def _ensure_network(self) -> None:
+        try:
+            self.client.networks.get(_NETWORK_NAME)
+        except docker.errors.NotFound:
+            self.client.networks.create(_NETWORK_NAME, driver='bridge')
+            tui.console.print(f"Created Docker network {_NETWORK_NAME}")
+        except docker.errors.APIError as e:
+            tui.console.error(f"Could not ensure Docker network {_NETWORK_NAME}: {e}")
+            tui.console.print(f"Could not ensure Docker network {_NETWORK_NAME}: {e}")
+            tui.Exit(1)
+
+    def _ensure_apt_cache(self) -> bool:
+        try:
+            container = self.client.containers.get(_APT_CACHE_NAME)
+            container.reload()
+            network_names = container.attrs.get('NetworkSettings', {}).get('Networks', {})
+            if _NETWORK_NAME not in network_names:
+                self.client.networks.get(_NETWORK_NAME).connect(container)
+            if container.status != 'running':
+                container.start()
+                tui.console.print(f"Started existing apt-cacher-ng container")
+            else:
+                tui.console.print(f"apt-cacher-ng already running")
+        except docker.errors.NotFound:
+            self.client.containers.run(
+                _APT_CACHE_IMG,
+                name=_APT_CACHE_NAME,
+                detach=True,
+                restart_policy={'Name': 'unless-stopped'},
+                network=_NETWORK_NAME,
+                volumes={_APT_CACHE_VOL: {'bind': '/var/cache/apt-cacher-ng', 'mode': 'rw'}},
+            )
+            tui.console.print(f"Started new apt-cacher-ng container ({_APT_CACHE_NAME})")
+        except docker.errors.APIError as e:
+            tui.console.warning(f"apt-cacher-ng unavailable, builds will run without cache: {e}")
+            return False
+        return True
+
     def build(self, src_pkg: Source) -> bool:
         skip_list = []
 
         if src_pkg.package in skip_list:
             return False
 
-        # Check if build is already there
         if self.check_build(src_pkg):
             return True
 
-        # list of dependencies
         _dep_str = ' '.join(
             grp[0]['name'] for grp in src_pkg.build_depends(self.arch) if grp
         )
-        # source files are usually in form of <packagename_version.extension>
         _filename_prefix = src_pkg.package
-        # dsc file
         _dsc_file = ''
         try:
             _dsc_file = [file for file in src_pkg.files if file.endswith('.dsc')][0]
@@ -98,27 +143,42 @@ class BuildContainer:
         if src_pkg.skip_test:
             skip_build_test = 'DEB_BUILD_OPTIONS="nocheck" '
 
+        proxy_setup = ''
+        if self._apt_cache_active:
+            proxy_setup = (
+                f'echo \'Acquire::http::Proxy "http://{_APT_CACHE_NAME}:3142";\''
+                f' > /etc/apt/apt.conf.d/01proxy; '
+            )
+
         # TODO: Apply Build Patches
         patch_list = ' '.join(src_pkg.patch_list)
-        cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
+        cmd_str = f'{proxy_setup}' \
+                  f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'sudo apt -y install {_dep_str}; ' \
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
                   f'cd {_filename_prefix}; ' \
                   f'for PATCH in {patch_list}; do patch -p1 < /patch/"$PATCH"; done; ' \
                   f'dpkg-checkbuilddeps; {skip_build_test} dpkg-buildpackage -a amd64 -us -uc; cd ..;' \
-                  f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;' \
+                  f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'
 
         try:
             src_patch_path = os.path.join(self.patch_path, src_pkg.package, str(src_pkg.version))
             if not os.path.exists(src_patch_path):
                 src_patch_path = self.patch_empty
 
-            container = self.client.containers.run("athenalinux:build", command=f"/bin/bash -c '{cmd_str}'",
-                                                   detach=True, auto_remove=False,
-                                                   volumes={self.src_path: {'bind': '/source', 'mode': 'rw'},
-                                                            self.repo_path: {'bind': '/repo', 'mode': 'rw'},
-                                                            src_patch_path: {'bind': '/patch', 'mode': 'rw'}})
+            container = self.client.containers.run(
+                "athenalinux:build",
+                command=f"/bin/bash -c '{cmd_str}'",
+                detach=True,
+                auto_remove=False,
+                network=_NETWORK_NAME,
+                volumes={
+                    self.src_path:    {'bind': '/source', 'mode': 'rw'},
+                    self.repo_path:   {'bind': '/repo',   'mode': 'rw'},
+                    src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
+                },
+            )
 
             with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
                 for line in container.logs(stream=True):
@@ -132,6 +192,21 @@ class BuildContainer:
             tui.console.print(f"Athena Linux Docker: Error {e}")
             tui.Exit(1)
 
+    def build_all(self, packages: List[Source], on_done=None) -> Dict[str, bool]:
+        results: Dict[str, bool] = {}
+        with ThreadPoolExecutor(max_workers=self._max_parallel) as executor:
+            futures = {executor.submit(self.build, pkg): pkg for pkg in packages}
+            for future in as_completed(futures):
+                pkg = futures[future]
+                try:
+                    results[pkg.package] = future.result()
+                except Exception as e:
+                    tui.console.error(f"Build failed for {pkg.package}: {e}")
+                    results[pkg.package] = False
+                if on_done is not None:
+                    on_done(pkg.package, results[pkg.package])
+        return results
+
     def check_build(self, src_pkg: Source) -> bool:
 
         if not src_pkg.pkgs:
@@ -139,10 +214,8 @@ class BuildContainer:
 
         for _file in src_pkg.pkgs:
             _filename = os.path.join(self.repo_path, _file)
-            # Check is file exists first
             if not os.path.isfile(_filename):
                 return False
-
             if not self.is_ar_file(_filename):
                 return False
 
@@ -154,46 +227,32 @@ class BuildContainer:
         _filelist: [] = []
         try:
             with open(filename, 'rb') as f:
-                # Read the file header
                 header = f.read(8)
                 if header != b'!<arch>\n':
                     return False
 
-                # Loop through the file entries
                 while True:
-                    # Read the entry header
                     entry_header = f.read(60)
                     if not entry_header:
-                        # End of file
                         break
 
-                    # Parse the entry header
                     name = entry_header[:16].decode().rstrip()
                     if not name:
-                        # End of archive marker
                         break
-                    # Saving filenames
                     _filelist.append(name)
 
-                    # Read the entry content
                     size = int(entry_header[48:58].decode().rstrip(), 10)
                     content = f.read(size)
                     if len(content) != size:
-                        # Entry content is incomplete
                         return False
 
-                    # Check for entry alignment
                     if f.tell() % 2 != 0:
                         f.seek(1, os.SEEK_CUR)
 
-        # Continue to the next entry
         except Exception as e:
-            # Exception occurred while reading the file
             tui.console.error(f"Error reading file: {str(e)}")
             return False
 
-        # If we made it here, the file is a valid ar file
-        # Checking if it's a valid deb file
         _compressions = ['.xz', '.gz', '.bz2', '.lmza', '.zst']
         _required_files = ['control.tar', 'data.tar']
 
@@ -202,7 +261,6 @@ class BuildContainer:
             _filename, _ext = os.path.splitext(_file)
             _parsed_filelist[_filename] = _ext
 
-        # No compression/ extension
         if 'debian-binary' not in _parsed_filelist:
             return False
 
