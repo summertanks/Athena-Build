@@ -338,18 +338,29 @@ class Cache:
 
             _arch_match: bool = False
             for _pkt_arch in _pkg.arch:
-                # 'all' and 'any' match any host arch; guard 'all' explicitly as
-                # matches_architecture() does not handle it.
-                if _pkt_arch == 'all' or self._arch_table.matches_architecture(_pkt_arch, arch):
+                # Explicit guards for Debian arch wildcards that matches_architecture()
+                # handles unreliably (returns None or False for short arch names):
+                #   all / any        — match every arch
+                #   linux-any        — any Linux arch  (amd64 IS linux-amd64)
+                #   linux-{arch}     — full triplet form of the target arch
+                #   any-{arch}       — target cpu on any OS
+                #   {arch}           — exact short-name match
+                # Fall back to matches_architecture for anything else, using
+                # `is not False` so that None (unrecognised wildcard) is a pass.
+                if (_pkt_arch in ('all', 'any', 'linux-any', arch,
+                                  f'any-{arch}', f'linux-{arch}') or
+                        self._arch_table.matches_architecture(_pkt_arch, arch) is not False):
                     _arch_match = True
-            
+                    break
+
             if not _arch_match:
                 continue
-            
-            self.source_hashtable[_package_name].append(_pkg) 
+
+            self.source_hashtable[_package_name].append(_pkg)
 
         progress_bar_src.close()
         parser_spinner.done()
+        tui.console.print(f'Indexed {len(self.source_hashtable)} source records')
         
         # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
         # TODO: sort key x.split('-')[1] gives identical keys for gcc-10 and gcc-10-base — both yield (10,).
@@ -394,25 +405,3 @@ class Cache:
             except Exception:
                 pass
         return result
-
-    # def get_provides(self, provides_name: str,
-    #                  version: Version = None, constraint: str = '') -> List[Package]:
-    #     """Return packages that provide the given virtual name.
-
-    #     Same version/constraint filtering as get_packages.
-    #     """
-    #     if version is None:
-    #         result: List[Package] = []
-    #         for _pkgs in self.package_hashtable[provides_name].values():
-    #             result.extend(_pkgs)
-    #         return result
-
-    #     _constraint = constraint if constraint in self._VALID_CONSTRAINTS else '>='
-    #     result = []
-    #     for _pkg_version, _pkgs in self.package_hashtable[provides_name].items():
-    #         try:
-    #             if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
-    #                 result.extend(_pkgs)
-    #         except Exception:
-    #             pass
-    #     return result
