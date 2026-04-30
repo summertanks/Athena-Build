@@ -174,7 +174,11 @@ class BuildContainer:
         if src_pkg.skip_test:
             skip_build_test = 'DEB_BUILD_OPTIONS="nocheck" '
 
-        proxy_opt = f'-o Acquire::http::Proxy=http://{_APT_CACHE_NAME}:3142 ' if self._apt_cache_active else ''
+        proxy_opt = (
+            f'-o Acquire::http::Proxy=http://{_APT_CACHE_NAME}:3142 '
+            f'-o Acquire::http::Proxy::security.debian.org=DIRECT '
+            f'-o Acquire::http::Proxy::deb.debian.org/debian-security=DIRECT '
+        ) if self._apt_cache_active else ''
 
         # TODO: Apply Build Patches
         patch_list = ' '.join(src_pkg.patch_list)
