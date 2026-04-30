@@ -357,17 +357,21 @@ def main(banner: str):
 
         _progress_flags.download_ready = True
 
-    def cmd_source_build():
+    def cmd_source_build(force: str = ''):
         if not _progress_flags.download_ready:
             console.print("  Run 'source_download' first")
             return
+
+        _force = force.strip().lower() in ('force', 'true', '1', 'yes')
+        if _force:
+            console.print("  Force mode: skipping build cache checks")
 
         packages = list(dependency_tree.selected_srcs.values())
         if not packages:
             console.print("  No source packages to build")
             return
 
-        _success = _failed = 0
+        _success = _failed = _skipped = 0
         progress_bar = ProgressBar(label='Source Build', itr_label='pkgs', maxvalue=len(packages))
 
         def _on_done(pkg_name: str, ok: bool):
@@ -384,10 +388,15 @@ def main(banner: str):
                 _failed += 1
             progress_bar.step(1)
 
-        build_container.build_all(packages, on_done=_on_done)
+        def _on_skip(pkg_name: str):
+            nonlocal _skipped
+            _skipped += 1
+            progress_bar.step(1)
+
+        build_container.build_all(packages, on_done=_on_done, on_skip=_on_skip, force=_force)
         progress_bar.close()
 
-        console.print(f"Source build complete: {_success} passed, {_failed} failed")
+        console.print(f"Source build complete: {_success} passed, {_failed} failed, {_skipped} skipped")
         if _failed > 0:
             console.error(f"{_failed} source build(s) failed")
             _resp = Prompt(PROMPT_YESNO, "There are source build failures, Proceed?").get_response()
@@ -404,7 +413,7 @@ def main(banner: str):
     tui.register_command('parse_dependency',  cmd_parse_dependency,   'Parse dependency tree for selected packages')
     tui.register_command('parse_sources',     cmd_parse_source,       'Parse source packages for selected dependencies')
     tui.register_command('source_download',   cmd_source_download,    'Download source packages')
-    tui.register_command('source_build',      cmd_source_build,       'Build source packages in parallel')
+    tui.register_command('source_build',      cmd_source_build,       'Build source packages in parallel (source_build [force])')
     tui.register_command('print',             cmd_print,              'Print info: print <config|required|important|selected>')
 
     spin = Spinner("Creating Build System")

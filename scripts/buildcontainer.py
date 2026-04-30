@@ -150,13 +150,13 @@ class BuildContainer:
             return False
         return True
 
-    def build(self, src_pkg: Source) -> bool:
+    def build(self, src_pkg: Source, force: bool = False) -> bool:
         skip_list = []
 
         if src_pkg.package in skip_list:
             return False
 
-        if self.check_build(src_pkg):
+        if not force and self.check_build(src_pkg):
             return True
 
         _dep_str = ' '.join(
@@ -221,10 +221,20 @@ class BuildContainer:
             tui.console.print(f"Athena Linux Docker: Error {e}")
             tui.Exit(1)
 
-    def build_all(self, packages: List[Source], on_done=None) -> Dict[str, bool]:
+    def build_all(self, packages: List[Source], on_done=None, on_skip=None, force: bool = False) -> Dict[str, bool]:
         results: Dict[str, bool] = {}
+
+        to_build = []
+        for pkg in packages:
+            if not force and self.check_build(pkg):
+                results[pkg.package] = True
+                if on_skip is not None:
+                    on_skip(pkg.package)
+            else:
+                to_build.append(pkg)
+
         with ThreadPoolExecutor(max_workers=self._max_parallel) as executor:
-            futures = {executor.submit(self.build, pkg): pkg for pkg in packages}
+            futures = {executor.submit(self.build, pkg, force): pkg for pkg in to_build}
             for future in as_completed(futures):
                 pkg = futures[future]
                 try:
@@ -237,8 +247,15 @@ class BuildContainer:
         return results
 
     def check_build(self, src_pkg: Source) -> bool:
-
         if not src_pkg.pkgs:
+            return False
+
+        result_file = os.path.join(self.buildlog_path, src_pkg.package + '.result')
+        try:
+            with open(result_file, 'r') as fh:
+                if fh.readline().strip() != 'PASS':
+                    return False
+        except OSError:
             return False
 
         for _file in src_pkg.pkgs:
