@@ -1,4 +1,5 @@
 
+import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
@@ -53,33 +54,63 @@ class BuildContainer:
                 tui.console.print(f"Athena Linux Docker: Error {e}")
                 tui.Exit(1)
 
+        dockerfile_hash = self._hash_dockerfile(config.dir_config)
+
+        _needs_build = False
         try:
             image = self.client.images.get("athenalinux:build")
-            tui.console.print(f"Using Athena Linux Image - {image.tags}")
+            stored_hash = image.labels.get('athena.dockerfile.sha256', '')
+            if stored_hash != dockerfile_hash:
+                tui.console.print(f"Dockerfile changed — rebuilding athenalinux:build")
+                _needs_build = True
+            else:
+                tui.console.print(f"Using Athena Linux Image - {image.tags}")
         except docker.errors.ImageNotFound:
-            tui.console.print("Image not found, Building AthenaLinux Image...")
-            image, build_logs = self.client.images.build(path=config.dir_config, tag='athenalinux:build',
-                                                         nocache=True, rm=True)
-            tui.console.print(f"Athena Linux Image Built - {image.tags}")
-            try:
-                with open(os.path.join(self.log_path, 'docker_build.log'), 'w') as fh:
-                    for chunk in build_logs:
-                        if 'stream' in chunk:
-                            for line in chunk['stream'].splitlines():
-                                fh.write(line + '\n')
-            except (FileNotFoundError, PermissionError) as e:
-                tui.console.error(f"Error writing docker build log: {e}")
-                tui.console.print(f"Error writing docker build log: {e}")
-                tui.Exit(1)
+            tui.console.print("Image not found — building athenalinux:build")
+            _needs_build = True
         except docker.errors.APIError as e:
             tui.console.error(f"Athena Linux Docker: Error {e}")
             tui.console.print(f"Athena Linux Docker: Error {e}")
             tui.Exit(1)
 
+        if _needs_build:
+            try:
+                image, build_logs = self.client.images.build(
+                    path=config.dir_config,
+                    tag='athenalinux:build',
+                    labels={'athena.dockerfile.sha256': dockerfile_hash},
+                    nocache=False,
+                    rm=True,
+                )
+                tui.console.print(f"Athena Linux Image Built - {image.tags}")
+                try:
+                    with open(os.path.join(self.log_path, 'docker_build.log'), 'w') as fh:
+                        for chunk in build_logs:
+                            if 'stream' in chunk:
+                                for line in chunk['stream'].splitlines():
+                                    fh.write(line + '\n')
+                except (FileNotFoundError, PermissionError) as e:
+                    tui.console.error(f"Error writing docker build log: {e}")
+                    tui.console.print(f"Error writing docker build log: {e}")
+                    tui.Exit(1)
+            except docker.errors.APIError as e:
+                tui.console.error(f"Athena Linux Docker: Error {e}")
+                tui.console.print(f"Athena Linux Docker: Error {e}")
+                tui.Exit(1)
+
         self.image = image
 
         self._ensure_network()
         self._apt_cache_active = self._ensure_apt_cache()
+
+    @staticmethod
+    def _hash_dockerfile(config_dir: str) -> str:
+        dockerfile = os.path.join(config_dir, 'Dockerfile')
+        try:
+            with open(dockerfile, 'rb') as fh:
+                return hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            return ''
 
     def _ensure_network(self) -> None:
         try:

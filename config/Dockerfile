@@ -2,6 +2,7 @@ FROM debian:11.6-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update
+RUN apt-get install -y --only-upgrade dpkg dpkg-dev libdpkg-perl
 RUN apt-get install -y  \
         net-tools iputils-ping util-linux \
         bc bison build-essential cpio flex  libncurses-dev libssl-dev ca-certificates less sudo keyboard-configuration \
