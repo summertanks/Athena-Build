@@ -1,11 +1,46 @@
 # internal modules
 from debian.deb822 import Packages, Sources
-from debian.debian_support import Version
+from debian.debian_support import Version, DpkgArchTable
 
 import apt_pkg
 import tui
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
+
+_arch_table: Optional[DpkgArchTable] = None
+
+def _load_arch_table() -> Optional[DpkgArchTable]:
+    global _arch_table
+    if _arch_table is None:
+        try:
+            _arch_table = DpkgArchTable.load_arch_table()
+        except Exception:
+            pass
+    return _arch_table
+
+def _dep_arch_ok(arch_restrictions, target_arch: str) -> bool:
+    """Return True if arch_restrictions allow target_arch."""
+    if not arch_restrictions:
+        return True
+
+    table = _load_arch_table()
+
+    def _matches(spec: str) -> bool:
+        if spec in ('all', 'any', target_arch, 'linux-any',
+                    f'any-{target_arch}', f'linux-{target_arch}'):
+            return True
+        if table is not None:
+            return table.matches_architecture(spec, target_arch) is not False
+        return False
+
+    positives = [r for r in arch_restrictions if r.enabled]
+    negatives = [r for r in arch_restrictions if not r.enabled]
+
+    if positives and not any(_matches(r.arch) for r in positives):
+        return False
+    if any(_matches(r.arch) for r in negatives):
+        return False
+    return True
 
 class VersionConstraint:
     """
@@ -509,10 +544,12 @@ class Source(Sources):
         """
 
         all_deps: List[List[Dict[str, Any]]] = []
-        
-        # Combine all relevant build-depends lists
-        for _dep_group in (self.depends, self.depends_indep, self.depends_arch):
-            for _dep_package in _dep_group:
-                all_deps.append(_dep_package)
+
+        for dep_group in (self.depends, self.depends_indep, self.depends_arch):
+            for alternatives in dep_group:
+                valid = [alt for alt in alternatives
+                         if _dep_arch_ok(alt.get('arch'), arch)]
+                if valid:
+                    all_deps.append(valid)
 
         return all_deps
