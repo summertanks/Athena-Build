@@ -1,5 +1,4 @@
 # Internal modules
-import re
 from collections import defaultdict
 from typing import Dict, List, Optional
 
@@ -16,7 +15,8 @@ from tui import Prompt, PROMPT_OPTIONS
 
 class DependencyTree:
 
-    def __init__(self, cache: Cache, select_recommended: bool, arch: str, lookahead=None):
+    def __init__(self, cache: Cache, select_recommended: bool, arch: str,
+                 build_profiles: frozenset = frozenset(), lookahead=None):
 
         self.__recommended = select_recommended
         self.__cache = cache
@@ -27,6 +27,7 @@ class DependencyTree:
         self.selected_pkgs: Dict[str, package.Package] = {}
         self.selected_srcs: Dict[str, package.Source]  = {}
         self.arch = arch
+        self.build_profiles = build_profiles
 
         if lookahead is not None:
             self.add_lookahead(lookahead)
@@ -48,12 +49,15 @@ class DependencyTree:
             if len(_candidates) == 1:
                 _selected = _candidates[0]
             else:
+                _mark = tui.console.mark()
                 tui.console.print(f"Multiple versions for '{_pkg_name}':")
                 for _i, _c in enumerate(_candidates, 1):
                     tui.console.print(f"  {_i}.  {_c.package}  ({_c.version})")
                 _options = [str(_i) for _i in range(1, len(_candidates) + 1)]
                 _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_candidates)}]", _options).get_response()
                 _selected = _candidates[int(_choice) - 1]
+                tui.console.trim_to(_mark)
+                tui.console.print(f"Multiple versions for '{_pkg_name}': Selected {_selected.package} ({_selected.version})")
 
             # 3. Hard conflict check against entries already in lookahead
             _conflict_found = False
@@ -107,6 +111,19 @@ class DependencyTree:
 
     # Operators accepted by apt_pkg.check_dep for version constraint checks
     _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
+
+    @property
+    def selected_count(self) -> int:
+        return sum(1 for _k in self.selected_pkgs if _k == self.selected_pkgs[_k]['Package'])
+
+    def resolve_packages(self, packages: list[str]) -> list[str]:
+        self.add_lookahead(packages)
+        unresolved = [pkg for pkg in packages if self.parse_dependency(pkg) is None]
+        for pkg in unresolved:
+            tui.console.print(f"WARNING: cannot resolve '{pkg}'")
+            tui.console.error(f"parse_dependency({pkg}) returned None")
+        return unresolved                                    
+
 
     def parse_dependency(self, package_name: str,
                          version: Optional[Version] = None,
@@ -168,12 +185,15 @@ class DependencyTree:
 
         # Case - IV : Multiple candidates — show numbered list, prompt for index
         elif len(_pkg_candidates) > 1:
+            _mark = tui.console.mark()
             tui.console.print(f"Multiple packages satisfy '{package_name}':")
             for _i, _pkg in enumerate(_pkg_candidates, 1):
                 tui.console.print(f"  {_i}.  {_pkg.package}  ({_pkg.version})")
             _options = [str(_i) for _i in range(1, len(_pkg_candidates) + 1)]
             _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_pkg_candidates)}]", _options).get_response()
             _selected_pkg = _pkg_candidates[int(_choice) - 1]
+            tui.console.trim_to(_mark)
+            tui.console.print(f"Multiple packages satisfy '{package_name}': Selected {_selected_pkg.package} ({_selected_pkg.version})")
 
         else:  # Do not know how we got here
             tui.console.error(f"Unknown Error in Parsing dependencies: {package_name}")
@@ -288,7 +308,15 @@ class DependencyTree:
                     # "package breaks its own alias" (false positive) from a real break.
                     if self.selected_pkgs[_breaks_name] is self.selected_pkgs[_pkg]:
                         continue
-                    _pkg_ver = str(self.selected_pkgs[_breaks_name].version)
+                    _broken_obj = self.selected_pkgs[_breaks_name]
+                    if _broken_obj['Package'] != _breaks_name:
+                        # Provider: use the Provides version, not the provider's own version
+                        _provided_ver = next(
+                            (str(v) for n, v in _broken_obj.get_provides()
+                             if n == _breaks_name and v is not None), None)
+                        _pkg_ver = _provided_ver if _provided_ver else str(_broken_obj.version)
+                    else:
+                        _pkg_ver = str(_broken_obj.version)
                     _break_version = _break_group[0][1]
                     _break_comparator = _break_group[0][2]
 
@@ -315,7 +343,14 @@ class DependencyTree:
                     # "I am X and nothing else can be X". Not a real conflict with another package.
                     if self.selected_pkgs[_conflicts_name] is self.selected_pkgs[_pkg]:
                         continue
-                    _pkg_ver = str(self.selected_pkgs[_conflicts_name].version)
+                    _conflict_obj = self.selected_pkgs[_conflicts_name]
+                    if _conflict_obj['Package'] != _conflicts_name:
+                        _provided_ver = next(
+                            (str(v) for n, v in _conflict_obj.get_provides()
+                             if n == _conflicts_name and v is not None), None)
+                        _pkg_ver = _provided_ver if _provided_ver else str(_conflict_obj.version)
+                    else:
+                        _pkg_ver = str(_conflict_obj.version)
                     _conflict_version = _conflict_group[0][1]
                     _conflict_comparator = _conflict_group[0][2]
 
@@ -429,10 +464,8 @@ class DependencyTree:
                     continue
 
                 _src_candidates = self.__cache.source_hashtable[_src_name]
-                # If single entry its simple
                 if len(_src_candidates) == 1:
                     self.selected_srcs[_src_name] = _src_candidates[0]
-                # If more than one, differentiate on version
                 else:
                     _selected_pkg = [_pkg for _pkg in _src_candidates if _pkg.version == Version(_src_version)]
                     if len(_selected_pkg) == 1:
@@ -443,70 +476,7 @@ class DependencyTree:
                         _found = False
                         continue
 
-            # ideally the following should have been sufficient
-            # self.selected_srcs[_src_name].pkgs.append(os.path.basename(self.selected_pkgs[_pkg_name]['Filename']))
-            # but there are some +deb11ux issues that are not getting addressed
-            _pkg_list = self.selected_srcs[_src_name].package_list
-            if not _pkg_list:
-                continue
-            for _pkg in _pkg_list:
-                _pkg = _pkg.split()
-
-                # Malformed / empty — need at least name + type (deb/udeb) to build a filename
-                if len(_pkg) < 2:
-                    continue
-
-                # Check if the Package matches
-                if _pkg[0] != _src[2].package:
-                    continue
-
-                # Package-List fields 5+ are optional key=value pairs (arch, profile, essential, ...)
-                # in arbitrary order — scan for the 'arch=' field, fall back to self.arch if absent.
-                _arch_field = next((f for f in _pkg[4:] if f.startswith('arch=')), None)
-
-                # No arch info - assume it's the same as self.arch (by virtue of control file architecture)
-                if _arch_field is None:
-                    _arch = self.arch
-
-                # Select from the list
-                else:
-                    # Original — reused `_arch` as string, then list, then string:
-                    # _arch = _arch_field.split('=', 1)[1]
-                    # _arch = _arch.split(',')
-                    # _arch_type = [self.arch, 'any', 'linux-any', 'any-' + self.arch]
-                    # _selected_arch = [__arch for __arch in _arch_type if __arch in _arch]
-                    # if len(_selected_arch) > 0:
-                    #     _arch = self.arch
-                    # elif 'all' in _arch:
-                    #     _arch = 'all'
-                    # else:
-                    #     continue
-                    _arch_list = _arch_field.split('=', 1)[1].split(',')
-                    _arch_type = [self.arch, 'any', 'linux-any', 'any-' + self.arch]
-                    _selected_arch = [__arch for __arch in _arch_type if __arch in _arch_list]
-                    if len(_selected_arch) > 0:
-                        _arch = self.arch
-                    elif 'all' in _arch_list:
-                        _arch = 'all'
-                    else:
-                        # not for the arch we need, skip
-                        continue
-
-                _version = str(_src[2].version).split(':')
-                if len(_version) > 1:
-                    _version = _version[1]
-                else:
-                    _version = _version[0]
-
-                # stripping build revisions, because these do not reflect on source code builds
-                _version = re.sub(r"\+b\d+$", "", _version)
-
-                # Now that the arch has been established,
-                self.selected_srcs[_src_name].pkgs.append(
-                    _src[2].package + '_' + _version + '_' + _arch + '.' + _pkg[1])
-
-                # If we are we matched, there should be another match withing the same package list, lets break
-                break
+                self.selected_srcs[_src_name].populate_pkgs(self.arch, self.build_profiles)
 
         tui.console.warning(f"parse_sources: selected {len(self.selected_srcs)} source packages")
         return _found
