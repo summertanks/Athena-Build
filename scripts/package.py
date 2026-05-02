@@ -18,29 +18,7 @@ def _load_arch_table() -> Optional[DpkgArchTable]:
             pass
     return _arch_table
 
-def _dep_arch_ok(arch_restrictions, target_arch: str) -> bool:
-    """Return True if arch_restrictions allow target_arch."""
-    if not arch_restrictions:
-        return True
 
-    table = _load_arch_table()
-
-    def _matches(spec: str) -> bool:
-        if spec in ('all', 'any', target_arch, 'linux-any',
-                    f'any-{target_arch}', f'linux-{target_arch}'):
-            return True
-        if table is not None:
-            return table.matches_architecture(spec, target_arch) is not False
-        return False
-
-    positives = [r for r in arch_restrictions if r.enabled]
-    negatives = [r for r in arch_restrictions if not r.enabled]
-
-    if positives and not any(_matches(r.arch) for r in positives):
-        return False
-    if any(_matches(r.arch) for r in negatives):
-        return False
-    return True
 
 class VersionConstraint:
     """
@@ -414,20 +392,8 @@ class Source(Sources):
         self.files:      Dict[str, Dict[str, Any]] = {}
         self.arch:       List[str] = []
 
-        # 'build-depends', 'build-depends-indep', 'build-depends-arch',
-        # 'build-conflicts', 'build-conflicts-indep', 'build-conflicts-arch', 'binary'
-        self.binary:             List[str] = []
-        self.depends:            List[List[Dict[str, Any]]] = []
-        self.depends_indep:      List[List[Dict[str, Any]]] = []
-        self.depends_arch:       List[List[Dict[str, Any]]] = []
-        self.conflicts:          List[List[Dict[str, Any]]] = []
-        self.conflicts_indep:    List[List[Dict[str, Any]]] = []
-        self.conflicts_arch:     List[List[Dict[str, Any]]] = []
+        self.binary: List[str] = []
 
-        # can be derived from Package-List field, but it is tedious - correlation for versions required
-        # One source provides multiple packages, package may have different version from the source version
-        # Package-List may have additional information e.g. 'udeb' tag which is not there in package
-        # Lets only select the package-files that the Package actually needs, the others produced are optional
         self.package_list: List[str] = []
 
         # Runtime: binary .deb filenames produced from this source (populated by DependencyTree.parse_sources)
@@ -490,24 +456,27 @@ class Source(Sources):
 
         self.binary = [p.strip() for p in self.get('Binary', '').split(',') if p.strip()]
 
-        try:
-            self.depends         = self.relations.get('build-depends', [])
-            self.depends_indep   = self.relations.get('build-depends-indep', [])
-            self.depends_arch    = self.relations.get('build-depends-arch', [])
-
-            self.conflicts       = self.relations.get('build-conflicts', [])
-            self.conflicts_indep = self.relations.get('build-conflicts-indep', [])
-            self.conflicts_arch  = self.relations.get('build-conflicts-arch', [])
-        except Exception as e:
-            self._err_str = f"Failed to parse build dependencies for source '{self.package}': {e}"
-            tui.console.print(f"WARNING: {self._err_str}")
-            return
-        
         _raw_pkg_list = self.get('Package-List') or ''
+        self.package_list = []
         if isinstance(_raw_pkg_list, list):
-            self.package_list = [str(item).strip() for item in _raw_pkg_list if str(item).strip()]
+            for _item in _raw_pkg_list:
+                if hasattr(_item, 'get'):
+                    # python-debian parses Package-List into Deb822Dict with keys:
+                    # 'package', 'package-type', 'section', 'priority', '_other'
+                    # All optional key=value pairs (arch=, profile=) are in '_other'
+                    _name = (_item.get('package') or '').strip()
+                    _type = (_item.get('package-type') or 'deb').strip()
+                    if not _name or not _type:
+                        continue
+                    _line = f'{_name} {_type}'
+                    _other = (_item.get('_other') or '').strip()
+                    if _other:
+                        _line += f' {_other}'
+                    self.package_list.append(_line)
+                elif str(_item).strip():
+                    self.package_list.append(str(_item).strip())
         elif isinstance(_raw_pkg_list, str):
-            self.package_list = [line for line in _raw_pkg_list.split('\n') if line.strip()]
+            self.package_list = [line.strip() for line in _raw_pkg_list.split('\n') if line.strip()]
        
         _arch_field = self.get('Architecture', '').strip()
         if not _arch_field:
@@ -536,20 +505,53 @@ class Source(Sources):
         return sum(f['size'] for f in self.files.values())
 
 
-    def build_depends(self, arch: str) -> List[List[Dict[str, Any]]]:
+    def populate_pkgs(self, arch: str, build_profiles: frozenset) -> None:
+        """Populate self.pkgs from Package-List, filtered by arch and active build profiles."""
+        self.pkgs = []
+        for _entry in self.package_list:
+            _fields = _entry.split()
+            if len(_fields) < 2:
+                continue
+            _pkg_name, _pkg_type = _fields[0], _fields[1]
+
+            _pf = next((f for f in _fields[2:] if f.startswith('profile=')), None)
+            if _pf is not None:
+                _expr = _pf.split('=', 1)[1].strip('<>')
+                if any(
+                    (t.startswith('!') and t[1:] in build_profiles) or
+                    (not t.startswith('!') and t not in build_profiles)
+                    for t in (t.strip() for t in _expr.split(','))
+                ):
+                    continue
+
+            _af = next((f for f in _fields[2:] if f.startswith('arch=')), None)
+            if _af is not None:
+                _arch_list = _af.split('=', 1)[1].split(',')
+                if any(a in _arch_list for a in (arch, 'any', 'linux-any', f'any-{arch}', f'linux-{arch}')):
+                    _pkg_arch = arch
+                elif 'all' in _arch_list:
+                    _pkg_arch = 'all'
+                else:
+                    continue
+            else:
+                _pkg_arch = arch
+
+            _ver = str(self.version).split(':', 1)[-1]
+            self.pkgs.append(f'{_pkg_name}_{_ver}_{_pkg_arch}.{_pkg_type}')
+
+    def build_depends(self, arch: str, active_profiles: frozenset = frozenset()) -> List[List[Tuple]]:
+        """Returns combined build dependencies filtered by arch and active build profiles.
+
+        Each entry is a list of OR-alternatives; each alternative is a tuple (name, ver, op).
+        apt_pkg.parse_src_depends filters arch and profile restrictions internally.
         """
-        Returns combined build dependencies from build-depends, build-depends-indep,
-        and build-depends-arch as a list of dependency groups (each group is a list
-        of dicts with keys: name, version, arch, archqual, restrictions).
-        """
-
-        all_deps: List[List[Dict[str, Any]]] = []
-
-        for dep_group in (self.depends, self.depends_indep, self.depends_arch):
-            for alternatives in dep_group:
-                valid = [alt for alt in alternatives
-                         if _dep_arch_ok(alt.get('arch'), arch)]
-                if valid:
-                    all_deps.append(valid)
-
+        apt_pkg.config['APT::Build-Profiles'] = ' '.join(active_profiles)
+        all_deps: List[List[Tuple]] = []
+        for field in ('Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch'):
+            raw = (self.get(field) or '').strip()
+            if raw:
+                try:
+                    all_deps.extend(apt_pkg.parse_src_depends(raw, architecture=arch))
+                except Exception as e:
+                    tui.console.warning(f"parse_src_depends({field}) for '{self.package}': {e}")
         return all_deps

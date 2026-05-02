@@ -905,11 +905,27 @@ class Tui:
         with self._print_lock:
             if 'console' not in self._tabs:
                 return
-            if attribute is None:
-                attribute = curses.color_pair(self.COLOR_NORMAL)
+            attribute = curses.color_pair(attribute if attribute is not None else self.COLOR_NORMAL)
             con = self._tabs['console']
             for line in message.split('\n'):
                 con['buffer'].append((line, attribute))
+            con['cursor'] = len(con['buffer'])
+            self._dirty = True
+
+    def console_mark(self) -> int:
+        """Return the current console buffer length as a bookmark."""
+        with self._print_lock:
+            if 'console' not in self._tabs:
+                return 0
+            return len(self._tabs['console']['buffer'])
+
+    def console_trim_to(self, mark: int) -> None:
+        """Truncate the console buffer back to a previously recorded bookmark."""
+        with self._print_lock:
+            if 'console' not in self._tabs:
+                return
+            con = self._tabs['console']
+            con['buffer'] = con['buffer'][:mark]
             con['cursor'] = len(con['buffer'])
             self._dirty = True
 
@@ -1065,7 +1081,7 @@ class Tui:
             if not command:
                 continue
 
-            self.print(f'  {command}', curses.color_pair(self.COLOR_HIGHLIGHT))
+            self.print(f'${command}', self.COLOR_HIGHLIGHT)
             self.cmd_prompt = self._PROMPT_BUSY
             self.INFO(f'Executing: {command}')
             self._cmd.add_history(command)
@@ -1352,6 +1368,12 @@ class Console:
     def print(self, message: str, attribute: Optional[int] = None) -> None:
         self._tui().print(message, attribute)
 
+    def mark(self) -> int:
+        return self._tui().console_mark()
+
+    def trim_to(self, mark: int) -> None:
+        self._tui().console_trim_to(mark)
+
     def error(self, message: str) -> None:
         self._tui().ERROR(message)
 
@@ -1365,10 +1387,23 @@ class Console:
 console = Console()
 
 
+# Module-level color constants — mirrors Tui class attributes for convenient import
+COLOR_NORMAL    = Tui.COLOR_NORMAL
+COLOR_REVERSE   = Tui.COLOR_REVERSE
+COLOR_WARNING   = Tui.COLOR_WARNING
+COLOR_ERROR     = Tui.COLOR_ERROR
+COLOR_HIGHLIGHT = Tui.COLOR_HIGHLIGHT
+COLOR_INFO      = Tui.COLOR_INFO
+
+
 def Exit(err_code: int = 0) -> None:
     """Shut down the TUI cleanly then exit the process."""
+    global tui_instance
     if tui_instance is not None:
         tui_instance.exit(err_code)
+        tui_instance.wait()
+        tui_instance = None
+    print("Shutdown TUI\n")
     sys.exit(err_code)
 
 

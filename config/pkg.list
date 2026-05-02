@@ -47,9 +47,10 @@ ncurses-bin
 perl-base
 sysvinit-utils
 
-#gpgv2          # does not exist — correct name is gpgv (dep of apt)
 initramfs-tools
 
 # Remote access
 openssh-server
 
+# simplifying package selection
+dialog

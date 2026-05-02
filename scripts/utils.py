@@ -28,6 +28,7 @@ class BuildConfig:
     baseversion: str
     build_codename: str
     build_version: str
+    container_release: str
 
     skip_build_test: list[str]
     max_parallel_builds: int
@@ -100,7 +101,12 @@ class BuildConfig:
             self.build_codename = config_parser.get('Build', 'CODENAME')
             self.build_version = config_parser.get('Build', 'VERSION')
 
+            self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback='bookworm')
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
+            _profiles_raw = config_parser.get('Source', 'BuildProfiles', fallback='')
+            self.build_profiles: frozenset[str] = frozenset(
+                p.strip() for p in _profiles_raw.split(',') if p.strip()
+            )
             self.max_parallel_builds = config_parser.getint('Build', 'MaxParallelBuilds', fallback=4)
 
             # NOTE: The directories are relative to the working directory

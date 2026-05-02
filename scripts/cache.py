@@ -22,7 +22,6 @@ from tui import ProgressBar, Spinner
 class Cache:
 
     package_hashtable:  Dict[str, Dict[Version, List[Package]]]
-    # provides_hashtable: Dict[str, Dict[Version, List[str]]]
     source_hashtable:   Dict[str, List[Source]]
 
     _arch_table: DpkgArchTable
@@ -94,6 +93,8 @@ class Cache:
         
         self.required: List[str] = []
         self.important: List[str] = []
+
+        self.skip_src: List[str] = []
 
         
         self.package_hashtable = defaultdict(lambda: defaultdict(list))
@@ -367,10 +368,16 @@ class Cache:
         # sorted(...)[-1:] keeps only one of them (last in stable sort order), silently dropping the other
         # from required even if it's a distinct needed package. Fix: find the max version number, then
         # keep ALL packages whose version number matches it, not just the last sorted element.
-        gcc_versions = [pkg for pkg in self.required
-                        if pkg.startswith('gcc-') and pkg.split('-')[1].isdigit()]
-        latest_gcc_versions = sorted(gcc_versions, key=lambda x: tuple(int(n) for n in x.split('-')[1].split('.')))[-1:]
-        latest_gcc = set(latest_gcc_versions)
+        # Find the latest gcc major version from all available packages (not just required),
+        # since Bookworm's gcc-N-base is Priority: optional and won't appear in self.required.
+        _gcc_available = [pkg for pkg in self.package_hashtable
+                          if pkg.startswith('gcc-') and pkg.split('-')[1].isdigit()
+                          and pkg in (f"gcc-{pkg.split('-')[1]}", f"gcc-{pkg.split('-')[1]}-base")]
+        if _gcc_available:
+            _max_major = max(int(pkg.split('-')[1]) for pkg in _gcc_available)
+            latest_gcc = {f"gcc-{_max_major}", f"gcc-{_max_major}-base"}
+        else:
+            latest_gcc = set()
         self.required = [pkg for pkg in self.required if not pkg.startswith('gcc-') or pkg in latest_gcc]
         tui.console.print(f"Selected : {latest_gcc}")
         tui.console.print(f"Required Package Count : {len(self.required)}")
