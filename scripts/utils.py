@@ -32,6 +32,7 @@ class BuildConfig:
     docker_server: str
 
     skip_build_test: list[str]
+    tunnel_packages: list[str]
     max_parallel_builds: int
 
     error_str: str
@@ -105,6 +106,8 @@ class BuildConfig:
             self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback='bookworm')
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
+            _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
+            self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]
             _profiles_raw = config_parser.get('Source', 'BuildProfiles', fallback='')
             self.build_profiles: frozenset[str] = frozenset(
                 p.strip() for p in _profiles_raw.split(',') if p.strip()

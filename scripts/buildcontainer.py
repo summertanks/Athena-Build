@@ -196,7 +196,7 @@ class BuildContainer:
         result_file = os.path.join(self.buildlog_path, src_pkg.package + '.result')
         try:
             with open(result_file, 'r') as fh:
-                if fh.readline().strip() != 'PASS':
+                if fh.readline().strip() not in ('PASS', 'TUNNELED'):
                     return False
         except OSError:
             return False

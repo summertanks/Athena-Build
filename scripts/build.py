@@ -312,6 +312,72 @@ def cmd_init_container():
         console.error(f"BuildContainer() raised: {e}")
 
 
+def _do_tunnel(src_pkg) -> bool:
+    """Download binary .deb files for src_pkg from the base Debian repo into the repo directory."""
+    if not src_pkg.pkgs:
+        console.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
+        return False
+
+    _base = f"https://{build_config.baseurl}/debian"
+    _success = True
+
+    for _filename in src_pkg.pkgs:
+        _dest = os.path.join(build_container.repo_path, _filename)
+        if os.path.isfile(_dest):
+            console.info(f"tunnel {src_pkg.package}: {_filename} already present, skipping download")
+            continue
+        _url = f"{_base}/{src_pkg.directory}/{_filename}"
+        console.info(f"tunnel {src_pkg.package}: downloading {_url}")
+        _bytes = utils.download_file(_url, _dest)
+        if _bytes < 0:
+            console.error(f"tunnel {src_pkg.package}: failed to download {_filename}")
+            _success = False
+
+    _result_file = os.path.join(build_container.buildlog_path, src_pkg.package + '.result')
+    try:
+        with open(_result_file, 'w') as fh:
+            fh.write('TUNNELED\n' if _success else 'FAIL\n')
+    except OSError as e:
+        console.error(f"tunnel {src_pkg.package}: cannot write result file: {e}")
+
+    return _success
+
+
+def cmd_tunnel_package(*args):
+    if not _progress_flags.download_ready:
+        console.print("Run 'source_download' first")
+        return
+    if not _progress_flags.build_container_ready:
+        console.print("Run 'build_container' first")
+        return
+
+    _names = list(args) if args else build_config.tunnel_packages
+    if not _names:
+        console.print("No packages specified and Tunneled list in build.conf is empty")
+        return
+
+    packages = []
+    for name in _names:
+        src = dependency_tree.selected_srcs.get(name)
+        if src is None:
+            console.print(f"Unknown package: {name}")
+            return
+        packages.append(src)
+
+    _success = _failed = 0
+    progress_bar = ProgressBar(label='Tunnel', itr_label='pkgs', maxvalue=len(packages))
+    for _src_pkg in packages:
+        _result = _do_tunnel(_src_pkg)
+        if _result:
+            _success += 1
+        else:
+            _failed += 1
+        console.info(f"Tunnel {_src_pkg.package} [{'TUNNELED' if _result else 'FAIL'}]")
+        progress_bar.step(1)
+    progress_bar.close()
+    console.print(f"Tunnel complete: {_success} tunneled, {_failed} failed")
+
+
 def cmd_source_build(*args):
     
     if not _progress_flags.download_ready:
@@ -351,6 +417,21 @@ def cmd_source_build(*args):
         if _src_pkg.package in build_cache.skip_src:
             console.warning(f"Package {_src_pkg.package} in skip_list")
             _skipped = _skipped + 1
+            progress_bar.step(1)
+            continue
+
+        if _src_pkg.package in build_config.tunnel_packages:
+            if build_container.check_build(_src_pkg):
+                console.info(f"Package {_src_pkg.package} already tunneled [SKIPPED]")
+                _skipped += 1
+                progress_bar.step(1)
+                continue
+            _build_result = _do_tunnel(_src_pkg)
+            console.info(f"Tunnel {_src_pkg.package} [{'TUNNELED' if _build_result else 'FAIL'}]")
+            if _build_result:
+                _success += 1
+            else:
+                _failed += 1
             progress_bar.step(1)
             continue
 
@@ -424,6 +505,7 @@ def main(banner: str):
     tui.register_command('source_download',   cmd_source_download,    'Download source packages')
     tui.register_command('build_container',   cmd_init_container,     'Initialise Docker build container')
     tui.register_command('source_build',      cmd_source_build,       'Build source packages in parallel (source_build [pkg …] [force])')
+    tui.register_command('tunnel_package',    cmd_tunnel_package,     'Download binary .debs from Debian repo (tunnel_package [pkg …])')
     tui.register_command('print',             cmd_print,              'Print info: print <config|required|important|selected>')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
