@@ -1,0 +1,30 @@
+Description: Guard bash-doc example installation against nodoc
+ With nodoc in DEB_BUILD_OPTIONS, dh_installexamples skips installing
+ examples, leaving debian/bash-doc/usr/share/doc/bash/examples/ absent.
+ Two subsequent cd+chmod calls then fail. Wrap the entire bash-doc
+ examples block in a nodoc guard.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -231,7 +231,7 @@
+ 	$(ID) -D debian/shells.d/bash $(d)/usr/share/debianutils/shells.d/bash
+ 
+ 	: # files for the bash-doc package
+-
++ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
+ 	dh_installexamples -p$(p_doc) examples/*
+ 	rm -rf $(d_doc)/usr/share/doc/$(p)/examples/loadables
+ 	mkdir -p $(d_doc)/usr/share/doc/$(p_doc)
+@@ -243,6 +243,7 @@
+ 
+ 	cd $(d_doc)/usr/share/doc/$(p)/examples && chmod 644 \
+ 		scripts/shprompt
++endif
+ 
+ 	: # files for the bash-builtins package
+ 	mv $(d)/usr/include $(d_bins)/usr/.

@@ -269,8 +269,8 @@ class Cache:
             try:
                 _pkg = package.Package(_pkg_record)
             except Exception as e:
-                tui.console.print(f"WARNING: Skipping malformed package record: {e}")
-                tui.console.warning(f"Corruption in Record: {_pkg_record.split(chr(10))}")
+                _first_line = _pkg_record.strip().splitlines()[0] if _pkg_record.strip() else '<empty>'
+                tui.console.warning(f"Skipping record ({type(e).__name__}: {e}) — {_first_line}")
                 continue
 
             # Basic sanity check

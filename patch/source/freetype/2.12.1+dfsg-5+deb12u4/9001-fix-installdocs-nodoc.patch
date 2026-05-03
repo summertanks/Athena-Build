@@ -1,0 +1,29 @@
+Description: Guard override_dh_installdocs-indep against nodoc
+ With nodoc in DEB_BUILD_OPTIONS, dh_installdocs skips HTML doc installation
+ into debian/freetype2-doc/. Subsequent cp and sed commands then fail
+ because the target directory and files do not exist. Wrap the entire
+ override_dh_installdocs-indep block in a nodoc guard.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -58,6 +58,7 @@
+ 	dh_install --remaining-packages
+ 
+ override_dh_installdocs-indep:
++ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
+ 	dh_installdocs -p freetype2-doc --doc-main-package=libfreetype-dev \
+ 	    -Xreference/assets/images
+ 	cp docs/CHANGES $(doc_dir)/NEWS
+@@ -72,6 +73,7 @@
+ 	sed -i '/gstatic/d' $(doc_dir)/reference/*.html
+ 	sed -i '/googleapis/d' $(doc_dir)/reference/*.html
+ 	sed -i '/assets\/javascripts/d' $(doc_dir)/reference/*.html
++endif
+ 
+ override_dh_installchangelogs:
+ 	dh_installchangelogs -p freetype2-demos ft2demos/ChangeLog

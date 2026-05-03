@@ -1,0 +1,43 @@
+Description: Work around dpkg-dev 1.21.x SymbolFile.pm crash in dh_shlibdeps
+ dpkg-dev 1.21.22 (bookworm) crashes in SymbolFile.pm when dh_shlibdeps
+ encounters libnsl.so.1 (linked by libcom_err.so.2.1) or when processing
+ the -L local-shlibs-override files. Fixed in dpkg-dev 1.22.x.
+ .
+ Two changes:
+  - Drop -L shlibs.local flags (triggers line-569 crash on shlibs format)
+  - Handle libcom-err2 separately: run dh_shlibdeps with || true to absorb
+    the libnsl.so.1 crash, inject libnsl2 into its substvars manually, then
+    exclude it from --remaining-packages via -N.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -160,17 +160,20 @@
+ 	dh_makeshlibs $(if $(filter noudeb,$(DEB_BUILD_PROFILES)),,--add-udeb=e2fsprogs-udeb)
+ 
+ override_dh_shlibdeps:
+-	dh_shlibdeps -pe2fsprogs -l${stdbuilddir}/lib \
+-		-- -Ldebian/e2fsprogs.shlibs.local
++	dh_shlibdeps -pe2fsprogs -l${stdbuilddir}/lib
+ ifeq (,$(filter noudeb,$(DEB_BUILD_PROFILES)))
+-	dh_shlibdeps -pe2fsprogs-udeb -l${stdbuilddir}/lib \
+-		-- -Ldebian/e2fsprogs-udeb.shlibs.local
++	dh_shlibdeps -pe2fsprogs-udeb -l${stdbuilddir}/lib
+ endif
+ ifeq ($(SKIP_FUSE2FS),)
+-	dh_shlibdeps -pfuse2fs -l${stdbuilddir}/lib \
+-		-- -Ldebian/e2fsprogs.shlibs.local
++	dh_shlibdeps -pfuse2fs -l${stdbuilddir}/lib
+ endif
+-	dh_shlibdeps --remaining-packages -l${stdbuilddir}/lib
++	# libcom-err2 links against libnsl.so.1 which crashes dpkg-dev 1.21.x SymbolFile.pm
++	# (fixed in 1.22.x). Run separately, inject libnsl2 into substvars, exclude from rest.
++	dh_shlibdeps -plibcom-err2 -l${stdbuilddir}/lib 2>/dev/null || true
++	grep -qs 'shlibs:Depends' debian/libcom-err2.substvars || \
++		echo 'shlibs:Depends=' >> debian/libcom-err2.substvars
++	sed -i 's/^\(shlibs:Depends=\)/\1libnsl2, /' debian/libcom-err2.substvars
++	dh_shlibdeps --remaining-packages -Nlibcom-err2 -l${stdbuilddir}/lib

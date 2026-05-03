@@ -1,0 +1,26 @@
+Description: Guard execute_after_dh_installman-arch mv against nodoc
+ With nodoc in DEB_BUILD_OPTIONS, dh_installman does not install man pages
+ so perl.1 and cpan.1 are absent from debian/libperl5.36/usr/share/man/man1/.
+ The unconditional mv loop in execute_after_dh_installman-arch then fails.
+ Guard it with a nodoc check.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -288,10 +288,12 @@
+ 
+ execute_after_dh_installman-arch:
+ 	# put version+arch -specific manpages in libperl5.xx
++ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
+ 	for prefix in perl cpan; do \
+ 	  mv debian/libperl$(version)/usr/share/man/man1/$$prefix.1 \
+ 	     debian/libperl$(version)/usr/share/man/man1/$${prefix}$(version)-$(archtriplet).1; \
+ 	done
++endif
+ 
+ override_dh_strip:
+ 	dh_strip --no-package=perl-debug --dbg-package=perl-debug

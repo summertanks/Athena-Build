@@ -1,0 +1,24 @@
+Description: Guard execute_after_dh_installman against nodoc
+ With nodoc in DEB_BUILD_OPTIONS, dh_installman skips installing man pages
+ so zstd.1 is absent. The subsequent cp and help2man calls in
+ execute_after_dh_installman then fail. Wrap the block in a nodoc guard.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -63,9 +63,11 @@
+ 	dh_makeshlibs -plibzstd1 -V'libzstd1 (>= 1.5.2)' --add-udeb=libzstd1-udeb
+ 
+ execute_after_dh_installman:
++ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
+ 	cp $(mandir)/zstd.1 $(mandir)/zstdmt.1
+ 	$(HELP2MAN) --name='parallelized Zstandard compression, a la pigz' contrib/pzstd/pzstd \
+ 	| perl -pe 's/(\(de\)compression\s\(default:)(\d+)(\))/$$1 All$$3/g' >$(mandir)/pzstd.1
++endif
+ 
+ build:
+ 	dh $@

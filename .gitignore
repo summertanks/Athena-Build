@@ -1,17 +1,2 @@
-# Python
-__pycache__/
-*.py[cod]
-
-# Editor
-.vscode/
-
-# Runtime outputs (generated, large)
-cache/
-source/
-download/
-log/
-image/
-buildroot/
-
-# Claude Code local settings
-.claude/
+# Created by venv; see https://docs.python.org/3/library/venv.html
+*

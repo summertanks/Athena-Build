@@ -1,0 +1,27 @@
+Description: Patch dpkg Version.pm inline to fix version_check crash on "3.0.0"
+ dpkg-dev 1.21.x crashes in Dpkg::Version::version_check() when called with
+ a plain string version (e.g. "3.0.0" from libssl3 symbols) because it calls
+ ->epoch() without first wrapping the argument in a Dpkg::Version object.
+ Fixed in 1.22.x by adding "unless ref($version)". Since each package builds
+ in its own ephemeral container, patch Version.pm inline before dh_shlibdeps.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -213,6 +213,13 @@
+ 	dh_missing --list-missing
+ 
+ # Tighten libssl dependencies to match the check in entropy.c.
++override_dh_shlibdeps:
++	# dpkg-dev 1.21.x bug: version_check() crashes on plain string e.g. "3.0.0".
++	# Fixed in 1.22.x. Patch Version.pm in this ephemeral container only.
++	sudo perl -i -pe \
++		's{(\$$str = "\$$version";\n)}{$$1        \$$version = Dpkg::Version->new(\$$str) unless ref(\$$version);\n}g' \
++		/usr/share/perl5/Dpkg/Version.pm
++	dh_shlibdeps -a
+ execute_after_dh_shlibdeps:
+ 	debian/adjust-openssl-dependencies
