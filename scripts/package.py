@@ -505,39 +505,6 @@ class Source(Sources):
         return sum(f['size'] for f in self.files.values())
 
 
-    def populate_pkgs(self, arch: str, build_profiles: frozenset) -> None:
-        """Populate self.pkgs from Package-List, filtered by arch and active build profiles."""
-        self.pkgs = []
-        for _entry in self.package_list:
-            _fields = _entry.split()
-            if len(_fields) < 2:
-                continue
-            _pkg_name, _pkg_type = _fields[0], _fields[1]
-
-            _pf = next((f for f in _fields[2:] if f.startswith('profile=')), None)
-            if _pf is not None:
-                _expr = _pf.split('=', 1)[1].strip('<>')
-                if any(
-                    (t.startswith('!') and t[1:] in build_profiles) or
-                    (not t.startswith('!') and t not in build_profiles)
-                    for t in (t.strip() for t in _expr.split(','))
-                ):
-                    continue
-
-            _af = next((f for f in _fields[2:] if f.startswith('arch=')), None)
-            if _af is not None:
-                _arch_list = _af.split('=', 1)[1].split(',')
-                if any(a in _arch_list for a in (arch, 'any', 'linux-any', f'any-{arch}', f'linux-{arch}')):
-                    _pkg_arch = arch
-                elif 'all' in _arch_list:
-                    _pkg_arch = 'all'
-                else:
-                    continue
-            else:
-                _pkg_arch = arch
-
-            _ver = str(self.version).split(':', 1)[-1]
-            self.pkgs.append(f'{_pkg_name}_{_ver}_{_pkg_arch}.{_pkg_type}')
 
     def build_depends(self, arch: str, active_profiles: frozenset = frozenset()) -> List[List[Tuple]]:
         """Returns combined build dependencies filtered by arch and active build profiles.
