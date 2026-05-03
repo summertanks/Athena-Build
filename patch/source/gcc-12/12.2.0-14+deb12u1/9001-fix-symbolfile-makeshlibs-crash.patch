@@ -1,0 +1,24 @@
+Description: Patch Dpkg::Shlibs::SymbolFile::get_object to guard against
+ non-ref return values, fixing dh_makeshlibs crash on dpkg-dev 1.21.22.
+ get_object() returns $self->{objects}{$soname} which can be the soname
+ string itself (auto-vivified) rather than a hash ref. Callers then crash
+ with "Can't use string as a HASH ref" at SymbolFile.pm line 569.
+ Guard get_object to return undef when the stored value is not a reference
+ so callers fall through cleanly. Patch is applied once inside the
+ install-stamp recipe, before any dh_makeshlibs call runs.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules2
++++ b/debian/rules2
+@@ -2697,6 +2697,7 @@
+ 	@echo III: =============== fixed install $(DEB_TARGET_ARCH) ===============
+ 	find $(d) ! -type d -print
+ 	@echo III: =============== end fixed install $(DEB_TARGET_ARCH) ===============
++	sudo perl -i -0pe 's{return ref\(\$$soname\) \? \$$soname : \$$self->\{objects\}\{\$$soname\};}{my \$$o = ref(\$$soname) ? \$$soname : \$$self->{objects}{\$$soname}; return ref(\$$o) ? \$$o : undef;}' /usr/share/perl5/Dpkg/Shlibs/SymbolFile.pm
+ 	touch $(install_stamp)
+ 
+ $(install_jit_stamp): $(build_jit_stamp) $(install_stamp)
