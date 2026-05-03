@@ -131,17 +131,20 @@ class BuildContainer:
             return False
 
         # TODO: support per-package extra DEB_BUILD_OPTIONS (e.g. noudeb, nostrip) via build.conf
-        _deb_build_opts = 'nodoc'
-        if src_pkg.skip_test:
-            _deb_build_opts += ' nocheck'
+        # _deb_build_opts = 'nodoc'
+        # if src_pkg.skip_test:
+        #     _deb_build_opts += ' nocheck'
+        _deb_build_opts = ' '.join(sorted(_active_profiles))
         deb_build_env = f'DEB_BUILD_OPTIONS="{_deb_build_opts}" DEB_BUILD_PROFILES="{_deb_build_opts}" '
 
+        # TODO: read patch files from disk here instead of relying on src_pkg.patch_list
+        # (patch_list is set during parse_dependency; patches added after that run are missed)
         patch_cmd = (
             f'for PATCH in {" ".join(src_pkg.patch_list)}; do patch -p1 < /patch/"$PATCH"; done; '
             if src_pkg.patch_list else ''
         )
         _dep_install = (f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_apt_retry}install {" ".join(_plain_deps)}; ' if _plain_deps else '') + \
-                       (' '.join(_or_cmds) + '; ' if _or_cmds else '')
+                       ('; '.join(_or_cmds) + '; ' if _or_cmds else '')
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
                   f'{_dep_install}' \

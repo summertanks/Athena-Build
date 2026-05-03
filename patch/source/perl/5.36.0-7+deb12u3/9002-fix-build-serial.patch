@@ -1,0 +1,43 @@
+Description: Force serial builds for all flavours to fix mktables race condition
+ With parallel make the three build flavours (static, shared, debug) run
+ concurrently as prerequisites of override_dh_auto_build-arch. All three
+ invoke mktables which writes generated Unicode tables into lib/unicore/;
+ because the build directories share the source tree lib/unicore/ via
+ symlinks, concurrent writes collide and produce "Invalid type 'J' in pack
+ at lib/unicore/mktables". The within-build parallelism also causes a
+ secondary race (DJoinType.txt written while read by a parallel extension
+ sub-make). Fix both by:
+  1. Adding explicit serial ordering: static depends on shared, debug
+     depends on static. make's scheduler then builds them one at a time
+     even with -j8.
+  2. Adding --no-parallel to the shared and static dh_auto_build calls so
+     mktables finishes before extension sub-makes start within each flavour.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -115,14 +115,18 @@
+ 	if [ "$*" = "shared" ]; then \
+ 	  ln -s libperl.so.$(fullversion) build-$*/libperl.so.$(version); \
+ 	  ln -s libperl.so.$(version) build-$*/libperl.so; \
+-	  dh_auto_build --builddirectory=build-$* -- SHRPLDFLAGS='$$(LDDLFLAGS) -Wl,-soname,libperl.so.$(version)'; \
++	  dh_auto_build --builddirectory=build-$* --no-parallel -- SHRPLDFLAGS='$$(LDDLFLAGS) -Wl,-soname,libperl.so.$(version)'; \
+ 	elif [ "$*" = "debug" ]; then \
+ 	  dh_auto_build --builddirectory=build-$* -- perl; \
+ 	else \
+-	  dh_auto_build --builddirectory=build-$*; \
++	  dh_auto_build --builddirectory=build-$* --no-parallel; \
+ 	fi
+ 	touch $@
+ 
++# Serialise flavour builds: all write to the shared lib/unicore/ symlink
++perl-build-static-stamp: perl-build-shared-stamp
++perl-build-debug-stamp: perl-build-static-stamp
++
+ perl-test-%-stamp: perl-build-%-stamp
+ 	dh_auto_test --builddirectory=build-$*
+ 	touch $@

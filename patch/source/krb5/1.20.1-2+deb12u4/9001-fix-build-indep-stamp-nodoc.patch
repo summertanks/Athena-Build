@@ -1,0 +1,25 @@
+Description: Move touch build-indep-stamp outside nodoc ifeq block
+ When nodoc is in DEB_BUILD_OPTIONS the entire ifeq block is excluded
+ at Makefile parse time, leaving build-indep-stamp with an empty recipe.
+ GNU Make then falls through to the %: dh $@ catch-all and calls
+ "dh build-indep-stamp" which is not a valid dh sequence (Error 25).
+ Moving the touch outside the ifeq gives the rule a non-empty recipe
+ unconditionally, preventing the catch-all from firing.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -61,8 +61,8 @@
+ 	ln -sf /usr/share/javascript/underscore/underscore.js build/doc/html_subst/_static/underscore.js
+ 	ln -sf /usr/share/javascript/sphinxdoc/1.0/doctools.js build/doc/html_subst/_static/doctools.js
+ 	ln -sf /usr/share/javascript/sphinxdoc/1.0/searchtools.js build/doc/html_subst/_static/searchtools.js
+-	touch build-indep-stamp
+ endif
++	touch build-indep-stamp
+ 
+ clean:
+ 	dh_testdir

@@ -1,0 +1,35 @@
+Description: Guard doc/man mv commands against nodoc skipping dh_install helpers
+ With nodoc in DEB_BUILD_OPTIONS, dh_installdocs and dh_installman do not
+ install files, so unconditional mv calls for ChangeLog and rmt.8 fail.
+ Guard all affected mv calls to only run when the source file exists.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -95,16 +95,16 @@
+ 	dh_testdir
+ 	dh_testroot
+ 	dh_installdocs
+-	mv -f debian/tar/usr/share/doc/tar/ChangeLog \
+-		debian/tar/usr/share/doc/tar/changelog
+-	mv -f debian/tar/usr/share/doc/tar/ChangeLog.1 \
+-		debian/tar/usr/share/doc/tar/changelog.1
++	[ ! -f debian/tar/usr/share/doc/tar/ChangeLog ] || \
++		mv -f debian/tar/usr/share/doc/tar/ChangeLog debian/tar/usr/share/doc/tar/changelog
++	[ ! -f debian/tar/usr/share/doc/tar/ChangeLog.1 ] || \
++		mv -f debian/tar/usr/share/doc/tar/ChangeLog.1 debian/tar/usr/share/doc/tar/changelog.1
+ 	dh_installexamples
+ 	dh_installmenu
+ 	dh_installcron
+ 	dh_installman doc/tar.1 doc/rmt.8 debian/tarcat.1
+-	mv debian/tar/usr/share/man/man8/rmt.8 \
+-	   debian/tar/usr/share/man/man8/rmt-tar.8
++	[ ! -f debian/tar/usr/share/man/man8/rmt.8 ] || \
++		mv debian/tar/usr/share/man/man8/rmt.8 debian/tar/usr/share/man/man8/rmt-tar.8
+ 	dh_installinfo
+ 	rm -f debian/tar/usr/share/info/dir*
+ 	dh_installmime

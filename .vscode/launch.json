@@ -10,7 +10,23 @@
             "request": "launch",
             "program": "${file}",
             "console": "externalTerminal",
-            "args": "${command:pickArgs}"
+            "justMyCode": false,
+            "args": "${command:pickArgs}",
+            "env": {
+                "PYTHONFAULTHANDLER": "1"
+            }
+        },
+        {
+            "name": "Python Debugger: build.py (no args prompt)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/build.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [],
+            "env": {
+                "PYTHONFAULTHANDLER": "1"
+            }
         }
     ]
 }

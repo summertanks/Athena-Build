@@ -2,8 +2,8 @@
 
 # External imports
 
-#import faulthandler
-#faulthandler.enable()
+import faulthandler
+faulthandler.enable(open('/tmp/athena_crash.log', 'w'))
 
 import tui
 import os
@@ -193,13 +193,17 @@ def cmd_parse_dependency():
         if _pkg in dependency_tree.selected_srcs:
             dependency_tree.selected_srcs[_pkg].skip_test = True
 
+    console.info(f"Patch base dir: {build_config.dir_patch_source}")
     for _pkg in dependency_tree.selected_srcs:
-        _patch_path = os.path.join(build_config.dir_patch_source, _pkg,
-                                   str(dependency_tree.selected_srcs[_pkg].version))
+        _ver = str(dependency_tree.selected_srcs[_pkg].version)
+        _patch_path = os.path.join(build_config.dir_patch_source, _pkg, _ver)
         try:
-            if os.path.exists(_patch_path):
+            _exists = os.path.exists(_patch_path)
+            console.info(f"[patch] {_pkg} {_ver} -> exists={_exists}")
+            if _exists:
                 _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
                 dependency_tree.selected_srcs[_pkg].patch_list = sorted(_patch_files, key=lambda x: x[:5])
+                console.info(f"[patch] {_pkg}: {_patch_files}")
         except OSError as e:
             console.print(f"WARNING: cannot list patches for '{_pkg}'")
             console.warning(f"patch discovery {_patch_path}: {e}")
@@ -427,8 +431,6 @@ def main(banner: str):
     console.print(f"\tArch\t\t\t{build_config.arch}")
     console.print(f"\tParent Distribution\t{build_config.basecodename} {build_config.baseversion}")
     console.print(f"\tBuild Distribution\t{build_config.build_codename} {build_config.build_version}")
-
-    cmd_build_cache()
 
     _tui.wait()
     Exit(0)

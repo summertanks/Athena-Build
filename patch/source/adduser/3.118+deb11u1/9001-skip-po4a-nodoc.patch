@@ -1,0 +1,27 @@
+Description: Skip po4a doc generation when nodoc is in DEB_BUILD_OPTIONS
+ adduser's debian/rules unconditionally calls `po4a --previous` which
+ passes --previous to every msgmerge invocation. msgmerge in Bullseye's
+ gettext 0.21-4 segfaults (signal 11) on certain .po files when given
+ --previous. Guard the doc build step so it is skipped when nodoc is set
+ in DEB_BUILD_OPTIONS.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-01
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -9,8 +9,10 @@ %:
+ 	dh $@
+
+ override_dh_auto_build:
+ 	$(MAKE) -C po all adduser.pot
+-	# generate man pages
+-	cd doc/po4a && po4a --previous po4a.conf
++ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
++	# generate man pages
++	cd doc/po4a && po4a --previous po4a.conf
++endif
+
+ override_dh_auto_clean:
