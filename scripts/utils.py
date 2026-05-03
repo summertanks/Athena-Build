@@ -29,6 +29,7 @@ class BuildConfig:
     build_codename: str
     build_version: str
     container_release: str
+    docker_server: str
 
     skip_build_test: list[str]
     max_parallel_builds: int
@@ -102,6 +103,7 @@ class BuildConfig:
             self.build_version = config_parser.get('Build', 'VERSION')
 
             self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback='bookworm')
+            self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _profiles_raw = config_parser.get('Source', 'BuildProfiles', fallback='')
             self.build_profiles: frozenset[str] = frozenset(

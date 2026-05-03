@@ -302,7 +302,7 @@ def cmd_init_container():
     _progress_flags.build_container_ready = False
     spin = Spinner("Initialising build container")
     try:
-        build_container = buildcontainer.BuildContainer(build_config)
+        build_container = buildcontainer.BuildContainer(build_config, docker_server=build_config.docker_server or None)
         _progress_flags.build_container_ready = True
         spin.done()
         console.print("  Build container ready")
