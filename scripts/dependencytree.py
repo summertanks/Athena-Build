@@ -454,6 +454,7 @@ class DependencyTree:
                 _found = False
         for _src in _src_list:
             _src_name = _src[0]
+            _bin_pkg   = _src[2]
             if _src_name not in self.selected_srcs:
                 _src_version = _src[1]
 
@@ -476,7 +477,11 @@ class DependencyTree:
                         _found = False
                         continue
 
-                self.selected_srcs[_src_name].populate_pkgs(self.arch, self.build_profiles)
+                self.selected_srcs[_src_name].pkgs = []
+
+            _bin_filename = (_bin_pkg.get('Filename') or '').rsplit('/', 1)[-1]
+            if _bin_filename and _bin_filename not in self.selected_srcs[_src_name].pkgs:
+                self.selected_srcs[_src_name].pkgs.append(_bin_filename)
 
         tui.console.warning(f"parse_sources: selected {len(self.selected_srcs)} source packages")
         return _found
