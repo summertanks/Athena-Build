@@ -1,0 +1,26 @@
+Description: Force --disable-bootstrap to avoid RTL SSA ICE during stage2
+ The stage1 gcc binary compiled from this source has a latent bug in its
+ RTL SSA pass (rtl_ssa::sort_accesses) that causes a reproducible ICE
+ when recompiling fs_path.cc during stage2 of the 3-stage bootstrap on
+ virtualized amd64 hosts. Forcing with_bootstrap := off limits the build
+ to a single-stage compilation by the system gcc, which does not exhibit
+ the bug, while still producing a fully functional gcc-12 toolchain.
+ Patches debian/rules.defs directly (a debian/ file, no quilt needed).
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-04
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules.defs
++++ b/debian/rules.defs
+@@ -363,6 +363,9 @@
+ ifneq ($(findstring nostrap, $(DEB_BUILD_OPTIONS)),)
+   with_bootstrap := off
+ endif
+
++# Athena Linux: single-stage build to avoid stage2 RTL SSA ICE on virt hosts
++with_bootstrap := off
++
+ ifneq ($(findstring nolto, $(DEB_BUILD_OPTIONS)),)
+   with_lto_build :=
