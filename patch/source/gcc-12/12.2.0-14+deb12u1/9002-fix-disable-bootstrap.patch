@@ -1,10 +1,13 @@
-Description: Force --disable-bootstrap to avoid RTL SSA ICE during stage2
+Description: Force --disable-bootstrap and disable Go runtime build
  The stage1 gcc binary compiled from this source has a latent bug in its
  RTL SSA pass (rtl_ssa::sort_accesses) that causes a reproducible ICE
  when recompiling fs_path.cc during stage2 of the 3-stage bootstrap on
  virtualized amd64 hosts. Forcing with_bootstrap := off limits the build
  to a single-stage compilation by the system gcc, which does not exhibit
  the bug, while still producing a fully functional gcc-12 toolchain.
+ Additionally, libgo (Go runtime) fails to compile net/http in the i386
+ multilib variant; since Athena Linux does not ship a Go toolchain from
+ gcc-12, Go support is disabled entirely via with_go :=.
  Patches debian/rules.defs directly (a debian/ file, no quilt needed).
 Author: Harkirat S Virk <harkiratsvirk@gmail.com>
 Origin: local
@@ -24,3 +27,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
  ifneq ($(findstring nolto, $(DEB_BUILD_OPTIONS)),)
    with_lto_build :=
+--- a/debian/rules.defs
++++ b/debian/rules.defs
+@@ -1044,6 +1044,9 @@
+ with_go := $(call envfilt, go, , , $(with_go))
+
++# Athena Linux: disable Go runtime — net/http fails in i386 multilib libgo
++with_go :=
++
+ # Build all packages needed for Go development
+ ifneq (,$(findstring gcc, $(PKGSOURCE)))
