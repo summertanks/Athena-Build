@@ -193,17 +193,14 @@ def cmd_parse_dependency():
         if _pkg in dependency_tree.selected_srcs:
             dependency_tree.selected_srcs[_pkg].skip_test = True
 
-    console.info(f"Patch base dir: {build_config.dir_patch_source}")
     for _pkg in dependency_tree.selected_srcs:
         _ver = str(dependency_tree.selected_srcs[_pkg].version)
         _patch_path = os.path.join(build_config.dir_patch_source, _pkg, _ver)
         try:
-            _exists = os.path.exists(_patch_path)
-            console.info(f"[patch] {_pkg} {_ver} -> exists={_exists}")
-            if _exists:
+            if os.path.exists(_patch_path):
                 _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
                 dependency_tree.selected_srcs[_pkg].patch_list = sorted(_patch_files, key=lambda x: x[:5])
-                console.info(f"[patch] {_pkg}: {_patch_files}")
+                console.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
         except OSError as e:
             console.print(f"WARNING: cannot list patches for '{_pkg}'")
             console.warning(f"patch discovery {_patch_path}: {e}")
@@ -344,11 +341,9 @@ def _do_tunnel(src_pkg) -> bool:
 
 
 def cmd_tunnel_package(*args):
-    if not _progress_flags.download_ready:
-        console.print("Run 'source_download' first")
-        return
-    if not _progress_flags.build_container_ready:
-        console.print("Run 'build_container' first")
+
+    if not _progress_flags.dep_check_ready:
+        console.print("Run 'parse_dependency' first")
         return
 
     _names = list(args) if args else build_config.tunnel_packages
@@ -375,6 +370,7 @@ def cmd_tunnel_package(*args):
         console.info(f"Tunnel {_src_pkg.package} [{'TUNNELED' if _result else 'FAIL'}]")
         progress_bar.step(1)
     progress_bar.close()
+    
     console.print(f"Tunnel complete: {_success} tunneled, {_failed} failed")
 
 
