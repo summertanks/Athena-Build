@@ -845,3 +845,135 @@ class BuildSystem:
         if _proc.returncode != 0:
             tui.console.print(f"ERROR: Failed to write {rel_path} into chroot")
             tui.console.error(f"_write_chroot_file {rel_path}: {_proc.stderr}")
+
+    # ── ISO build ─────────────────────────────────────────────────────────────
+
+    def build_iso(self) -> bool:
+        """Create a bootable hybrid BIOS/EFI ISO from the assembled chroot.
+
+        Steps:
+          1. Locate the latest kernel (vmlinuz-*) and initramfs (initrd.img-*)
+             installed in chroot/boot/ by the linux-image package.
+          2. Create a staging tree under dir_image/staging/.
+          3. Copy kernel and initramfs into staging/boot/.
+          4. Write staging/boot/grub/grub.cfg configured for live-boot — the
+             'boot=live' parameter tells live-boot to mount the squashfs as root
+             with an overlayfs for writes.
+          5. Create staging/live/filesystem.squashfs from the chroot via
+             mksquashfs, excluding runtime virtual directories (proc, sys, dev,
+             run, tmp) that live-boot mounts fresh at boot.
+          6. Run grub-mkrescue to produce a hybrid BIOS+EFI ISO.
+
+        Logs for the long-running steps are written to dir_log/mksquashfs.log
+        and dir_log/grub-mkrescue.log.
+
+        Returns:
+            True on success, False if any step fails.
+        """
+        import glob
+        import shutil
+
+        # ── Step 1: locate kernel and initramfs ───────────────────────────────
+        _boot = os.path.join(self.__dir_chroot, 'boot')
+        _kernels = sorted(glob.glob(os.path.join(_boot, 'vmlinuz-*')))
+        _initrds = sorted(glob.glob(os.path.join(_boot, 'initrd.img-*')))
+
+        if not _kernels:
+            tui.console.print("ERROR: no kernel found in chroot/boot/ — is linux-image installed?")
+            tui.console.error("build_iso: no vmlinuz-* in chroot/boot/")
+            return False
+        if not _initrds:
+            tui.console.print("ERROR: no initramfs found in chroot/boot/ — is initramfs-tools installed?")
+            tui.console.error("build_iso: no initrd.img-* in chroot/boot/")
+            return False
+
+        # Use the latest kernel version (highest sort order).
+        _kernel = _kernels[-1]
+        _initrd = _initrds[-1]
+        tui.console.print(f"Kernel  : {os.path.basename(_kernel)}")
+        tui.console.print(f"Initrd  : {os.path.basename(_initrd)}")
+
+        # ── Step 2: create staging tree ───────────────────────────────────────
+        _staging      = os.path.join(self.__dir_image, 'staging')
+        _staging_boot = os.path.join(_staging, 'boot')
+        _staging_grub = os.path.join(_staging, 'boot', 'grub')
+        _staging_live = os.path.join(_staging, 'live')
+
+        for _d in [_staging_boot, _staging_grub, _staging_live]:
+            os.makedirs(_d, exist_ok=True)
+
+        # ── Step 3: copy kernel and initramfs ─────────────────────────────────
+        shutil.copy2(_kernel, os.path.join(_staging_boot, 'vmlinuz'))
+        shutil.copy2(_initrd, os.path.join(_staging_boot, 'initrd.img'))
+        tui.console.print("Kernel and initramfs copied to staging")
+
+        # ── Step 4: write grub.cfg ────────────────────────────────────────────
+        # 'boot=live' is the live-boot trigger; live-boot locates the squashfs
+        # under /live/filesystem.squashfs on the boot device and mounts it as
+        # the root filesystem with overlayfs.
+        cfg = self.__config
+        _grub_cfg = (
+            'set default=0\n'
+            'set timeout=5\n'
+            '\n'
+            f'menuentry "{cfg.build_codename} {cfg.build_version}" {{\n'
+            '    linux  /boot/vmlinuz boot=live quiet splash\n'
+            '    initrd /boot/initrd.img\n'
+            '}\n'
+        )
+        with open(os.path.join(_staging_grub, 'grub.cfg'), 'w') as fh:
+            fh.write(_grub_cfg)
+        tui.console.print("grub.cfg written")
+
+        # ── Step 5: create squashfs ───────────────────────────────────────────
+        # Runtime virtual directories are excluded — live-boot mounts these
+        # fresh at boot.  -noappend overwrites any previous squashfs.
+        _squashfs     = os.path.join(_staging_live, 'filesystem.squashfs')
+        _squash_log   = os.path.join(self.__dir_log, 'mksquashfs.log')
+        _runtime_dirs = ['proc', 'sys', 'dev', 'run', 'tmp']
+        _exclude_args = []
+        for _d in _runtime_dirs:
+            _exclude_args += ['-e', os.path.join(self.__dir_chroot, _d)]
+
+        tui.console.print("Creating squashfs — this may take several minutes...")
+        _cmd = (
+            ['sudo', '-S', 'mksquashfs', self.__dir_chroot, _squashfs,
+             '-comp', 'xz', '-noappend'] + _exclude_args
+        )
+        with open(_squash_log, 'w') as fh:
+            _proc = subprocess.run(
+                _cmd, input=self.__password + '\n',
+                stdout=fh, stderr=subprocess.STDOUT, text=True
+            )
+
+        if _proc.returncode != 0:
+            tui.console.print(f"ERROR: mksquashfs failed — see {_squash_log}")
+            tui.console.error(f"build_iso: mksquashfs exited {_proc.returncode}")
+            return False
+
+        _sq_mb = os.path.getsize(_squashfs) // (2 ** 20)
+        tui.console.print(f"squashfs created: {_sq_mb} MB")
+
+        # ── Step 6: run grub-mkrescue ─────────────────────────────────────────
+        # grub-mkrescue produces a hybrid image bootable on BIOS and UEFI
+        # systems.  It requires grub-pc-bin, grub-efi-amd64-bin, and xorriso
+        # to be installed on the host.
+        _iso_name   = f"athena-{cfg.build_version}-amd64.iso"
+        _iso_path   = os.path.join(self.__dir_image, _iso_name)
+        _grub_log   = os.path.join(self.__dir_log, 'grub-mkrescue.log')
+
+        tui.console.print("Running grub-mkrescue...")
+        with open(_grub_log, 'w') as fh:
+            _proc = subprocess.run(
+                ['grub-mkrescue', '-o', _iso_path, _staging],
+                stdout=fh, stderr=subprocess.STDOUT, text=True
+            )
+
+        if _proc.returncode != 0:
+            tui.console.print(f"ERROR: grub-mkrescue failed — see {_grub_log}")
+            tui.console.error(f"build_iso: grub-mkrescue exited {_proc.returncode}")
+            return False
+
+        _iso_mb = os.path.getsize(_iso_path) // (2 ** 20)
+        tui.console.print(f"ISO built: {_iso_path} ({_iso_mb} MB)")
+        return True
