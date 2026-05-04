@@ -4,18 +4,18 @@ import pathlib
 import shlex
 import subprocess
 import re
-from rich.prompt import Confirm, Prompt
-
 # Internal
+import tui
+from tui import Prompt, PROMPT_PASSWORD
 import dependencytree
 import utils
 from utils import BuildConfig
-Print = print
 
 
 class BuildSystem:
     def __init__(self, dependency_tree: dependencytree.DependencyTree, config: BuildConfig):
         self.__dependencytree = dependency_tree
+        self.__config = config
         self.__dir_image = config.dir_image
         self.__dir_chroot = config.dir_chroot
         self.__dir_repo = config.dir_repo
@@ -23,21 +23,35 @@ class BuildSystem:
         self.__dir_preinstall_patch = config.dir_patch_preinstall
         self.__dir_postinstall_patch = config.dir_patch_postinstall
 
-        # Sanity Check - Just making sure folders exist, typically created by utils.DirectoryListing
+        # Sanity check — directories must exist before anything else runs.
         for _dir in [self.__dir_chroot, self.__dir_image, self.__dir_repo]:
-            assert os.path.exists(_dir), f"Missing essential folder {_dir}"
+            if not os.path.exists(_dir):
+                raise RuntimeError(f"Missing essential directory: {_dir}")
 
-        # Check if directory empty, if there are files from previous install the results will vary significantly
+        # Warn if the chroot is not empty — leftover files from a previous run
+        # can produce a corrupted or inconsistent system image.
         if len(os.listdir(self.__dir_chroot)) != 0:
-            Print(f"WARNING: Chroot folder '{os.path.basename(self.__dir_chroot)}' not empty,"
-                  f" may end up with corrupted system. Delete manually if not certain")
+            tui.console.print(
+                f"WARNING: Chroot folder '{os.path.basename(self.__dir_chroot)}' not empty, "
+                f"may end up with corrupted system. Delete manually if not certain"
+            )
 
-        # Need Password for sudo,
-        Print("This needs to run as superuser, current user needs to be in sudoers group")
-        self.__password = Prompt.ask("Please enter password", password=True)
-        # Checking if password is valid
-        _proc = subprocess.run(['sudo', '-v'], input=self.__password, capture_output=True, text=True)
-        assert _proc.returncode == 0, f"ERROR: Incorrect password or user not in sudoers file, {_proc.stdout}"
+        # dpkg and the install scripts run under sudo; collect the password once
+        # here and reuse it for all subprocess calls via sudo -S (stdin).
+        # Using tui.Prompt keeps input masked and routed through the TUI layer
+        # rather than writing directly to the terminal, which would corrupt the
+        # TUI rendering.
+        tui.console.print("Build system needs sudo — current user must be in the sudoers group")
+        self.__password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+
+        # Validate the password immediately so we fail fast rather than
+        # discovering a bad credential mid-install.
+        _proc = subprocess.run(['sudo', '-S', '-v'], input=self.__password + '\n',
+                               capture_output=True, text=True)
+        if _proc.returncode != 0:
+            raise RuntimeError(
+                f"Incorrect password or user not in sudoers file: {_proc.stdout.strip()}"
+            )
 
         # Create Directory Structure
         self.build_chroot_directories()
@@ -46,109 +60,498 @@ class BuildSystem:
         self.pre_install()
 
     def build_chroot(self) -> bool:
-        """
-        This builds the chroot environment with the selected packages in dependency tree
+        """Install all selected packages into the chroot in dependency order.
+
+        Two Tree forests track what each package is still waiting for:
+
+          Unpack forest    — root=pkg, children=its Pre-Depends not yet configured.
+                             A package is ready to unpack when its tree is childless
+                             (all Pre-Depends have been configured).
+
+          Configure forest — root=pkg, children=its Depends not yet unpacked.
+                             A package is ready to configure when its tree is childless
+                             (all Depends have been unpacked) AND it has been unpacked.
+
+        Each round alternates between two phases:
+          Unpack phase   — harvest childless roots from unpack_forest → unpack
+                           → delete their names from configure_forest dep lists
+                           (satisfies Depends constraints for packages that need them).
+          Configure phase — harvest childless roots from configure_forest that are
+                           already unpacked → configure → delete their names from
+                           unpack_forest dep lists (satisfies Pre-Depends constraints).
+
+        Circular dependencies (no package can go first) are detected when a phase
+        produces nothing despite the forest being non-empty.  The entire stuck set
+        is forced through as a single batch to break the cycle, matching dpkg's own
+        behaviour when --force-* flags allow it.
+
         Returns:
-        boot: True on success, False otherwise
+            True on completion (individual package failures are logged but do not
+            abort the run — a partial chroot is still useful for diagnosis).
         """
-        _chroot = self.__dir_chroot
+        # All canonical packages — filter out virtual-package alias entries
+        # (entries where the key differs from Package['Package']).
+        all_pkgs = [
+            p for p in self.__dependencytree.selected_pkgs
+            if p == self.__dependencytree.selected_pkgs[p]['Package']
+        ]
 
-        # First install 'required' - it is the easiest (and most predictable) the handle
-        _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
-                     if self.__dependencytree.selected_pkgs[_pkg].priority == 'required']
+        # gcc-NN-base bootstrap: libc6 → libgcc-s1 → gcc-NN-base forms a
+        # Pre-Depends cycle that the forest algorithm cannot break on its own.
+        # We treat these packages as already installed (batch 0) so all other
+        # packages see their deps satisfied from the start.
+        _gcc_base = next(
+            (p for p in all_pkgs if re.fullmatch(r'gcc-\d+-base', p)), None
+        )
+        if _gcc_base is None:
+            tui.console.print(
+                "WARNING: no gcc-NN-base found in selected set — "
+                "circular Pre-Depends bootstrap may fail"
+            )
+            tui.console.warning("build_chroot: gcc-NN-base not found in selected_pkgs")
+            libc_seed = ['libc6', 'libgcc-s1', 'libcrypt1']
+        else:
+            libc_seed = [_gcc_base, 'libc6', 'libgcc-s1', 'libcrypt1']
 
-        # Lets setup default installation list, also the known circular dependency
-        libc_list = ['gcc-10-base', 'libc6', 'libgcc-s1', 'libcrypt1']
-        installed_list = []
+        libc_seed_set = set(libc_seed)
 
-        # build installation sequence -
-        # since we are using dpkg and not apt, it is up to us to make sure that pre-requisites (Depends) and
-        # especially (Pre-Depends) are already unpacked. it gets more tricky since Pre-Depends need also to be
-        # configured before package is unpacked (and thus the distinction between 'Depends' and 'Pre-Depends')
+        # --- Build unpack forest ---
+        # Each tree: root=pkg, children=Pre-Depends present in selected set
+        # that are NOT in libc_seed (seed deps treated as already configured).
+        unpack_forest: dict = {}
+        for pkg in all_pkgs:
+            if pkg in libc_seed_set:
+                continue
+            tree = utils.Tree()
+            tree.add_node(pkg)
+            for dep in self._resolve_pre_depends(pkg):
+                if dep not in libc_seed_set:
+                    try:
+                        tree.add_node(dep, pkg)
+                    except ValueError:
+                        pass  # dep listed twice in Pre-Depends
+            unpack_forest[pkg] = tree
 
-        # installation sequence is a list of lists, where each list is a block of independent packages
-        # which have prerequisites satisfied
-        # this will fail in circular dependencies. Hence, calling it with assumption libc_list is already installed
-        installation_sequence = [libc_list] + self.get_install_sequence(_pkg_list, libc_list)
+        # --- Build configure forest ---
+        # Each tree: root=pkg, children=Depends present in selected set
+        # that are NOT in libc_seed (seed deps treated as already unpacked).
+        configure_forest: dict = {}
+        for pkg in all_pkgs:
+            if pkg in libc_seed_set:
+                continue
+            tree = utils.Tree()
+            tree.add_node(pkg)
+            for dep in self._resolve_depends(pkg):
+                if dep not in libc_seed_set:
+                    try:
+                        tree.add_node(dep, pkg)
+                    except ValueError:
+                        pass  # dep listed twice in Depends
+            configure_forest[pkg] = tree
 
-        Print(f"Installing {len(_pkg_list)} 'required' packages in {len(installation_sequence)} iterations")
-        installed_list += self.install_packages(installation_sequence, 'chroot-required.log')
+        # --- Install ---
+        self._setup_chroot_env()
+        _log_path = os.path.join(self.__dir_log, 'chroot-install.log')
 
-        # Starting the remaining Installation, this required preparing of the chroot system
-        # selecting the not 'important' packages now
-        _pkg_list = [_pkg for _pkg in self.__dependencytree.selected_pkgs
-                     if self.__dependencytree.selected_pkgs[_pkg].priority == 'important']
-        # New installation sequence based on packages installed
-        installation_sequence = self.get_install_sequence(_pkg_list, installed_list)
+        with open(_log_path, 'w') as fh:
 
-        # Install
-        Print(f"Installing {len(_pkg_list)} 'important' packages in {len(installation_sequence)} iterations")
-        installed_list += self.install_packages(installation_sequence, 'chroot-important.log')
+            # Batch 0: libc circular-dep bootstrap installed unconditionally first.
+            tui.console.print(f"Batch 0 (bootstrap): {libc_seed}")
+            fh.write(f'Batch 0 (bootstrap): {libc_seed}\n')
+            self._unpack_packages(libc_seed, fh)
+            self._configure_packages(libc_seed, fh)
+            unpacked   = set(libc_seed)
+            configured = set(libc_seed)
+
+            _round = 1
+            while unpack_forest or configure_forest:
+                _progress = False
+
+                # ── Unpack phase ─────────────────────────────────────────────
+                # Packages whose Pre-Depends are all configured: their tree is
+                # childless because every Pre-Dep was deleted when it was
+                # configured in a previous round.
+                ready_to_unpack = [
+                    pkg for pkg, tree in unpack_forest.items()
+                    if tree.is_childless and not tree.is_empty
+                ]
+
+                if not ready_to_unpack and unpack_forest:
+                    # No childless roots despite non-empty forest → circular
+                    # Pre-Depends.  Force all remaining through together.
+                    tui.console.print(
+                        f"WARNING: circular Pre-Depends detected — "
+                        f"forcing batch of {len(unpack_forest)} packages"
+                    )
+                    tui.console.warning(
+                        f"build_chroot round {_round}: forced Pre-Depends batch: "
+                        f"{list(unpack_forest.keys())}"
+                    )
+                    ready_to_unpack = list(unpack_forest.keys())
+
+                if ready_to_unpack:
+                    tui.console.print(
+                        f"Round {_round} — unpacking {len(ready_to_unpack)} packages"
+                    )
+                    fh.write(f'\n--- Round {_round} unpack ---\n')
+                    self._unpack_packages(ready_to_unpack, fh)
+                    unpacked.update(ready_to_unpack)
+                    _progress = True
+
+                    for pkg in ready_to_unpack:
+                        # Remove pkg's own unpack tree — it is now processed.
+                        unpack_forest.pop(pkg, None)
+                        # Delete pkg from configure_forest dep lists: pkg being
+                        # unpacked satisfies the Depends constraint for any
+                        # package that lists pkg as a dep.
+                        for other_tree in configure_forest.values():
+                            if other_tree.find_node(pkg):
+                                other_tree.delete_node(pkg)
+
+                # ── Configure phase ───────────────────────────────────────────
+                # Packages whose Depends are all unpacked (childless configure
+                # tree) AND that have themselves been unpacked already.
+                ready_to_configure = [
+                    pkg for pkg, tree in configure_forest.items()
+                    if tree.is_childless and not tree.is_empty
+                    and pkg in unpacked
+                ]
+
+                if not ready_to_configure:
+                    # Check for circular Depends among already-unpacked packages.
+                    stuck = [p for p in configure_forest if p in unpacked]
+                    if stuck:
+                        tui.console.print(
+                            f"WARNING: circular Depends detected — "
+                            f"forcing configure of {len(stuck)} packages"
+                        )
+                        tui.console.warning(
+                            f"build_chroot round {_round}: forced Depends batch: {stuck}"
+                        )
+                        ready_to_configure = stuck
+
+                if ready_to_configure:
+                    fh.write(f'\n--- Round {_round} configure ---\n')
+                    self._configure_packages(ready_to_configure, fh)
+                    configured.update(ready_to_configure)
+                    _progress = True
+
+                    for pkg in ready_to_configure:
+                        # Remove pkg's own configure tree — it is now processed.
+                        configure_forest.pop(pkg, None)
+                        # Delete pkg from unpack_forest dep lists: pkg being
+                        # configured satisfies the Pre-Depends constraint for any
+                        # package that lists pkg as a pre-dep.
+                        for other_tree in unpack_forest.values():
+                            if other_tree.find_node(pkg):
+                                other_tree.delete_node(pkg)
+
+                if not _progress:
+                    # Neither phase moved anything — unrecoverable.
+                    stuck_all = list(unpack_forest.keys()) + list(configure_forest.keys())
+                    tui.console.print(
+                        f"ERROR: no progress in round {_round} — "
+                        f"{len(stuck_all)} packages stuck"
+                    )
+                    tui.console.error(
+                        f"build_chroot stuck in round {_round}: {stuck_all}"
+                    )
+                    return False
+
+                _round += 1
+
+        tui.console.print(
+            f"Chroot build complete — {len(configured)} packages installed "
+            f"in {_round - 1} rounds"
+        )
+
+        # Apply post-install patches and overlay files now that all packages
+        # are configured.  This is the right moment to override config files
+        # or apply distro-specific fixups that would be clobbered by dpkg.
+        self.post_install()
+
+        # Write base system configuration files that dpkg does not create:
+        # OS identity, hostname, hosts, fstab, machine-id, apt sources.
+        self.generate_system_configs()
 
         return True
 
+    # ── Dependency resolution helpers ─────────────────────────────────────────
+
+    def _resolve_pre_depends(self, pkg_name: str) -> list:
+        """Return Pre-Depends names for pkg_name that are present in selected_pkgs.
+
+        Only single-alternative Pre-Depends are considered (alternatives are rare
+        in Pre-Depends and are not tracked in Package.pre_depends).  Names not in
+        selected_pkgs are omitted — they are either already installed on the host
+        or irrelevant to the chroot ordering.
+        """
+        pkg = self.__dependencytree.selected_pkgs.get(pkg_name)
+        if pkg is None:
+            return []
+        # Package.pre_depends is List[Tuple[name, ver, op]] — dep[0] is the name.
+        return [dep[0] for dep in pkg.pre_depends
+                if dep[0] in self.__dependencytree.selected_pkgs]
+
+    def _resolve_depends(self, pkg_name: str) -> list:
+        """Return Depends names for pkg_name that are present in selected_pkgs.
+
+        Only single-alternative Depends are considered (alt_depends with OR
+        alternatives are resolved by the dependency tree and do not need explicit
+        ordering here — the package will configure regardless of which alternative
+        was chosen).
+        """
+        pkg = self.__dependencytree.selected_pkgs.get(pkg_name)
+        if pkg is None:
+            return []
+        return [dep[0] for dep in pkg.depends
+                if dep[0] in self.__dependencytree.selected_pkgs]
+
+    # ── dpkg execution helpers ────────────────────────────────────────────────
+
+    def _setup_chroot_env(self):
+        """Set environment variables required for non-interactive dpkg in a chroot."""
+        os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        os.environ['DPKG_ROOT'] = self.__dir_chroot
+        os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
+        os.environ['DEBCONF_NONINTERACTIVE_SEEN'] = 'true'
+
+    def _get_deb_files(self, pkg_list: list) -> list:
+        """Resolve package names to absolute .deb paths in the repo directory.
+
+        Uses the Filename field from the binary Packages index and strips any
+        binNMU suffix (+bN) via strip_build_version() so the path matches what
+        dpkg-buildpackage actually produced on disk.
+        """
+        file_list = []
+        for pkg in pkg_list:
+            _filename = os.path.basename(
+                self.__dependencytree.selected_pkgs[pkg]['Filename']
+            )
+            _filename = self.strip_build_version(_filename)
+            _filepath = os.path.join(self.__dir_repo, _filename)
+            if not os.path.exists(_filepath):
+                tui.console.print(f"WARNING: .deb not found, skipping: {_filename}")
+                tui.console.warning(f"_get_deb_files: missing {_filepath}")
+                continue
+            file_list.append(_filepath)
+        return file_list
+
+    def _unpack_packages(self, pkg_list: list, fh) -> bool:
+        """Run dpkg --unpack for pkg_list inside the chroot.
+
+        --force-script-chrootless allows maintainer scripts to run without
+        being inside a chroot bind-mount.  --no-triggers defers trigger
+        processing to the configure phase.
+
+        Returns True if dpkg exited 0, False otherwise.
+        """
+        if not pkg_list:
+            return True
+        _chroot = self.__dir_chroot
+        _cmd = shlex.split(
+            f'sudo -S dpkg --root={_chroot} --instdir={_chroot} '
+            f'--admindir={_chroot}/var/lib/dpkg '
+            f'--force-script-chrootless -D1 --no-triggers --unpack'
+        ) + self._get_deb_files(pkg_list)
+
+        fh.write(f'Unpack: {" ".join(pkg_list)}\n')
+        _proc = subprocess.run(_cmd, input=self.__password + '\n',
+                               capture_output=True, text=True, env=os.environ)
+        fh.write(_proc.stdout)
+        if _proc.returncode != 0:
+            fh.write(_proc.stderr)
+            tui.console.print(
+                f'Error unpacking {pkg_list[:3]}{"…" if len(pkg_list) > 3 else ""}: '
+                f'{_proc.stderr[:200]}'
+            )
+        return _proc.returncode == 0
+
+    def _configure_packages(self, pkg_list: list, fh) -> bool:
+        """Run dpkg --configure for pkg_list inside the chroot.
+
+        --force-confdef/--force-confnew resolve config-file prompts
+        non-interactively.  Returns True if dpkg exited 0, False otherwise.
+        """
+        if not pkg_list:
+            return True
+        _chroot = self.__dir_chroot
+        _cmd = shlex.split(
+            f'sudo -S dpkg --root={_chroot} --instdir={_chroot} '
+            f'--admindir={_chroot}/var/lib/dpkg '
+            f'--force-script-chrootless -D1 --force-confdef --force-confnew '
+            f'--configure --no-triggers'
+        ) + pkg_list
+
+        fh.write(f'Configure: {" ".join(pkg_list)}\n')
+        _proc = subprocess.run(_cmd, input=self.__password + '\n',
+                               capture_output=True, text=True, env=os.environ)
+        fh.write(_proc.stdout)
+        if _proc.returncode != 0:
+            fh.write(_proc.stderr)
+            tui.console.print(
+                f'Error configuring {pkg_list[:3]}{"…" if len(pkg_list) > 3 else ""}: '
+                f'{_proc.stderr[:200]}'
+            )
+        return _proc.returncode == 0
+
     def get_install_sequence(self, selected_pkgs: [], installed_pkgs: []) -> []:
+        """Produce a topologically sorted installation order for selected_pkgs.
+
+        Algorithm — iterative leaf-removal (Kahn's algorithm on a forest):
+          1. Build one dependency tree per package: root = package, children =
+             its direct dependencies (Package.depends_on).
+          2. Strip any dependency node that is already in installed_pkgs — those
+             constraints are already satisfied and don't affect ordering.
+          3. Repeatedly harvest all trees whose root has no remaining children
+             (i.e. all dependencies satisfied).  Each harvest is one installation
+             batch; packages within a batch are mutually independent and can be
+             installed together.  After harvesting, remove those package names
+             from every other tree's dependency lists so their dependents may
+             become eligible in the next round.
+          4. Terminate when no trees remain (success) or when a round produces
+             nothing despite non-empty trees still existing (failure).
+
+        The failure case arises in two situations:
+          - True circular dependency (A→B→A): neither tree ever becomes childless.
+          - Dependency on a package outside selected_pkgs that is also not in
+            installed_pkgs: the child node is never removed, so the parent tree
+            never clears.
+
+        Args:
+            selected_pkgs:  Package names to install, in any order.
+            installed_pkgs: Package names already present in the chroot; their
+                            dependency obligations are treated as satisfied.
+
+        Returns:
+            List of batches, where each batch is a list of package names that
+            can be installed together (all their deps satisfied by earlier batches
+            or by installed_pkgs).
+
+        Raises:
+            ValueError: if a circular or unresolvable dependency is detected,
+                        with a message naming each stuck package and its unmet deps.
+        """
         sequence = []
         collection = []
-        # let's first build dependency tree for each package
+
+        # Build one tree per package with its direct dependencies as children.
         for _pkg in selected_pkgs:
-            # build tree and add root node
             tree = utils.Tree()
             tree.add_node(_pkg)
-
-            # Add to collection
             collection.append(tree)
 
-            # just add leaves
-            leaves = self.__dependencytree.selected_pkgs[_pkg].depends_on
-            for leaf in leaves:
+            for leaf in self.__dependencytree.selected_pkgs[_pkg].depends_on:
                 tree.add_node(leaf, tree.root.value)
 
-        # first parse installed packages, remove those dependencies
+        # Remove already-installed packages from all dependency lists so they
+        # don't block packages that only depend on them.
         for _pkg in installed_pkgs:
             for _tree in collection:
                 if _tree.find_node(_pkg):
                     _tree.delete_node(_pkg)
 
         while True:
-            sub_sequence = []
-            pkg_list = [_tree.root.value for _tree in collection if _tree.is_childless and not _tree.is_empty]
-            # anything to process this iteration
-            if not len(pkg_list):
-                if len([_tree.root for _tree in collection if _tree.is_childless and not _tree.is_empty]):
-                    # Something was not addressed, maybe circular dependency?
-                    raise ValueError(f"Packages exist which dont have dependencies fulfilled {collection}")
-                # No packages left to process
+            # Childless non-empty trees: root's dependencies are all satisfied.
+            pkg_list = [_tree.root.value for _tree in collection
+                        if _tree.is_childless and not _tree.is_empty]
+
+            if not pkg_list:
+                # No childless trees this round.  If any trees are still
+                # non-empty their deps can never be cleared — circular or
+                # unresolvable dependency.
+                #
+                # NOTE: the original code checked `is_childless and not is_empty`
+                # here, which is the same predicate as pkg_list and is therefore
+                # always False when pkg_list is empty.  The correct check is
+                # simply `not is_empty`.
+                stuck = [_tree for _tree in collection if not _tree.is_empty]
+                if stuck:
+                    _details = '; '.join(
+                        f"{_tree.root.value} waiting on "
+                        f"[{', '.join(c.value for c in _tree.root.children)}]"
+                        for _tree in stuck
+                    )
+                    raise ValueError(
+                        f"Circular or unresolvable dependencies detected: {_details}"
+                    )
+                # All trees are empty — every package was placed in a batch.
                 break
 
+            # Remove this batch's packages from every tree so their dependents
+            # may become childless in the next round.
             for _pkg in pkg_list:
                 for _tree in collection:
                     if _tree.find_node(_pkg):
                         _tree.delete_node(_pkg)
-                sub_sequence.append(_pkg)
 
-            sequence.append(sub_sequence)
+            sequence.append(pkg_list)
 
         return sequence
 
     def build_chroot_directories(self):
+        """Create the standard FHS directory structure inside the chroot.
+
+        Sequence matters here — usrmerge symlinks must be created before any
+        directory tree expansion, otherwise os.makedirs will create a real /lib
+        (and /bin, /sbin) which conflicts with dpkg's expectation that those
+        paths are symlinks into /usr.
+
+        Step 1 — usrmerge symlinks
+            Since Debian bookworm all of /lib, /lib32, /lib64, /bin, /sbin are
+            symlinks into /usr (the 'usrmerge' change).  dpkg and the packages
+            it installs hard-depend on this layout: if any of those names exist
+            as a real directory, package installation into /usr/lib (for example)
+            will not be visible through /lib, breaking ld.so and any binary that
+            embeds the old path.
+
+            The symlink targets are relative (e.g. 'usr/lib' not '/usr/lib') so
+            they remain valid when the chroot is bind-mounted or moved.  The
+            /usr/<name> target directories are created with os.makedirs before
+            os.symlink so the link always points at an existing directory.
+
+        Step 2 — remaining FHS tree
+            Only directories that cannot exist as symlinks are listed here.
+            /usr/bin, /usr/sbin, /usr/lib* are already created in step 1, so
+            they appear in the expansion list but os.makedirs(exist_ok=True)
+            will simply skip them.
+
+        Ref: https://www.linuxfromscratch.org/lfs/view/development/chapter07/creatingdirs.html
+        Note: man(1..8) directories are intentionally omitted for now.
+        TODO: load dir/owner/permission list from a config file rather than hardcoding.
         """
-        Function creates the standard directory structure expected on GNU (Debian) Linux
-        ref: https://www.linuxfromscratch.org/lfs/view/development/chapter07/creatingdirs.html
 
-        Not all directories done though, less the man(1..8)
+        # Step 1: usrmerge — create /usr/<name> targets then symlink the legacy
+        # top-level names to them.  Order: mkdir target → symlink, so the link
+        # is never dangling even if a later step fails partway through.
+        _usrmerge = ['bin', 'sbin', 'lib', 'lib32', 'lib64']
+        for _name in _usrmerge:
+            _target = os.path.join(self.__dir_chroot, 'usr', _name)
+            _link   = os.path.join(self.__dir_chroot, _name)
+            os.makedirs(_target, exist_ok=True)
+            if not os.path.lexists(_link):
+                # Relative target keeps the symlink valid after the chroot is
+                # moved or bind-mounted; 'usr/lib' resolves relative to chroot/
+                # (the parent of the symlink), giving chroot/usr/lib.
+                os.symlink(os.path.join('usr', _name), _link)
 
-        will raise 'assert' if there are failures
-        """
-        # TODO: This should be a built from a conf file which list folders, owners and their permissions
-
-        # TODO: build man(1..8)
-        dir_structure = ['/{boot,home,mnt,opt,srv,sys,proc,dev}', '/etc/{opt,sysconfig}', '/lib/{firmware}',
-                         '/media/{floppy,cdrom}', '/usr/{local,include,src,share}',
-                         '/usr/local/{bin,lib,sbin,include,src,share}',
-                         '/usr/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
-                         '/usr/local/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
-                         '/var/{cache,local,log,mail,opt,spool}', '/var/lib/{color,misc,locate}']
+        # Step 2: remaining FHS tree.  /usr/{bin,sbin,lib,...} are listed
+        # explicitly so the expansion is self-documenting, even though step 1
+        # already created them — makedirs with exist_ok=True is idempotent.
+        # /lib/{firmware} is intentionally absent: firmware lives at
+        # /usr/lib/firmware and is reachable via the /lib symlink.
+        dir_structure = [
+            '/{boot,home,mnt,opt,srv,sys,proc,dev}',
+            '/etc/{opt,sysconfig}',
+            '/media/{floppy,cdrom}',
+            '/usr/{bin,sbin,lib,lib32,lib64,local,include,src,share}',
+            '/usr/lib/{firmware}',
+            '/usr/local/{bin,lib,sbin,include,src,share}',
+            '/usr/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
+            '/usr/local/share/{color,dict,doc,info,locale,man,misc,terminfo,zoneinfo}',
+            '/var/{cache,local,log,mail,opt,spool}',
+            '/var/lib/{color,misc,locate}',
+        ]
 
         for _dir in dir_structure:
             utils.create_folders(self.__dir_chroot + _dir)
@@ -158,7 +561,8 @@ class BuildSystem:
         # stripping build revisions, because these do not reflect on source code builds
         _name, _ext = os.path.splitext(file)
         _name = _name.split('_')
-        assert len(_name) == 3, f"Incorrectly formatted package name {file}"
+        if len(_name) != 3:
+            raise ValueError(f"Incorrectly formatted package filename: {file!r}")
         _pkg_name = _name[0]
         _version = _name[1]
         _arch = _name[2]
@@ -209,34 +613,42 @@ class BuildSystem:
                         _file = self.strip_build_version(_file)
                         _file_path = os.path.join(self.__dir_repo, _file)
 
-                        # confirm the source has been built and deb package is available in repo
-                        assert os.path.exists(_file_path), f"ERROR: Package not build {_file}"
+                        if not os.path.exists(_file_path):
+                            tui.console.print(f"WARNING: .deb not found, skipping: {_file}")
+                            tui.console.warning(f"install_packages: missing {_file_path}")
+                            continue
                         _file_list.append(os.path.join(self.__dir_repo, _file))
 
                     fh.write(f'Installing package set {" ".join(_set)}\n')
 
                     # run unpack
+                    # sudo -S reads the password from stdin and expects a newline
+                    # terminator; without it sudo blocks waiting for more input.
                     _cmd = _dpkg_unpack_cmd + _file_list
-                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
+                    _proc = subprocess.run(_cmd, input=self.__password + '\n',
+                                           capture_output=True, text=True, env=os.environ)
                     fh.write(_proc.stdout)
                     if _proc.returncode != 0:
-                        Print(f'Error: Failed unpacking set - {_set} : {_proc.stderr}')
+                        tui.console.print(f'Error: Failed unpacking set - {_set}')
+                        tui.console.error(f'install_packages unpack {_set}: {_proc.stderr}')
                         fh.write(_proc.stderr)
 
                     # run configure
                     _cmd = _dpkg_configure_cmd + _set
-                    _proc = subprocess.run(_cmd, input=self.__password, capture_output=True, text=True, env=os.environ)
+                    _proc = subprocess.run(_cmd, input=self.__password + '\n',
+                                           capture_output=True, text=True, env=os.environ)
                     fh.write(_proc.stdout)
                     if _proc.returncode != 0:
-                        Print(f'Error: Failed configuring set - {_set} : {_proc.stderr}')
+                        tui.console.print(f'Error: Failed configuring set - {_set}')
+                        tui.console.error(f'install_packages configure {_set}: {_proc.stderr}')
                         fh.write(_proc.stderr)
 
                     # update install list
                     installed_list += _set
 
         except (FileNotFoundError, PermissionError) as e:
-            Print(f"Error: {e}")
-            exit(1)
+            tui.console.print(f"Error: cannot write install log — {e}")
+            tui.console.error(f"install_packages log write: {e}")
 
         return installed_list
 
@@ -256,35 +668,180 @@ class BuildSystem:
 
             for _file in files:
                 _orig_file = os.path.join(root, _file)
-                if os.path.splitext(_file) != '.patch':
-                    # this won't give right permissions, not all cases will package correct permissions
-                    # non patch files (any other extension) are copied into that folder
+                if os.path.splitext(_file)[1] != '.patch':
+                    # Non-patch files are copied directly into the chroot directory.
+                    # Note: cp does not preserve all permissions — packages that
+                    # need specific ownership must be handled in the cmd_list below.
                     _proc = subprocess.run(['sudo', '-S', 'cp', _orig_file, chroot_relative_dir],
-                                           input=self.__password, capture_output=True, text=True, env=os.environ)
+                                           input=self.__password + '\n', capture_output=True, text=True, env=os.environ)
                     if _proc.returncode != 0:
-                        Print(f'Error: Failed copying file - {_file} : {_proc.stderr}')
+                        tui.console.print(f'Error: Failed copying pre-install file — {_file}')
+                        tui.console.error(f'pre_install cp {_file}: {_proc.stderr}')
                 else:
-                    # patch files (.patch extension) are applied to that folder
-                    # TODO: Test
-                    _proc = subprocess.run(['patch', '-p1', '<', _orig_file], cwd=chroot_relative_dir,
-                                           input=self.__password, capture_output=True, text=True, env=os.environ)
+                    # Patch files are applied relative to chroot_relative_dir.
+                    # Use -i to pass the patch file directly; '<' is a shell
+                    # redirect and is not valid as a subprocess argument.
+                    _proc = subprocess.run(['patch', '-p1', '-i', _orig_file],
+                                           cwd=chroot_relative_dir,
+                                           capture_output=True, text=True, env=os.environ)
                     if _proc.returncode != 0:
-                        Print(f'Error: Failed Patching file - {_file} : {_proc.stderr}')
+                        tui.console.print(f'Error: Failed applying pre-install patch — {_file}')
+                        tui.console.error(f'pre_install patch {_file}: {_proc.stderr}')
 
         # Parse commands to execute, since nothing else has been till now, it is usually used to set right permission
-        cmd_list = [f'sudo ln -sfv {self.__dir_chroot}/run {self.__dir_chroot}/var/run',
-                    f'sudo ln -sfv {self.__dir_chroot}/run/lock {self.__dir_chroot}/var/lock',
-                    f'sudo install -dv -m 0750 {self.__dir_chroot}/root',
-                    f'sudo install -dv -m 1777 {self.__dir_chroot}/tmp {self.__dir_chroot}/var/tmp',
-                    f'sudo chgrp -v utmp {self.__dir_chroot}/var/log/lastlog',
-                    f'sudo chmod -v 664 {self.__dir_chroot}/var/log/lastlog',
-                    f'sudo chmod -v 600 {self.__dir_chroot}/var/log/btmp',
-                    f'sudo chmod -R 755 {self.__dir_chroot}/etc/'
+        # All commands use sudo -S so the password is read from stdin rather than
+        # the terminal (which would corrupt TUI rendering).  The '\n' terminator
+        # is required by sudo -S — without it sudo blocks waiting for more input.
+        cmd_list = [f'sudo -S ln -sfv {self.__dir_chroot}/run {self.__dir_chroot}/var/run',
+                    f'sudo -S ln -sfv {self.__dir_chroot}/run/lock {self.__dir_chroot}/var/lock',
+                    f'sudo -S install -dv -m 0750 {self.__dir_chroot}/root',
+                    f'sudo -S install -dv -m 1777 {self.__dir_chroot}/tmp {self.__dir_chroot}/var/tmp',
+                    f'sudo -S chgrp -v utmp {self.__dir_chroot}/var/log/lastlog',
+                    f'sudo -S chmod -v 664 {self.__dir_chroot}/var/log/lastlog',
+                    f'sudo -S chmod -v 600 {self.__dir_chroot}/var/log/btmp',
+                    f'sudo -S chmod -R 755 {self.__dir_chroot}/etc/'
                     ]
 
         for _cmd in cmd_list:
-            _proc = subprocess.run(shlex.split(_cmd), input=self.__password, capture_output=True, text=True)
-            assert _proc.returncode == 0, f"ERROR: Failed executing {_cmd}, {_proc.stdout}"
+            _proc = subprocess.run(shlex.split(_cmd), input=self.__password + '\n',
+                                   capture_output=True, text=True)
+            if _proc.returncode != 0:
+                tui.console.print(f"WARNING: pre-install command failed: {_cmd}")
+                tui.console.warning(f"pre_install cmd: {_cmd}\n{_proc.stdout.strip()}")
+
+    def post_install(self):
+        """Apply post-install overlay files and patches into the chroot.
+
+        Runs after all packages are unpacked and configured.  Use this for:
+          - Distro-specific config file overrides that dpkg would otherwise
+            reset (e.g. /etc/os-release, /etc/hostname, /etc/locale.conf)
+          - Files that must land after dpkg creates the target path
+          - Patches against files installed by packages
+
+        Directory layout mirrors pre_install: files under dir_patch_postinstall
+        are placed at the same relative path inside the chroot.  Files with a
+        .patch extension are applied with patch -p1 -i; all other files are
+        copied verbatim.
+
+        Unlike pre_install there is no hardcoded cmd_list — post-install
+        permission fixups belong in the overlay files themselves or in
+        generate_system_configs().
+        """
+        for root, dirs, files in os.walk(self.__dir_postinstall_patch):
+            if not files:
+                continue
+
+            # Mirror the source directory structure into the chroot.
+            chroot_relative_dir = root.replace(self.__dir_postinstall_patch, self.__dir_chroot)
+            pathlib.Path(chroot_relative_dir).mkdir(parents=True, exist_ok=True)
+
+            for _file in files:
+                _orig_file = os.path.join(root, _file)
+                if os.path.splitext(_file)[1] != '.patch':
+                    _proc = subprocess.run(
+                        ['sudo', '-S', 'cp', _orig_file, chroot_relative_dir],
+                        input=self.__password + '\n', capture_output=True, text=True, env=os.environ
+                    )
+                    if _proc.returncode != 0:
+                        tui.console.print(f'Error: Failed copying post-install file — {_file}')
+                        tui.console.error(f'post_install cp {_file}: {_proc.stderr}')
+                else:
+                    _proc = subprocess.run(
+                        ['patch', '-p1', '-i', _orig_file],
+                        cwd=chroot_relative_dir,
+                        capture_output=True, text=True, env=os.environ
+                    )
+                    if _proc.returncode != 0:
+                        tui.console.print(f'Error: Failed applying post-install patch — {_file}')
+                        tui.console.error(f'post_install patch {_file}: {_proc.stderr}')
 
     def generate_system_configs(self):
-        pass
+        """Write base system configuration files into the chroot.
+
+        Covers files that dpkg does not create but the OS needs to be
+        functional and identifiable.  All files are written via
+        _write_chroot_file() which uses sudo -S tee so ownership is correct
+        even after dpkg has made the chroot root-owned.
+
+        Files written:
+          /etc/os-release      — OS identity (name, version, codename)
+          /etc/hostname        — default hostname
+          /etc/hosts           — localhost resolution
+          /etc/fstab           — virtual filesystem mount points
+          /etc/machine-id      — empty; systemd generates on first boot
+          /etc/apt/sources.list — APT repository for the installed system
+        """
+        cfg = self.__config
+
+        # /etc/os-release — standard file read by systemd, lsb_release, etc.
+        self._write_chroot_file('/etc/os-release', (
+            f'NAME="{cfg.build_codename}"\n'
+            f'VERSION="{cfg.build_version}"\n'
+            f'ID=athena\n'
+            f'ID_LIKE=debian\n'
+            f'VERSION_CODENAME={cfg.build_codename.lower()}\n'
+            f'PRETTY_NAME="{cfg.build_codename} {cfg.build_version}"\n'
+            f'HOME_URL="https://athenalinux.org"\n'
+        ))
+
+        # /etc/hostname — a sensible default; can be changed post-install.
+        self._write_chroot_file('/etc/hostname', 'athena\n')
+
+        # /etc/hosts — minimal localhost entries required for basic name
+        # resolution before a real DNS resolver is configured.
+        self._write_chroot_file('/etc/hosts', (
+            '127.0.0.1   localhost\n'
+            '127.0.1.1   athena\n'
+            '::1         localhost ip6-localhost ip6-loopback\n'
+            'ff02::1     ip6-allnodes\n'
+            'ff02::2     ip6-allrouters\n'
+        ))
+
+        # /etc/fstab — virtual filesystems that systemd or init needs at boot.
+        # Real block devices (root, swap, efi) are left out — they are image-
+        # or hardware-specific and should be added by the image-build stage.
+        self._write_chroot_file('/etc/fstab', (
+            '# <file system>  <mount point>  <type>     <options>  <dump>  <pass>\n'
+            'proc             /proc          proc       defaults   0       0\n'
+            'sysfs            /sys           sysfs      defaults   0       0\n'
+            'devtmpfs         /dev           devtmpfs   defaults   0       0\n'
+            'tmpfs            /tmp           tmpfs      defaults   0       0\n'
+        ))
+
+        # /etc/machine-id — empty file; systemd-machine-id-setup will populate
+        # it on first boot.  Must exist (even empty) for systemd to start.
+        self._write_chroot_file('/etc/machine-id', '')
+
+        # /etc/apt/sources.list — lets the installed system update itself from
+        # the same mirror used to build it.
+        _base = f'http://{cfg.baseurl}/debian'
+        _sec  = f'http://security.debian.org/debian-security'
+        _comp = 'main contrib non-free non-free-firmware'
+        self._write_chroot_file('/etc/apt/sources.list', (
+            f'deb {_base} {cfg.basecodename} {_comp}\n'
+            f'deb {_base} {cfg.basecodename}-updates {_comp}\n'
+            f'deb {_sec} {cfg.basecodename}-security {_comp}\n'
+        ))
+
+        tui.console.print("System configuration files written")
+
+    def _write_chroot_file(self, rel_path: str, content: str):
+        """Write content to rel_path inside the chroot as root via sudo tee.
+
+        sudo -S reads the password from stdin (first line), then tee reads the
+        remaining input as the file content.  This works because subprocess
+        writes the full input string to the pipe before any reader consumes it.
+
+        Args:
+            rel_path: Absolute path relative to the chroot root (e.g. '/etc/hostname').
+            content:  Text content to write; may be empty.
+        """
+        _dest = os.path.join(self.__dir_chroot, rel_path.lstrip('/'))
+        _proc = subprocess.run(
+            ['sudo', '-S', 'tee', _dest],
+            input=self.__password + '\n' + content,
+            capture_output=True, text=True
+        )
+        if _proc.returncode != 0:
+            tui.console.print(f"ERROR: Failed to write {rel_path} into chroot")
+            tui.console.error(f"_write_chroot_file {rel_path}: {_proc.stderr}")
