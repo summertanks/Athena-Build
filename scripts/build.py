@@ -75,11 +75,12 @@ class BuildFlags:
         self.download_ready: bool = False          # source_download completed
         self.build_container_ready: bool = False   # build_container initialised
         self.source_build_ready: bool = False      # source_build completed
+        self.chroot_ready: bool = False            # build_bootable completed
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""
         fields = ['cache_ready', 'dep_check_ready', 'download_ready',
-                  'build_container_ready', 'source_build_ready']
+                  'build_container_ready', 'source_build_ready', 'chroot_ready']
         return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
 
 _progress_flags = BuildFlags()
@@ -557,6 +558,44 @@ def cmd_build_bootable(*args):
     if not _result:
         console.print("ERROR: chroot build failed — check logs for details")
         console.error("build_chroot() returned False")
+        return
+
+    _progress_flags.chroot_ready = True
+
+
+# ---------------------------------------------------------------------------
+# Command: build_iso
+# ---------------------------------------------------------------------------
+
+def cmd_build_iso(*args):
+    """Build a bootable hybrid BIOS/EFI ISO from the assembled chroot.
+
+    Packages the chroot produced by build_bootable into a squashfs live image,
+    writes a GRUB configuration, and runs grub-mkrescue to produce a bootable
+    ISO at dir_image/athena-VERSION-amd64.iso.
+
+    Requires on the host: squashfs-tools, grub-pc-bin, grub-efi-amd64-bin,
+    xorriso.  These are checked by build-system.sh at startup.
+
+    Prerequisites: build_bootable must have completed (chroot_ready flag).
+    """
+    if not _progress_flags.chroot_ready:
+        console.print("Run 'build_bootable' first")
+        return
+
+    console.print("Initialising build system for ISO...")
+    try:
+        build_system = buildsystem.BuildSystem(dependency_tree, build_config)
+    except RuntimeError as e:
+        console.print(f"ERROR: build system initialisation failed — {e}")
+        console.error(f"BuildSystem() raised: {e}")
+        return
+
+    console.print("Building ISO...")
+    _result = build_system.build_iso()
+    if not _result:
+        console.print("ERROR: ISO build failed — check logs for details")
+        console.error("build_iso() returned False")
 
 
 # ---------------------------------------------------------------------------
@@ -738,6 +777,7 @@ def main(banner: str):
     tui.register_command('source_build',      cmd_source_build,       'Build source packages in parallel (source_build [pkg …] [force])')
     tui.register_command('tunnel_package',    cmd_tunnel_package,     'Download binary .debs from Debian repo (tunnel_package [pkg …])')
     tui.register_command('build_bootable',    cmd_build_bootable,     'Build bootable chroot environment')
+    tui.register_command('build_iso',         cmd_build_iso,          'Build bootable ISO from chroot (build_iso)')
     tui.register_command('print',             cmd_print,              'Print info: print <config|required|important|selected>')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
