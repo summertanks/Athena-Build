@@ -6,7 +6,7 @@ import subprocess
 import re
 # Internal
 import tui
-from tui import Prompt, PROMPT_PASSWORD
+from tui import Prompt, PROMPT_PASSWORD, PROMPT_YESNO
 import dependencytree
 import utils
 from utils import BuildConfig
@@ -28,13 +28,20 @@ class BuildSystem:
             if not os.path.exists(_dir):
                 raise RuntimeError(f"Missing essential directory: {_dir}")
 
-        # Warn if the chroot is not empty — leftover files from a previous run
-        # can produce a corrupted or inconsistent system image.
-        if len(os.listdir(self.__dir_chroot)) != 0:
+        # If the chroot is not empty, offer to wipe it before proceeding.
+        # Leftover files from a failed previous run will corrupt the new build
+        # because dpkg's database will be in an inconsistent state.
+        _chroot_nonempty = len(os.listdir(self.__dir_chroot)) != 0
+        _wipe_chroot = False
+        if _chroot_nonempty:
             tui.console.print(
-                f"WARNING: Chroot folder '{os.path.basename(self.__dir_chroot)}' not empty, "
-                f"may end up with corrupted system. Delete manually if not certain"
+                f"WARNING: '{os.path.basename(self.__dir_chroot)}' is not empty — "
+                f"leftover files from a previous run will corrupt the build."
             )
+            _resp = Prompt(PROMPT_YESNO, "Wipe chroot and start clean?").get_response()
+            _wipe_chroot = _resp.lower() in ('y', 'yes')
+            if not _wipe_chroot:
+                tui.console.print("Continuing with non-empty chroot — results may vary")
 
         # dpkg and the install scripts run under sudo; collect the password once
         # here and reuse it for all subprocess calls via sudo -S (stdin).
@@ -52,6 +59,20 @@ class BuildSystem:
             raise RuntimeError(
                 f"Incorrect password or user not in sudoers file: {_proc.stdout.strip()}"
             )
+
+        # Wipe the chroot now that we have a validated sudo credential.
+        # rm -rf the contents (not the directory itself) so dir_chroot remains.
+        if _wipe_chroot:
+            tui.console.print("Wiping chroot...")
+            _proc = subprocess.run(
+                ['sudo', '-S', 'find', self.__dir_chroot,
+                 '-mindepth', '1', '-delete'],
+                input=self.__password + '\n',
+                capture_output=True, text=True
+            )
+            if _proc.returncode != 0:
+                raise RuntimeError(f"Failed to wipe chroot: {_proc.stderr.strip()}")
+            tui.console.print("Chroot wiped")
 
         # Create Directory Structure
         self.build_chroot_directories()
