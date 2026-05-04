@@ -4,6 +4,7 @@ import pathlib
 import shlex
 import subprocess
 import re
+import tempfile
 # Internal
 import tui
 from tui import Prompt, PROMPT_PASSWORD, PROMPT_YESNO
@@ -89,17 +90,18 @@ class BuildSystem:
                              A package is ready to unpack when its tree is childless
                              (all Pre-Depends have been configured).
 
-          Configure forest — root=pkg, children=its Depends not yet unpacked.
+          Configure forest — root=pkg, children=its Depends not yet configured.
                              A package is ready to configure when its tree is childless
-                             (all Depends have been unpacked) AND it has been unpacked.
+                             (all Depends have been configured) AND it has been unpacked.
 
         Each round alternates between two phases:
-          Unpack phase   — harvest childless roots from unpack_forest → unpack
-                           → delete their names from configure_forest dep lists
-                           (satisfies Depends constraints for packages that need them).
+          Unpack phase   — harvest childless roots from unpack_forest → unpack.
+                           Configure forest is NOT touched here; it tracks configured
+                           status, not unpacked status.
           Configure phase — harvest childless roots from configure_forest that are
                            already unpacked → configure → delete their names from
-                           unpack_forest dep lists (satisfies Pre-Depends constraints).
+                           unpack_forest dep lists (satisfies Pre-Depends) AND from
+                           configure_forest dep lists (satisfies Depends for waiters).
 
         Circular dependencies (no package can go first) are detected when a phase
         produces nothing despite the forest being non-empty.  The entire stuck set
@@ -155,7 +157,7 @@ class BuildSystem:
 
         # --- Build configure forest ---
         # Each tree: root=pkg, children=Depends present in selected set
-        # that are NOT in libc_seed (seed deps treated as already unpacked).
+        # that are NOT in libc_seed (seed deps treated as already configured).
         configure_forest: dict = {}
         for pkg in all_pkgs:
             if pkg in libc_seed_set:
@@ -221,21 +223,12 @@ class BuildSystem:
                     _progress = True
 
                     for pkg in ready_to_unpack:
-                        # Remove pkg's own unpack tree — it is now processed.
                         unpack_forest.pop(pkg, None)
-                        # Delete pkg from configure_forest dep lists: pkg being
-                        # unpacked satisfies the Depends constraint for any
-                        # package that lists pkg as a dep.
-                        # Guard other_pkg != pkg: configure_forest still contains
-                        # pkg's own tree at this point (we only popped from
-                        # unpack_forest above).  Trying to delete pkg from its
-                        # own root — which has children — crashes Tree.delete_node.
-                        for other_pkg, other_tree in configure_forest.items():
-                            if other_pkg != pkg and other_tree.find_node(pkg):
-                                other_tree.delete_node(pkg)
+                        # Configure forest tracks configured status, not unpacked
+                        # status — do not touch it here.
 
                 # ── Configure phase ───────────────────────────────────────────
-                # Packages whose Depends are all unpacked (childless configure
+                # Packages whose Depends are all configured (childless configure
                 # tree) AND that have themselves been unpacked already.
                 ready_to_configure = [
                     pkg for pkg, tree in configure_forest.items()
@@ -263,16 +256,15 @@ class BuildSystem:
                     _progress = True
 
                     for pkg in ready_to_configure:
-                        # Remove pkg's own configure tree — it is now processed.
                         configure_forest.pop(pkg, None)
-                        # Delete pkg from unpack_forest dep lists: pkg being
-                        # configured satisfies the Pre-Depends constraint for any
-                        # package that lists pkg as a pre-dep.
-                        # Guard other_pkg != pkg for symmetry with the unpack
-                        # phase, even though pkg was already popped from
-                        # unpack_forest during the unpack phase.
+                        # pkg is now configured — satisfy Pre-Depends constraints
+                        # (unpack_forest) and Depends constraints (configure_forest)
+                        # for any package still waiting on pkg.
                         for other_pkg, other_tree in unpack_forest.items():
-                            if other_pkg != pkg and other_tree.find_node(pkg):
+                            if other_tree.find_node(pkg):
+                                other_tree.delete_node(pkg)
+                        for other_pkg, other_tree in configure_forest.items():
+                            if other_tree.find_node(pkg):
                                 other_tree.delete_node(pkg)
 
                 if not _progress:
@@ -310,31 +302,41 @@ class BuildSystem:
     def _resolve_pre_depends(self, pkg_name: str) -> list:
         """Return Pre-Depends names for pkg_name that are present in selected_pkgs.
 
-        Only single-alternative Pre-Depends are considered (alternatives are rare
-        in Pre-Depends and are not tracked in Package.pre_depends).  Names not in
-        selected_pkgs are omitted — they are either already installed on the host
-        or irrelevant to the chroot ordering.
+        Handles both single-alternative and OR-alternative Pre-Depends.  For OR
+        groups (e.g. 'systemd-sysv | sysvinit-core'), the first alternative that
+        is present in selected_pkgs is used as the ordering constraint.  Names not
+        in selected_pkgs are omitted — satisfied by something already on the host.
         """
         pkg = self.__dependencytree.selected_pkgs.get(pkg_name)
         if pkg is None:
             return []
-        # Package.pre_depends is List[Tuple[name, ver, op]] — dep[0] is the name.
-        return [dep[0] for dep in pkg.pre_depends
-                if dep[0] in self.__dependencytree.selected_pkgs]
+        selected = self.__dependencytree.selected_pkgs
+        result = [dep[0] for dep in pkg.pre_depends if dep[0] in selected]
+        for group in pkg.alt_pre_depends:
+            for alt in group:
+                if alt[0] in selected:
+                    result.append(alt[0])
+                    break
+        return result
 
     def _resolve_depends(self, pkg_name: str) -> list:
         """Return Depends names for pkg_name that are present in selected_pkgs.
 
-        Only single-alternative Depends are considered (alt_depends with OR
-        alternatives are resolved by the dependency tree and do not need explicit
-        ordering here — the package will configure regardless of which alternative
-        was chosen).
+        Handles both single-alternative and OR-alternative Depends.  For OR
+        groups, the first alternative present in selected_pkgs is used so that
+        configure ordering tracks the actual package we installed.
         """
         pkg = self.__dependencytree.selected_pkgs.get(pkg_name)
         if pkg is None:
             return []
-        return [dep[0] for dep in pkg.depends
-                if dep[0] in self.__dependencytree.selected_pkgs]
+        selected = self.__dependencytree.selected_pkgs
+        result = [dep[0] for dep in pkg.depends if dep[0] in selected]
+        for group in pkg.alt_depends:
+            for alt in group:
+                if alt[0] in selected:
+                    result.append(alt[0])
+                    break
+        return result
 
     # ── dpkg execution helpers ────────────────────────────────────────────────
 
@@ -467,7 +469,8 @@ class BuildSystem:
             return True
         _chroot = self.__dir_chroot
         _cmd = shlex.split(
-            f'sudo -S dpkg --root={_chroot} --instdir={_chroot} '
+            f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
+            f'dpkg --root={_chroot} --instdir={_chroot} '
             f'--admindir={_chroot}/var/lib/dpkg '
             f'--force-script-chrootless -D1 --no-triggers --unpack'
         ) + self._get_deb_files(pkg_list)
@@ -494,7 +497,8 @@ class BuildSystem:
             return True
         _chroot = self.__dir_chroot
         _cmd = shlex.split(
-            f'sudo -S dpkg --root={_chroot} --instdir={_chroot} '
+            f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
+            f'dpkg --root={_chroot} --instdir={_chroot} '
             f'--admindir={_chroot}/var/lib/dpkg '
             f'--force-script-chrootless -D1 --force-confdef --force-confnew '
             f'--configure --no-triggers'
@@ -943,25 +947,39 @@ class BuildSystem:
         tui.console.print("System configuration files written")
 
     def _write_chroot_file(self, rel_path: str, content: str):
-        """Write content to rel_path inside the chroot as root via sudo tee.
+        """Write content to rel_path inside the chroot as root.
 
-        sudo -S reads the password from stdin (first line), then tee reads the
-        remaining input as the file content.  This works because subprocess
-        writes the full input string to the pipe before any reader consumes it.
+        Uses a NamedTemporaryFile + sudo cp rather than sudo tee with stdin,
+        because when sudo's credential is already cached it does NOT consume the
+        password line from stdin, so tee would receive and write the raw password
+        as the first line of the file.
 
         Args:
-            rel_path: Absolute path relative to the chroot root (e.g. '/etc/hostname').
+            rel_path: Path relative to the chroot root (e.g. '/etc/hostname').
             content:  Text content to write; may be empty.
         """
         _dest = os.path.join(self.__dir_chroot, rel_path.lstrip('/'))
-        _proc = subprocess.run(
-            ['sudo', '-S', 'tee', _dest],
-            input=self.__password + '\n' + content,
-            capture_output=True, text=True
+
+        _parent = os.path.dirname(_dest)
+        subprocess.run(
+            ['sudo', '-S', 'mkdir', '-p', _parent],
+            input=self.__password + '\n', capture_output=True, text=True
         )
-        if _proc.returncode != 0:
-            tui.console.print(f"ERROR: Failed to write {rel_path} into chroot")
-            tui.console.error(f"_write_chroot_file {rel_path}: {_proc.stderr}")
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.chroot-write', delete=False) as _tf:
+            _tf.write(content)
+            _tmp_path = _tf.name
+
+        try:
+            _proc = subprocess.run(
+                ['sudo', '-S', 'cp', _tmp_path, _dest],
+                input=self.__password + '\n', capture_output=True, text=True
+            )
+            if _proc.returncode != 0:
+                tui.console.print(f"ERROR: Failed to write {rel_path} into chroot")
+                tui.console.error(f"_write_chroot_file {rel_path}: {_proc.stderr}")
+        finally:
+            os.unlink(_tmp_path)
 
     # ── ISO build ─────────────────────────────────────────────────────────────
 

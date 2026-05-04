@@ -110,7 +110,8 @@ class Package(Packages):
         self.alt_depends:    List[List[Tuple]] = []
 
         # dependencies that must be satisfied before the package can be unpacked
-        self.pre_depends:    List[Tuple] = []
+        self.pre_depends:     List[Tuple]       = []
+        self.alt_pre_depends: List[List[Tuple]] = []
         self.recommends:     List[Tuple] = []
         self.suggests:       List[Tuple] = []
         self.breaks:         List[List[Tuple]] = []
@@ -183,7 +184,9 @@ class Package(Packages):
             self.depends     = [g[0] for g in _all_deps if len(g) == 1]
             self.alt_depends = [g     for g in _all_deps if len(g) > 1]
 
-            self.pre_depends = [g[0] for g in _parse('Pre-Depends') if len(g) == 1]
+            _all_pre = _parse('Pre-Depends')
+            self.pre_depends     = [g[0] for g in _all_pre if len(g) == 1]
+            self.alt_pre_depends = [g     for g in _all_pre if len(g) > 1]
             self.recommends  = [g[0] for g in _parse('Recommends')  if len(g) == 1]
             self.suggests    = [g[0] for g in _parse('Suggests')    if len(g) == 1]
             self.breaks      = _parse('Breaks')
