@@ -117,6 +117,17 @@ class DependencyTree:
     def selected_count(self) -> int:
         return sum(1 for _k in self.selected_pkgs if _k == self.selected_pkgs[_k]['Package'])
 
+    @property
+    def canonical_pkgs(self) -> Dict[str, 'package.Package']:
+        """selected_pkgs filtered to canonical entries only (key == pkg['Package']).
+
+        selected_pkgs also stores virtual-alias entries where the key is a
+        provided name (e.g. 'libcomerr2') mapping to the real Package object
+        (package='libcom-err2').  Iterating canonical_pkgs skips those aliases
+        so callers get exactly one entry per real package.
+        """
+        return {k: v for k, v in self.selected_pkgs.items() if k == v['Package']}
+
     def resolve_packages(self, packages: list[str]) -> list[str]:
         self.add_lookahead(packages)
         unresolved = [pkg for pkg in packages if self.parse_dependency(pkg) is None]

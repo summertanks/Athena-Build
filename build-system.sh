@@ -159,8 +159,15 @@ else
     ISO_TOOLS_OK=0
 fi
 
+if [ -x "$(which mformat 2>/dev/null)" ]; then
+    echo Using "mformat $(mformat --version 2>&1 | head -n1)"
+else
+    echo "W: mformat not found (install mtools) — grub-mkrescue will fail"
+    ISO_TOOLS_OK=0
+fi
+
 if [[ $ISO_TOOLS_OK -eq 0 ]]; then
-    echo "E: one or more ISO build tools missing — run: sudo apt install squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso" >&2
+    echo "E: one or more ISO build tools missing — run: sudo apt install squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso mtools" >&2
     exit 1
 else
     echo "All ISO build tools found."

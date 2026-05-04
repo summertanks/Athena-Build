@@ -15,7 +15,8 @@ utmp:x:43:
 cdrom:x:24:
 adm:x:4:
 mail:x:8:
-kvm:x:61:
+kvm:x:106:
+crontab:x:103:
 uuidd:x:80:
 wheel:x:97:
 users:x:999:

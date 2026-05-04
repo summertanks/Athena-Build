@@ -29,9 +29,11 @@ class BuildSystem:
             if not os.path.exists(_dir):
                 raise RuntimeError(f"Missing essential directory: {_dir}")
 
-        # If the chroot is not empty, offer to wipe it before proceeding.
-        # Leftover files from a failed previous run will corrupt the new build
-        # because dpkg's database will be in an inconsistent state.
+        # If the chroot is not empty, require the user to confirm a wipe before
+        # proceeding.  Leftover files from a failed previous run leave dpkg's
+        # database in an inconsistent state and will corrupt the new build.
+        # Continuing without a wipe is not supported — if the user declines,
+        # abort so they can inspect or manually clean the directory first.
         _chroot_nonempty = len(os.listdir(self.__dir_chroot)) != 0
         _wipe_chroot = False
         if _chroot_nonempty:
@@ -40,9 +42,12 @@ class BuildSystem:
                 f"leftover files from a previous run will corrupt the build."
             )
             _resp = Prompt(PROMPT_YESNO, "Wipe chroot and start clean?").get_response()
-            _wipe_chroot = _resp.lower() in ('y', 'yes')
-            if not _wipe_chroot:
-                tui.console.print("Continuing with non-empty chroot — results may vary")
+            if _resp.lower() not in ('y', 'yes'):
+                raise RuntimeError(
+                    "Aborted: chroot is not empty and wipe was declined. "
+                    "Manually clean the directory or re-run and confirm the wipe."
+                )
+            _wipe_chroot = True
 
         # dpkg and the install scripts run under sudo; collect the password once
         # here and reuse it for all subprocess calls via sudo -S (stdin).
@@ -78,39 +83,72 @@ class BuildSystem:
         # Create Directory Structure
         self.build_chroot_directories()
 
+        # Patch dependency metadata from the actual .deb files.  The Packages
+        # cache may be from a different point in time than the downloaded .debs
+        # (e.g. a binNMU rebuild happened between cache fetch and package
+        # download).  When deps differ, dpkg's configure ordering will fail even
+        # though our resolver computed a valid order based on the cache.
+        self._sync_deps_from_debs()
+
         # Run pre-Install
         self.pre_install()
+
+    @classmethod
+    def for_iso(cls, config: BuildConfig) -> 'BuildSystem':
+        """Factory: create a BuildSystem for ISO assembly only.
+
+        Does NOT touch the chroot — safe to call on an already-assembled
+        chroot.  Sets only the attributes that build_iso() needs: paths and
+        the sudo password.  Use instead of the normal constructor when you
+        want to run build_iso() without triggering the wipe-chroot prompt.
+        """
+        _self = cls.__new__(cls)
+        # Set only the attributes build_iso() accesses.
+        # Name-mangling: __x inside the class body → _BuildSystem__x on the object.
+        _self._BuildSystem__config    = config
+        _self._BuildSystem__dir_chroot = config.dir_chroot
+        _self._BuildSystem__dir_image  = config.dir_image
+        _self._BuildSystem__dir_log    = config.dir_log
+
+        for _dir in [config.dir_chroot, config.dir_image]:
+            if not os.path.exists(_dir):
+                raise RuntimeError(f"Missing essential directory: {_dir}")
+
+        tui.console.print("Build system needs sudo — current user must be in the sudoers group")
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _proc = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
+                               capture_output=True, text=True)
+        if _proc.returncode != 0:
+            raise RuntimeError(
+                f"Incorrect password or user not in sudoers file: {_proc.stdout.strip()}"
+            )
+        _self._BuildSystem__password = _password
+        return _self
 
     def build_chroot(self) -> bool:
         """Install all selected packages into the chroot in dependency order.
 
-        Two Tree forests track what each package is still waiting for:
+        Unpack phase (chrootless, all rounds):
+          An unpack forest tracks Pre-Depends ordering.  Each round unpacks
+          packages whose Pre-Depends are all already configured, then runs
+          `dpkg --configure -a` INSIDE a real chroot so maintainer scripts
+          run in the correct environment without DPKG_ROOT workarounds.
 
-          Unpack forest    — root=pkg, children=its Pre-Depends not yet configured.
-                             A package is ready to unpack when its tree is childless
-                             (all Pre-Depends have been configured).
-
-          Configure forest — root=pkg, children=its Depends not yet configured.
-                             A package is ready to configure when its tree is childless
-                             (all Depends have been configured) AND it has been unpacked.
-
-        Each round alternates between two phases:
-          Unpack phase   — harvest childless roots from unpack_forest → unpack.
-                           Configure forest is NOT touched here; it tracks configured
-                           status, not unpacked status.
-          Configure phase — harvest childless roots from configure_forest that are
-                           already unpacked → configure → delete their names from
-                           unpack_forest dep lists (satisfies Pre-Depends) AND from
-                           configure_forest dep lists (satisfies Depends for waiters).
-
-        Circular dependencies (no package can go first) are detected when a phase
-        produces nothing despite the forest being non-empty.  The entire stuck set
-        is forced through as a single batch to break the cycle, matching dpkg's own
-        behaviour when --force-* flags allow it.
+        Configure phase (real chroot, after each unpack round):
+          `dpkg --configure -a` is run inside the chroot.  dpkg itself handles
+          Depends ordering; we only track what got configured so we can update
+          the unpack forest (removing satisfied Pre-Depends edges).
 
         Returns:
-            True on completion (individual package failures are logged but do not
-            abort the run — a partial chroot is still useful for diagnosis).
+            True on completion.  Individual package failures are logged but do
+            not abort the run — a partial chroot is still useful for diagnosis.
+
+        # ── TO REVERT TO CHROOTLESS CONFIGURE ────────────────────────────────
+        # Search for "── NEW: chroot configure" below and comment those blocks.
+        # Search for "── OLD: chrootless configure" and uncomment those blocks.
+        # Also restore the configure_forest build section and the
+        # `while unpack_forest or configure_forest` loop condition.
+        # ─────────────────────────────────────────────────────────────────────
         """
         # All canonical packages — filter out virtual-package alias entries
         # (entries where the key differs from Package['Package']).
@@ -155,136 +193,199 @@ class BuildSystem:
                         pass  # dep listed twice in Pre-Depends
             unpack_forest[pkg] = tree
 
-        # --- Build configure forest ---
-        # Each tree: root=pkg, children=Depends present in selected set
-        # that are NOT in libc_seed (seed deps treated as already configured).
-        configure_forest: dict = {}
-        for pkg in all_pkgs:
-            if pkg in libc_seed_set:
-                continue
-            tree = utils.Tree()
-            tree.add_node(pkg)
-            for dep in self._resolve_depends(pkg):
-                if dep not in libc_seed_set:
-                    try:
-                        tree.add_node(dep, pkg)
-                    except ValueError:
-                        pass  # dep listed twice in Depends
-            configure_forest[pkg] = tree
+        # ── OLD: chrootless configure — configure forest (commented out) ─────
+        # configure_forest: dict = {}
+        # for pkg in all_pkgs:
+        #     if pkg in libc_seed_set:
+        #         continue
+        #     tree = utils.Tree()
+        #     tree.add_node(pkg)
+        #     for dep in self._resolve_depends(pkg):
+        #         if dep not in libc_seed_set:
+        #             try:
+        #                 tree.add_node(dep, pkg)
+        #             except ValueError:
+        #                 pass
+        #     configure_forest[pkg] = tree
+        # ─────────────────────────────────────────────────────────────────────
 
         # --- Install ---
         self._setup_chroot_env()
         self._init_dpkg_database()
         _log_path = os.path.join(self.__dir_log, 'chroot-install.log')
 
-        with open(_log_path, 'w') as fh:
+        # ── NEW: chroot configure — mount virtual filesystems ─────────────────
+        # /proc, /sys, /dev, /dev/pts are needed by many postinstall scripts
+        # (systemctl detection, uname, pty operations).  Mounted before the
+        # first dpkg --configure -a call, unmounted in the finally block.
+        self._mount_chroot_fs()
+        # ─────────────────────────────────────────────────────────────────────
 
-            # Batch 0: libc circular-dep bootstrap installed unconditionally first.
-            tui.console.print(f"Batch 0 (bootstrap): {libc_seed}")
-            fh.write(f'Batch 0 (bootstrap): {libc_seed}\n')
-            self._unpack_packages(libc_seed, fh)
-            self._configure_packages(libc_seed, fh)
-            unpacked   = set(libc_seed)
-            configured = set(libc_seed)
+        _result = True
+        try:
+            with open(_log_path, 'w') as fh:
 
-            _round = 1
-            while unpack_forest or configure_forest:
-                _progress = False
+                # Batch 0: libc circular-dep bootstrap unpacked first.
+                tui.console.print(f"Batch 0 (bootstrap): {libc_seed}")
+                fh.write(f'Batch 0 (bootstrap): {libc_seed}\n')
+                self._unpack_packages(libc_seed, fh)
+                unpacked = set(libc_seed)
 
-                # ── Unpack phase ─────────────────────────────────────────────
-                # Packages whose Pre-Depends are all configured: their tree is
-                # childless because every Pre-Dep was deleted when it was
-                # configured in a previous round.
-                ready_to_unpack = [
-                    pkg for pkg, tree in unpack_forest.items()
-                    if tree.is_childless and not tree.is_empty
-                ]
+                # ── OLD: chrootless configure — batch 0 configure (commented out)
+                # self._configure_packages(libc_seed, fh, force_depends=True)
+                # configured = set(libc_seed)
+                # ──────────────────────────────────────────────────────────────
 
-                if not ready_to_unpack and unpack_forest:
-                    # No childless roots despite non-empty forest → circular
-                    # Pre-Depends.  Force all remaining through together.
-                    tui.console.print(
-                        f"WARNING: circular Pre-Depends detected — "
-                        f"forcing batch of {len(unpack_forest)} packages"
-                    )
-                    tui.console.warning(
-                        f"build_chroot round {_round}: forced Pre-Depends batch: "
-                        f"{list(unpack_forest.keys())}"
-                    )
-                    ready_to_unpack = list(unpack_forest.keys())
+                # ── NEW: chroot configure — batch 0 configure ─────────────────
+                fh.write('\n--- Batch 0 configure ---\n')
+                _boot_configured = self._configure_chroot(fh)
+                configured = set(libc_seed) | _boot_configured
+                # ─────────────────────────────────────────────────────────────
 
-                if ready_to_unpack:
-                    tui.console.print(
-                        f"Round {_round} — unpacking {len(ready_to_unpack)} packages"
-                    )
-                    fh.write(f'\n--- Round {_round} unpack ---\n')
-                    self._unpack_packages(ready_to_unpack, fh)
-                    unpacked.update(ready_to_unpack)
-                    _progress = True
+                _round = 1
+                # ── OLD: chrootless — loop condition was `while unpack_forest or configure_forest`
+                while unpack_forest:
+                    _progress = False
 
-                    for pkg in ready_to_unpack:
-                        unpack_forest.pop(pkg, None)
-                        # Configure forest tracks configured status, not unpacked
-                        # status — do not touch it here.
+                    # ── Unpack phase (unchanged) ──────────────────────────────
+                    ready_to_unpack = [
+                        pkg for pkg, tree in unpack_forest.items()
+                        if tree.is_childless and not tree.is_empty
+                    ]
 
-                # ── Configure phase ───────────────────────────────────────────
-                # Packages whose Depends are all configured (childless configure
-                # tree) AND that have themselves been unpacked already.
-                ready_to_configure = [
-                    pkg for pkg, tree in configure_forest.items()
-                    if tree.is_childless and not tree.is_empty
-                    and pkg in unpacked
-                ]
-
-                if not ready_to_configure:
-                    # Check for circular Depends among already-unpacked packages.
-                    stuck = [p for p in configure_forest if p in unpacked]
-                    if stuck:
+                    if not ready_to_unpack and unpack_forest:
+                        # Circular Pre-Depends — force all remaining through.
                         tui.console.print(
-                            f"WARNING: circular Depends detected — "
-                            f"forcing configure of {len(stuck)} packages"
+                            f"WARNING: circular Pre-Depends detected — "
+                            f"forcing batch of {len(unpack_forest)} packages"
                         )
                         tui.console.warning(
-                            f"build_chroot round {_round}: forced Depends batch: {stuck}"
+                            f"build_chroot round {_round}: forced Pre-Depends batch: "
+                            f"{list(unpack_forest.keys())}"
                         )
-                        ready_to_configure = stuck
+                        ready_to_unpack = list(unpack_forest.keys())
 
-                if ready_to_configure:
+                    if ready_to_unpack:
+                        tui.console.print(
+                            f"Round {_round} — unpacking {len(ready_to_unpack)} packages"
+                        )
+                        fh.write(f'\n--- Round {_round} unpack ---\n')
+                        _newly_unpacked = self._unpack_packages(ready_to_unpack, fh)
+                        unpacked.update(_newly_unpacked)
+                        _progress = bool(_newly_unpacked)
+                        for pkg in _newly_unpacked:
+                            unpack_forest.pop(pkg, None)
+
+                    # ── OLD: chrootless configure phase (commented out) ────────
+                    # _configure_forced = False
+                    # ready_to_configure = [
+                    #     pkg for pkg, tree in configure_forest.items()
+                    #     if tree.is_childless and not tree.is_empty
+                    #     and pkg in unpacked
+                    # ]
+                    # if not ready_to_configure:
+                    #     stuck = [p for p in configure_forest if p in unpacked]
+                    #     if stuck:
+                    #         tui.console.print(f"WARNING: circular Depends detected — forcing configure of {len(stuck)} packages")
+                    #         tui.console.warning(f"build_chroot round {_round}: forced Depends batch: {stuck}")
+                    #         ready_to_configure = stuck
+                    #         _configure_forced  = True
+                    # if ready_to_configure:
+                    #     if 'passwd' in ready_to_configure:   # workaround — see _reset_passwd_to_master
+                    #         self._reset_passwd_to_master()
+                    #     fh.write(f'\n--- Round {_round} configure ---\n')
+                    #     self._configure_packages(ready_to_configure, fh, force_depends=_configure_forced)
+                    #     configured.update(ready_to_configure)
+                    #     _progress = True
+                    #     for pkg in ready_to_configure:
+                    #         configure_forest.pop(pkg, None)
+                    #         for other_tree in unpack_forest.values():
+                    #             if other_tree.find_node(pkg): other_tree.delete_node(pkg)
+                    #         for other_tree in configure_forest.values():
+                    #             if other_tree.find_node(pkg): other_tree.delete_node(pkg)
+                    # ──────────────────────────────────────────────────────────
+
+                    # ── NEW: chroot configure phase ───────────────────────────
+                    # dpkg --configure -a handles Depends ordering internally.
+                    # We only need to know what got configured to update the
+                    # unpack forest (removing satisfied Pre-Depends edges).
                     fh.write(f'\n--- Round {_round} configure ---\n')
-                    self._configure_packages(ready_to_configure, fh)
-                    configured.update(ready_to_configure)
-                    _progress = True
+                    _newly_configured = self._configure_chroot(fh)
+                    _new = _newly_configured - configured
+                    if _new:
+                        configured.update(_new)
+                        for pkg in _new:
+                            for other_tree in unpack_forest.values():
+                                if other_tree.find_node(pkg):
+                                    other_tree.delete_node(pkg)
+                        _progress = True
+                    # ─────────────────────────────────────────────────────────
 
-                    for pkg in ready_to_configure:
-                        configure_forest.pop(pkg, None)
-                        # pkg is now configured — satisfy Pre-Depends constraints
-                        # (unpack_forest) and Depends constraints (configure_forest)
-                        # for any package still waiting on pkg.
-                        for other_pkg, other_tree in unpack_forest.items():
-                            if other_tree.find_node(pkg):
-                                other_tree.delete_node(pkg)
-                        for other_pkg, other_tree in configure_forest.items():
-                            if other_tree.find_node(pkg):
-                                other_tree.delete_node(pkg)
+                    if not _progress:
+                        stuck_all = list(unpack_forest.keys())
+                        tui.console.print(
+                            f"ERROR: no progress in round {_round} — "
+                            f"{len(stuck_all)} packages stuck in unpack forest"
+                        )
+                        tui.console.error(
+                            f"build_chroot stuck in round {_round}: {stuck_all}"
+                        )
+                        _result = False
+                        break
 
-                if not _progress:
-                    # Neither phase moved anything — unrecoverable.
-                    stuck_all = list(unpack_forest.keys()) + list(configure_forest.keys())
-                    tui.console.print(
-                        f"ERROR: no progress in round {_round} — "
-                        f"{len(stuck_all)} packages stuck"
-                    )
-                    tui.console.error(
-                        f"build_chroot stuck in round {_round}: {stuck_all}"
-                    )
-                    return False
+                    _round += 1
 
-                _round += 1
+                # ── NEW: final configure pass ─────────────────────────────────
+                # After the last unpack round the unpack forest is empty but
+                # some packages may still be in the "unpacked" (not configured)
+                # state.  One final dpkg --configure -a picks them all up.
+                if _result:
+                    tui.console.print("Final configure pass...")
+                    fh.write('\n--- Final configure ---\n')
+                    _final_configured = self._configure_chroot(fh, is_final=True)
+                    configured.update(_final_configured)
+                # ─────────────────────────────────────────────────────────────
 
-        tui.console.print(
-            f"Chroot build complete — {len(configured)} packages installed "
-            f"in {_round - 1} rounds"
-        )
+        finally:
+            # ── NEW: chroot configure — unmount virtual filesystems ───────────
+            self._umount_chroot_fs()
+            # ─────────────────────────────────────────────────────────────────
+
+        if not _result:
+            return False
+
+        # Query dpkg inside the chroot for the definitive list of packages
+        # that are NOT fully configured so the user gets a clear summary.
+        _status_cmd = ['sudo', '-S', 'chroot', self.__dir_chroot,
+                       'dpkg', '--get-selections']
+        _status = subprocess.run(_status_cmd, input=self.__password + '\n',
+                                 capture_output=True, text=True)
+        _not_installed = [
+            l.split()[0] for l in _status.stdout.splitlines()
+            if l.endswith('\thalf-configured') or l.endswith('\tunpacked')
+        ] if _status.returncode == 0 else []
+
+        if _not_installed:
+            tui.console.print(
+                f"Chroot build done — {len(configured)} packages configured, "
+                f"{len(_not_installed)} incomplete: {', '.join(_not_installed[:8])}"
+                f"{'…' if len(_not_installed) > 8 else ''}"
+            )
+            tui.console.warning(
+                f"build_chroot: {len(_not_installed)} packages not fully configured: "
+                f"{_not_installed}"
+            )
+        else:
+            tui.console.print(
+                f"Chroot build complete — {len(configured)} packages installed "
+                f"in {_round - 1} rounds — all packages fully configured"
+            )
+
+        # Ensure every installed kernel has an initramfs.  With --force-depends
+        # linux-image can configure before initramfs-tools is ready, causing
+        # update-initramfs to fail silently and leave no initrd.img-*.  We
+        # detect and repair that here after all packages are confirmed configured.
+        self._ensure_initramfs()
 
         # Apply post-install patches and overlay files now that all packages
         # are configured.  This is the right moment to override config files
@@ -297,25 +398,302 @@ class BuildSystem:
 
         return True
 
+    # ── NEW: chroot configure helpers ────────────────────────────────────────
+
+    def _mount_chroot_fs(self):
+        """Bind-mount /proc, /sys, /dev, /dev/pts into the chroot.
+
+        Required before running `dpkg --configure -a` inside the chroot.
+        Many postinstall scripts check /proc/1/environ, call systemctl,
+        or open ptys — they fail silently or loudly without these mounts.
+        Always paired with _umount_chroot_fs() in a try/finally block.
+        """
+        _chroot = self.__dir_chroot
+        _mounts = [
+            (['-t', 'proc',   'proc',       f'{_chroot}/proc']),
+            (['-t', 'sysfs',  'sysfs',      f'{_chroot}/sys']),
+            (['--bind',       '/dev',        f'{_chroot}/dev']),
+            (['--bind',       '/dev/pts',    f'{_chroot}/dev/pts']),
+        ]
+        for _args in _mounts:
+            _dst = _args[-1]
+            subprocess.run(['sudo', '-S', 'mkdir', '-p', _dst],
+                           input=self.__password + '\n', capture_output=True, text=True)
+            _proc = subprocess.run(['sudo', '-S', 'mount'] + _args,
+                                   input=self.__password + '\n', capture_output=True, text=True)
+            if _proc.returncode != 0:
+                tui.console.warning(f'_mount_chroot_fs: mount {_dst}: {_proc.stderr.strip()}')
+
+    def _umount_chroot_fs(self):
+        """Unmount virtual filesystems from the chroot (reverse of _mount_chroot_fs).
+
+        Uses -lf (lazy force) so a partial mount state from a previous failed
+        run does not prevent cleanup.  Safe to call even if nothing was mounted.
+        """
+        _chroot = self.__dir_chroot
+        for _dst in [
+            f'{_chroot}/dev/pts',
+            f'{_chroot}/dev',
+            f'{_chroot}/sys',
+            f'{_chroot}/proc',
+        ]:
+            subprocess.run(['sudo', '-S', 'umount', '-lf', _dst],
+                           input=self.__password + '\n', capture_output=True, text=True)
+
+    def _configure_chroot(self, fh, is_final: bool = False) -> set:
+        """Run `dpkg --configure -a` and return the set of successfully configured package names.
+
+        Automatically selects between two modes based on whether dpkg is present
+        inside the chroot yet:
+
+          Chroot mode (dpkg present in chroot):
+            sudo env VAR=val chroot <dir> dpkg --configure -a
+            `env` runs on the HOST (always available) and sets the environment
+            before entering the chroot.  Scripts run inside the real chroot so
+            tools like addgroup, shadowconfig, etc. operate on the chroot's files
+            directly with no DPKG_ROOT confusion.
+
+          Chrootless fallback (dpkg not yet in chroot — early bootstrap rounds):
+            sudo env VAR=val dpkg --root=<dir> --force-script-chrootless --configure -a
+            Used for the first few rounds before coreutils/dpkg are unpacked.
+            DPKG_ROOT workarounds apply here, but the packages that configure in
+            these early rounds (libc6, libssl3, …) do not trigger them.
+
+        Args:
+            is_final: True only for the post-loop cleanup pass.  Intermediate
+                      round failures are expected (packages waiting on deps that
+                      arrive in a later round) and are silently logged to file.
+                      Only the final pass surfaces errors on the console so the
+                      user gets a single, definitive signal.
+
+        Returns a set of base package names (arch suffix stripped) that dpkg
+        reported as "Setting up X (version)" — i.e., successfully configured.
+        Failed packages are NOT in the returned set.
+        """
+        _chroot = self.__dir_chroot
+        _dpkg_in_chroot = os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg'))
+
+        if _dpkg_in_chroot:
+            # Real chroot: env runs on host (no /usr/bin/env needed inside chroot).
+            # TEMPORARY: --force-depends bypasses version-constraint checks so
+            # packages whose deps have a cache/deb skew (e.g. openssh needs
+            # libssl3 >= 3.0.19 but repo has 3.0.18) still configure.
+            # Remove once packages are refreshed from the security repo.
+            # OLD (without force-depends, without -D1 suppressed):
+            # _cmd = shlex.split(
+            #     f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
+            #     f'chroot {_chroot} '
+            #     f'dpkg --configure -a --force-confdef --force-confnew -D1'
+            # )
+            _cmd = shlex.split(
+                f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
+                f'chroot {_chroot} '
+                f'dpkg --configure -a --force-confdef --force-confnew --force-depends'
+            )
+        else:
+            # Chrootless fallback for early bootstrap rounds.
+            # TEMPORARY: --force-depends — same reason as chroot mode above.
+            # OLD (without force-depends, without -D1 suppressed):
+            # _cmd = shlex.split(
+            #     f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
+            #     f'dpkg --root={_chroot} --instdir={_chroot} '
+            #     f'--admindir={_chroot}/var/lib/dpkg '
+            #     f'--force-script-chrootless -D1 --force-confdef --force-confnew '
+            #     f'--configure -a'
+            # )
+            _cmd = shlex.split(
+                f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
+                f'dpkg --root={_chroot} --instdir={_chroot} '
+                f'--admindir={_chroot}/var/lib/dpkg '
+                f'--force-script-chrootless --force-confdef --force-confnew '
+                f'--force-depends --configure -a'
+            )
+
+        _proc = subprocess.run(_cmd, input=self.__password + '\n',
+                               capture_output=True, text=True, env=os.environ)
+        fh.write(_proc.stdout)
+        if _proc.returncode != 0:
+            fh.write(_proc.stderr)
+            _mode = 'chroot' if _dpkg_in_chroot else 'chrootless'
+            if is_final:
+                # Final pass failures are real — surface them immediately.
+                _failed = [
+                    l.split()[-1] for l in _proc.stdout.splitlines()
+                    if l.startswith('dpkg: error processing package')
+                ]
+                tui.console.print(
+                    f'Final configure had errors — {len(_failed)} package(s) failed: '
+                    f'{", ".join(_failed[:5])}{"…" if len(_failed) > 5 else ""}'
+                )
+                tui.console.error(
+                    f'_configure_chroot final ({_mode}): '
+                    f'{len(_failed)} failed — see log for details'
+                )
+            else:
+                # Intermediate round: expected for packages waiting on deps from
+                # a later round.  Log to file only; do not clutter the console.
+                tui.console.warning(
+                    f'Round configure ({_mode}): some packages deferred — '
+                    f'will retry in next round'
+                )
+
+        _configured: set = set()
+        for _line in _proc.stdout.splitlines():
+            _m = re.match(r'^Setting up (\S+?)(?::\S+)? \(', _line)
+            if _m:
+                _configured.add(_m.group(1))
+        return _configured
+
+    def _ensure_initramfs(self):
+        """Generate initramfs for any kernel that is missing one.
+
+        With --force-depends, linux-image may configure before initramfs-tools
+        is ready.  update-initramfs then exits non-zero and leaves no initrd.
+        This method scans /boot/ for vmlinuz-* files and, for each one that has
+        no matching initrd.img-*, runs update-initramfs -c inside the chroot to
+        create it.
+        """
+        _chroot = self.__dir_chroot
+        _boot = os.path.join(_chroot, 'boot')
+
+        _kernels = sorted(
+            f for f in os.listdir(_boot) if f.startswith('vmlinuz-')
+        ) if os.path.isdir(_boot) else []
+
+        for _vmlinuz in _kernels:
+            _kver  = _vmlinuz.replace('vmlinuz-', '')
+            _initrd = os.path.join(_boot, f'initrd.img-{_kver}')
+            if os.path.exists(_initrd):
+                continue
+
+            tui.console.print(f"Generating initramfs for {_kver} (was missing)...")
+            _proc = subprocess.run(
+                ['sudo', '-S', 'chroot', _chroot,
+                 'update-initramfs', '-c', '-k', _kver],
+                input=self.__password + '\n',
+                capture_output=True, text=True
+            )
+            if _proc.returncode != 0:
+                tui.console.print(f"WARNING: update-initramfs failed for {_kver} — see log")
+                tui.console.warning(
+                    f"_ensure_initramfs {_kver}: {_proc.stderr.strip()[:300]}"
+                )
+            else:
+                tui.console.print(f"Initramfs generated: initrd.img-{_kver}")
+
+    # ── WORKAROUND: passwd/shadowconfig chrootless compat ────────────────────
+    # See the call site in build_chroot() for the full explanation.
+    # To remove: delete this method and the 'if passwd in ready_to_configure'
+    # block in build_chroot().
+    def _reset_passwd_to_master(self):
+        """Copy passwd.master → /etc/passwd and group.master → /etc/group.
+
+        Ensures the two files are byte-for-byte identical to their masters so
+        that shadowconfig on's DPKG_ROOT-aware fast path (cmp check) succeeds.
+        Called once, immediately before the configure batch that contains
+        'passwd'.  Any system-account additions made between base-passwd's
+        configure and this point are intentionally discarded — update-passwd
+        (run by passwd's own postinstall) re-adds them from the master.
+        """
+        _chroot = self.__dir_chroot
+        for _master_rel, _dest_rel in [
+            ('usr/share/base-passwd/passwd.master', 'etc/passwd'),
+            ('usr/share/base-passwd/group.master',  'etc/group'),
+        ]:
+            _master = os.path.join(_chroot, _master_rel)
+            _dest   = os.path.join(_chroot, _dest_rel)
+            if not os.path.exists(_master):
+                tui.console.warning(
+                    f'_reset_passwd_to_master: {_master_rel} not found — skipping'
+                )
+                continue
+            _proc = subprocess.run(
+                ['sudo', '-S', 'cp', '--preserve=mode,ownership', _master, _dest],
+                input=self.__password + '\n', capture_output=True, text=True
+            )
+            if _proc.returncode != 0:
+                tui.console.warning(
+                    f'_reset_passwd_to_master: cp {_master_rel} failed: '
+                    f'{_proc.stderr.strip()}'
+                )
+    # ── END WORKAROUND ────────────────────────────────────────────────────────
+
+    # ── Dependency sync from .deb files ──────────────────────────────────────
+
+    def _sync_deps_from_debs(self):
+        """Patch dependency fields on Package objects from the actual .deb files.
+
+        The Packages cache and the downloaded .debs may be out of sync when a
+        binNMU rebuild happened between the two fetches (e.g. libcom-err2 gained
+        a libnsl2 dep in 1.47.0-2 that was removed again in 1.47.0-2+b2).
+        Reading deps from the cache produces a wrong configure ordering; dpkg
+        then reads the real deps from the installed .deb and refuses to configure.
+
+        This method overwrites depends / alt_depends / pre_depends /
+        alt_pre_depends on every canonical Package object with what dpkg-deb
+        reports from the file on disk.  All other fields (version, arch,
+        Filename, …) are left untouched.
+        """
+        import package as _pkg_module
+        for _pkg_name, _pkg_obj in self.__dependencytree.canonical_pkgs.items():
+            _filename = os.path.basename(_pkg_obj.get('Filename', ''))
+            if not _filename:
+                continue
+            _filename  = self.strip_build_version(_filename)
+            _deb_path  = os.path.join(self.__dir_repo, _filename)
+            if not os.path.exists(_deb_path):
+                continue
+            _proc = subprocess.run(
+                ['dpkg-deb', '-f', _deb_path],
+                capture_output=True, text=True
+            )
+            if _proc.returncode != 0 or not _proc.stdout.strip():
+                continue
+            _deb_pkg = _pkg_module.Package(_proc.stdout)
+            if not _deb_pkg.isvalid:
+                continue
+            _pkg_obj.depends         = _deb_pkg.depends
+            _pkg_obj.alt_depends     = _deb_pkg.alt_depends
+            _pkg_obj.pre_depends     = _deb_pkg.pre_depends
+            _pkg_obj.alt_pre_depends = _deb_pkg.alt_pre_depends
+
     # ── Dependency resolution helpers ─────────────────────────────────────────
 
     def _resolve_pre_depends(self, pkg_name: str) -> list:
-        """Return Pre-Depends names for pkg_name that are present in selected_pkgs.
+        """Return Pre-Depends canonical package names for pkg_name present in selected_pkgs.
 
         Handles both single-alternative and OR-alternative Pre-Depends.  For OR
         groups (e.g. 'systemd-sysv | sysvinit-core'), the first alternative that
         is present in selected_pkgs is used as the ordering constraint.  Names not
         in selected_pkgs are omitted — satisfied by something already on the host.
+
+        Virtual-package names (e.g. 'awk') are resolved to the real Package name
+        (e.g. 'mawk') so that the unpack-forest node deletion in build_chroot()
+        works correctly: dpkg reports "Setting up mawk", not "Setting up awk".
+        Without this resolution the virtual-name child node would never be deleted
+        and the parent would stay non-childless forever.
         """
         pkg = self.__dependencytree.selected_pkgs.get(pkg_name)
         if pkg is None:
             return []
         selected = self.__dependencytree.selected_pkgs
-        result = [dep[0] for dep in pkg.pre_depends if dep[0] in selected]
+        result: list = []
+        seen: set = set()
+        for dep in pkg.pre_depends:
+            dep_name = dep[0]
+            if dep_name in selected:
+                canonical = selected[dep_name]['Package']
+                if canonical not in seen:
+                    seen.add(canonical)
+                    result.append(canonical)
         for group in pkg.alt_pre_depends:
             for alt in group:
-                if alt[0] in selected:
-                    result.append(alt[0])
+                dep_name = alt[0]
+                if dep_name in selected:
+                    canonical = selected[dep_name]['Package']
+                    if canonical not in seen:
+                        seen.add(canonical)
+                        result.append(canonical)
                     break
         return result
 
@@ -456,17 +834,20 @@ class BuildSystem:
             file_list.append(_filepath)
         return file_list
 
-    def _unpack_packages(self, pkg_list: list, fh) -> bool:
+    def _unpack_packages(self, pkg_list: list, fh) -> set:
         """Run dpkg --unpack for pkg_list inside the chroot.
 
         --force-script-chrootless allows maintainer scripts to run without
         being inside a chroot bind-mount.  --no-triggers defers trigger
         processing to the configure phase.
 
-        Returns True if dpkg exited 0, False otherwise.
+        Returns the set of base package names that were successfully unpacked
+        (parsed from dpkg's "Unpacking NAME:arch (ver)" stdout lines).
+        Packages that dpkg rejected (pre-dep failures, etc.) are not in the
+        returned set and will be retried in a later round.
         """
         if not pkg_list:
-            return True
+            return set()
         _chroot = self.__dir_chroot
         _cmd = shlex.split(
             f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
@@ -485,23 +866,34 @@ class BuildSystem:
                 f'Error unpacking {pkg_list[:3]}{"…" if len(pkg_list) > 3 else ""}: '
                 f'{_proc.stderr[:200]}'
             )
-        return _proc.returncode == 0
 
-    def _configure_packages(self, pkg_list: list, fh) -> bool:
+        # Parse successfully unpacked package names from dpkg output.
+        # dpkg prints "Unpacking NAME:arch (version) ..." for each success.
+        _unpacked: set = set()
+        for _line in _proc.stdout.splitlines():
+            _m = re.match(r'^Unpacking (\S+)', _line)
+            if _m:
+                _unpacked.add(_m.group(1).split(':')[0])
+        return _unpacked
+
+    def _configure_packages(self, pkg_list: list, fh, force_depends: bool = False) -> bool:
         """Run dpkg --configure for pkg_list inside the chroot.
 
         --force-confdef/--force-confnew resolve config-file prompts
-        non-interactively.  Returns True if dpkg exited 0, False otherwise.
+        non-interactively.  force_depends=True adds --force-depends, used when
+        breaking circular configure dependencies so dpkg does not reject the
+        batch outright.  Returns True if dpkg exited 0, False otherwise.
         """
         if not pkg_list:
             return True
         _chroot = self.__dir_chroot
+        _force_dep_flag = '--force-depends ' if force_depends else ''
         _cmd = shlex.split(
             f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
             f'dpkg --root={_chroot} --instdir={_chroot} '
             f'--admindir={_chroot}/var/lib/dpkg '
             f'--force-script-chrootless -D1 --force-confdef --force-confnew '
-            f'--configure --no-triggers'
+            f'{_force_dep_flag}--configure --no-triggers'
         ) + pkg_list
 
         fh.write(f'Configure: {" ".join(pkg_list)}\n')

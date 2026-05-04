@@ -23,7 +23,9 @@ faulthandler.enable(open('/tmp/athena_crash.log', 'w'))
 
 import tui
 import os
+import glob
 import shutil
+import subprocess
 import cache
 import sys
 
@@ -40,7 +42,7 @@ import buildsystem
 import signal
 
 
-from tui import Tui, Console, Prompt, PROMPT_YESNO, Spinner, ProgressBar, Exit
+from tui import Tui, Console, Prompt, PROMPT_YESNO, PROMPT_PASSWORD, Spinner, ProgressBar, Exit
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
@@ -531,7 +533,7 @@ def cmd_tunnel_package(*args):
 # Command: build_bootable
 # ---------------------------------------------------------------------------
 
-def cmd_build_bootable(*args):
+def cmd_build_chroot(*args):
     """Assemble the resolved package set into a bootable chroot environment.
 
     Takes the .deb files produced by source_build from dir_repo and installs
@@ -585,10 +587,10 @@ def cmd_build_iso(*args):
 
     console.print("Initialising build system for ISO...")
     try:
-        build_system = buildsystem.BuildSystem(dependency_tree, build_config)
+        build_system = buildsystem.BuildSystem.for_iso(build_config)
     except RuntimeError as e:
         console.print(f"ERROR: build system initialisation failed — {e}")
-        console.error(f"BuildSystem() raised: {e}")
+        console.error(f"BuildSystem.for_iso() raised: {e}")
         return
 
     console.print("Building ISO...")
@@ -714,6 +716,152 @@ def cmd_source_build(*args):
 
 
 # ---------------------------------------------------------------------------
+# Command: verify_chroot
+# ---------------------------------------------------------------------------
+
+def cmd_verify_chroot():
+    """Run a suite of checks against the assembled chroot and report PASS/FAIL.
+
+    Checks performed:
+      1. dpkg --audit          — no packages in a broken state
+      2. dpkg --get-selections — all packages fully installed (none half-configured)
+      3. Kernel present        — at least one vmlinuz-* in /boot/
+      4. Initramfs present     — at least one initrd.img-* in /boot/
+      5. bash --version        — shell is executable inside the chroot
+      6. systemctl --version   — systemd is present and executable
+      7. live-boot installed   — required for live ISO boot
+      8. /etc/os-release       — OS identity file written by generate_system_configs
+
+    Prerequisites: build_bootable must have completed (chroot_ready flag).
+    """
+    if not _progress_flags.chroot_ready:
+        console.print("Run 'build_bootable' first")
+        return
+
+    _chroot = build_config.dir_chroot
+    console.print(f"Verifying chroot at {_chroot}...")
+
+    _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+    _proc = subprocess.run(['sudo', '-S', '-v'],
+                           input=_password + '\n', capture_output=True, text=True)
+    if _proc.returncode != 0:
+        console.print("ERROR: incorrect sudo password")
+        console.error("verify_chroot: sudo -v failed")
+        return
+
+    _passed = 0
+    _failed = 0
+
+    def _check(label: str, ok: bool, detail: str = ''):
+        nonlocal _passed, _failed
+        _status = '[PASS]' if ok else '[FAIL]'
+        _color  = tui.COLOR_HIGHLIGHT if ok else tui.COLOR_ERROR
+        _suffix = f' — {detail}' if detail else ''
+        console.print(f'  {label:<45} {_status}{_suffix}', _color)
+        if ok:
+            _passed += 1
+        else:
+            _failed += 1
+
+    def _chroot_run(*cmd):
+        return subprocess.run(
+            ['sudo', '-S', 'chroot', _chroot] + list(cmd),
+            input=_password + '\n', capture_output=True, text=True
+        )
+
+    # ── Check 1: dpkg --audit ────────────────────────────────────────────────
+    _r = _chroot_run('dpkg', '--audit')
+    _audit_out = _r.stdout.strip()
+    _check('dpkg audit — no broken packages',
+           _r.returncode == 0 and not _audit_out,
+           'clean' if not _audit_out else _audit_out.splitlines()[0][:60])
+
+    # ── Check 2: all packages fully configured ───────────────────────────────
+    _r = _chroot_run('dpkg', '--get-selections')
+    _lines      = _r.stdout.splitlines()
+    _total      = len(_lines)
+    _incomplete = [l.split()[0] for l in _lines if l and not l.endswith('\tinstall')]
+    _check('All packages fully installed',
+           not _incomplete,
+           f'{_total} packages installed' if not _incomplete
+           else f'{len(_incomplete)} incomplete: {", ".join(_incomplete[:4])}')
+
+    # ── Check 3: kernel ──────────────────────────────────────────────────────
+    _kernels = sorted(glob.glob(os.path.join(_chroot, 'boot', 'vmlinuz-*')))
+    _check('Kernel present in /boot/',
+           bool(_kernels),
+           os.path.basename(_kernels[-1]) if _kernels else 'no vmlinuz-* found')
+
+    # ── Check 4: initramfs ───────────────────────────────────────────────────
+    _initrds = sorted(glob.glob(os.path.join(_chroot, 'boot', 'initrd.img-*')))
+    _check('Initramfs present in /boot/',
+           bool(_initrds),
+           os.path.basename(_initrds[-1]) if _initrds else 'no initrd.img-* found')
+
+    # ── Check 5: bash ────────────────────────────────────────────────────────
+    _r = _chroot_run('bash', '--version')
+    _ver = _r.stdout.splitlines()[0] if _r.stdout else ''
+    _check('Bash executable inside chroot',
+           _r.returncode == 0,
+           _ver[:60] if _ver else _r.stderr.strip()[:60])
+
+    # ── Check 6: systemd ─────────────────────────────────────────────────────
+    _r = _chroot_run('systemctl', '--version')
+    _ver = _r.stdout.splitlines()[0] if _r.stdout else ''
+    _check('systemd present and executable',
+           _r.returncode == 0,
+           _ver[:60] if _ver else _r.stderr.strip()[:60])
+
+    # ── Check 7: live-boot ───────────────────────────────────────────────────
+    _r = _chroot_run('dpkg', '-l', 'live-boot')
+    _live_ok = _r.returncode == 0 and any(l.startswith('ii') for l in _r.stdout.splitlines())
+    _check('live-boot installed',
+           _live_ok,
+           'installed' if _live_ok else 'not installed or unconfigured')
+
+    # ── Check 8: /etc/os-release ─────────────────────────────────────────────
+    _os_release = os.path.join(_chroot, 'etc', 'os-release')
+    _os_ok = os.path.exists(_os_release)
+    _os_detail = ''
+    if _os_ok:
+        try:
+            _os_detail = next(
+                (l.split('=', 1)[1].strip('"') for l in
+                 open(_os_release).read().splitlines()
+                 if l.startswith('PRETTY_NAME=')), 'present')
+        except OSError:
+            _os_detail = 'present'
+    _check('/etc/os-release written',
+           _os_ok,
+           _os_detail if _os_ok else 'missing — run build_bootable again')
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    _total_checks = _passed + _failed
+    console.print('')
+    if _failed == 0:
+        console.print(
+            f'Verification complete: {_passed}/{_total_checks} passed'
+            f' — chroot is ready for ISO build',
+            tui.COLOR_HIGHLIGHT
+        )
+    else:
+        console.print(
+            f'Verification complete: {_passed}/{_total_checks} passed,'
+            f' {_failed} failed — chroot may not boot correctly',
+            tui.COLOR_ERROR
+        )
+
+def cmd_auto_run():
+    cmd_build_cache()
+    cmd_parse_dependency()
+    cmd_source_download()
+    cmd_init_container()
+    cmd_source_build()
+    cmd_build_chroot()
+    cmd_verify_chroot()
+
+    return
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -776,8 +924,10 @@ def main(banner: str):
     tui.register_command('build_container',   cmd_init_container,     'Initialise Docker build container')
     tui.register_command('source_build',      cmd_source_build,       'Build source packages in parallel (source_build [pkg …] [force])')
     tui.register_command('tunnel_package',    cmd_tunnel_package,     'Download binary .debs from Debian repo (tunnel_package [pkg …])')
-    tui.register_command('build_bootable',    cmd_build_bootable,     'Build bootable chroot environment')
+    tui.register_command('build_chroot',      cmd_build_chroot,       'Build bootable chroot environment')
+    tui.register_command('verify_chroot',     cmd_verify_chroot,      'Verify chroot health — 8 checks, PASS/FAIL per test')
     tui.register_command('build_iso',         cmd_build_iso,          'Build bootable ISO from chroot (build_iso)')
+    tui.register_command('autorun',           cmd_auto_run,           'Runs all commands in sequence')
     tui.register_command('print',             cmd_print,              'Print info: print <config|required|important|selected>')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
