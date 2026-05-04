@@ -151,6 +151,7 @@ class BuildSystem:
 
         # --- Install ---
         self._setup_chroot_env()
+        self._init_dpkg_database()
         _log_path = os.path.join(self.__dir_log, 'chroot-install.log')
 
         with open(_log_path, 'w') as fh:
@@ -204,8 +205,12 @@ class BuildSystem:
                         # Delete pkg from configure_forest dep lists: pkg being
                         # unpacked satisfies the Depends constraint for any
                         # package that lists pkg as a dep.
-                        for other_tree in configure_forest.values():
-                            if other_tree.find_node(pkg):
+                        # Guard other_pkg != pkg: configure_forest still contains
+                        # pkg's own tree at this point (we only popped from
+                        # unpack_forest above).  Trying to delete pkg from its
+                        # own root — which has children — crashes Tree.delete_node.
+                        for other_pkg, other_tree in configure_forest.items():
+                            if other_pkg != pkg and other_tree.find_node(pkg):
                                 other_tree.delete_node(pkg)
 
                 # ── Configure phase ───────────────────────────────────────────
@@ -242,8 +247,11 @@ class BuildSystem:
                         # Delete pkg from unpack_forest dep lists: pkg being
                         # configured satisfies the Pre-Depends constraint for any
                         # package that lists pkg as a pre-dep.
-                        for other_tree in unpack_forest.values():
-                            if other_tree.find_node(pkg):
+                        # Guard other_pkg != pkg for symmetry with the unpack
+                        # phase, even though pkg was already popped from
+                        # unpack_forest during the unpack phase.
+                        for other_pkg, other_tree in unpack_forest.items():
+                            if other_pkg != pkg and other_tree.find_node(pkg):
                                 other_tree.delete_node(pkg)
 
                 if not _progress:
@@ -308,6 +316,30 @@ class BuildSystem:
                 if dep[0] in self.__dependencytree.selected_pkgs]
 
     # ── dpkg execution helpers ────────────────────────────────────────────────
+
+    def _init_dpkg_database(self):
+        """Create the dpkg database structure inside the chroot.
+
+        dpkg refuses to run if /var/lib/dpkg and its subdirectories do not
+        exist, and requires /var/lib/dpkg/status to be present (even if empty)
+        before the first package is installed.  These are not created by the
+        FHS directory setup in build_chroot_directories() because they are
+        dpkg-specific rather than general filesystem structure.
+        """
+        _dpkg_dirs = [
+            'var/lib/dpkg',
+            'var/lib/dpkg/info',
+            'var/lib/dpkg/updates',
+            'var/lib/dpkg/triggers',
+            'var/cache/apt/archives',
+        ]
+        for _d in _dpkg_dirs:
+            os.makedirs(os.path.join(self.__dir_chroot, _d), exist_ok=True)
+
+        # status must exist before dpkg's first invocation.
+        _status = os.path.join(self.__dir_chroot, 'var/lib/dpkg/status')
+        if not os.path.exists(_status):
+            open(_status, 'w').close()
 
     def _setup_chroot_env(self):
         """Set environment variables required for non-interactive dpkg in a chroot."""
