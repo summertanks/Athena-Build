@@ -1,6 +1,7 @@
 # Internal modules
 from collections import defaultdict
 from typing import Dict, List, Optional
+import re
 
 import package
 from package import Version
@@ -480,8 +481,15 @@ class DependencyTree:
                 self.selected_srcs[_src_name].pkgs = []
 
             _bin_filename = (_bin_pkg.get('Filename') or '').rsplit('/', 1)[-1]
-            if _bin_filename and _bin_filename not in self.selected_srcs[_src_name].pkgs:
-                self.selected_srcs[_src_name].pkgs.append(_bin_filename)
+            if _bin_filename:
+                # Strip binNMU suffix (+bN) — dpkg-buildpackage produces files using
+                # the source version, which never carries the +bN rebuild suffix.
+                # Lookahead anchors to the arch field so +deb12uN and other legitimate
+                # upstream suffixes (which don't end with +b\d+ immediately before _arch)
+                # are left untouched.
+                _bin_filename = re.sub(r'\+b\d+(?=_\w+\.u?deb$)', '', _bin_filename)
+                if _bin_filename not in self.selected_srcs[_src_name].pkgs:
+                    self.selected_srcs[_src_name].pkgs.append(_bin_filename)
 
         tui.console.warning(f"parse_sources: selected {len(self.selected_srcs)} source packages")
         return _found
