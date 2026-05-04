@@ -374,6 +374,58 @@ class BuildSystem:
                 capture_output=True, text=True
             )
 
+        # --force-script-chrootless runs pre/post-install scripts on the HOST
+        # but exports DPKG_ROOT=<chroot> to them.  Debconf's Config.pm reads
+        # $DPKG_ROOT/etc/debconf.conf — if it doesn't exist, every package
+        # whose maintainer script uses debconf (libc6, bash, apt, …) fails
+        # its pre-install script with "No config file found".
+        # Writing a minimal debconf.conf into the chroot's /etc/ before the
+        # first dpkg call makes debconf find its config and proceed silently
+        # in noninteractive mode.
+        _debconf_conf_content = (
+            'Config: configdb\n'
+            'Templates: templatedb\n'
+            '\n'
+            'Name: config\n'
+            'Driver: File\n'
+            'Mode: 644\n'
+            'Filename: /var/cache/debconf/config.dat\n'
+            '\n'
+            'Name: passwords\n'
+            'Driver: File\n'
+            'Mode: 600\n'
+            'Backup: false\n'
+            'Required: false\n'
+            'Filename: /var/cache/debconf/passwords.dat\n'
+            '\n'
+            'Name: templates\n'
+            'Driver: File\n'
+            'Mode: 644\n'
+            'Filename: /var/cache/debconf/templates.dat\n'
+            '\n'
+            'Name: configdb\n'
+            'Driver: Stack\n'
+            'Stack: config, passwords\n'
+            '\n'
+            'Name: templatedb\n'
+            'Driver: Stack\n'
+            'Stack: templates\n'
+        )
+        self._write_chroot_file('/etc/debconf.conf', _debconf_conf_content)
+
+        # Ensure the debconf data directory and seed files exist so debconf
+        # does not fail trying to create them during installation.
+        _debconf_dir = os.path.join(self.__dir_chroot, 'var/cache/debconf')
+        subprocess.run(
+            ['sudo', '-S', 'mkdir', '-p', _debconf_dir],
+            input=self.__password + '\n', capture_output=True, text=True
+        )
+        for _f in ['config.dat', 'passwords.dat', 'templates.dat']:
+            subprocess.run(
+                ['sudo', '-S', 'touch', os.path.join(_debconf_dir, _f)],
+                input=self.__password + '\n', capture_output=True, text=True
+            )
+
     def _setup_chroot_env(self):
         """Set environment variables required for non-interactive dpkg in a chroot."""
         os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
