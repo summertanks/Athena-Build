@@ -68,6 +68,20 @@ if [[ "$(id -u)" ==  0 ]]; then
 	echo "W: running as sudo"
 fi
 
+# Check sudo access — build_bootable and build_iso run dpkg and mksquashfs
+# as root via sudo.  -l lists the user's privileges; -n skips the password
+# prompt so this is non-interactive.  A warning (not a fatal error) is issued
+# here because the core build pipeline (cache/dependency/source) does not
+# require sudo — only the chroot and ISO stages do.
+if sudo -l -n 2>/dev/null | grep -q '(ALL'; then
+    echo "Sudo access: OK ($(whoami) has sudo privileges)"
+elif id -nG "$(whoami)" | grep -qw sudo; then
+    echo "Sudo access: OK ($(whoami) is in sudo group — password will be required)"
+else
+    echo "E: $(whoami) does not have sudo access — build_bootable and build_iso require sudo" >&2
+    exit 1
+fi
+
 # Bash version
 echo Using `/usr/bin/bash  --version | head -n1`
 
@@ -118,6 +132,38 @@ if [ -x "$AWK_PATH" ]; then
 else
     echo "E: awk not found, build script will not work" >&2
     exit 1
+fi
+
+# Checking ISO build tools (required for build_iso command only)
+echo "Checking ISO build tools..."
+ISO_TOOLS_OK=1
+
+if [ -x "$(which mksquashfs 2>/dev/null)" ]; then
+    echo Using "mksquashfs $(mksquashfs -version 2>&1 | head -n1)"
+else
+    echo "W: mksquashfs not found (install squashfs-tools) — build_iso will not work"
+    ISO_TOOLS_OK=0
+fi
+
+if [ -x "$(which grub-mkrescue 2>/dev/null)" ]; then
+    echo Using "grub-mkrescue $(grub-mkrescue --version 2>/dev/null | head -n1)"
+else
+    echo "W: grub-mkrescue not found (install grub-pc-bin grub-efi-amd64-bin) — build_iso will not work"
+    ISO_TOOLS_OK=0
+fi
+
+if [ -x "$(which xorriso 2>/dev/null)" ]; then
+    echo Using "xorriso $(xorriso --version 2>&1 | head -n1)"
+else
+    echo "W: xorriso not found (install xorriso) — build_iso will not work"
+    ISO_TOOLS_OK=0
+fi
+
+if [[ $ISO_TOOLS_OK -eq 0 ]]; then
+    echo "E: one or more ISO build tools missing — run: sudo apt install squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso" >&2
+    exit 1
+else
+    echo "All ISO build tools found."
 fi
 
 # Checking build directories
