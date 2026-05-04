@@ -321,10 +321,13 @@ class BuildSystem:
         """Create the dpkg database structure inside the chroot.
 
         dpkg refuses to run if /var/lib/dpkg and its subdirectories do not
-        exist, and requires /var/lib/dpkg/status to be present (even if empty)
-        before the first package is installed.  These are not created by the
-        FHS directory setup in build_chroot_directories() because they are
-        dpkg-specific rather than general filesystem structure.
+        exist, and requires /var/lib/dpkg/status and /var/lib/dpkg/available
+        to be present (even if empty) before the first package is installed.
+
+        All operations run via sudo -S because after a failed or partial
+        previous run the chroot tree may be owned by root, making os.makedirs
+        silently pass exist_ok but leave files in an inconsistent state.
+        sudo touch is idempotent — safe to call on every startup.
         """
         _dpkg_dirs = [
             'var/lib/dpkg',
@@ -334,12 +337,21 @@ class BuildSystem:
             'var/cache/apt/archives',
         ]
         for _d in _dpkg_dirs:
-            os.makedirs(os.path.join(self.__dir_chroot, _d), exist_ok=True)
+            _path = os.path.join(self.__dir_chroot, _d)
+            subprocess.run(
+                ['sudo', '-S', 'mkdir', '-p', _path],
+                input=self.__password + '\n',
+                capture_output=True, text=True
+            )
 
-        # status must exist before dpkg's first invocation.
-        _status = os.path.join(self.__dir_chroot, 'var/lib/dpkg/status')
-        if not os.path.exists(_status):
-            open(_status, 'w').close()
+        # status and available must exist before dpkg's first invocation.
+        for _f in ['var/lib/dpkg/status', 'var/lib/dpkg/available']:
+            _path = os.path.join(self.__dir_chroot, _f)
+            subprocess.run(
+                ['sudo', '-S', 'touch', _path],
+                input=self.__password + '\n',
+                capture_output=True, text=True
+            )
 
     def _setup_chroot_env(self):
         """Set environment variables required for non-interactive dpkg in a chroot."""
