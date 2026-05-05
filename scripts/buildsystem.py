@@ -1205,8 +1205,8 @@ class BuildSystem:
         # All commands use sudo -S so the password is read from stdin rather than
         # the terminal (which would corrupt TUI rendering).  The '\n' terminator
         # is required by sudo -S — without it sudo blocks waiting for more input.
-        cmd_list = [f'sudo -S ln -sfv {self.__dir_chroot}/run {self.__dir_chroot}/var/run',
-                    f'sudo -S ln -sfv {self.__dir_chroot}/run/lock {self.__dir_chroot}/var/lock',
+        cmd_list = [f'sudo -S ln -sfv /run {self.__dir_chroot}/var/run',
+                    f'sudo -S ln -sfv /run/lock {self.__dir_chroot}/var/lock',
                     f'sudo -S install -dv -m 0750 {self.__dir_chroot}/root',
                     f'sudo -S install -dv -m 1777 {self.__dir_chroot}/tmp {self.__dir_chroot}/var/tmp',
                     f'sudo -S chgrp -v utmp {self.__dir_chroot}/var/log/lastlog',
@@ -1336,6 +1336,92 @@ class BuildSystem:
             f'deb {_sec} {cfg.basecodename}-security {_comp}\n'
         ))
 
+        # Run update-locale inside the chroot so /etc/default/locale is created
+        # by the proper tool (same as locales postinst does on a normal install).
+        _proc = subprocess.run(
+            ['sudo', '-S', 'chroot', self.__dir_chroot,
+             '/usr/sbin/update-locale', 'LANG=C.UTF-8'],
+            input=self.__password + '\n',
+            capture_output=True, text=True
+        )
+        if _proc.returncode != 0:
+            tui.console.print("WARNING: update-locale failed — /etc/default/locale not created")
+            tui.console.warning(f"update-locale: {_proc.stderr.strip()}")
+        else:
+            tui.console.print("Locale configured: LANG=C.UTF-8")
+
+        # TODO: replace these manual writes with a proper pam-auth-update call.
+        # pam-auth-update --root {chroot} --package --force is the correct tool
+        # but requires debconf and fails silently when called from the host against
+        # the chroot.  The right fix is to run it inside a chroot with /proc and
+        # /sys mounted (or via systemd-nspawn) so debconf can access the chroot DB.
+        #
+        # For now: write the standard Debian 12 common-* files directly.
+        # These are the exact files pam-auth-update generates on a fresh Debian 12
+        # install with the unix + systemd profiles selected.  We are NOT modifying
+        # any package-owned PAM files — we are only creating the missing generated
+        # files that libpam-runtime's postinst should have created.
+        self._write_chroot_file(
+            '/etc/pam.d/common-auth',
+            'auth\t[success=1 default=ignore]\tpam_unix.so nullok\n'
+            'auth\trequisite\t\t\tpam_deny.so\n'
+            'auth\trequired\t\t\tpam_permit.so\n'
+        )
+        self._write_chroot_file(
+            '/etc/pam.d/common-account',
+            'account\t[success=1 new_authtok_reqd=done default=ignore]\tpam_unix.so\n'
+            'account\trequisite\t\t\t\t\tpam_deny.so\n'
+            'account\trequired\t\t\t\t\tpam_permit.so\n'
+        )
+        self._write_chroot_file(
+            '/etc/pam.d/common-session',
+            'session\t[default=1]\t\tpam_permit.so\n'
+            'session\trequisite\t\tpam_deny.so\n'
+            'session\trequired\t\tpam_permit.so\n'
+            'session\toptional\t\tpam_systemd.so\n'
+        )
+        self._write_chroot_file(
+            '/etc/pam.d/common-password',
+            'password\t[success=1 default=ignore]\tpam_unix.so obscure yescrypt\n'
+            'password\trequisite\t\t\tpam_deny.so\n'
+            'password\trequired\t\t\tpam_permit.so\n'
+        )
+        self._write_chroot_file(
+            '/etc/pam.d/common-session-noninteractive',
+            'session\t[default=1]\t\tpam_permit.so\n'
+            'session\trequisite\t\tpam_deny.so\n'
+            'session\trequired\t\tpam_permit.so\n'
+        )
+        tui.console.print("PAM common files written (temporary — see TODO)")
+
+        # Forward all journal entries to /dev/console (= ttyS0 via console=ttyS0
+        # kernel cmdline) so auth/PAM failures are visible on serial output
+        # even when autologin is broken and no interactive login is possible.
+        self._write_chroot_file(
+            '/etc/systemd/journald.conf.d/50-console.conf',
+            '[Journal]\n'
+            'ForwardToConsole=yes\n'
+            'MaxLevelConsole=info\n'
+        )
+        tui.console.print("journald console forwarding configured (ttyS0)")
+
+        _proc = subprocess.run(
+            ['sudo', '-S', 'systemd-firstboot',
+             f'--root={self.__dir_chroot}',
+             '--root-password=root',
+             '--hostname=athena',
+             '--timezone=UTC',
+             '--setup-machine-id',
+             '--force'],
+            input=self.__password + '\n',
+            capture_output=True, text=True
+        )
+        if _proc.returncode != 0:
+            tui.console.print(f"WARNING: systemd-firstboot failed: {_proc.stderr.strip()}")
+            tui.console.warning(f"systemd-firstboot stderr: {_proc.stderr.strip()}")
+        else:
+            tui.console.print("systemd-firstboot: root password / hostname / machine-id configured")
+
         tui.console.print("System configuration files written")
 
     def _write_chroot_file(self, rel_path: str, content: str):
@@ -1439,12 +1525,20 @@ class BuildSystem:
         # under /live/filesystem.squashfs on the boot device and mounts it as
         # the root filesystem with overlayfs.
         cfg = self.__config
+        # Strip any stray quotes that may be embedded in the config values
+        # (e.g. VERSION = "0.1" parsed with the surrounding quotes intact).
+        _codename = cfg.build_codename.strip('"').strip("'")
+        _version  = cfg.build_version.strip('"').strip("'")
         _grub_cfg = (
             'set default=0\n'
             'set timeout=5\n'
             '\n'
-            f'menuentry "{cfg.build_codename} {cfg.build_version}" {{\n'
-            '    linux  /boot/vmlinuz boot=live quiet splash\n'
+            f'menuentry "{_codename} {_version}" {{\n'
+            # boot=live   — triggers live-boot to find and mount the squashfs root
+            # components  — tells live-boot to activate all its hook scripts
+            # console=tty0 — ensures kernel messages go to the screen (visible in QEMU)
+            # nomodeset   — disables KMS; prevents blank/garbled screen in QEMU/VMs
+            '    linux  /boot/vmlinuz boot=live components username=root console=tty0 nomodeset\n'
             '    initrd /boot/initrd.img\n'
             '}\n'
         )
@@ -1453,14 +1547,30 @@ class BuildSystem:
         tui.console.print("grub.cfg written")
 
         # ── Step 5: create squashfs ───────────────────────────────────────────
-        # Runtime virtual directories are excluded — live-boot mounts these
-        # fresh at boot.  -noappend overwrites any previous squashfs.
-        _squashfs     = os.path.join(_staging_live, 'filesystem.squashfs')
-        _squash_log   = os.path.join(self.__dir_log, 'mksquashfs.log')
-        _runtime_dirs = ['proc', 'sys', 'dev', 'run', 'tmp']
+        # Runtime virtual directories (proc, sys, dev, run, tmp) must NOT be
+        # excluded as directories — live-boot's initramfs bind-mounts /dev,
+        # /proc, /sys, /run into the new root and needs those directories to
+        # exist as mount points inside the squashfs.  We only exclude their
+        # CONTENTS (which are empty after _umount_chroot_fs anyway) by passing
+        # each entry inside the dir rather than the dir itself.
+        # -noappend overwrites any previous squashfs.
+        _squashfs   = os.path.join(_staging_live, 'filesystem.squashfs')
+        _squash_log = os.path.join(self.__dir_log, 'mksquashfs.log')
+
+        # Collect any actual files inside the runtime dirs to exclude (normally
+        # empty after unmounting, but defensive in case something was left).
         _exclude_args = []
-        for _d in _runtime_dirs:
-            _exclude_args += ['-e', os.path.join(self.__dir_chroot, _d)]
+        for _d in ['proc', 'sys', 'dev', 'run', 'tmp']:
+            _dir_path = os.path.join(self.__dir_chroot, _d)
+            if not os.path.isdir(_dir_path):
+                continue
+            try:
+                for _entry in os.listdir(_dir_path):
+                    _exclude_args += ['-e', os.path.join(_dir_path, _entry)]
+            except PermissionError:
+                # dev/* may have root-owned nodes — exclude the whole dir's
+                # contents via a glob pattern as a fallback
+                _exclude_args += ['-e', os.path.join(_dir_path, '*')]
 
         tui.console.print("Creating squashfs — this may take several minutes...")
         _cmd = (
@@ -1485,7 +1595,7 @@ class BuildSystem:
         # grub-mkrescue produces a hybrid image bootable on BIOS and UEFI
         # systems.  It requires grub-pc-bin, grub-efi-amd64-bin, and xorriso
         # to be installed on the host.
-        _iso_name   = f"athena-{cfg.build_version}-amd64.iso"
+        _iso_name   = f"athena-{_version}-amd64.iso"
         _iso_path   = os.path.join(self.__dir_image, _iso_name)
         _grub_log   = os.path.join(self.__dir_log, 'grub-mkrescue.log')
 

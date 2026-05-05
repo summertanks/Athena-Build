@@ -8,6 +8,11 @@ grub-efi-amd64
 live-boot
 live-boot-initramfs-tools
 
+# Live session configuration — creates live user, autologin, locale at boot
+live-config
+live-config-systemd
+user-setup
+
 # Essential Packages
 base-files
 base-passwd
@@ -55,6 +60,9 @@ initramfs-tools
 
 # Remote access
 openssh-server
+
+# required for login
+dbus
 
 # simplifying package selection
 dialog
