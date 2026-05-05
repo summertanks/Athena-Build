@@ -1336,64 +1336,6 @@ class BuildSystem:
             f'deb {_sec} {cfg.basecodename}-security {_comp}\n'
         ))
 
-        # Run update-locale inside the chroot so /etc/default/locale is created
-        # by the proper tool (same as locales postinst does on a normal install).
-        _proc = subprocess.run(
-            ['sudo', '-S', 'chroot', self.__dir_chroot,
-             '/usr/sbin/update-locale', 'LANG=C.UTF-8'],
-            input=self.__password + '\n',
-            capture_output=True, text=True
-        )
-        if _proc.returncode != 0:
-            tui.console.print("WARNING: update-locale failed — /etc/default/locale not created")
-            tui.console.warning(f"update-locale: {_proc.stderr.strip()}")
-        else:
-            tui.console.print("Locale configured: LANG=C.UTF-8")
-
-        # TODO: replace these manual writes with a proper pam-auth-update call.
-        # pam-auth-update --root {chroot} --package --force is the correct tool
-        # but requires debconf and fails silently when called from the host against
-        # the chroot.  The right fix is to run it inside a chroot with /proc and
-        # /sys mounted (or via systemd-nspawn) so debconf can access the chroot DB.
-        #
-        # For now: write the standard Debian 12 common-* files directly.
-        # These are the exact files pam-auth-update generates on a fresh Debian 12
-        # install with the unix + systemd profiles selected.  We are NOT modifying
-        # any package-owned PAM files — we are only creating the missing generated
-        # files that libpam-runtime's postinst should have created.
-        self._write_chroot_file(
-            '/etc/pam.d/common-auth',
-            'auth\t[success=1 default=ignore]\tpam_unix.so nullok\n'
-            'auth\trequisite\t\t\tpam_deny.so\n'
-            'auth\trequired\t\t\tpam_permit.so\n'
-        )
-        self._write_chroot_file(
-            '/etc/pam.d/common-account',
-            'account\t[success=1 new_authtok_reqd=done default=ignore]\tpam_unix.so\n'
-            'account\trequisite\t\t\t\t\tpam_deny.so\n'
-            'account\trequired\t\t\t\t\tpam_permit.so\n'
-        )
-        self._write_chroot_file(
-            '/etc/pam.d/common-session',
-            'session\t[default=1]\t\tpam_permit.so\n'
-            'session\trequisite\t\tpam_deny.so\n'
-            'session\trequired\t\tpam_permit.so\n'
-            'session\toptional\t\tpam_systemd.so\n'
-        )
-        self._write_chroot_file(
-            '/etc/pam.d/common-password',
-            'password\t[success=1 default=ignore]\tpam_unix.so obscure yescrypt\n'
-            'password\trequisite\t\t\tpam_deny.so\n'
-            'password\trequired\t\t\tpam_permit.so\n'
-        )
-        self._write_chroot_file(
-            '/etc/pam.d/common-session-noninteractive',
-            'session\t[default=1]\t\tpam_permit.so\n'
-            'session\trequisite\t\tpam_deny.so\n'
-            'session\trequired\t\tpam_permit.so\n'
-        )
-        tui.console.print("PAM common files written (temporary — see TODO)")
-
         # Forward all journal entries to /dev/console (= ttyS0 via console=ttyS0
         # kernel cmdline) so auth/PAM failures are visible on serial output
         # even when autologin is broken and no interactive login is possible.
@@ -1411,6 +1353,7 @@ class BuildSystem:
              '--root-password=root',
              '--hostname=athena',
              '--timezone=UTC',
+             '--locale=C.UTF-8',
              '--setup-machine-id',
              '--force'],
             input=self.__password + '\n',
