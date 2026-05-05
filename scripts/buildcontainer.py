@@ -143,6 +143,29 @@ class BuildContainer:
             f'for PATCH in {" ".join(src_pkg.patch_list)}; do patch -p1 < /patch/"$PATCH"; done; '
             if src_pkg.patch_list else ''
         )
+
+        # A few packages (notably pam) ship a second quilt-managed patch series
+        # at debian/patches-applied/series in addition to debian/patches/series.
+        # dpkg-source only applies debian/patches/series during 3.0 (quilt)
+        # extraction, and dh_quilt_patch in such packages silently no-ops because
+        # the .pc/ directory is already pinned to debian/patches/.  The result
+        # is a half-patched source tree (e.g. pam without 031_pam_include, which
+        # adds @include directive support to libpam → broken /etc/pam.d/login).
+        #
+        # Apply debian/patches-applied/ ourselves before our custom /patch/
+        # patches and before dpkg-buildpackage.  For packages without this
+        # directory the [ -f ... ] guard skips the loop entirely.
+        patches_applied_cmd = (
+            'if [ -f debian/patches-applied/series ]; then '
+            'echo "Applying debian/patches-applied/ series"; '
+            'while IFS= read -r p; do '
+            '[ -z "$p" ] && continue; '
+            '[ "${p#\\#}" != "$p" ] && continue; '
+            'p="${p% }"; '
+            'patch -p1 -N -i "debian/patches-applied/$p"; '
+            'done < debian/patches-applied/series; '
+            'fi; '
+        )
         _dep_install = (f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_apt_retry}install {" ".join(_plain_deps)}; ' if _plain_deps else '') + \
                        ('; '.join(_or_cmds) + '; ' if _or_cmds else '')
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
@@ -151,8 +174,9 @@ class BuildContainer:
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
                   f'cd {_filename_prefix}; ' \
+                  f'{patches_applied_cmd}' \
                   f'{patch_cmd}' \
-                  f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -us -uc; cd ..;' \
+                  f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -us -uc -nc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'
 
         try:
