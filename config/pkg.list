@@ -42,6 +42,7 @@ gawk
 # Init System
 systemd-sysv
 libsystemd0
+libpam-systemd
 
 bash
 bsdutils
