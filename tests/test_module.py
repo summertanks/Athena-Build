@@ -166,6 +166,53 @@ def test_package_and_source_have_mirror_field():
     assert src._mirror is None
 
 
+def test_source_parses_security_stanza_without_files_field():
+    """bookworm-security source stanzas drop the legacy MD5 'Files:' field
+    and ship only 'Checksums-Sha256:'.  The Source parser must accept this
+    and build self.files from the sha256 entries."""
+    import package
+    stanza = (
+        "Package: openssh\n"
+        "Version: 1:9.2p1-2+deb12u9\n"
+        "Architecture: any all\n"
+        "Directory: pool/updates/main/o/openssh\n"
+        "Checksums-Sha256:\n"
+        " d0fa1ecc55cdfc7d82db05d9cedc52ec96d0641c2cd2b283446df5d73e09534e 3327 openssh_9.2p1-2+deb12u9.dsc\n"
+        " 3f66dbf1655fb45f50e1c56da62ab01218c228807b21338d634ebcdf9d71cf46 1852380 openssh_9.2p1.orig.tar.gz\n"
+    )
+    src = package.Source(stanza)
+    assert src.isvalid, f"Source invalid: {src._err_str}"
+    assert src.package == 'openssh'
+    assert 'openssh_9.2p1-2+deb12u9.dsc' in src.files
+    dsc = src.files['openssh_9.2p1-2+deb12u9.dsc']
+    assert dsc['sha256'] == 'd0fa1ecc55cdfc7d82db05d9cedc52ec96d0641c2cd2b283446df5d73e09534e'
+    assert dsc['size'] == 3327
+    assert dsc['md5'] == ''  # no Files: → no MD5 available
+    assert dsc['path'] == 'pool/updates/main/o/openssh/openssh_9.2p1-2+deb12u9.dsc'
+
+
+def test_source_parses_main_stanza_with_both_files_and_sha256():
+    """bookworm main still ships both Files: (MD5) and Checksums-Sha256:.
+    The parser must populate both md5 and sha256."""
+    import package
+    stanza = (
+        "Package: hello\n"
+        "Version: 2.10-3\n"
+        "Architecture: any\n"
+        "Directory: pool/main/h/hello\n"
+        "Files:\n"
+        " aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 100 hello_2.10-3.dsc\n"
+        "Checksums-Sha256:\n"
+        " bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 100 hello_2.10-3.dsc\n"
+    )
+    src = package.Source(stanza)
+    assert src.isvalid, f"Source invalid: {src._err_str}"
+    f = src.files['hello_2.10-3.dsc']
+    assert f['md5']    == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    assert f['sha256'] == 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    assert f['size']   == 100
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,6 +226,8 @@ def main() -> int:
         test_buildconfig_parses_three_mirrors,
         test_buildconfig_rejects_no_mirrors,
         test_package_and_source_have_mirror_field,
+        test_source_parses_security_stanza_without_files_field,
+        test_source_parses_main_stanza_with_both_files_and_sha256,
     ]
     failures = 0
     for t in tests:

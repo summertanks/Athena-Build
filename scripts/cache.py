@@ -1,4 +1,4 @@
-import bz2, gzip
+import bz2, gzip, lzma
 import os
 import shutil
 import apt_pkg
@@ -48,17 +48,27 @@ class Cache:
             return
 
         # All configured mirrors (main, updates, security) — ingested in
-        # declaration order.
+        # declaration order.  If snapshot pinning is enabled, every mirror's
+        # baseurl is rewritten to point at snapshot.debian.org/archive/...
+        # before any URL is composed downstream; with_snapshot(None) is a
+        # no-op so the assignment is unconditional.
         self.cache_dir = buildconfig.dir_cache
-        self.mirrors = buildconfig.mirrors
-
-        # Compression
-        self.supported_compression = ['.gz', '.bz2']
-        self.compression = '.gz'
-        if self.compression not in self.supported_compression:
-            self.error_str = f"Unsupported compression '{self.compression}' specified"
+        try:
+            self.snapshot_ts: Optional[str] = utils.resolve_snapshot_timestamp(buildconfig)
+        except (RuntimeError, ValueError) as e:
+            self.error_str = f"Snapshot resolution failed: {e}"
             tui.console.error(self.error_str)
             return
+        self.mirrors = [m.with_snapshot(self.snapshot_ts) for m in buildconfig.mirrors]
+
+        # Compression: tried in this order per file; first one listed in the
+        # mirror's InRelease wins.  bookworm-updates / bookworm-security ship
+        # only .xz; main ships all three.
+        self._compression_openers = [
+            ('.xz',  lzma.open),
+            ('.gz',  gzip.open),
+            ('.bz2', bz2.open),
+        ]
 
         # Per-mirror cache file paths: {mirror_id: {'Packages': path, 'Sources': path}}
         self.mirror_cache_files: Dict[str, Dict[str, str]] = {}
@@ -121,21 +131,8 @@ class Cache:
             try:
                 with open(_release_file, 'r') as fh:
                     rel = Release(fh)
-                    for _path in _ctrl:
-                        _sha256 = [line['sha256'] for line in rel['SHA256'] if line['name'] == _path]
-                        if len(_sha256) == 0:
-                            self.error_str = f"File ({_path}) not found in {_release_file}"
-                            return -1
-                        if len(_sha256) > 1:
-                            self.error_str = f"Multiple instances for {_path} in {_release_file}"
-                            return -1
-                        _ctrl[_path] = _sha256[0]
             except (FileNotFoundError, PermissionError, OSError) as e:
                 self.error_str = f"Cannot read release file: {e}"
-                tui.console.error(self.error_str)
-                return -1
-            except KeyError as e:
-                self.error_str = f"Missing field in release file: {e}"
                 tui.console.error(self.error_str)
                 return -1
             except Exception as e:
@@ -143,39 +140,55 @@ class Cache:
                 tui.console.error(self.error_str)
                 return -1
 
+            try:
+                _rel_sha = {line['name']: line['sha256'] for line in rel['SHA256']}
+            except KeyError as e:
+                self.error_str = f"Missing SHA256 field in {_release_file}: {e}"
+                tui.console.error(self.error_str)
+                return -1
+
             _mirror_files: Dict[str, str] = {}
-            for _path, _expected_sha in _ctrl.items():
-                _src_url = _base_url + _path + self.compression
-                _dst     = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(_base_url + _path))
+            for _path in _ctrl:
+                _expected_uncompressed_sha = _rel_sha.get(_path, '')
+                _dst = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(_base_url + _path))
 
-                if utils.get_sha256(_dst) != _expected_sha:
-                    if utils.download_file(_src_url, _dst + self.compression) <= 0:
-                        self.error_str = f"Error downloading file {_src_url}"
-                        return -1
-                    tui.console.print(f'Downloaded {_src_url}')
-
-                    try:
-                        if self.compression == '.gz':
-                            with gzip.open(_dst + self.compression, 'rb') as f_in:
-                                with open(_dst, 'wb') as f_out:
-                                    shutil.copyfileobj(f_in, f_out)
-                        elif self.compression == '.bz2':
-                            with bz2.open(_dst + self.compression, 'rb') as f_in:
-                                with open(_dst, 'wb') as f_out:
-                                    shutil.copyfileobj(f_in, f_out)
-                        else:
-                            self.error_str = f'Unsupported extension {self.compression}'
-                            tui.console.error(self.error_str)
-                            return -1
-                    except (OSError, EOFError) as e:
-                        self.error_str = f"Failed to decompress {os.path.basename(_dst)}: {e}"
-                        tui.console.error(self.error_str)
-                        return -1
-                else:
+                if _expected_uncompressed_sha and utils.get_sha256(_dst) == _expected_uncompressed_sha:
                     tui.console.print(f'Skipping download for {os.path.basename(_dst)}')
+                    _mirror_files[_path.rsplit('/', 1)[-1]] = _dst
+                    continue
 
-                # Map the basename of the relative path ("Packages"/"Sources")
-                # to the local file path so __build_cache can find it.
+                # Pick a compressed variant the mirror actually publishes.
+                # bookworm-updates / bookworm-security ship .xz only; main
+                # ships all three.
+                _chosen_ext = None
+                _chosen_opener = None
+                for _ext, _opener in self._compression_openers:
+                    if (_path + _ext) in _rel_sha:
+                        _chosen_ext = _ext
+                        _chosen_opener = _opener
+                        break
+                if _chosen_ext is None:
+                    self.error_str = (f"No supported compression for {_path} in {_release_file} — "
+                                      f"tried {[e for e, _ in self._compression_openers]}")
+                    tui.console.error(self.error_str)
+                    return -1
+
+                _src_url = _base_url + _path + _chosen_ext
+                _compressed_dst = _dst + _chosen_ext
+                if utils.download_file(_src_url, _compressed_dst) <= 0:
+                    self.error_str = f"Error downloading file {_src_url}"
+                    return -1
+                tui.console.print(f'Downloaded {_src_url}')
+
+                try:
+                    with _chosen_opener(_compressed_dst, 'rb') as f_in:
+                        with open(_dst, 'wb') as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                except (OSError, EOFError, lzma.LZMAError) as e:
+                    self.error_str = f"Failed to decompress {os.path.basename(_compressed_dst)}: {e}"
+                    tui.console.error(self.error_str)
+                    return -1
+
                 _mirror_files[_path.rsplit('/', 1)[-1]] = _dst
 
             self.mirror_cache_files[_mirror.id] = _mirror_files

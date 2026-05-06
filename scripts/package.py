@@ -433,9 +433,17 @@ class Source(Sources):
                 tui.console.print(f"WARNING: {self._err_str}")
                 return
 
-        if 'Files' not in self or self['Files'] is None:
+        # Either 'Files' (legacy MD5 list) or 'Checksums-Sha256' must be
+        # present so we know what to download.  bookworm-security drops the
+        # MD5 list entirely; main still ships both.  We treat
+        # 'Checksums-Sha256' as canonical (it's what download_source
+        # verifies against), with 'Files' contributing optional MD5s.
+        _has_sha256 = bool(self.get('Checksums-Sha256'))
+        _has_md5    = bool(self.get('Files'))
+        if not _has_sha256 and not _has_md5:
             _pkg_name = self.get('Package', '<unknown>')
-            self._err_str = f"Missing 'Files' field in source '{_pkg_name}'"
+            self._err_str = (f"Source '{_pkg_name}' has neither 'Files' nor "
+                             f"'Checksums-Sha256' — no way to verify downloads")
             tui.console.print(f"WARNING: {self._err_str}")
             return
 
@@ -450,18 +458,28 @@ class Source(Sources):
         self.directory = self['Directory']
 
         try:
-            _sha256_map: Dict[str, str] = {}
-            for _entry in (self.get('Checksums-Sha256') or []):
-                _sha256_map[_entry['name']] = _entry['sha256']
+            _md5_map: Dict[str, str] = {}
+            _size_map: Dict[str, int] = {}
+            for _entry in (self.get('Files') or []):
+                _md5_map[_entry['name']]  = _entry['md5sum']
+                _size_map[_entry['name']] = int(_entry['size'])
+
+            # Build authoritative list from sha256 entries; fall back to MD5
+            # entries if sha256 is absent (shouldn't happen on modern Debian
+            # but keeps the parser tolerant).
+            _entries = list(self.get('Checksums-Sha256') or []) or [
+                {'name': e['name'], 'size': e['size'], 'sha256': ''}
+                for e in (self.get('Files') or [])
+            ]
 
             self.files: Dict[str, Dict[str, Any]] = {
                 _entry['name']: {
-                    'md5':    _entry['md5sum'],
-                    'sha256': _sha256_map.get(_entry['name'], ''),
-                    'size':   int(_entry['size']),
+                    'md5':    _md5_map.get(_entry['name'], ''),
+                    'sha256': _entry.get('sha256', ''),
+                    'size':   int(_entry.get('size', _size_map.get(_entry['name'], 0))),
                     'path':   self['Directory'].rstrip('/') + '/' + _entry['name'],
                 }
-                for _entry in self['Files']
+                for _entry in _entries
             }
         except (KeyError, ValueError, TypeError) as e:
             self._err_str = f"Failed to parse Files/Checksums for source '{self.package}': {e}"
