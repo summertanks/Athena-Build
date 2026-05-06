@@ -322,10 +322,12 @@ def cmd_print(category: str = ''):
     if category == 'config':
         console.print("Build Configuration:")
         console.print(f"    Arch                : {build_config.arch}")
-        console.print(f"    Base URL            : {build_config.baseurl}")
-        console.print(f"    Base ID             : {build_config.baseid}")
-        console.print(f"    Parent codename     : {build_config.basecodename}")
+        console.print(f"    Release             : {build_config.release}")
+        console.print(f"    Base ID (default)   : {build_config.baseid}")
         console.print(f"    Parent version      : {build_config.baseversion}")
+        console.print(f"    Mirrors             :")
+        for _m in build_config.mirrors:
+            console.print(f"      [{_m.id:8}] {_m.url}  {_m.suite}  {_m.component}")
         console.print(f"    Build codename      : {build_config.build_codename}")
         console.print(f"    Build version       : {build_config.build_version}")
         console.print(f"    Config file         : {build_config.config_path}")
@@ -385,7 +387,7 @@ def cmd_source_download():
                   f"Used: {_used // (2**30)} GiB, Free: {_free // (2**30)} GiB")
 
     console.print("Starting downloads...")
-    _downloaded_size = utils.download_source(dependency_tree, build_config.dir_source, build_cache.base)
+    _downloaded_size = utils.download_source(dependency_tree, build_config.dir_source)
 
     # A size mismatch usually means a network interruption or a package whose
     # expected size in the index differs from what the mirror actually served.
@@ -451,8 +453,13 @@ def _do_tunnel(src_pkg) -> bool:
         console.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
         return False
 
-    # Construct the pool base URL from the configured mirror.
-    _base = f"https://{build_config.baseurl}/debian"
+    # Construct the pool base URL from the source's origin mirror.  This
+    # matters for sources in bookworm-security, whose pool lives at a
+    # different baseid than main.
+    if src_pkg._mirror is None:
+        console.error(f"tunnel {src_pkg.package}: source has no _mirror — cache ingest bug")
+        return False
+    _base = src_pkg._mirror.url
     _success = True
 
     for _filename in src_pkg.pkgs:
@@ -933,7 +940,7 @@ def main(banner: str):
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Source Build System for Athena Linux...", tui.COLOR_HIGHLIGHT)
     console.print(f"\tArch\t\t\t{build_config.arch}")
-    console.print(f"\tParent Distribution\t{build_config.basecodename} {build_config.baseversion}")
+    console.print(f"\tParent Distribution\t{build_config.release} {build_config.baseversion}")
     console.print(f"\tBuild Distribution\t{build_config.build_codename} {build_config.build_version}")
 
     _tui.wait()

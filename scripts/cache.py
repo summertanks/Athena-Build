@@ -3,11 +3,10 @@ import os
 import shutil
 import apt_pkg
 
-from urllib.parse import urlsplit
 from debian.deb822 import Release
 from debian.debian_support import DpkgArchTable, Version
 from typing import List, Dict, Optional
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 
 # Internal
 import utils, package, tui
@@ -30,12 +29,11 @@ class Cache:
     _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
 
     def __init__(self, buildconfig: BuildConfig):
-        """Builds the Cache. Release file is used based on BaseDistribution defined
-            Args:
-                base (BaseDistribution): details of the system being derived from
-                cache_dir (str): Dir where cache files are to be downloaded
-
-            Returns:
+        """Builds the Cache by fetching Packages + Sources for every Mirror
+        configured in [Mirror.*] (typically main + updates + security).
+        Records are merged into a single hashtable; multiple versions for the
+        same package name coexist as separate version keys, so the solver can
+        pick the higher one (security/updates always > main).
         """
 
         # Set when config is validated
@@ -49,11 +47,10 @@ class Cache:
             tui.console.error(self.error_str)
             return
 
-        # Base Distribution
+        # All configured mirrors (main, updates, security) — ingested in
+        # declaration order.
         self.cache_dir = buildconfig.dir_cache
-        self.base = utils.BaseDistribution(url=buildconfig.baseurl, baseid=buildconfig.baseid,
-                                           codename=buildconfig.basecodename, version=buildconfig.baseversion,
-                                           arch=buildconfig.arch)
+        self.mirrors = buildconfig.mirrors
 
         # Compression
         self.supported_compression = ['.gz', '.bz2']
@@ -63,31 +60,13 @@ class Cache:
             tui.console.error(self.error_str)
             return
 
-        # Protocol
-        self.supported_protocol = ['http://', 'https://']
-        self.protocol = 'http://'
-        if self.protocol not in self.supported_protocol:
-            self.error_str = f"Unsupported protocol '{self.protocol}' specified"
-            tui.console.error(self.error_str)
-            return
-
-        # Control files
-        # TODO: currently, only for main, add for update & security repo too
-        self.control_files = OrderedDict.fromkeys(
-            ['main/binary-' + self.base.arch + '/Packages', 'main/source/Sources']
-        )
-
-        # Outputs file list
-        self.cache_files: Dict[str, str] = {}
+        # Per-mirror cache file paths: {mirror_id: {'Packages': path, 'Sources': path}}
+        self.mirror_cache_files: Dict[str, Dict[str, str]] = {}
 
         # InRelease info
         self.release_info = ''
 
         # Cache data
-        self.__package_file = ''
-        self.__source_file = ''
-        self.__package_records = []
-        self.__source_records = []
         self.pkg_list = []
         self.src_list = []
         
@@ -117,251 +96,210 @@ class Cache:
         return self._config_valid
 
     def __get_files(self) -> int:
+        """Fetch InRelease + Packages + Sources for every configured mirror.
 
-        __base_url = self.protocol + self.base.url + '/' + self.base.baseid + '/dists/' + self.base.codename + '/'
+        Each mirror writes to its own cache files (filenames disambiguated by
+        apt_pkg.uri_to_filename, which encodes the full URL).  Per-mirror
+        SHA256 from the mirror's own InRelease gates the (re)download.
+        """
+        for _mirror in self.mirrors:
+            _base_url     = _mirror.dist_url
+            _release_url  = _base_url + 'InRelease'
+            _release_file = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(_release_url))
 
-        # Defaults for release file
-        __release_url = __base_url + 'InRelease'
-        __release_file = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(__release_url))
+            # Per-mirror control files: relative path → expected sha256 (filled below)
+            _ctrl: Dict[str, str] = {
+                _mirror.packages_path: '',
+                _mirror.sources_path:  '',
+            }
 
-        # Setup files - Sequence is Packages & Sources, you change it you break it
-        __cache_source: List[str] = []
-        __cache_destination: List[str] = []
-        
-        for _file in self.control_files:
-            __cache_source.append(__base_url + _file + self.compression)
-            __cache_destination.append(os.path.join(self.cache_dir, apt_pkg.uri_to_filename(__base_url + _file)))
+            if utils.download_file(_release_url, _release_file) <= 0:
+                self.error_str = f"Error downloading release file from {_release_url}"
+                return -1
+            tui.console.print(f'Downloaded {_release_file}')
 
-        # By default, download release file
-        if utils.download_file(__release_url, __release_file) <= 0:
-            self.error_str = f"Error downloading release file from {__release_url}"
-            return -1
-        tui.console.print(f'Downloaded {__release_file}')
+            try:
+                with open(_release_file, 'r') as fh:
+                    rel = Release(fh)
+                    for _path in _ctrl:
+                        _sha256 = [line['sha256'] for line in rel['SHA256'] if line['name'] == _path]
+                        if len(_sha256) == 0:
+                            self.error_str = f"File ({_path}) not found in {_release_file}"
+                            return -1
+                        if len(_sha256) > 1:
+                            self.error_str = f"Multiple instances for {_path} in {_release_file}"
+                            return -1
+                        _ctrl[_path] = _sha256[0]
+            except (FileNotFoundError, PermissionError, OSError) as e:
+                self.error_str = f"Cannot read release file: {e}"
+                tui.console.error(self.error_str)
+                return -1
+            except KeyError as e:
+                self.error_str = f"Missing field in release file: {e}"
+                tui.console.error(self.error_str)
+                return -1
+            except Exception as e:
+                self.error_str = f"Error parsing release file: {e}"
+                tui.console.error(self.error_str)
+                return -1
 
-        # Extract the SHA256 for the files from the release file
-        try:
-            with open(__release_file, 'r') as fh:
-                rel = Release(fh)
-                for _file in self.control_files:
-                    # Check if file is present in release file
-                    _sha256 = [line['sha256'] for line in rel['SHA256'] if line['name'] == _file]
-                    if len(_sha256) == 0:
-                        self.error_str = f"File ({_file}) not found in release file"
+            _mirror_files: Dict[str, str] = {}
+            for _path, _expected_sha in _ctrl.items():
+                _src_url = _base_url + _path + self.compression
+                _dst     = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(_base_url + _path))
+
+                if utils.get_sha256(_dst) != _expected_sha:
+                    if utils.download_file(_src_url, _dst + self.compression) <= 0:
+                        self.error_str = f"Error downloading file {_src_url}"
                         return -1
+                    tui.console.print(f'Downloaded {_src_url}')
 
-                    # If multiple instances found, raise error
-                    if len(_sha256) > 1:
-                        self.error_str = f"Multiple instances for {_file} found in release file"
-                        return -1
-
-                    self.control_files[_file] = _sha256[0]
-
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            self.error_str = f"Cannot read release file: {e}"
-            tui.console.error(self.error_str)
-            return -1
-        except KeyError as e:
-            self.error_str = f"Missing field in release file: {e}"
-            tui.console.error(self.error_str)
-            return -1
-        except Exception as e:
-            self.error_str = f"Error parsing release file: {e}"
-            tui.console.error(self.error_str)
-            return -1
-
-        _iter_control_file = iter(self.control_files)
-
-        # Iterate over uncompressed destination files
-        for _file in __cache_destination:
-            
-            # get hash
-            sha256_check = utils.get_sha256(_file)
-            index = __cache_destination.index(_file)
-            control_files_key = next(_iter_control_file)
-            _sha256 = self.control_files[control_files_key]
-
-            if _sha256 != sha256_check:
-                # download given file to location
-                if (utils.download_file(__cache_source[index], __cache_destination[index] + self.compression)) <= 0:
-                    self.error_str = f"Error downloading file {__cache_source[index]}"
-                    return -1
-                tui.console.print(f'Downloaded {__cache_source[index]}')
-
-                # decompress file based on extension
-                try:
-                    if self.compression == '.gz':
-                        with gzip.open(_file + self.compression, 'rb') as f_in:
-                            with open(_file, 'wb') as f_out:
-                                shutil.copyfileobj(f_in, f_out)
-
-                    elif self.compression == '.bz2':
-                        with bz2.open(_file + self.compression, 'rb') as f_in:
-                            with open(_file, 'wb') as f_out:
-                                shutil.copyfileobj(f_in, f_out)
-
-                    elif self.compression == '':
-                        # if no ext leave as such
-                        pass
-                        # XXX: check if other extensions are required to be supported
-
-                    else:
-                        self.error_str = f'Unsupported extension {self.compression}'
+                    try:
+                        if self.compression == '.gz':
+                            with gzip.open(_dst + self.compression, 'rb') as f_in:
+                                with open(_dst, 'wb') as f_out:
+                                    shutil.copyfileobj(f_in, f_out)
+                        elif self.compression == '.bz2':
+                            with bz2.open(_dst + self.compression, 'rb') as f_in:
+                                with open(_dst, 'wb') as f_out:
+                                    shutil.copyfileobj(f_in, f_out)
+                        else:
+                            self.error_str = f'Unsupported extension {self.compression}'
+                            tui.console.error(self.error_str)
+                            return -1
+                    except (OSError, EOFError) as e:
+                        self.error_str = f"Failed to decompress {os.path.basename(_dst)}: {e}"
                         tui.console.error(self.error_str)
                         return -1
-                except (OSError, EOFError) as e:
-                    self.error_str = f"Failed to decompress {os.path.basename(_file)}: {e}"
-                    tui.console.error(self.error_str)
-                    return -1
-            else:
-                tui.console.print(f'Skipping download for {os.path.basename(__cache_destination[index])}')
+                else:
+                    tui.console.print(f'Skipping download for {os.path.basename(_dst)}')
 
-            # List of cache files are in the sequence specified earlier
-            self.cache_files[urlsplit(control_files_key).path.split('/')[-1]] = _file
+                # Map the basename of the relative path ("Packages"/"Sources")
+                # to the local file path so __build_cache can find it.
+                _mirror_files[_path.rsplit('/', 1)[-1]] = _dst
 
-        tui.console.print("Using Release File")
-        tui.console.print('\tOrigin: {Origin}\n\tCodename: {Codename}\n\tVersion: {Version}\n\tDate: {Date}'.format_map(rel))
+            self.mirror_cache_files[_mirror.id] = _mirror_files
+            tui.console.print(f"Mirror [{_mirror.id}] {_mirror.suite}: "
+                              f"{rel.get('Origin','?')} {rel.get('Codename','?')} "
+                              f"{rel.get('Version','?')} {rel.get('Date','?')}")
 
         return 0
 
     def __build_cache(self, arch: str) -> bool:
-        """Builds the cache from the control files downloaded"""
+        """Build the package + source hashtables by ingesting every mirror.
 
-        if 'Packages' not in self.cache_files:
-            self.error_str = "Missing Packages control file from cache"
-            return False
-
-        if 'Sources' not in self.cache_files:
-            self.error_str = "Missing Sources control file from cache"
-            return False
-        
-        if self.cache_files['Packages'] == '':
-            self.error_str = "Missing Packages control file from cache"
-            return False
-        
-        if self.cache_files['Sources'] == '':
-            self.error_str = "Missing Sources control file from cache"
-            return False
-        
-
-        self.__package_file = self.cache_files['Packages']
-        self.__source_file = self.cache_files['Sources']
-
-        # load data from the files
-        try:
-            self.__package_records = utils.readfile(self.__package_file).split('\n\n')
-            self.__source_records = utils.readfile(self.__source_file).split('\n\n')
-        except OSError as e:
-            self.error_str = f"Failed to read cache files: {e}"
-            tui.console.error(self.error_str)
-            return False
-
-        # create a list, since we can have duplicates
+        Mirrors are walked in declaration order.  Multiple versions of the
+        same package coexist in the hashtable (different version keys); the
+        solver picks the highest one when resolving deps.  Each parsed
+        Package/Source has its `_mirror` field stamped so consumers
+        (download_source, tunnel_package) can fetch from the right pool.
+        """
         parser_spinner = Spinner("Parsing Package Files")
-        
-        progress_bar_pkg = ProgressBar(label = f"{'Indexing Package File'}", itr_label = 'rec/s', maxvalue = len(self.__package_records))
-        for _pkg_record in self.__package_records:
-            progress_bar_pkg.step(1)
-            
-            _pkg_record = _pkg_record.strip()
-            if not _pkg_record:
-                continue
+
+        for _mirror in self.mirrors:
+            _mirror_files = self.mirror_cache_files.get(_mirror.id, {})
+            _pkg_file = _mirror_files.get('Packages', '')
+            _src_file = _mirror_files.get('Sources',  '')
+            if not _pkg_file or not _src_file:
+                self.error_str = f"Missing cache files for mirror {_mirror.id}"
+                return False
 
             try:
-                _pkg = package.Package(_pkg_record)
-            except Exception as e:
-                _first_line = _pkg_record.strip().splitlines()[0] if _pkg_record.strip() else '<empty>'
-                tui.console.warning(f"Skipping record ({type(e).__name__}: {e}) — {_first_line}")
-                continue
+                _pkg_records = utils.readfile(_pkg_file).split('\n\n')
+                _src_records = utils.readfile(_src_file).split('\n\n')
+            except OSError as e:
+                self.error_str = f"Failed to read cache files for {_mirror.id}: {e}"
+                tui.console.error(self.error_str)
+                return False
 
-            # Basic sanity check
-            if not _pkg.isvalid:
-                continue
+            progress_bar_pkg = ProgressBar(
+                label=f"Indexing {_mirror.id}/Packages",
+                itr_label='rec/s', maxvalue=len(_pkg_records))
+            for _pkg_record in _pkg_records:
+                progress_bar_pkg.step(1)
+                _pkg_record = _pkg_record.strip()
+                if not _pkg_record:
+                    continue
 
-            # 'all' = arch-independent package; always compatible with any host arch.
-            # matches_architecture() does not handle 'all' — guard it explicitly.
-            if _pkg.arch != 'all' and self._arch_table.matches_architecture(_pkg.arch, arch) is False:
-                continue
+                try:
+                    _pkg = package.Package(_pkg_record)
+                except Exception as e:
+                    _first_line = _pkg_record.splitlines()[0] if _pkg_record else '<empty>'
+                    tui.console.warning(f"Skipping record ({type(e).__name__}: {e}) — {_first_line}")
+                    continue
 
-            # add Package in hashtable
-            _package_name = _pkg.package
-            _package_ver = _pkg.version
+                if not _pkg.isvalid:
+                    continue
 
-            # Package associated with 'Package' name,
-            # Mode than one Package could be associated by same name, e.g. different version
-            self.package_hashtable[_package_name][_package_ver].append(_pkg)
+                # 'all' = arch-independent package; always compatible.
+                if _pkg.arch != 'all' and self._arch_table.matches_architecture(_pkg.arch, arch) is False:
+                    continue
 
-            # Which Package provides 'package' name
-            # get_provides() returns a list of tupple(name, version)
-            # e.g. [('acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn-bigint','1.0.0')]
-            # there can be more than one version in provided by for same package name.
-            try:
-                for _provided in _pkg.get_provides():
-                    _provided_name = _provided[0]
-                    _provided_ver = _provided[1]
+                _pkg._mirror = _mirror
 
-                    if _provided_name != _package_name:
-                        self.package_hashtable[_provided_name][_provided_ver].append(_pkg)
+                _package_name = _pkg.package
+                _package_ver  = _pkg.version
+                self.package_hashtable[_package_name][_package_ver].append(_pkg)
 
-            except Exception as e:
-                tui.console.warning(f"Skipping malformed provides for '{_pkg.package}': {e}")
+                try:
+                    for _provided_name, _provided_ver in _pkg.get_provides():
+                        if _provided_name != _package_name:
+                            self.package_hashtable[_provided_name][_provided_ver].append(_pkg)
+                except Exception as e:
+                    tui.console.warning(f"Skipping malformed provides for '{_pkg.package}': {e}")
 
-            # build the required(s) list
-            if _pkg.priority == 'required':
-                self.required.append(_package_name)
+                if _pkg.priority == 'required':
+                    self.required.append(_package_name)
+                if _pkg.priority == 'important':
+                    self.important.append(_package_name)
 
-            # Build the 'important' list
-            if _pkg.priority == 'important':
-                self.important.append(_package_name)
-                
-        progress_bar_pkg.close()
+            progress_bar_pkg.close()
 
-        tui.console.print(f'From {len(self.__package_records)} parsed {len(self.package_hashtable)} package records')
-   
-        progress_bar_src = ProgressBar(label = f"{'Indexing Source File'}", itr_label = 'rec/s', maxvalue = len(self.__source_records))
-        for _src_record in self.__source_records:
-            progress_bar_src.step(1)
+            progress_bar_src = ProgressBar(
+                label=f"Indexing {_mirror.id}/Sources",
+                itr_label='rec/s', maxvalue=len(_src_records))
+            for _src_record in _src_records:
+                progress_bar_src.step(1)
+                if _src_record.strip() == '':
+                    continue
 
-            if _src_record.strip() == '':
-                continue
+                try:
+                    _src = package.Source(_src_record)
+                except Exception as e:
+                    tui.console.warning(f"Skipping malformed source record: {e}")
+                    continue
+                if not _src.isvalid:
+                    continue
 
-            try:
-                _pkg = package.Source(_src_record)
-            except Exception as e:
-                tui.console.print(f"WARNING: Skipping malformed source record: {e}")
-                tui.console.warning(f"Record: {_src_record.split(chr(10))}")
-                continue
-            
-            if not _pkg.isvalid:
-                continue
+                _arch_match: bool = False
+                for _pkt_arch in _src.arch:
+                    # Explicit guards for arch wildcards matches_architecture
+                    # handles unreliably; fall back via `is not False` so None
+                    # (unrecognised wildcard) is a pass.
+                    if (_pkt_arch in ('all', 'any', 'linux-any', arch,
+                                      f'any-{arch}', f'linux-{arch}') or
+                            self._arch_table.matches_architecture(_pkt_arch, arch) is not False):
+                        _arch_match = True
+                        break
+                if not _arch_match:
+                    continue
 
-            # add Package in hashtable
-            _package_name = _pkg.package
+                _src._mirror = _mirror
+                self.source_hashtable[_src.package].append(_src)
 
-            _arch_match: bool = False
-            for _pkt_arch in _pkg.arch:
-                # Explicit guards for Debian arch wildcards that matches_architecture()
-                # handles unreliably (returns None or False for short arch names):
-                #   all / any        — match every arch
-                #   linux-any        — any Linux arch  (amd64 IS linux-amd64)
-                #   linux-{arch}     — full triplet form of the target arch
-                #   any-{arch}       — target cpu on any OS
-                #   {arch}           — exact short-name match
-                # Fall back to matches_architecture for anything else, using
-                # `is not False` so that None (unrecognised wildcard) is a pass.
-                if (_pkt_arch in ('all', 'any', 'linux-any', arch,
-                                  f'any-{arch}', f'linux-{arch}') or
-                        self._arch_table.matches_architecture(_pkt_arch, arch) is not False):
-                    _arch_match = True
-                    break
+            progress_bar_src.close()
 
-            if not _arch_match:
-                continue
+        # Multi-mirror ingest can record the same package under 'required'
+        # or 'important' more than once (e.g. main and security both ship it);
+        # dedup while preserving order for stable downstream iteration.
+        self.required  = list(dict.fromkeys(self.required))
+        self.important = list(dict.fromkeys(self.important))
 
-            self.source_hashtable[_package_name].append(_pkg)
-
-        progress_bar_src.close()
         parser_spinner.done()
-        tui.console.print(f'Indexed {len(self.source_hashtable)} source records')
+        tui.console.print(
+            f'Indexed {len(self.package_hashtable)} package names, '
+            f'{len(self.source_hashtable)} source names across {len(self.mirrors)} mirror(s)'
+        )
         
         # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
         # TODO: sort key x.split('-')[1] gives identical keys for gcc-10 and gcc-10-base — both yield (10,).

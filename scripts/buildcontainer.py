@@ -24,6 +24,7 @@ class BuildContainer:
         self.patch_path = config.dir_patch_source
         self.patch_empty = config.dir_patch_empty
         self.build_profiles = config.build_profiles
+        self.mirrors = config.mirrors
 
         self.client = None
 
@@ -168,7 +169,24 @@ class BuildContainer:
         )
         _dep_install = (f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_apt_retry}install {" ".join(_plain_deps)}; ' if _plain_deps else '') + \
                        ('; '.join(_or_cmds) + '; ' if _or_cmds else '')
+
+        # Pin the container's apt to the exact mirrors our cache was built
+        # from.  Without this the base image's stock sources.list (live
+        # mirror) is used, and a security update landing between our cache
+        # snapshot and the build run will produce dep version skew between
+        # the .deb we build and what the cache thinks (caught by
+        # _verify_dep_resolution).  Step 2 will swap these URLs for snapshot
+        # URLs to make the alignment durable.
+        _apt_sources = ''.join(
+            f'deb {_m.url} {_m.suite} {_m.component}\n' for _m in self.mirrors
+        )
+        _write_sources = (
+            f"sudo tee /etc/apt/sources.list >/dev/null <<'EOF'\n"
+            f"{_apt_sources}EOF\n"
+        )
+
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
+                  f'{_write_sources}' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
                   f'{_dep_install}' \
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
