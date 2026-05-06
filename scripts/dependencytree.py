@@ -14,6 +14,29 @@ import tui
 from tui import Prompt, PROMPT_OPTIONS
 
 
+def _auto_pick_candidate(candidates):
+    """Pick a unique candidate without prompting, when possible.
+
+    Returns the chosen Package if every candidate has the same Package name
+    (i.e. the only difference is version) — in that case the highest version
+    wins, matching apt's "highest version satisfying constraints" rule.
+    Within a coherent mirror set (single snapshot or a live archive at one
+    moment in time) this is always the right call.
+
+    Returns None when candidates name *different* Packages (genuine
+    alternative providers like mawk vs gawk for the virtual `awk`).  The
+    caller must prompt in that case — there is no mechanical rule.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    _names = {p['Package'] for p in candidates}
+    if len(_names) == 1:
+        return max(candidates, key=lambda p: p.version)
+    return None
+
+
 class DependencyTree:
 
     def __init__(self, cache: Cache, select_recommended: bool, arch: str,
@@ -195,17 +218,28 @@ class DependencyTree:
         elif len(_pkg_candidates) == 1:
             _selected_pkg = _pkg_candidates[0]
 
-        # Case - IV : Multiple candidates — show numbered list, prompt for index
+        # Case - IV : Multiple candidates.  If they're all the same Package
+        # name (only versions differ), auto-pick the highest — within a
+        # coherent mirror set this is always correct and matches apt.
+        # Prompt only when names differ (genuine alternative providers).
         elif len(_pkg_candidates) > 1:
-            _mark = tui.console.mark()
-            tui.console.print(f"Multiple packages satisfy '{package_name}':")
-            for _i, _pkg in enumerate(_pkg_candidates, 1):
-                tui.console.print(f"  {_i}.  {_pkg.package}  ({_pkg.version})")
-            _options = [str(_i) for _i in range(1, len(_pkg_candidates) + 1)]
-            _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_pkg_candidates)}]", _options).get_response()
-            _selected_pkg = _pkg_candidates[int(_choice) - 1]
-            tui.console.trim_to(_mark)
-            tui.console.print(f"Multiple packages satisfy '{package_name}': Selected {_selected_pkg.package} ({_selected_pkg.version})")
+            _auto = _auto_pick_candidate(_pkg_candidates)
+            if _auto is not None:
+                _selected_pkg = _auto
+                tui.console.info(
+                    f"auto-pick {_selected_pkg.package} {_selected_pkg.version} "
+                    f"from {len(_pkg_candidates)} versions of '{package_name}'"
+                )
+            else:
+                _mark = tui.console.mark()
+                tui.console.print(f"Multiple packages satisfy '{package_name}':")
+                for _i, _pkg in enumerate(_pkg_candidates, 1):
+                    tui.console.print(f"  {_i}.  {_pkg.package}  ({_pkg.version})")
+                _options = [str(_i) for _i in range(1, len(_pkg_candidates) + 1)]
+                _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_pkg_candidates)}]", _options).get_response()
+                _selected_pkg = _pkg_candidates[int(_choice) - 1]
+                tui.console.trim_to(_mark)
+                tui.console.print(f"Multiple packages satisfy '{package_name}': Selected {_selected_pkg.package} ({_selected_pkg.version})")
 
         else:  # Do not know how we got here
             tui.console.error(f"Unknown Error in Parsing dependencies: {package_name}")

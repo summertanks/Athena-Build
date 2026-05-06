@@ -328,6 +328,16 @@ def cmd_print(category: str = ''):
         console.print(f"    Mirrors             :")
         for _m in build_config.mirrors:
             console.print(f"      [{_m.id:8}] {_m.url}  {_m.suite}  {_m.component}")
+        if build_config.snapshot_enabled:
+            try:
+                _resolved = utils.resolve_snapshot_timestamp(build_config)
+            except (RuntimeError, ValueError) as e:
+                _resolved = f"<unresolved: {e}>"
+            console.print(f"    Snapshot            : enabled")
+            console.print(f"      Configured        : {build_config.snapshot_timestamp_config}")
+            console.print(f"      Resolved          : {_resolved}")
+        else:
+            console.print(f"    Snapshot            : disabled (live mirrors)")
         console.print(f"    Build codename      : {build_config.build_codename}")
         console.print(f"    Build version       : {build_config.build_version}")
         console.print(f"    Config file         : {build_config.config_path}")

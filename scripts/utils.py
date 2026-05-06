@@ -52,8 +52,189 @@ class Mirror:
     def sources_path(self) -> str:
         return f'{self.component}/source/Sources'
 
+    def with_snapshot(self, ts):
+        """Return a copy of this Mirror rewritten to snapshot.debian.org.
+
+        snapshot.debian.org preserves the full archive layout under
+            /archive/<baseid>/<TS>/dists/<suite>/...
+        so we only need to rewrite baseurl + baseid; everything else
+        (suite, component, packages_path, sources_path) is unchanged.
+        Passing ts=None returns self — call sites can use this method
+        unconditionally.
+        """
+        if ts is None:
+            return self
+        return Mirror(
+            mirror_id = self.id,
+            baseurl   = 'http://snapshot.debian.org/archive',
+            baseid    = f'{self.baseid}/{ts}',
+            release   = self.release,
+            suffix    = self.suffix,
+            component = self.component,
+            arch      = self.arch,
+        )
+
     def __repr__(self) -> str:
         return f"Mirror({self.id}: {self.url} {self.suite} {self.component})"
+
+
+# Module-level memo so resolve_snapshot_timestamp() doesn't repeat the
+# network query within one process.  Keyed by (state_file_path, config_ts)
+# so different BuildConfig instances under different cache dirs don't
+# collide in tests.
+_SNAPSHOT_TS_CACHE: dict = {}
+
+# Format check: Debian snapshot timestamps are YYYYMMDDTHHMMSSZ (15 chars).
+_SNAPSHOT_TS_RE = re.compile(r'^\d{8}T\d{6}Z$')
+
+
+def _query_snapshot_latest() -> str:
+    """Fetch the latest snapshot timestamp covering both `debian` and
+    `debian-security` archives on snapshot.debian.org.
+
+    Returns min(latest_debian, latest_debian-security) so the chosen TS is
+    valid for both archive trees (snapshot.d.o resolves a missing exact TS
+    to the nearest snapshot ≤ TS via 302, but we want the symmetric guarantee
+    that both archives have a snapshot at or before the timestamp).
+
+    Endpoint:  GET https://snapshot.debian.org/mr/timestamp/
+    Response:  {"result": {"debian": [...sorted ts list...], "debian-security": [...]}}
+    The list is sorted lexicographically which matches chronological order
+    for the YYYYMMDDTHHMMSSZ format, so `[-1]` is the latest.
+    """
+    URL = 'https://snapshot.debian.org/mr/timestamp/'
+    try:
+        resp = requests.get(URL, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        raise RuntimeError(f"Failed to query {URL}: {e}") from e
+
+    try:
+        result = data['result']
+        debian_latest   = result['debian'][-1]
+        security_latest = result['debian-security'][-1]
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(
+            f"Unexpected response shape from {URL}: {e}; top-level keys={list(data.keys())}"
+        ) from e
+
+    for _label, _ts in (('debian', debian_latest), ('debian-security', security_latest)):
+        if not _SNAPSHOT_TS_RE.match(_ts):
+            raise RuntimeError(
+                f"snapshot.d.o returned malformed timestamp for {_label}: {_ts!r}"
+            )
+
+    # Lexical min == chronological min for YYYYMMDDTHHMMSSZ
+    chosen = min(debian_latest, security_latest)
+    tui.console.print(
+        f"snapshot.d.o latest: debian={debian_latest}, "
+        f"debian-security={security_latest}, picking {chosen}"
+    )
+    return chosen
+
+
+def _validate_snapshot_timestamp(ts: str, mirrors: 'List[Mirror]') -> bool:
+    """HEAD-validate that every mirror has an InRelease available at the
+    given snapshot timestamp.  Catches typos and timestamps that predate a
+    given suite (e.g. picking 20180101 when bookworm didn't exist yet).
+
+    snapshot.debian.org responds 302 → /file/<sha> for any timestamp it can
+    serve (it nearest-≤ resolves arbitrary timestamps), so we follow the
+    redirect and check the final 200.  A 404 at the redirect target means
+    the file doesn't exist for that timestamp and the validation fails.
+    """
+    for m in mirrors:
+        snap = m.with_snapshot(ts)
+        url  = snap.dist_url + 'InRelease'
+        try:
+            resp = requests.head(url, timeout=15, allow_redirects=True)
+        except Exception as e:
+            tui.console.error(f"snapshot validate: HEAD {url} failed: {e}")
+            return False
+        if resp.status_code != 200:
+            tui.console.error(
+                f"snapshot validate: {url} returned HTTP {resp.status_code} — "
+                f"timestamp {ts} does not cover suite {snap.suite} on archive {m.baseid}"
+            )
+            return False
+        tui.console.print(f"snapshot validate: OK {url}")
+    return True
+
+
+def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
+    """Resolve the effective snapshot timestamp for this build.
+
+    Returns None when snapshot pinning is disabled — call sites can pass
+    the result straight to Mirror.with_snapshot() unconditionally.
+
+    Resolution rules:
+      - snapshot_enabled is False           → None
+      - snapshot_timestamp_config = 'latest':
+          * if cache/snapshot.timestamp exists and looks valid, use it
+            (reproducible across runs; delete the file to advance)
+          * otherwise call _query_snapshot_latest() and persist
+      - snapshot_timestamp_config is explicit:
+          * format-check, validate via HEAD, return as-is (do NOT persist —
+            the explicit config is already the source of truth)
+
+    Memoised per (state_file, config_ts) so this is safe to call from
+    multiple sites in one run without re-resolving.
+    """
+    if not config.snapshot_enabled:
+        return None
+
+    state_file = os.path.join(config.dir_cache, 'snapshot.timestamp')
+    cfg_ts     = config.snapshot_timestamp_config
+    cache_key  = (state_file, cfg_ts)
+    if cache_key in _SNAPSHOT_TS_CACHE:
+        return _SNAPSHOT_TS_CACHE[cache_key]
+
+    if cfg_ts == 'latest':
+        # Prefer persisted value for reproducibility
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, 'r') as fh:
+                    persisted = fh.read().strip()
+                if _SNAPSHOT_TS_RE.match(persisted):
+                    tui.console.print(f"Snapshot pin: using persisted {persisted} from {state_file}")
+                    _SNAPSHOT_TS_CACHE[cache_key] = persisted
+                    return persisted
+                tui.console.warning(
+                    f"Snapshot state file {state_file} contains invalid timestamp "
+                    f"{persisted!r}; re-resolving"
+                )
+            except OSError as e:
+                tui.console.warning(f"Cannot read {state_file}: {e}; re-resolving")
+
+        # Cold path: ask snapshot.debian.org
+        ts = _query_snapshot_latest()
+        try:
+            with open(state_file, 'w') as fh:
+                fh.write(ts + '\n')
+            tui.console.print(f"Snapshot pin: resolved 'latest' → {ts}, persisted to {state_file}")
+        except OSError as e:
+            tui.console.warning(
+                f"Cannot persist snapshot timestamp to {state_file}: {e}; "
+                f"build will re-resolve next run"
+            )
+        _SNAPSHOT_TS_CACHE[cache_key] = ts
+        return ts
+
+    # Explicit timestamp from config
+    if not _SNAPSHOT_TS_RE.match(cfg_ts):
+        raise ValueError(
+            f"Snapshot.Timestamp = {cfg_ts!r} is not a valid Debian snapshot "
+            f"timestamp (expected YYYYMMDDTHHMMSSZ, e.g. 20260506T120451Z, or 'latest')"
+        )
+    if not _validate_snapshot_timestamp(cfg_ts, config.mirrors):
+        raise ValueError(
+            f"Snapshot.Timestamp = {cfg_ts!r} does not cover all configured "
+            f"mirrors on snapshot.debian.org (see prior log lines)"
+        )
+    tui.console.print(f"Snapshot pin: explicit {cfg_ts} validated")
+    _SNAPSHOT_TS_CACHE[cache_key] = cfg_ts
+    return cfg_ts
 
 
 class BuildConfig:
@@ -63,6 +244,8 @@ class BuildConfig:
     baseid: str
     release: str
     baseversion: str
+    snapshot_enabled: bool
+    snapshot_timestamp_config: str
     build_codename: str
     build_version: str
     container_release: str
@@ -158,6 +341,11 @@ class BuildConfig:
             if not self.mirrors:
                 self.error_str = "No [Mirror.*] sections in config"
                 return
+
+            # Snapshot pinning — opt-in.  Default off keeps the existing
+            # live-mirror behaviour for users who haven't migrated yet.
+            self.snapshot_enabled = config_parser.getboolean('Snapshot', 'Enabled', fallback=False)
+            self.snapshot_timestamp_config = config_parser.get('Snapshot', 'Timestamp', fallback='latest').strip()
             self.build_codename = config_parser.get('Build', 'CODENAME')
             self.build_version = config_parser.get('Build', 'VERSION')
 

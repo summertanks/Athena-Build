@@ -24,7 +24,18 @@ class BuildContainer:
         self.patch_path = config.dir_patch_source
         self.patch_empty = config.dir_patch_empty
         self.build_profiles = config.build_profiles
-        self.mirrors = config.mirrors
+
+        # Apply snapshot pinning to mirrors so the container's apt fetches
+        # build-deps from the same archive snapshot the cache was built from.
+        # resolve_snapshot_timestamp is memoised — if Cache already resolved,
+        # this is a dict lookup, not a network call.
+        from utils import resolve_snapshot_timestamp
+        try:
+            self.snapshot_ts = resolve_snapshot_timestamp(config)
+        except (RuntimeError, ValueError) as e:
+            tui.console.error(f"BuildContainer: snapshot resolution failed: {e}")
+            raise
+        self.mirrors = [m.with_snapshot(self.snapshot_ts) for m in config.mirrors]
 
         self.client = None
 
