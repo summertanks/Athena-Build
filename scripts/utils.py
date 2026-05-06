@@ -11,20 +11,57 @@ from tui import Prompt, Spinner, ProgressBar
 from typing import List, Optional, Any
 
 
-class BaseDistribution:
-    def __init__(self, url: str, baseid: str, codename: str, version: str, arch: str):
-        self.url: str = url
-        self.baseid: str = baseid
-        self.codename: str = codename
-        self.version: str = version
-        self.arch: str = arch
+class Mirror:
+    """A single archive source (e.g. bookworm main, bookworm-security main).
+
+    A mirror is composed from defaults + per-mirror overrides at parse time:
+        url   = <baseurl>/<baseid>          # e.g. http://deb.debian.org/debian
+        suite = <release><suffix>           # e.g. bookworm, bookworm-security
+    The split exists so rebasing to a different release only requires changing
+    one [Base].RELEASE field, not every [Mirror.*] section.
+    """
+
+    def __init__(self, mirror_id: str, baseurl: str, baseid: str,
+                 release: str, suffix: str, component: str, arch: str):
+        self.id        = mirror_id
+        self.baseurl   = baseurl.rstrip('/')
+        self.baseid    = baseid.strip('/')
+        self.release   = release
+        self.suffix    = suffix or ''
+        self.component = component
+        self.arch      = arch
+
+    @property
+    def suite(self) -> str:
+        return f'{self.release}{self.suffix}'
+
+    @property
+    def url(self) -> str:
+        return f'{self.baseurl}/{self.baseid}'
+
+    @property
+    def dist_url(self) -> str:
+        # 'http://deb.debian.org/debian/dists/bookworm/'
+        return f'{self.url}/dists/{self.suite}/'
+
+    @property
+    def packages_path(self) -> str:
+        return f'{self.component}/binary-{self.arch}/Packages'
+
+    @property
+    def sources_path(self) -> str:
+        return f'{self.component}/source/Sources'
+
+    def __repr__(self) -> str:
+        return f"Mirror({self.id}: {self.url} {self.suite} {self.component})"
+
 
 class BuildConfig:
 
     arch: str
-    baseurl: str
-    basecodename: str
+    mirrors: 'List[Mirror]'
     baseid: str
+    release: str
     baseversion: str
     build_codename: str
     build_version: str
@@ -96,10 +133,31 @@ class BuildConfig:
         try:
             config_parser.read(self.config_path)
             self.arch = config_parser.get('Build', 'ARCH')
-            self.baseurl = config_parser.get('Base', 'baseurl')
-            self.basecodename = config_parser.get('Base', 'BASECODENAME')
-            self.baseid = config_parser.get('Base', 'BASEID')
+
+            # [Base] defaults — per-mirror sections may override BASEURL/BASEID
+            _default_baseurl = config_parser.get('Base', 'BASEURL')
+            _default_baseid  = config_parser.get('Base', 'BASEID')
+            self.release     = config_parser.get('Base', 'RELEASE')
+            self.baseid      = _default_baseid
             self.baseversion = config_parser.get('Base', 'BASEVERSION')
+
+            self.mirrors = []
+            for _section in config_parser.sections():
+                if not _section.startswith('Mirror.'):
+                    continue
+                _id = _section.split('.', 1)[1]
+                self.mirrors.append(Mirror(
+                    mirror_id = _id,
+                    baseurl   = config_parser.get(_section, 'BASEURL', fallback=_default_baseurl),
+                    baseid    = config_parser.get(_section, 'BASEID',  fallback=_default_baseid),
+                    release   = self.release,
+                    suffix    = config_parser.get(_section, 'Suffix',    fallback=''),
+                    component = config_parser.get(_section, 'Component', fallback='main'),
+                    arch      = self.arch,
+                ))
+            if not self.mirrors:
+                self.error_str = "No [Mirror.*] sections in config"
+                return
             self.build_codename = config_parser.get('Build', 'CODENAME')
             self.build_version = config_parser.get('Build', 'VERSION')
 
@@ -238,19 +296,27 @@ def download_file(url: str, filename: str) -> int:
         return -1
 
 
-def download_source(dependency_tree, dir_download, base_distribution: BaseDistribution):
+def download_source(dependency_tree, dir_download):
     from urllib.parse import urljoin
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
 
     _downloaded_size = 0
     _download_size = dependency_tree.download_size
 
-    base_url = 'http://' + base_distribution.url + '/' + base_distribution.baseid + '/'
-
-    # build filelist to download - just for improved readability
-    _file_list = {}
-    for _pkg in dependency_tree.selected_srcs:
-        _file_list.update(dependency_tree.selected_srcs[_pkg].files)
+    # Per-file: {filename: file_meta}, parallel {filename: Mirror}.  Each
+    # Source object carries the mirror it was parsed from so we hit the
+    # correct pool (sources in bookworm-security live under a different
+    # baseid than main).
+    _file_list: dict = {}
+    _file_mirror: dict = {}
+    for _pkg_name in dependency_tree.selected_srcs:
+        _src = dependency_tree.selected_srcs[_pkg_name]
+        if _src._mirror is None:
+            tui.console.error(f"download_source: source {_pkg_name} has no _mirror — cache ingest bug")
+            continue
+        _file_list.update(_src.files)
+        for _fname in _src.files:
+            _file_mirror[_fname] = _src._mirror
 
     _index = 1
     _skipped = 0
@@ -267,7 +333,9 @@ def download_source(dependency_tree, dir_download, base_distribution: BaseDistri
         if progress_bar is not None:
             progress_bar.label(f'({_index}/{_total}) {_file[:20]}')
 
-        _url = urljoin(base_url, _file_list[_file]['path'])
+        _mirror = _file_mirror[_file]
+        _base_url = _mirror.url + '/'
+        _url = urljoin(_base_url, _file_list[_file]['path'])
         _sha256 = _file_list[_file]['sha256']
         _download_path = os.path.join(dir_download, _file)
 

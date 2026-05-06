@@ -2,8 +2,11 @@ ARG RELEASE=bookworm
 FROM debian:${RELEASE}-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update
-RUN apt-get install -y  \
+# Toolchain layer.  Uses the base image's stock sources.list (live mirror) —
+# this only runs at image-build time to install our static build toolchain.
+# Per-package builds inside the container rewrite /etc/apt/sources.list to
+# the configured mirrors before any apt-get update (see BuildContainer.build).
+RUN apt-get update && apt-get install -y \
         net-tools iputils-ping util-linux \
         bc bison build-essential cpio flex  libncurses-dev libssl-dev ca-certificates less sudo keyboard-configuration \
         vim gettext debhelper texinfo groff media-types libselinux1-dev gperf libgmp3-dev procps\

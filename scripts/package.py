@@ -98,11 +98,17 @@ class Package(Packages):
     # so we cannot use these as attributes
 
     def __init__(self, section: str):
-        
+
         # Whether the package is valid or not, set to True if all required fields are present
         self._isvalid: bool = False
         self.package:        str     = ''
         self.version:        Version = Version('0')
+
+        # Origin mirror (set by Cache.__build_cache after parsing).  None for
+        # synthetic Package objects (e.g. ones built from `dpkg-deb -f` output
+        # in BuildSystem._check_dep_drift).  Consumers that need to download
+        # this package's .deb must check that _mirror is set.
+        self._mirror = None  # type: 'Optional[utils.Mirror]'
 
         # 'depends', 'pre-depends', 'recommends', 'suggests', 'breaks',
         # 'conflicts', 'provides', 'replaces', 'enhances', 'built-using']
@@ -394,6 +400,11 @@ class Source(Sources):
         self.directory:  str     = ''
         self.files:      Dict[str, Dict[str, Any]] = {}
         self.arch:       List[str] = []
+
+        # Origin mirror (set by Cache.__build_cache after parsing).  Used by
+        # download_source to fetch tarballs from the right pool — sources in
+        # bookworm-security live under a different baseid than main.
+        self._mirror = None  # type: 'Optional[utils.Mirror]'
 
         self.binary: List[str] = []
 

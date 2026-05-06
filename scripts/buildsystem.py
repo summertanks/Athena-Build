@@ -62,33 +62,30 @@ class BuildSystem:
         _proc = subprocess.run(['sudo', '-S', '-v'], input=self.__password + '\n',
                                capture_output=True, text=True)
         if _proc.returncode != 0:
-            raise RuntimeError(
-                f"Incorrect password or user not in sudoers file: {_proc.stdout.strip()}"
-            )
+            raise RuntimeError(f"Incorrect password or user not in sudoers file: {_proc.stdout.strip()}")
 
         # Wipe the chroot now that we have a validated sudo credential.
         # rm -rf the contents (not the directory itself) so dir_chroot remains.
         if _wipe_chroot:
             tui.console.print("Wiping chroot...")
-            _proc = subprocess.run(
-                ['sudo', '-S', 'find', self.__dir_chroot,
-                 '-mindepth', '1', '-delete'],
-                input=self.__password + '\n',
+            _proc = subprocess.run(['sudo', '-S', 'find', self.__dir_chroot,
+                 '-mindepth', '1', '-delete'], input=self.__password + '\n',
                 capture_output=True, text=True
             )
+
             if _proc.returncode != 0:
                 raise RuntimeError(f"Failed to wipe chroot: {_proc.stderr.strip()}")
             tui.console.print("Chroot wiped")
 
         # Create Directory Structure
-        self.build_chroot_directories()
+        self._build_chroot_directories()
 
         # Patch dependency metadata from the actual .deb files.  The Packages
         # cache may be from a different point in time than the downloaded .debs
         # (e.g. a binNMU rebuild happened between cache fetch and package
         # download).  When deps differ, dpkg's configure ordering will fail even
         # though our resolver computed a valid order based on the cache.
-        self._sync_deps_from_debs()
+        self._check_dep_drift()
 
         # Run pre-Install
         self.pre_install()
@@ -500,19 +497,45 @@ class BuildSystem:
 
     # ── Dependency sync from .deb files ──────────────────────────────────────
 
-    def _sync_deps_from_debs(self):
-        """Patch dependency fields on Package objects from the actual .deb files.
+    def _check_dep_drift(self):
+        """Patch Package dep fields from the on-disk .debs and verify resolution.
 
         The Packages cache and the downloaded .debs may be out of sync when a
-        binNMU rebuild happened between the two fetches (e.g. libcom-err2 gained
-        a libnsl2 dep in 1.47.0-2 that was removed again in 1.47.0-2+b2).
-        Reading deps from the cache produces a wrong configure ordering; dpkg
-        then reads the real deps from the installed .deb and refuses to configure.
+        binNMU rebuild has shifted runtime deps under the same source version.
+        Two stanzas can describe the "same" package with different Depends:
 
-        This method overwrites depends / alt_depends / pre_depends /
+          Cache index entry (fetched from deb.debian.org)
+              Package: libcom-err2
+              Version: 1.47.0-2+b2
+              Depends: libc6 (>= 2.17)
+
+          Locally-built .deb in repo/
+              Package: libcom-err2
+              Version: 1.47.0-2
+              Depends: libnsl2, libc6 (>= 2.17)
+
+        The buildd's binNMU (+b2) was rebuilt after upstream silently dropped
+        the libnsl2 link; we built from the unsuffixed source and still link
+        against libnsl2.  If the configure-ordering forest is built from the
+        cache, libcom-err2 looks like it only needs libc6 and is scheduled
+        right after it — but dpkg installs the on-disk .deb, which actually
+        Pre-Depends on libnsl2 being configured first, and refuses with:
+            libcom-err2 depends on libnsl2; however:
+            Package libnsl2 is not configured yet.
+
+        Pass 1 — sync.  Overwrites depends / alt_depends / pre_depends /
         alt_pre_depends on every canonical Package object with what dpkg-deb
-        reports from the file on disk.  All other fields (version, arch,
-        Filename, …) are left untouched.
+        reports.  All other fields (Version, Arch, Filename, …) are left
+        untouched.  Drift is logged at info level (log tab only) in the form
+        "Dep drift seen for package <pkg> from <cache_ver> to <disk_ver>".
+
+        Pass 2 — verify.  After every package is synced, walk every (now-
+        synced) dep field and check that each named dep is in selected_pkgs
+        and that any version constraint is satisfied via apt_pkg.check_dep.
+        OR-groups (alt_*) pass if at least one alternative resolves.  Any
+        unresolved or version-mismatched dep is collected and the build
+        aborts via RuntimeError — proceeding would just fail at install time
+        with a less actionable message.
         """
         import package as _pkg_module
         for _pkg_name, _pkg_obj in self.__dependencytree.canonical_pkgs.items():
@@ -532,10 +555,89 @@ class BuildSystem:
             _deb_pkg = _pkg_module.Package(_proc.stdout)
             if not _deb_pkg.isvalid:
                 continue
+
+            _drift = []
+            for _field in ('pre_depends', 'depends', 'alt_pre_depends', 'alt_depends'):
+                _cache_val = getattr(_pkg_obj, _field)
+                _disk_val  = getattr(_deb_pkg, _field)
+                if _cache_val != _disk_val:
+                    _drift.append((_field, _cache_val, _disk_val))
+            if _drift:
+                _cache_ver = _pkg_obj.get('Version', '?')
+                _disk_ver  = _deb_pkg.get('Version', '?')
+                tui.console.info(
+                    f"Dep drift seen for package {_pkg_name} "
+                    f"from {_cache_ver} to {_disk_ver}"
+                )
+                for _field, _cache_val, _disk_val in _drift:
+                    tui.console.info(f"  {_field}: from {_cache_val} to {_disk_val}")
+
             _pkg_obj.depends         = _deb_pkg.depends
             _pkg_obj.alt_depends     = _deb_pkg.alt_depends
             _pkg_obj.pre_depends     = _deb_pkg.pre_depends
             _pkg_obj.alt_pre_depends = _deb_pkg.alt_pre_depends
+
+        self._verify_dep_resolution()
+
+    def _verify_dep_resolution(self):
+        """Second pass: confirm every synced dep resolves in selected_pkgs.
+
+        For each canonical package, walk pre_depends + depends as hard
+        requirements and alt_pre_depends + alt_depends as OR-groups.  A hard
+        requirement passes when its name is in selected_pkgs (real or virtual
+        alias) and the version constraint, if any, is satisfied by the
+        provider's own version.  An OR-group passes when at least one
+        alternative passes.  Aggregate all violations and raise at the end so
+        a single run reports every problem rather than failing on the first.
+        """
+        import apt_pkg
+        _selected = self.__dependencytree.selected_pkgs
+
+        def _resolves(dep_tuple):
+            _name, _ver, _op = dep_tuple[0], dep_tuple[1], dep_tuple[2]
+            _provider = _selected.get(_name)
+            if _provider is None:
+                return False, 'unresolved'
+            if not _op:
+                return True, None
+            try:
+                if apt_pkg.check_dep(str(_provider.version), _op, str(_ver)):
+                    return True, None
+                return False, f'version mismatch (have {_provider.version}, need {_op} {_ver})'
+            except SystemError as e:
+                return False, f'check_dep error: {e}'
+
+        _violations = []
+        for _pkg_name, _pkg_obj in self.__dependencytree.canonical_pkgs.items():
+            for _field in ('pre_depends', 'depends'):
+                for _dep in getattr(_pkg_obj, _field):
+                    _ok, _why = _resolves(_dep)
+                    if not _ok:
+                        _violations.append(
+                            f"{_pkg_name} {_field}: {_dep[0]} "
+                            f"({_dep[2]} {_dep[1]}) — {_why}"
+                        )
+            for _field in ('alt_pre_depends', 'alt_depends'):
+                for _group in getattr(_pkg_obj, _field):
+                    if not any(_resolves(_alt)[0] for _alt in _group):
+                        _alts = ' | '.join(
+                            f"{_alt[0]} ({_alt[2]} {_alt[1]})" if _alt[2] else _alt[0]
+                            for _alt in _group
+                        )
+                        _violations.append(
+                            f"{_pkg_name} {_field}: [{_alts}] — no alternative resolves"
+                        )
+
+        if _violations:
+            tui.console.error(
+                f"_verify_dep_resolution: {len(_violations)} unresolved dep(s) after sync"
+            )
+            for _v in _violations:
+                tui.console.error(f"  {_v}")
+            raise RuntimeError(
+                f"_verify_dep_resolution: {len(_violations)} unresolved dep(s); "
+                "see log for details"
+            )
 
     # ── Dependency resolution helpers ─────────────────────────────────────────
 
@@ -850,7 +952,7 @@ class BuildSystem:
 
         return sequence
 
-    def build_chroot_directories(self):
+    def _build_chroot_directories(self):
         """Create the standard FHS directory structure inside the chroot.
 
         Sequence matters here — usrmerge symlinks must be created before any
@@ -1092,16 +1194,18 @@ class BuildSystem:
         # it on first boot.  Must exist (even empty) for systemd to start.
         self._write_chroot_file('/etc/machine-id', '')
 
-        # /etc/apt/sources.list — lets the installed system update itself from
-        # the same mirror used to build it.
-        _base = f'http://{cfg.baseurl}/debian'
-        _sec  = f'http://security.debian.org/debian-security'
-        _comp = 'main contrib non-free non-free-firmware'
-        self._write_chroot_file('/etc/apt/sources.list', (
-            f'deb {_base} {cfg.basecodename} {_comp}\n'
-            f'deb {_base} {cfg.basecodename}-updates {_comp}\n'
-            f'deb {_sec} {cfg.basecodename}-security {_comp}\n'
-        ))
+        # /etc/apt/sources.list — lets the installed system update itself
+        # from the same mirrors used to build it.  Composed from the
+        # configured mirrors so a config change rebases the live system too.
+        # Extra components (contrib/non-free/non-free-firmware) added to each
+        # line so the running system can install firmware/non-free pkgs even
+        # though our build only consumes 'main'.
+        _extra_comp = 'contrib non-free non-free-firmware'
+        _lines = [
+            f'deb {_m.url} {_m.suite} {_m.component} {_extra_comp}\n'
+            for _m in cfg.mirrors
+        ]
+        self._write_chroot_file('/etc/apt/sources.list', ''.join(_lines))
 
         # Forward all journal entries to /dev/console (= ttyS0 via console=ttyS0
         # kernel cmdline) so auth/PAM failures are visible on serial output
