@@ -69,19 +69,28 @@ class DependencyTree:
                 tui.console.warning(f"add_lookahead: '{_pkg_name}' not found in cache, skipping")
                 continue
 
-            # 2. Select version — prompt if multiple exist
-            if len(_candidates) == 1:
-                _selected = _candidates[0]
+            # 2. Select version — auto-pick when only versions differ
+            # (mechanically correct within a coherent mirror set), prompt
+            # only on genuine alternative providers (different Package
+            # names like mawk vs gawk for `awk`).
+            _auto = _auto_pick_candidate(_candidates)
+            if _auto is not None:
+                _selected = _auto
+                if len(_candidates) > 1:
+                    tui.console.info(
+                        f"add_lookahead: auto-pick {_selected.package} "
+                        f"{_selected.version} from {len(_candidates)} versions of '{_pkg_name}'"
+                    )
             else:
                 _mark = tui.console.mark()
-                tui.console.print(f"Multiple versions for '{_pkg_name}':")
+                tui.console.print(f"Multiple providers for '{_pkg_name}':")
                 for _i, _c in enumerate(_candidates, 1):
                     tui.console.print(f"  {_i}.  {_c.package}  ({_c.version})")
                 _options = [str(_i) for _i in range(1, len(_candidates) + 1)]
                 _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_candidates)}]", _options).get_response()
                 _selected = _candidates[int(_choice) - 1]
                 tui.console.trim_to(_mark)
-                tui.console.print(f"Multiple versions for '{_pkg_name}': Selected {_selected.package} ({_selected.version})")
+                tui.console.print(f"Multiple providers for '{_pkg_name}': Selected {_selected.package} ({_selected.version})")
 
             # 3. Hard conflict check against entries already in lookahead
             _conflict_found = False
@@ -514,14 +523,31 @@ class DependencyTree:
                 if len(_src_candidates) == 1:
                     self.selected_srcs[_src_name] = _src_candidates[0]
                 else:
-                    _selected_pkg = [_pkg for _pkg in _src_candidates if _pkg.version == Version(_src_version)]
-                    if len(_selected_pkg) == 1:
-                        self.selected_srcs[_src_name] = _selected_pkg[0]
-                    else:
+                    # Multiple candidates: filter by exact source version.
+                    # With multi-mirror ingest the same (name, version) can
+                    # appear in BOTH main and security (a security upload
+                    # also lands in main once unstable→testing→stable
+                    # transitions catch up).  When that happens, prefer the
+                    # source whose _mirror matches the binary's origin so
+                    # all downloads for this build come from the same pool.
+                    _matched = [s for s in _src_candidates if s.version == Version(_src_version)]
+                    if not _matched:
                         tui.console.print(f"ERROR: Source '{_src_name}' version '{_src_version}' not found")
                         tui.console.error(f"Source '{_src_name}' version '{_src_version}' not found in cache")
                         _found = False
                         continue
+                    if len(_matched) == 1:
+                        self.selected_srcs[_src_name] = _matched[0]
+                    else:
+                        _bin_mirror = getattr(_bin_pkg, '_mirror', None)
+                        _same_mirror = [s for s in _matched
+                                        if _bin_mirror is not None and s._mirror is _bin_mirror]
+                        _picked = _same_mirror[0] if _same_mirror else _matched[0]
+                        self.selected_srcs[_src_name] = _picked
+                        tui.console.info(
+                            f"parse_sources: {_src_name} {_src_version} present in "
+                            f"{len(_matched)} mirrors; picked {_picked._mirror.id}"
+                        )
 
                 self.selected_srcs[_src_name].pkgs = []
 
