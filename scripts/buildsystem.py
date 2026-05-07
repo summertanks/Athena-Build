@@ -1163,6 +1163,7 @@ class BuildSystem:
 
         # /etc/os-release — standard file read by systemd, lsb_release, etc.
         self._write_chroot_file('/etc/os-release', (
+            f'# Athena Linux — (c) 2025-26 Harkirat S Virk\n'
             f'NAME="{cfg.build_codename}"\n'
             f'VERSION="{cfg.build_version}"\n'
             f'ID=athena\n'
@@ -1170,6 +1171,16 @@ class BuildSystem:
             f'VERSION_CODENAME={cfg.build_codename.lower()}\n'
             f'PRETTY_NAME="{cfg.build_codename} {cfg.build_version}"\n'
             f'HOME_URL="https://athenalinux.org"\n'
+            f'VENDOR_NAME="Harkirat S Virk"\n'
+        ))
+
+        # /etc/issue — pre-login banner on TTY consoles. Uses agetty escapes:
+        #   \S = PRETTY_NAME from os-release, \r = kernel, \l = tty
+        self._write_chroot_file('/etc/issue', (
+            f'{cfg.build_codename} {cfg.build_version} \\n \\l\n'
+            f'\n'
+            f'(c) 2025-26 Harkirat S Virk\n'
+            f'\n'
         ))
 
         # /etc/hostname — a sensible default; can be changed post-install.
