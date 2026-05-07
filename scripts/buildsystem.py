@@ -925,35 +925,68 @@ class BuildSystem:
         (parsed from dpkg's "Unpacking NAME:arch (ver)" stdout lines).
         Packages that dpkg rejected (pre-dep failures, etc.) are not in the
         returned set and will be retried in a later round.
+
+        Failure routing:
+          - Total failure (dpkg rc != 0 AND nothing unpacked) — surface
+            on the console with the LAST line of stderr (the actual dpkg
+            error), not the first 200 chars (which used to land mid-debug
+            output and hid the real cause).
+          - Partial failure (some unpacked, some not) — log-tab warning
+            only.  The build_chroot loop is designed to retry deferred
+            packages in the next round, so this is normal flow, not a
+            stop-the-world condition.  Pre-fix the same shape was
+            surfaced as "Error unpacking …" on the console even when
+            the build went on to complete cleanly.
         """
         if not pkg_list:
             return set()
         _chroot = self.__dir_chroot
+        # No -D1: dpkg debug-level-1 prints a D000001 line per internal
+        # action to stderr.  That noise (a) provides nothing actionable
+        # in production and (b) drowns the real failure message when we
+        # later try to surface stderr to the user.
         _cmd = shlex.split(
             f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
             f'dpkg --root={_chroot} --instdir={_chroot} '
             f'--admindir={_chroot}/var/lib/dpkg '
-            f'--force-script-chrootless -D1 --no-triggers --unpack'
+            f'--force-script-chrootless --no-triggers --unpack'
         ) + self._get_deb_files(pkg_list)
 
         fh.write(f'Unpack: {" ".join(pkg_list)}\n')
         _proc = subprocess.run(_cmd, input=self.__password + '\n',
                                capture_output=True, text=True, env=os.environ)
         fh.write(_proc.stdout)
-        if _proc.returncode != 0:
-            fh.write(_proc.stderr)
-            tui.console.print(
-                f'Error unpacking {pkg_list[:3]}{"…" if len(pkg_list) > 3 else ""}: '
-                f'{_proc.stderr[:200]}'
-            )
 
-        # Parse successfully unpacked package names from dpkg output.
-        # dpkg prints "Unpacking NAME:arch (version) ..." for each success.
+        # Parse successfully unpacked package names from dpkg output first
+        # so the failure classifier below can distinguish partial from total.
         _unpacked: set = set()
         for _line in _proc.stdout.splitlines():
             _m = re.match(r'^Unpacking (\S+)', _line)
             if _m:
                 _unpacked.add(_m.group(1).split(':')[0])
+
+        if _proc.returncode != 0:
+            fh.write(_proc.stderr)
+            _failed = [p for p in pkg_list if p not in _unpacked]
+            if _unpacked:
+                tui.console.warning(
+                    f'_unpack_packages: partial — '
+                    f'{len(_unpacked)}/{len(pkg_list)} succeeded; '
+                    f'deferring to next round: '
+                    f'{", ".join(_failed[:5])}'
+                    f'{"…" if len(_failed) > 5 else ""}'
+                )
+            else:
+                _stderr_lines = [
+                    l for l in _proc.stderr.strip().splitlines() if l.strip()
+                ]
+                _stderr_tail = _stderr_lines[-1] if _stderr_lines else 'no stderr'
+                tui.console.print(
+                    f'Error unpacking {pkg_list[:3]}'
+                    f'{"…" if len(pkg_list) > 3 else ""}: '
+                    f'{_stderr_tail[:200]}'
+                )
+
         return _unpacked
 
     def get_install_sequence(self, selected_pkgs: [], installed_pkgs: []) -> []:
