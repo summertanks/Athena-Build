@@ -56,6 +56,9 @@ class BuildSystem:
         # TUI rendering.
         tui.console.print("Build system needs sudo — current user must be in the sudoers group")
         self.__password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        # Initialised here so the .password property's post-scrub check
+        # behaves the same on a fresh instance and a scrubbed one.
+        self.__password_scrubbed = False
 
         # Validate the password immediately so we fail fast rather than
         # discovering a bad credential mid-install.
@@ -120,13 +123,41 @@ class BuildSystem:
                 f"Incorrect password or user not in sudoers file: {_proc.stdout.strip()}"
             )
         _self._BuildSystem__password = _password
+        _self._BuildSystem__password_scrubbed = False
         return _self
 
     @property
     def password(self) -> str:
         """Validated sudo password collected at construction. Reused by callers
-        (e.g. cmd_build_chroot's verify step) to avoid prompting twice."""
+        (e.g. cmd_build_chroot's verify step) to avoid prompting twice.
+
+        Raises RuntimeError after scrub_password() has been called: a
+        BuildSystem instance is single-use w.r.t. its sudo credential, and
+        a stale read after scrub almost always indicates a missed cleanup
+        in a command handler.
+        """
+        if getattr(self, '_BuildSystem__password_scrubbed', False):
+            raise RuntimeError(
+                "BuildSystem.password accessed after scrub_password() — "
+                "this BuildSystem is single-use; create a fresh one"
+            )
         return self.__password
+
+    def scrub_password(self) -> None:
+        """Drop the cached sudo password from this instance.
+
+        Python strings are immutable, so we cannot truly zero the bytes
+        in place — assigning '' only drops this instance's reference and
+        leaves GC to reclaim the original.  The point is to bracket the
+        password's lifetime to the command that needed it (build_chroot,
+        build_iso) instead of carrying it in BuildSystem state for the
+        remainder of the TUI session.
+
+        Idempotent — safe to call from a finally block alongside a
+        successful exit path.
+        """
+        self.__password = ''
+        self.__password_scrubbed = True
 
     def build_chroot(self, debug: bool = False) -> bool:
         """Install all selected packages into the chroot in dependency order.
