@@ -403,6 +403,58 @@ def test_buildconfig_security_enabled_rejects_missing_keyring():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STA-07 — BuildSystem sudo-password lifetime
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bare_buildsystem(password: str = 'secret'):
+    """Construct a BuildSystem with just the password attributes set —
+    bypasses __init__ so tests don't need real config / sudo / chroot dirs."""
+    import buildsystem
+    bs = buildsystem.BuildSystem.__new__(buildsystem.BuildSystem)
+    bs._BuildSystem__password = password
+    bs._BuildSystem__password_scrubbed = False
+    return bs
+
+
+def test_buildsystem_password_readable_before_scrub():
+    bs = _bare_buildsystem('hunter2')
+    assert bs.password == 'hunter2'
+
+
+def test_buildsystem_scrub_password_clears_field():
+    bs = _bare_buildsystem('hunter2')
+    bs.scrub_password()
+    assert bs._BuildSystem__password == ''
+    assert bs._BuildSystem__password_scrubbed is True
+
+
+def test_buildsystem_password_property_raises_after_scrub():
+    """The .password property is the surface area cmd_build_chroot uses;
+    a stale read after scrub must fail loudly so a missed cleanup in a
+    handler cannot smuggle an empty password into a sudo subprocess
+    call (which would silently fail authentication and corrupt the
+    user-visible error message)."""
+    bs = _bare_buildsystem('hunter2')
+    bs.scrub_password()
+    raised = False
+    try:
+        _ = bs.password
+    except RuntimeError as e:
+        raised = True
+        assert 'scrub' in str(e).lower(), str(e)
+    assert raised, "expected RuntimeError on .password after scrub"
+
+
+def test_buildsystem_scrub_password_idempotent():
+    """Calling scrub_password twice must not raise — finally blocks paired
+    with try blocks that themselves call scrub on an early-return need
+    this to be safe."""
+    bs = _bare_buildsystem('hunter2')
+    bs.scrub_password()
+    bs.scrub_password()  # should not raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STA-04 — download_source surfaces HTTP / short-download errors clearly
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -561,6 +613,11 @@ def main() -> int:
         test_buildconfig_security_disabled_accepts_missing_keyring,
         test_buildconfig_security_enabled_rejects_missing_keyring,
         test_buildconfig_creates_dir_gnupg_with_0700,
+        # STA-07
+        test_buildsystem_password_readable_before_scrub,
+        test_buildsystem_scrub_password_clears_field,
+        test_buildsystem_password_property_raises_after_scrub,
+        test_buildsystem_scrub_password_idempotent,
         # STA-04
         test_download_source_surfaces_http_error_clearly,
         test_download_source_surfaces_short_download_clearly,

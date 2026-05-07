@@ -586,20 +586,29 @@ def cmd_build_chroot(*args):
         console.error(f"BuildSystem() raised: {e}")
         return
 
-    console.print("Building chroot environment...")
-    _result = build_system.build_chroot(debug=_debug)
-    if not _result:
-        console.print("ERROR: chroot build failed — check logs for details")
-        console.error("build_chroot() returned False")
-        return
+    # Bracket the BuildSystem's lifetime so the cached sudo password is
+    # scrubbed on every exit path — success, build failure, KeyboardInterrupt.
+    # Python strings are immutable so this only drops the reference (the GC
+    # reclaims it later), but it shrinks the window in which the password is
+    # reachable from this process's heap from "for the rest of the TUI
+    # session" to "until this command returns".
+    try:
+        console.print("Building chroot environment...")
+        _result = build_system.build_chroot(debug=_debug)
+        if not _result:
+            console.print("ERROR: chroot build failed — check logs for details")
+            console.error("build_chroot() returned False")
+            return
 
-    _progress_flags.chroot_ready = True
+        _progress_flags.chroot_ready = True
 
-    # Run verification immediately — chroot_verified gates build_iso
-    _passed, _failed = _verify_chroot(build_system.password, build_config.dir_chroot)
-    _progress_flags.chroot_verified = (_failed == 0)
-    if _failed > 0:
-        console.error(f"chroot verification: {_failed} of {_passed + _failed} checks failed")
+        # Run verification immediately — chroot_verified gates build_iso
+        _passed, _failed = _verify_chroot(build_system.password, build_config.dir_chroot)
+        _progress_flags.chroot_verified = (_failed == 0)
+        if _failed > 0:
+            console.error(f"chroot verification: {_failed} of {_passed + _failed} checks failed")
+    finally:
+        build_system.scrub_password()
 
 
 # ---------------------------------------------------------------------------
@@ -635,11 +644,17 @@ def cmd_build_iso(*args):
         console.error(f"BuildSystem.for_iso() raised: {e}")
         return
 
-    console.print("Building ISO...")
-    _result = build_system.build_iso()
-    if not _result:
-        console.print("ERROR: ISO build failed — check logs for details")
-        console.error("build_iso() returned False")
+    # Same try/finally pattern as cmd_build_chroot — scrub the cached
+    # sudo password on every exit path so it does not outlive the ISO
+    # build command.
+    try:
+        console.print("Building ISO...")
+        _result = build_system.build_iso()
+        if not _result:
+            console.print("ERROR: ISO build failed — check logs for details")
+            console.error("build_iso() returned False")
+    finally:
+        build_system.scrub_password()
 
 
 # ---------------------------------------------------------------------------
@@ -899,15 +914,20 @@ def cmd_verify_chroot():
         return
 
     _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-    _proc = subprocess.run(['sudo', '-S', '-v'],
-                           input=_password + '\n', capture_output=True, text=True)
-    if _proc.returncode != 0:
-        console.print("ERROR: incorrect sudo password")
-        console.error("verify_chroot: sudo -v failed")
-        return
+    try:
+        _proc = subprocess.run(['sudo', '-S', '-v'],
+                               input=_password + '\n', capture_output=True, text=True)
+        if _proc.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            console.error("verify_chroot: sudo -v failed")
+            return
 
-    _passed, _failed = _verify_chroot(_password, build_config.dir_chroot)
-    _progress_flags.chroot_verified = (_failed == 0)
+        _passed, _failed = _verify_chroot(_password, build_config.dir_chroot)
+        _progress_flags.chroot_verified = (_failed == 0)
+    finally:
+        # Drop the local reference as soon as we are done — same caveat
+        # as BuildSystem.scrub_password (Python strings are immutable).
+        _password = ''
 
 
 def cmd_auto_run():
