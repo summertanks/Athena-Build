@@ -386,55 +386,24 @@ def test_compute_install_batches_acyclic_then_cycle():
     ], batches
 
 
-def test_compute_install_batches_essential_emitted_first_as_forced_batch():
-    """Packages flagged Essential go in the first emitted batch with
-    needs_force=True — solves Debian's implicit-Essential-deps
-    contract that topo sort cannot see (e.g. dpkg's maintainer scripts
-    need /bin/sh from dash even though dpkg does not declare a Depends
-    on dash).  Pre-fix, the user's build aborted at batch 4 with
-    "'sh' not found in PATH" because dpkg landed before dash."""
+def test_compute_install_batches_essential_flag_is_ignored():
+    """Essential: yes is NOT used to manipulate the graph.  Earlier
+    iteration extracted Essentials into a forced bootstrap batch; that
+    broke the unpack ordering because Essentials Pre-Depend on
+    non-Essential libs (base-files → mawk via 'awk' Provides; bash →
+    libtinfo6).  Topo sort over the declared deps already produces the
+    right ordering — Essential packages just happen to be near the
+    bottom of the dep graph.  This test pins that contract: Essential
+    flag does not affect batch composition."""
     bs = _bare_buildsystem_with_deps([
-        ('dpkg', [], ['tar'], True),                # essential
-        ('dash', [], ['dpkg'], True),               # essential, depends on dpkg
-        ('tar',  [], [],     True),                 # essential
-        ('app',  [], ['dpkg', 'dash']),             # non-essential, depends on essentials
+        ('liba', [], [],          False),       # leaf, non-essential
+        ('libb', [], [],          False),       # leaf, non-essential
+        ('app',  ['liba'], ['libb'], True),     # essential, depends on libs
     ])
     batches = bs._compute_install_batches(libc_seed_set=set())
-    # Essential batch (forced) first, then the non-essential leaf.
-    # All Essential packages share one forced batch — dpkg's --force-depends
-    # within that one invocation breaks any inter-essential cycles.
-    assert batches == [
-        (['dash', 'dpkg', 'tar'], True),
-        (['app'], False),
-    ], batches
-
-
-def test_compute_install_batches_essential_overlap_with_libc_seed_excluded():
-    """A package that is both Essential AND in the libc seed (libc-bin in
-    Debian, conceptually) appears only once — in the libc seed batch
-    that the caller installs separately, not in the Essential batch."""
-    bs = _bare_buildsystem_with_deps([
-        ('libc6',    [], [],            False),     # in libc seed, not essential
-        ('libc-bin', [], ['libc6'],     True),      # essential, but ALSO in libc seed
-        ('dpkg',     [], [],            True),      # essential
-    ])
-    batches = bs._compute_install_batches(
-        libc_seed_set={'libc6', 'libc-bin'}
-    )
-    # libc-bin is in libc seed → caller handles it → not in any output batch.
-    # dpkg is essential → first batch, forced.
-    assert batches == [(['dpkg'], True)], batches
-
-
-def test_compute_install_batches_no_essential_no_essential_batch():
-    """Selected set with zero Essential packages → no Essential batch
-    is prepended.  Existing acyclic-only tests must continue to pass."""
-    bs = _bare_buildsystem_with_deps([
-        ('A', [], ['B']),
-        ('B', [], []),
-    ])
-    batches = bs._compute_install_batches(libc_seed_set=set())
-    assert batches == [(['B'], False), (['A'], False)], batches
+    # Acyclic; libs in batch 1, essential app in batch 2.  The
+    # essential flag has no effect — pure topo order.
+    assert batches == [(['liba', 'libb'], False), (['app'], False)], batches
 
 
 def test_compute_install_batches_external_deps_filtered():
@@ -858,9 +827,7 @@ def main() -> int:
         test_compute_install_batches_self_dep_is_ignored,
         test_compute_install_batches_cycle_emitted_as_forced_batch,
         test_compute_install_batches_acyclic_then_cycle,
-        test_compute_install_batches_essential_emitted_first_as_forced_batch,
-        test_compute_install_batches_essential_overlap_with_libc_seed_excluded,
-        test_compute_install_batches_no_essential_no_essential_batch,
+        test_compute_install_batches_essential_flag_is_ignored,
         test_compute_install_batches_external_deps_filtered,
         # STA-07
         test_buildsystem_password_readable_before_scrub,

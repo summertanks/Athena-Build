@@ -778,11 +778,10 @@ class BuildSystem:
         """Topologically sort selected packages over Pre-Depends ∪ Depends.
 
         Returns a list of (batch, needs_force) tuples.  Each batch is a
-        list of canonical package names; needs_force is True for the
-        Essential bootstrap batch (always emitted first when there are
-        Essential packages in the selected set) and for any terminal
-        "cycle batch" emitted when Kahn cannot make further progress
-        on a real dep cycle.
+        list of canonical package names; needs_force is True only for a
+        terminal "cycle batch" emitted when Kahn cannot make further
+        progress on a real dep cycle (libdevmapper1.02.1 ↔ dmsetup +
+        reachable closure on bookworm).
 
         Acyclic batches (needs_force=False) share two properties:
 
@@ -797,9 +796,20 @@ class BuildSystem:
         --force-depends to this batch alone (see _configure_packages),
         which lets dpkg break the SCC the same way `--configure -a`
         previously did, but without papering over real dep failures
-        elsewhere in the graph.  In practice on Debian bookworm only
-        the libdevmapper1.02.1 ↔ dmsetup co-install pair (and the small
-        set of packages reachable from it) lands in the cycle batch.
+        elsewhere in the graph.
+
+        Note on Debian Essential packages.  An earlier iteration of this
+        method extracted `Essential: yes` packages into a forced
+        bootstrap batch on the assumption that they had implicit mutual
+        deps invisible to topo sort (specifically dpkg needing /bin/sh
+        from dash for its maintainer scripts).  That was wrong: pulling
+        Essentials out of the graph dropped the edges to their genuine
+        non-Essential Pre-Depends (e.g. base-files Pre-Depends on awk
+        which mawk provides; bash on libtinfo6) and unpack failed.
+        The dpkg/dash sh-availability inversion is handled entirely by
+        the chroot-mode probe in _configure_packages (chrootless mode
+        runs maintainer scripts on the host with DPKG_ROOT set, so no
+        chroot sh is required) — no graph manipulation needed.
 
         libc_seed_set is the hard-coded base bootstrap set
         (gcc-NN-base, libc6, libgcc-s1, libcrypt1) installed first by
@@ -815,39 +825,20 @@ class BuildSystem:
         """
         selected = self.__dependencytree.selected_pkgs
 
-        # Essential packages (Debian's `Essential: yes` set — bash, dash,
-        # coreutils, dpkg, sed, tar, ...) have implicit mutual deps that
-        # they do not declare in their stanzas, on the assumption that an
-        # Essential package can rely on every other Essential being
-        # available.  Topo sort cannot see this contract, so without
-        # special handling dpkg ends up scheduled before dash and the
-        # chroot has no /bin/sh for dpkg's maintainer scripts.  Pull
-        # them out and emit as a forced bootstrap batch (--force-depends
-        # scoped to that one batch) before any normal Kahn batches —
-        # same pattern as the libc seed's batch 0.
-        essential_pkgs = sorted(
-            p for p in selected
-            if p == selected[p]['Package']
-            and p not in libc_seed_set
-            and selected[p].get('Essential', '').strip().lower() == 'yes'
-        )
-        essential_set = set(essential_pkgs)
-        bootstrap_set = libc_seed_set | essential_set
-
         # Restrict the graph to canonical (non-virtual) names that are NOT
-        # part of either bootstrap layer.  Aliases would inflate the graph
-        # with redundant nodes and Kahn would never be able to retire them.
+        # part of the libc seed.  Aliases would inflate the graph with
+        # redundant nodes and Kahn would never be able to retire them.
         all_pkgs = [
             p for p in selected
-            if p == selected[p]['Package'] and p not in bootstrap_set
+            if p == selected[p]['Package'] and p not in libc_seed_set
         ]
         in_scope = set(all_pkgs)
 
         # deps[pkg] = set of canonical names that pkg depends on AND are
-        # also in scope.  Edges to bootstrap_set (libc seed + Essential)
-        # or to packages outside selected_pkgs (presumed satisfied by
-        # chroot base state) are silently dropped — Kahn's invariant
-        # only needs to see edges that block ordering decisions.
+        # also in scope.  Edges to libc_seed_set or to packages outside
+        # selected_pkgs (presumed satisfied by chroot base state) are
+        # silently dropped — Kahn's invariant only needs to see edges
+        # that block ordering decisions.
         deps: dict = {}
         for pkg in all_pkgs:
             d: set = set()
@@ -860,11 +851,8 @@ class BuildSystem:
 
         # Kahn: each round, pull every node with zero remaining in-scope
         # deps into a batch; remove them from `remaining`; repeat.
-        # Sorted output for deterministic batches across runs.  The
-        # Essential bootstrap batch (forced) goes first when present.
+        # Sorted output for deterministic batches across runs.
         batches: list = []
-        if essential_pkgs:
-            batches.append((essential_pkgs, True))
         remaining = set(all_pkgs)
         while remaining:
             ready = sorted(p for p in remaining if not (deps[p] & remaining))
@@ -1118,20 +1106,22 @@ class BuildSystem:
 
         Returns the set of base package names that were successfully unpacked
         (parsed from dpkg's "Unpacking NAME:arch (ver)" stdout lines).
-        Packages that dpkg rejected (pre-dep failures, etc.) are not in the
-        returned set and will be retried in a later round.
+        Packages that dpkg rejected (pre-dep failures, etc.) are not in
+        the returned set; the caller's _configure_packages then raises
+        when those names are missing from "Setting up X" — a single
+        actionable error rather than two competing reports.
 
         Failure routing:
           - Total failure (dpkg rc != 0 AND nothing unpacked) — surface
             on the console with the LAST line of stderr (the actual dpkg
-            error), not the first 200 chars (which used to land mid-debug
-            output and hid the real cause).
+            error).  Pre-ARCH-12 the first 200 chars landed mid -D1 debug
+            output and hid the real cause; -D1 is now gone so stderr is
+            clean.
           - Partial failure (some unpacked, some not) — log-tab warning
-            only.  The build_chroot loop is designed to retry deferred
-            packages in the next round, so this is normal flow, not a
-            stop-the-world condition.  Pre-fix the same shape was
-            surfaced as "Error unpacking …" on the console even when
-            the build went on to complete cleanly.
+            only.  Under ARCH-12 each batch's deps are guaranteed to be
+            in earlier batches (Kahn invariant), so a partial unpack is
+            a real precondition violation; surfacing it as a console
+            error too would just duplicate the configure-side error.
         """
         if not pkg_list:
             return set()
@@ -1167,7 +1157,7 @@ class BuildSystem:
                 tui.console.warning(
                     f'_unpack_packages: partial — '
                     f'{len(_unpacked)}/{len(pkg_list)} succeeded; '
-                    f'deferring to next round: '
+                    f'unmet pre-deps for: '
                     f'{", ".join(_failed[:5])}'
                     f'{"…" if len(_failed) > 5 else ""}'
                 )
