@@ -122,6 +122,12 @@ class BuildSystem:
         _self._BuildSystem__password = _password
         return _self
 
+    @property
+    def password(self) -> str:
+        """Validated sudo password collected at construction. Reused by callers
+        (e.g. cmd_build_chroot's verify step) to avoid prompting twice."""
+        return self.__password
+
     def build_chroot(self) -> bool:
         """Install all selected packages into the chroot in dependency order.
 
