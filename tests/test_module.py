@@ -402,6 +402,21 @@ def test_buildconfig_security_enabled_rejects_missing_keyring():
         assert 'Keyring not found' in cfg.error_str, cfg.error_str
 
 
+def test_shipped_build_conf_has_snapshot_enabled():
+    """STA-03: the shipped config/build.conf must default to snapshot pinning
+    enabled, so cache and live mirror cannot drift between cache build and
+    source build.  Lock-in test — fails if anyone flips Enabled back to false."""
+    import configparser
+    p = configparser.ConfigParser()
+    cfg_path = os.path.join(_ROOT, 'config', 'build.conf')
+    assert os.path.isfile(cfg_path), f"shipped build.conf missing at {cfg_path}"
+    p.read(cfg_path)
+    assert p.has_section('Snapshot'), "shipped build.conf is missing [Snapshot]"
+    assert p.getboolean('Snapshot', 'Enabled') is True, (
+        "STA-03 regression: shipped build.conf must default Snapshot.Enabled = true"
+    )
+
+
 def test_buildconfig_creates_dir_gnupg_with_0700():
     """dir_gnupg is created and chmod 0700 (gpg homedir requirement)."""
     import stat
@@ -446,6 +461,8 @@ def main() -> int:
         test_buildconfig_security_disabled_accepts_missing_keyring,
         test_buildconfig_security_enabled_rejects_missing_keyring,
         test_buildconfig_creates_dir_gnupg_with_0700,
+        # STA-03
+        test_shipped_build_conf_has_snapshot_enabled,
     ]
     failures = 0
     for t in tests:
