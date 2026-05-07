@@ -10,7 +10,7 @@ import tui
 
 class BuildContainer:
 
-    def __init__(self, config: BuildConfig, docker_server=None) -> bool:
+    def __init__(self, config: BuildConfig, docker_server=None):
 
         self.build_path = config.dir_repo
         self.src_path = config.dir_source
