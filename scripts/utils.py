@@ -666,25 +666,30 @@ def download_source(dependency_tree, dir_download):
         _base_url = _mirror.url + '/'
         _url = urljoin(_base_url, _file_list[_file]['path'])
         _sha256 = _file_list[_file]['sha256']
+        _expected_size = int(_file_list[_file]['size'])
         _download_path = os.path.join(dir_download, _file)
 
         if get_sha256(_download_path) != _sha256:
+            # Use the size from the InRelease-verified Sources index instead
+            # of a HEAD probe — saves one round-trip per file and removes
+            # the prior bug where a HEAD that returned 0 still produced
+            # `_downloaded_size += 0` while the GET silently 404ed.
             try:
-                response = requests.head(_url)
-                _size = int(response.headers.get('content-length', 0))
-
-                response = requests.get(_url, stream=True, timeout=30)
-                if response.status_code == 200:
+                with requests.get(_url, stream=True, timeout=30) as response:
+                    # raise_for_status surfaces 4xx/5xx as HTTPError so the
+                    # existing requests-exception handler logs a clear
+                    # "HTTP <status>" message instead of the prior cryptic
+                    # downstream "Hash mismatch" the user saw on 404s.
+                    response.raise_for_status()
                     with open(_download_path, 'wb') as f:
                         for chunk in response.iter_content(chunk_size=1024):
                             if chunk:
                                 f.write(chunk)
                                 if progress_bar is not None:
                                     progress_bar.step(len(chunk))
-                _downloaded_size += _size
 
             except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-                tui.console.print(f"ERROR: connection failed for {_url}")
+                tui.console.print(f"ERROR: HTTP failure for {_url}")
                 tui.console.error(f"download_source({_url}): {e}")
                 continue
             except OSError as e:
@@ -700,16 +705,40 @@ def download_source(dependency_tree, dir_download):
                 tui.console.error(f"download_source({_url}): {type(e).__name__}: {e}")
                 continue
 
+            # Validate what landed on disk *before* the sha256 check, so a
+            # short/truncated 200 surfaces as a precise byte-count error
+            # rather than the more cryptic "hash mismatch".  Skipping the
+            # check when expected size is 0 lets older Sources stanzas
+            # without size metadata still pass through to the sha256 gate.
+            try:
+                _on_disk = os.path.getsize(_download_path)
+            except OSError as e:
+                tui.console.print(f"ERROR: cannot stat downloaded {_download_path}")
+                tui.console.error(f"download_source stat {_download_path}: {e}")
+                continue
+
+            if _expected_size > 0 and _on_disk != _expected_size:
+                tui.console.print(
+                    f"ERROR: short download for {_file} — "
+                    f"got {_on_disk} bytes, expected {_expected_size}"
+                )
+                tui.console.error(
+                    f"short_download {_url}: {_on_disk}/{_expected_size} bytes"
+                )
+                continue
+
             if get_sha256(_download_path) != _sha256:
                 tui.console.print(f"ERROR: Hash mismatch for {_file} — download may be corrupt")
                 tui.console.error(f"sha256 mismatch: {_download_path} expected {_sha256}")
                 continue
 
+            _downloaded_size += _on_disk
+
         else:
             _skipped += 1
             if progress_bar is not None:
-                progress_bar.step(int(_file_list[_file]['size']))
-            _downloaded_size += int(_file_list[_file]['size'])
+                progress_bar.step(_expected_size)
+            _downloaded_size += _expected_size
 
         _index += 1
 
