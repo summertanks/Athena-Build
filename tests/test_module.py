@@ -215,6 +215,185 @@ def test_source_parses_main_stanza_with_both_files_and_sha256():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ARCH-12 — _compute_install_batches single-pass topo sort
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Tests use lightweight stand-in objects so we can exercise the graph logic
+# without a real DependencyTree / apt cache / dpkg subprocess.
+
+class _StubDepTree:
+    """Mimics the surface of dependencytree.DependencyTree that
+    _resolve_pre_depends / _resolve_depends touch.
+
+    Each entry in pkg_specs is (name, pre_depends, depends).  pre_depends
+    and depends are lists of canonical names — the stub bypasses the
+    Provides / alt-deps machinery (covered by other tests) so this fixture
+    stays focused on Kahn behaviour.
+    """
+    def __init__(self, pkg_specs):
+        class _Pkg:
+            def __init__(self, name, pre, dep):
+                self._name = name
+                # _resolve_pre_depends / _resolve_depends iterate
+                # pkg.pre_depends / pkg.depends as lists of (name,…) tuples,
+                # then look the name up in selected_pkgs and read .['Package'].
+                self.pre_depends    = [(n, '', '') for n in pre]
+                self.alt_pre_depends = []
+                self.depends        = [(n, '', '') for n in dep]
+                self.alt_depends    = []
+            def __getitem__(self, k):
+                if k == 'Package':
+                    return self._name
+                raise KeyError(k)
+        self.selected_pkgs = {
+            spec[0]: _Pkg(*spec) for spec in pkg_specs
+        }
+
+
+class _StubConsole:
+    def print(s, m, *a, **k): pass
+    def info(s, m): pass
+    def warning(s, m): pass
+    def error(s, m): pass
+    def mark(s): return 0
+    def trim_to(s, *a): pass
+
+
+def _bare_buildsystem_with_deps(pkg_specs):
+    """Build a BuildSystem instance wired only enough to run the dep-graph
+    methods.  Bypasses __init__ (no sudo, no chroot dirs, no Prompt).
+
+    Always replaces tui.console with a no-op stub: the default
+    tui.console is a Console facade whose methods raise
+    "No Tui instance — create Tui before using Console" — has the right
+    surface but the wrong behaviour for tests.  Replacing it is cheap
+    and makes the cycle-batch warning path testable.
+    """
+    import buildsystem
+    import tui as _tui
+    _tui.console = _StubConsole()
+    bs = buildsystem.BuildSystem.__new__(buildsystem.BuildSystem)
+    bs._BuildSystem__dependencytree = _StubDepTree(pkg_specs)
+    return bs
+
+
+def test_compute_install_batches_linear_chain():
+    """A→B→C produces one batch per node, in topo order (deepest first).
+    All batches acyclic so needs_force=False everywhere."""
+    bs = _bare_buildsystem_with_deps([
+        ('A', [], ['B']),       # A depends on B
+        ('B', [], ['C']),       # B depends on C
+        ('C', [], []),          # C is the leaf
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    assert batches == [(['C'], False), (['B'], False), (['A'], False)], batches
+
+
+def test_compute_install_batches_independent_packages_share_a_batch():
+    """A, B, C with no edges between them collapse into a single batch."""
+    bs = _bare_buildsystem_with_deps([
+        ('A', [], []),
+        ('B', [], []),
+        ('C', [], []),
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    # Within-batch order is deterministic-sorted by the implementation.
+    assert batches == [(['A', 'B', 'C'], False)], batches
+
+
+def test_compute_install_batches_fan_out():
+    """Common base + multiple dependents: base alone, then dependents in
+    one parallel batch — proves Kahn collapses independent leaves."""
+    bs = _bare_buildsystem_with_deps([
+        ('base', [], []),
+        ('a',    [], ['base']),
+        ('b',    [], ['base']),
+        ('c',    [], ['base']),
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    assert batches == [(['base'], False), (['a', 'b', 'c'], False)], batches
+
+
+def test_compute_install_batches_pre_depends_and_depends_unioned():
+    """Pre-Depends and Depends edges both contribute to ordering."""
+    bs = _bare_buildsystem_with_deps([
+        ('A', ['B'], []),       # A pre-depends on B
+        ('B', [], ['C']),       # B depends on C
+        ('C', [], []),
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    assert batches == [(['C'], False), (['B'], False), (['A'], False)], batches
+
+
+def test_compute_install_batches_libc_seed_breaks_cycle():
+    """The libc seed pattern: libc6 ↔ gcc-12-base — both are pre-installed
+    (in libc_seed_set) so neither appears in the output and edges into
+    them from other packages are dropped."""
+    bs = _bare_buildsystem_with_deps([
+        ('libc6',       ['gcc-12-base'], []),
+        ('gcc-12-base', ['libc6'],       []),
+        ('bash',        ['libc6'],       []),
+    ])
+    batches = bs._compute_install_batches(
+        libc_seed_set={'libc6', 'gcc-12-base'}
+    )
+    # bash's only edge points into the seed → ready in batch 1, no force.
+    # libc6 / gcc-12-base never appear (seed handled separately by caller).
+    assert batches == [(['bash'], False)], batches
+
+
+def test_compute_install_batches_self_dep_is_ignored():
+    """Self-edges (A → A via Provides loop) must not block A's own batch."""
+    bs = _bare_buildsystem_with_deps([
+        ('A', [], ['A']),       # self-edge
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    assert batches == [(['A'], False)], batches
+
+
+def test_compute_install_batches_cycle_emitted_as_forced_batch():
+    """Two packages that mutually depend, with no seed entry to break the
+    cycle, are emitted as a single terminal batch with force_deps=True
+    (real-world parallel: libdevmapper1.02.1 ↔ dmsetup on bookworm)."""
+    bs = _bare_buildsystem_with_deps([
+        ('X', [], ['Y']),
+        ('Y', [], ['X']),
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    assert batches == [(['X', 'Y'], True)], batches
+
+
+def test_compute_install_batches_acyclic_then_cycle():
+    """Acyclic prefix is emitted normally, cycle is the terminal batch."""
+    bs = _bare_buildsystem_with_deps([
+        ('leaf', [], []),
+        ('top',  [], ['leaf']),
+        ('X',    [], ['Y']),
+        ('Y',    [], ['X']),
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    # Acyclic batches first (in dep order), then the cycle batch.
+    assert batches == [
+        (['leaf'], False),
+        (['top'], False),
+        (['X', 'Y'], True),
+    ], batches
+
+
+def test_compute_install_batches_external_deps_filtered():
+    """A Depends entry that names a package not in selected (presumed
+    satisfied by chroot base state, e.g. 'awk' on a host already
+    providing one) must not block ordering."""
+    bs = _bare_buildsystem_with_deps([
+        ('A', [], ['some-package-not-in-graph']),
+        ('B', [], []),
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    # External dep dropped → A and B both ready in batch 1, no force.
+    assert batches == [(['A', 'B'], False)], batches
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STA-01 / SEC-01 — InRelease GPG verification
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -613,6 +792,16 @@ def main() -> int:
         test_buildconfig_security_disabled_accepts_missing_keyring,
         test_buildconfig_security_enabled_rejects_missing_keyring,
         test_buildconfig_creates_dir_gnupg_with_0700,
+        # ARCH-12
+        test_compute_install_batches_linear_chain,
+        test_compute_install_batches_independent_packages_share_a_batch,
+        test_compute_install_batches_fan_out,
+        test_compute_install_batches_pre_depends_and_depends_unioned,
+        test_compute_install_batches_libc_seed_breaks_cycle,
+        test_compute_install_batches_self_dep_is_ignored,
+        test_compute_install_batches_cycle_emitted_as_forced_batch,
+        test_compute_install_batches_acyclic_then_cycle,
+        test_compute_install_batches_external_deps_filtered,
         # STA-07
         test_buildsystem_password_readable_before_scrub,
         test_buildsystem_scrub_password_clears_field,

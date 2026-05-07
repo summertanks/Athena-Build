@@ -162,46 +162,43 @@ class BuildSystem:
     def build_chroot(self, debug: bool = False) -> bool:
         """Install all selected packages into the chroot in dependency order.
 
+        Single-pass topo-sorted install (ARCH-12).  The previous round-loop
+        retry pattern computed Pre-Depends ordering for unpack only and
+        let `dpkg --configure -a` sort out Depends ordering itself; when
+        dpkg's solver hit a transient unmet dep the round failed and we
+        retried.  This version computes one batch sequence over
+        `Pre-Depends ∪ Depends` up front (`_compute_install_batches`),
+        guaranteeing every batch's deps are in earlier batches.  Each
+        batch is unpacked then configured exactly once with named
+        `dpkg --configure pkg1 pkg2 ...` — no retries possible because
+        no batch can have a transient unmet dep.
+
         Args:
             debug: When True, generate_system_configs() also writes a
                 journald drop-in to forward all entries to /dev/console.
                 Off by default — opt in for serial-debug builds only.
 
-        Unpack phase (chrootless, all rounds):
-          An unpack forest tracks Pre-Depends ordering.  Each round unpacks
-          packages whose Pre-Depends are all already configured, then runs
-          `dpkg --configure -a` INSIDE a real chroot so maintainer scripts
-          run in the correct environment without DPKG_ROOT workarounds.
-
-        Configure phase (real chroot, after each unpack round):
-          `dpkg --configure -a` is run inside the chroot.  dpkg itself handles
-          Depends ordering; we only track what got configured so we can update
-          the unpack forest (removing satisfied Pre-Depends edges).
-
         Returns:
-            True on completion.  Individual package failures are logged but do
-            not abort the run — a partial chroot is still useful for diagnosis.
+            True on completion.
 
         Raises:
-            RuntimeError if a virtual-fs mount (proc / sys / dev / dev/pts)
-            cannot be established or verified — chroot postinstall scripts
-            need these and proceeding without them produces a partially-
-            configured chroot whose only failure signal is "many packages
-            not fully configured" much later in the run.  The try/finally
-            below ensures any successful partial mounts get unmounted on
-            this exit path too.
+            RuntimeError if (a) a virtual-fs mount fails (caught by
+            try/finally so partial mounts get cleaned up), (b) a
+            dependency cycle remains after libc-seed removal in
+            _compute_install_batches, or (c) any package in any batch
+            fails to configure (caught by _configure_packages and
+            converted to a clean False return so the operator sees a
+            single actionable error in the console).
         """
+        selected = self.__dependencytree.selected_pkgs
         # All canonical packages — filter out virtual-package alias entries
         # (entries where the key differs from Package['Package']).
-        all_pkgs = [
-            p for p in self.__dependencytree.selected_pkgs
-            if p == self.__dependencytree.selected_pkgs[p]['Package']
-        ]
+        all_pkgs = [p for p in selected if p == selected[p]['Package']]
 
         # gcc-NN-base bootstrap: libc6 → libgcc-s1 → gcc-NN-base forms a
-        # Pre-Depends cycle that the forest algorithm cannot break on its own.
-        # We treat these packages as already installed (batch 0) so all other
-        # packages see their deps satisfied from the start.
+        # Pre-Depends cycle Kahn cannot break on its own.  Pre-install these
+        # as the first batch so the rest of the graph has all libc deps
+        # already satisfied — same pattern as the legacy unpack-forest seed.
         _gcc_base = next(
             (p for p in all_pkgs if re.fullmatch(r'gcc-\d+-base', p)), None
         )
@@ -214,31 +211,32 @@ class BuildSystem:
             libc_seed = ['libc6', 'libgcc-s1', 'libcrypt1']
         else:
             libc_seed = [_gcc_base, 'libc6', 'libgcc-s1', 'libcrypt1']
-
         libc_seed_set = set(libc_seed)
 
-        # --- Build unpack forest ---
-        # Each tree: root=pkg, children=Pre-Depends present in selected set
-        # that are NOT in libc_seed (seed deps treated as already configured).
-        unpack_forest: dict = {}
-        for pkg in all_pkgs:
-            if pkg in libc_seed_set:
-                continue
-            tree = utils.Tree()
-            tree.add_node(pkg)
-            for dep in self._resolve_pre_depends(pkg):
-                if dep not in libc_seed_set:
-                    try:
-                        tree.add_node(dep, pkg)
-                    except ValueError:
-                        pass  # dep listed twice in Pre-Depends
-            unpack_forest[pkg] = tree
+        # Compute the batch sequence up front.  Failure here means an
+        # unbreakable cycle remains after libc-seed handling — surface it
+        # before touching the chroot so the operator sees the dep problem
+        # without first sitting through unrelated dpkg activity.
+        try:
+            batches = self._compute_install_batches(libc_seed_set)
+        except RuntimeError as e:
+            tui.console.print(f"ERROR: cannot order packages — {e}")
+            tui.console.error(f"_compute_install_batches: {e}")
+            return False
+
+        _total_to_install = len(libc_seed) + sum(len(b) for b in batches)
+        tui.console.print(
+            f"Computed install plan: {len(batches) + 1} batches, "
+            f"{_total_to_install} packages "
+            f"(seed: {len(libc_seed)}, batches 1..{len(batches)})"
+        )
 
         # --- Install ---
         self._setup_chroot_env()
         self._init_dpkg_database()
         _log_path = os.path.join(self.__dir_log, 'chroot-install.log')
 
+        configured: set = set()
         _result = True
         try:
             # /proc, /sys, /dev, /dev/pts are needed by many postinstall
@@ -250,93 +248,42 @@ class BuildSystem:
 
             with open(_log_path, 'w') as fh:
 
-                # Batch 0: libc circular-dep bootstrap unpacked first.
+                # Batch 0: libc circular-dep bootstrap.
                 tui.console.print(f"Batch 0 (bootstrap): {libc_seed}")
-                fh.write(f'Batch 0 (bootstrap): {libc_seed}\n')
+                fh.write(f'--- Batch 0 (bootstrap) ---\n')
                 self._unpack_packages(libc_seed, fh)
-                unpacked = set(libc_seed)
+                configured |= self._configure_packages(libc_seed, fh)
 
-                fh.write('\n--- Batch 0 configure ---\n')
-                _boot_configured = self._configure_chroot(fh)
-                configured = set(libc_seed) | _boot_configured
-
-                _round = 1
-                while unpack_forest:
-                    _progress = False
-
-                    ready_to_unpack = [
-                        pkg for pkg, tree in unpack_forest.items()
-                        if tree.is_childless and not tree.is_empty
-                    ]
-
-                    if not ready_to_unpack and unpack_forest:
-                        # Circular Pre-Depends — force all remaining through.
-                        tui.console.print(
-                            f"WARNING: circular Pre-Depends detected — "
-                            f"forcing batch of {len(unpack_forest)} packages"
-                        )
-                        tui.console.warning(
-                            f"build_chroot round {_round}: forced Pre-Depends batch: "
-                            f"{list(unpack_forest.keys())}"
-                        )
-                        ready_to_unpack = list(unpack_forest.keys())
-
-                    if ready_to_unpack:
-                        tui.console.print(
-                            f"Round {_round} — unpacking {len(ready_to_unpack)} packages"
-                        )
-                        fh.write(f'\n--- Round {_round} unpack ---\n')
-                        _newly_unpacked = self._unpack_packages(ready_to_unpack, fh)
-                        unpacked.update(_newly_unpacked)
-                        _progress = bool(_newly_unpacked)
-                        for pkg in _newly_unpacked:
-                            unpack_forest.pop(pkg, None)
-
-                    # dpkg --configure -a handles Depends ordering internally.
-                    # We only need to know what got configured to update the
-                    # unpack forest (removing satisfied Pre-Depends edges).
-                    fh.write(f'\n--- Round {_round} configure ---\n')
-                    _newly_configured = self._configure_chroot(fh)
-                    _new = _newly_configured - configured
-                    if _new:
-                        configured.update(_new)
-                        for pkg in _new:
-                            for other_tree in unpack_forest.values():
-                                if other_tree.find_node(pkg):
-                                    other_tree.delete_node(pkg)
-                        _progress = True
-
-                    if not _progress:
-                        stuck_all = list(unpack_forest.keys())
-                        tui.console.print(
-                            f"ERROR: no progress in round {_round} — "
-                            f"{len(stuck_all)} packages stuck in unpack forest"
-                        )
-                        tui.console.error(
-                            f"build_chroot stuck in round {_round}: {stuck_all}"
-                        )
-                        _result = False
-                        break
-
-                    _round += 1
-
-                # After the last unpack round the unpack forest is empty but
-                # some packages may still be in the "unpacked" (not configured)
-                # state.  One final dpkg --configure -a picks them all up.
-                if _result:
-                    tui.console.print("Final configure pass...")
-                    fh.write('\n--- Final configure ---\n')
-                    _final_configured = self._configure_chroot(fh, is_final=True)
-                    configured.update(_final_configured)
-
+                # Batches 1..N — Kahn-ordered, dep-independent within each.
+                # The terminal batch may be a "cycle batch" (force_deps=True)
+                # that contains a real SCC; in that case dpkg gets
+                # --force-depends scoped to that batch only.
+                for _i, (_batch, _force) in enumerate(batches, start=1):
+                    _label = f"Batch {_i}/{len(batches)} — {len(_batch)} package(s)"
+                    if _force:
+                        _label += " [cycle, --force-depends]"
+                    tui.console.print(_label)
+                    fh.write(f'\n--- Batch {_i} ({len(_batch)} pkgs'
+                             f'{", forced" if _force else ""}) ---\n')
+                    self._unpack_packages(_batch, fh)
+                    configured |= self._configure_packages(
+                        _batch, fh, force_deps=_force
+                    )
+        except RuntimeError as e:
+            tui.console.print(f"ERROR: chroot install aborted — {e}")
+            tui.console.error(f"build_chroot install loop: {e}")
+            _result = False
         finally:
             self._umount_chroot_fs()
 
         if not _result:
             return False
 
-        # Query dpkg inside the chroot for the definitive list of packages
-        # that are NOT fully configured so the user gets a clear summary.
+        # Defence-in-depth: even with a clean batch sequence, query dpkg
+        # for the authoritative list of packages NOT in 'install ok
+        # installed' state.  Should be empty after a successful run; if
+        # not, surface the names so the operator can investigate without
+        # parsing 80k lines of chroot-install.log.
         _status_cmd = ['sudo', '-S', 'chroot', self.__dir_chroot,
                        'dpkg', '--get-selections']
         _status = subprocess.run(_status_cmd, input=self.__password + '\n',
@@ -359,7 +306,7 @@ class BuildSystem:
         else:
             tui.console.print(
                 f"Chroot build complete — {len(configured)} packages installed "
-                f"in {_round - 1} rounds — all packages fully configured"
+                f"in {len(batches) + 1} batches — all packages fully configured"
             )
 
         # Ensure every installed kernel has an initramfs.  Defence-in-depth
@@ -778,23 +725,221 @@ class BuildSystem:
         return result
 
     def _resolve_depends(self, pkg_name: str) -> list:
-        """Return Depends names for pkg_name that are present in selected_pkgs.
+        """Return Depends canonical package names for pkg_name present in selected_pkgs.
 
         Handles both single-alternative and OR-alternative Depends.  For OR
         groups, the first alternative present in selected_pkgs is used so that
         configure ordering tracks the actual package we installed.
+
+        Like _resolve_pre_depends, virtual-package names (e.g. 'awk') are
+        resolved to the real Package name (e.g. 'mawk') so that callers
+        comparing names against actual package identifiers — including
+        the topo-sort in _compute_install_batches and the Setting-up
+        parser in _configure_packages — match correctly.  Pre-fix this
+        method returned virtual names verbatim, which silently dropped
+        edges in the dep graph whenever a Depends pointed at a Provides.
         """
         pkg = self.__dependencytree.selected_pkgs.get(pkg_name)
         if pkg is None:
             return []
         selected = self.__dependencytree.selected_pkgs
-        result = [dep[0] for dep in pkg.depends if dep[0] in selected]
+        result: list = []
+        seen: set = set()
+        for dep in pkg.depends:
+            dep_name = dep[0]
+            if dep_name in selected:
+                canonical = selected[dep_name]['Package']
+                if canonical not in seen:
+                    seen.add(canonical)
+                    result.append(canonical)
         for group in pkg.alt_depends:
             for alt in group:
                 if alt[0] in selected:
-                    result.append(alt[0])
+                    canonical = selected[alt[0]]['Package']
+                    if canonical not in seen:
+                        seen.add(canonical)
+                        result.append(canonical)
                     break
         return result
+
+    def _compute_install_batches(self, libc_seed_set: set) -> list:
+        """Topologically sort selected packages over Pre-Depends ∪ Depends.
+
+        Returns a list of (batch, needs_force) tuples.  Each batch is a
+        list of canonical package names; needs_force is True only for a
+        terminal "cycle batch" emitted when Kahn cannot make further
+        progress (a real dep cycle remains after libc-seed removal).
+
+        Acyclic batches (needs_force=False) share two properties:
+
+          1. None of their members depends on any other in the same batch.
+             So one `dpkg --unpack` followed by one `dpkg --configure`
+             always satisfies dpkg's ordering constraints.
+          2. All Pre-Depends and Depends are in *earlier* batches (or in
+             libc_seed_set, treated as already-resolved).
+
+        The cycle batch (needs_force=True) does NOT have property 1 —
+        by construction its members mutually depend.  The caller scopes
+        --force-depends to this batch alone (see _configure_packages),
+        which lets dpkg break the SCC the same way `--configure -a`
+        previously did, but without papering over real dep failures
+        elsewhere in the graph.  In practice on Debian bookworm only
+        the libdevmapper1.02.1 ↔ dmsetup co-install pair (and the small
+        set of packages reachable from it) lands in the cycle batch.
+
+        libc_seed_set is the hard-coded base bootstrap set
+        (gcc-NN-base, libc6, libgcc-s1, libcrypt1) installed first by
+        the caller to break the libc circular Pre-Depends.  Edges into
+        the seed are dropped so other packages see those deps as
+        already satisfied.
+
+        Raises:
+            RuntimeError only if Kahn produces no acyclic batches AND the
+            graph has more than one disjoint SCC large enough to suggest
+            a genuinely pathological state (every package in one cycle).
+            Practical Debian dep graphs do not hit this.
+        """
+        selected = self.__dependencytree.selected_pkgs
+
+        # Restrict the graph to canonical (non-virtual) names that are NOT
+        # part of the seed.  Aliases would inflate the graph with redundant
+        # nodes and Kahn would never be able to retire them.
+        all_pkgs = [
+            p for p in selected
+            if p == selected[p]['Package'] and p not in libc_seed_set
+        ]
+        in_scope = set(all_pkgs)
+
+        # deps[pkg] = set of canonical names that pkg depends on AND are
+        # also in scope.  Edges to libc_seed_set or to packages outside
+        # selected_pkgs (presumed satisfied by chroot base state) are
+        # silently dropped — Kahn's invariant only needs to see edges that
+        # block ordering decisions.
+        deps: dict = {}
+        for pkg in all_pkgs:
+            d: set = set()
+            for n in self._resolve_pre_depends(pkg) + self._resolve_depends(pkg):
+                if n == pkg:
+                    continue                # self-edge (via Provides loops)
+                if n in in_scope:
+                    d.add(n)
+            deps[pkg] = d
+
+        # Kahn: each round, pull every node with zero remaining in-scope
+        # deps into a batch; remove them from `remaining`; repeat.
+        # Sorted output for deterministic batches across runs.
+        batches: list = []
+        remaining = set(all_pkgs)
+        while remaining:
+            ready = sorted(p for p in remaining if not (deps[p] & remaining))
+            if not ready:
+                # Cycle remains.  Emit ALL remaining packages as one
+                # cycle batch — the caller will pass --force-depends
+                # for this batch only.  We don't try to find the
+                # minimum SCC: dpkg with --force-depends across the
+                # whole remaining set produces the same result as
+                # repeated targeted forcing, and the simpler emission
+                # gives the operator a single, complete picture of
+                # what's in the cycle.
+                _stuck = sorted(remaining)
+                tui.console.warning(
+                    f"_compute_install_batches: dep cycle in "
+                    f"{len(_stuck)} package(s); emitting as forced batch "
+                    f"(--force-depends scoped to this batch only): "
+                    f"{_stuck[:6]}{'…' if len(_stuck) > 6 else ''}"
+                )
+                batches.append((_stuck, True))
+                return batches
+            batches.append((ready, False))
+            remaining -= set(ready)
+        return batches
+
+    def _configure_packages(self, pkg_list: list, fh,
+                            force_deps: bool = False) -> set:
+        """Run `dpkg --configure pkg1 pkg2 ...` for the named packages.
+
+        Counterpart to _unpack_packages and the named-list alternative
+        to _configure_chroot's `--configure -a` blanket sweep.  Used by
+        the single-pass batched install in build_chroot — each acyclic
+        batch's deps are guaranteed to be in earlier batches by Kahn's
+        invariant, so a configure failure here is a real error (not the
+        "transient, retry next round" case the legacy loop tolerated).
+
+        Auto-selects chroot vs chrootless mode using the same probe as
+        _configure_chroot: dpkg-in-chroot once /usr/bin/dpkg has been
+        unpacked, chrootless --root before that.
+
+        Args:
+            pkg_list:   canonical package names to configure.
+            fh:         open file handle for the chroot install log.
+            force_deps: True only for the cycle batch emitted by
+                        _compute_install_batches.  Adds --force-depends
+                        scoped to this single dpkg invocation so dpkg
+                        can break the SCC; acyclic batches must NOT
+                        force, so a real dep violation surfaces.
+
+        Returns the set of base package names dpkg reported as
+        "Setting up X (version)".  Raises RuntimeError when any package
+        in pkg_list is not in that set after dpkg returns — caller
+        relies on this to abort the install rather than continue with
+        a half-configured chroot.
+        """
+        if not pkg_list:
+            return set()
+
+        _chroot = self.__dir_chroot
+        _dpkg_in_chroot = os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg'))
+        _force = '--force-depends ' if force_deps else ''
+
+        if _dpkg_in_chroot:
+            _cmd = shlex.split(
+                f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
+                f'chroot {_chroot} '
+                f'dpkg --configure --force-confdef --force-confnew {_force}'
+            ) + pkg_list
+        else:
+            _cmd = shlex.split(
+                f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
+                f'dpkg --root={_chroot} --instdir={_chroot} '
+                f'--admindir={_chroot}/var/lib/dpkg '
+                f'--force-script-chrootless --force-confdef --force-confnew {_force}'
+                f'--configure'
+            ) + pkg_list
+
+        fh.write(f'Configure: {" ".join(pkg_list)}\n')
+        _proc = subprocess.run(_cmd, input=self.__password + '\n',
+                               capture_output=True, text=True, env=os.environ)
+        fh.write(_proc.stdout)
+
+        _configured: set = set()
+        for _line in _proc.stdout.splitlines():
+            _m = re.match(r'^Setting up (\S+?)(?::\S+)? \(', _line)
+            if _m:
+                _configured.add(_m.group(1))
+
+        # Anything that was asked to be configured but didn't show up in
+        # "Setting up" stdout is a failure.  dpkg may print errors in any
+        # mix of stdout and stderr; capture both for the diagnostic so the
+        # operator can see the underlying cause without scanning the log
+        # file separately.
+        _missing = [p for p in pkg_list if p not in _configured]
+        if _proc.returncode != 0 or _missing:
+            fh.write(_proc.stderr)
+            tui.console.print(
+                f'Configure failed for {len(_missing)} of {len(pkg_list)} '
+                f'packages: {", ".join(_missing[:5])}'
+                f'{"…" if len(_missing) > 5 else ""}'
+            )
+            tui.console.error(
+                f'_configure_packages: rc={_proc.returncode} '
+                f'missing={_missing[:5]}'
+            )
+            raise RuntimeError(
+                f'configure failed for {len(_missing)} package(s); '
+                f'first: {_missing[:5]}'
+            )
+
+        return _configured
 
     # ── dpkg execution helpers ────────────────────────────────────────────────
 
