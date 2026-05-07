@@ -224,11 +224,15 @@ class BuildSystem:
             tui.console.error(f"_compute_install_batches: {e}")
             return False
 
-        _total_to_install = len(libc_seed) + sum(len(b) for b in batches)
+        # batches is List[Tuple[List[str], bool]]; len(b) on the tuple
+        # is always 2 — use b[0] for the actual package list.
+        _total_to_install = len(libc_seed) + sum(len(b[0]) for b in batches)
+        _forced = sum(1 for b in batches if b[1])
         tui.console.print(
             f"Computed install plan: {len(batches) + 1} batches, "
             f"{_total_to_install} packages "
-            f"(seed: {len(libc_seed)}, batches 1..{len(batches)})"
+            f"(seed: {len(libc_seed)}; batches 1..{len(batches)}: "
+            f"{_forced} forced, {len(batches) - _forced} acyclic)"
         )
 
         # --- Install ---
@@ -438,7 +442,15 @@ class BuildSystem:
         Failed packages are NOT in the returned set.
         """
         _chroot = self.__dir_chroot
-        _dpkg_in_chroot = os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg'))
+        # Same chroot-mode probe as _configure_packages — both /usr/bin/dpkg
+        # and sh (at /bin/sh or /usr/bin/sh, whichever update-alternatives
+        # installed) must be in place before chroot dpkg can run any
+        # maintainer script (else "'sh' not found in PATH").
+        _dpkg_in_chroot = (
+            os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg')) and
+            (os.path.lexists(os.path.join(_chroot, 'bin/sh')) or
+             os.path.lexists(os.path.join(_chroot, 'usr/bin/sh')))
+        )
 
         if _dpkg_in_chroot:
             # Real chroot: env runs on host (no /usr/bin/env needed inside chroot).
@@ -766,9 +778,11 @@ class BuildSystem:
         """Topologically sort selected packages over Pre-Depends ∪ Depends.
 
         Returns a list of (batch, needs_force) tuples.  Each batch is a
-        list of canonical package names; needs_force is True only for a
-        terminal "cycle batch" emitted when Kahn cannot make further
-        progress (a real dep cycle remains after libc-seed removal).
+        list of canonical package names; needs_force is True for the
+        Essential bootstrap batch (always emitted first when there are
+        Essential packages in the selected set) and for any terminal
+        "cycle batch" emitted when Kahn cannot make further progress
+        on a real dep cycle.
 
         Acyclic batches (needs_force=False) share two properties:
 
@@ -801,20 +815,39 @@ class BuildSystem:
         """
         selected = self.__dependencytree.selected_pkgs
 
+        # Essential packages (Debian's `Essential: yes` set — bash, dash,
+        # coreutils, dpkg, sed, tar, ...) have implicit mutual deps that
+        # they do not declare in their stanzas, on the assumption that an
+        # Essential package can rely on every other Essential being
+        # available.  Topo sort cannot see this contract, so without
+        # special handling dpkg ends up scheduled before dash and the
+        # chroot has no /bin/sh for dpkg's maintainer scripts.  Pull
+        # them out and emit as a forced bootstrap batch (--force-depends
+        # scoped to that one batch) before any normal Kahn batches —
+        # same pattern as the libc seed's batch 0.
+        essential_pkgs = sorted(
+            p for p in selected
+            if p == selected[p]['Package']
+            and p not in libc_seed_set
+            and selected[p].get('Essential', '').strip().lower() == 'yes'
+        )
+        essential_set = set(essential_pkgs)
+        bootstrap_set = libc_seed_set | essential_set
+
         # Restrict the graph to canonical (non-virtual) names that are NOT
-        # part of the seed.  Aliases would inflate the graph with redundant
-        # nodes and Kahn would never be able to retire them.
+        # part of either bootstrap layer.  Aliases would inflate the graph
+        # with redundant nodes and Kahn would never be able to retire them.
         all_pkgs = [
             p for p in selected
-            if p == selected[p]['Package'] and p not in libc_seed_set
+            if p == selected[p]['Package'] and p not in bootstrap_set
         ]
         in_scope = set(all_pkgs)
 
         # deps[pkg] = set of canonical names that pkg depends on AND are
-        # also in scope.  Edges to libc_seed_set or to packages outside
-        # selected_pkgs (presumed satisfied by chroot base state) are
-        # silently dropped — Kahn's invariant only needs to see edges that
-        # block ordering decisions.
+        # also in scope.  Edges to bootstrap_set (libc seed + Essential)
+        # or to packages outside selected_pkgs (presumed satisfied by
+        # chroot base state) are silently dropped — Kahn's invariant
+        # only needs to see edges that block ordering decisions.
         deps: dict = {}
         for pkg in all_pkgs:
             d: set = set()
@@ -827,8 +860,11 @@ class BuildSystem:
 
         # Kahn: each round, pull every node with zero remaining in-scope
         # deps into a batch; remove them from `remaining`; repeat.
-        # Sorted output for deterministic batches across runs.
+        # Sorted output for deterministic batches across runs.  The
+        # Essential bootstrap batch (forced) goes first when present.
         batches: list = []
+        if essential_pkgs:
+            batches.append((essential_pkgs, True))
         remaining = set(all_pkgs)
         while remaining:
             ready = sorted(p for p in remaining if not (deps[p] & remaining))
@@ -888,7 +924,21 @@ class BuildSystem:
             return set()
 
         _chroot = self.__dir_chroot
-        _dpkg_in_chroot = os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg'))
+        # Chroot-mode dpkg requires both:
+        #   /usr/bin/dpkg — the chroot's dpkg binary, unpacked
+        #   sh on PATH    — created (typically as a symlink to dash) by
+        #                   dash's postinst via update-alternatives
+        # Until sh is in place inside the chroot, dpkg cannot run any
+        # maintainer script there ("'sh' not found in PATH").  Stay in
+        # chrootless mode (--root=DIR + --force-script-chrootless)
+        # which uses the host's sh + DPKG_ROOT until that's true.
+        # update-alternatives may install at either /bin/sh or
+        # /usr/bin/sh depending on usrmerge layout — accept either.
+        _dpkg_in_chroot = (
+            os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg')) and
+            (os.path.lexists(os.path.join(_chroot, 'bin/sh')) or
+             os.path.lexists(os.path.join(_chroot, 'usr/bin/sh')))
+        )
         _force = '--force-depends ' if force_deps else ''
 
         if _dpkg_in_chroot:
