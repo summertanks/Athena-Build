@@ -70,7 +70,7 @@ and an 8-check chroot verifier that gates ISO build.
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
-| STA-01 | P0 | todo | Verify mirror `InRelease` GPG signatures against a pinned keyring before trusting `Packages` / `Sources` indices. |
+| STA-01 | P0 | done | Verify mirror `InRelease` GPG signatures against a pinned keyring before trusting `Packages` / `Sources` indices. *(implemented via `utils.verify_inrelease()` + `[Security]` config; default uses host-provided debian-archive-keyring; tests in `test_module.py`)* |
 | STA-02 | P1 | todo | Remove `--force-depends` from `_configure_chroot` (`buildsystem.py:424,434`) and surface the real dep error. Pre-req: STA-03. |
 | STA-03 | P1 | todo | Make snapshot pinning the **default** in `config/build.conf` so cache and live mirror cannot drift between cache build and source build. |
 | STA-04 | P1 | todo | Validate downloaded files at the moment they finish writing in `download_source` — currently size and `sha256` are checked, but a non-200 response writes a 0-byte file and the loop continues; surface a clear error for the user. |
@@ -158,12 +158,12 @@ and an 8-check chroot verifier that gates ISO build.
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
-| SEC-01 | P0 | todo | (Same as STA-01) Verify `InRelease` GPG signatures with a pinned keyring before trusting any mirror data. |
+| SEC-01 | P0 | done | (Same as STA-01) Verify `InRelease` GPG signatures with a pinned keyring before trusting any mirror data. |
 | SEC-02 | P1 | todo | The Docker image grants `athena ALL=(ALL) NOPASSWD:ALL`. Acceptable for a build sandbox, but document the threat model and ensure the image is *never* exposed to a network the host doesn’t control. |
 | SEC-03 | P1 | todo | Source archives from snapshot.debian.org are downloaded over plain `http://` (`Mirror.baseurl = http://snapshot.debian.org/archive`). Switch to `https://` everywhere — snapshot supports it. |
 | SEC-04 | P1 | todo | `systemd-firstboot --root-password=root` (`buildsystem.py:1254`). Replace with a generated random password printed to console and written to the ISO label, or force a reset on first boot. |
 | SEC-05 | P2 | todo | The build container runs `apt-get install -y` on whatever the resolved build-deps are — without dep-graph review. Acceptable today, but add an opt-in “show me what is about to be installed” gate for hostile-mirror scenarios. |
-| SEC-06 | P2 | todo | The smoke driver and tests do not exercise GPG paths; once SEC-01 lands, add fixtures with a known-bad signature to confirm the verifier rejects it. |
+| SEC-06 | P2 | done | The smoke driver and tests do not exercise GPG paths; once SEC-01 lands, add fixtures with a known-bad signature to confirm the verifier rejects it. *(landed alongside STA-01 — see `test_verify_inrelease_*` in `tests/test_module.py`)* |
 
 ## 8. Operator UX — P2 / P3
 

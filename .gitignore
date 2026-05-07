@@ -12,6 +12,7 @@ __pycache__/
 buildroot/
 cache/
 download/
+gnupg/
 image/
 log/
 packages/

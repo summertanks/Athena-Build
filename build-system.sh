@@ -12,6 +12,7 @@ DIR_CACHE="cache"
 DIR_DOWNLOAD="download"
 DIR_LOG="log"
 DIR_SOURCE="source"
+DIR_GNUPG="gnupg"
 
 VERBOSE="0"
 CONFIG_FILE="config/build.conf"
@@ -97,6 +98,27 @@ if [ -x "$(which docker 2>/dev/null)" ]; then
 else
     echo "E: docker not found, build system requires docker" >&2
     exit 1
+fi
+
+# checking gpg (used by python-gnupg in verify_inrelease).
+# python-gnupg invokes `gpg`, not `gpgv`, so we check for the full binary.
+if [ -x "$(which gpg 2>/dev/null)" ]; then
+    echo Using `gpg --version | head -n1`
+else
+    echo "E: gpg not found (install gnupg) — required for InRelease verification" >&2
+    exit 1
+fi
+
+# checking default Debian archive keyring.  build.conf [Security] Keyring
+# may override this path; the Python BuildConfig validates the configured
+# value.  Here we only check the default location with a warning so a
+# config-overridden setup is not blocked.
+DEFAULT_KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
+if [ -r "$DEFAULT_KEYRING" ]; then
+    echo "Using keyring $DEFAULT_KEYRING (from debian-archive-keyring)"
+else
+    echo "W: $DEFAULT_KEYRING not found — install 'debian-archive-keyring'" \
+         "or set [Security] Keyring in build.conf to a readable file" >&2
 fi
 
 # checking docker group membership
@@ -191,6 +213,10 @@ mkdir -p $BUILD_DIR/$DIR_CACHE
 mkdir -p $BUILD_DIR/$DIR_DOWNLOAD
 mkdir -p $BUILD_DIR/$DIR_SOURCE
 mkdir -p $BUILD_DIR/$DIR_LOG/build
+# gpg requires 0700 on its homedir; chmod here so the Python verifier
+# does not have to (and so re-runs are idempotent).
+mkdir -p $BUILD_DIR/$DIR_GNUPG
+chmod 0700 $BUILD_DIR/$DIR_GNUPG
 
 # Checking build system
 awk -F= '/PRETTY_NAME/ { print "Current Build System " $2 }' /etc/os-release
