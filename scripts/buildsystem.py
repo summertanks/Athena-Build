@@ -362,10 +362,9 @@ class BuildSystem:
                 f"in {_round - 1} rounds — all packages fully configured"
             )
 
-        # Ensure every installed kernel has an initramfs.  With --force-depends
-        # linux-image can configure before initramfs-tools is ready, causing
-        # update-initramfs to fail silently and leave no initrd.img-*.  We
-        # detect and repair that here after all packages are confirmed configured.
+        # Ensure every installed kernel has an initramfs.  Defence-in-depth
+        # against update-initramfs edge cases that can leave no initrd.img-*
+        # even when dpkg reports the kernel as fully configured.
         self._ensure_initramfs()
 
         # Apply post-install patches and overlay files now that all packages
@@ -496,24 +495,27 @@ class BuildSystem:
 
         if _dpkg_in_chroot:
             # Real chroot: env runs on host (no /usr/bin/env needed inside chroot).
-            # TEMPORARY: --force-depends bypasses version-constraint checks so
-            # packages whose deps have a cache/deb skew (e.g. openssh needs
-            # libssl3 >= 3.0.19 but repo has 3.0.18) still configure.
-            # Remove once packages are refreshed from the security repo.
+            # No --force-depends: snapshot pinning (STA-03) keeps cache and
+            # on-disk .debs at the same Debian timestamp, and _check_dep_drift
+            # + _verify_dep_resolution already raise on any unresolved dep
+            # before we get here.  A real configure-time dep failure now
+            # surfaces with dpkg's actual error rather than being papered
+            # over and breaking maintainer-script ordering downstream.
             _cmd = shlex.split(
                 f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
                 f'chroot {_chroot} '
-                f'dpkg --configure -a --force-confdef --force-confnew --force-depends'
+                f'dpkg --configure -a --force-confdef --force-confnew'
             )
         else:
-            # Chrootless fallback for early bootstrap rounds.
-            # TEMPORARY: --force-depends — same reason as chroot mode above.
+            # Chrootless fallback for early bootstrap rounds — same dep-resolution
+            # guarantees as the chroot-mode call above (STA-03 + dep-drift sync),
+            # so no --force-depends here either.
             _cmd = shlex.split(
                 f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
                 f'dpkg --root={_chroot} --instdir={_chroot} '
                 f'--admindir={_chroot}/var/lib/dpkg '
                 f'--force-script-chrootless --force-confdef --force-confnew '
-                f'--force-depends --configure -a'
+                f'--configure -a'
             )
 
         _proc = subprocess.run(_cmd, input=self.__password + '\n',
@@ -554,11 +556,14 @@ class BuildSystem:
     def _ensure_initramfs(self):
         """Generate initramfs for any kernel that is missing one.
 
-        With --force-depends, linux-image may configure before initramfs-tools
-        is ready.  update-initramfs then exits non-zero and leaves no initrd.
-        This method scans /boot/ for vmlinuz-* files and, for each one that has
-        no matching initrd.img-*, runs update-initramfs -c inside the chroot to
-        create it.
+        Defence-in-depth check after configure.  Even with strict dep
+        ordering (STA-02 dropped --force-depends), update-initramfs has
+        been observed to silently skip generation in edge cases:
+        kernel-package quirks, stale /usr/share/initramfs-tools/modules
+        entries, or a chroot where linux-image's postinst raced with a
+        not-yet-configured initramfs hook.  This method scans /boot/ for
+        vmlinuz-* files and, for each one without a matching initrd.img-*,
+        runs update-initramfs -c inside the chroot to create it.
         """
         _chroot = self.__dir_chroot
         _boot = os.path.join(_chroot, 'boot')
