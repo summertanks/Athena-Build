@@ -104,6 +104,7 @@ _BASE_CONF_BODY = """
     Patch = patch
     Image = image
     Chroot = buildroot
+    Gnupg = gnupg
 
     [Source]
     SkipTest =
@@ -214,6 +215,214 @@ def test_source_parses_main_stanza_with_both_files_and_sha256():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STA-01 / SEC-01 — InRelease GPG verification
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# These tests generate a throwaway PGP keypair in a temp dir, clear-sign a
+# tiny payload with it, then verify against an exported keyring file.  No
+# host state required — works on any machine with `gpg` on PATH.
+
+def _gen_signed_fixture(tmpdir: str):
+    """Create a temp keypair, return (signed_path, keyring_path, gen_home).
+
+    gen_home is the gnupg homedir used to generate the key.  The caller
+    should pass a *different* gnupg homedir to verify_inrelease() so we
+    are testing the keyring-import path, not just the same-home case.
+    """
+    import gnupg
+
+    gen_home = os.path.join(tmpdir, 'gen-home')
+    os.makedirs(gen_home, mode=0o700)
+    gpg = gnupg.GPG(gnupghome=gen_home)
+    key_input = gpg.gen_key_input(
+        name_real='Athena Test Signer',
+        name_email='test@athena.local',
+        passphrase='',
+        no_protection=True,
+        key_type='RSA',
+        key_length=2048,
+        expire_date='1d',
+    )
+    key = gpg.gen_key(key_input)
+    assert key.fingerprint, f"gen_key failed: {key.stderr if hasattr(key, 'stderr') else key}"
+
+    # NOTE: python-gnupg silently drops the first line of stdin to gpg
+    # (a known library quirk).  Lead with a blank line so the signed
+    # body actually contains the headers we expect to tamper with.
+    payload = (
+        "\n"
+        "Origin: AthenaTest\n"
+        "Suite: athena\n"
+        "Codename: athena\n"
+        "Date: Thu, 07 May 2026 12:00:00 UTC\n"
+        "SHA256:\n"
+        " 0000000000000000000000000000000000000000000000000000000000000000 "
+        "1 main/binary-amd64/Packages\n"
+    )
+    signed = gpg.sign(payload, keyid=key.fingerprint, clearsign=True, passphrase='')
+    signed_path = os.path.join(tmpdir, 'InRelease')
+    with open(signed_path, 'w') as fh:
+        fh.write(str(signed))
+
+    keyring_path = os.path.join(tmpdir, 'keyring.gpg')
+    pubkey = gpg.export_keys(key.fingerprint)
+    assert pubkey, "export_keys returned empty"
+    with open(keyring_path, 'w') as fh:
+        fh.write(pubkey)
+
+    return signed_path, keyring_path, gen_home
+
+
+def test_verify_inrelease_clean_signature_passes():
+    """A correctly clear-signed InRelease verifies against its keyring."""
+    from utils import verify_inrelease, _GPG_VERIFIER_CACHE
+    with tempfile.TemporaryDirectory() as tmp:
+        signed, keyring, _ = _gen_signed_fixture(tmp)
+        verify_home = os.path.join(tmp, 'verify-home')
+        os.makedirs(verify_home, mode=0o700)
+        # Per-test isolation — the module-level verifier cache must not
+        # carry stale GPG instances from earlier tests.
+        _GPG_VERIFIER_CACHE.clear()
+
+        ok, detail = verify_inrelease(signed, keyring, verify_home)
+        assert ok, f"expected verify ok, got: {detail}"
+        assert 'Athena Test Signer' in detail or 'test@athena.local' in detail, detail
+
+
+def test_verify_inrelease_tampered_signature_fails():
+    """Flipping a byte in the signed body breaks the signature."""
+    from utils import verify_inrelease, _GPG_VERIFIER_CACHE
+    with tempfile.TemporaryDirectory() as tmp:
+        signed, keyring, _ = _gen_signed_fixture(tmp)
+        verify_home = os.path.join(tmp, 'verify-home')
+        os.makedirs(verify_home, mode=0o700)
+        _GPG_VERIFIER_CACHE.clear()
+
+        # Replace 'AthenaTest' with 'AthenaXEST' inside the signed body.
+        # Byte-flip inside the signature block can be hidden by gpg's
+        # error recovery; modifying covered text guarantees BADSIG.
+        with open(signed, 'r') as fh:
+            content = fh.read()
+        with open(signed, 'w') as fh:
+            fh.write(content.replace('AthenaTest', 'AthenaXEST'))
+
+        ok, detail = verify_inrelease(signed, keyring, verify_home)
+        assert not ok, f"expected verify failure on tampered file, got ok: {detail}"
+
+
+def test_verify_inrelease_missing_keyring_fails():
+    """A keyring path that does not exist is reported, not silently swallowed."""
+    from utils import verify_inrelease
+    with tempfile.TemporaryDirectory() as tmp:
+        signed = os.path.join(tmp, 'InRelease')
+        with open(signed, 'w') as fh:
+            fh.write('placeholder\n')
+        verify_home = os.path.join(tmp, 'verify-home')
+        os.makedirs(verify_home, mode=0o700)
+
+        ok, detail = verify_inrelease(signed, '/nonexistent/keyring.gpg', verify_home)
+        assert not ok, "expected failure when keyring missing"
+        assert 'keyring missing' in detail, detail
+
+
+def test_verify_inrelease_empty_keyring_fails():
+    """A keyring file with no keys is rejected with a clear message."""
+    from utils import verify_inrelease, _GPG_VERIFIER_CACHE
+    with tempfile.TemporaryDirectory() as tmp:
+        signed = os.path.join(tmp, 'InRelease')
+        with open(signed, 'w') as fh:
+            fh.write('placeholder\n')
+        empty = os.path.join(tmp, 'empty.gpg')
+        with open(empty, 'wb') as fh:
+            fh.write(b'')
+        verify_home = os.path.join(tmp, 'verify-home')
+        os.makedirs(verify_home, mode=0o700)
+        _GPG_VERIFIER_CACHE.clear()
+
+        ok, detail = verify_inrelease(signed, empty, verify_home)
+        assert not ok, "expected failure on empty keyring"
+        assert 'no keys imported' in detail, detail
+
+
+def test_buildconfig_security_defaults():
+    """Without an explicit [Security] section, defaults kick in and (if the
+    debian-archive-keyring is installed on the test host) validation passes."""
+    keyring_default = '/usr/share/keyrings/debian-archive-keyring.gpg'
+    if not os.path.exists(keyring_default):
+        # Host is non-Debian or keyring not installed — skip.
+        print("SKIP test_buildconfig_security_defaults (no host keyring)")
+        return
+
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        assert cfg.security_keyring == keyring_default, cfg.security_keyring
+        assert cfg.security_disabled is False
+
+
+def test_buildconfig_security_disabled_accepts_missing_keyring():
+    """Disabled = true skips the keyring file check entirely."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+
+    [Security]
+    Keyring = /definitely/not/here/keyring.gpg
+    Disabled = true
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig should accept missing keyring when Disabled=true: {cfg.error_str}"
+        assert cfg.security_disabled is True
+
+
+def test_buildconfig_security_enabled_rejects_missing_keyring():
+    """When Disabled=false (default), a non-existent keyring is fatal."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+
+    [Security]
+    Keyring = /definitely/not/here/keyring.gpg
+    Disabled = false
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert not cfg.is_valid, "BuildConfig should reject missing keyring when Disabled=false"
+        assert 'Keyring not found' in cfg.error_str, cfg.error_str
+
+
+def test_buildconfig_creates_dir_gnupg_with_0700():
+    """dir_gnupg is created and chmod 0700 (gpg homedir requirement)."""
+    import stat
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            # Possibly missing host keyring; that's covered by another test.
+            print(f"SKIP test_buildconfig_creates_dir_gnupg_with_0700 ({cfg.error_str})")
+            return
+        assert os.path.isdir(cfg.dir_gnupg), cfg.dir_gnupg
+        mode = stat.S_IMODE(os.stat(cfg.dir_gnupg).st_mode)
+        assert mode == 0o700, f"expected 0700, got {oct(mode)}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -228,6 +437,15 @@ def main() -> int:
         test_package_and_source_have_mirror_field,
         test_source_parses_security_stanza_without_files_field,
         test_source_parses_main_stanza_with_both_files_and_sha256,
+        # STA-01 / SEC-01
+        test_verify_inrelease_clean_signature_passes,
+        test_verify_inrelease_tampered_signature_fails,
+        test_verify_inrelease_missing_keyring_fails,
+        test_verify_inrelease_empty_keyring_fails,
+        test_buildconfig_security_defaults,
+        test_buildconfig_security_disabled_accepts_missing_keyring,
+        test_buildconfig_security_enabled_rejects_missing_keyring,
+        test_buildconfig_creates_dir_gnupg_with_0700,
     ]
     failures = 0
     for t in tests:

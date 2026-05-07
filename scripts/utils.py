@@ -100,6 +100,92 @@ _SNAPSHOT_TS_CACHE: dict = {}
 # Format check: Debian snapshot timestamps are YYYYMMDDTHHMMSSZ (15 chars).
 _SNAPSHOT_TS_RE = re.compile(r'^\d{8}T\d{6}Z$')
 
+# Module-level memo for GPG verifier instances.  Keyed by (keyring_path,
+# work_dir) so re-using the same keyring across multiple verify_inrelease()
+# calls in one Cache build avoids re-importing the (large) Debian keyring
+# per mirror.
+_GPG_VERIFIER_CACHE: dict = {}
+
+
+def verify_inrelease(signed_path: str, keyring_path: str, work_dir: str) -> tuple:
+    """Verify the inline GPG signature on a Debian InRelease file.
+
+    InRelease is an inline-signed (cleartext-signed) document that lists
+    SHA256 sums for the index files (Packages, Sources) it covers.  Once
+    this signature is verified against a trusted keyring, those SHA256
+    sums extend trust to the index files via the existing per-file hash
+    check in Cache.__get_files — same chain apt uses.
+
+    Args:
+        signed_path:  Path to the downloaded InRelease file.
+        keyring_path: Path to a keyring file (legacy .gpg / .kbx keybox /
+                      OpenPGP cert dump — gpg --import accepts all three).
+        work_dir:     Existing gnupg homedir, mode 0700, writable.  Created
+                      by build-system.sh / BuildConfig; this function does
+                      not create or chmod it (single-source-of-truth for
+                      project directory layout).
+
+    Returns:
+        (ok, detail) — ok is True when the signature is mathematically
+        valid and the signing key is in the keyring; detail is a short
+        human-readable status string suitable for both console and log.
+    """
+    import gnupg
+
+    if not os.path.isfile(signed_path):
+        return False, f"signed file missing: {signed_path}"
+    if not os.path.isfile(keyring_path):
+        return False, f"keyring missing: {keyring_path}"
+    if not os.access(keyring_path, os.R_OK):
+        return False, f"keyring unreadable: {keyring_path}"
+    if not os.path.isdir(work_dir):
+        return False, f"gnupg work_dir missing: {work_dir}"
+
+    # Per-build cache: one GPG instance per (keyring, work_dir) pair.
+    # Re-importing the full Debian keyring (1k+ keys) for every mirror
+    # would be wasteful — a single import_keys is plenty.
+    cache_key = (os.path.realpath(keyring_path), os.path.realpath(work_dir))
+    gpg = _GPG_VERIFIER_CACHE.get(cache_key)
+    if gpg is None:
+        try:
+            gpg = gnupg.GPG(gnupghome=work_dir)
+        except (OSError, ValueError) as e:
+            return False, f"gnupg init failed: {e}"
+
+        try:
+            with open(keyring_path, 'rb') as fh:
+                import_result = gpg.import_keys(fh.read())
+        except OSError as e:
+            return False, f"keyring read failed: {e}"
+
+        # import_keys returns an ImportResult; .count is the number of
+        # keys processed.  Zero means the file parsed as 0 keys —
+        # malformed or empty file — and verification cannot succeed.
+        if not getattr(import_result, 'count', 0):
+            return False, (
+                f"no keys imported from {keyring_path} "
+                f"(stderr: {getattr(import_result, 'stderr', '')[:120]})"
+            )
+
+        _GPG_VERIFIER_CACHE[cache_key] = gpg
+
+    try:
+        with open(signed_path, 'rb') as fh:
+            v = gpg.verify_file(fh)
+    except OSError as e:
+        return False, f"signed file read failed: {e}"
+
+    if not v.valid:
+        # python-gnupg surfaces the gpg --status-fd reason in v.status
+        # when available; fall back to the human-readable v.stderr line.
+        _why = getattr(v, 'status', None) or (
+            (v.stderr or '').splitlines()[-1] if getattr(v, 'stderr', '') else ''
+        ) or 'signature invalid'
+        return False, str(_why)[:200]
+
+    _ident = getattr(v, 'username', '') or getattr(v, 'fingerprint', '') or 'unknown'
+    return True, f"signed by {_ident}"
+
 
 def _query_snapshot_latest() -> str:
     """Fetch the latest snapshot timestamp covering both `debian` and
@@ -268,6 +354,9 @@ class BuildConfig:
     tunnel_packages: list[str]
     max_parallel_builds: int
 
+    security_keyring: str
+    security_disabled: bool
+
     error_str: str
     config_path: str
 
@@ -281,6 +370,7 @@ class BuildConfig:
     dir_repo: str
     dir_config: str
     dir_patch: str
+    dir_gnupg: str
     dir_image: str
     dir_chroot: str
     
@@ -373,6 +463,31 @@ class BuildConfig:
             )
             self.max_parallel_builds = config_parser.getint('Build', 'MaxParallelBuilds', fallback=4)
 
+            # Mirror InRelease GPG verification.  Default: enabled,
+            # using the host-provided debian-archive-keyring.  Disabled
+            # = true is for offline test fixtures and dev sandboxes only;
+            # Cache.__get_files emits a per-build WARN when bypassed.
+            self.security_keyring = config_parser.get(
+                'Security', 'Keyring',
+                fallback='/usr/share/keyrings/debian-archive-keyring.gpg'
+            ).strip()
+            self.security_disabled = config_parser.getboolean(
+                'Security', 'Disabled', fallback=False
+            )
+            if not self.security_disabled:
+                if not os.path.isfile(self.security_keyring):
+                    self.error_str = (
+                        f"Security.Keyring not found: {self.security_keyring} "
+                        f"(install debian-archive-keyring, point Keyring "
+                        f"at a different file, or set Disabled=true)"
+                    )
+                    return
+                if not os.access(self.security_keyring, os.R_OK):
+                    self.error_str = (
+                        f"Security.Keyring not readable: {self.security_keyring}"
+                    )
+                    return
+
             # NOTE: The directories are relative to the working directory
             self.dir_download = os.path.join(self.working_dir, config_parser.get('Directories', 'Download'))
             self.dir_log = os.path.join(self.working_dir, config_parser.get('Directories', 'Log'))
@@ -389,6 +504,12 @@ class BuildConfig:
             self.dir_patch_preinstall = os.path.join(self.dir_patch, 'pre-install')
             self.dir_patch_postinstall = os.path.join(self.dir_patch, 'post-install')
             self.dir_patch_empty = os.path.join(self.dir_patch, 'empty')
+
+            # Isolated gnupg homedir for InRelease verification.  The
+            # build-system.sh bootstrap creates this with mode 0700;
+            # mirror that here so a Python-only invocation (e.g. tests)
+            # gets the same layout without depending on the bash script.
+            self.dir_gnupg = os.path.join(self.working_dir, config_parser.get('Directories', 'Gnupg'))
 
         except (configparser.Error, OSError) as e:
             self.error_str = str(e)
@@ -415,11 +536,18 @@ class BuildConfig:
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
 
+            # gpg refuses any homedir whose mode is broader than 0700,
+            # so create with mode 0700 directly.  os.makedirs respects
+            # the umask, so we follow with an explicit chmod to be safe
+            # on hosts whose umask leaves the dir 0755.
+            pathlib.Path(self.dir_gnupg).mkdir(parents=True, mode=0o700, exist_ok=True)
+            os.chmod(self.dir_gnupg, 0o700)
+
             for _dir in (
                 self.dir_download, self.dir_log, self.dir_cache, self.dir_temp,
                 self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
-                self.dir_image, self.dir_chroot,
+                self.dir_image, self.dir_chroot, self.dir_gnupg,
             ):
                 if not os.access(_dir, os.W_OK):
                     raise PermissionError(f'Build directory is not writable: {_dir}')

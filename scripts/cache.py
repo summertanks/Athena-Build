@@ -53,6 +53,13 @@ class Cache:
         # before any URL is composed downstream; with_snapshot(None) is a
         # no-op so the assignment is unconditional.
         self.cache_dir = buildconfig.dir_cache
+
+        # Security fields are read once here so __get_files doesn't need
+        # the full BuildConfig object — just keyring + work_dir + flag.
+        self._security_keyring  = buildconfig.security_keyring
+        self._security_work_dir = buildconfig.dir_gnupg
+        self._security_disabled = buildconfig.security_disabled
+
         try:
             self.snapshot_ts: Optional[str] = utils.resolve_snapshot_timestamp(buildconfig)
         except (RuntimeError, ValueError) as e:
@@ -111,7 +118,20 @@ class Cache:
         Each mirror writes to its own cache files (filenames disambiguated by
         apt_pkg.uri_to_filename, which encodes the full URL).  Per-mirror
         SHA256 from the mirror's own InRelease gates the (re)download.
+
+        Security: every mirror's InRelease is GPG-verified against the
+        configured keyring before its SHA256 list is trusted.  Verification
+        can be opted out via [Security] Disabled = true; doing so emits a
+        single conspicuous WARN at the start of the cache build so the
+        bypass is never silent.
         """
+        if self._security_disabled:
+            tui.console.warning(
+                "Security: GPG verification of InRelease is DISABLED — "
+                "mirror data is being trusted without signature checks. "
+                "This is intended only for offline test fixtures."
+            )
+
         for _mirror in self.mirrors:
             _base_url     = _mirror.dist_url
             _release_url  = _base_url + 'InRelease'
@@ -127,6 +147,27 @@ class Cache:
                 self.error_str = f"Error downloading release file from {_release_url}"
                 return -1
             tui.console.print(f'Downloaded {_release_file}')
+
+            # Verify the InRelease GPG signature *before* parsing — once
+            # the signature is good the SHA256 entries inside can be
+            # trusted to gate the index downloads.  Skip when explicitly
+            # disabled (single WARN already emitted above).
+            if not self._security_disabled:
+                _ok, _detail = utils.verify_inrelease(
+                    _release_file,
+                    self._security_keyring,
+                    self._security_work_dir,
+                )
+                if not _ok:
+                    self.error_str = (
+                        f"InRelease GPG verification failed for "
+                        f"[{_mirror.id}] {_release_url}: {_detail}"
+                    )
+                    tui.console.error(self.error_str)
+                    return -1
+                tui.console.info(
+                    f"InRelease verified for [{_mirror.id}]: {_detail}"
+                )
 
             try:
                 with open(_release_file, 'r') as fh:
