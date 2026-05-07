@@ -128,8 +128,13 @@ class BuildSystem:
         (e.g. cmd_build_chroot's verify step) to avoid prompting twice."""
         return self.__password
 
-    def build_chroot(self) -> bool:
+    def build_chroot(self, debug: bool = False) -> bool:
         """Install all selected packages into the chroot in dependency order.
+
+        Args:
+            debug: When True, generate_system_configs() also writes a
+                journald drop-in to forward all entries to /dev/console.
+                Off by default — opt in for serial-debug builds only.
 
         Unpack phase (chrootless, all rounds):
           An unpack forest tracks Pre-Depends ordering.  Each round unpacks
@@ -328,7 +333,7 @@ class BuildSystem:
 
         # Write base system configuration files that dpkg does not create:
         # OS identity, hostname, hosts, fstab, machine-id, apt sources.
-        self.generate_system_configs()
+        self.generate_system_configs(debug=debug)
 
         return True
 
@@ -1143,8 +1148,14 @@ class BuildSystem:
                         tui.console.print(f'Error: Failed applying post-install patch — {_file}')
                         tui.console.error(f'post_install patch {_file}: {_proc.stderr}')
 
-    def generate_system_configs(self):
+    def generate_system_configs(self, debug: bool = False):
         """Write base system configuration files into the chroot.
+
+        Args:
+            debug: When True, also write
+                /etc/systemd/journald.conf.d/50-console.conf to forward all
+                journal entries to /dev/console (= ttyS0 with serial boot).
+                Off by default to keep production images quiet.
 
         Covers files that dpkg does not create but the OS needs to be
         functional and identifiable.  All files are written via
@@ -1227,13 +1238,15 @@ class BuildSystem:
         # Forward all journal entries to /dev/console (= ttyS0 via console=ttyS0
         # kernel cmdline) so auth/PAM failures are visible on serial output
         # even when autologin is broken and no interactive login is possible.
-        self._write_chroot_file(
-            '/etc/systemd/journald.conf.d/50-console.conf',
-            '[Journal]\n'
-            'ForwardToConsole=yes\n'
-            'MaxLevelConsole=info\n'
-        )
-        tui.console.print("journald console forwarding configured (ttyS0)")
+        # Opt-in via 'build_chroot with_debug' — production builds skip this.
+        if debug:
+            self._write_chroot_file(
+                '/etc/systemd/journald.conf.d/50-console.conf',
+                '[Journal]\n'
+                'ForwardToConsole=yes\n'
+                'MaxLevelConsole=info\n'
+            )
+            tui.console.print("journald console forwarding configured (ttyS0) — debug mode")
 
         _proc = subprocess.run(
             ['sudo', '-S', 'systemd-firstboot',

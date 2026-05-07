@@ -153,7 +153,7 @@ def cmd_parse_dependency():
     _spiner = Spinner("Parsing Dependencies")
     _progress_flags.dep_check_ready = False  # reset before the long parse
 
-    console.print("Preparing Parsing Tree...")
+    console.print("Preparing Parsing Tree...", tui.COLOR_INFO)
     dependency_tree = dependencytree.DependencyTree(build_cache, select_recommended=False,
                                                      arch=build_config.arch,
                                                      build_profiles=build_config.build_profiles)
@@ -556,6 +556,13 @@ def cmd_tunnel_package(*args):
 def cmd_build_chroot(*args):
     """Assemble the resolved package set into a bootable chroot environment.
 
+    Usage: build_chroot [with_debug]
+
+      with_debug — write /etc/systemd/journald.conf.d/50-console.conf so all
+                   journal entries forward to /dev/console (ttyS0 in serial
+                   boots).  Off by default — production images should not leak
+                   logs onto the console.
+
     Takes the .deb files produced by source_build from dir_repo and installs
     them into a chroot tree at dir_chroot using dpkg.  The resulting chroot
     can be packaged into an ISO or disk image.
@@ -567,6 +574,10 @@ def cmd_build_chroot(*args):
         console.print("Run 'source_build' first")
         return
 
+    _debug = 'with_debug' in args
+    if _debug:
+        console.print("Debug mode: journald will forward to ttyS0 in built chroot")
+
     console.print("Initialising build system...")
     try:
         build_system = buildsystem.BuildSystem(dependency_tree, build_config)
@@ -576,7 +587,7 @@ def cmd_build_chroot(*args):
         return
 
     console.print("Building chroot environment...")
-    _result = build_system.build_chroot()
+    _result = build_system.build_chroot(debug=_debug)
     if not _result:
         console.print("ERROR: chroot build failed — check logs for details")
         console.error("build_chroot() returned False")
