@@ -194,7 +194,7 @@ class Cache:
             self.mirror_cache_files[_mirror.id] = _mirror_files
             tui.console.print(f"Mirror [{_mirror.id}] {_mirror.suite}: "
                               f"{rel.get('Origin','?')} {rel.get('Codename','?')} "
-                              f"{rel.get('Version','?')} {rel.get('Date','?')}")
+                              f"{rel.get('Version','?')} {rel.get('Date','?')}", tui.COLOR_HIGHLIGHT)
 
         return 0
 
