@@ -273,6 +273,26 @@ class BuildSystem:
                     configured |= self._configure_packages(
                         _batch, fh, force_deps=_force
                     )
+
+                # Final defensive sweep.  Many Debian postinst scripts
+                # invoke helper tools from packages they do not formally
+                # Depend on (udev calls update-rc.d from
+                # init-system-helpers; apt calls deb-systemd-helper).
+                # When those helpers are scheduled later in the topo
+                # order, the early postinst returns non-zero and dpkg
+                # marks the package half-configured.  `dpkg --configure
+                # -a` retries every half-configured package — by this
+                # point all batches are unpacked + their declared deps
+                # configured, so the implicit helpers are present and
+                # the postinst succeeds.  The dpkg --get-selections
+                # check below is the authoritative pass/fail gate.
+                tui.console.print(
+                    "Final configure sweep — "
+                    "retrying any postinst-deferred packages..."
+                )
+                fh.write('\n--- Final configure sweep ---\n')
+                _final_configured = self._configure_chroot(fh, is_final=True)
+                configured |= _final_configured
         except RuntimeError as e:
             tui.console.print(f"ERROR: chroot install aborted — {e}")
             tui.console.error(f"build_chroot install loop: {e}")
@@ -884,14 +904,12 @@ class BuildSystem:
 
         Counterpart to _unpack_packages and the named-list alternative
         to _configure_chroot's `--configure -a` blanket sweep.  Used by
-        the single-pass batched install in build_chroot — each acyclic
-        batch's deps are guaranteed to be in earlier batches by Kahn's
-        invariant, so a configure failure here is a real error (not the
-        "transient, retry next round" case the legacy loop tolerated).
+        the single-pass batched install in build_chroot.
 
         Auto-selects chroot vs chrootless mode using the same probe as
-        _configure_chroot: dpkg-in-chroot once /usr/bin/dpkg has been
-        unpacked, chrootless --root before that.
+        _configure_chroot: dpkg-in-chroot once /usr/bin/dpkg AND sh are
+        in the chroot, chrootless --root with --force-script-chrootless
+        before that.
 
         Args:
             pkg_list:   canonical package names to configure.
@@ -899,14 +917,28 @@ class BuildSystem:
             force_deps: True only for the cycle batch emitted by
                         _compute_install_batches.  Adds --force-depends
                         scoped to this single dpkg invocation so dpkg
-                        can break the SCC; acyclic batches must NOT
-                        force, so a real dep violation surfaces.
+                        can break the SCC; acyclic batches do not force,
+                        but their postinst-failure tolerance is the
+                        same (see Returns).
 
         Returns the set of base package names dpkg reported as
-        "Setting up X (version)".  Raises RuntimeError when any package
-        in pkg_list is not in that set after dpkg returns — caller
-        relies on this to abort the install rather than continue with
-        a half-configured chroot.
+        "Setting up X (version)".
+
+        Does NOT raise on rc != 0.  In Debian, many postinst scripts
+        invoke helper tools from packages not declared as Depends —
+        e.g. udev.postinst calls update-rc.d from init-system-helpers,
+        apt.postinst calls deb-systemd-helper.  When those helper
+        packages are scheduled later in the topo order, the early
+        batch's postinst returns non-zero and dpkg marks the package
+        half-configured but keeps going.  build_chroot follows the
+        per-batch loop with a single defensive `dpkg --configure -a`
+        which retries every half-configured package now that its
+        implicit deps are present; the final `dpkg --get-selections`
+        sweep is the authoritative pass/fail gate.
+
+        rc != 0 is logged at warn level so the operator can correlate
+        a final-sweep failure back to the originating batch when
+        triaging.
         """
         if not pkg_list:
             return set()
@@ -960,21 +992,20 @@ class BuildSystem:
         # mix of stdout and stderr; capture both for the diagnostic so the
         # operator can see the underlying cause without scanning the log
         # file separately.
-        _missing = [p for p in pkg_list if p not in _configured]
-        if _proc.returncode != 0 or _missing:
+        # Tolerate rc != 0 — log and let the build_chroot defensive
+        # `dpkg --configure -a` retry any half-configured packages once
+        # their implicit deps are in place (see method docstring).  The
+        # warning here gives the operator a breadcrumb back to the
+        # originating batch if the final sweep cannot recover.
+        if _proc.returncode != 0:
             fh.write(_proc.stderr)
-            tui.console.print(
-                f'Configure failed for {len(_missing)} of {len(pkg_list)} '
-                f'packages: {", ".join(_missing[:5])}'
+            _missing = [p for p in pkg_list if p not in _configured]
+            tui.console.warning(
+                f'_configure_packages: rc={_proc.returncode}, '
+                f'{len(_configured)}/{len(pkg_list)} configured this pass; '
+                f'deferred to final sweep: '
+                f'{", ".join(_missing[:5])}'
                 f'{"…" if len(_missing) > 5 else ""}'
-            )
-            tui.console.error(
-                f'_configure_packages: rc={_proc.returncode} '
-                f'missing={_missing[:5]}'
-            )
-            raise RuntimeError(
-                f'configure failed for {len(_missing)} package(s); '
-                f'first: {_missing[:5]}'
             )
 
         return _configured
