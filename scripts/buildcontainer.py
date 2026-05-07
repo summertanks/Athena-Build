@@ -208,6 +208,13 @@ class BuildContainer:
                   f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -us -uc -nc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'
 
+        # `container` is initialised to None so the finally block can tell
+        # whether containers.run() actually produced a container (failure
+        # before that point leaves nothing to clean up).  All exception
+        # paths below — APIError, OSError on log writes, KeyboardInterrupt
+        # mid-build — flow through the finally so a leftover container can
+        # never accumulate in `docker ps -a` between runs.
+        container = None
         try:
             src_patch_path = os.path.join(self.patch_path, src_pkg.package, str(src_pkg.version))
             if not os.path.exists(src_patch_path):
@@ -222,24 +229,52 @@ class BuildContainer:
                     src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
                 },
             )
+            tui.console.info(
+                f"Build container {container.short_id} started for {src_pkg.package}"
+            )
 
             with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
                 for line in container.logs(stream=True):
                     fh.write(line.decode("utf-8"))
 
             _exit_code = container.wait()['StatusCode']
-            container.remove()
 
             _build_result = (_exit_code == 0)
             with open(os.path.join(self.buildlog_path, _filename_prefix + '.result'), 'w') as fh:
                 fh.write('PASS\n' if _build_result else 'FAIL\n')
 
+            if not _build_result:
+                tui.console.error(
+                    f"Build {src_pkg.package} failed in container "
+                    f"{container.short_id} (exit {_exit_code})"
+                )
+
             return _build_result
 
         except docker.errors.APIError as e:
-            tui.console.error(f"Athena Linux Docker: Error {e}")
+            _cid = container.short_id if container is not None else '<not-started>'
+            tui.console.error(
+                f"Athena Linux Docker error for {src_pkg.package} "
+                f"(container {_cid}): {e}"
+            )
             tui.console.print(f"Athena Linux Docker: Error {e}")
             return False
+
+        finally:
+            # force=True so a still-running container (e.g. interrupted by
+            # KeyboardInterrupt or an OSError on the log file) is killed
+            # before removal — a non-force remove on a running container
+            # raises and would re-leak it.
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except docker.errors.APIError as e:
+                    # Cleanup failure is non-fatal — surface but do not
+                    # mask the original exception or build result.
+                    tui.console.warning(
+                        f"Failed to remove container {container.short_id} "
+                        f"for {src_pkg.package}: {e}"
+                    )
 
     def check_build(self, src_pkg: Source) -> bool:
 
