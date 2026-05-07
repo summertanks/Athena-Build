@@ -16,7 +16,7 @@ image/
 log/
 packages/
 repo/
-source/
+/source/
 tmp/
 
 # IDE
