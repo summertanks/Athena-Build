@@ -11,6 +11,19 @@ from tui import Prompt, Spinner, ProgressBar
 from typing import List, Optional, Any
 
 
+def _strip_quotes(s: str) -> str:
+    """Remove a single matching pair of surrounding quotes from a config value.
+
+    configparser does not unquote values: `KEY = "value"` reads back as the
+    literal 6-char string `"value"`. Apply to string values where the operator
+    may have wrapped them in quotes by INI convention from other tools.
+    """
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    return s
+
+
 class Mirror:
     """A single archive source (e.g. bookworm main, bookworm-security main).
 
@@ -346,8 +359,8 @@ class BuildConfig:
             # live-mirror behaviour for users who haven't migrated yet.
             self.snapshot_enabled = config_parser.getboolean('Snapshot', 'Enabled', fallback=False)
             self.snapshot_timestamp_config = config_parser.get('Snapshot', 'Timestamp', fallback='latest').strip()
-            self.build_codename = config_parser.get('Build', 'CODENAME')
-            self.build_version = config_parser.get('Build', 'VERSION')
+            self.build_codename = _strip_quotes(config_parser.get('Build', 'CODENAME'))
+            self.build_version  = _strip_quotes(config_parser.get('Build', 'VERSION'))
 
             self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback='bookworm')
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
