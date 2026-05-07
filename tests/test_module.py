@@ -402,6 +402,106 @@ def test_buildconfig_security_enabled_rejects_missing_keyring():
         assert 'Keyring not found' in cfg.error_str, cfg.error_str
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STA-04 — download_source surfaces HTTP / short-download errors clearly
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _download_source_with_mocked_get(mock_resp_factory, expected_size: int = 100,
+                                     sha256_hex: str = 'a' * 64):
+    """Run utils.download_source against a single-file fake dep tree, with
+    requests.get patched to return whatever mock_resp_factory() yields.
+
+    Returns the list of console messages (print/info/warning/error) emitted
+    during the call, so callers can assert on the wording without any live
+    network or real Mirror infrastructure.
+    """
+    from unittest.mock import patch
+    import utils
+    from utils import Mirror
+
+    captured: list = []
+    class _Cap:
+        def print(s, m, *a, **k): captured.append(m)
+        def info(s, m):           captured.append(m)
+        def warning(s, m):        captured.append(m)
+        def error(s, m):          captured.append(m)
+
+    class _Bar:
+        def __init__(s, *a, **k): pass
+        def step(s, *a, **k): pass
+        def label(s, *a, **k): pass
+        def close(s, *a, **k): pass
+
+    mirror = Mirror('main', 'http://x.test', 'debian', 'bookworm', '', 'main', 'amd64')
+
+    class _Src:
+        _mirror = mirror
+        files = {
+            'pkg_1.0.dsc': {
+                'sha256': sha256_hex,
+                'size':   expected_size,
+                'md5':    '',
+                'path':   'pool/main/p/pkg/pkg_1.0.dsc',
+            }
+        }
+
+    class _Dt:
+        selected_srcs = {'pkg': _Src()}
+        download_size = expected_size
+
+    saved_console = utils.tui.console
+    saved_bar     = utils.ProgressBar
+    utils.tui.console = _Cap()
+    utils.ProgressBar = _Bar
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(utils.requests, 'get', return_value=mock_resp_factory()):
+                utils.download_source(_Dt(), tmp)
+    finally:
+        utils.tui.console = saved_console
+        utils.ProgressBar = saved_bar
+
+    return captured
+
+
+def test_download_source_surfaces_http_error_clearly():
+    """Non-200 GET → HTTPError → handler logs 'HTTP failure'.  Pre-fix this
+    surfaced as the misleading 'Hash mismatch' downstream after the GET
+    silently no-op'd on a 404."""
+    from unittest.mock import MagicMock
+    from requests import HTTPError
+
+    def mock_resp():
+        m = MagicMock()
+        m.__enter__.return_value = m
+        m.raise_for_status.side_effect = HTTPError('404 Not Found')
+        return m
+
+    msgs = ' | '.join(_download_source_with_mocked_get(mock_resp))
+    assert 'HTTP failure' in msgs, msgs
+    assert 'Hash mismatch' not in msgs, msgs
+
+
+def test_download_source_surfaces_short_download_clearly():
+    """A truncated 200 (file shorter than the expected size from Sources)
+    surfaces as 'short download' with a precise byte count, not the
+    cryptic 'hash mismatch' that hid the real symptom pre-fix."""
+    from unittest.mock import MagicMock
+
+    def mock_resp():
+        m = MagicMock()
+        m.__enter__.return_value = m
+        m.raise_for_status.return_value = None
+        # Yield 50 bytes — half of the expected 100.
+        m.iter_content.return_value = [b'x' * 50]
+        return m
+
+    msgs = ' | '.join(_download_source_with_mocked_get(mock_resp))
+    assert 'short download' in msgs, msgs
+    assert '50' in msgs and '100' in msgs, msgs
+    assert 'Hash mismatch' not in msgs, msgs
+
+
 def test_shipped_build_conf_has_snapshot_enabled():
     """STA-03: the shipped config/build.conf must default to snapshot pinning
     enabled, so cache and live mirror cannot drift between cache build and
@@ -461,6 +561,9 @@ def main() -> int:
         test_buildconfig_security_disabled_accepts_missing_keyring,
         test_buildconfig_security_enabled_rejects_missing_keyring,
         test_buildconfig_creates_dir_gnupg_with_0700,
+        # STA-04
+        test_download_source_surfaces_http_error_clearly,
+        test_download_source_surfaces_short_download_clearly,
         # STA-03
         test_shipped_build_conf_has_snapshot_enabled,
     ]
