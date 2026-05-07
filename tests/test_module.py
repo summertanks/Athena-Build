@@ -223,16 +223,18 @@ def test_source_parses_main_stanza_with_both_files_and_sha256():
 
 class _StubDepTree:
     """Mimics the surface of dependencytree.DependencyTree that
-    _resolve_pre_depends / _resolve_depends touch.
+    _resolve_pre_depends / _resolve_depends / _compute_install_batches
+    touch.
 
-    Each entry in pkg_specs is (name, pre_depends, depends).  pre_depends
+    Each entry in pkg_specs is (name, pre_depends, depends) or the
+    4-tuple (name, pre_depends, depends, essential_bool).  pre_depends
     and depends are lists of canonical names — the stub bypasses the
-    Provides / alt-deps machinery (covered by other tests) so this fixture
-    stays focused on Kahn behaviour.
+    Provides / alt-deps machinery (covered by other tests) so this
+    fixture stays focused on Kahn behaviour.
     """
     def __init__(self, pkg_specs):
         class _Pkg:
-            def __init__(self, name, pre, dep):
+            def __init__(self, name, pre, dep, essential=False):
                 self._name = name
                 # _resolve_pre_depends / _resolve_depends iterate
                 # pkg.pre_depends / pkg.depends as lists of (name,…) tuples,
@@ -241,10 +243,14 @@ class _StubDepTree:
                 self.alt_pre_depends = []
                 self.depends        = [(n, '', '') for n in dep]
                 self.alt_depends    = []
+                self._fields = {
+                    'Package': name,
+                    'Essential': 'yes' if essential else '',
+                }
             def __getitem__(self, k):
-                if k == 'Package':
-                    return self._name
-                raise KeyError(k)
+                return self._fields[k]
+            def get(self, k, default=''):
+                return self._fields.get(k, default)
         self.selected_pkgs = {
             spec[0]: _Pkg(*spec) for spec in pkg_specs
         }
@@ -378,6 +384,57 @@ def test_compute_install_batches_acyclic_then_cycle():
         (['top'], False),
         (['X', 'Y'], True),
     ], batches
+
+
+def test_compute_install_batches_essential_emitted_first_as_forced_batch():
+    """Packages flagged Essential go in the first emitted batch with
+    needs_force=True — solves Debian's implicit-Essential-deps
+    contract that topo sort cannot see (e.g. dpkg's maintainer scripts
+    need /bin/sh from dash even though dpkg does not declare a Depends
+    on dash).  Pre-fix, the user's build aborted at batch 4 with
+    "'sh' not found in PATH" because dpkg landed before dash."""
+    bs = _bare_buildsystem_with_deps([
+        ('dpkg', [], ['tar'], True),                # essential
+        ('dash', [], ['dpkg'], True),               # essential, depends on dpkg
+        ('tar',  [], [],     True),                 # essential
+        ('app',  [], ['dpkg', 'dash']),             # non-essential, depends on essentials
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    # Essential batch (forced) first, then the non-essential leaf.
+    # All Essential packages share one forced batch — dpkg's --force-depends
+    # within that one invocation breaks any inter-essential cycles.
+    assert batches == [
+        (['dash', 'dpkg', 'tar'], True),
+        (['app'], False),
+    ], batches
+
+
+def test_compute_install_batches_essential_overlap_with_libc_seed_excluded():
+    """A package that is both Essential AND in the libc seed (libc-bin in
+    Debian, conceptually) appears only once — in the libc seed batch
+    that the caller installs separately, not in the Essential batch."""
+    bs = _bare_buildsystem_with_deps([
+        ('libc6',    [], [],            False),     # in libc seed, not essential
+        ('libc-bin', [], ['libc6'],     True),      # essential, but ALSO in libc seed
+        ('dpkg',     [], [],            True),      # essential
+    ])
+    batches = bs._compute_install_batches(
+        libc_seed_set={'libc6', 'libc-bin'}
+    )
+    # libc-bin is in libc seed → caller handles it → not in any output batch.
+    # dpkg is essential → first batch, forced.
+    assert batches == [(['dpkg'], True)], batches
+
+
+def test_compute_install_batches_no_essential_no_essential_batch():
+    """Selected set with zero Essential packages → no Essential batch
+    is prepended.  Existing acyclic-only tests must continue to pass."""
+    bs = _bare_buildsystem_with_deps([
+        ('A', [], ['B']),
+        ('B', [], []),
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    assert batches == [(['B'], False), (['A'], False)], batches
 
 
 def test_compute_install_batches_external_deps_filtered():
@@ -801,6 +858,9 @@ def main() -> int:
         test_compute_install_batches_self_dep_is_ignored,
         test_compute_install_batches_cycle_emitted_as_forced_batch,
         test_compute_install_batches_acyclic_then_cycle,
+        test_compute_install_batches_essential_emitted_first_as_forced_batch,
+        test_compute_install_batches_essential_overlap_with_libc_seed_excluded,
+        test_compute_install_batches_no_essential_no_essential_batch,
         test_compute_install_batches_external_deps_filtered,
         # STA-07
         test_buildsystem_password_readable_before_scrub,
