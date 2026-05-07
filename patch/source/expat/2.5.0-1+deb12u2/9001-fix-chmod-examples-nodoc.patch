@@ -1,0 +1,32 @@
+Description: Guard chmod of examples directory against nodoc build option
+ With nodoc in DEB_BUILD_OPTIONS, dh_installexamples skips installing
+ example files, so debian/libexpat1-dev/usr/share/doc/libexpat1-dev/examples
+ does not exist (the entire usr/share/doc/<pkg>/ doc tree is suppressed).
+ The unconditional chmod line in debian/rules then fails with
+   chmod: cannot access '.../examples/*': No such file or directory
+ and aborts the binary-arch target.
+ .
+ The aclocal/* part of the same chmod is unaffected by nodoc (aclocal is
+ installed by dh_install, not dh_installexamples).  Split the chmod into
+ two and guard only the examples branch.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-07
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -129,8 +129,10 @@
+ 	dh_strip -a
+ 	dh_compress -a
+ 	dh_fixperms -a
+-	chmod 644 $(CURDIR)/debian/libexpat1-dev/usr/share/doc/libexpat1-dev/examples/* \
+-	          $(CURDIR)/debian/libexpat1-dev/usr/share/aclocal/*
++ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
++	chmod 644 $(CURDIR)/debian/libexpat1-dev/usr/share/doc/libexpat1-dev/examples/*
++endif
++	chmod 644 $(CURDIR)/debian/libexpat1-dev/usr/share/aclocal/*
+ 	dh_makeshlibs -a -V $(if $(with_udeb),--add-udeb=$(UPACKAGE))
+ 	dh_installdeb -a
+ 	dh_shlibdeps -a -l $(CURDIR)/debian/libexpat1/usr/lib/$(DEB_HOST_MULTIARCH)

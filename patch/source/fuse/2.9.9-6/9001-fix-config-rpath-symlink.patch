@@ -1,0 +1,24 @@
+Description: Force symlink in override_dh_autoreconf to handle pre-existing config.rpath
+ The upstream fuse 2.9.9 tarball ships a config.rpath in the source tree.
+ debian/rules' override_dh_autoreconf then runs
+   ln -s /usr/share/gettext/config.rpath $(CURDIR)
+ which fails with "File exists" because $(CURDIR)/config.rpath is already
+ there.  Switch to ln -sf so the override is idempotent and works whether
+ or not the upstream tarball provides config.rpath.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-07
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -19,7 +19,7 @@
+ 	dh ${@}
+
+ override_dh_autoreconf:
+-	ln -s /usr/share/gettext/config.rpath $(CURDIR)
++	ln -sf /usr/share/gettext/config.rpath $(CURDIR)
+ 	dh_autoreconf
+
+ override_dh_auto_configure:
