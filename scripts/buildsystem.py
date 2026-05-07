@@ -181,6 +181,15 @@ class BuildSystem:
         Returns:
             True on completion.  Individual package failures are logged but do
             not abort the run — a partial chroot is still useful for diagnosis.
+
+        Raises:
+            RuntimeError if a virtual-fs mount (proc / sys / dev / dev/pts)
+            cannot be established or verified — chroot postinstall scripts
+            need these and proceeding without them produces a partially-
+            configured chroot whose only failure signal is "many packages
+            not fully configured" much later in the run.  The try/finally
+            below ensures any successful partial mounts get unmounted on
+            this exit path too.
         """
         # All canonical packages — filter out virtual-package alias entries
         # (entries where the key differs from Package['Package']).
@@ -230,13 +239,15 @@ class BuildSystem:
         self._init_dpkg_database()
         _log_path = os.path.join(self.__dir_log, 'chroot-install.log')
 
-        # /proc, /sys, /dev, /dev/pts are needed by many postinstall scripts
-        # (systemctl detection, uname, pty operations).  Mounted before the
-        # first dpkg --configure -a call, unmounted in the finally block.
-        self._mount_chroot_fs()
-
         _result = True
         try:
+            # /proc, /sys, /dev, /dev/pts are needed by many postinstall
+            # scripts (systemctl detection, uname, pty operations).
+            # Mounted inside the try block so a partial-mount failure
+            # (raised by _mount_chroot_fs) still flows through the finally
+            # below and umount-cleans whatever did get mounted.
+            self._mount_chroot_fs()
+
             with open(_log_path, 'w') as fh:
 
                 # Batch 0: libc circular-dep bootstrap unpacked first.
@@ -377,6 +388,19 @@ class BuildSystem:
         Many postinstall scripts check /proc/1/environ, call systemctl,
         or open ptys — they fail silently or loudly without these mounts.
         Always paired with _umount_chroot_fs() in a try/finally block.
+
+        Two-step verification on each entry:
+          1. `mount` returncode must be zero, and
+          2. os.path.ismount(target) must report True after the call.
+        Step 2 catches the rare case where mount silently no-ops without
+        raising (we have not seen this in practice on Linux, but rc=0
+        without an actual mount would let dpkg's postinstall scripts
+        produce a chroot whose only failure signal is "many packages
+        not fully configured" much later in the run — far from the
+        actionable cause).
+
+        On any failure the method raises RuntimeError so build_chroot()'s
+        try/finally cleans up partial state via _umount_chroot_fs().
         """
         _chroot = self.__dir_chroot
         _mounts = [
@@ -392,13 +416,37 @@ class BuildSystem:
             _proc = subprocess.run(['sudo', '-S', 'mount'] + _args,
                                    input=self.__password + '\n', capture_output=True, text=True)
             if _proc.returncode != 0:
-                tui.console.warning(f'_mount_chroot_fs: mount {_dst}: {_proc.stderr.strip()}')
+                tui.console.error(
+                    f'_mount_chroot_fs: mount {_dst} failed (rc={_proc.returncode}): '
+                    f'{_proc.stderr.strip()}'
+                )
+                raise RuntimeError(
+                    f'mount {_dst} failed: {_proc.stderr.strip() or "no stderr"}'
+                )
+
+            # ismount uses st_dev comparison against the parent — valid for
+            # the four targets here (procfs / sysfs / devtmpfs / devpts all
+            # have different st_dev from a typical chroot's host filesystem).
+            if not os.path.ismount(_dst):
+                tui.console.error(
+                    f'_mount_chroot_fs: mount {_dst} returned 0 but kernel '
+                    f'mountinfo does not show it as a mount point'
+                )
+                raise RuntimeError(
+                    f'mount {_dst} reported success but is not actually mounted'
+                )
+
+            tui.console.info(f'_mount_chroot_fs: mounted {_dst}')
 
     def _umount_chroot_fs(self):
         """Unmount virtual filesystems from the chroot (reverse of _mount_chroot_fs).
 
         Uses -lf (lazy force) so a partial mount state from a previous failed
-        run does not prevent cleanup.  Safe to call even if nothing was mounted.
+        run does not prevent cleanup.  Safe to call even if nothing was mounted
+        (umount on a non-mountpoint returns non-zero but is harmless here).
+        Logs each successful unmount at info level for symmetry with the
+        mount path; failures (target was never a mount point) are silent
+        because that's the normal case after a partial-mount cleanup.
         """
         _chroot = self.__dir_chroot
         for _dst in [
@@ -407,8 +455,11 @@ class BuildSystem:
             f'{_chroot}/sys',
             f'{_chroot}/proc',
         ]:
+            _was_mounted = os.path.ismount(_dst)
             subprocess.run(['sudo', '-S', 'umount', '-lf', _dst],
                            input=self.__password + '\n', capture_output=True, text=True)
+            if _was_mounted:
+                tui.console.info(f'_umount_chroot_fs: unmounted {_dst}')
 
     def _configure_chroot(self, fh, is_final: bool = False) -> set:
         """Run `dpkg --configure -a` and return the set of successfully configured package names.
