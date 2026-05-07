@@ -99,6 +99,14 @@ else
     exit 1
 fi
 
+# checking docker group membership
+if id -nG "$(whoami)" | grep -qw docker; then
+    echo "User $(whoami) is in the docker group"
+else
+    echo "E: user $(whoami) is not in the 'docker' group — cannot talk to docker daemon" >&2
+    exit 1
+fi
+
 # checking wget
 if [ -x /usr/bin/wget ]; then
         echo Using `/usr/bin/wget --version | head -n1`

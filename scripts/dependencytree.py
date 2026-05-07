@@ -15,26 +15,31 @@ from tui import Prompt, PROMPT_OPTIONS
 
 
 def _auto_pick_candidate(candidates):
-    """Pick a unique candidate without prompting, when possible.
+    """Collapse same-name version dupes; auto-pick if one Package name remains.
 
-    Returns the chosen Package if every candidate has the same Package name
-    (i.e. the only difference is version) — in that case the highest version
-    wins, matching apt's "highest version satisfying constraints" rule.
-    Within a coherent mirror set (single snapshot or a live archive at one
-    moment in time) this is always the right call.
+    Returns (picked_or_None, collapsed_list).
 
-    Returns None when candidates name *different* Packages (genuine
-    alternative providers like mawk vs gawk for the virtual `awk`).  The
-    caller must prompt in that case — there is no mechanical rule.
+    Collapse step: per Package name, keep only the highest version — within a
+    coherent mirror set this is always correct and matches apt's "highest
+    version satisfying constraints" rule.  Result is sorted alphabetically by
+    Package name for deterministic prompt ordering.
+
+    Auto-pick: if only one Package name remains after collapse, return it.
+    Otherwise return (None, collapsed_list) so the caller can prompt with the
+    deduplicated set (genuine alternative providers like mawk vs gawk for the
+    virtual `awk`).
     """
     if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    _names = {p['Package'] for p in candidates}
-    if len(_names) == 1:
-        return max(candidates, key=lambda p: p.version)
-    return None
+        return None, []
+    _by_name: Dict[str, list] = defaultdict(list)
+    for _c in candidates:
+        _by_name[_c['Package']].append(_c)
+    _collapsed = [max(_versions, key=lambda p: p.version)
+                  for _versions in _by_name.values()]
+    _collapsed.sort(key=lambda p: p['Package'])
+    if len(_collapsed) == 1:
+        return _collapsed[0], _collapsed
+    return None, _collapsed
 
 
 class DependencyTree:
@@ -73,22 +78,28 @@ class DependencyTree:
             # (mechanically correct within a coherent mirror set), prompt
             # only on genuine alternative providers (different Package
             # names like mawk vs gawk for `awk`).
-            _auto = _auto_pick_candidate(_candidates)
+            _auto, _collapsed = _auto_pick_candidate(_candidates)
             if _auto is not None:
                 _selected = _auto
                 if len(_candidates) > 1:
                     tui.console.info(
                         f"add_lookahead: auto-pick {_selected.package} "
-                        f"{_selected.version} from {len(_candidates)} versions of '{_pkg_name}'"
+                        f"{_selected.version} from {len(_candidates)} candidates "
+                        f"(collapsed {len(_candidates)}→{len(_collapsed)}) of '{_pkg_name}'"
                     )
             else:
                 _mark = tui.console.mark()
                 tui.console.print(f"Multiple providers for '{_pkg_name}':")
-                for _i, _c in enumerate(_candidates, 1):
+                for _i, _c in enumerate(_collapsed, 1):
                     tui.console.print(f"  {_i}.  {_c.package}  ({_c.version})")
-                _options = [str(_i) for _i in range(1, len(_candidates) + 1)]
-                _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_candidates)}]", _options).get_response()
-                _selected = _candidates[int(_choice) - 1]
+                if len(_candidates) != len(_collapsed):
+                    tui.console.info(
+                        f"add_lookahead: prompt for '{_pkg_name}' "
+                        f"collapsed {len(_candidates)}→{len(_collapsed)} candidates"
+                    )
+                _options = [str(_i) for _i in range(1, len(_collapsed) + 1)]
+                _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_collapsed)}]", _options).get_response()
+                _selected = _collapsed[int(_choice) - 1]
                 tui.console.trim_to(_mark)
                 tui.console.print(f"Multiple providers for '{_pkg_name}': Selected {_selected.package} ({_selected.version})")
 
@@ -232,21 +243,27 @@ class DependencyTree:
         # coherent mirror set this is always correct and matches apt.
         # Prompt only when names differ (genuine alternative providers).
         elif len(_pkg_candidates) > 1:
-            _auto = _auto_pick_candidate(_pkg_candidates)
+            _auto, _collapsed = _auto_pick_candidate(_pkg_candidates)
             if _auto is not None:
                 _selected_pkg = _auto
                 tui.console.info(
                     f"auto-pick {_selected_pkg.package} {_selected_pkg.version} "
-                    f"from {len(_pkg_candidates)} versions of '{package_name}'"
+                    f"from {len(_pkg_candidates)} candidates "
+                    f"(collapsed {len(_pkg_candidates)}→{len(_collapsed)}) of '{package_name}'"
                 )
             else:
                 _mark = tui.console.mark()
                 tui.console.print(f"Multiple packages satisfy '{package_name}':")
-                for _i, _pkg in enumerate(_pkg_candidates, 1):
+                for _i, _pkg in enumerate(_collapsed, 1):
                     tui.console.print(f"  {_i}.  {_pkg.package}  ({_pkg.version})")
-                _options = [str(_i) for _i in range(1, len(_pkg_candidates) + 1)]
-                _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_pkg_candidates)}]", _options).get_response()
-                _selected_pkg = _pkg_candidates[int(_choice) - 1]
+                if len(_pkg_candidates) != len(_collapsed):
+                    tui.console.info(
+                        f"parse_dependency: prompt for '{package_name}' "
+                        f"collapsed {len(_pkg_candidates)}→{len(_collapsed)} candidates"
+                    )
+                _options = [str(_i) for _i in range(1, len(_collapsed) + 1)]
+                _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_collapsed)}]", _options).get_response()
+                _selected_pkg = _collapsed[int(_choice) - 1]
                 tui.console.trim_to(_mark)
                 tui.console.print(f"Multiple packages satisfy '{package_name}': Selected {_selected_pkg.package} ({_selected_pkg.version})")
 

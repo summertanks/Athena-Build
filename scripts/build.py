@@ -77,12 +77,14 @@ class BuildFlags:
         self.download_ready: bool = False          # source_download completed
         self.build_container_ready: bool = False   # build_container initialised
         self.source_build_ready: bool = False      # source_build completed
-        self.chroot_ready: bool = False            # build_bootable completed
+        self.chroot_ready: bool = False            # build_chroot completed
+        self.chroot_verified: bool = False         # build_chroot + verify_chroot all checks passed
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""
         fields = ['cache_ready', 'dep_check_ready', 'download_ready',
-                  'build_container_ready', 'source_build_ready', 'chroot_ready']
+                  'build_container_ready', 'source_build_ready',
+                  'chroot_ready', 'chroot_verified']
         return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
 
 _progress_flags = BuildFlags()
@@ -536,10 +538,11 @@ def cmd_tunnel_package(*args):
     for _src_pkg in packages:
         _result = _do_tunnel(_src_pkg)
         if _result:
+            console.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
             _success += 1
         else:
+            console.error(f"Tunnel {_src_pkg.package} [FAIL]")
             _failed += 1
-        console.info(f"Tunnel {_src_pkg.package} [{'TUNNELED' if _result else 'FAIL'}]")
         progress_bar.step(1)
     progress_bar.close()
 
@@ -581,6 +584,12 @@ def cmd_build_chroot(*args):
 
     _progress_flags.chroot_ready = True
 
+    # Run verification immediately — chroot_verified gates build_iso
+    _passed, _failed = _verify_chroot(build_system.password, build_config.dir_chroot)
+    _progress_flags.chroot_verified = (_failed == 0)
+    if _failed > 0:
+        console.error(f"chroot verification: {_failed} of {_passed + _failed} checks failed")
+
 
 # ---------------------------------------------------------------------------
 # Command: build_iso
@@ -596,10 +605,15 @@ def cmd_build_iso(*args):
     Requires on the host: squashfs-tools, grub-pc-bin, grub-efi-amd64-bin,
     xorriso.  These are checked by build-system.sh at startup.
 
-    Prerequisites: build_bootable must have completed (chroot_ready flag).
+    Prerequisites: chroot must be built AND verified (chroot_verified flag).
+    Run 'build_chroot' (which now also runs verification), or re-run
+    'verify_chroot' if the chroot was edited after the initial build.
     """
-    if not _progress_flags.chroot_ready:
-        console.print("Run 'build_bootable' first")
+    if not _progress_flags.chroot_verified:
+        if _progress_flags.chroot_ready:
+            console.print("Chroot built but verification failed — re-run 'verify_chroot' after fixing")
+        else:
+            console.print("Run 'build_chroot' first")
         return
 
     console.print("Initialising build system for ISO...")
@@ -689,15 +703,16 @@ def cmd_source_build(*args):
         # packages that were already tunneled in a previous run.
         if _src_pkg.package in build_config.tunnel_packages:
             if build_container.check_build(_src_pkg):
-                console.info(f"Package {_src_pkg.package} already tunneled [SKIPPED]")
+                console.warning(f"Package {_src_pkg.package} already tunneled [SKIPPED]")
                 _skipped += 1
                 progress_bar.step(1)
                 continue
             _build_result = _do_tunnel(_src_pkg)
-            console.info(f"Tunnel {_src_pkg.package} [{'TUNNELED' if _build_result else 'FAIL'}]")
             if _build_result:
+                console.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
                 _success += 1
             else:
+                console.error(f"Tunnel {_src_pkg.package} [FAIL]")
                 _failed += 1
             progress_bar.step(1)
             continue
@@ -712,11 +727,11 @@ def cmd_source_build(*args):
         _build_result = build_container.build(_src_pkg)
 
         if _build_result:
+            console.info(f"Building Package {_src_pkg.package} [PASS]")
             _success = _success + 1
         else:
+            console.error(f"Building Package {_src_pkg.package} [FAIL]")
             _failed = _failed + 1
-
-        console.info(f"Building Package {_src_pkg.package} [{'PASS' if _build_result else 'FAIL'}]")
 
         progress_bar.step(1)
 
@@ -736,35 +751,22 @@ def cmd_source_build(*args):
 # Command: verify_chroot
 # ---------------------------------------------------------------------------
 
-def cmd_verify_chroot():
-    """Run a suite of checks against the assembled chroot and report PASS/FAIL.
+def _verify_chroot(password: str, chroot: str) -> tuple:
+    """Run the 8-check chroot verification suite. Returns (passed, failed).
 
-    Checks performed:
-      1. dpkg --audit          — no packages in a broken state
-      2. dpkg --get-selections — all packages fully installed (none half-configured)
-      3. Kernel present        — at least one vmlinuz-* in /boot/
-      4. Initramfs present     — at least one initrd.img-* in /boot/
-      5. bash --version        — shell is executable inside the chroot
-      6. systemctl --version   — systemd is present and executable
-      7. live-boot installed   — required for live ISO boot
-      8. /etc/os-release       — OS identity file written by generate_system_configs
-
-    Prerequisites: build_bootable must have completed (chroot_ready flag).
+    Caller is responsible for prerequisite checks, password validation, and
+    setting any progress flags. Prints per-check PASS/FAIL lines and a summary.
     """
-    if not _progress_flags.chroot_ready:
-        console.print("Run 'build_bootable' first")
-        return
-
-    _chroot = build_config.dir_chroot
-    console.print(f"Verifying chroot at {_chroot}...")
-
-    _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-    _proc = subprocess.run(['sudo', '-S', '-v'],
-                           input=_password + '\n', capture_output=True, text=True)
-    if _proc.returncode != 0:
-        console.print("ERROR: incorrect sudo password")
-        console.error("verify_chroot: sudo -v failed")
-        return
+    # Checks performed:
+    #   1. dpkg --audit          — no packages in a broken state
+    #   2. dpkg --get-selections — all packages fully installed (none half-configured)
+    #   3. Kernel present        — at least one vmlinuz-* in /boot/
+    #   4. Initramfs present     — at least one initrd.img-* in /boot/
+    #   5. bash --version        — shell is executable inside the chroot
+    #   6. systemctl --version   — systemd is present and executable
+    #   7. live-boot installed   — required for live ISO boot
+    #   8. /etc/os-release       — OS identity file written by generate_system_configs
+    console.print(f"Verifying chroot at {chroot}...")
 
     _passed = 0
     _failed = 0
@@ -782,8 +784,8 @@ def cmd_verify_chroot():
 
     def _chroot_run(*cmd):
         return subprocess.run(
-            ['sudo', '-S', 'chroot', _chroot] + list(cmd),
-            input=_password + '\n', capture_output=True, text=True
+            ['sudo', '-S', 'chroot', chroot] + list(cmd),
+            input=password + '\n', capture_output=True, text=True
         )
 
     # ── Check 1: dpkg --audit ────────────────────────────────────────────────
@@ -804,13 +806,13 @@ def cmd_verify_chroot():
            else f'{len(_incomplete)} incomplete: {", ".join(_incomplete[:4])}')
 
     # ── Check 3: kernel ──────────────────────────────────────────────────────
-    _kernels = sorted(glob.glob(os.path.join(_chroot, 'boot', 'vmlinuz-*')))
+    _kernels = sorted(glob.glob(os.path.join(chroot, 'boot', 'vmlinuz-*')))
     _check('Kernel present in /boot/',
            bool(_kernels),
            os.path.basename(_kernels[-1]) if _kernels else 'no vmlinuz-* found')
 
     # ── Check 4: initramfs ───────────────────────────────────────────────────
-    _initrds = sorted(glob.glob(os.path.join(_chroot, 'boot', 'initrd.img-*')))
+    _initrds = sorted(glob.glob(os.path.join(chroot, 'boot', 'initrd.img-*')))
     _check('Initramfs present in /boot/',
            bool(_initrds),
            os.path.basename(_initrds[-1]) if _initrds else 'no initrd.img-* found')
@@ -837,7 +839,7 @@ def cmd_verify_chroot():
            'installed' if _live_ok else 'not installed or unconfigured')
 
     # ── Check 8: /etc/os-release ─────────────────────────────────────────────
-    _os_release = os.path.join(_chroot, 'etc', 'os-release')
+    _os_release = os.path.join(chroot, 'etc', 'os-release')
     _os_ok = os.path.exists(_os_release)
     _os_detail = ''
     if _os_ok:
@@ -864,9 +866,36 @@ def cmd_verify_chroot():
     else:
         console.print(
             f'Verification complete: {_passed}/{_total_checks} passed,'
-            f' {_failed} failed — chroot may not boot correctly',
+            f' {_failed} failed — build_iso blocked until verify passes',
             tui.COLOR_ERROR
         )
+
+    return _passed, _failed
+
+
+def cmd_verify_chroot():
+    """Re-run the chroot verification suite against an existing chroot.
+
+    Useful after a manual edit of the chroot to re-establish the
+    chroot_verified flag without rebuilding from scratch.
+
+    Prerequisites: chroot must already be built (chroot_ready flag).
+    """
+    if not _progress_flags.chroot_ready:
+        console.print("Run 'build_chroot' first")
+        return
+
+    _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+    _proc = subprocess.run(['sudo', '-S', '-v'],
+                           input=_password + '\n', capture_output=True, text=True)
+    if _proc.returncode != 0:
+        console.print("ERROR: incorrect sudo password")
+        console.error("verify_chroot: sudo -v failed")
+        return
+
+    _passed, _failed = _verify_chroot(_password, build_config.dir_chroot)
+    _progress_flags.chroot_verified = (_failed == 0)
+
 
 def cmd_auto_run():
     cmd_build_cache()
@@ -874,8 +903,7 @@ def cmd_auto_run():
     cmd_source_download()
     cmd_init_container()
     cmd_source_build()
-    cmd_build_chroot()
-    cmd_verify_chroot()
+    cmd_build_chroot()  # also runs verify_chroot internally
 
     return
 # ---------------------------------------------------------------------------
