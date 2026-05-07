@@ -686,9 +686,11 @@ def cmd_source_build(*args):
         return
 
     _success = _failed = _skipped = 0
-    progress_bar = ProgressBar(label='Source Build', itr_label='pkgs', maxvalue=len(packages))
+    _total = len(packages)
+    progress_bar = ProgressBar(label='Source Build', itr_label='pkgs', maxvalue=_total)
 
-    for _src_pkg in packages:
+    for _index, _src_pkg in enumerate(packages, start=1):
+        progress_bar.label(f'({_index}/{_total}) {_src_pkg.package[:20]}')
 
         # Packages on the skip_src list are excluded unconditionally — typically
         # packages that are known to be unbuildable in the current environment.
@@ -735,7 +737,7 @@ def cmd_source_build(*args):
 
         progress_bar.step(1)
 
-    progress_bar.close()
+    progress_bar.close(persist=True)
 
     console.print(f"Source build complete: {_success} passed, {_failed} failed, {_skipped} skipped")
     if _failed > 0:
