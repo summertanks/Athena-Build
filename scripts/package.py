@@ -2,10 +2,13 @@
 from debian.deb822 import Packages, Sources
 from debian.debian_support import Version, DpkgArchTable
 
+import logging
 import apt_pkg
 import tui
 
 from typing import List, Dict, Any, Optional, Tuple
+
+logger = logging.getLogger('athena')
 
 _arch_table: Optional[DpkgArchTable] = None
 
@@ -288,7 +291,7 @@ class Package(Packages):
                     _provides_names.append((_name, _version))
 
                 except (IndexError, ValueError, AttributeError, TypeError) as e:
-                    tui.console.warning(f"Skipping malformed provides entry for '{self.package}': {e}")
+                    logger.warning(f"Skipping malformed provides entry for '{self.package}': {e}")
                     continue
         
         # provides a list of tupples
@@ -552,5 +555,5 @@ class Source(Sources):
                 try:
                     all_deps.extend(apt_pkg.parse_src_depends(raw, architecture=arch))
                 except Exception as e:
-                    tui.console.warning(f"parse_src_depends({field}) for '{self.package}': {e}")
+                    logger.warning(f"parse_src_depends({field}) for '{self.package}': {e}")
         return all_deps

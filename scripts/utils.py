@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import pathlib
 import re
@@ -9,6 +10,8 @@ import requests
 import tui
 from tui import Prompt, Spinner, ProgressBar
 from typing import List, Optional
+
+logger = logging.getLogger('athena')
 
 
 def _strip_quotes(s: str) -> str:
@@ -288,10 +291,10 @@ def _validate_snapshot_timestamp(ts: str, mirrors: 'List[Mirror]') -> bool:
         try:
             resp = requests.head(url, timeout=15, allow_redirects=True)
         except Exception as e:
-            tui.console.error(f"snapshot validate: HEAD {url} failed: {e}")
+            logger.error(f"snapshot validate: HEAD {url} failed: {e}")
             return False
         if resp.status_code != 200:
-            tui.console.error(
+            logger.error(
                 f"snapshot validate: {url} returned HTTP {resp.status_code} — "
                 f"timestamp {ts} does not cover suite {snap.suite} on archive {m.baseid}"
             )
@@ -338,12 +341,12 @@ def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
                     tui.console.print(f"Snapshot pin: using persisted {persisted} from {state_file}")
                     _SNAPSHOT_TS_CACHE[cache_key] = persisted
                     return persisted
-                tui.console.warning(
+                logger.warning(
                     f"Snapshot state file {state_file} contains invalid timestamp "
                     f"{persisted!r}; re-resolving"
                 )
             except OSError as e:
-                tui.console.warning(f"Cannot read {state_file}: {e}; re-resolving")
+                logger.warning(f"Cannot read {state_file}: {e}; re-resolving")
 
         # Cold path: ask snapshot.debian.org
         ts = _query_snapshot_latest()
@@ -352,7 +355,7 @@ def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
                 fh.write(ts + '\n')
             tui.console.print(f"Snapshot pin: resolved 'latest' → {ts}, persisted to {state_file}")
         except OSError as e:
-            tui.console.warning(
+            logger.warning(
                 f"Cannot persist snapshot timestamp to {state_file}: {e}; "
                 f"build will re-resolve next run"
             )
@@ -682,27 +685,27 @@ def download_file(url: str, filename: str) -> tuple:
         else:
             _detail = f"HTTPError: {e}"
         tui.console.print(f"ERROR: {_detail} for {url}")
-        tui.console.error(f"download_file({url}): {_detail}")
+        logger.error(f"download_file({url}): {_detail}")
         return -1, _detail
     except (ConnectionError, Timeout, TooManyRedirects, RequestException) as e:
         _detail = f"{type(e).__name__}: {e}"
         tui.console.print(f"ERROR: download failed for {url}")
-        tui.console.error(f"download_file({url}): {_detail}")
+        logger.error(f"download_file({url}): {_detail}")
         return -1, _detail
     except OSError as e:
         _detail = f"OS write error: {e}"
         tui.console.print(f"ERROR: cannot write to {filename}")
-        tui.console.error(f"download_file write {filename}: {e}")
+        logger.error(f"download_file write {filename}: {e}")
         return -1, _detail
     except ValueError as e:
         _detail = f"malformed response: {e}"
         tui.console.print(f"ERROR: malformed response from {url}")
-        tui.console.error(f"download_file parse {url}: {e}")
+        logger.error(f"download_file parse {url}: {e}")
         return -1, _detail
     except Exception as e:
         _detail = f"{type(e).__name__}: {e}"
         tui.console.print(f"ERROR: unexpected failure downloading {url}")
-        tui.console.error(f"download_file({url}): {_detail}")
+        logger.error(f"download_file({url}): {_detail}")
         return -1, _detail
 
 
@@ -722,7 +725,7 @@ def download_source(dependency_tree, dir_download):
     for _pkg_name in dependency_tree.selected_srcs:
         _src = dependency_tree.selected_srcs[_pkg_name]
         if _src._mirror is None:
-            tui.console.error(f"download_source: source {_pkg_name} has no _mirror — cache ingest bug")
+            logger.error(f"download_source: source {_pkg_name} has no _mirror — cache ingest bug")
             continue
         _file_list.update(_src.files)
         for _fname in _src.files:
@@ -737,7 +740,7 @@ def download_source(dependency_tree, dir_download):
     except Exception as e:
         progress_bar = None
         tui.console.print(f"WARNING: progress bar unavailable, continuing without it")
-        tui.console.error(f"download_source ProgressBar: {type(e).__name__}: {e}")
+        logger.error(f"download_source ProgressBar: {type(e).__name__}: {e}")
 
     for _file in _file_list:
         if progress_bar is not None:
@@ -771,19 +774,19 @@ def download_source(dependency_tree, dir_download):
 
             except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
                 tui.console.print(f"ERROR: HTTP failure for {_url}")
-                tui.console.error(f"download_source({_url}): {e}")
+                logger.error(f"download_source({_url}): {e}")
                 continue
             except OSError as e:
                 tui.console.print(f"ERROR: cannot write {_download_path}")
-                tui.console.error(f"download_source write {_download_path}: {e}")
+                logger.error(f"download_source write {_download_path}: {e}")
                 continue
             except ValueError as e:
                 tui.console.print(f"ERROR: malformed response for {_url}")
-                tui.console.error(f"download_source parse {_url}: {e}")
+                logger.error(f"download_source parse {_url}: {e}")
                 continue
             except Exception as e:
                 tui.console.print(f"ERROR: unexpected failure for {_url}")
-                tui.console.error(f"download_source({_url}): {type(e).__name__}: {e}")
+                logger.error(f"download_source({_url}): {type(e).__name__}: {e}")
                 continue
 
             # Validate what landed on disk *before* the sha256 check, so a
@@ -795,7 +798,7 @@ def download_source(dependency_tree, dir_download):
                 _on_disk = os.path.getsize(_download_path)
             except OSError as e:
                 tui.console.print(f"ERROR: cannot stat downloaded {_download_path}")
-                tui.console.error(f"download_source stat {_download_path}: {e}")
+                logger.error(f"download_source stat {_download_path}: {e}")
                 continue
 
             if _expected_size > 0 and _on_disk != _expected_size:
@@ -803,14 +806,14 @@ def download_source(dependency_tree, dir_download):
                     f"ERROR: short download for {_file} — "
                     f"got {_on_disk} bytes, expected {_expected_size}"
                 )
-                tui.console.error(
+                logger.error(
                     f"short_download {_url}: {_on_disk}/{_expected_size} bytes"
                 )
                 continue
 
             if get_sha256(_download_path) != _sha256:
                 tui.console.print(f"ERROR: Hash mismatch for {_file} — download may be corrupt")
-                tui.console.error(f"sha256 mismatch: {_download_path} expected {_sha256}")
+                logger.error(f"sha256 mismatch: {_download_path} expected {_sha256}")
                 continue
 
             _downloaded_size += _on_disk
@@ -864,7 +867,7 @@ def get_md5(filepath: str) -> str:
                 h.update(chunk)
         return h.hexdigest()
     except OSError as e:
-        tui.console.warning(f"get_md5: cannot read {filepath}: {e}")
+        logger.warning(f"get_md5: cannot read {filepath}: {e}")
         return ''
 
 
@@ -882,7 +885,7 @@ def get_sha256(filepath: str) -> str:
         with open(filepath, 'rb') as f:
             return hashlib.file_digest(f, 'sha256').hexdigest()
     except OSError as e:
-        tui.console.warning(f"get_sha256: cannot read {filepath}: {e}")
+        logger.warning(f"get_sha256: cannot read {filepath}: {e}")
         return ''
 
 
@@ -916,6 +919,6 @@ def create_folders(folder_structure: str):
                 os.makedirs(path, exist_ok=True)
     except Exception as e:
         tui.console.print(f"ERROR: Failed to build folder structure: {e}")
-        tui.console.error(f"create_folders({folder_structure}): {e}")
+        logger.error(f"create_folders({folder_structure}): {e}")
 
 

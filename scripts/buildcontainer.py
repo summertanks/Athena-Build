@@ -1,5 +1,6 @@
 
 import hashlib
+import logging
 import os
 from typing import List, Dict
 from utils import BuildConfig
@@ -7,6 +8,9 @@ from package import Source
 
 import docker
 import tui
+
+logger = logging.getLogger('athena')
+
 
 class BuildContainer:
 
@@ -34,7 +38,7 @@ class BuildContainer:
         try:
             self.snapshot_ts = resolve_snapshot_timestamp(config)
         except (RuntimeError, ValueError) as e:
-            tui.console.error(f"BuildContainer: snapshot resolution failed: {e}")
+            logger.error(f"BuildContainer: snapshot resolution failed: {e}")
             raise
         self.mirrors = [m.with_snapshot(self.snapshot_ts) for m in config.mirrors]
 
@@ -67,7 +71,7 @@ class BuildContainer:
                 self.client = docker.from_env()
                 self.client.ping()
             except docker.errors.APIError as e:
-                tui.console.error(f"Athena Linux Docker: Error {e}")
+                logger.error(f"Athena Linux Docker: Error {e}")
                 tui.console.print(f"Athena Linux Docker: Error {e}")
                 raise RuntimeError(f"Cannot connect to local Docker daemon: {e}")
 
@@ -91,7 +95,7 @@ class BuildContainer:
             _needs_build = True
 
         except docker.errors.APIError as e:
-            tui.console.error(f"Athena Linux Docker: Error {e}")
+            logger.error(f"Athena Linux Docker: Error {e}")
             tui.console.print(f"Athena Linux Docker: Error {e}")
             tui.Exit(1)
 
@@ -112,12 +116,12 @@ class BuildContainer:
                                     fh.write(line + '\n')
 
                 except (FileNotFoundError, PermissionError) as e:
-                    tui.console.error(f"Error writing docker build log: {e}")
+                    logger.error(f"Error writing docker build log: {e}")
                     tui.console.print(f"Error writing docker build log: {e}")
                     raise RuntimeError(f"Cannot write Docker build log: {e}")
                 
             except docker.errors.APIError as e:
-                tui.console.error(f"Athena Linux Docker: Error {e}")
+                logger.error(f"Athena Linux Docker: Error {e}")
                 tui.console.print(f"Athena Linux Docker: Error {e}")
                 raise RuntimeError(f"Docker image build failed: {e}")
 
@@ -194,7 +198,7 @@ class BuildContainer:
         try:
             _dsc_file = [file for file in src_pkg.files if file.endswith('.dsc')][0]
         except IndexError:
-            tui.console.error(f"DSC not found for {src_pkg.package}")
+            logger.error(f"DSC not found for {src_pkg.package}")
             return False
 
         # DEB_BUILD_OPTIONS and DEB_BUILD_PROFILES are different namespaces
@@ -290,7 +294,7 @@ class BuildContainer:
                     src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
                 },
             )
-            tui.console.info(
+            logger.info(
                 f"Build container {container.short_id} started for {src_pkg.package}"
             )
 
@@ -305,7 +309,7 @@ class BuildContainer:
                 fh.write('PASS\n' if _build_result else 'FAIL\n')
 
             if not _build_result:
-                tui.console.error(
+                logger.error(
                     f"Build {src_pkg.package} failed in container "
                     f"{container.short_id} (exit {_exit_code})"
                 )
@@ -314,7 +318,7 @@ class BuildContainer:
 
         except docker.errors.APIError as e:
             _cid = container.short_id if container is not None else '<not-started>'
-            tui.console.error(
+            logger.error(
                 f"Athena Linux Docker error for {src_pkg.package} "
                 f"(container {_cid}): {e}"
             )
@@ -332,7 +336,7 @@ class BuildContainer:
                 except docker.errors.APIError as e:
                     # Cleanup failure is non-fatal — surface but do not
                     # mask the original exception or build result.
-                    tui.console.warning(
+                    logger.warning(
                         f"Failed to remove container {container.short_id} "
                         f"for {src_pkg.package}: {e}"
                     )
@@ -382,5 +386,5 @@ class BuildContainer:
             # ArError / DebError / unexpected EOFs all bubble up here;
             # surface to the log tab so a malformed .deb can be traced
             # without deeper debugging.
-            tui.console.error(f"is_ar_file({filename}): {type(e).__name__}: {e}")
+            logger.error(f"is_ar_file({filename}): {type(e).__name__}: {e}")
             return False

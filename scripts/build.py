@@ -43,7 +43,11 @@ import buildsystem
 import signal
 
 
+import logging
 from tui import Tui, console, Prompt, PROMPT_YESNO, PROMPT_PASSWORD, Spinner, ProgressBar, Exit
+from tui import setup_file_logging
+
+logger = logging.getLogger('athena')
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
@@ -106,12 +110,12 @@ class BuildSession:
             self.cache = Cache(self.config)
         except Exception as e:
             console.print(f"ERROR: build cache - {e}")
-            console.error(f"Cache() raised: {e}")
+            logger.error(f"Cache() raised: {e}")
             return
 
         if not self.cache.is_valid:
             console.print(f"ERROR: build cache - {self.cache.error_str}")
-            console.error(f"Cache invalid: {self.cache.error_str}")
+            logger.error(f"Cache invalid: {self.cache.error_str}")
             return
 
         self.flags.cache_ready = True
@@ -207,7 +211,7 @@ class BuildSession:
             manual_packages_list = utils.readfile(self.config.pkglist_path).split('\n')
         except OSError as e:
             console.print(f"ERROR: cannot read package list {self.config.pkglist_path}")
-            console.error(f"readfile({self.config.pkglist_path}): {e}")
+            logger.error(f"readfile({self.config.pkglist_path}): {e}")
             manual_packages_list = []
 
         # Strip comments and blank lines; only add packages not already selected.
@@ -243,7 +247,7 @@ class BuildSession:
                     f.write(str(self.dep_tree.selected_pkgs[pkg]) + '\n\n')
         except OSError as e:
             console.print(f"ERROR: cannot write selected_packages.list")
-            console.error(f"selected_packages.list write: {e}")
+            logger.error(f"selected_packages.list write: {e}")
             return
 
         # --- Source mapping -----------------------------------------------------
@@ -272,7 +276,7 @@ class BuildSession:
                 if os.path.exists(_patch_path):
                     _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
                     self.dep_tree.selected_srcs[_pkg].patch_list = sorted(_patch_files, key=lambda x: x[:5])
-                    console.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
+                    logger.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
                     # CONF-05: soft DEP-3 header check on each discovered
                     # patch.  Missing fields → log-tab warning only; the
                     # patch is still applied at build time.  Keeps the
@@ -282,13 +286,13 @@ class BuildSession:
                         _missing = utils.check_dep3_header(
                             os.path.join(_patch_path, _pf))
                         if _missing:
-                            console.warning(
+                            logger.warning(
                                 f"DEP-3: {_pkg}/{_ver}/{_pf} missing "
                                 f"header(s): {', '.join(_missing)}"
                             )
             except OSError as e:
                 console.print(f"WARNING: cannot list patches for '{_pkg}'")
-                console.warning(f"patch discovery {_patch_path}: {e}")
+                logger.warning(f"patch discovery {_patch_path}: {e}")
 
         _patched = sum(1 for _s in self.dep_tree.selected_srcs.values() if _s.patch_list)
         console.print(f"Found patches for {_patched} source package(s)", tui.COLOR_INFO)
@@ -303,7 +307,7 @@ class BuildSession:
                             fb.write(f"{_file}: {self.dep_tree.selected_srcs[_pkg].files[_file]}\n")
         except OSError as e:
             console.print(f"ERROR: cannot write source lists")
-            console.error(f"source lists write: {e}")
+            logger.error(f"source lists write: {e}")
             return
 
         console.print(f"Selected {len(self.dep_tree.selected_srcs)} source packages", tui.COLOR_HIGHLIGHT)
@@ -440,7 +444,7 @@ class BuildSession:
         except RuntimeError as e:
             spin.done()
             console.print(f"  ERROR: build container initialisation failed — {e}")
-            console.error(f"BuildContainer() raised: {e}")
+            logger.error(f"BuildContainer() raised: {e}")
 
 
     # ---------------------------------------------------------------------------
@@ -467,14 +471,14 @@ class BuildSession:
             True if every binary package was downloaded successfully, False otherwise.
         """
         if not src_pkg.pkgs:
-            console.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
+            logger.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
             return False
 
         # Construct the pool base URL from the source's origin mirror.  This
         # matters for sources in bookworm-security, whose pool lives at a
         # different baseid than main.
         if src_pkg._mirror is None:
-            console.error(f"tunnel {src_pkg.package}: source has no _mirror — cache ingest bug")
+            logger.error(f"tunnel {src_pkg.package}: source has no _mirror — cache ingest bug")
             return False
         _base = src_pkg._mirror.url
         _success = True
@@ -485,14 +489,14 @@ class BuildSession:
             # Skip files already on disk — no integrity check here; the repo
             # directory is trusted to contain only valid packages.
             if os.path.isfile(_dest):
-                console.info(f"tunnel {src_pkg.package}: {_filename} already present, skipping download")
+                logger.info(f"tunnel {src_pkg.package}: {_filename} already present, skipping download")
                 continue
 
             _url = f"{_base}/{src_pkg.directory}/{_filename}"
-            console.info(f"tunnel {src_pkg.package}: downloading {_url}")
+            logger.info(f"tunnel {src_pkg.package}: downloading {_url}")
             _bytes, _detail = utils.download_file(_url, _dest)
             if _bytes < 0:
-                console.error(
+                logger.error(
                     f"tunnel {src_pkg.package}: failed to download {_filename}: "
                     f"{_detail or 'unknown'}"
                 )
@@ -504,7 +508,7 @@ class BuildSession:
             with open(_result_file, 'w') as fh:
                 fh.write('TUNNELED\n' if _success else 'FAIL\n')
         except OSError as e:
-            console.error(f"tunnel {src_pkg.package}: cannot write result file: {e}")
+            logger.error(f"tunnel {src_pkg.package}: cannot write result file: {e}")
 
         return _success
 
@@ -546,10 +550,10 @@ class BuildSession:
         for _src_pkg in packages:
             _result = self._do_tunnel(_src_pkg)
             if _result:
-                console.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
+                logger.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
                 _success += 1
             else:
-                console.error(f"Tunnel {_src_pkg.package} [FAIL]")
+                logger.error(f"Tunnel {_src_pkg.package} [FAIL]")
                 _failed += 1
             progress_bar.step(1)
         progress_bar.close()
@@ -591,7 +595,7 @@ class BuildSession:
             build_system = buildsystem.BuildSystem(self.dep_tree, self.config)
         except RuntimeError as e:
             console.print(f"ERROR: build system initialisation failed — {e}")
-            console.error(f"BuildSystem() raised: {e}")
+            logger.error(f"BuildSystem() raised: {e}")
             return
 
         # Bracket the BuildSystem's lifetime so the cached sudo password is
@@ -605,7 +609,7 @@ class BuildSession:
             _result = build_system.build_chroot(debug=_debug)
             if not _result:
                 console.print("ERROR: chroot build failed — check logs for details")
-                console.error("build_chroot() returned False")
+                logger.error("build_chroot() returned False")
                 return
 
             self.flags.chroot_ready = True
@@ -614,7 +618,7 @@ class BuildSession:
             _passed, _failed = self._verify_chroot(build_system.password, self.config.dir_chroot)
             self.flags.chroot_verified = (_failed == 0)
             if _failed > 0:
-                console.error(f"chroot verification: {_failed} of {_passed + _failed} checks failed")
+                logger.error(f"chroot verification: {_failed} of {_passed + _failed} checks failed")
         finally:
             build_system.scrub_password()
 
@@ -660,7 +664,7 @@ class BuildSession:
             build_system = buildsystem.BuildSystem.for_iso(self.config)
         except RuntimeError as e:
             console.print(f"ERROR: build system initialisation failed — {e}")
-            console.error(f"BuildSystem.for_iso() raised: {e}")
+            logger.error(f"BuildSystem.for_iso() raised: {e}")
             return
 
         # Same try/finally pattern as cmd_build_chroot — scrub the cached
@@ -677,7 +681,7 @@ class BuildSession:
                         f"({_failed} of {_passed + _failed} checks) — "
                         f"refusing to build ISO"
                     )
-                    console.error(
+                    logger.error(
                         f"build_iso force: verify failed "
                         f"{_failed}/{_passed + _failed}"
                     )
@@ -690,7 +694,7 @@ class BuildSession:
             _result = build_system.build_iso()
             if not _result:
                 console.print("ERROR: ISO build failed — check logs for details")
-                console.error("build_iso() returned False")
+                logger.error("build_iso() returned False")
         finally:
             build_system.scrub_password()
 
@@ -759,7 +763,7 @@ class BuildSession:
             # Packages on the skip_src list are excluded unconditionally — typically
             # packages that are known to be unbuildable in the current environment.
             if _src_pkg.package in self.cache.skip_src:
-                console.warning(f"Package {_src_pkg.package} in skip_list")
+                logger.warning(f"Package {_src_pkg.package} in skip_list")
                 _skipped = _skipped + 1
                 progress_bar.step(1)
                 continue
@@ -769,23 +773,23 @@ class BuildSession:
             # packages that were already tunneled in a previous run.
             if _src_pkg.package in self.config.tunnel_packages:
                 if self.container.check_build(_src_pkg):
-                    console.warning(f"Package {_src_pkg.package} already tunneled [SKIPPED]")
+                    logger.warning(f"Package {_src_pkg.package} already tunneled [SKIPPED]")
                     _skipped += 1
                     progress_bar.step(1)
                     continue
                 _build_result = self._do_tunnel(_src_pkg)
                 if _build_result:
-                    console.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
+                    logger.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
                     _success += 1
                 else:
-                    console.error(f"Tunnel {_src_pkg.package} [FAIL]")
+                    logger.error(f"Tunnel {_src_pkg.package} [FAIL]")
                     _failed += 1
                 progress_bar.step(1)
                 continue
 
             # Skip packages with a valid existing build result unless force is set.
             if not _force and self.container.check_build(_src_pkg):
-                console.info(f"Package {_src_pkg.package} already built [SKIPPED]")
+                logger.info(f"Package {_src_pkg.package} already built [SKIPPED]")
                 _skipped = _skipped + 1
                 progress_bar.step(1)
                 continue
@@ -793,10 +797,10 @@ class BuildSession:
             _build_result = self.container.build(_src_pkg)
 
             if _build_result:
-                console.info(f"Building Package {_src_pkg.package} [PASS]")
+                logger.info(f"Building Package {_src_pkg.package} [PASS]")
                 _success = _success + 1
             else:
-                console.error(f"Building Package {_src_pkg.package} [FAIL]")
+                logger.error(f"Building Package {_src_pkg.package} [FAIL]")
                 _failed = _failed + 1
 
             progress_bar.step(1)
@@ -805,7 +809,7 @@ class BuildSession:
 
         console.print(f"Source build complete: {_success} passed, {_failed} failed, {_skipped} skipped")
         if _failed > 0:
-            console.error(f"{_failed} source build(s) failed")
+            logger.error(f"{_failed} source build(s) failed")
             _resp = Prompt(PROMPT_YESNO, "There are source build failures, Proceed?").get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
@@ -956,7 +960,7 @@ class BuildSession:
                                    input=_password + '\n', capture_output=True, text=True)
             if _proc.returncode != 0:
                 console.print("ERROR: incorrect sudo password")
-                console.error("verify_chroot: sudo -v failed")
+                logger.error("verify_chroot: sudo -v failed")
                 return
 
             _passed, _failed = self._verify_chroot(_password, self.config.dir_chroot)
@@ -987,7 +991,7 @@ class BuildSession:
             _fn()
             if not getattr(self.flags, _flag):
                 console.print(f"autorun: '{_name}' did not complete — aborting")
-                console.error(f"autorun aborted at '{_name}' (flag {_flag} not set)")
+                logger.error(f"autorun aborted at '{_name}' (flag {_flag} not set)")
                 return
 
         console.print("autorun: all stages complete")
@@ -1017,6 +1021,17 @@ def main(banner: str) -> None:
     if not config.is_valid:
         print(f"ERROR: load configuration - {config.error_str}, Exiting...")
         sys.exit(1)
+
+    # Attach a timestamped FileHandler to the 'athena' logger so every
+    # logger.X (and logger.debug from chroot / mksquashfs / grub-mkrescue
+    # subprocess transcripts) is captured to a single per-run file.
+    # Replaces the legacy chroot-install.log / mksquashfs.log /
+    # grub-mkrescue.log split.
+    try:
+        _log_path = setup_file_logging(config.dir_log)
+        print(f"Logging to {_log_path}")
+    except OSError as e:
+        print(f"WARN: could not open run log ({e}); continuing without file logging")
 
     print("Initialising TUI...")
     try:

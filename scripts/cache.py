@@ -1,4 +1,5 @@
 import bz2, gzip, lzma
+import logging
 import os
 import shutil
 import apt_pkg
@@ -17,6 +18,9 @@ from package import Package, Source
 # https://www.juliensobczak.com/inspect/2021/05/15/linux-packages-under-the-hood.html
 
 from tui import ProgressBar, Spinner
+
+logger = logging.getLogger('athena')
+
 
 class Cache:
 
@@ -44,7 +48,7 @@ class Cache:
             self._arch_table = DpkgArchTable.load_arch_table()
         except Exception as e:
             self.error_str = f"Failed to load dpkg arch table: {e}"
-            tui.console.error(self.error_str)
+            logger.error(self.error_str)
             return
 
         # All configured mirrors (main, updates, security) — ingested in
@@ -64,7 +68,7 @@ class Cache:
             self.snapshot_ts: Optional[str] = utils.resolve_snapshot_timestamp(buildconfig)
         except (RuntimeError, ValueError) as e:
             self.error_str = f"Snapshot resolution failed: {e}"
-            tui.console.error(self.error_str)
+            logger.error(self.error_str)
             return
         self.mirrors = [m.with_snapshot(self.snapshot_ts) for m in buildconfig.mirrors]
 
@@ -126,7 +130,7 @@ class Cache:
         bypass is never silent.
         """
         if self._security_disabled:
-            tui.console.warning(
+            logger.warning(
                 "Security: GPG verification of InRelease is DISABLED — "
                 "mirror data is being trusted without signature checks. "
                 "This is intended only for offline test fixtures."
@@ -167,9 +171,9 @@ class Cache:
                         f"InRelease GPG verification failed for "
                         f"[{_mirror.id}] {_release_url}: {_detail}"
                     )
-                    tui.console.error(self.error_str)
+                    logger.error(self.error_str)
                     return -1
-                tui.console.info(
+                logger.info(
                     f"InRelease verified for [{_mirror.id}]: {_detail}"
                 )
 
@@ -178,18 +182,18 @@ class Cache:
                     rel = Release(fh)
             except (FileNotFoundError, PermissionError, OSError) as e:
                 self.error_str = f"Cannot read release file: {e}"
-                tui.console.error(self.error_str)
+                logger.error(self.error_str)
                 return -1
             except Exception as e:
                 self.error_str = f"Error parsing release file: {e}"
-                tui.console.error(self.error_str)
+                logger.error(self.error_str)
                 return -1
 
             try:
                 _rel_sha = {line['name']: line['sha256'] for line in rel['SHA256']}
             except KeyError as e:
                 self.error_str = f"Missing SHA256 field in {_release_file}: {e}"
-                tui.console.error(self.error_str)
+                logger.error(self.error_str)
                 return -1
 
             _mirror_files: Dict[str, str] = {}
@@ -215,7 +219,7 @@ class Cache:
                 if _chosen_ext is None:
                     self.error_str = (f"No supported compression for {_path} in {_release_file} — "
                                       f"tried {[e for e, _ in self._compression_openers]}")
-                    tui.console.error(self.error_str)
+                    logger.error(self.error_str)
                     return -1
 
                 _src_url = _base_url + _path + _chosen_ext
@@ -235,7 +239,7 @@ class Cache:
                             shutil.copyfileobj(f_in, f_out)
                 except (OSError, EOFError, lzma.LZMAError) as e:
                     self.error_str = f"Failed to decompress {os.path.basename(_compressed_dst)}: {e}"
-                    tui.console.error(self.error_str)
+                    logger.error(self.error_str)
                     return -1
 
                 _mirror_files[_path.rsplit('/', 1)[-1]] = _dst
@@ -271,7 +275,7 @@ class Cache:
                 _src_records = utils.readfile(_src_file).split('\n\n')
             except OSError as e:
                 self.error_str = f"Failed to read cache files for {_mirror.id}: {e}"
-                tui.console.error(self.error_str)
+                logger.error(self.error_str)
                 return False
 
             progress_bar_pkg = ProgressBar(
@@ -287,7 +291,7 @@ class Cache:
                     _pkg = package.Package(_pkg_record)
                 except Exception as e:
                     _first_line = _pkg_record.splitlines()[0] if _pkg_record else '<empty>'
-                    tui.console.warning(f"Skipping record ({type(e).__name__}: {e}) — {_first_line}")
+                    logger.warning(f"Skipping record ({type(e).__name__}: {e}) — {_first_line}")
                     continue
 
                 if not _pkg.isvalid:
@@ -308,7 +312,7 @@ class Cache:
                         if _provided_name != _package_name:
                             self.package_hashtable[_provided_name][_provided_ver].append(_pkg)
                 except Exception as e:
-                    tui.console.warning(f"Skipping malformed provides for '{_pkg.package}': {e}")
+                    logger.warning(f"Skipping malformed provides for '{_pkg.package}': {e}")
 
                 if _pkg.priority == 'required':
                     self.required.append(_package_name)
@@ -328,7 +332,7 @@ class Cache:
                 try:
                     _src = package.Source(_src_record)
                 except Exception as e:
-                    tui.console.warning(f"Skipping malformed source record: {e}")
+                    logger.warning(f"Skipping malformed source record: {e}")
                     continue
                 if not _src.isvalid:
                     continue

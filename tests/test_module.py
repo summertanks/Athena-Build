@@ -1156,6 +1156,123 @@ def test_setup_logging_is_idempotent():
     assert len(info_hits) == 1, captured
 
 
+def test_setup_file_logging_writes_records_to_timestamped_file():
+    """setup_file_logging(dir) attaches a FileHandler that captures DEBUG
+    and above into a build-<timestamp>.log; the path returned must exist
+    and contain records emitted after the call."""
+    import logging as _logging
+    import os, tempfile, glob
+    import tui as _tui
+
+    saved_handlers = list(_logging.getLogger(_tui.LOGGER_NAME).handlers)
+    saved_tui = _tui.tui_instance
+    _tui.tui_instance = None  # tab handlers no-op
+    _tui.setup_logging()      # clean slate
+
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            path = _tui.setup_file_logging(d, name='build')
+            assert path.endswith('.log'), path
+            assert os.path.dirname(path) == os.path.abspath(d)
+
+            log = _logging.getLogger(_tui.LOGGER_NAME)
+            log.debug('chroot transcript line')
+            log.info('cache loaded')
+            log.warning('mirror lag')
+            log.error('GPG verify failed')
+
+            # Flush handler buffers before reading.
+            for h in log.handlers:
+                h.flush()
+
+            with open(path, 'r') as fh:
+                content = fh.read()
+
+            assert 'chroot transcript line' in content, content
+            assert 'cache loaded' in content, content
+            assert 'mirror lag' in content, content
+            assert 'GPG verify failed' in content, content
+            assert '[DEBUG' in content and '[INFO' in content, content
+        finally:
+            log = _logging.getLogger(_tui.LOGGER_NAME)
+            for h in list(log.handlers):
+                log.removeHandler(h)
+                try: h.close()
+                except Exception: pass
+            for h in saved_handlers:
+                log.addHandler(h)
+            _tui.tui_instance = saved_tui
+
+
+def test_setup_file_logging_filename_has_timestamp():
+    """Two calls in quick succession produce distinct files (timestamped)."""
+    import os, tempfile, time
+    import tui as _tui
+
+    with tempfile.TemporaryDirectory() as d:
+        p1 = _tui.setup_file_logging(d, name='build')
+        time.sleep(1.1)  # ensure timestamp granularity (seconds) ticks
+        p2 = _tui.setup_file_logging(d, name='build')
+        assert p1 != p2, (p1, p2)
+        assert os.path.exists(p1) and os.path.exists(p2)
+
+
+def test_log_tab_line_wrap_splits_long_records_to_fit_window():
+    """A long INFO message wraps to multiple buffer entries instead of
+    being clipped; continuation lines are indented under the prefix."""
+    import tui as _tui
+
+    # Stand-up a fake log tab window of known width (columns=80).
+    class _FakeWin:
+        def getmaxyx(self): return (10, 80)
+    fake_log_tab = {'win': _FakeWin(), 'buffer': [], 'cursor': 0,
+                    'panel': None, 'selected': True}
+
+    # Build a Tui without going through curses.
+    tui = _tui.Tui.__new__(_tui.Tui)
+    tui._log_lock = __import__('threading').Lock()
+    tui._tabs = {'log': fake_log_tab}
+    tui._dirty = False
+    tui._log_map = _tui.Tui._log_map  # severity → (tag, attr)
+
+    long_msg = 'x' * 300  # well over a single 80-col row
+    tui._log(_tui.Tui.SEVERITY_INFO, long_msg)
+
+    buf = fake_log_tab['buffer']
+    assert len(buf) >= 4, f'expected wrap into multiple lines, got {len(buf)}'
+    # First line carries the timestamp + tag prefix.
+    assert '[INFO ]' in buf[0][0], buf[0][0]
+    # Continuation lines are indented under the prefix (no '[INFO ]' tag).
+    assert '[INFO ]' not in buf[1][0], buf[1][0]
+    # Reassembled content matches the original message.
+    reassembled = ''.join(line.lstrip() for line, _ in buf)
+    assert reassembled.endswith('x' * 50), reassembled[-60:]
+    assert all('x' in line for line, _ in buf), buf
+
+
+def test_log_tab_preserves_explicit_newlines_inside_message():
+    """Embedded \\n in the message should split into separate buffer entries
+    (each independently wrapped), not be silently flattened."""
+    import tui as _tui
+
+    class _FakeWin:
+        def getmaxyx(self): return (10, 80)
+    fake_log_tab = {'win': _FakeWin(), 'buffer': [], 'cursor': 0,
+                    'panel': None, 'selected': True}
+    tui = _tui.Tui.__new__(_tui.Tui)
+    tui._log_lock = __import__('threading').Lock()
+    tui._tabs = {'log': fake_log_tab}
+    tui._dirty = False
+    tui._log_map = _tui.Tui._log_map
+
+    tui._log(_tui.Tui.SEVERITY_WARNING, 'first line\nsecond line\nthird line')
+    buf = fake_log_tab['buffer']
+    assert len(buf) == 3, buf
+    assert 'first line'  in buf[0][0]
+    assert 'second line' in buf[1][0]
+    assert 'third line'  in buf[2][0]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STA-09 — download_file surfaces HTTP status in its return value
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1351,6 +1468,10 @@ def main() -> int:
         test_logger_display_propagates_attribute_extra,
         test_logger_debug_is_dropped_below_handler_threshold,
         test_setup_logging_is_idempotent,
+        test_setup_file_logging_writes_records_to_timestamped_file,
+        test_setup_file_logging_filename_has_timestamp,
+        test_log_tab_line_wrap_splits_long_records_to_fit_window,
+        test_log_tab_preserves_explicit_newlines_inside_message,
         # STA-09
         test_download_file_returns_http_status_detail_on_404,
         test_download_file_success_returns_size_and_empty_detail,

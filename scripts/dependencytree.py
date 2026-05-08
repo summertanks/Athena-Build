@@ -10,8 +10,11 @@ from cache import Cache
 # External Modules
 import apt_pkg
 
+import logging
 import tui
 from tui import Prompt, PROMPT_OPTIONS
+
+logger = logging.getLogger('athena')
 
 
 def _auto_pick_candidate(candidates):
@@ -71,7 +74,7 @@ class DependencyTree:
             _candidates = self.__cache.get_packages(_pkg_name)
             if not _candidates:
                 tui.console.print(f"WARNING: add_lookahead: '{_pkg_name}' not found in cache, skipping")
-                tui.console.warning(f"add_lookahead: '{_pkg_name}' not found in cache, skipping")
+                logger.warning(f"add_lookahead: '{_pkg_name}' not found in cache, skipping")
                 continue
 
             # 2. Select version — auto-pick when only versions differ
@@ -82,7 +85,7 @@ class DependencyTree:
             if _auto is not None:
                 _selected = _auto
                 if len(_candidates) > 1:
-                    tui.console.info(
+                    logger.info(
                         f"add_lookahead: auto-pick {_selected.package} "
                         f"{_selected.version} from {len(_candidates)} candidates "
                         f"(collapsed {len(_candidates)}→{len(_collapsed)}) of '{_pkg_name}'"
@@ -93,7 +96,7 @@ class DependencyTree:
                 for _i, _c in enumerate(_collapsed, 1):
                     tui.console.print(f"  {_i}.  {_c.package}  ({_c.version})")
                 if len(_candidates) != len(_collapsed):
-                    tui.console.info(
+                    logger.info(
                         f"add_lookahead: prompt for '{_pkg_name}' "
                         f"collapsed {len(_candidates)}→{len(_collapsed)} candidates"
                     )
@@ -141,7 +144,7 @@ class DependencyTree:
                     if _triggered:
                         _ver_info = f" ({_triggered_ver})" if _triggered_ver else ""
                         tui.console.print(f"ERROR: Cannot add '{_pkg_name}' — conflicts with '{_conflict_name}{_ver_info}' already in lookahead")
-                        tui.console.error(f"CRITICAL: add_lookahead — '{_pkg_name}' conflicts with '{_conflict_name}{_ver_info}'")
+                        logger.error(f"CRITICAL: add_lookahead — '{_pkg_name}' conflicts with '{_conflict_name}{_ver_info}'")
                         _conflict_found = True
                         break
             if _conflict_found:
@@ -176,7 +179,7 @@ class DependencyTree:
         unresolved = [pkg for pkg in packages if self.parse_dependency(pkg) is None]
         for pkg in unresolved:
             tui.console.print(f"WARNING: cannot resolve '{pkg}'")
-            tui.console.error(f"parse_dependency({pkg}) returned None")
+            logger.error(f"parse_dependency({pkg}) returned None")
         return unresolved                                    
 
 
@@ -207,7 +210,7 @@ class DependencyTree:
             if _satisfies(_existing.version):
                 return _existing
             tui.console.print(f"WARNING: '{package_name}' already selected at {_existing.version}, cannot satisfy {_constraint} {version}")
-            tui.console.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
+            logger.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
             return None
 
 
@@ -219,7 +222,7 @@ class DependencyTree:
             if _pkg['Package'] in self.selected_pkgs:
                 _existing = self.selected_pkgs[_pkg['Package']]
                 if not _satisfies(_existing.version):
-                    tui.console.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
+                    logger.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
                 return _existing
 
         # At this point, if lookahead is available use that to select packages.
@@ -246,7 +249,7 @@ class DependencyTree:
             _auto, _collapsed = _auto_pick_candidate(_pkg_candidates)
             if _auto is not None:
                 _selected_pkg = _auto
-                tui.console.info(
+                logger.info(
                     f"auto-pick {_selected_pkg.package} {_selected_pkg.version} "
                     f"from {len(_pkg_candidates)} candidates "
                     f"(collapsed {len(_pkg_candidates)}→{len(_collapsed)}) of '{package_name}'"
@@ -257,7 +260,7 @@ class DependencyTree:
                 for _i, _pkg in enumerate(_collapsed, 1):
                     tui.console.print(f"  {_i}.  {_pkg.package}  ({_pkg.version})")
                 if len(_pkg_candidates) != len(_collapsed):
-                    tui.console.info(
+                    logger.info(
                         f"parse_dependency: prompt for '{package_name}' "
                         f"collapsed {len(_pkg_candidates)}→{len(_collapsed)} candidates"
                     )
@@ -268,7 +271,7 @@ class DependencyTree:
                 tui.console.print(f"Multiple packages satisfy '{package_name}': Selected {_selected_pkg.package} ({_selected_pkg.version})")
 
         else:  # Do not know how we got here
-            tui.console.error(f"Unknown Error in Parsing dependencies: {package_name}")
+            logger.error(f"Unknown Error in Parsing dependencies: {package_name}")
             return None
 
         # Insert BEFORE recursing: cycle protection. If A depends on B and B depends on A,
@@ -331,12 +334,12 @@ class DependencyTree:
                 try:
                     _dep_ver = Version(_pkg[1])
                 except (ValueError, TypeError):
-                    tui.console.warning(f"Malformed version '{_pkg[1]}' in dep on '{_pkg[0]}', ignoring")
+                    logger.warning(f"Malformed version '{_pkg[1]}' in dep on '{_pkg[0]}', ignoring")
 
             _parsed_pkg = self.parse_dependency(_pkg[0], _dep_ver, _pkg[2])
             if _parsed_pkg is None:
                 tui.console.print(f"WARNING: unresolved dependency '{_pkg[0]}' for {_selected_pkg.package}")
-                tui.console.warning(f"parse_dependency({_pkg[0]}) from {_selected_pkg.package} returned None")
+                logger.warning(f"parse_dependency({_pkg[0]}) from {_selected_pkg.package} returned None")
                 continue
 
             # add forward dependency
@@ -351,7 +354,7 @@ class DependencyTree:
                 try:
                     self.selected_pkgs[_parsed_pkg['Package']].add_constraint(_dep_ver, _pkg[2])
                 except (ValueError, TypeError) as e:
-                    tui.console.warning(f"Skipping invalid version constraint '{_pkg[1]}' "
+                    logger.warning(f"Skipping invalid version constraint '{_pkg[1]}' "
                                         f"on {_parsed_pkg.package} (from {_selected_pkg.package}): {e}")
 
         return _selected_pkg
@@ -397,12 +400,12 @@ class DependencyTree:
                         _triggered = (_break_comparator == '' or
                                       apt_pkg.check_dep(_pkg_ver, _break_comparator, _break_version))
                     except Exception as e:
-                        tui.console.warning(f"check_dep raised for breaks {_breaks_name} "
+                        logger.warning(f"check_dep raised for breaks {_breaks_name} "
                                             f"({_pkg_ver} {_break_comparator} {_break_version}): {e}")
                         _triggered = True  # conservative: assume break on parse error
                     if _triggered:
                         tui.console.print(f"ERROR: Package {_pkg} breaks {_breaks_name}")
-                        tui.console.error(f"DEPENDENCY HELL: {_pkg} breaks {_breaks_name} "
+                        logger.error(f"DEPENDENCY HELL: {_pkg} breaks {_breaks_name} "
                                           f"(ver {_pkg_ver} {_break_comparator} {_break_version})")
                         _breaks = True
 
@@ -431,19 +434,19 @@ class DependencyTree:
                         _triggered = (_conflict_comparator == '' or
                                       apt_pkg.check_dep(_pkg_ver, _conflict_comparator, _conflict_version))
                     except Exception as e:
-                        tui.console.warning(f"check_dep raised for conflicts {_conflicts_name} "
+                        logger.warning(f"check_dep raised for conflicts {_conflicts_name} "
                                             f"({_pkg_ver} {_conflict_comparator} {_conflict_version}): {e}")
                         _triggered = True  # conservative: assume conflict on parse error
                     if _triggered:
                         tui.console.print(f"ERROR: Package {_pkg} conflicts with {_conflicts_name}")
-                        tui.console.error(f"DEPENDENCY HELL: {_pkg} conflicts with {_conflicts_name} "
+                        logger.error(f"DEPENDENCY HELL: {_pkg} conflicts with {_conflicts_name} "
                                           f"(ver {_pkg_ver} {_conflict_comparator} {_conflict_version})")
                         _breaks = True
 
             # Check for package version constraints collected from upstream
             if not self.selected_pkgs[_pkg].constraints_satisfied:
                 tui.console.print(f"ERROR: Package {_pkg} version constraints unsatisfied")
-                tui.console.error(f"DEPENDENCY HELL: {_pkg} version constraints unsatisfied")
+                logger.error(f"DEPENDENCY HELL: {_pkg} version constraints unsatisfied")
                 _breaks = True
 
             # Check Alt Depends
@@ -465,13 +468,13 @@ class DependencyTree:
                                           apt_pkg.check_dep(str(self.selected_pkgs[pkg_name].version),
                                                             pkg_constraint, pkg_version))
                         except Exception as e:
-                            tui.console.warning(f"check_dep raised for {pkg_name} "
+                            logger.warning(f"check_dep raised for {pkg_name} "
                                                 f"({self.selected_pkgs[pkg_name].version} {pkg_constraint} {pkg_version}): {e}")
                             _satisfies = False
                         if _satisfies:
                             _found = True
                         else:
-                            tui.console.warning(f"Alt-dep version constraint failed for {pkg_name} "
+                            logger.warning(f"Alt-dep version constraint failed for {pkg_name} "
                                                 f"({self.selected_pkgs[pkg_name].version} {pkg_constraint} {pkg_version})")
                     else:
                         # Lets try in Provides, little more complex
@@ -490,20 +493,20 @@ class DependencyTree:
                                                   apt_pkg.check_dep(str(self.selected_pkgs[_pkg_name].version),
                                                                     pkg_constraint, pkg_version))
                                 except Exception as e:
-                                    tui.console.warning(f"check_dep raised for {_pkg_name} "
+                                    logger.warning(f"check_dep raised for {_pkg_name} "
                                                         f"({self.selected_pkgs[_pkg_name].version} "
                                                         f"{pkg_constraint} {pkg_version}): {e}")
                                     _satisfies = False
                                 if _satisfies:
                                     _found = True
                                 else:
-                                    tui.console.warning(f"Alt-dep (via provides) version constraint failed for "
+                                    logger.warning(f"Alt-dep (via provides) version constraint failed for "
                                                         f"{_pkg_name} ({self.selected_pkgs[_pkg_name].version} "
                                                         f"{pkg_constraint} {pkg_version})")
 
                 if not _found:
                     tui.console.print(f"ERROR: unresolved alt-dependency for package {_pkg}")
-                    tui.console.error(f"DEPENDENCY HELL: {_pkg} unresolved alt-dep section: {_section}")
+                    logger.error(f"DEPENDENCY HELL: {_pkg} unresolved alt-dep section: {_section}")
                     _breaks = True
 
         return not _breaks
@@ -522,7 +525,7 @@ class DependencyTree:
                                   self.selected_pkgs[_pkg]))
             except Exception as e:
                 tui.console.print(f"WARNING: cannot read source info for {_pkg}, skipping")
-                tui.console.error(f"parse_sources source-access for {_pkg}: {type(e).__name__}: {e}")
+                logger.error(f"parse_sources source-access for {_pkg}: {type(e).__name__}: {e}")
                 _found = False
         for _src in _src_list:
             _src_name = _src[0]
@@ -532,7 +535,7 @@ class DependencyTree:
 
                 if _src_name not in self.__cache.source_hashtable:
                     tui.console.print(f"ERROR: Source package '{_src_name}' not found in cache")
-                    tui.console.error(f"CRITICAL: Source '{_src_name}' not found in cache — build cannot proceed")
+                    logger.error(f"CRITICAL: Source '{_src_name}' not found in cache — build cannot proceed")
                     _found = False
                     continue
 
@@ -550,7 +553,7 @@ class DependencyTree:
                     _matched = [s for s in _src_candidates if s.version == Version(_src_version)]
                     if not _matched:
                         tui.console.print(f"ERROR: Source '{_src_name}' version '{_src_version}' not found")
-                        tui.console.error(f"Source '{_src_name}' version '{_src_version}' not found in cache")
+                        logger.error(f"Source '{_src_name}' version '{_src_version}' not found in cache")
                         _found = False
                         continue
                     if len(_matched) == 1:
@@ -561,7 +564,7 @@ class DependencyTree:
                                         if _bin_mirror is not None and s._mirror is _bin_mirror]
                         _picked = _same_mirror[0] if _same_mirror else _matched[0]
                         self.selected_srcs[_src_name] = _picked
-                        tui.console.info(
+                        logger.info(
                             f"parse_sources: {_src_name} {_src_version} present in "
                             f"{len(_matched)} mirrors; picked {_picked._mirror.id}"
                         )
@@ -579,7 +582,7 @@ class DependencyTree:
                 if _bin_filename not in self.selected_srcs[_src_name].pkgs:
                     self.selected_srcs[_src_name].pkgs.append(_bin_filename)
 
-        tui.console.warning(f"parse_sources: selected {len(self.selected_srcs)} source packages")
+        logger.warning(f"parse_sources: selected {len(self.selected_srcs)} source packages")
         return _found
 
     @property

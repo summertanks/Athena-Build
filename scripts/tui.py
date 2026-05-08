@@ -30,6 +30,7 @@ import queue
 import signal
 import socket
 import sys
+import textwrap
 import threading
 import time
 from math import floor
@@ -892,13 +893,39 @@ class Tui:
 
         ts = datetime.datetime.now().strftime('%H:%M:%S')
         tag, attr = self._log_map[severity]
-        line = f'[{ts}] {tag} {message}'
+        prefix = f'[{ts}] {tag} '
+        indent = ' ' * len(prefix)
 
         with self._log_lock:
             if 'log' not in self._tabs:
                 return
             log = self._tabs['log']
-            log['buffer'].append((line, attr))
+
+            # Wrap on append at the current window width so long records
+            # show their tail instead of being clipped by _safe_addstr.
+            # _safe_addstr clamps to (max_x - x - 1) cells; mirror that.
+            try:
+                _, max_x = log['win'].getmaxyx()
+            except curses.error:
+                max_x = 80
+            wrap_w = max(20, max_x - 1 - len(prefix))
+
+            # Honour explicit \n in the caller-supplied message: each line
+            # is wrapped independently so multi-line records stay readable.
+            chunks: List[str] = []
+            for seg in str(message).split('\n'):
+                if not seg:
+                    chunks.append('')
+                    continue
+                wrapped = textwrap.wrap(
+                    seg, width=wrap_w,
+                    break_long_words=True, break_on_hyphens=False,
+                ) or ['']
+                chunks.extend(wrapped)
+
+            for idx, chunk in enumerate(chunks):
+                line = (prefix if idx == 0 else indent) + chunk
+                log['buffer'].append((line, attr))
             log['cursor'] = len(log['buffer'])
 
         self._dirty = True
@@ -1547,6 +1574,38 @@ def setup_logging(tui: 'Optional[Tui]' = None) -> logging.Logger:
 def get_logger() -> logging.Logger:
     """Convenience accessor — equivalent to ``logging.getLogger('athena')``."""
     return logging.getLogger(LOGGER_NAME)
+
+
+def setup_file_logging(log_dir: str, name: str = 'build') -> str:
+    """Attach a `FileHandler` to the 'athena' logger.
+
+    Filename is timestamped (`{name}-YYYY-MM-DDTHH-MM-SS.log`) so each
+    run lands in its own file rather than overwriting prior runs.
+    The handler captures DEBUG and above, so subprocess transcripts
+    (chroot install, mksquashfs, …) routed through ``logger.debug``
+    end up in the file alongside operator-visible INFO/WARNING/ERROR
+    records.
+
+    Args:
+        log_dir: Directory to write the log file into; created if absent.
+        name:    Filename prefix (default ``'build'``).
+
+    Returns:
+        The absolute path of the newly opened log file.
+    """
+    os.makedirs(log_dir, exist_ok=True)
+    ts   = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+    path = os.path.abspath(os.path.join(log_dir, f'{name}-{ts}.log'))
+
+    fh = logging.FileHandler(path, mode='w', encoding='utf-8')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)-7s] %(message)s', '%Y-%m-%d %H:%M:%S'
+    ))
+
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.addHandler(fh)
+    return path
 
 
 # Module-level color constants — mirrors Tui class attributes for convenient import

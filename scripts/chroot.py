@@ -13,6 +13,7 @@ All methods access `self._dependencytree`, `self._dir_chroot`,
 — provided by `BuildSystem`.
 """
 
+import logging
 import os
 import pathlib
 import re
@@ -22,6 +23,8 @@ import tempfile
 
 import tui
 import utils
+
+logger = logging.getLogger('athena')
 
 
 class _ChrootMixin:
@@ -65,7 +68,7 @@ class _ChrootMixin:
                 "WARNING: no gcc-NN-base found in selected set — "
                 "circular Pre-Depends bootstrap may fail"
             )
-            tui.console.warning("build_chroot: gcc-NN-base not found in selected_pkgs")
+            logger.warning("build_chroot: gcc-NN-base not found in selected_pkgs")
             libc_seed = ['libc6', 'libgcc-s1', 'libcrypt1']
         else:
             libc_seed = [_gcc_base, 'libc6', 'libgcc-s1', 'libcrypt1']
@@ -79,7 +82,7 @@ class _ChrootMixin:
             batches = self._compute_install_batches(libc_seed_set)
         except RuntimeError as e:
             tui.console.print(f"ERROR: cannot order packages — {e}")
-            tui.console.error(f"_compute_install_batches: {e}")
+            logger.error(f"_compute_install_batches: {e}")
             return False
 
         # batches is List[Tuple[List[str], bool]]; len(b) on the tuple
@@ -96,7 +99,6 @@ class _ChrootMixin:
         # --- Install ---
         self._setup_chroot_env()
         self._init_dpkg_database()
-        _log_path = os.path.join(self._dir_log, 'chroot-install.log')
 
         configured: set = set()
         _result = True
@@ -108,52 +110,52 @@ class _ChrootMixin:
             # below and umount-cleans whatever did get mounted.
             self._mount_chroot_fs()
 
-            with open(_log_path, 'w') as fh:
+            # Batch 0: libc circular-dep bootstrap.  Subprocess output
+            # from each batch is now routed through logger.debug — the
+            # file handler attached by setup_file_logging() captures it
+            # alongside INFO/WARNING/ERROR records, so the unified run
+            # log replaces the legacy chroot-install.log.
+            tui.console.print(f"Batch 0 (bootstrap): {libc_seed}")
+            logger.debug('--- Batch 0 (bootstrap) ---')
+            self._unpack_packages(libc_seed)
+            configured |= self._configure_packages(libc_seed)
 
-                # Batch 0: libc circular-dep bootstrap.
-                tui.console.print(f"Batch 0 (bootstrap): {libc_seed}")
-                fh.write(f'--- Batch 0 (bootstrap) ---\n')
-                self._unpack_packages(libc_seed, fh)
-                configured |= self._configure_packages(libc_seed, fh)
+            # Batches 1..N — Kahn-ordered, dep-independent within each.
+            # The terminal batch may be a "cycle batch" (force_deps=True)
+            # that contains a real SCC; in that case dpkg gets
+            # --force-depends scoped to that batch only.
+            for _i, (_batch, _force) in enumerate(batches, start=1):
+                _label = f"Batch {_i}/{len(batches)} — {len(_batch)} package(s)"
+                if _force:
+                    _label += " [cycle, --force-depends]"
+                tui.console.print(_label)
+                logger.debug(f'--- Batch {_i} ({len(_batch)} pkgs'
+                             f'{", forced" if _force else ""}) ---')
+                self._unpack_packages(_batch)
+                configured |= self._configure_packages(_batch, force_deps=_force)
 
-                # Batches 1..N — Kahn-ordered, dep-independent within each.
-                # The terminal batch may be a "cycle batch" (force_deps=True)
-                # that contains a real SCC; in that case dpkg gets
-                # --force-depends scoped to that batch only.
-                for _i, (_batch, _force) in enumerate(batches, start=1):
-                    _label = f"Batch {_i}/{len(batches)} — {len(_batch)} package(s)"
-                    if _force:
-                        _label += " [cycle, --force-depends]"
-                    tui.console.print(_label)
-                    fh.write(f'\n--- Batch {_i} ({len(_batch)} pkgs'
-                             f'{", forced" if _force else ""}) ---\n')
-                    self._unpack_packages(_batch, fh)
-                    configured |= self._configure_packages(
-                        _batch, fh, force_deps=_force
-                    )
-
-                # Final defensive sweep.  Many Debian postinst scripts
-                # invoke helper tools from packages they do not formally
-                # Depend on (udev calls update-rc.d from
-                # init-system-helpers; apt calls deb-systemd-helper).
-                # When those helpers are scheduled later in the topo
-                # order, the early postinst returns non-zero and dpkg
-                # marks the package half-configured.  `dpkg --configure
-                # -a` retries every half-configured package — by this
-                # point all batches are unpacked + their declared deps
-                # configured, so the implicit helpers are present and
-                # the postinst succeeds.  The dpkg --get-selections
-                # check below is the authoritative pass/fail gate.
-                tui.console.print(
-                    "Final configure sweep — "
-                    "retrying any postinst-deferred packages..."
-                )
-                fh.write('\n--- Final configure sweep ---\n')
-                _final_configured = self._configure_chroot(fh, is_final=True)
-                configured |= _final_configured
+            # Final defensive sweep.  Many Debian postinst scripts
+            # invoke helper tools from packages they do not formally
+            # Depend on (udev calls update-rc.d from
+            # init-system-helpers; apt calls deb-systemd-helper).
+            # When those helpers are scheduled later in the topo
+            # order, the early postinst returns non-zero and dpkg
+            # marks the package half-configured.  `dpkg --configure
+            # -a` retries every half-configured package — by this
+            # point all batches are unpacked + their declared deps
+            # configured, so the implicit helpers are present and
+            # the postinst succeeds.  The dpkg --get-selections
+            # check below is the authoritative pass/fail gate.
+            tui.console.print(
+                "Final configure sweep — "
+                "retrying any postinst-deferred packages..."
+            )
+            logger.debug('--- Final configure sweep ---')
+            _final_configured = self._configure_chroot(is_final=True)
+            configured |= _final_configured
         except RuntimeError as e:
             tui.console.print(f"ERROR: chroot install aborted — {e}")
-            tui.console.error(f"build_chroot install loop: {e}")
+            logger.error(f"build_chroot install loop: {e}")
             _result = False
         finally:
             self._umount_chroot_fs()
@@ -165,7 +167,7 @@ class _ChrootMixin:
         # for the authoritative list of packages NOT in 'install ok
         # installed' state.  Should be empty after a successful run; if
         # not, surface the names so the operator can investigate without
-        # parsing 80k lines of chroot-install.log.
+        # parsing 80k lines of the unified run log.
         _status_cmd = ['sudo', '-S', 'chroot', self._dir_chroot,
                        'dpkg', '--get-selections']
         _status = subprocess.run(_status_cmd, input=self._password + '\n',
@@ -181,7 +183,7 @@ class _ChrootMixin:
                 f"{len(_not_installed)} incomplete: {', '.join(_not_installed[:8])}"
                 f"{'…' if len(_not_installed) > 8 else ''}"
             )
-            tui.console.warning(
+            logger.warning(
                 f"build_chroot: {len(_not_installed)} packages not fully configured: "
                 f"{_not_installed}"
             )
@@ -244,7 +246,7 @@ class _ChrootMixin:
             _proc = subprocess.run(['sudo', '-S', 'mount'] + _args,
                                    input=self._password + '\n', capture_output=True, text=True)
             if _proc.returncode != 0:
-                tui.console.error(
+                logger.error(
                     f'_mount_chroot_fs: mount {_dst} failed (rc={_proc.returncode}): '
                     f'{_proc.stderr.strip()}'
                 )
@@ -256,7 +258,7 @@ class _ChrootMixin:
             # the four targets here (procfs / sysfs / devtmpfs / devpts all
             # have different st_dev from a typical chroot's host filesystem).
             if not os.path.ismount(_dst):
-                tui.console.error(
+                logger.error(
                     f'_mount_chroot_fs: mount {_dst} returned 0 but kernel '
                     f'mountinfo does not show it as a mount point'
                 )
@@ -264,7 +266,7 @@ class _ChrootMixin:
                     f'mount {_dst} reported success but is not actually mounted'
                 )
 
-            tui.console.info(f'_mount_chroot_fs: mounted {_dst}')
+            logger.info(f'_mount_chroot_fs: mounted {_dst}')
 
     def _umount_chroot_fs(self):
         """Unmount virtual filesystems from the chroot (reverse of _mount_chroot_fs).
@@ -287,7 +289,7 @@ class _ChrootMixin:
             subprocess.run(['sudo', '-S', 'umount', '-lf', _dst],
                            input=self._password + '\n', capture_output=True, text=True)
             if _was_mounted:
-                tui.console.info(f'_umount_chroot_fs: unmounted {_dst}')
+                logger.info(f'_umount_chroot_fs: unmounted {_dst}')
 
     def _chroot_dpkg_available(self) -> bool:
         """True when the chroot has both dpkg and sh, so chroot-mode dpkg
@@ -302,7 +304,7 @@ class _ChrootMixin:
              os.path.lexists(os.path.join(_chroot, 'usr/bin/sh')))
         )
 
-    def _configure_chroot(self, fh, is_final: bool = False) -> set:
+    def _configure_chroot(self, is_final: bool = False) -> set:
         """Run `dpkg --configure -a` and return the set of successfully configured package names.
 
         Automatically selects between two modes based on whether dpkg is present
@@ -357,9 +359,11 @@ class _ChrootMixin:
 
         _proc = subprocess.run(_cmd, input=self._password + '\n',
                                capture_output=True, text=True, env=os.environ)
-        fh.write(_proc.stdout)
+        for _line in _proc.stdout.splitlines():
+            logger.debug(_line)
         if _proc.returncode != 0:
-            fh.write(_proc.stderr)
+            for _line in _proc.stderr.splitlines():
+                logger.debug(_line)
             _mode = 'chroot' if _dpkg_in_chroot else 'chrootless'
             if is_final:
                 # Final pass failures are real — surface them immediately.
@@ -371,14 +375,14 @@ class _ChrootMixin:
                     f'Final configure had errors — {len(_failed)} package(s) failed: '
                     f'{", ".join(_failed[:5])}{"…" if len(_failed) > 5 else ""}'
                 )
-                tui.console.error(
+                logger.error(
                     f'_configure_chroot final ({_mode}): '
                     f'{len(_failed)} failed — see log for details'
                 )
             else:
                 # Intermediate round: expected for packages waiting on deps from
                 # a later round.  Log to file only; do not clutter the console.
-                tui.console.warning(
+                logger.warning(
                     f'Round configure ({_mode}): some packages deferred — '
                     f'will retry in next round'
                 )
@@ -421,7 +425,7 @@ class _ChrootMixin:
             )
             if _proc.returncode != 0:
                 tui.console.print(f"WARNING: update-initramfs failed for {_kver} — see log")
-                tui.console.warning(
+                logger.warning(
                     f"_ensure_initramfs {_kver}: {_proc.stderr.strip()[:300]}"
                 )
             else:
@@ -579,7 +583,7 @@ class _ChrootMixin:
                 # the SCC in the right order.
                 _stuck = sorted(remaining)
                 _subs = self._pre_depends_subbatches(_stuck)
-                tui.console.warning(
+                logger.warning(
                     f"_compute_install_batches: dep cycle in "
                     f"{len(_stuck)} package(s); split into "
                     f"{len(_subs)} forced sub-batch(es) by Pre-Depends: "
@@ -625,7 +629,7 @@ class _ChrootMixin:
             remaining -= set(ready)
         return sub_batches
 
-    def _configure_packages(self, pkg_list: list, fh,
+    def _configure_packages(self, pkg_list: list,
                             force_deps: bool = False) -> set:
         """Run `dpkg --configure pkg1 pkg2 ...` for the named packages.
 
@@ -640,7 +644,6 @@ class _ChrootMixin:
 
         Args:
             pkg_list:   canonical package names to configure.
-            fh:         open file handle for the chroot install log.
             force_deps: True only for the cycle batch emitted by
                         _compute_install_batches.  Adds --force-depends
                         scoped to this single dpkg invocation so dpkg
@@ -689,10 +692,11 @@ class _ChrootMixin:
                 f'--configure'
             ) + pkg_list
 
-        fh.write(f'Configure: {" ".join(pkg_list)}\n')
+        logger.debug(f'Configure: {" ".join(pkg_list)}')
         _proc = subprocess.run(_cmd, input=self._password + '\n',
                                capture_output=True, text=True, env=os.environ)
-        fh.write(_proc.stdout)
+        for _line in _proc.stdout.splitlines():
+            logger.debug(_line)
 
         _configured: set = set()
         for _line in _proc.stdout.splitlines():
@@ -711,9 +715,10 @@ class _ChrootMixin:
         # warning here gives the operator a breadcrumb back to the
         # originating batch if the final sweep cannot recover.
         if _proc.returncode != 0:
-            fh.write(_proc.stderr)
+            for _line in _proc.stderr.splitlines():
+                logger.debug(_line)
             _missing = [p for p in pkg_list if p not in _configured]
-            tui.console.warning(
+            logger.warning(
                 f'_configure_packages: rc={_proc.returncode}, '
                 f'{len(_configured)}/{len(pkg_list)} configured this pass; '
                 f'deferred to final sweep: '
@@ -836,12 +841,12 @@ class _ChrootMixin:
             _filepath = os.path.join(self._dir_repo, _filename)
             if not os.path.exists(_filepath):
                 tui.console.print(f"WARNING: .deb not found, skipping: {_filename}")
-                tui.console.warning(f"_get_deb_files: missing {_filepath}")
+                logger.warning(f"_get_deb_files: missing {_filepath}")
                 continue
             file_list.append(_filepath)
         return file_list
 
-    def _unpack_packages(self, pkg_list: list, fh) -> set:
+    def _unpack_packages(self, pkg_list: list) -> set:
         """Run dpkg --unpack for pkg_list inside the chroot.
 
         --force-script-chrootless lets maintainer scripts run without a
@@ -874,10 +879,11 @@ class _ChrootMixin:
             f'--force-script-chrootless --no-triggers --unpack'
         ) + self._get_deb_files(pkg_list)
 
-        fh.write(f'Unpack: {" ".join(pkg_list)}\n')
+        logger.debug(f'Unpack: {" ".join(pkg_list)}')
         _proc = subprocess.run(_cmd, input=self._password + '\n',
                                capture_output=True, text=True, env=os.environ)
-        fh.write(_proc.stdout)
+        for _line in _proc.stdout.splitlines():
+            logger.debug(_line)
 
         # Parse successfully unpacked package names from dpkg output first
         # so the failure classifier below can distinguish partial from total.
@@ -888,10 +894,11 @@ class _ChrootMixin:
                 _unpacked.add(_m.group(1).split(':')[0])
 
         if _proc.returncode != 0:
-            fh.write(_proc.stderr)
+            for _line in _proc.stderr.splitlines():
+                logger.debug(_line)
             _failed = [p for p in pkg_list if p not in _unpacked]
             if _unpacked:
-                tui.console.warning(
+                logger.warning(
                     f'_unpack_packages: partial — '
                     f'{len(_unpacked)}/{len(pkg_list)} succeeded; '
                     f'unmet pre-deps for: '
@@ -1002,7 +1009,7 @@ class _ChrootMixin:
                                            input=self._password + '\n', capture_output=True, text=True, env=os.environ)
                     if _proc.returncode != 0:
                         tui.console.print(f'Error: Failed copying pre-install file — {_file}')
-                        tui.console.error(f'pre_install cp {_file}: {_proc.stderr}')
+                        logger.error(f'pre_install cp {_file}: {_proc.stderr}')
                 else:
                     # Patch files are applied relative to chroot_relative_dir.
                     # Use -i to pass the patch file directly; '<' is a shell
@@ -1012,7 +1019,7 @@ class _ChrootMixin:
                                            capture_output=True, text=True, env=os.environ)
                     if _proc.returncode != 0:
                         tui.console.print(f'Error: Failed applying pre-install patch — {_file}')
-                        tui.console.error(f'pre_install patch {_file}: {_proc.stderr}')
+                        logger.error(f'pre_install patch {_file}: {_proc.stderr}')
 
         # Permission / FHS-symlink fixups that the chroot package set
         # cannot lay down itself.  argv lists rather than f-strings +
@@ -1038,7 +1045,7 @@ class _ChrootMixin:
             if _proc.returncode != 0:
                 _label = ' '.join(_cmd)
                 tui.console.print(f"WARNING: pre-install command failed: {_label}")
-                tui.console.warning(f"pre_install cmd: {_label}\n{_proc.stdout.strip()}")
+                logger.warning(f"pre_install cmd: {_label}\n{_proc.stdout.strip()}")
 
     def post_install(self):
         """Apply post-install overlay files and patches into the chroot.
@@ -1075,7 +1082,7 @@ class _ChrootMixin:
                     )
                     if _proc.returncode != 0:
                         tui.console.print(f'Error: Failed copying post-install file — {_file}')
-                        tui.console.error(f'post_install cp {_file}: {_proc.stderr}')
+                        logger.error(f'post_install cp {_file}: {_proc.stderr}')
                 else:
                     _proc = subprocess.run(
                         ['patch', '-p1', '-i', _orig_file],
@@ -1084,7 +1091,7 @@ class _ChrootMixin:
                     )
                     if _proc.returncode != 0:
                         tui.console.print(f'Error: Failed applying post-install patch — {_file}')
-                        tui.console.error(f'post_install patch {_file}: {_proc.stderr}')
+                        logger.error(f'post_install patch {_file}: {_proc.stderr}')
 
     def generate_system_configs(self, debug: bool = False):
         """Write base system configuration files into the chroot.
@@ -1202,7 +1209,7 @@ class _ChrootMixin:
         )
         if _proc.returncode != 0:
             tui.console.print(f"WARNING: systemd-firstboot failed: {_proc.stderr.strip()}")
-            tui.console.warning(f"systemd-firstboot stderr: {_proc.stderr.strip()}")
+            logger.warning(f"systemd-firstboot stderr: {_proc.stderr.strip()}")
         else:
             tui.console.print("systemd-firstboot: root password / hostname / machine-id configured")
 
@@ -1239,7 +1246,7 @@ class _ChrootMixin:
             )
             if _proc.returncode != 0:
                 tui.console.print(f"ERROR: Failed to write {rel_path} into chroot")
-                tui.console.error(f"_write_chroot_file {rel_path}: {_proc.stderr}")
+                logger.error(f"_write_chroot_file {rel_path}: {_proc.stderr}")
         finally:
             os.unlink(_tmp_path)
 
