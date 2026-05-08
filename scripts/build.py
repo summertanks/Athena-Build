@@ -485,9 +485,12 @@ def _do_tunnel(src_pkg) -> bool:
 
         _url = f"{_base}/{src_pkg.directory}/{_filename}"
         console.info(f"tunnel {src_pkg.package}: downloading {_url}")
-        _bytes = utils.download_file(_url, _dest)
+        _bytes, _detail = utils.download_file(_url, _dest)
         if _bytes < 0:
-            console.error(f"tunnel {src_pkg.package}: failed to download {_filename}")
+            console.error(
+                f"tunnel {src_pkg.package}: failed to download {_filename}: "
+                f"{_detail or 'unknown'}"
+            )
             _success = False
 
     # Write a result file so check_build() can skip re-tunneling on the next run.
