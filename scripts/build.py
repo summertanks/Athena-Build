@@ -1002,7 +1002,7 @@ def main(banner: str):
         _tui = Tui(banner)
         _tui.run()
 
-        tui.tui_instance = _tui
+        # Tui.__init__ already registers itself as the module singleton.
         signal.signal(signal.SIGINT, _tui.sig_shutdown)  # clean shutdown on Ctrl-C
 
     except Exception as e:
