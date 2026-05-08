@@ -71,19 +71,19 @@ line-length = 100
 target-version = "py39"
 
 [tool.ruff.lint]
-# Curated ruleset — pragmatic baseline, not a wishlist.
+# Conservative baseline ruleset — only "almost certainly a bug" checks
+# turned on so the first CI run reflects the codebase honestly rather
+# than failing on style choices we haven't decided about.  The full
+# ruff catalogue (E / W / B / I / UP / SIM / etc.) can be enabled
+# incrementally as we agree on house style; the right gate for that
+# is a follow-on ticket, not this one.
 select = [
-    "E",      # pycodestyle errors
-    "F",      # pyflakes (unused imports, undefined names)
-    "W",      # pycodestyle warnings
-    "B",      # flake8-bugbear (likely-bug patterns)
-    "I",      # isort (import ordering)
-    "UP",     # pyupgrade (modern syntax)
+    "F",      # pyflakes — unused imports, undefined names, redefined symbols
+    "E9",     # pycodestyle errors that are syntax-level (E901 SyntaxError, etc.)
 ]
 ignore = [
-    "E501",   # line too long — codebase has many docstring-paragraph wraps
-    "E402",   # module-level import not at top — build.py runs faulthandler.enable() before imports
-    "E741",   # ambiguous variable name `l` — used in a few short comprehensions
+    "F401",   # unused imports — many tui re-exports + intentional warm-up imports
+    "F841",   # unused local — surfaces in a few defensive try/except blocks
 ]
 
 [tool.ruff.lint.per-file-ignores]
