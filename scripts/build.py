@@ -273,6 +273,19 @@ class BuildSession:
                     _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
                     self.dep_tree.selected_srcs[_pkg].patch_list = sorted(_patch_files, key=lambda x: x[:5])
                     console.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
+                    # CONF-05: soft DEP-3 header check on each discovered
+                    # patch.  Missing fields → log-tab warning only; the
+                    # patch is still applied at build time.  Keeps the
+                    # convention enforceable without blocking ad-hoc
+                    # one-off operator patches.
+                    for _pf in _patch_files:
+                        _missing = utils.check_dep3_header(
+                            os.path.join(_patch_path, _pf))
+                        if _missing:
+                            console.warning(
+                                f"DEP-3: {_pkg}/{_ver}/{_pf} missing "
+                                f"header(s): {', '.join(_missing)}"
+                            )
             except OSError as e:
                 console.print(f"WARNING: cannot list patches for '{_pkg}'")
                 console.warning(f"patch discovery {_patch_path}: {e}")

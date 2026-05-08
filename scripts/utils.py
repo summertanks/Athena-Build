@@ -79,7 +79,7 @@ class Mirror:
             return self
         return Mirror(
             mirror_id = self.id,
-            baseurl   = 'http://snapshot.debian.org/archive',
+            baseurl   = 'https://snapshot.debian.org/archive',
             baseid    = f'{self.baseid}/{ts}',
             release   = self.release,
             suffix    = self.suffix,
@@ -185,6 +185,45 @@ def verify_inrelease(signed_path: str, keyring_path: str, work_dir: str) -> tupl
 
     _ident = getattr(v, 'username', '') or getattr(v, 'fingerprint', '') or 'unknown'
     return True, f"signed by {_ident}"
+
+
+def check_dep3_header(patch_path: str) -> list:
+    """Inspect the leading prose of a patch file for required DEP-3 headers.
+
+    DEP-3 (https://dep-team.pages.debian.net/deps/dep3/) defines the
+    pseudo-headers Debian expects above the `--- a/...` diff line:
+
+      Description: (or Subject:)  what the patch does and why
+      Origin: / Author:           where it came from / who wrote it
+      Forwarded:                  whether the upstream knows about it
+
+    Returns the list of required field names that are missing.  An
+    empty list means the header passes; a non-empty list is what the
+    caller surfaces in a warning.  We scan only the first ~40 lines —
+    DEP-3 headers must precede the diff hunks anyway.
+
+    Soft check: returns missing fields, does not raise.  The caller
+    (cmd_parse_dependency) logs them as warnings; the patch is still
+    applied at build time.  Keep DEP-3 a guideline rather than a gate
+    so an operator's ad-hoc one-off patch is not blocked, but the
+    project's own patch tree is held to the convention.
+    """
+    REQUIRED = ('Description', 'Origin')   # Author satisfies Origin
+    found: set = set()
+    try:
+        with open(patch_path, 'r', errors='replace') as fh:
+            for _i, _line in enumerate(fh):
+                if _i >= 40 or _line.startswith('---'):
+                    break       # past the header, into the diff
+                _s = _line.strip()
+                if _s.startswith('Description:') or _s.startswith('Subject:'):
+                    found.add('Description')
+                elif _s.startswith('Origin:') or _s.startswith('Author:'):
+                    found.add('Origin')
+    except OSError:
+        # Caller will warn separately on read failure; pretend complete.
+        return []
+    return [_f for _f in REQUIRED if _f not in found]
 
 
 def _query_snapshot_latest() -> str:
@@ -352,6 +391,8 @@ class BuildConfig:
 
     skip_build_test: list[str]
     tunnel_packages: list[str]
+    build_profiles: frozenset
+    build_options: frozenset
     max_parallel_builds: int
 
     security_keyring: str
@@ -457,10 +498,29 @@ class BuildConfig:
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]
+            # BuildProfiles → DEB_BUILD_PROFILES (which Build-Depends a
+            # source package activates at build time).
+            # BuildOptions  → DEB_BUILD_OPTIONS  (how the build itself
+            # behaves: nodoc, nocheck, parallel=N, …).
+            # The two share names like nodoc / nocheck but are distinct
+            # namespaces with distinct semantics.  Pre-CONF-04 a single
+            # `BuildProfiles` was set into BOTH env vars, which made
+            # values like `parallel=4` (only valid as an option) attempt
+            # to be a profile and triggered apt warnings.
+            #
+            # Backward compat: when BuildOptions is missing, mirror
+            # BuildProfiles so existing build.conf files keep working.
             _profiles_raw = config_parser.get('Source', 'BuildProfiles', fallback='')
             self.build_profiles: frozenset[str] = frozenset(
                 p.strip() for p in _profiles_raw.split(',') if p.strip()
             )
+            _options_raw = config_parser.get('Source', 'BuildOptions', fallback='').strip()
+            if _options_raw:
+                self.build_options: frozenset[str] = frozenset(
+                    p.strip() for p in _options_raw.split(',') if p.strip()
+                )
+            else:
+                self.build_options = self.build_profiles
             self.max_parallel_builds = config_parser.getint('Build', 'MaxParallelBuilds', fallback=4)
 
             # Mirror InRelease GPG verification.  Default: enabled,
