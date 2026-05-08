@@ -613,18 +613,29 @@ class BuildSession:
     def cmd_build_iso(self, *args):
         """Build a bootable hybrid BIOS/EFI ISO from the assembled chroot.
 
-        Packages the chroot produced by build_bootable into a squashfs live image,
-        writes a GRUB configuration, and runs grub-mkrescue to produce a bootable
-        ISO at dir_image/athena-VERSION-amd64.iso.
+        Usage: build_iso [force]
+
+          force — skip the chroot_verified flag check.  After a manual
+                  edit of the chroot tree (e.g. dropping in extra config
+                  files between `build_chroot` and `build_iso`) the
+                  in-memory chroot_verified flag is stale even though the
+                  on-disk chroot may still be valid.  With force, we
+                  re-run verify_chroot against the on-disk chroot using
+                  the password just collected for ISO assembly, and
+                  proceed only if all 8 checks still pass.
+
+        Packages the chroot produced by build_chroot into a squashfs live
+        image, writes a GRUB configuration, and runs grub-mkrescue to
+        produce a bootable ISO at dir_image/athena-VERSION-amd64.iso.
 
         Requires on the host: squashfs-tools, grub-pc-bin, grub-efi-amd64-bin,
         xorriso.  These are checked by build-system.sh at startup.
 
-        Prerequisites: chroot must be built AND verified (chroot_verified flag).
-        Run 'build_chroot' (which now also runs verification), or re-run
-        'verify_chroot' if the chroot was edited after the initial build.
+        Prerequisites: chroot must be built AND verified (chroot_verified
+        flag), unless `force` is given in which case verify is re-run.
         """
-        if not self.flags.chroot_verified:
+        _force = 'force' in args
+        if not _force and not self.flags.chroot_verified:
             if self.flags.chroot_ready:
                 console.print("Chroot built but verification failed — re-run 'verify_chroot' after fixing")
             else:
@@ -643,6 +654,25 @@ class BuildSession:
         # sudo password on every exit path so it does not outlive the ISO
         # build command.
         try:
+            if _force:
+                console.print("Force mode: re-verifying chroot before ISO...")
+                _passed, _failed = self._verify_chroot(
+                    build_system.password, self.config.dir_chroot)
+                if _failed > 0:
+                    console.print(
+                        f"ERROR: chroot verification failed "
+                        f"({_failed} of {_passed + _failed} checks) — "
+                        f"refusing to build ISO"
+                    )
+                    console.error(
+                        f"build_iso force: verify failed "
+                        f"{_failed}/{_passed + _failed}"
+                    )
+                    return
+                # Refresh the flag so subsequent (non-force) calls work
+                # without re-verifying.
+                self.flags.chroot_verified = True
+
             console.print("Building ISO...")
             _result = build_system.build_iso()
             if not _result:
