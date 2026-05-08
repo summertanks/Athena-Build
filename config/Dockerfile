@@ -18,5 +18,15 @@ RUN echo 'net.ipv6.conf.default.disable_ipv6=0' >> /etc/sysctl.conf
 RUN echo 'net.ipv6.conf.lo.disable_ipv6=0' >> /etc/sysctl.conf
 
 RUN useradd -G sudo -ms /bin/bash athena
-RUN echo 'athena ALL=(ALL) NOPASSWD:ALL' >>  /etc/sudoers
+# Passwordless sudo for the build user.  dpkg-buildpackage and the
+# Debian build-helper machinery routinely call sudo for build-dep
+# installs, dpkg invocations, etc.; a TTY-prompted password would
+# break the unattended per-package build loop.
+#
+# This makes the container a privileged sandbox, NOT a security
+# boundary.  See docs/security.md for the threat model — the short
+# version: never expose the docker daemon driving this image to a
+# network you don't fully control (BuildContainer._guard_docker_server
+# enforces the loopback / TLS check at runtime).
+RUN echo 'athena ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 USER athena
