@@ -84,6 +84,23 @@ patch -p1 < <patch dir>/package/version/xxxx-description.patch
 The patch file numbering is four digit, preferably start from 9001 for simplicity sake
 The patch folder will have folder for each source package 'name' and sub folders for respective versions. each patch is version specific and saved in that version folder.
 
+## Development
+
+Lint and unit tests run in CI on every push (`.github/workflows/ci.yml`).
+To run them locally:
+
+```
+pip install ruff mypy            # one-time
+ruff check .                     # style + likely-bug checks
+mypy scripts/                    # type checks (advisory)
+python3 tests/test_module.py     # unit tests
+```
+
+The ruff rule set is conservative — only pyflakes (`F`) plus syntax-level
+errors (`E9`).  Tightening the catalogue (style, import order, modernisation)
+is a follow-on task; see `ARCH-06` in `TODO.md`.  mypy is `continue-on-error`
+in CI for the same reason.
+
 ## Misc
 
 ### Installing Docker

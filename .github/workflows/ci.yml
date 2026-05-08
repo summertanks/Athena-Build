@@ -1,0 +1,72 @@
+name: ci
+
+# Runs lint (ruff + mypy) and unit tests on every push to master and
+# every PR.  Ruff and mypy config live in pyproject.toml so the local
+# invocation
+#
+#     ruff check .
+#     mypy scripts/
+#
+# matches what CI runs.  Both linters use the conservative initial
+# rulesets in pyproject (ruff: F + E9 only; mypy: untyped-defs not
+# checked) so the gate stays honest rather than green-washing the
+# codebase's current discipline.  Tightening is a follow-on ticket.
+#
+# mypy is `continue-on-error: true` so it reports findings without
+# failing the workflow — gives us a baseline diagnostic to triage
+# before we make it strict.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  ruff:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Run ruff
+        run: ruff check .
+
+  mypy:
+    name: mypy
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install mypy + minimal type stubs
+        run: pip install mypy types-requests types-psutil
+      - name: Run mypy
+        # ignore_missing_imports = true in pyproject covers apt_pkg /
+        # debian / docker which have partial or absent stubs on PyPI.
+        run: mypy scripts/
+
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python deps
+        # python3-apt / aptsources only ship as Debian packages and
+        # are not exercised by the unit suite, so we skip them here.
+        # The four imports below cover everything tests/test_module.py
+        # touches: gnupg (verify_inrelease), python-debian (Source/
+        # Package/DebFile parsers), requests (download_file mocks),
+        # psutil (Tui resource probe).
+        run: pip install python-gnupg python-debian requests psutil
+      - name: Run unit tests
+        run: python3 tests/test_module.py
