@@ -162,16 +162,13 @@ class BuildSystem:
     def build_chroot(self, debug: bool = False) -> bool:
         """Install all selected packages into the chroot in dependency order.
 
-        Single-pass topo-sorted install (ARCH-12).  The previous round-loop
-        retry pattern computed Pre-Depends ordering for unpack only and
-        let `dpkg --configure -a` sort out Depends ordering itself; when
-        dpkg's solver hit a transient unmet dep the round failed and we
-        retried.  This version computes one batch sequence over
-        `Pre-Depends ∪ Depends` up front (`_compute_install_batches`),
-        guaranteeing every batch's deps are in earlier batches.  Each
-        batch is unpacked then configured exactly once with named
-        `dpkg --configure pkg1 pkg2 ...` — no retries possible because
-        no batch can have a transient unmet dep.
+        Computes a topo-sorted batch sequence over Pre-Depends ∪ Depends
+        once (_compute_install_batches), then for each batch runs one
+        `dpkg --unpack` followed by one `dpkg --configure pkg1 pkg2 ...`.
+        A final `dpkg --configure -a` retries any package whose postinst
+        was deferred by an undeclared helper-tool dependency (e.g. udev
+        calling update-rc.d from init-system-helpers); the dpkg
+        --get-selections summary at the end is the authoritative gate.
 
         Args:
             debug: When True, generate_system_configs() also writes a
@@ -179,16 +176,10 @@ class BuildSystem:
                 Off by default — opt in for serial-debug builds only.
 
         Returns:
-            True on completion.
-
-        Raises:
-            RuntimeError if (a) a virtual-fs mount fails (caught by
-            try/finally so partial mounts get cleaned up), (b) a
-            dependency cycle remains after libc-seed removal in
-            _compute_install_batches, or (c) any package in any batch
-            fails to configure (caught by _configure_packages and
-            converted to a clean False return so the operator sees a
-            single actionable error in the console).
+            True on completion, False on a fatal error during install
+            (mount failure, unbreakable dep cycle, etc.).  Individual
+            postinst failures are tolerated and surfaced via the final
+            get-selections check.
         """
         selected = self.__dependencytree.selected_pkgs
         # All canonical packages — filter out virtual-package alias entries
@@ -431,6 +422,19 @@ class BuildSystem:
             if _was_mounted:
                 tui.console.info(f'_umount_chroot_fs: unmounted {_dst}')
 
+    def _chroot_dpkg_available(self) -> bool:
+        """True when the chroot has both dpkg and sh, so chroot-mode dpkg
+        can invoke maintainer scripts.  Until that's true the caller must
+        stay in chrootless mode (host sh + DPKG_ROOT).  sh may live at
+        /bin/sh or /usr/bin/sh depending on update-alternatives layout.
+        """
+        _chroot = self.__dir_chroot
+        return (
+            os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg')) and
+            (os.path.lexists(os.path.join(_chroot, 'bin/sh')) or
+             os.path.lexists(os.path.join(_chroot, 'usr/bin/sh')))
+        )
+
     def _configure_chroot(self, fh, is_final: bool = False) -> set:
         """Run `dpkg --configure -a` and return the set of successfully configured package names.
 
@@ -462,33 +466,20 @@ class BuildSystem:
         Failed packages are NOT in the returned set.
         """
         _chroot = self.__dir_chroot
-        # Same chroot-mode probe as _configure_packages — both /usr/bin/dpkg
-        # and sh (at /bin/sh or /usr/bin/sh, whichever update-alternatives
-        # installed) must be in place before chroot dpkg can run any
-        # maintainer script (else "'sh' not found in PATH").
-        _dpkg_in_chroot = (
-            os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg')) and
-            (os.path.lexists(os.path.join(_chroot, 'bin/sh')) or
-             os.path.lexists(os.path.join(_chroot, 'usr/bin/sh')))
-        )
+        _dpkg_in_chroot = self._chroot_dpkg_available()
 
         if _dpkg_in_chroot:
-            # Real chroot: env runs on host (no /usr/bin/env needed inside chroot).
-            # No --force-depends: snapshot pinning (STA-03) keeps cache and
-            # on-disk .debs at the same Debian timestamp, and _check_dep_drift
-            # + _verify_dep_resolution already raise on any unresolved dep
-            # before we get here.  A real configure-time dep failure now
-            # surfaces with dpkg's actual error rather than being papered
-            # over and breaking maintainer-script ordering downstream.
+            # env runs on the host so we don't need /usr/bin/env inside the
+            # chroot.  Snapshot pinning + the dep-drift verifier (run before
+            # this method) ensure unresolved deps are caught upstream, so we
+            # surface dpkg's real error rather than masking it with --force-depends.
             _cmd = shlex.split(
                 f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
                 f'chroot {_chroot} '
                 f'dpkg --configure -a --force-confdef --force-confnew'
             )
         else:
-            # Chrootless fallback for early bootstrap rounds — same dep-resolution
-            # guarantees as the chroot-mode call above (STA-03 + dep-drift sync),
-            # so no --force-depends here either.
+            # Chrootless fallback before /usr/bin/dpkg + sh exist in the chroot.
             _cmd = shlex.split(
                 f'sudo -S env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true '
                 f'dpkg --root={_chroot} --instdir={_chroot} '
@@ -535,14 +526,11 @@ class BuildSystem:
     def _ensure_initramfs(self):
         """Generate initramfs for any kernel that is missing one.
 
-        Defence-in-depth check after configure.  Even with strict dep
-        ordering (STA-02 dropped --force-depends), update-initramfs has
-        been observed to silently skip generation in edge cases:
-        kernel-package quirks, stale /usr/share/initramfs-tools/modules
-        entries, or a chroot where linux-image's postinst raced with a
-        not-yet-configured initramfs hook.  This method scans /boot/ for
-        vmlinuz-* files and, for each one without a matching initrd.img-*,
-        runs update-initramfs -c inside the chroot to create it.
+        Defence-in-depth after configure.  update-initramfs occasionally
+        skips generation silently (kernel-package quirks, races between
+        linux-image's postinst and an initramfs hook that isn't ready
+        yet).  Scan /boot/ for vmlinuz-* and, for each one missing its
+        matching initrd.img-*, run update-initramfs -c inside the chroot.
         """
         _chroot = self.__dir_chroot
         _boot = os.path.join(_chroot, 'boot')
@@ -761,15 +749,9 @@ class BuildSystem:
 
         Handles both single-alternative and OR-alternative Depends.  For OR
         groups, the first alternative present in selected_pkgs is used so that
-        configure ordering tracks the actual package we installed.
-
-        Like _resolve_pre_depends, virtual-package names (e.g. 'awk') are
-        resolved to the real Package name (e.g. 'mawk') so that callers
-        comparing names against actual package identifiers — including
-        the topo-sort in _compute_install_batches and the Setting-up
-        parser in _configure_packages — match correctly.  Pre-fix this
-        method returned virtual names verbatim, which silently dropped
-        edges in the dep graph whenever a Depends pointed at a Provides.
+        configure ordering tracks the actual package we installed.  Virtual
+        names (e.g. 'awk' → 'mawk') are resolved to the real Package name so
+        callers comparing names against actual package identifiers match.
         """
         pkg = self.__dependencytree.selected_pkgs.get(pkg_name)
         if pkg is None:
@@ -814,22 +796,8 @@ class BuildSystem:
         The cycle batch (needs_force=True) does NOT have property 1 —
         by construction its members mutually depend.  The caller scopes
         --force-depends to this batch alone (see _configure_packages),
-        which lets dpkg break the SCC the same way `--configure -a`
-        previously did, but without papering over real dep failures
-        elsewhere in the graph.
-
-        Note on Debian Essential packages.  An earlier iteration of this
-        method extracted `Essential: yes` packages into a forced
-        bootstrap batch on the assumption that they had implicit mutual
-        deps invisible to topo sort (specifically dpkg needing /bin/sh
-        from dash for its maintainer scripts).  That was wrong: pulling
-        Essentials out of the graph dropped the edges to their genuine
-        non-Essential Pre-Depends (e.g. base-files Pre-Depends on awk
-        which mawk provides; bash on libtinfo6) and unpack failed.
-        The dpkg/dash sh-availability inversion is handled entirely by
-        the chroot-mode probe in _configure_packages (chrootless mode
-        runs maintainer scripts on the host with DPKG_ROOT set, so no
-        chroot sh is required) — no graph manipulation needed.
+        which lets dpkg break the SCC without weakening dep checking
+        on the rest of the graph.
 
         libc_seed_set is the hard-coded base bootstrap set
         (gcc-NN-base, libc6, libgcc-s1, libcrypt1) installed first by
@@ -944,21 +912,7 @@ class BuildSystem:
             return set()
 
         _chroot = self.__dir_chroot
-        # Chroot-mode dpkg requires both:
-        #   /usr/bin/dpkg — the chroot's dpkg binary, unpacked
-        #   sh on PATH    — created (typically as a symlink to dash) by
-        #                   dash's postinst via update-alternatives
-        # Until sh is in place inside the chroot, dpkg cannot run any
-        # maintainer script there ("'sh' not found in PATH").  Stay in
-        # chrootless mode (--root=DIR + --force-script-chrootless)
-        # which uses the host's sh + DPKG_ROOT until that's true.
-        # update-alternatives may install at either /bin/sh or
-        # /usr/bin/sh depending on usrmerge layout — accept either.
-        _dpkg_in_chroot = (
-            os.path.exists(os.path.join(_chroot, 'usr/bin/dpkg')) and
-            (os.path.lexists(os.path.join(_chroot, 'bin/sh')) or
-             os.path.lexists(os.path.join(_chroot, 'usr/bin/sh')))
-        )
+        _dpkg_in_chroot = self._chroot_dpkg_available()
         _force = '--force-depends ' if force_deps else ''
 
         if _dpkg_in_chroot:
@@ -1131,28 +1085,21 @@ class BuildSystem:
     def _unpack_packages(self, pkg_list: list, fh) -> set:
         """Run dpkg --unpack for pkg_list inside the chroot.
 
-        --force-script-chrootless allows maintainer scripts to run without
-        being inside a chroot bind-mount.  --no-triggers defers trigger
-        processing to the configure phase.
+        --force-script-chrootless lets maintainer scripts run without a
+        chroot bind-mount; --no-triggers defers trigger processing to
+        configure time.
 
-        Returns the set of base package names that were successfully unpacked
-        (parsed from dpkg's "Unpacking NAME:arch (ver)" stdout lines).
-        Packages that dpkg rejected (pre-dep failures, etc.) are not in
-        the returned set; the caller's _configure_packages then raises
-        when those names are missing from "Setting up X" — a single
-        actionable error rather than two competing reports.
+        Returns the set of base package names dpkg reported as
+        "Unpacking NAME:arch (ver)".  Packages dpkg rejected (pre-dep
+        failures etc.) are not in the returned set; the caller's
+        _configure_packages surfaces the actual failure when it tries
+        to configure a missing package.
 
         Failure routing:
-          - Total failure (dpkg rc != 0 AND nothing unpacked) — surface
-            on the console with the LAST line of stderr (the actual dpkg
-            error).  Pre-ARCH-12 the first 200 chars landed mid -D1 debug
-            output and hid the real cause; -D1 is now gone so stderr is
-            clean.
-          - Partial failure (some unpacked, some not) — log-tab warning
-            only.  Under ARCH-12 each batch's deps are guaranteed to be
-            in earlier batches (Kahn invariant), so a partial unpack is
-            a real precondition violation; surfacing it as a console
-            error too would just duplicate the configure-side error.
+          - Total failure (rc != 0, nothing unpacked) — console error
+            with the LAST line of stderr (dpkg's real message).
+          - Partial failure (some unpacked) — log-tab warning only;
+            the configure step will produce the actionable error.
         """
         if not pkg_list:
             return set()
