@@ -113,7 +113,8 @@ and an 8-check chroot verifier that gates ISO build.
 | COMP-07 | P2 | todo | **Cross-build container per release** — `Dockerfile` is currently hard-pinned to `bookworm`. Auto-rebuild a per-release image (`bookworm`, `trixie`, `noble`, …) when `CONTAINER_RELEASE` changes; keep them in parallel so the user can cross-target. |
 | COMP-08 | P2 | todo | **System-level firstboot** — `systemd-firstboot --root-password=root` ships an ISO with `root:root`. Replace with a firstboot wizard or, at minimum, randomize and print the password during ISO build. |
 | COMP-09 | P2 | todo | **Disk-image (raw / qcow2)** output alongside the ISO, for direct VM/cloud use. |
-| COMP-10 | P3 | todo | **Architecture for OS-release branding** — `id`, `id_like`, `vendor` are hardcoded to Athena strings in `generate_system_configs`. Move to `[Build]` config so a real derivative does not have to fork the source. |
+| COMP-10 | P3 | todo | **Architecture for OS-release branding** — `id`, `id_like`, `vendor` are hardcoded to Athena strings in `generate_system_configs`. Move to `[Build]` config so a real derivative does not have to fork the source.  Subsumed by COMP-11 once that lands. |
+| COMP-11 | P2 | todo | **Distro abstraction**: `[Build] Distro = debian \| ubuntu` selects parallel artifact sets — `pkg.list.<distro>` (Ubuntu uses `casper` instead of `live-boot`, plus its own initramfs hooks and grub package names), `Dockerfile.<distro>` (`FROM ubuntu:${RELEASE}`), and the `os-release` ID/ID_LIKE/VENDOR_NAME fields (subsumes COMP-10).  `[Snapshot] Enabled = false` becomes the implicit default for non-Debian distros (no snapshot.d.o equivalent).  Cluster: ARCH-13 + COMP-11 + HK-05 = "distro-portability".  Hardest piece: maintaining two parallel pkg.lists in sync; consider a shared base + per-distro overlay file. |
 
 ## 4. Architecture & coding practices — P1 / P2
 
@@ -131,6 +132,7 @@ and an 8-check chroot verifier that gates ISO build.
 | ARCH-10 | P2 | todo | Drop the unused `config/requirements.txt` (rich, tqdm, gnupg, docker) — `py_requirements.txt` is the source of truth used by `build-system.sh`. |
 | ARCH-11 | P3 | todo | Consolidate `Mirror` URL building (`url`, `dist_url`, `packages_path`, `sources_path`) with a single Pydantic-style validated model. |
 | ARCH-12 | P1 | done | Replace `BuildSystem.build_chroot`'s try-fail-retry round loop with a single-pass topo-sorted install. *(implemented: `_compute_install_batches` does Kahn over `Pre-Depends ∪ Depends`; remaining SCC after libc-seed removal is emitted as a terminal "cycle batch" with `--force-depends` scoped to that batch only; `_configure_packages` is the named-list counterpart to `--configure -a`. Real cycle on bookworm: libdevmapper1.02.1 ↔ dmsetup + reachable systemd/grub/cryptsetup, ~15 pkgs. 8 unit tests cover the algorithm; live cache produces 14 batches for 212 pkgs, 13 acyclic + 1 forced.)* |
+| ARCH-13 | P2 | todo | Externalize hardcoded URLs/endpoints to `build.conf` so a derivative-distro setup is config-only.  `utils.py:82` (snapshot baseurl `https://snapshot.debian.org/archive`), `utils.py:243` (timestamp API `https://snapshot.debian.org/mr/timestamp/`), `utils.py:254/260/270` (JSON archive keys `debian` / `debian-security`).  Add `[Snapshot] BaseUrl`, `TimestampApi`, `ArchiveKeys` config fields with the current values as defaults.  Note: snapshot pinning is Debian-specific — Ubuntu has no equivalent service, so under COMP-11 you'd disable snapshot for non-Debian builds.  Cluster: ARCH-13 + COMP-11 + HK-05 = "distro-portability". |
 
 ## 5. Tests & CI — P1
 
@@ -185,6 +187,7 @@ and an 8-check chroot verifier that gates ISO build.
 | HK-02  | P3 | todo | Drop `cmd_print`’s commented-out `# TODO` items in `build.py`; turn them into entries in this file (UX-01) and remove the inline TODOs. |
 | HK-03  | P3 | todo | Empty `config/testpkg.list` — either populate (intent: a tiny smoke pkg list) or remove. |
 | HK-04  | P3 | todo | `scripts/__pycache__/` is committed-adjacent (in tree) — confirm `.gitignore` covers it (it does), but inspect whether any stray `.pyc` was ever committed (`git log -- '*.pyc'`). |
+| HK-05  | P3 | todo | `config/build.conf:100` has a dead `MIRROR_URL="deb.debian.org"` line — no reader anywhere in `scripts/`.  Drop it.  Also `PACKAGE_LISTS_SUFFIX="default"` on the next line — same story.  Cluster: ARCH-13 + COMP-11 + HK-05 = "distro-portability". |
 
 ---
 
