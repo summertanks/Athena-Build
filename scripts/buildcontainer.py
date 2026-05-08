@@ -24,6 +24,7 @@ class BuildContainer:
         self.patch_path = config.dir_patch_source
         self.patch_empty = config.dir_patch_empty
         self.build_profiles = config.build_profiles
+        self.build_options  = config.build_options
 
         # Apply snapshot pinning to mirrors so the container's apt fetches
         # build-deps from the same archive snapshot the cache was built from.
@@ -142,12 +143,18 @@ class BuildContainer:
             tui.console.error(f"DSC not found for {src_pkg.package}")
             return False
 
-        # TODO: support per-package extra DEB_BUILD_OPTIONS (e.g. noudeb, nostrip) via build.conf
-        # _deb_build_opts = 'nodoc'
-        # if src_pkg.skip_test:
-        #     _deb_build_opts += ' nocheck'
-        _deb_build_opts = ' '.join(sorted(_active_profiles))
-        deb_build_env = f'DEB_BUILD_OPTIONS="{_deb_build_opts}" DEB_BUILD_PROFILES="{_deb_build_opts}" '
+        # DEB_BUILD_OPTIONS and DEB_BUILD_PROFILES are different namespaces
+        # (CONF-04): options control build-time behaviour (nodoc, nocheck,
+        # parallel=N), profiles activate Build-Depends annotations like
+        # `<!nodoc>` and `<!stage1>`.  Source.build_depends has already had
+        # `_active_profiles` applied above for build-dep filtering; the env
+        # vars below propagate the right values into dpkg-buildpackage.
+        _deb_build_opts     = ' '.join(sorted(self.build_options))
+        _deb_build_profiles = ' '.join(sorted(_active_profiles))
+        deb_build_env = (
+            f'DEB_BUILD_OPTIONS="{_deb_build_opts}" '
+            f'DEB_BUILD_PROFILES="{_deb_build_profiles}" '
+        )
 
         # TODO: read patch files from disk here instead of relying on src_pkg.patch_list
         # (patch_list is set during parse_dependency; patches added after that run are missed)

@@ -1108,26 +1108,31 @@ class _ChrootMixin:
                         tui.console.print(f'Error: Failed applying pre-install patch — {_file}')
                         tui.console.error(f'pre_install patch {_file}: {_proc.stderr}')
 
-        # Parse commands to execute, since nothing else has been till now, it is usually used to set right permission
-        # All commands use sudo -S so the password is read from stdin rather than
-        # the terminal (which would corrupt TUI rendering).  The '\n' terminator
-        # is required by sudo -S — without it sudo blocks waiting for more input.
-        cmd_list = [f'sudo -S ln -sfv /run {self._dir_chroot}/var/run',
-                    f'sudo -S ln -sfv /run/lock {self._dir_chroot}/var/lock',
-                    f'sudo -S install -dv -m 0750 {self._dir_chroot}/root',
-                    f'sudo -S install -dv -m 1777 {self._dir_chroot}/tmp {self._dir_chroot}/var/tmp',
-                    f'sudo -S chgrp -v utmp {self._dir_chroot}/var/log/lastlog',
-                    f'sudo -S chmod -v 664 {self._dir_chroot}/var/log/lastlog',
-                    f'sudo -S chmod -v 600 {self._dir_chroot}/var/log/btmp',
-                    f'sudo -S chmod -R 755 {self._dir_chroot}/etc/'
-                    ]
+        # Permission / FHS-symlink fixups that the chroot package set
+        # cannot lay down itself.  argv lists rather than f-strings +
+        # shlex.split so a chroot path containing whitespace or shell
+        # metacharacters (rare but legal) does not split mid-token.
+        # All commands use sudo -S; the password is fed via stdin and
+        # newline-terminated so sudo does not block waiting for more.
+        cmd_list = [
+            ['sudo', '-S', 'ln', '-sfv', '/run',      f'{self._dir_chroot}/var/run'],
+            ['sudo', '-S', 'ln', '-sfv', '/run/lock', f'{self._dir_chroot}/var/lock'],
+            ['sudo', '-S', 'install', '-dv', '-m', '0750', f'{self._dir_chroot}/root'],
+            ['sudo', '-S', 'install', '-dv', '-m', '1777',
+             f'{self._dir_chroot}/tmp', f'{self._dir_chroot}/var/tmp'],
+            ['sudo', '-S', 'chgrp', '-v', 'utmp', f'{self._dir_chroot}/var/log/lastlog'],
+            ['sudo', '-S', 'chmod', '-v', '664',  f'{self._dir_chroot}/var/log/lastlog'],
+            ['sudo', '-S', 'chmod', '-v', '600',  f'{self._dir_chroot}/var/log/btmp'],
+            ['sudo', '-S', 'chmod', '-R', '755',  f'{self._dir_chroot}/etc/'],
+        ]
 
         for _cmd in cmd_list:
-            _proc = subprocess.run(shlex.split(_cmd), input=self._password + '\n',
+            _proc = subprocess.run(_cmd, input=self._password + '\n',
                                    capture_output=True, text=True)
             if _proc.returncode != 0:
-                tui.console.print(f"WARNING: pre-install command failed: {_cmd}")
-                tui.console.warning(f"pre_install cmd: {_cmd}\n{_proc.stdout.strip()}")
+                _label = ' '.join(_cmd)
+                tui.console.print(f"WARNING: pre-install command failed: {_label}")
+                tui.console.warning(f"pre_install cmd: {_label}\n{_proc.stdout.strip()}")
 
     def post_install(self):
         """Apply post-install overlay files and patches into the chroot.

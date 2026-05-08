@@ -752,6 +752,100 @@ def test_download_source_surfaces_short_download_clearly():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONF-04 — BuildOptions / BuildProfiles are separate config keys
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_buildconfig_build_options_and_profiles_are_separate():
+    """When both keys are set they populate distinct frozensets."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'BuildProfiles = nodoc, nocheck',
+        'BuildOptions = nodoc, nocheck, parallel=4\n    BuildProfiles = nodoc, nocheck',
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_buildconfig_build_options_and_profiles_are_separate ({cfg.error_str})")
+            return
+        assert cfg.build_options  == frozenset({'nodoc', 'nocheck', 'parallel=4'}), cfg.build_options
+        assert cfg.build_profiles == frozenset({'nodoc', 'nocheck'}),               cfg.build_profiles
+
+
+def test_buildconfig_build_options_falls_back_to_profiles_when_omitted():
+    """Backward compat: legacy build.conf without BuildOptions reuses
+    BuildProfiles for both env vars (the prior conflated semantics)."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_buildconfig_build_options_falls_back_to_profiles_when_omitted ({cfg.error_str})")
+            return
+        # _BASE_CONF_BODY sets BuildProfiles = nodoc, nocheck and no BuildOptions.
+        assert cfg.build_options == cfg.build_profiles
+        assert cfg.build_options == frozenset({'nodoc', 'nocheck'})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONF-05 — DEP-3 header check
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_check_dep3_header_clean_patch_returns_empty():
+    """Patch with Description + Origin/Author headers passes."""
+    from utils import check_dep3_header
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'good.patch')
+        with open(path, 'w') as fh:
+            fh.write(
+                'Description: tighten foo\n'
+                ' Long-form prose lines here.\n'
+                'Author: Test <test@example.org>\n'
+                'Forwarded: no\n'
+                '---\n'
+                '--- a/foo\n'
+                '+++ b/foo\n'
+            )
+        assert check_dep3_header(path) == []
+
+
+def test_check_dep3_header_missing_origin_returns_field():
+    """A patch without Origin or Author flags Origin as missing."""
+    from utils import check_dep3_header
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'no-origin.patch')
+        with open(path, 'w') as fh:
+            fh.write(
+                'Description: only one header\n'
+                '--- a/foo\n'
+                '+++ b/foo\n'
+            )
+        assert check_dep3_header(path) == ['Origin']
+
+
+def test_check_dep3_header_subject_satisfies_description():
+    """Subject: alias is accepted in place of Description:."""
+    from utils import check_dep3_header
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'subject.patch')
+        with open(path, 'w') as fh:
+            fh.write(
+                'Subject: alias header\n'
+                'Author: t\n'
+                '---\n'
+            )
+        assert check_dep3_header(path) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ARCH-01 — BuildSession encapsulates pipeline state; cmd_* handlers are
 #           methods bound to it (no module-level globals).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1060,6 +1154,13 @@ def main() -> int:
         # STA-04
         test_download_source_surfaces_http_error_clearly,
         test_download_source_surfaces_short_download_clearly,
+        # CONF-04
+        test_buildconfig_build_options_and_profiles_are_separate,
+        test_buildconfig_build_options_falls_back_to_profiles_when_omitted,
+        # CONF-05
+        test_check_dep3_header_clean_patch_returns_empty,
+        test_check_dep3_header_missing_origin_returns_field,
+        test_check_dep3_header_subject_satisfies_description,
         # ARCH-01
         test_buildsession_constructible_with_stub_tui,
         # ARCH-03
