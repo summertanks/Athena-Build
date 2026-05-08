@@ -30,7 +30,6 @@ import queue
 import signal
 import socket
 import sys
-import textwrap
 import threading
 import time
 from math import floor
@@ -893,39 +892,13 @@ class Tui:
 
         ts = datetime.datetime.now().strftime('%H:%M:%S')
         tag, attr = self._log_map[severity]
-        prefix = f'[{ts}] {tag} '
-        indent = ' ' * len(prefix)
+        line = f'[{ts}] {tag} {message}'
 
         with self._log_lock:
             if 'log' not in self._tabs:
                 return
             log = self._tabs['log']
-
-            # Wrap on append at the current window width so long records
-            # show their tail instead of being clipped by _safe_addstr.
-            # _safe_addstr clamps to (max_x - x - 1) cells; mirror that.
-            try:
-                _, max_x = log['win'].getmaxyx()
-            except curses.error:
-                max_x = 80
-            wrap_w = max(20, max_x - 1 - len(prefix))
-
-            # Honour explicit \n in the caller-supplied message: each line
-            # is wrapped independently so multi-line records stay readable.
-            chunks: List[str] = []
-            for seg in str(message).split('\n'):
-                if not seg:
-                    chunks.append('')
-                    continue
-                wrapped = textwrap.wrap(
-                    seg, width=wrap_w,
-                    break_long_words=True, break_on_hyphens=False,
-                ) or ['']
-                chunks.extend(wrapped)
-
-            for idx, chunk in enumerate(chunks):
-                line = (prefix if idx == 0 else indent) + chunk
-                log['buffer'].append((line, attr))
+            log['buffer'].append((line, attr))
             log['cursor'] = len(log['buffer'])
 
         self._dirty = True
