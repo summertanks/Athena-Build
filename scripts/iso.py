@@ -8,10 +8,34 @@ provided by `BuildSystem`.
 
 import glob
 import os
+import secrets
 import shutil
 import subprocess
 
 import tui
+
+
+# Common English first names used as the random live-user account.
+# `secrets.choice` picks one at every ISO build so the username is
+# not predictable across releases.  Lowercase only — Debian useradd
+# rejects mixed case for portability.  Curated list, not a dictionary
+# import, so the namespace stays small and readable.
+_LIVE_USERNAMES = [
+    'agatha',  'alan',     'alice',    'amelia',   'arthur',
+    'beatrice','benjamin', 'blake',    'caroline', 'charlie',
+    'chloe',   'daisy',    'david',    'dorian',   'edward',
+    'eleanor', 'emma',     'felix',    'finn',     'fiona',
+    'george',  'grace',    'gregor',   'harriet',  'henry',
+    'hugo',    'iris',     'isaac',    'james',    'jane',
+    'julian',  'kate',     'kevin',    'laura',    'leon',
+    'linus',   'lucy',     'maggie',   'marcus',   'max',
+    'megan',   'milo',     'nathan',   'nora',     'oliver',
+    'ophelia', 'owen',     'patrick',  'penny',    'philip',
+    'quentin', 'quinn',    'rachel',   'rufus',    'ruby',
+    'sam',     'sarah',    'simon',    'sophie',   'thomas',
+    'theodore','victor',   'violet',   'walter',   'william',
+    'yvonne',  'zara',
+]
 
 
 class _IsoMixin:
@@ -81,22 +105,28 @@ class _IsoMixin:
         # (e.g. VERSION = "0.1" parsed with the surrounding quotes intact).
         _codename = cfg.build_codename.strip('"').strip("'")
         _version  = cfg.build_version.strip('"').strip("'")
+        # Pick a random live-user name per build so SSH attackers do not
+        # have a fixed `root` (or `user`) target — the username becomes
+        # the first secret an attacker has to guess.  live-config (already
+        # in the package set) creates the user at first boot from this
+        # kernel cmdline arg.
+        _live_user = secrets.choice(_LIVE_USERNAMES)
         _grub_cfg = (
             'set default=0\n'
             'set timeout=5\n'
             '\n'
-            f'menuentry "{_codename} {_version}" {{\n'
+            f'menuentry "{_codename} {_version} (live as {_live_user})" {{\n'
             # boot=live   — triggers live-boot to find and mount the squashfs root
             # components  — tells live-boot to activate all its hook scripts
             # console=tty0 — ensures kernel messages go to the screen (visible in QEMU)
             # nomodeset   — disables KMS; prevents blank/garbled screen in QEMU/VMs
-            '    linux  /boot/vmlinuz boot=live components username=root console=tty0 nomodeset\n'
+            f'    linux  /boot/vmlinuz boot=live components username={_live_user} console=tty0 nomodeset\n'
             '    initrd /boot/initrd.img\n'
             '}\n'
         )
         with open(os.path.join(_staging_grub, 'grub.cfg'), 'w') as fh:
             fh.write(_grub_cfg)
-        tui.console.print("grub.cfg written")
+        tui.console.print(f"grub.cfg written (live user: {_live_user})")
 
         # ── Step 5: create squashfs ───────────────────────────────────────────
         # Runtime virtual directories (proc, sys, dev, run, tmp) must NOT be
@@ -165,4 +195,17 @@ class _IsoMixin:
 
         _iso_mb = os.path.getsize(_iso_path) // (2 ** 20)
         tui.console.print(f"ISO built: {_iso_path} ({_iso_mb} MB)")
+
+        # Sidecar file with the random live-user name.  The boot menu
+        # entry shows it too, but the operator may need it before
+        # booting (e.g. to write a kickstart on a separate machine);
+        # one-line file at <iso>.user keeps it close to the ISO.
+        _user_path = _iso_path + '.user'
+        try:
+            with open(_user_path, 'w') as fh:
+                fh.write(_live_user + '\n')
+            tui.console.print(f"Live user: {_live_user}  (also at {_user_path})")
+        except OSError as e:
+            tui.console.warning(f"Could not write live-user sidecar {_user_path}: {e}")
+
         return True
