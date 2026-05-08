@@ -752,6 +752,67 @@ def test_download_source_surfaces_short_download_clearly():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ARCH-01 — BuildSession encapsulates pipeline state; cmd_* handlers are
+#           methods bound to it (no module-level globals).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_buildsession_constructible_with_stub_tui():
+    """BuildSession ctor takes (config, tui_inst); flags init clean,
+    state pointers start as None.  No singleton, no TUI subsystem,
+    no apt_pkg required — exactly the unit-test entry point the prior
+    module-globals layout was blocking."""
+    import sys, tempfile, textwrap
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+
+    # Minimum stub config + Tui to satisfy BuildSession.__init__ assertions.
+    class _StubTui: pass
+    saved = _tui.tui_instance
+    _tui.tui_instance = _StubTui()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror_block = textwrap.dedent("""
+                [Mirror.main]
+                Suffix =
+                Component = main
+            """)
+            cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+            cfg = _build_config_from(tmp, cfg_path)
+            if not cfg.is_valid:
+                # Host may lack debian-archive-keyring — skip rather than
+                # fail; the construction logic itself is what we are
+                # exercising and that is module-level.
+                print(f"SKIP test_buildsession_constructible_with_stub_tui ({cfg.error_str})")
+                return
+
+            from build import BuildSession
+            session = BuildSession(cfg, _StubTui())
+
+            # State starts as documented.
+            assert session.config is cfg
+            assert session.cache is None
+            assert session.dep_tree is None
+            assert session.container is None
+            assert session.flags.cache_ready is False
+            assert session.flags.dep_check_ready is False
+            assert session.flags.chroot_verified is False
+
+            # Command handlers are bound methods on the session so the TUI
+            # can register them directly without lambdas / closures.
+            for _name in ('cmd_build_cache', 'cmd_parse_dependency',
+                          'cmd_source_download', 'cmd_init_container',
+                          'cmd_source_build', 'cmd_tunnel_package',
+                          'cmd_build_chroot', 'cmd_build_iso',
+                          'cmd_verify_chroot', 'cmd_auto_run',
+                          'cmd_print'):
+                _fn = getattr(session, _name)
+                assert callable(_fn), f"{_name} not callable"
+                assert _fn.__self__ is session, f"{_name} not bound to this session"
+    finally:
+        _tui.tui_instance = saved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ARCH-03 — TUI primitives accept Tui explicitly (no singleton required)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -999,6 +1060,8 @@ def main() -> int:
         # STA-04
         test_download_source_surfaces_http_error_clearly,
         test_download_source_surfaces_short_download_clearly,
+        # ARCH-01
+        test_buildsession_constructible_with_stub_tui,
         # ARCH-03
         test_console_with_explicit_tui_does_not_touch_singleton,
         test_console_singleton_fallback_when_tui_omitted,
