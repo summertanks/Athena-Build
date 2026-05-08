@@ -360,52 +360,27 @@ class BuildContainer:
         return True
 
     @staticmethod
-    def is_ar_file(filename: str):
+    def is_ar_file(filename: str) -> bool:
+        """Confirm `filename` is a syntactically valid `.deb` archive
+        (an `ar` archive containing `debian-binary`, a compressed
+        `control.tar.*`, and a compressed `data.tar.*`).
 
-        _filelist: list = []
+        Used by `check_build` to decide whether a previous run's `.deb`
+        on disk can stand in for re-running the build.
+
+        Backed by `python-debian.debfile.DebFile` — a single, audited
+        parser shared with apt/dpkg ecosystem tooling, replacing this
+        method's previous hand-rolled `ar`-format reader.
+        """
         try:
-            with open(filename, 'rb') as f:
-                header = f.read(8)
-                if header != b'!<arch>\n':
-                    return False
-
-                while True:
-                    entry_header = f.read(60)
-                    if not entry_header:
-                        break
-
-                    name = entry_header[:16].decode().rstrip()
-                    if not name:
-                        break
-                    _filelist.append(name)
-
-                    size = int(entry_header[48:58].decode().rstrip(), 10)
-                    content = f.read(size)
-                    if len(content) != size:
-                        return False
-
-                    if f.tell() % 2 != 0:
-                        f.seek(1, os.SEEK_CUR)
-
+            from debian.debfile import DebFile
+            with DebFile(filename):
+                return True
+        except (FileNotFoundError, PermissionError):
+            return False
         except Exception as e:
-            tui.console.error(f"Error reading file: {str(e)}")
+            # ArError / DebError / unexpected EOFs all bubble up here;
+            # surface to the log tab so a malformed .deb can be traced
+            # without deeper debugging.
+            tui.console.error(f"is_ar_file({filename}): {type(e).__name__}: {e}")
             return False
-
-        _compressions = ['.xz', '.gz', '.bz2', '.lmza', '.zst']
-        _required_files = ['control.tar', 'data.tar']
-
-        _parsed_filelist = {}
-        for _file in _filelist:
-            _filename, _ext = os.path.splitext(_file)
-            _parsed_filelist[_filename] = _ext
-
-        if 'debian-binary' not in _parsed_filelist:
-            return False
-
-        for _file in _required_files:
-            if _file not in _parsed_filelist:
-                return False
-            if _parsed_filelist[_file] not in _compressions:
-                return False
-
-        return True
