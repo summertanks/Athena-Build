@@ -23,6 +23,7 @@ history, info, help, quit.  Register additional commands with
 import curses
 import curses.panel
 import datetime
+import logging
 import os
 import platform
 import queue
@@ -290,6 +291,11 @@ class Tui:
             self._shutdown()
             print(f'TUI: failed to start shell thread — {e}\r')
             sys.exit(1)
+
+        # ARCH-07: bind the 'athena' stdlib logger to this Tui so any module
+        # using `logging.getLogger('athena')` ends up routed to the same
+        # console/log tabs as `tui.console.X`.
+        setup_logging(self)
 
     # =====================================================================
     # Low-level curses helpers
@@ -1408,6 +1414,139 @@ class Console:
 
 
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Logging adapter (ARCH-07)
+# ---------------------------------------------------------------------------
+#
+# The codebase has historically split output four ways:
+#
+#   - bare ``print()``                  → host stdout (pre-Tui startup only)
+#   - ``tui.console.print(msg)``        → curses console tab (operator-facing)
+#   - ``tui.console.{info,warning,error}`` → curses log tab (severity-tagged)
+#   - per-command files (chroot-install.log, mksquashfs.log, …)  → diagnostic capture
+#
+# That fragmentation has two costs: (a) every call site has to pick which
+# idiom to use, and (b) tests / future redirection have to monkey-patch
+# multiple seams.  The fix is to expose a single stdlib ``logging`` logger
+# whose handlers route by level back into the same Tui sinks the Console
+# facade already drives — so the call site picks one API (`logging`) and
+# the *handlers* decide the destination.
+#
+# Mapping:
+#
+#   logger.log(DISPLAY, ...)   → Tui.print              (console tab)
+#   logger.info(...)           → Tui.INFO               (log tab)
+#   logger.warning(...)        → Tui.WARNING            (log tab)
+#   logger.error(...)          → Tui.ERROR              (log tab)
+#   logger.critical(...)       → Tui.ERROR              (log tab)
+#   logger.debug(...)          → dropped (handler level = INFO)
+#
+# Existing call sites using the Console facade keep working unchanged;
+# both Console and the logger handlers terminate at the same Tui methods,
+# so the two APIs are interchangeable.  Per-command log files remain a
+# separate concern (raw subprocess output capture, not Python records);
+# unifying those is left for a future ticket.
+
+LOGGER_NAME = 'athena'
+
+# Custom level between INFO (20) and WARNING (30).  Records at this level
+# carry "operator-facing display text" semantics — they belong on the
+# console tab, not the diagnostic log tab.
+DISPLAY = 25
+logging.addLevelName(DISPLAY, 'DISPLAY')
+
+
+class _LogTabHandler(logging.Handler):
+    """Routes records to the curses log tab via Tui.{INFO,WARNING,ERROR}.
+
+    Severity mapping:
+        levelno >= ERROR    → Tui.ERROR
+        levelno == WARNING  → Tui.WARNING
+        otherwise (INFO)    → Tui.INFO
+
+    DISPLAY-level records are filtered out by setup_logging() so they
+    only reach _ConsoleTabHandler.
+    """
+
+    def __init__(self, tui: 'Optional[Tui]' = None,
+                 level: int = logging.INFO) -> None:
+        super().__init__(level)
+        self._tui = tui
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            t = self._tui if self._tui is not None else tui_instance
+            if t is None:
+                return  # no Tui yet — drop, same as Console facade did pre-Tui
+            msg = self.format(record)
+            if record.levelno >= logging.ERROR:
+                t.ERROR(msg)
+            elif record.levelno >= logging.WARNING:
+                t.WARNING(msg)
+            else:
+                t.INFO(msg)
+        except Exception:
+            self.handleError(record)
+
+
+class _ConsoleTabHandler(logging.Handler):
+    """Routes DISPLAY-level records to the curses console tab via Tui.print.
+
+    The optional ``attribute`` field on the LogRecord (passed through
+    ``logger.log(DISPLAY, msg, extra={'attribute': COLOR_HIGHLIGHT})``)
+    is forwarded to Tui.print as the colour-pair argument.
+    """
+
+    def __init__(self, tui: 'Optional[Tui]' = None) -> None:
+        super().__init__(level=DISPLAY)
+        self._tui = tui
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            t = self._tui if self._tui is not None else tui_instance
+            if t is None:
+                return
+            attr = getattr(record, 'attribute', None)
+            t.print(record.getMessage(), attr)
+        except Exception:
+            self.handleError(record)
+
+
+def setup_logging(tui: 'Optional[Tui]' = None) -> logging.Logger:
+    """Configure the 'athena' logger to route records into the TUI.
+
+    Called automatically by ``Tui.__init__``; an explicit call is only
+    needed when you want the logger configured before a Tui exists, or
+    to re-bind an explicit Tui in a test.
+
+    Idempotent: previously-installed handlers are removed before the
+    new ones are attached so tests that re-create a Tui (and so
+    re-call setup_logging) don't accumulate duplicate handlers.
+
+    Returns the configured logger.
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # don't bubble records up to the root logger
+
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+
+    log_h = _LogTabHandler(tui=tui, level=logging.INFO)
+    # DISPLAY records belong only on the console tab — keep them out of
+    # the log tab even though their numeric level (25) sits above INFO.
+    log_h.addFilter(lambda r: r.levelno != DISPLAY)
+    logger.addHandler(log_h)
+
+    logger.addHandler(_ConsoleTabHandler(tui=tui))
+    return logger
+
+
+def get_logger() -> logging.Logger:
+    """Convenience accessor — equivalent to ``logging.getLogger('athena')``."""
+    return logging.getLogger(LOGGER_NAME)
 
 
 # Module-level color constants — mirrors Tui class attributes for convenient import

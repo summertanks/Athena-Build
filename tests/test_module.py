@@ -1024,6 +1024,139 @@ def test_console_raises_when_no_tui_anywhere():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ARCH-07 — single logging adapter routes by level into the Tui
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _logger_test_with_stub_tui():
+    """Set up _StubTui as tui_instance and configure logger handlers.
+    Returns (captured_list, restore_callable)."""
+    import tui as _tui
+
+    captured = []
+    class _StubTui:
+        def print(self, m, attr=None): captured.append(('print', m, attr))
+        def ERROR(self, m): captured.append(('error', m))
+        def WARNING(self, m): captured.append(('warning', m))
+        def INFO(self, m): captured.append(('info', m))
+
+    saved = _tui.tui_instance
+    _tui.tui_instance = _StubTui()
+    _tui.setup_logging()  # binds handlers via tui_instance fallback
+
+    def restore():
+        _tui.tui_instance = saved
+        _tui.setup_logging(saved)  # rebind to original (or None)
+    return captured, restore
+
+
+def test_logger_info_routes_to_log_tab():
+    """logging.getLogger('athena').info(...) → Tui.INFO (log tab)."""
+    import logging as _logging
+    import tui as _tui
+
+    captured, restore = _logger_test_with_stub_tui()
+    try:
+        _logging.getLogger(_tui.LOGGER_NAME).info('hi from logger')
+    finally:
+        restore()
+
+    assert ('info', 'hi from logger') in captured, captured
+    # Must NOT also reach the console tab
+    assert not any(k == 'print' for k, *_ in captured), captured
+
+
+def test_logger_warning_routes_to_log_tab():
+    import logging as _logging
+    import tui as _tui
+
+    captured, restore = _logger_test_with_stub_tui()
+    try:
+        _logging.getLogger(_tui.LOGGER_NAME).warning('mirror lag')
+    finally:
+        restore()
+
+    assert ('warning', 'mirror lag') in captured, captured
+
+
+def test_logger_error_routes_to_log_tab():
+    import logging as _logging
+    import tui as _tui
+
+    captured, restore = _logger_test_with_stub_tui()
+    try:
+        _logging.getLogger(_tui.LOGGER_NAME).error('GPG verify failed')
+    finally:
+        restore()
+
+    assert ('error', 'GPG verify failed') in captured, captured
+
+
+def test_logger_display_level_routes_to_console_tab():
+    """logger.log(DISPLAY, ...) → Tui.print (console tab); NOT the log tab."""
+    import logging as _logging
+    import tui as _tui
+
+    captured, restore = _logger_test_with_stub_tui()
+    try:
+        _logging.getLogger(_tui.LOGGER_NAME).log(_tui.DISPLAY, 'building cache')
+    finally:
+        restore()
+
+    # Reached console tab
+    assert any(entry[0] == 'print' and entry[1] == 'building cache'
+               for entry in captured), captured
+    # Did NOT also leak to the log tab
+    assert not any(k in ('info', 'warning', 'error') for k, *_ in captured), captured
+
+
+def test_logger_display_propagates_attribute_extra():
+    """The optional 'attribute' extra reaches Tui.print as its colour arg."""
+    import logging as _logging
+    import tui as _tui
+
+    captured, restore = _logger_test_with_stub_tui()
+    try:
+        log = _logging.getLogger(_tui.LOGGER_NAME)
+        log.log(_tui.DISPLAY, 'green text', extra={'attribute': _tui.COLOR_HIGHLIGHT})
+    finally:
+        restore()
+
+    found = [e for e in captured if e[0] == 'print']
+    assert len(found) == 1, captured
+    assert found[0] == ('print', 'green text', _tui.COLOR_HIGHLIGHT), found
+
+
+def test_logger_debug_is_dropped_below_handler_threshold():
+    """logger.debug(...) is suppressed: _LogTabHandler is INFO-gated."""
+    import logging as _logging
+    import tui as _tui
+
+    captured, restore = _logger_test_with_stub_tui()
+    try:
+        _logging.getLogger(_tui.LOGGER_NAME).debug('chatter')
+    finally:
+        restore()
+
+    assert captured == [], captured
+
+
+def test_setup_logging_is_idempotent():
+    """Calling setup_logging() twice does not duplicate handlers."""
+    import logging as _logging
+    import tui as _tui
+
+    captured, restore = _logger_test_with_stub_tui()
+    try:
+        _tui.setup_logging()  # second call
+        _logging.getLogger(_tui.LOGGER_NAME).info('once')
+    finally:
+        restore()
+
+    info_hits = [e for e in captured if e[0] == 'info' and e[1] == 'once']
+    assert len(info_hits) == 1, captured
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STA-09 — download_file surfaces HTTP status in its return value
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1210,6 +1343,14 @@ def main() -> int:
         test_console_with_explicit_tui_does_not_touch_singleton,
         test_console_singleton_fallback_when_tui_omitted,
         test_console_raises_when_no_tui_anywhere,
+        # ARCH-07
+        test_logger_info_routes_to_log_tab,
+        test_logger_warning_routes_to_log_tab,
+        test_logger_error_routes_to_log_tab,
+        test_logger_display_level_routes_to_console_tab,
+        test_logger_display_propagates_attribute_extra,
+        test_logger_debug_is_dropped_below_handler_threshold,
+        test_setup_logging_is_idempotent,
         # STA-09
         test_download_file_returns_http_status_detail_on_404,
         test_download_file_success_returns_size_and_empty_detail,
