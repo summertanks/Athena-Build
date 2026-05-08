@@ -120,7 +120,7 @@ and an 8-check chroot verifier that gates ISO build.
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
 | ARCH-01 | P1 | todo | Eliminate module-level globals in `build.py` (`build_config`, `build_cache`, `dependency_tree`, `build_container`, `console`, `_tui`). Encapsulate in a `BuildSession` object that the TUI command handlers receive as `self`. Unblocks unit tests that don’t need a TUI. |
-| ARCH-02 | P1 | todo | `tui.console` is mutable module state assigned during init in `build.py:971`; the rest of the code does `from tui import console` and gets the bound object — but if `tui.console = Console()` runs *after* import, callers see the original. Fix by exposing a `set_console()` setter or by always going through `tui.console.print(...)` (already true in places, inconsistent). |
+| ARCH-02 | P1 | done | `tui.console` is mutable module state assigned during init in `build.py:971`. *(Dropped the redundant `console = Console()` + `tui.console = console` reassignment from `build.py.main()`; replaced with `from tui import console`. The single Console facade created in `tui.py` at module load is now the canonical one.)* |
 | ARCH-03 | P1 | todo | Decouple `Console`, `Spinner`, `ProgressBar`, `Prompt` from a singleton `tui_instance` — accept it explicitly. Today `tests/smoke_dep_drift.py` has to monkey-patch the module to test anything. |
 | ARCH-04 | P1 | todo | Split `buildsystem.py` (1,460 LOC, 25k+ tokens) into: `chroot.py`, `iso.py`, `dep_drift.py`. The file currently crosses two-tab read budgets. |
 | ARCH-05 | P2 | todo | Add `pyproject.toml` with `setuptools`/`hatch` so `pip install -e .` works and entry points are declared. |
