@@ -1,0 +1,97 @@
+[build-system]
+requires      = ["setuptools >= 61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "athena-build"
+version         = "0.1.0"
+description     = "TUI source-build system for a Debian-derivative Linux distribution"
+readme          = "README.md"
+license         = { file = "COPYING" }
+requires-python = ">= 3.9"
+authors         = [{ name = "Harkirat S Virk", email = "harkiratsvirk@gmail.com" }]
+keywords        = ["debian", "linux", "distro", "build", "iso"]
+classifiers     = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Operating System Kernels :: Linux",
+    "Topic :: System :: Software Distribution",
+]
+
+# These mirror py_requirements.txt — kept as a list of pip-installable
+# names where one exists.  Some (apt_pkg / aptsources) are only available
+# from the Debian system package python3-apt and won't pip-install on
+# every host; py_requirements.txt remains the source of truth checked by
+# build-system.sh and lists the apt package name in those cases.
+dependencies = [
+    "psutil",
+    "requests",
+    "rich",
+    "python-debian",
+    "python-gnupg",
+    "docker",
+]
+
+[project.urls]
+Homepage = "https://github.com/summertanks/Athena-Build"
+
+# Source layout: scripts/ holds importable modules driven by the
+# build-system.sh wrapper.  setuptools' src-layout discovery would
+# normally expect them under a single top-level package, but we
+# preserve the existing flat-module layout here.  An entry-point
+# (`athena-build = build:main`) and a proper package directory
+# would belong with a future packaging-polish ticket.
+[tool.setuptools]
+package-dir = { "" = "scripts" }
+py-modules  = [
+    "build",
+    "buildcontainer",
+    "buildsystem",
+    "cache",
+    "chroot",
+    "dep_drift",
+    "dependencytree",
+    "iso",
+    "package",
+    "tui",
+    "utils",
+]
+
+# ── tooling config ─────────────────────────────────────────────────────────
+# ruff and mypy config land here under ARCH-06.  Empty stubs for now so
+# `python -m ruff check .` and `python -m mypy scripts/` find a config
+# file rather than guessing.
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+# Curated ruleset — pragmatic baseline, not a wishlist.
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes (unused imports, undefined names)
+    "W",      # pycodestyle warnings
+    "B",      # flake8-bugbear (likely-bug patterns)
+    "I",      # isort (import ordering)
+    "UP",     # pyupgrade (modern syntax)
+]
+ignore = [
+    "E501",   # line too long — codebase has many docstring-paragraph wraps
+    "E402",   # module-level import not at top — build.py runs faulthandler.enable() before imports
+    "E741",   # ambiguous variable name `l` — used in a few short comprehensions
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F841"]   # tests legitimately bind unused locals
+
+[tool.mypy]
+python_version          = "3.9"
+warn_return_any         = false
+warn_unused_configs     = true
+ignore_missing_imports  = true   # apt_pkg / debian / docker have partial stubs
+check_untyped_defs      = false  # codebase has many untyped funcs; gate-only mode
