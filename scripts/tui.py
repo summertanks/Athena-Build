@@ -210,6 +210,11 @@ class Tui:
         if Tui._instance is not None:
             raise RuntimeError('Only one Tui instance may exist at a time')
         Tui._instance = self
+        # Register as the module-level singleton so the Console facade /
+        # Spinner / ProgressBar / Prompt fall-back path picks us up
+        # without callers needing to write `tui.tui_instance = ...`.
+        global tui_instance
+        tui_instance = self
 
         self._error_code:     int  = 0
         self._quit:           bool = False
@@ -1129,14 +1134,17 @@ class Prompt:
     _YESNO   = {'y', 'Y', 'n', 'N', 'yes', 'no', 'Yes', 'No'}
 
     def __init__(self, prompt_type: int, message: str,
-                 options: Optional[List[str]] = None) -> None:
-        if tui_instance is None:
+                 options: Optional[List[str]] = None,
+                 tui: 'Optional[Tui]' = None) -> None:
+        _tui = tui if tui is not None else tui_instance
+        if _tui is None:
             raise RuntimeError('No Tui instance — create Tui before using Prompt')
         if prompt_type not in self._VALID:
             raise ValueError(f'Invalid prompt type: {prompt_type}')
         if prompt_type == PROMPT_OPTIONS and (not options or len(options) < 2):
             raise ValueError('PROMPT_OPTIONS requires at least 2 options')
 
+        self._tui     = _tui
         self._type    = prompt_type
         self._options = list(options) if options else []
         self._masked  = (prompt_type == PROMPT_PASSWORD)
@@ -1151,20 +1159,17 @@ class Prompt:
 
     def get_response(self) -> str:
         """Block for user input, re-prompting on validation failure."""
-        if tui_instance is None:
-            raise RuntimeError('No Tui instance — create Tui before using Prompt')
-
         while True:
-            response = tui_instance.prompt(
+            response = self._tui.prompt(
                 message=self._message, masked=self._masked, keymode=self._keymode
             )
 
             if self._type == PROMPT_OPTIONS and response not in self._options:
-                tui_instance.print(f'  Please enter one of: {", ".join(self._options)}')
+                self._tui.print(f'  Please enter one of: {", ".join(self._options)}')
                 continue
 
             if self._type == PROMPT_YESNO and response not in self._YESNO:
-                tui_instance.print('  Please answer y or n')
+                self._tui.print('  Please answer y or n')
                 continue
 
             break
@@ -1173,7 +1178,7 @@ class Prompt:
             return ''
 
         echo = ('*' * len(response)) if self._masked else response
-        tui_instance.print(f'  {self._message}{echo}')
+        self._tui.print(f'  {self._message}{echo}')
         return response
 
 
@@ -1207,10 +1212,13 @@ class ProgressBar:
     _SCALE: Dict[str, float] = {'K': 1e3, 'M': 1e6, 'G': 1e9}
 
     def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40,
-                 scale_factor: str = '', maxvalue: int = 100, fmt: str = '') -> None:
-        if tui_instance is None:
+                 scale_factor: str = '', maxvalue: int = 100, fmt: str = '',
+                 tui: 'Optional[Tui]' = None) -> None:
+        _tui = tui if tui is not None else tui_instance
+        if _tui is None:
             raise RuntimeError('No Tui instance — create Tui before using ProgressBar')
 
+        self._tui          = _tui
         self._label        = label[:20]
         self._itr_label    = itr_label[:8]
         self._max          = max(1, maxvalue)
@@ -1220,7 +1228,7 @@ class ProgressBar:
         self._scale_factor = scale_factor if scale_factor in ('', 'K', 'M', 'G') else ''
         self._bar_width    = max(10, min(60, bar_width))
         self._fmt          = fmt if fmt else self._DEFAULT_FMT
-        self._widget_id    = tui_instance.add_widget(self)
+        self._widget_id    = _tui.add_widget(self)
 
     def __str__(self) -> str:
         pct    = self._value / self._max
@@ -1292,11 +1300,9 @@ class ProgressBar:
     def close(self, persist: bool = False) -> None:
         """Stop the bar; optionally print its final state to the console."""
         self._state = self.STOPPED
-        if tui_instance is None:
-            return
         if persist:
-            tui_instance.print(str(self))
-        tui_instance.del_widget(self._widget_id)
+            self._tui.print(str(self))
+        self._tui.del_widget(self._widget_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1312,14 +1318,16 @@ class Spinner:
 
     _FRAMES = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
 
-    def __init__(self, message: str) -> None:
-        if tui_instance is None:
+    def __init__(self, message: str, tui: 'Optional[Tui]' = None) -> None:
+        _tui = tui if tui is not None else tui_instance
+        if _tui is None:
             raise RuntimeError('No Tui instance — create Tui before using Spinner')
+        self._tui       = _tui
         self._message   = message[:70]
         self._pos       = 0
         self._running   = True
         self._lock      = threading.Lock()
-        self._widget_id = tui_instance.add_widget(self)
+        self._widget_id = _tui.add_widget(self)
         threading.Thread(target=self._tick, daemon=True).start()
 
     def _tick(self) -> None:
@@ -1331,10 +1339,8 @@ class Spinner:
     def done(self) -> None:
         """Stop the spinner and print a completion line."""
         self._running = False
-        if tui_instance is None:
-            return
-        tui_instance.del_widget(self._widget_id)
-        tui_instance.print(f'{self._message} … done')
+        self._tui.del_widget(self._widget_id)
+        self._tui.print(f'{self._message} … done')
 
     @property
     def message(self) -> str:
@@ -1350,38 +1356,55 @@ class Spinner:
 # ---------------------------------------------------------------------------
 
 class Console:
-    """Facade over ``tui_instance`` for use by other modules.
+    """Facade over a Tui instance for use by other modules.
+
+    Construct with an explicit ``tui`` argument when testing, or omit
+    it to fall back to the module-level ``tui_instance`` singleton at
+    every call (the facade resolves lazily so the module-level
+    ``console = Console()`` below is safe to create before any Tui
+    exists — calls only fail if no Tui has been created by the time
+    the call runs).
 
     Usage::
 
-        from tui import console
+        from tui import console        # uses singleton
         console.print('Building package...')
         console.error('Something went wrong')
+
+        # or in tests:
+        c = Console(tui=stub_tui)
+        c.print('hi')                  # routed to stub_tui
     """
 
-    @staticmethod
-    def _tui() -> Tui:
-        if tui_instance is None:
+    def __init__(self, tui: 'Optional[Tui]' = None) -> None:
+        # None means "resolve singleton at call time"; an explicit Tui
+        # is captured eagerly so tests are isolated from changes to
+        # the global tui_instance during their run.
+        self._tui = tui
+
+    def _resolve(self) -> 'Tui':
+        t = self._tui if self._tui is not None else tui_instance
+        if t is None:
             raise RuntimeError('No Tui instance — create Tui before using Console')
-        return tui_instance
+        return t
 
     def print(self, message: str, attribute: Optional[int] = None) -> None:
-        self._tui().print(message, attribute)
+        self._resolve().print(message, attribute)
 
     def mark(self) -> int:
-        return self._tui().console_mark()
+        return self._resolve().console_mark()
 
     def trim_to(self, mark: int) -> None:
-        self._tui().console_trim_to(mark)
+        self._resolve().console_trim_to(mark)
 
     def error(self, message: str) -> None:
-        self._tui().ERROR(message)
+        self._resolve().ERROR(message)
 
     def info(self, message: str) -> None:
-        self._tui().INFO(message)
+        self._resolve().INFO(message)
 
     def warning(self, message: str) -> None:
-        self._tui().WARNING(message)
+        self._resolve().WARNING(message)
 
 
 console = Console()

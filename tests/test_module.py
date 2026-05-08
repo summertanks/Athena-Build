@@ -752,6 +752,83 @@ def test_download_source_surfaces_short_download_clearly():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ARCH-03 — TUI primitives accept Tui explicitly (no singleton required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_console_with_explicit_tui_does_not_touch_singleton():
+    """Constructing Console(tui=stub) routes calls to the stub, not to
+    whatever is in tui_instance — so tests can isolate the TUI without
+    monkey-patching module state."""
+    import tui as _tui
+
+    captured = []
+    class _StubTui:
+        def print(self, m, attr=None): captured.append(('print', m))
+        def ERROR(self, m): captured.append(('error', m))
+        def INFO(self, m):  captured.append(('info', m))
+        def WARNING(self, m): captured.append(('warning', m))
+        def console_mark(self): return 42
+        def console_trim_to(self, n): captured.append(('trim_to', n))
+
+    saved = _tui.tui_instance
+    _tui.tui_instance = None        # force singleton path to fail
+    try:
+        c = _tui.Console(tui=_StubTui())
+        c.print('hello', None)
+        c.error('uh-oh')
+        c.info('fyi')
+        c.warning('careful')
+        assert c.mark() == 42
+        c.trim_to(7)
+    finally:
+        _tui.tui_instance = saved
+
+    kinds = [k for k, _ in captured]
+    assert kinds == ['print', 'error', 'info', 'warning', 'trim_to'], kinds
+
+
+def test_console_singleton_fallback_when_tui_omitted():
+    """Console() with no arg keeps the legacy behaviour: resolve through
+    the module-level tui_instance at call time."""
+    import tui as _tui
+
+    captured = []
+    class _Sentinel:
+        def print(self, m, attr=None): captured.append(m)
+        def ERROR(self, m): pass
+        def INFO(self, m): pass
+        def WARNING(self, m): pass
+
+    saved = _tui.tui_instance
+    _tui.tui_instance = _Sentinel()
+    try:
+        c = _tui.Console()           # no explicit tui → singleton fallback
+        c.print('routed-via-singleton')
+    finally:
+        _tui.tui_instance = saved
+
+    assert captured == ['routed-via-singleton'], captured
+
+
+def test_console_raises_when_no_tui_anywhere():
+    """No explicit tui AND no singleton → RuntimeError on use."""
+    import tui as _tui
+    saved = _tui.tui_instance
+    _tui.tui_instance = None
+    try:
+        c = _tui.Console()
+        raised = False
+        try:
+            c.print('should not be sent')
+        except RuntimeError as e:
+            raised = True
+            assert 'No Tui instance' in str(e), str(e)
+        assert raised
+    finally:
+        _tui.tui_instance = saved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STA-09 — download_file surfaces HTTP status in its return value
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -922,6 +999,10 @@ def main() -> int:
         # STA-04
         test_download_source_surfaces_http_error_clearly,
         test_download_source_surfaces_short_download_clearly,
+        # ARCH-03
+        test_console_with_explicit_tui_does_not_touch_singleton,
+        test_console_singleton_fallback_when_tui_omitted,
+        test_console_raises_when_no_tui_anywhere,
         # STA-09
         test_download_file_returns_http_status_detail_on_404,
         test_download_file_success_returns_size_and_empty_detail,
