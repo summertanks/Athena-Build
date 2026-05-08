@@ -270,7 +270,7 @@ def _bare_buildsystem_with_deps(pkg_specs):
     import tui as _tui
     _tui.console = _StubConsole()
     bs = buildsystem.BuildSystem.__new__(buildsystem.BuildSystem)
-    bs._BuildSystem__dependencytree = _StubDepTree(pkg_specs)
+    bs._dependencytree = _StubDepTree(pkg_specs)
     return bs
 
 
@@ -608,8 +608,8 @@ def _bare_buildsystem(password: str = 'secret'):
     bypasses __init__ so tests don't need real config / sudo / chroot dirs."""
     import buildsystem
     bs = buildsystem.BuildSystem.__new__(buildsystem.BuildSystem)
-    bs._BuildSystem__password = password
-    bs._BuildSystem__password_scrubbed = False
+    bs._password = password
+    bs._password_scrubbed = False
     return bs
 
 
@@ -621,8 +621,8 @@ def test_buildsystem_password_readable_before_scrub():
 def test_buildsystem_scrub_password_clears_field():
     bs = _bare_buildsystem('hunter2')
     bs.scrub_password()
-    assert bs._BuildSystem__password == ''
-    assert bs._BuildSystem__password_scrubbed is True
+    assert bs._password == ''
+    assert bs._password_scrubbed is True
 
 
 def test_buildsystem_password_property_raises_after_scrub():
