@@ -1072,8 +1072,6 @@ class _ChrootMixin:
         for _dir in dir_structure:
             utils.create_folders(self._dir_chroot + _dir)
 
-    @staticmethod
-
     def pre_install(self):
         # Two parts here - copy files and then run commands
         # TODO: Let it load from file rather than hard coding it, risk of something malicious coming in though
