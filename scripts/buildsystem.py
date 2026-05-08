@@ -845,26 +845,61 @@ class BuildSystem:
         while remaining:
             ready = sorted(p for p in remaining if not (deps[p] & remaining))
             if not ready:
-                # Cycle remains.  Emit ALL remaining packages as one
-                # cycle batch — the caller will pass --force-depends
-                # for this batch only.  We don't try to find the
-                # minimum SCC: dpkg with --force-depends across the
-                # whole remaining set produces the same result as
-                # repeated targeted forcing, and the simpler emission
-                # gives the operator a single, complete picture of
-                # what's in the cycle.
+                # Cycle remains in the Pre-Depends ∪ Depends graph.
+                # Split the SCC by Pre-Depends order alone (Depends
+                # cycles are tolerated by --force-depends, but
+                # Pre-Depends are strict — dpkg refuses to unpack X
+                # until X's Pre-Depends are configured).  Each
+                # sub-batch is emitted as its own forced batch so
+                # build_chroot does unpack→configure cycles within
+                # the SCC in the right order.
                 _stuck = sorted(remaining)
+                _subs = self._pre_depends_subbatches(_stuck)
                 tui.console.warning(
                     f"_compute_install_batches: dep cycle in "
-                    f"{len(_stuck)} package(s); emitting as forced batch "
-                    f"(--force-depends scoped to this batch only): "
+                    f"{len(_stuck)} package(s); split into "
+                    f"{len(_subs)} forced sub-batch(es) by Pre-Depends: "
                     f"{_stuck[:6]}{'…' if len(_stuck) > 6 else ''}"
                 )
-                batches.append((_stuck, True))
+                for _sub in _subs:
+                    batches.append((_sub, True))
                 return batches
             batches.append((ready, False))
             remaining -= set(ready)
         return batches
+
+    def _pre_depends_subbatches(self, pkgs: list) -> list:
+        """Kahn over Pre-Depends edges only, restricted to `pkgs`.
+
+        Used by _compute_install_batches to split a Depends-cycle batch
+        into Pre-Depends-respecting sub-batches.  Edges outside `pkgs`
+        are dropped — those Pre-Depends are already satisfied by
+        earlier batches (or by the libc seed).
+
+        If a Pre-Depends cycle remains within `pkgs` (rare; Debian
+        Pre-Depends cycles are essentially limited to libc), the
+        residue is emitted as one final sub-batch and dpkg's
+        --force-depends has to break it.
+        """
+        in_scope = set(pkgs)
+        pre_deps: dict = {}
+        for p in pkgs:
+            d: set = set()
+            for n in self._resolve_pre_depends(p):
+                if n != p and n in in_scope:
+                    d.add(n)
+            pre_deps[p] = d
+
+        sub_batches: list = []
+        remaining = set(pkgs)
+        while remaining:
+            ready = sorted(p for p in remaining if not (pre_deps[p] & remaining))
+            if not ready:
+                sub_batches.append(sorted(remaining))
+                break
+            sub_batches.append(ready)
+            remaining -= set(ready)
+        return sub_batches
 
     def _configure_packages(self, pkg_list: list, fh,
                             force_deps: bool = False) -> set:

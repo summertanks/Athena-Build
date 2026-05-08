@@ -349,9 +349,9 @@ def test_compute_install_batches_self_dep_is_ignored():
 
 
 def test_compute_install_batches_cycle_emitted_as_forced_batch():
-    """Two packages that mutually depend, with no seed entry to break the
-    cycle, are emitted as a single terminal batch with force_deps=True
-    (real-world parallel: libdevmapper1.02.1 ↔ dmsetup on bookworm)."""
+    """Two packages with mutual Depends and no Pre-Depends within the cycle
+    collapse into a single forced batch — Pre-Depends sub-splitting yields
+    one sub-group containing both."""
     bs = _bare_buildsystem_with_deps([
         ('X', [], ['Y']),
         ('Y', [], ['X']),
@@ -360,8 +360,30 @@ def test_compute_install_batches_cycle_emitted_as_forced_batch():
     assert batches == [(['X', 'Y'], True)], batches
 
 
+def test_compute_install_batches_cycle_with_pre_depends_chain_splits():
+    """When a Depends-cycle batch also contains an internal Pre-Depends chain,
+    the cycle is split into sub-batches by Pre-Depends order so dpkg's strict
+    Pre-Depends contract holds within the cycle.  Real-world parallel on
+    bookworm: the systemd ↔ systemd-sysv ↔ init Pre-Depends chain inside the
+    libdevmapper/grub Depends-SCC."""
+    bs = _bare_buildsystem_with_deps([
+        ('A', [],         ['B']),    # Depends cycle A ↔ B
+        ('B', [],         ['A']),
+        ('C', ['A', 'B'], []),       # Pre-Depends on cycle members → must come after
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    # All three are in the cycle (A↔B closes it; C joins via Pre-Depends).
+    # Pre-Depends sub-split: A,B in sub-batch 1 (no in-cycle Pre-Depends);
+    # C in sub-batch 2 (Pre-Depends on A and B).
+    assert batches == [
+        (['A', 'B'], True),
+        (['C'], True),
+    ], batches
+
+
 def test_compute_install_batches_acyclic_then_cycle():
-    """Acyclic prefix is emitted normally, cycle is the terminal batch."""
+    """Acyclic prefix is emitted normally, cycle is split by Pre-Depends
+    (here a single sub-group since the cycle has no internal Pre-Depends)."""
     bs = _bare_buildsystem_with_deps([
         ('leaf', [], []),
         ('top',  [], ['leaf']),
@@ -369,7 +391,6 @@ def test_compute_install_batches_acyclic_then_cycle():
         ('Y',    [], ['X']),
     ])
     batches = bs._compute_install_batches(libc_seed_set=set())
-    # Acyclic batches first (in dep order), then the cycle batch.
     assert batches == [
         (['leaf'], False),
         (['top'], False),
@@ -797,6 +818,7 @@ def main() -> int:
         test_compute_install_batches_libc_seed_breaks_cycle,
         test_compute_install_batches_self_dep_is_ignored,
         test_compute_install_batches_cycle_emitted_as_forced_batch,
+        test_compute_install_batches_cycle_with_pre_depends_chain_splits,
         test_compute_install_batches_acyclic_then_cycle,
         test_compute_install_batches_external_deps_filtered,
         # STA-07
