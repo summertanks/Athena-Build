@@ -42,7 +42,7 @@ import buildsystem
 import signal
 
 
-from tui import Tui, Console, Prompt, PROMPT_YESNO, PROMPT_PASSWORD, Spinner, ProgressBar, Exit
+from tui import Tui, console, Prompt, PROMPT_YESNO, PROMPT_PASSWORD, Spinner, ProgressBar, Exit
 
 asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
                 '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
@@ -57,7 +57,6 @@ build_config: BuildConfig
 build_cache: Cache
 dependency_tree: dependencytree.DependencyTree
 build_container: buildcontainer.BuildContainer
-console: Console
 
 # TUI instance — kept separate from console so shutdown signals can reach it directly.
 _tui: Tui
@@ -974,7 +973,7 @@ def main(banner: str):
     All commands are registered before the banner is shown so that the TUI
     command table is complete from the moment the interface is visible.
     """
-    global build_config, _tui, console
+    global build_config, _tui
 
     # apt_pkg.init_system() must be called once before any apt_pkg parsing;
     # it reads /etc/apt/apt.conf and sets up architecture defaults.
@@ -1005,9 +1004,6 @@ def main(banner: str):
 
         tui.tui_instance = _tui
         signal.signal(signal.SIGINT, _tui.sig_shutdown)  # clean shutdown on Ctrl-C
-
-        console = Console()
-        tui.console = console
 
     except Exception as e:
         print(f"FATAL: TUI initialisation failed: {e}")
