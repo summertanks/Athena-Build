@@ -1528,12 +1528,14 @@ class BuildSystem:
         # /etc/fstab — virtual filesystems that systemd or init needs at boot.
         # Real block devices (root, swap, efi) are left out — they are image-
         # or hardware-specific and should be added by the image-build stage.
+        # No /tmp entry here: systemd ships its own tmp.mount unit and
+        # listing /tmp in fstab causes systemd-fstab-generator to write a
+        # duplicate /run/systemd/generator/tmp.mount and fail at boot.
         self._write_chroot_file('/etc/fstab', (
             '# <file system>  <mount point>  <type>     <options>  <dump>  <pass>\n'
             'proc             /proc          proc       defaults   0       0\n'
             'sysfs            /sys           sysfs      defaults   0       0\n'
             'devtmpfs         /dev           devtmpfs   defaults   0       0\n'
-            'tmpfs            /tmp           tmpfs      defaults   0       0\n'
         ))
 
         # /etc/machine-id — empty file; systemd-machine-id-setup will populate
