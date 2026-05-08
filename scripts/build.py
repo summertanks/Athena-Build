@@ -1022,17 +1022,6 @@ def main(banner: str) -> None:
         print(f"ERROR: load configuration - {config.error_str}, Exiting...")
         sys.exit(1)
 
-    # Attach a timestamped FileHandler to the 'athena' logger so every
-    # logger.X (and logger.debug from chroot / mksquashfs / grub-mkrescue
-    # subprocess transcripts) is captured to a single per-run file.
-    # Replaces the legacy chroot-install.log / mksquashfs.log /
-    # grub-mkrescue.log split.
-    try:
-        _log_path = setup_file_logging(config.dir_log)
-        print(f"Logging to {_log_path}")
-    except OSError as e:
-        print(f"WARN: could not open run log ({e}); continuing without file logging")
-
     print("Initialising TUI...")
     try:
         tui_inst = Tui(banner)
@@ -1042,6 +1031,19 @@ def main(banner: str) -> None:
     except Exception as e:
         print(f"FATAL: TUI initialisation failed: {e}")
         Exit(1)
+
+    # Attach a timestamped FileHandler to the 'athena' logger after the
+    # Tui is constructed.  Tui.__init__ calls setup_logging() to (re)bind
+    # the tab handlers; setup_logging is careful to leave non-tab
+    # handlers alone, but attaching the file handler *after* the Tui is
+    # the safer ordering — and it lets the operator see the path on the
+    # console tab via tui.console.print rather than only host stdout.
+    try:
+        _log_path = setup_file_logging(config.dir_log)
+        console.print(f"Logging to {_log_path}", tui.COLOR_INFO)
+    except OSError as e:
+        console.print(f"WARN: could not open run log ({e}); "
+                      f"continuing without file logging", tui.COLOR_WARNING)
 
     session = BuildSession(config, tui_inst)
 

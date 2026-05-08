@@ -1204,6 +1204,74 @@ def test_setup_file_logging_writes_records_to_timestamped_file():
             _tui.tui_instance = saved_tui
 
 
+def test_setup_logging_preserves_filehandler_added_before_it():
+    """Regression: build.py main() opens the FileHandler via
+    setup_file_logging() *before* Tui(banner) constructs the Tui (which
+    calls setup_logging() again).  setup_logging must not nuke the
+    FileHandler — otherwise the per-run log file ends up empty."""
+    import logging as _logging
+    import os, tempfile
+    import tui as _tui
+
+    saved_handlers = list(_logging.getLogger(_tui.LOGGER_NAME).handlers)
+    saved_tui = _tui.tui_instance
+    _tui.tui_instance = None
+
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            _tui.setup_logging()
+            path = _tui.setup_file_logging(d, name='build')
+            # Now simulate Tui.__init__ re-calling setup_logging — the
+            # FileHandler must survive.
+            _tui.setup_logging()
+
+            log = _logging.getLogger(_tui.LOGGER_NAME)
+            file_handlers = [h for h in log.handlers
+                             if isinstance(h, _logging.FileHandler)]
+            assert len(file_handlers) == 1, log.handlers
+
+            log.info('still alive after re-setup')
+            for h in log.handlers:
+                h.flush()
+            assert os.path.exists(path)
+            with open(path) as fh:
+                content = fh.read()
+            assert 'still alive after re-setup' in content, content
+        finally:
+            log = _logging.getLogger(_tui.LOGGER_NAME)
+            for h in list(log.handlers):
+                log.removeHandler(h)
+                try: h.close()
+                except Exception: pass
+            for h in saved_handlers:
+                log.addHandler(h)
+            _tui.tui_instance = saved_tui
+
+
+def test_logger_warning_does_not_leak_to_console_tab():
+    """Regression: _ConsoleTabHandler must filter strictly on
+    levelno == DISPLAY.  A bare `level=DISPLAY` floor would let
+    WARNING (30) and ERROR (40) pass through and double-print into
+    the console tab on top of the log tab routing."""
+    import logging as _logging
+    import tui as _tui
+
+    captured, restore = _logger_test_with_stub_tui()
+    try:
+        log = _logging.getLogger(_tui.LOGGER_NAME)
+        log.warning('mirror lag')
+        log.error('GPG verify failed')
+    finally:
+        restore()
+
+    # Must NOT reach the console tab via Tui.print
+    leaked = [e for e in captured if e[0] == 'print']
+    assert leaked == [], f'logger.warning/error leaked to console tab: {leaked}'
+    # But should reach the log tab
+    assert any(e[0] == 'warning' for e in captured), captured
+    assert any(e[0] == 'error'   for e in captured), captured
+
+
 def test_setup_file_logging_filename_has_timestamp():
     """Two calls in quick succession produce distinct files (timestamped)."""
     import os, tempfile, time
@@ -1413,6 +1481,8 @@ def main() -> int:
         test_logger_debug_is_dropped_below_handler_threshold,
         test_setup_logging_is_idempotent,
         test_setup_file_logging_writes_records_to_timestamped_file,
+        test_setup_logging_preserves_filehandler_added_before_it,
+        test_logger_warning_does_not_leak_to_console_tab,
         test_setup_file_logging_filename_has_timestamp,
         # STA-09
         test_download_file_returns_http_status_detail_on_404,

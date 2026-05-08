@@ -1521,9 +1521,12 @@ def setup_logging(tui: 'Optional[Tui]' = None) -> logging.Logger:
     needed when you want the logger configured before a Tui exists, or
     to re-bind an explicit Tui in a test.
 
-    Idempotent: previously-installed handlers are removed before the
-    new ones are attached so tests that re-create a Tui (and so
-    re-call setup_logging) don't accumulate duplicate handlers.
+    Idempotent: previously-installed *tab* handlers are removed before
+    the new ones are attached so tests / re-init paths that re-call
+    setup_logging don't accumulate duplicates.  Other handlers (notably
+    the FileHandler attached by `setup_file_logging`) are left alone —
+    main() may attach the file log before constructing the Tui, and a
+    blanket clear here would orphan it.
 
     Returns the configured logger.
     """
@@ -1531,8 +1534,11 @@ def setup_logging(tui: 'Optional[Tui]' = None) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False  # don't bubble records up to the root logger
 
+    # Selectively drop only the tab handlers we own.  Leaves FileHandler,
+    # NullHandler, captureWarnings handlers, etc. intact across re-setup.
     for h in list(logger.handlers):
-        logger.removeHandler(h)
+        if isinstance(h, (_LogTabHandler, _ConsoleTabHandler)):
+            logger.removeHandler(h)
 
     log_h = _LogTabHandler(tui=tui, level=logging.INFO)
     # DISPLAY records belong only on the console tab — keep them out of
@@ -1540,7 +1546,13 @@ def setup_logging(tui: 'Optional[Tui]' = None) -> logging.Logger:
     log_h.addFilter(lambda r: r.levelno != DISPLAY)
     logger.addHandler(log_h)
 
-    logger.addHandler(_ConsoleTabHandler(tui=tui))
+    # And the mirror filter on the console tab: a handler `level=25`
+    # is a *floor*, so without this filter WARNING (30) and ERROR (40)
+    # would leak into the console tab on top of being routed to the
+    # log tab by _LogTabHandler.
+    con_h = _ConsoleTabHandler(tui=tui)
+    con_h.addFilter(lambda r: r.levelno == DISPLAY)
+    logger.addHandler(con_h)
     return logger
 
 
