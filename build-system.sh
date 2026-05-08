@@ -83,18 +83,25 @@ else
     exit 1
 fi
 
+# Version probes use `|| true` after the head pipe.  `head -n1` closes
+# its read end after one line; the writer (bash, gunzip, etc.) gets
+# SIGPIPE 141 on its next write, and under `set -o pipefail` that
+# propagates and `errexit` kills the script silently.  Race condition —
+# whether the writer has finished flushing before head closes depends
+# on output size and scheduler timing.
+
 # Bash version
-echo Using `/usr/bin/bash  --version | head -n1`
+echo "Using $(/usr/bin/bash --version 2>/dev/null | head -n1 || true)"
 
 # gunzip version
-echo Using `/usr/bin/gunzip  --version | head -n1`
+echo "Using $(/usr/bin/gunzip --version 2>/dev/null | head -n1 || true)"
 
 # python version
-echo Using `/usr/bin/python3  --version | head -n1`
+echo "Using $(/usr/bin/python3 --version 2>/dev/null | head -n1 || true)"
 
 # checking docker
-if [ -x "$(which docker 2>/dev/null)" ]; then
-    echo Using `docker --version`
+if [ -x "$(command -v docker || true)" ]; then
+    echo "Using $(docker --version 2>/dev/null | head -n1 || true)"
 else
     echo "E: docker not found, build system requires docker" >&2
     exit 1
@@ -102,8 +109,8 @@ fi
 
 # checking gpg (used by python-gnupg in verify_inrelease).
 # python-gnupg invokes `gpg`, not `gpgv`, so we check for the full binary.
-if [ -x "$(which gpg 2>/dev/null)" ]; then
-    echo Using `gpg --version | head -n1`
+if [ -x "$(command -v gpg || true)" ]; then
+    echo "Using $(gpg --version 2>/dev/null | head -n1 || true)"
 else
     echo "E: gpg not found (install gnupg) — required for InRelease verification" >&2
     exit 1
@@ -131,66 +138,72 @@ fi
 
 # checking wget
 if [ -x /usr/bin/wget ]; then
-        echo Using `/usr/bin/wget --version | head -n1`
+        echo "Using $(/usr/bin/wget --version 2>/dev/null | head -n1 || true)"
 else
         echo "E: wget not found, do we want to be in a world without wget" > /dev/stderr
         exit 1
 fi
 
-# Checking awk
-AWK_PATH=$(which awk 2>/dev/null)
-
-if [ -x "$AWK_PATH" ]; then
-    REAL_AWK=$(readlink -f "$AWK_PATH")
-    PACKAGE=$(dpkg -S "$REAL_AWK" 2>/dev/null | cut -d: -f1)
-
-    case "$PACKAGE" in
-        gawk)
-            AWK_VERSION=$("$AWK_PATH" --version | head -n1)
-            ;;
-        mawk)
-            AWK_VERSION=$("$AWK_PATH" -W version 2>&1 | head -n1)
-            ;;
-        original-awk)
-            AWK_VERSION=$("$AWK_PATH" 2>&1 | grep -i version | head -n1)
-            ;;
-        *)
-            AWK_VERSION=$("$AWK_PATH" --version 2>/dev/null | head -n1 || echo "version unknown")
-            ;;
-    esac
-    echo "Using awk: $PACKAGE — $AWK_VERSION"
-else
+# Checking awk — every pipe below is `|| true` because under
+# `set -o pipefail` + `set -o errexit`:
+#   1. `which awk` returning non-zero (rare) would silently kill
+#      the script before the [ -x ] check runs.
+#   2. `dpkg -S /path` returns 1 when the file is not in any
+#      package and pipefail propagates that.
+#   3. `cmd --version | head -n1` is the SIGPIPE-141 race that
+#      manifested as the script silently exiting at this point.
+AWK_PATH=$(command -v awk || true)
+if [ -z "$AWK_PATH" ] || [ ! -x "$AWK_PATH" ]; then
     echo "E: awk not found, build script will not work" >&2
     exit 1
 fi
+
+REAL_AWK=$(readlink -f "$AWK_PATH" || echo "$AWK_PATH")
+PACKAGE=$(dpkg -S "$REAL_AWK" 2>/dev/null | cut -d: -f1 || true)
+
+case "$PACKAGE" in
+    gawk)
+        AWK_VERSION=$("$AWK_PATH" --version 2>/dev/null | head -n1 || true)
+        ;;
+    mawk)
+        AWK_VERSION=$("$AWK_PATH" -W version 2>&1 | head -n1 || true)
+        ;;
+    original-awk)
+        AWK_VERSION=$("$AWK_PATH" 2>&1 | grep -i version | head -n1 || true)
+        ;;
+    *)
+        AWK_VERSION=$("$AWK_PATH" --version 2>/dev/null | head -n1 || true)
+        ;;
+esac
+echo "Using awk: ${PACKAGE:-unknown} — ${AWK_VERSION:-version unknown}"
 
 # Checking ISO build tools (required for build_iso command only)
 echo "Checking ISO build tools..."
 ISO_TOOLS_OK=1
 
-if [ -x "$(which mksquashfs 2>/dev/null)" ]; then
-    echo Using "mksquashfs $(mksquashfs -version 2>&1 | head -n1)"
+if [ -x "$(command -v mksquashfs || true)" ]; then
+    echo "Using mksquashfs $(mksquashfs -version 2>&1 | head -n1 || true)"
 else
     echo "W: mksquashfs not found (install squashfs-tools) — build_iso will not work"
     ISO_TOOLS_OK=0
 fi
 
-if [ -x "$(which grub-mkrescue 2>/dev/null)" ]; then
-    echo Using "grub-mkrescue $(grub-mkrescue --version 2>/dev/null | head -n1)"
+if [ -x "$(command -v grub-mkrescue || true)" ]; then
+    echo "Using grub-mkrescue $(grub-mkrescue --version 2>/dev/null | head -n1 || true)"
 else
     echo "W: grub-mkrescue not found (install grub-pc-bin grub-efi-amd64-bin) — build_iso will not work"
     ISO_TOOLS_OK=0
 fi
 
-if [ -x "$(which xorriso 2>/dev/null)" ]; then
-    echo Using "xorriso $(xorriso --version 2>&1 | head -n1)"
+if [ -x "$(command -v xorriso || true)" ]; then
+    echo "Using xorriso $(xorriso --version 2>&1 | head -n1 || true)"
 else
     echo "W: xorriso not found (install xorriso) — build_iso will not work"
     ISO_TOOLS_OK=0
 fi
 
-if [ -x "$(which mformat 2>/dev/null)" ]; then
-    echo Using "mformat $(mformat --version 2>&1 | head -n1)"
+if [ -x "$(command -v mformat || true)" ]; then
+    echo "Using mformat $(mformat --version 2>&1 | head -n1 || true)"
 else
     echo "W: mformat not found (install mtools) — grub-mkrescue will fail"
     ISO_TOOLS_OK=0
