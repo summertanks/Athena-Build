@@ -171,7 +171,7 @@ and an 8-check chroot verifier that gates ISO build.
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
 | UX-01  | P2 | todo | `print` command takes only `config|required|important|selected`. Add `print sources`, `print mirrors`, `print snapshot`. |
-| UX-02  | P2 | todo | `cmd_auto_run` does not respect prerequisites if any earlier step fails — it still tries the next step and produces a confusing error. Make it bail at the first failed flag. |
+| UX-02  | P2 | done | `cmd_auto_run` does not respect prerequisites if any earlier step fails — it still tries the next step and produces a confusing error. Make it bail at the first failed flag. *(checks each step's progress flag after the call; aborts on first unset flag with a clear `autorun: '<step>' did not complete — aborting` message)* |
 | UX-03  | P2 | todo | Emit a final summary at end of `auto_run` (counts of cached/built/tunneled/failed, ISO path, total wall time). |
 | UX-04  | P2 | todo | Persist `BuildFlags` to disk between runs so a re-launched TUI can resume mid-pipeline. |
 | UX-05  | P3 | todo | Replace the curses TUI with a Textual-based one (or expose a non-TUI CLI mode for headless / CI use). The curses code is solid but Textual would simplify the prompt/widget plumbing significantly. |

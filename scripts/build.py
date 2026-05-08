@@ -931,14 +931,30 @@ def cmd_verify_chroot():
 
 
 def cmd_auto_run():
-    cmd_build_cache()
-    cmd_parse_dependency()
-    cmd_source_download()
-    cmd_init_container()
-    cmd_source_build()
-    cmd_build_chroot()  # also runs verify_chroot internally
+    """Run the full build pipeline in sequence, bailing at the first
+    step that does not set its progress flag.  Each step already resets
+    its flag to False at entry and sets it to True only on success, so
+    checking the flag after the call is a reliable did-it-complete probe.
+    """
+    _steps = [
+        (cmd_build_cache,       'cache_ready',           'build_cache'),
+        (cmd_parse_dependency,  'dep_check_ready',       'parse_dependency'),
+        (cmd_source_download,   'download_ready',        'source_download'),
+        (cmd_init_container,    'build_container_ready', 'build_container'),
+        (cmd_source_build,      'source_build_ready',    'source_build'),
+        # build_chroot also runs verify_chroot; chroot_verified is True
+        # only when both build AND all 8 verify checks passed.
+        (cmd_build_chroot,      'chroot_verified',       'build_chroot'),
+    ]
 
-    return
+    for _fn, _flag, _name in _steps:
+        _fn()
+        if not getattr(_progress_flags, _flag):
+            console.print(f"autorun: '{_name}' did not complete — aborting")
+            console.error(f"autorun aborted at '{_name}' (flag {_flag} not set)")
+            return
+
+    console.print("autorun: all stages complete")
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
