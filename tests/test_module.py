@@ -752,6 +752,46 @@ def test_download_source_surfaces_short_download_clearly():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SEC-02 — DOCKER_SERVER guard refuses unsafe network-reachable daemons
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_docker_server_guard_accepts_safe_targets():
+    """Loopback tcp + unix sockets + TLS-marked URLs all pass."""
+    from buildcontainer import BuildContainer
+    safe = [
+        'unix:///var/run/docker.sock',
+        'tcp://127.0.0.1:2375',
+        'tcp://[::1]:2375',
+        'tcp://localhost:2375',
+        'https://docker.example.com:2376',
+        'tcp://docker.example.com:2376?tls=true',
+        'tcp://docker.example.com:2376?tls=1',
+    ]
+    for url in safe:
+        BuildContainer._guard_docker_server(url)   # raises on reject
+
+
+def test_docker_server_guard_refuses_unsafe_targets():
+    """Bare tcp:// to a non-loopback host without a TLS marker raises."""
+    from buildcontainer import BuildContainer
+    unsafe = [
+        'tcp://192.168.1.100:2375',
+        'tcp://10.0.0.5:2375',
+        'tcp://docker.example.com:2375',
+        'http://192.168.1.100:2375',
+    ]
+    for url in unsafe:
+        raised = False
+        try:
+            BuildContainer._guard_docker_server(url)
+        except RuntimeError as e:
+            raised = True
+            assert 'TLS' in str(e), str(e)
+            assert 'docs/security.md' in str(e), str(e)
+        assert raised, f"expected RuntimeError for {url!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONF-04 — BuildOptions / BuildProfiles are separate config keys
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1154,6 +1194,9 @@ def main() -> int:
         # STA-04
         test_download_source_surfaces_http_error_clearly,
         test_download_source_surfaces_short_download_clearly,
+        # SEC-02
+        test_docker_server_guard_accepts_safe_targets,
+        test_docker_server_guard_refuses_unsafe_targets,
         # CONF-04
         test_buildconfig_build_options_and_profiles_are_separate,
         test_buildconfig_build_options_falls_back_to_profiles_when_omitted,

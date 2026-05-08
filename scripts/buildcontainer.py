@@ -41,6 +41,20 @@ class BuildContainer:
         self.client = None
 
         if docker_server is not None:
+            # Refuse to silently talk to an unsafely-exposed Docker daemon.
+            # The build container runs as a privileged sandbox (Dockerfile
+            # grants its `athena` user passwordless sudo, see docs/security.md);
+            # any code with reach to the daemon socket can mount the host fs
+            # via `docker run -v /:/host` and become root on the host.
+            #
+            # Loopback (127.0.0.1, ::1, localhost) and unix:// sockets are
+            # under operator control on the build machine.  Anything else —
+            # tcp:// to a remote host without TLS — is the failure mode the
+            # SEC-02 audit flagged: a network-reachable daemon is a
+            # privilege-escalation primitive.  Require either loopback /
+            # unix sockets, or an explicit tls=true marker in the URL
+            # confirming the operator has set up cert auth.
+            self._guard_docker_server(docker_server)
             try:
                 _client = docker.DockerClient(base_url=docker_server)
                 _client.ping()
@@ -109,6 +123,46 @@ class BuildContainer:
 
         self.image = image
 
+
+    @staticmethod
+    def _guard_docker_server(docker_server: str) -> None:
+        """Refuse to talk to a daemon that's reachable from the network
+        without TLS.  See SEC-02 in TODO.md and docs/security.md.
+
+        Acceptable targets:
+          - unix:///path/to/socket  — same host, filesystem-protected
+          - tcp://127.0.0.1:PORT    — loopback, same host
+          - tcp://[::1]:PORT        — loopback, same host
+          - tcp://localhost:PORT    — loopback, same host
+          - https://...             — TLS-protected (the docker SDK
+                                      enforces server-cert validation)
+          - any URL containing      — operator has explicitly set up TLS
+            'tls=true' or '?tls=1'    + client-cert auth out of band
+
+        Anything else (a bare tcp://192.168.x.y:2375) raises so the
+        operator confronts the privilege-escalation primitive before
+        the build container runs anything against it.
+        """
+        from urllib.parse import urlparse
+
+        _scheme = urlparse(docker_server).scheme.lower()
+        _host   = urlparse(docker_server).hostname or ''
+        _safe_loopback = _host in ('127.0.0.1', '::1', 'localhost', '')
+
+        if _scheme in ('unix', 'https'):
+            return
+        if _scheme in ('tcp', 'http') and _safe_loopback:
+            return
+        if 'tls=true' in docker_server.lower() or 'tls=1' in docker_server.lower():
+            return
+
+        raise RuntimeError(
+            f"DOCKER_SERVER={docker_server!r} points at a network-reachable "
+            f"daemon without TLS — see docs/security.md.  Build container has "
+            f"passwordless sudo so a daemon-reachable attacker can mount the "
+            f"host filesystem and become root.  Use unix:// or loopback "
+            f"tcp://127.0.0.1, or set up TLS and add 'tls=true' to the URL."
+        )
 
     @staticmethod
     def _hash_dockerfile(config_dir: str) -> str:
