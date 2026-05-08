@@ -7,12 +7,15 @@ provided by `BuildSystem`.
 """
 
 import glob
+import logging
 import os
 import secrets
 import shutil
 import subprocess
 
 import tui
+
+logger = logging.getLogger('athena')
 
 
 # Common English first names used as the random live-user account.
@@ -56,8 +59,10 @@ class _IsoMixin:
              run, tmp) that live-boot mounts fresh at boot.
           6. Run grub-mkrescue to produce a hybrid BIOS+EFI ISO.
 
-        Logs for the long-running steps are written to dir_log/mksquashfs.log
-        and dir_log/grub-mkrescue.log.
+        Subprocess transcripts for mksquashfs and grub-mkrescue are
+        routed through ``logger.debug``, captured by the file handler
+        attached in build.main() — see the unified run log under
+        dir_log/build-<timestamp>.log.
 
         Returns:
             True on success, False if any step fails.
@@ -69,11 +74,11 @@ class _IsoMixin:
 
         if not _kernels:
             tui.console.print("ERROR: no kernel found in chroot/boot/ — is linux-image installed?")
-            tui.console.error("build_iso: no vmlinuz-* in chroot/boot/")
+            logger.error("build_iso: no vmlinuz-* in chroot/boot/")
             return False
         if not _initrds:
             tui.console.print("ERROR: no initramfs found in chroot/boot/ — is initramfs-tools installed?")
-            tui.console.error("build_iso: no initrd.img-* in chroot/boot/")
+            logger.error("build_iso: no initrd.img-* in chroot/boot/")
             return False
 
         # Use the latest kernel version (highest sort order).
@@ -137,7 +142,6 @@ class _IsoMixin:
         # each entry inside the dir rather than the dir itself.
         # -noappend overwrites any previous squashfs.
         _squashfs   = os.path.join(_staging_live, 'filesystem.squashfs')
-        _squash_log = os.path.join(self._dir_log, 'mksquashfs.log')
 
         # Collect any actual files inside the runtime dirs to exclude (normally
         # empty after unmounting, but defensive in case something was left).
@@ -159,15 +163,21 @@ class _IsoMixin:
             ['sudo', '-S', 'mksquashfs', self._dir_chroot, _squashfs,
              '-comp', 'xz', '-noappend'] + _exclude_args
         )
-        with open(_squash_log, 'w') as fh:
-            _proc = subprocess.run(
-                _cmd, input=self._password + '\n',
-                stdout=fh, stderr=subprocess.STDOUT, text=True
-            )
+        # Subprocess transcript routed through logger.debug — the file
+        # handler attached by setup_file_logging() captures it in the
+        # unified run log, replacing the legacy mksquashfs.log file.
+        _proc = subprocess.run(
+            _cmd, input=self._password + '\n',
+            capture_output=True, text=True
+        )
+        for _line in _proc.stdout.splitlines():
+            logger.debug(_line)
+        for _line in _proc.stderr.splitlines():
+            logger.debug(_line)
 
         if _proc.returncode != 0:
-            tui.console.print(f"ERROR: mksquashfs failed — see {_squash_log}")
-            tui.console.error(f"build_iso: mksquashfs exited {_proc.returncode}")
+            tui.console.print(f"ERROR: mksquashfs failed — see unified run log")
+            logger.error(f"build_iso: mksquashfs exited {_proc.returncode}")
             return False
 
         _sq_mb = os.path.getsize(_squashfs) // (2 ** 20)
@@ -179,18 +189,22 @@ class _IsoMixin:
         # to be installed on the host.
         _iso_name   = f"athena-{_version}-amd64.iso"
         _iso_path   = os.path.join(self._dir_image, _iso_name)
-        _grub_log   = os.path.join(self._dir_log, 'grub-mkrescue.log')
 
         tui.console.print("Running grub-mkrescue...")
-        with open(_grub_log, 'w') as fh:
-            _proc = subprocess.run(
-                ['grub-mkrescue', '-o', _iso_path, _staging],
-                stdout=fh, stderr=subprocess.STDOUT, text=True
-            )
+        # Subprocess transcript routed through logger.debug — see comment
+        # above the mksquashfs invocation.
+        _proc = subprocess.run(
+            ['grub-mkrescue', '-o', _iso_path, _staging],
+            capture_output=True, text=True
+        )
+        for _line in _proc.stdout.splitlines():
+            logger.debug(_line)
+        for _line in _proc.stderr.splitlines():
+            logger.debug(_line)
 
         if _proc.returncode != 0:
-            tui.console.print(f"ERROR: grub-mkrescue failed — see {_grub_log}")
-            tui.console.error(f"build_iso: grub-mkrescue exited {_proc.returncode}")
+            tui.console.print(f"ERROR: grub-mkrescue failed — see unified run log")
+            logger.error(f"build_iso: grub-mkrescue exited {_proc.returncode}")
             return False
 
         _iso_mb = os.path.getsize(_iso_path) // (2 ** 20)
@@ -206,6 +220,6 @@ class _IsoMixin:
                 fh.write(_live_user + '\n')
             tui.console.print(f"Live user: {_live_user}  (also at {_user_path})")
         except OSError as e:
-            tui.console.warning(f"Could not write live-user sidecar {_user_path}: {e}")
+            logger.warning(f"Could not write live-user sidecar {_user_path}: {e}")
 
         return True

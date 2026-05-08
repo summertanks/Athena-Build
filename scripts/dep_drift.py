@@ -14,10 +14,13 @@ Both methods access `self._dependencytree`, `self._dir_repo`, and
 `self.strip_build_version` — provided by `BuildSystem`.
 """
 
+import logging
 import os
 import subprocess
 
 import tui
+
+logger = logging.getLogger('athena')
 
 
 class _DepDriftMixin:
@@ -90,12 +93,12 @@ class _DepDriftMixin:
             if _drift:
                 _cache_ver = _pkg_obj.get('Version', '?')
                 _disk_ver  = _deb_pkg.get('Version', '?')
-                tui.console.info(
+                logger.info(
                     f"Dep drift seen for package {_pkg_name} "
                     f"from {_cache_ver} to {_disk_ver}"
                 )
                 for _field, _cache_val, _disk_val in _drift:
-                    tui.console.info(f"  {_field}: from {_cache_val} to {_disk_val}")
+                    logger.info(f"  {_field}: from {_cache_val} to {_disk_val}")
 
             _pkg_obj.depends         = _deb_pkg.depends
             _pkg_obj.alt_depends     = _deb_pkg.alt_depends
@@ -154,11 +157,11 @@ class _DepDriftMixin:
                         )
 
         if _violations:
-            tui.console.error(
+            logger.error(
                 f"_verify_dep_resolution: {len(_violations)} unresolved dep(s) after sync"
             )
             for _v in _violations:
-                tui.console.error(f"  {_v}")
+                logger.error(f"  {_v}")
             raise RuntimeError(
                 f"_verify_dep_resolution: {len(_violations)} unresolved dep(s); "
                 "see log for details"
