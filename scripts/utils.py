@@ -575,7 +575,7 @@ class BuildConfig:
         """
         return self.error_str
     
-def download_file(url: str, filename: str) -> int:
+def download_file(url: str, filename: str) -> tuple:
     """Downloads file and updates progressbar in incremental manner.
 
     Args:
@@ -583,7 +583,12 @@ def download_file(url: str, filename: str) -> int:
         filename: Local path to write to; location must be writable.
 
     Returns:
-        File size in bytes on success, -1 on failure.
+        (size, detail) — size is bytes on success or -1 on failure;
+        detail is '' on success or a short human-readable cause on
+        failure (e.g. 'HTTP 404 Not Found', 'connection timeout',
+        'OS write error: ...').  Callers should surface detail in
+        their own error_str so the operator sees the actual reason
+        rather than a generic "download failed".
     """
     from urllib.parse import urlsplit
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
@@ -605,24 +610,40 @@ def download_file(url: str, filename: str) -> int:
                         progress_bar.step(len(chunk))
 
             progress_bar.close()
-            return file_size
+            return file_size, ''
 
-    except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+    except HTTPError as e:
+        # raise_for_status path — preserve the HTTP status line so the
+        # operator sees "HTTP 404 Not Found" rather than the generic
+        # "download failed" the legacy single-int return produced.
+        _resp = getattr(e, 'response', None)
+        if _resp is not None:
+            _detail = f"HTTP {_resp.status_code} {_resp.reason}"
+        else:
+            _detail = f"HTTPError: {e}"
+        tui.console.print(f"ERROR: {_detail} for {url}")
+        tui.console.error(f"download_file({url}): {_detail}")
+        return -1, _detail
+    except (ConnectionError, Timeout, TooManyRedirects, RequestException) as e:
+        _detail = f"{type(e).__name__}: {e}"
         tui.console.print(f"ERROR: download failed for {url}")
-        tui.console.error(f"download_file({url}): {e}")
-        return -1
+        tui.console.error(f"download_file({url}): {_detail}")
+        return -1, _detail
     except OSError as e:
+        _detail = f"OS write error: {e}"
         tui.console.print(f"ERROR: cannot write to {filename}")
         tui.console.error(f"download_file write {filename}: {e}")
-        return -1
+        return -1, _detail
     except ValueError as e:
+        _detail = f"malformed response: {e}"
         tui.console.print(f"ERROR: malformed response from {url}")
         tui.console.error(f"download_file parse {url}: {e}")
-        return -1
+        return -1, _detail
     except Exception as e:
+        _detail = f"{type(e).__name__}: {e}"
         tui.console.print(f"ERROR: unexpected failure downloading {url}")
-        tui.console.error(f"download_file({url}): {type(e).__name__}: {e}")
-        return -1
+        tui.console.error(f"download_file({url}): {_detail}")
+        return -1, _detail
 
 
 def download_source(dependency_tree, dir_download):

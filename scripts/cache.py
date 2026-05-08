@@ -143,8 +143,12 @@ class Cache:
                 _mirror.sources_path:  '',
             }
 
-            if utils.download_file(_release_url, _release_file) <= 0:
-                self.error_str = f"Error downloading release file from {_release_url}"
+            _size, _detail = utils.download_file(_release_url, _release_file)
+            if _size <= 0:
+                self.error_str = (
+                    f"Error downloading release file from {_release_url}: "
+                    f"{_detail or 'empty response'}"
+                )
                 return -1
             tui.console.print(f'Downloaded {_release_file}')
 
@@ -216,8 +220,12 @@ class Cache:
 
                 _src_url = _base_url + _path + _chosen_ext
                 _compressed_dst = _dst + _chosen_ext
-                if utils.download_file(_src_url, _compressed_dst) <= 0:
-                    self.error_str = f"Error downloading file {_src_url}"
+                _size, _detail = utils.download_file(_src_url, _compressed_dst)
+                if _size <= 0:
+                    self.error_str = (
+                        f"Error downloading file {_src_url}: "
+                        f"{_detail or 'empty response'}"
+                    )
                     return -1
                 tui.console.print(f'Downloaded {_src_url}')
 

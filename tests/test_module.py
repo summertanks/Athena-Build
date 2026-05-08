@@ -751,6 +751,99 @@ def test_download_source_surfaces_short_download_clearly():
     assert 'Hash mismatch' not in msgs, msgs
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STA-09 — download_file surfaces HTTP status in its return value
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_download_file_returns_http_status_detail_on_404():
+    """A non-200 GET → HTTPError → download_file returns (-1, 'HTTP 404 Not Found')
+    so callers can include the actual status in their error_str instead of
+    the legacy generic 'download failed' message."""
+    from unittest.mock import patch, MagicMock
+    from requests import HTTPError
+    import utils
+
+    class _Cap:
+        def print(s, m, *a, **k): pass
+        def info(s, m): pass
+        def warning(s, m): pass
+        def error(s, m): pass
+    class _Bar:
+        def __init__(s, *a, **k): pass
+        def step(s, *a, **k): pass
+        def label(s, *a, **k): pass
+        def close(s, *a, **k): pass
+
+    saved_console = utils.tui.console
+    saved_bar     = utils.tui.ProgressBar
+    utils.tui.console = _Cap()
+    utils.tui.ProgressBar = _Bar
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            mock_head = MagicMock()
+            mock_head.headers = {'content-length': '0'}
+
+            mock_get = MagicMock()
+            mock_get.__enter__.return_value = mock_get
+            _resp = MagicMock()
+            _resp.status_code = 404
+            _resp.reason = 'Not Found'
+            mock_get.raise_for_status.side_effect = HTTPError('404 Client Error', response=_resp)
+
+            with patch.object(utils.requests, 'head', return_value=mock_head), \
+                 patch.object(utils.requests, 'get', return_value=mock_get):
+                size, detail = utils.download_file('http://x.test/missing', os.path.join(tmp, 'out'))
+
+            assert size == -1, size
+            assert 'HTTP 404' in detail, detail
+            assert 'Not Found' in detail, detail
+    finally:
+        utils.tui.console = saved_console
+        utils.tui.ProgressBar = saved_bar
+
+
+def test_download_file_success_returns_size_and_empty_detail():
+    """Happy path: (size, '') so callers can keep using the size for their
+    accounting and treat empty detail as 'no error to surface'."""
+    from unittest.mock import patch, MagicMock
+    import utils
+
+    class _Cap:
+        def print(s, m, *a, **k): pass
+        def info(s, m): pass
+        def warning(s, m): pass
+        def error(s, m): pass
+    class _Bar:
+        def __init__(s, *a, **k): pass
+        def step(s, *a, **k): pass
+        def label(s, *a, **k): pass
+        def close(s, *a, **k): pass
+
+    saved_console = utils.tui.console
+    saved_bar     = utils.tui.ProgressBar
+    utils.tui.console = _Cap()
+    utils.tui.ProgressBar = _Bar
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            mock_head = MagicMock()
+            mock_head.headers = {'content-length': '11'}
+
+            mock_get = MagicMock()
+            mock_get.__enter__.return_value = mock_get
+            mock_get.raise_for_status.return_value = None
+            mock_get.iter_content.return_value = [b'hello world']
+
+            with patch.object(utils.requests, 'head', return_value=mock_head), \
+                 patch.object(utils.requests, 'get', return_value=mock_get):
+                size, detail = utils.download_file('http://x.test/ok', os.path.join(tmp, 'out'))
+
+            assert size == 11, size
+            assert detail == '', repr(detail)
+    finally:
+        utils.tui.console = saved_console
+        utils.tui.ProgressBar = saved_bar
+
+
 def test_shipped_build_conf_has_snapshot_enabled():
     """STA-03: the shipped config/build.conf must default to snapshot pinning
     enabled, so cache and live mirror cannot drift between cache build and
@@ -829,6 +922,9 @@ def main() -> int:
         # STA-04
         test_download_source_surfaces_http_error_clearly,
         test_download_source_surfaces_short_download_clearly,
+        # STA-09
+        test_download_file_returns_http_status_detail_on_404,
+        test_download_file_success_returns_size_and_empty_detail,
         # STA-03
         test_shipped_build_conf_has_snapshot_enabled,
     ]
