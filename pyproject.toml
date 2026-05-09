@@ -90,7 +90,14 @@ ignore = [
 "tests/*" = ["F841"]   # tests legitimately bind unused locals
 
 [tool.mypy]
-python_version          = "3.9"
+# Type-check assuming Python 3.10 syntax/semantics.  Modern mypy releases
+# (>= 1.10) dropped support for python_version = 3.9 even as a target —
+# this is just the *minimum* mypy assumes when reasoning about typing
+# constructs.  The project's runtime floor in [project] stays at 3.9;
+# 3.10 features (PEP 604 unions, `match`, etc.) are not used in the code
+# base, so this only silences the "Python 3.9 is not supported" config
+# error that newer mypy emits.
+python_version          = "3.10"
 warn_return_any         = false
 warn_unused_configs     = true
 ignore_missing_imports  = true   # apt_pkg / debian / docker have partial stubs

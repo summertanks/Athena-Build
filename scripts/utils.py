@@ -739,7 +739,7 @@ def download_source(dependency_tree, dir_download):
         progress_bar = ProgressBar(label='Downloading', itr_label='B/s', maxvalue=max(1, _download_size))
     except Exception as e:
         progress_bar = None
-        tui.console.print(f"WARNING: progress bar unavailable, continuing without it")
+        tui.console.print("WARNING: progress bar unavailable, continuing without it")
         logger.error(f"download_source ProgressBar: {type(e).__name__}: {e}")
 
     for _file in _file_list:

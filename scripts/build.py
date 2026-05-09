@@ -246,7 +246,7 @@ class BuildSession:
                         continue
                     f.write(str(self.dep_tree.selected_pkgs[pkg]) + '\n\n')
         except OSError as e:
-            console.print(f"ERROR: cannot write selected_packages.list")
+            console.print("ERROR: cannot write selected_packages.list")
             logger.error(f"selected_packages.list write: {e}")
             return
 
@@ -306,7 +306,7 @@ class BuildSession:
                         for _file in self.dep_tree.selected_srcs[_pkg].files:
                             fb.write(f"{_file}: {self.dep_tree.selected_srcs[_pkg].files[_file]}\n")
         except OSError as e:
-            console.print(f"ERROR: cannot write source lists")
+            console.print("ERROR: cannot write source lists")
             logger.error(f"source lists write: {e}")
             return
 
@@ -338,7 +338,7 @@ class BuildSession:
             console.print(f"    Release             : {self.config.release}")
             console.print(f"    Base ID (default)   : {self.config.baseid}")
             console.print(f"    Parent version      : {self.config.baseversion}")
-            console.print(f"    Mirrors             :")
+            console.print("    Mirrors             :")
             for _m in self.config.mirrors:
                 console.print(f"      [{_m.id:8}] {_m.url}  {_m.suite}  {_m.component}")
             if self.config.snapshot_enabled:
@@ -346,11 +346,11 @@ class BuildSession:
                     _resolved = utils.resolve_snapshot_timestamp(self.config)
                 except (RuntimeError, ValueError) as e:
                     _resolved = f"<unresolved: {e}>"
-                console.print(f"    Snapshot            : enabled")
+                console.print("    Snapshot            : enabled")
                 console.print(f"      Configured        : {self.config.snapshot_timestamp_config}")
                 console.print(f"      Resolved          : {_resolved}")
             else:
-                console.print(f"    Snapshot            : disabled (live mirrors)")
+                console.print("    Snapshot            : disabled (live mirrors)")
             console.print(f"    Build codename      : {self.config.build_codename}")
             console.print(f"    Build version       : {self.config.build_version}")
             console.print(f"    Config file         : {self.config.config_path}")

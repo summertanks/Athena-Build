@@ -57,16 +57,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install Python deps
-        # python3-apt / aptsources only ship as Debian packages and
-        # are not exercised by the unit suite, so we skip them here.
-        # The four imports below cover everything tests/test_module.py
-        # touches: gnupg (verify_inrelease), python-debian (Source/
-        # Package/DebFile parsers), requests (download_file mocks),
-        # psutil (Tui resource probe).
-        run: pip install python-gnupg python-debian requests psutil
+      # Use the runner's *system* Python (3.12 on ubuntu-24.04) rather
+      # than actions/setup-python.  Reason: python3-apt only ships as a
+      # Debian package and its compiled apt_pkg.so is ABI-bound to the
+      # system interpreter; the toolcache Python from setup-python can't
+      # import it.  Several test modules transitively import apt_pkg
+      # (chroot, package, dependencytree, buildsystem, cache, dep_drift)
+      # so without this they fail with ModuleNotFoundError.
+      #
+      # debian-archive-keyring satisfies BuildConfig's Security.Keyring
+      # default path /usr/share/keyrings/debian-archive-keyring.gpg —
+      # without it test_buildconfig_parses_three_mirrors fails.
+      #
+      # The remaining python3-* packages mirror what
+      # tests/test_module.py imports: python-debian (Source/Package/
+      # DebFile parsers), python-gnupg (verify_inrelease), requests
+      # (download_file mocks), psutil (Tui resource probe).
+      - name: Install system Debian-only deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              python3-apt \
+              python3-debian \
+              python3-gnupg \
+              python3-requests \
+              python3-psutil \
+              debian-archive-keyring
       - name: Run unit tests
         run: python3 tests/test_module.py
