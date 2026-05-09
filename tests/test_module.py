@@ -1474,6 +1474,37 @@ def test_strip_build_version_rejects_malformed_filename():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STA-12 — Cache._GCC_BASE_RE pattern
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_gcc_base_re_matches_gcc_N_and_gcc_N_base():
+    """The pattern matches the two canonical names and captures the major."""
+    from cache import _GCC_BASE_RE
+    for name, major in (('gcc-12', '12'), ('gcc-13-base', '13'),
+                        ('gcc-9', '9'), ('gcc-15-base', '15')):
+        m = _GCC_BASE_RE.fullmatch(name)
+        assert m is not None, f"{name!r} should match"
+        assert m.group(1) == major, f"{name!r} → {m.group(1)} (want {major})"
+
+
+def test_gcc_base_re_rejects_other_gcc_prefixed_packages():
+    """The pattern leaves cross-compilers, multilib variants, g++, etc. alone."""
+    from cache import _GCC_BASE_RE
+    for name in ('gcc-mingw-w64', 'gcc-12-multilib', 'gcc-12-cross',
+                 'g++-12', 'gcc', 'gcc-doc', 'gccgo-12', 'libgcc-12-dev'):
+        assert _GCC_BASE_RE.fullmatch(name) is None, \
+            f"{name!r} should NOT match (would clobber unrelated package)"
+
+
+def test_gcc_base_re_rejects_malformed_versions():
+    """Non-digit versions and trailing junk are not matched."""
+    from cache import _GCC_BASE_RE
+    for name in ('gcc-snapshot', 'gcc-12.1', 'gcc-12-base-extra',
+                 'gcc-12base', 'gcc--base'):
+        assert _GCC_BASE_RE.fullmatch(name) is None, f"{name!r} should NOT match"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1557,6 +1588,10 @@ def main() -> int:
         test_strip_build_version_handles_udeb_extension,
         test_strip_build_version_no_change_when_no_binNMU,
         test_strip_build_version_rejects_malformed_filename,
+        # STA-12
+        test_gcc_base_re_matches_gcc_N_and_gcc_N_base,
+        test_gcc_base_re_rejects_other_gcc_prefixed_packages,
+        test_gcc_base_re_rejects_malformed_versions,
     ]
     failures = 0
     for t in tests:

@@ -1,6 +1,7 @@
 import bz2, gzip, lzma
 import logging
 import os
+import re
 import shutil
 import apt_pkg
 
@@ -20,6 +21,15 @@ from package import Package, Source
 from tui import ProgressBar, Spinner
 
 logger = logging.getLogger('athena')
+
+
+# gcc-N or gcc-N-base — the C compiler's own package and the matching libgcc
+# base symbol package for major gcc release N.  Used by Cache.build_cache to
+# pick the latest gcc major present in the index and drop older majors from
+# self.required (otherwise both gcc-12-base and gcc-13-base land in required
+# and the chroot install conflicts).  Other gcc-prefixed names — `gcc-mingw-w64`,
+# `gcc-N-multilib`, etc. — are intentionally NOT matched and stay untouched.
+_GCC_BASE_RE = re.compile(r'gcc-(\d+)(?:-base)?$')
 
 
 class Cache:
@@ -367,22 +377,26 @@ class Cache:
             f'{len(self.source_hashtable)} source names across {len(self.mirrors)} mirror(s)'
         )
         
-        # Special case - if gcc-10 already selected, e.g. both gcc-9-base & gcc-10-base are marked required
-        # TODO: sort key x.split('-')[1] gives identical keys for gcc-10 and gcc-10-base — both yield (10,).
-        # sorted(...)[-1:] keeps only one of them (last in stable sort order), silently dropping the other
-        # from required even if it's a distinct needed package. Fix: find the max version number, then
-        # keep ALL packages whose version number matches it, not just the last sorted element.
-        # Find the latest gcc major version from all available packages (not just required),
-        # since Bookworm's gcc-N-base is Priority: optional and won't appear in self.required.
-        _gcc_available = [pkg for pkg in self.package_hashtable
-                          if pkg.startswith('gcc-') and pkg.split('-')[1].isdigit()
-                          and pkg in (f"gcc-{pkg.split('-')[1]}", f"gcc-{pkg.split('-')[1]}-base")]
-        if _gcc_available:
-            _max_major = max(int(pkg.split('-')[1]) for pkg in _gcc_available)
-            latest_gcc = {f"gcc-{_max_major}", f"gcc-{_max_major}-base"}
+        # Pick the latest gcc major present in the index and drop older majors
+        # from self.required.  We scan the *whole* index (not just self.required)
+        # because Bookworm's gcc-N-base is Priority: optional — it won't show up
+        # in self.required even when it ships, and we still need to keep the
+        # matching pair { gcc-N, gcc-N-base } together.  See _GCC_BASE_RE for the
+        # exact name pattern (other gcc-prefixed packages like gcc-mingw-w64 are
+        # NOT matched and pass through self.required untouched).
+        _gcc_majors: Dict[int, set] = defaultdict(set)
+        for _pkg_name in self.package_hashtable:
+            _m = _GCC_BASE_RE.fullmatch(_pkg_name)
+            if _m:
+                _gcc_majors[int(_m.group(1))].add(_pkg_name)
+        if _gcc_majors:
+            latest_gcc = _gcc_majors[max(_gcc_majors)]
         else:
             latest_gcc = set()
-        self.required = [pkg for pkg in self.required if not pkg.startswith('gcc-') or pkg in latest_gcc]
+        self.required = [
+            _pkg for _pkg in self.required
+            if not _GCC_BASE_RE.fullmatch(_pkg) or _pkg in latest_gcc
+        ]
         tui.console.print(f"Selected : {latest_gcc}")
         tui.console.print(f"Required Package Count : {len(self.required)}")
         tui.console.print(f"Important Package Count : {len(self.important)}")
