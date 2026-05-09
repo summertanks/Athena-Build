@@ -592,12 +592,25 @@ class Tui:
         active = [v for v in self._tabs.values() if v['selected']]
         if len(active) == 1:
             return active[0]
-        # Recover from inconsistent state
+        # Inconsistent state — recover by resetting to the first tab.  Capture
+        # the offending tab names *before* clearing so the diagnostic message
+        # actually identifies which tabs were simultaneously selected (or that
+        # none were).  Route the message through both the on-disk file logger
+        # (for post-mortem after the TUI exits) and the in-memory log tab
+        # (for the operator watching live).
+        _active_names = [
+            name for name, entry in self._tabs.items() if entry['selected']
+        ]
         for v in self._tabs.values():
             v['selected'] = False
-        first = next(iter(self._tabs.values()))
+        first_name, first = next(iter(self._tabs.items()))
         first['selected'] = True
-        self.ERROR(f'Tab state inconsistency ({len(active)} active) — reset to first')
+        _msg = (
+            f'Tab state inconsistency: {len(active)} tab(s) selected '
+            f'({_active_names!r}) — reset to {first_name!r}'
+        )
+        logging.getLogger('athena').error(_msg)
+        self.ERROR(_msg)
         return first
 
     def _activate(self, name: str) -> None:
