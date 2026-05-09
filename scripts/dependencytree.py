@@ -47,6 +47,12 @@ def _auto_pick_candidate(candidates):
 
 class DependencyTree:
 
+    # Operators accepted by apt_pkg.check_dep for version constraint checks.
+    # Defined here (above first use) so the class body reads top-down rather
+    # than relying on Python's runtime-name-resolution to find the attribute
+    # several methods above where it is declared.
+    _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
+
     def __init__(self, cache: Cache, select_recommended: bool, arch: str,
                  build_profiles: frozenset = frozenset(), lookahead=None):
 
@@ -155,9 +161,6 @@ class DependencyTree:
             for _provided_name, _provided_ver in _selected.get_provides():
                 if _provided_name != _pkg_name:
                     self.__lookahead[_provided_name][_provided_ver] = _selected
-
-    # Operators accepted by apt_pkg.check_dep for version constraint checks
-    _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
 
     @property
     def selected_count(self) -> int:
