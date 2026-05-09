@@ -175,7 +175,7 @@ and an 8-check chroot verifier that gates ISO build.
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
-| UX-01  | P2 | todo | `print` command takes only `config|required|important|selected`. Add `print sources`, `print mirrors`, `print snapshot`. |
+| UX-01  | P2 | done | `print` command takes only `config|required|important|selected`. Add `print sources`, `print mirrors`, `print snapshot`. *(subsumed by the broader `print` overhaul in `scripts/print_commands.py`.  All three asked-for views shipped, plus 8 more — full set: configuration (config / mirrors / snapshot / paths), build state (state / stats), packages (required / important / selected / tunneled / `pkg <name>` / `deps <name>`), sources (sources / `src <name>`), relations (provides), meta (help).  Help screen groups categories into named sections; parametrized views route `*extras` through the dispatcher.  10 unit tests — including a safety test that every registered handler runs cleanly against an uninitialised BuildSession (catches any future view that forgets a `_require_cache()` / `_require_dep_check()` guard).)* |
 | UX-02  | P2 | done | `cmd_auto_run` does not respect prerequisites if any earlier step fails — it still tries the next step and produces a confusing error. Make it bail at the first failed flag. *(checks each step's progress flag after the call; aborts on first unset flag with a clear `autorun: '<step>' did not complete — aborting` message)* |
 | UX-03  | P2 | todo | Emit a final summary at end of `auto_run` (counts of cached/built/tunneled/failed, ISO path, total wall time). |
 | UX-04  | P2 | todo | Persist `BuildFlags` to disk between runs so a re-launched TUI can resume mid-pipeline. |
