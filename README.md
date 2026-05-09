@@ -84,7 +84,7 @@ The pipeline (eight stages, plus one optional side-channel):
 2. `parse_dependency` — resolves the package list in `config/pkg.list` into a closed dependency graph (binary deps + matching source packages).
 3. `source_download` — fetches `.dsc`, `.orig.tar.*`, and `.debian.tar.*` files for every selected source.
 4. `build_container` — builds a per-release Docker image carrying the build-deps for the source packages.
-5. `source_build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files into `repo/`.
+5. `source_build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files into `repo/`.  Default mode skips *extras-only* sources (depth-1 Recommends pulled in by `parse_dependency` for the future apt-repo); `source_build recommended` builds those.  A bracket-token like `source_build live-boot-doc [nocheck]` overrides `DEB_BUILD_PROFILES` + `DEB_BUILD_OPTIONS` for that one build — useful when you want a `-doc` binary the default `nodoc` profile would skip.
 6. `build_chroot` — installs the built `.deb`s into a chroot under `buildroot/` in topo-sorted batches, handling the libc bootstrap cycle, post-install patch overlays, and the canonical libdevmapper/dmsetup/systemd cycle (ARCH-12).  Runs `verify_chroot` automatically as its tail end.
 7. `verify_chroot` — the 8-check verifier from step 6, also invokable on its own (e.g. after a manual edit of the chroot tree).  Fails loud; gates `build_iso`.
 8. `build_iso` — wraps the chroot into a squashfs, runs `grub-mkrescue` to produce a hybrid BIOS/EFI bootable ISO under `image/`.
@@ -125,8 +125,52 @@ From there:
 - When `autorun` finishes cleanly, run `build_iso` to produce the final image. (If you want to drop extra files into `buildroot/` first — custom motd, extra config — this is the moment.)
 - If a stage fails, fix the cause and re-run that stage by name (`source_build`, `build_chroot`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
 - TUI keys: arrows to scroll the active tab, `Tab` to cycle between tabs (console / log), `q`/`Q` to quit. Resize is handled automatically.
+- `print extras` shows the depth-1 *Recommends* of your selected packages that have been pulled into `repo/` but kept *out* of the chroot install — there to support `apt install <thing>` from a booted Athena system later, not to bloat the live ISO.  Toggle off with `[Build] IncludeRecommendsInRepo = false` if you want a strictly minimal repo.  See §Working with the package set below.
 
 The final ISO appears under `image/` named `athena-<version>-amd64.iso`. A sidecar `<iso>.user` file next to it carries the per-build random username for the live boot (see SEC-04).
+
+### Working with the package set
+
+The shipped pipeline already handles two distinct flavours of "package":
+
+1. **Install set** — what actually goes into the live ISO.  Comes from `config/pkg.list` plus the required/important closure plus their hard `Depends`.  These get built (or tunneled) by default `source_build` and installed by `build_chroot`.
+2. **Extras** — depth-1 *Recommends* of the install set.  They land in `selected_pkgs` (so `source_download` fetches their tarballs) but are filtered out of the chroot install and out of the default `source_build` run.  When you eventually publish the repo (CONF-01/02), they're what someone running `apt install <thing>` on a booted Athena system gets that *isn't* already on the disk.
+
+You don't have to think about this on a normal `autorun` — the defaults do the right thing.  When you do want to poke at it, the relevant commands are:
+
+```
+print extras                          # what's in the extras pool, with source mapping
+print stats                           # counts incl. "extras (recom): N pkg(s) (toggle=on|off)"
+
+source_build                          # build the install set (default — skips extras-only sources)
+source_build recommended              # build ONLY the extras-only sources
+source_build foo                      # build a specific source
+source_build force foo                # rebuild even if .result says PASS
+```
+
+#### Overriding build profiles per invocation
+
+`config/build.conf`'s `[Source] BuildProfiles = nodoc, nocheck` is sensible for the install set — most people don't want man-pages and test runs in the live ISO.  But when an extras package depends on those profiles being *off* (the obvious case being `live-boot-doc`, whose binary stanza in `debian/control` carries `Build-Profiles: <!nodoc>`), the default build silently drops it.
+
+The escape hatch is a bracket-token in the `source_build` args:
+
+```
+source_build live-boot-doc [nocheck]
+```
+
+The bracket-token replaces *both* `DEB_BUILD_PROFILES` and `DEB_BUILD_OPTIONS` for that single invocation.  The example above drops `nodoc`, so `dpkg-buildpackage` produces `live-boot-doc.deb` and it lands in `repo/`.  Other valid forms:
+
+| Command | What it does |
+|---|---|
+| `source_build foo []` | rebuild `foo` with NO profiles/options at all (most permissive — runs tests, generates docs) |
+| `source_build foo [nocheck]` | rebuild `foo` with profiles/options = `nocheck` only |
+| `source_build foo [nocheck,nodoc]` | rebuild `foo` with both |
+| `source_build [nocheck]` | rebuild all install-set sources with the override |
+| `source_build recommended [nocheck]` | rebuild all extras-only sources with the override |
+
+The override implies `force` — a prior `.result` file reflects the *old* profiles, so the cache check would falsely short-circuit the rebuild.  The TUI prints a clear note when this auto-flip happens so you're not surprised.
+
+Multiple bracket-tokens in one invocation is an error (we don't try to merge or pick).  `recommended` and named packages are mutually exclusive — pick one mode.
 
 ### Where logs live
 
@@ -155,6 +199,8 @@ Things that go wrong, ordered by how often they actually bite:
 **`source_build` fails with "missing build-dep `libfoo-dev`".** The build container doesn't have the build-deps for that source package. Either the container hasn't been rebuilt against the current `pkg.list`, or `libfoo-dev` lives in `non-free` / `contrib` and your mirror config doesn't include those components. Re-run `build_container`, or add the right component to the mirror block in `config/build.conf`.
 
 **A binNMU package isn't found on disk.** APT advertises `foo_1.2-3+b2_amd64.deb` but `dpkg-buildpackage` produced `foo_1.2-3_amd64.deb` from source. The pipeline strips the `+bN` suffix automatically (see `utils.strip_build_version` and STA-15); if you see this error anyway it usually means the source package failed silently in stage 5 and no `.deb` was produced. Re-run `source_build` and watch for the failed source — its dpkg log will be in the run log.
+
+**A `-doc` (or other Build-Profiles-gated) binary isn't in `repo/`.** `[Source] BuildProfiles = nodoc, nocheck` is the shipped default — it strips any `debian/control` stanza marked `Build-Profiles: <!nodoc>`, which silently drops doc binaries.  If you want the doc binary in your repo (so it's installable later via apt), rebuild that one source with the profile override:  `source_build live-boot-doc [nocheck]`.  Drops `nodoc` for that invocation only, produces the doc `.deb`, lands it in `repo/`.  See §Working with the package set.
 
 **Patch fails to apply with "fuzz" or "hunk failed".** A file under `patch/source/<pkg>/<ver>/9001-*.patch` no longer applies to the upstream source — the upstream changed between when the patch was written and now. Either pin the package version in `config/pkg.list` to the version the patch was written against, or regenerate the patch (see the `Source Code Patching` section below). Both are valid; pinning is faster, regenerating is correct.
 
