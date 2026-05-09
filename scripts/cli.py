@@ -247,17 +247,22 @@ class Cli:
         # 128 + SIGINT (2) = 130 — POSIX convention for interrupted programs.
         self._exit_code = 130
 
-    # ─── mark / trim_to — no-ops in CLI mode ───────────────────────────────
+    # ─── console_mark / console_trim_to — no-ops in CLI mode ───────────────
+    # NOTE the underscore-prefix names: the Console facade in tui.py calls
+    # self._resolve().console_mark() and .console_trim_to() — NOT plain
+    # mark/trim_to.  Naming them wrong was a real bug in the first cut and
+    # crashed parse_dependency at the multi-provider auto-pick path.
 
-    def mark(self) -> int:
+    def console_mark(self) -> int:
         """Console.mark calls this to remember a 'rewind point' on the
-        console tab.  Stdout has no rewind, so return a sentinel and let
-        trim_to() ignore it."""
+        console tab (multi-provider Prompt clears its scratch lines via
+        this).  Stdout has no rewind, so return a sentinel and let
+        console_trim_to() ignore it."""
         return 0
 
-    def trim_to(self, mark: int) -> None:
-        """Console.trim_to would erase tab buffer back to *mark* in the TUI.
-        Can't unprint stdout — silently no-op."""
+    def console_trim_to(self, mark: int) -> None:
+        """Console.trim_to would erase tab buffer back to *mark* in the
+        TUI.  Can't unprint stdout — silently no-op."""
         return
 
     # ─── help screen ───────────────────────────────────────────────────────
