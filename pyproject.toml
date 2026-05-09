@@ -53,6 +53,7 @@ py-modules  = [
     "buildsystem",
     "cache",
     "chroot",
+    "cli",
     "dep_drift",
     "dependencytree",
     "iso",
