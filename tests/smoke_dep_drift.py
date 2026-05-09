@@ -178,16 +178,19 @@ def drift_report(cfg, dt):
     canonical = (dt.canonical_pkgs if hasattr(dt, 'canonical_pkgs')
                  else dt.selected_pkgs)
 
+    import utils  # local import — sys.path already prepped above
     for pkg_name, pkg_obj in canonical.items():
         filename = os.path.basename(pkg_obj.get('Filename', ''))
         if not filename:
             continue
-        # strip_build_version lives on BuildSystem; replicate inline
-        # Strip Debian binNMU suffix '+bN' and possibly architecture suffix
-        # from the deb filename so we look up '...-2_amd64.deb' instead of
-        # '...-2+b2_amd64.deb'.
-        import re
-        filename = re.sub(r'\+b\d+_', '_', filename)
+        # Strip Debian binNMU suffix '+bN' so we look up '...-2_amd64.deb'
+        # instead of '...-2+b2_amd64.deb'.  utils.strip_build_version is the
+        # single source of truth shared with parse_sources and
+        # BuildSystem._get_deb_files (see STA-15).  Tolerate malformed entries.
+        try:
+            filename = utils.strip_build_version(filename)
+        except ValueError:
+            pass  # fall back to original filename
         deb_path = os.path.join(cfg.dir_repo, filename)
         if not os.path.exists(deb_path):
             no_disk += 1

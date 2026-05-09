@@ -14,6 +14,36 @@ from typing import List, Optional
 logger = logging.getLogger('athena')
 
 
+def strip_build_version(file: str) -> str:
+    """Remove a Debian binNMU rebuild suffix `+bN` from a `.deb` filename.
+
+    Input must be `name_version_arch.ext` shape (e.g. `pkg_1.0-2+b1_amd64.deb`).
+    Strips `+bN` only when it sits at the *end* of the version field, leaving
+    legitimate point-release / security-update suffixes (`+deb12u1`) intact:
+
+        foo_1.0-2+b1_amd64.deb       → foo_1.0-2_amd64.deb
+        foo_1.0-2+deb12u1_amd64.deb  → foo_1.0-2+deb12u1_amd64.deb (unchanged)
+        foo_1.0-2+deb12u1+b3_amd64.deb → foo_1.0-2+deb12u1_amd64.deb
+        foo_1.0+b1-2_amd64.deb       → foo_1.0+b1-2_amd64.deb (binNMU embedded
+                                       in version, not at end → not a rebuild
+                                       suffix; left alone)
+
+    Used to map an APT-resolved `Filename` (which carries the buildd's binNMU
+    rebuild suffix) onto the file `dpkg-buildpackage` actually produced from
+    source (which uses the source version, never `+bN`).
+
+    Raises:
+        ValueError: filename is not in `name_version_arch.ext` shape.
+    """
+    _name, _ext = os.path.splitext(file)
+    _name = _name.split('_')
+    if len(_name) != 3:
+        raise ValueError(f"Incorrectly formatted package filename: {file!r}")
+    _pkg_name, _version, _arch = _name
+    _version = re.sub(r"\+b\d+$", "", _version)
+    return f"{_pkg_name}_{_version}_{_arch}{_ext}"
+
+
 def _strip_quotes(s: str) -> str:
     """Remove a single matching pair of surrounding quotes from a config value.
 

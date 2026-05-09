@@ -914,9 +914,10 @@ class BuildSession:
         _os_detail = ''
         if _os_ok:
             try:
+                with open(_os_release) as _osf:
+                    _os_lines = _osf.read().splitlines()
                 _os_detail = next(
-                    (l.split('=', 1)[1].strip('"') for l in
-                     open(_os_release).read().splitlines()
+                    (l.split('=', 1)[1].strip('"') for l in _os_lines
                      if l.startswith('PRETTY_NAME=')), 'present')
             except OSError:
                 _os_detail = 'present'
