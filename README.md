@@ -50,14 +50,116 @@ Debian's package repositories are organized into several official repositories, 
 
 ### RHEL/Debian/Ubuntu
 
+The Linux distribution world (broadly) splits into two camps that have agreed on package format: the dpkg/apt camp (Debian and its many descendants), and the rpm/dnf camp (Red Hat and its descendants — RHEL, CentOS, Rocky, AlmaLinux, Fedora). They look superficially the same from a user's seat — kernel, userland, init, package manager — but the *philosophies* are different, and the philosophy bleeds into how you build.
+
+Red Hat optimises for a controlled commercial pipeline. Packages are RPMs, the policy is set by the vendor, and the source for any given binary goes through the distribution's own build farm. Signing and release cadence is tighter and slower, which is exactly what enterprise customers buying support contracts wanted.
+
+Debian sits at the other end of the same axis. Packaging is community-driven, every package has a *maintainer* (a real person, who has signed a social contract), the source is downloadable and rebuildable by anyone, and the Free Software requirements are taken seriously enough that an entire `non-free` archive exists to keep `main` clean. The cost is that Debian moves at the pace of consensus — stable releases land when they land.
+
+Ubuntu (Canonical) is the pragmatic middle. It takes Debian's package format, source policy, and most of its archive, then adds a more predictable six-month release cadence, an opinionated default install, paid LTS support, and a willingness to ship `non-free` bits in `main` (drivers, firmware) where Debian wouldn't. From a *build* perspective Ubuntu and Debian are very close — same `apt`/`dpkg`/`dpkg-buildpackage` toolchain, same source-package layout — which is why this project's design choices port to either. (See COMP-11 in `TODO.md` for the day Athena gains a `Distro = ubuntu` switch.)
+
+A practical note for anyone coming from RHEL: this project will be largely incomprehensible for the first afternoon. Conventions are different, assumed reading is different. Stick with it; the underlying ideas are the same.
+
 ### Stiched together
+
+So we have a kernel, a libc, a userland, a package manager, mirrors that hand out signed metadata, source archives that build into binary packages — what does it actually take to *stitch* this into a working system?
+
+Roughly: bootstrap a minimal root filesystem, teach it to find packages, install everything you want it to ship with, wire up the boot loader and the init system, write the identity files (`/etc/os-release`, `/etc/hostname`, network config), and wrap the whole tree into something a machine can boot from — a live ISO, an installer ISO, or a disk image.
+
+Done by hand this is a long week. `debootstrap` automates the bootstrap step. `live-build` automates the live-ISO bit. `debian-installer` automates the installer-ISO bit. Each tool does one piece well, and gluing them together for a *custom* distribution — your own package set, your own patches, your own branding — is where the friction usually shows up.
+
+Athena-Build is one attempt at that glue, with the additional constraint that everything ships from source. The chapters that follow walk through what that looks like in practice — what to install on the host before you start, how to drive the build, where to look when something breaks (and it will).
 
 
 ## Building Image
 
 ### Intro
 
-...
+The build system is a curses TUI driven by `build-system.sh`. There is one shipped pipeline (`autorun`) that runs the eight stages in order; you can also run any stage manually if you want to inspect intermediate state, retry a step, or experiment.
+
+The eight stages, in order:
+
+1. `build_cache` — pulls `Packages` and `Sources` indices from each configured mirror, GPG-verifies the `InRelease` signature against `debian-archive-keyring`, and assembles an in-memory APT cache.
+2. `parse_dependency` — resolves the package list in `config/pkg.list` into a closed dependency graph (binary deps + matching source packages).
+3. `source_download` — fetches `.dsc`, `.orig.tar.*`, and `.debian.tar.*` files for every selected source.
+4. `build_container` — builds a per-release Docker image carrying the build-deps for the source packages.
+5. `source_build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files into `repo/`.
+6. `build_chroot` — installs the built `.deb`s into a chroot under `buildroot/` in topo-sorted batches, handling the libc bootstrap cycle, debconf pre-seeds, and post-install patch overlays.
+7. `verify_chroot` — runs an 8-check verifier on the chroot. Fails loud if anything is broken; gates the next step.
+8. `build_iso` — wraps the chroot into a squashfs, runs `grub-mkrescue` to produce a hybrid BIOS/EFI bootable ISO under `image/`.
+
+Each stage sets a `BuildFlags` bit on success; later stages refuse to run unless their prerequisites are set. `autorun` walks them in order and bails on the first failure.
+
+### Prerequisites
+
+A Debian-derived host. Development happens on Debian bookworm; trixie should work, current Ubuntu LTS likely too. You need:
+
+- **sudo**. The chroot install steps shell out to `mount --bind`, `chroot`, `dpkg`. Run the build as a normal user; the TUI will prompt once for your sudo password and zero it from memory after the chroot stages finish (see STA-07).
+- **Docker Engine** (not Docker Desktop). The source-build container runs build-deps in isolation. The `Misc / Installing Docker` section at the bottom has the apt incantation for an up-to-date Engine.
+- **Python ≥ 3.9** plus `python3-apt`, `python3-debian`, `python3-gnupg`, `python3-requests`, `python3-psutil`, `python3-docker`. The wrapper `build-system.sh` checks `py_requirements.txt` and tells you what's missing.
+- **debian-archive-keyring** — used to GPG-verify mirror `InRelease` files. On a Debian host it's almost always there; on Ubuntu you may need to apt-install it (see `[Security]` in `config/build.conf` for the keyring path).
+- **Disk** — budget ~30 GB for a full bookworm-derived build. The bulk lives in `source/` (raw upstream tarballs), `build/` (per-package build trees inside the container), `repo/` (the produced `.deb`s), and `buildroot/` (the chroot the ISO is built from).
+- **RAM** — 8 GB is workable; 16 GB makes the source-build stage less painful, particularly once parallel builds land (COMP-03).
+- **Bandwidth** — first `build_cache` + `source_download` will pull a few GB. The rest is local.
+
+### First run
+
+Clone the repo, then:
+
+```
+cd Athena-Build
+./build-system.sh
+```
+
+The wrapper will tell you about any missing Python deps. Install them and re-run. The TUI launches.
+
+From there:
+
+- `print config` shows what `config/build.conf` resolved to — which mirrors are active, whether snapshot pinning is on, what `[Build]` codename will be baked into `/etc/os-release`. Run this first to confirm you're building what you think you're building.
+- `autorun` runs the full eight-stage pipeline. Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
+- If a stage fails, fix the cause and re-run that stage by name (`source_build`, `build_chroot`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
+
+The final ISO appears under `image/` named `athena-<version>-amd64.iso`. A sidecar `<iso>.user` file next to it carries the per-build random username for the live boot (see SEC-04).
+
+### Where logs live
+
+Everything logged at INFO and above (and `dpkg`/`mksquashfs`/`grub-mkrescue` subprocess transcripts, at DEBUG) goes to a single file:
+
+```
+log/build-YYYY-MM-DDTHH-MM-SS.log
+```
+
+One file per `build-system.sh` invocation, timestamped at start. Inside the running TUI the same content is split across two tabs: a *console* tab that mirrors what `tui.console.print` writes (the loud, user-visible traffic) and a *log* tab carrying the structured INFO/WARNING/ERROR/DEBUG records. After the run ends, the on-disk log is the canonical source of truth — the TUI buffers are gone.
+
+If you only want the warnings and errors from a session:
+
+```
+grep -E "WARNING|ERROR" log/build-2026-05-09T*.log
+```
+
+### Common failure modes
+
+Things that go wrong, ordered by how often they actually bite:
+
+**`InRelease` signature verification fails.** The mirror you pointed at is not signed by the keys in `debian-archive-keyring`, or your keyring is stale. Check `[Security]` in `config/build.conf`. The honest fix is to apt-install a fresher `debian-archive-keyring`. You *can* set `Disabled = true` to bypass for one run, but then you have no GPG check on what you're building from — don't do that on a mirror you don't run yourself.
+
+**`build_cache` says some `.deb` is missing from the mirror.** Mirrors lag. If you have `[Snapshot] Enabled = true` (the shipped default — see STA-03), you've pinned a specific timestamp and the file *should* be there. If it isn't, either the snapshot timestamp is broken or you typed it wrong; pick a fresh one from <https://snapshot.debian.org> and edit `[Snapshot] Timestamp`. If snapshot is off, the live mirror just doesn't have the file you asked for — pick a different mirror or wait for sync.
+
+**`source_build` fails with "missing build-dep `libfoo-dev`".** The build container doesn't have the build-deps for that source package. Either the container hasn't been rebuilt against the current `pkg.list`, or `libfoo-dev` lives in `non-free` / `contrib` and your mirror config doesn't include those components. Re-run `build_container`, or add the right component to the mirror block in `config/build.conf`.
+
+**A binNMU package isn't found on disk.** APT advertises `foo_1.2-3+b2_amd64.deb` but `dpkg-buildpackage` produced `foo_1.2-3_amd64.deb` from source. The pipeline strips the `+bN` suffix automatically (see `utils.strip_build_version` and STA-15); if you see this error anyway it usually means the source package failed silently in stage 5 and no `.deb` was produced. Re-run `source_build` and watch for the failed source — its dpkg log will be in the run log.
+
+**Patch fails to apply with "fuzz" or "hunk failed".** A file under `patch/source/<pkg>/<ver>/9001-*.patch` no longer applies to the upstream source — the upstream changed between when the patch was written and now. Either pin the package version in `config/pkg.list` to the version the patch was written against, or regenerate the patch (see the `Source Code Patching` section below). Both are valid; pinning is faster, regenerating is correct.
+
+**`build_chroot` aborts on a single package's `dpkg --configure` step.** Look for the dpkg transcript in `log/build-*.log`. Most often it's debconf prompting for input — the project pre-seeds debconf for the shipped package set (in `chroot.py`'s `_preseed_debconf`), but custom additions to `pkg.list` may not be pre-seeded. The fix is either to add the pre-seed, or to drop the package if you don't need it. STA-02 removed the old `--force-depends` mask, so a real configure failure is now visible rather than silently swallowed.
+
+**`verify_chroot` reports "linux-image installed but no kernel in /boot/".** A kernel package was unpacked but its post-install hook didn't fire — usually because `/proc` wasn't bind-mounted at the right moment. Re-run `build_chroot` from clean (delete `buildroot/` first); the second pass typically catches it. STA-10 hardened the mount checks, so this should be rare on the current code.
+
+**Dep-graph cycle the libc-seed didn't break.** ARCH-12 handles the canonical libdevmapper ↔ dmsetup ↔ systemd cycle automatically by emitting a terminal "force-depends" batch. A custom `pkg.list` can introduce a *different* cycle that escapes the seed. The chroot builder will name the offending packages in the log; usually you can break the cycle by removing whichever one isn't actually needed, or by accepting the force-depends batch and letting `_configure_packages` recover.
+
+**The TUI window goes blank or won't take input after a resize.** The renderer was redrawing when the terminal changed size. Hit `r` (refresh) or close and re-open the terminal. There's a real bug here that's filed as part of the broader TUI rework — see ARCH-14.
+
+When in doubt, the on-disk log under `log/` has more than the TUI shows. Start there.
 
 ### Source Code Patching
 Using quilt to create patches. can use standard diff also. Mostly templates are nice in quilt. While we would have prefered to use quilt natively for applying patch too but that requires the patch file being in the tarball, else a lot of 'fuzz' errors. So to apply patching still using standard 'patch'.
@@ -117,3 +219,7 @@ apt-get update
 apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 usermod -aG docker $USER
 ```
+
+---
+
+*A note to future-me (and anyone landing patches): this README is meant to track the state of the project, not just the day it was written. If you add a pipeline stage, change a default in `config/build.conf`, rename a command, retire a failure mode (or discover a new one), update this file in the same change. A README that lies is worse than a README that's missing — see `DOC-06` in `TODO.md`.*
