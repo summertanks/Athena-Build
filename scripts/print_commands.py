@@ -104,7 +104,11 @@ def _print_config(session, *_extras) -> None:
     tui.console.print(f"    Parent version      : {cfg.baseversion}")
     tui.console.print(f"    Build codename      : {cfg.build_codename}")
     tui.console.print(f"    Build version       : {cfg.build_version}")
-    tui.console.print(f"    Recommends pulled   : {getattr(cfg, 'select_recommended', False)}")
+    tui.console.print(
+        f"    Recommends in repo  : "
+        f"{getattr(cfg, 'include_recommends_in_repo', False)}  "
+        f"([Build] IncludeRecommendsInRepo)"
+    )
     if getattr(cfg, 'build_profiles', None):
         tui.console.print(f"    Build profiles      : {', '.join(sorted(cfg.build_profiles))}")
     if getattr(cfg, 'build_options', None):
@@ -230,14 +234,18 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print(f"  Dep tree: canonical pkgs : {canonical}")
         tui.console.print(f"  Dep tree: virtual aliases: {virtuals}")
         tui.console.print(f"  Dep tree: source pkgs    : {len(dt.selected_srcs)}")
-        # EXTRAS-01: surface the extras counts so stats matches reality.
+        # EXTRAS-01: always surface the extras counts so the operator can
+        # tell "toggle off" from "toggle on, 0 pulled" from "toggle on,
+        # N pulled".  Suppressing the row when 0 made the failure mode
+        # invisible and confused the operator on the first real run.
         _extras_n = len(getattr(dt, 'extras_pkg_names', set()))
         _extras_only_n = len(getattr(dt, 'extras_src_names', set()))
-        if _extras_n:
-            tui.console.print(
-                f"  Dep tree: extras (recom) : {_extras_n} pkg(s) "
-                f"from {_extras_only_n} extras-only source(s)"
-            )
+        _toggle = getattr(cfg, 'include_recommends_in_repo', False)
+        tui.console.print(
+            f"  Dep tree: extras (recom) : {_extras_n} pkg(s) "
+            f"from {_extras_only_n} extras-only source(s)  "
+            f"(toggle={'on' if _toggle else 'off'})"
+        )
         tui.console.print("  Dep tree: download size  : "
                           f"{getattr(dt, 'download_size', 0) // (2**20)} MB")
     else:
