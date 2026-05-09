@@ -1587,6 +1587,7 @@ class _PrintSessionStub:
             tunnel_packages: list = []
             working_dir = '/tmp/build'
             dir_cache = '/tmp/build/cache'
+            dir_image = '/tmp/build/image'
             dir_log = '/tmp/build/log'
             config_path = '/tmp/build/build.conf'
             pkglist_path = '/tmp/build/pkg.list'
@@ -1621,31 +1622,31 @@ def test_print_no_handler_crashes_on_uninitialized_session():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UX-03 — autorun final summary
+# UX-03 — autorun summary (lives in print_commands.summary)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_format_duration_seconds_only():
     """Under a minute: just `Ns`."""
-    from build import BuildSession
-    assert BuildSession._format_duration(0) == '0s'
-    assert BuildSession._format_duration(7) == '7s'
-    assert BuildSession._format_duration(59) == '59s'
+    from print_commands import format_duration
+    assert format_duration(0) == '0s'
+    assert format_duration(7) == '7s'
+    assert format_duration(59) == '59s'
 
 
 def test_format_duration_minutes_seconds():
     """Under an hour: `Mm SSs` with zero-padded seconds."""
-    from build import BuildSession
-    assert BuildSession._format_duration(60) == '1m 00s'
-    assert BuildSession._format_duration(125) == '2m 05s'
-    assert BuildSession._format_duration(3599) == '59m 59s'
+    from print_commands import format_duration
+    assert format_duration(60) == '1m 00s'
+    assert format_duration(125) == '2m 05s'
+    assert format_duration(3599) == '59m 59s'
 
 
 def test_format_duration_hours_minutes_seconds():
     """An hour or more: `Hh MMm SSs` with zero-padding on minutes + seconds."""
-    from build import BuildSession
-    assert BuildSession._format_duration(3600) == '1h 00m 00s'
-    assert BuildSession._format_duration(7325) == '2h 02m 05s'
-    assert BuildSession._format_duration(36000) == '10h 00m 00s'
+    from print_commands import format_duration
+    assert format_duration(3600) == '1h 00m 00s'
+    assert format_duration(7325) == '2h 02m 05s'
+    assert format_duration(36000) == '10h 00m 00s'
 
 
 def _build_autorun_session_stub(*, all_done: bool, source_build_done: bool):
@@ -1694,16 +1695,20 @@ def _build_autorun_session_stub(*, all_done: bool, source_build_done: bool):
 
 
 def test_autorun_summary_success_includes_counts_and_iso_path():
-    """Successful autorun summary surfaces wall time, all stage counts,
-    and the predicted ISO path so the operator knows where to look."""
+    """Successful autorun summary (timing-driven path) surfaces wall time,
+    all stage counts, and the predicted ISO path with build_iso hint."""
     import datetime as _dt
+    import print_commands
     sess = _build_autorun_session_stub(all_done=True, source_build_done=True)
-    output = _capture_console_print(lambda: sess._print_autorun_summary(
-        _dt.datetime(2026, 5, 9, 12, 0, 0),
-        _dt.datetime(2026, 5, 9, 13, 5, 30),
-        3930,
-        None,
-    ))
+    timing = print_commands.AutorunTiming(
+        started=_dt.datetime(2026, 5, 9, 12, 0, 0),
+        finished=_dt.datetime(2026, 5, 9, 13, 5, 30),
+        elapsed=3930,
+        aborted_at=None,
+    )
+    output = _capture_console_print(
+        lambda: print_commands.summary(sess, timing=timing)
+    )
     assert 'SUCCESS' in output
     assert '2026-05-09 12:00:00' in output
     assert '2026-05-09 13:05:30' in output
@@ -1715,24 +1720,63 @@ def test_autorun_summary_success_includes_counts_and_iso_path():
     assert '2 tunneled'  in output
     assert 'verified'    in output
     assert '/tmp/image/athena-0.1-amd64.iso' in output
+    # All-green next-step hint should be visible
+    assert 'Ready' in output and 'build_iso' in output
 
 
 def test_autorun_summary_aborted_marks_stage_and_partial_state():
     """Aborted autorun summary identifies the stage that didn't complete
     and renders 'not built'/'not run' for stages downstream of the abort."""
     import datetime as _dt
+    import print_commands
     sess = _build_autorun_session_stub(all_done=False, source_build_done=False)
-    output = _capture_console_print(lambda: sess._print_autorun_summary(
-        _dt.datetime(2026, 5, 9, 12, 0, 0),
-        _dt.datetime(2026, 5, 9, 12, 30, 0),
-        1800,
-        'source_download',
-    ))
+    timing = print_commands.AutorunTiming(
+        started=_dt.datetime(2026, 5, 9, 12, 0, 0),
+        finished=_dt.datetime(2026, 5, 9, 12, 30, 0),
+        elapsed=1800,
+        aborted_at='source_download',
+    )
+    output = _capture_console_print(
+        lambda: print_commands.summary(sess, timing=timing)
+    )
     assert 'ABORTED' in output
     assert "'source_download'" in output
     assert '30m 00s' in output
     assert 'Source build   : not run' in output
     assert 'Chroot         : not built' in output
+
+
+def test_print_summary_without_timing_renders_state_snapshot():
+    """Operator-invoked `print summary` (no timing) shows a state snapshot
+    rather than SUCCESS/ABORTED — same per-stage rows, no wall clock."""
+    import print_commands
+    sess = _build_autorun_session_stub(all_done=True, source_build_done=True)
+    output = _capture_console_print(
+        lambda: print_commands.summary(sess, timing=None)
+    )
+    # State header, not SUCCESS/ABORTED
+    assert 'Pipeline summary' in output
+    assert 'SUCCESS' not in output
+    assert 'ABORTED' not in output
+    # Wall-clock rows must be absent
+    assert 'Started' not in output
+    assert 'Wall time' not in output
+    # But per-stage rows present
+    assert '32847 package names' in output
+    assert '26 built' in output
+    assert 'verified' in output
+
+
+def test_print_summary_dispatch_through_handler():
+    """`print summary` via the CATEGORIES dispatch reaches the no-timing
+    branch (operator path)."""
+    import print_commands
+    sess = _build_autorun_session_stub(all_done=True, source_build_done=True)
+    output = _capture_console_print(
+        lambda: print_commands.dispatch(sess, 'summary')
+    )
+    assert 'Pipeline summary' in output
+    assert 'SUCCESS' not in output
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1888,12 +1932,14 @@ def main() -> int:
         test_fmt_dep_with_constraint,
         test_fmt_dep_group_alternates_with_pipe,
         test_print_no_handler_crashes_on_uninitialized_session,
-        # UX-03 — autorun summary
+        # UX-03 — autorun summary (in print_commands)
         test_format_duration_seconds_only,
         test_format_duration_minutes_seconds,
         test_format_duration_hours_minutes_seconds,
         test_autorun_summary_success_includes_counts_and_iso_path,
         test_autorun_summary_aborted_marks_stage_and_partial_state,
+        test_print_summary_without_timing_renders_state_snapshot,
+        test_print_summary_dispatch_through_handler,
     ]
     failures = 0
     for t in tests:
