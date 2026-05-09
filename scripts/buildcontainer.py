@@ -177,12 +177,32 @@ class BuildContainer:
         except OSError:
             return ''
 
-    def build(self, src_pkg: Source) -> bool:
+    def build(self, src_pkg: Source, *,
+              profiles_override=None, options_override=None) -> bool:
+        """Build a single source package inside the container.
+
+        profiles_override / options_override (keyword-only) replace
+        self.build_profiles / self.build_options for THIS invocation only.
+        Pass an iterable of profile/option names; pass an empty iterable
+        for "no profiles/options at all" (the most permissive build,
+        includes docs and runs tests).  None means "use the configured
+        defaults" (today's behaviour, no override).
+
+        Used by `source_build <pkg> [profiles]` to rebuild a package
+        under different profiles than the build.conf default — e.g. drop
+        nodoc to actually produce -doc binaries that the default build
+        would skip.
+        """
 
         _plain_deps = []
         _or_cmds = []
         _apt_retry = '-o Acquire::Retries=5 '
-        _active_profiles = self.build_profiles
+        _active_profiles = (frozenset(profiles_override)
+                            if profiles_override is not None
+                            else self.build_profiles)
+        _active_options = (frozenset(options_override)
+                           if options_override is not None
+                           else self.build_options)
 
         for _grp in src_pkg.build_depends(self.arch, _active_profiles):
             if not _grp:
@@ -207,7 +227,7 @@ class BuildContainer:
         # `<!nodoc>` and `<!stage1>`.  Source.build_depends has already had
         # `_active_profiles` applied above for build-dep filtering; the env
         # vars below propagate the right values into dpkg-buildpackage.
-        _deb_build_opts     = ' '.join(sorted(self.build_options))
+        _deb_build_opts     = ' '.join(sorted(_active_options))
         _deb_build_profiles = ' '.join(sorted(_active_profiles))
         deb_build_env = (
             f'DEB_BUILD_OPTIONS="{_deb_build_opts}" '

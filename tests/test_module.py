@@ -2098,6 +2098,97 @@ def test_print_extras_handles_empty_extras_set():
     assert 'IncludeRecommendsInRepo' in output
 
 
+# ─── EXTRAS-01: source_build [profiles] override parsing ────────────────────
+
+def test_source_build_args_no_args_is_default_mode():
+    """Bare `source_build` → no flags, no names, no override."""
+    from build import BuildSession
+    err, force, rec, names, override = \
+        BuildSession._parse_source_build_args(())
+    assert err is None
+    assert (force, rec, names, override) == (False, False, [], None)
+
+
+def test_source_build_args_force_flag_anywhere():
+    """`force` is detectable in any position, case-insensitive."""
+    from build import BuildSession
+    for argv in (('force',), ('Force',), ('foo', 'FORCE'), ('force', 'foo')):
+        err, force, _r, _n, _o = BuildSession._parse_source_build_args(argv)
+        assert err is None and force is True, f"args={argv!r}"
+
+
+def test_source_build_args_recommended_and_named_pkgs_mutually_exclusive():
+    """`recommended pkg1` is rejected — operator must pick one mode."""
+    from build import BuildSession
+    err, *_ = BuildSession._parse_source_build_args(('recommended', 'pkg1'))
+    assert err is not None and 'mutually exclusive' in err
+
+
+def test_source_build_args_bracket_token_extracts_profiles():
+    """`[nocheck]` parses to ['nocheck']; commas + whitespace tolerated."""
+    from build import BuildSession
+    err, _f, _r, names, override = \
+        BuildSession._parse_source_build_args(('foo', '[nocheck]'))
+    assert err is None
+    assert names == ['foo']
+    assert override == ['nocheck']
+
+    _, _, _, _, override2 = \
+        BuildSession._parse_source_build_args(('foo', '[nocheck, nodoc]'))
+    assert override2 == ['nocheck', 'nodoc']
+
+
+def test_source_build_args_empty_bracket_means_no_profiles():
+    """`[]` parses to an empty list — most-permissive build, distinct from
+    None (no override)."""
+    from build import BuildSession
+    err, _f, _r, _n, override = \
+        BuildSession._parse_source_build_args(('foo', '[]'))
+    assert err is None
+    assert override == []
+    # Distinct from "no override at all"
+    assert override is not None
+
+
+def test_source_build_args_multiple_bracket_tokens_rejected():
+    """Two bracket-tokens is ambiguous — refuse with a usage hint."""
+    from build import BuildSession
+    err, *_ = BuildSession._parse_source_build_args(
+        ('foo', '[nocheck]', '[nodoc]')
+    )
+    assert err is not None and 'only one [profiles] override' in err
+
+
+def test_source_build_args_bracket_position_does_not_matter():
+    """Bracket-token can appear before or after pkg names + flag-words."""
+    from build import BuildSession
+    for argv in (
+        ('foo', '[nocheck]'),
+        ('[nocheck]', 'foo'),
+        ('force', '[nocheck]', 'foo'),
+        ('foo', 'force', '[nocheck]'),
+    ):
+        err, _f, _r, names, override = \
+            BuildSession._parse_source_build_args(argv)
+        assert err is None, f"args={argv!r}"
+        assert names == ['foo'], f"args={argv!r}"
+        assert override == ['nocheck'], f"args={argv!r}"
+
+
+def test_buildcontainer_build_signature_accepts_profile_override_kwargs():
+    """BuildContainer.build must accept profiles_override + options_override
+    as keyword-only args.  Catches accidental signature regressions."""
+    import inspect
+    from buildcontainer import BuildContainer
+    sig = inspect.signature(BuildContainer.build)
+    assert 'profiles_override' in sig.parameters
+    assert 'options_override' in sig.parameters
+    assert sig.parameters['profiles_override'].kind == \
+           inspect.Parameter.KEYWORD_ONLY
+    assert sig.parameters['options_override'].kind == \
+           inspect.Parameter.KEYWORD_ONLY
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2217,6 +2308,15 @@ def main() -> int:
         test_compute_install_batches_excludes_extras_pkg_names,
         test_print_extras_lists_recommended_packages,
         test_print_extras_handles_empty_extras_set,
+        # EXTRAS-01: source_build [profiles] override parsing
+        test_source_build_args_no_args_is_default_mode,
+        test_source_build_args_force_flag_anywhere,
+        test_source_build_args_recommended_and_named_pkgs_mutually_exclusive,
+        test_source_build_args_bracket_token_extracts_profiles,
+        test_source_build_args_empty_bracket_means_no_profiles,
+        test_source_build_args_multiple_bracket_tokens_rejected,
+        test_source_build_args_bracket_position_does_not_matter,
+        test_buildcontainer_build_signature_accepts_profile_override_kwargs,
     ]
     failures = 0
     for t in tests:
