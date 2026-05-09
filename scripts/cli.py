@@ -50,6 +50,23 @@ import tui
 logger = logging.getLogger('athena')
 
 
+def _is_progress_bar(widget: object) -> bool:
+    """True iff `widget` is a ProgressBar (used by Cli.add_widget /
+    del_widget to print start/finish markers in CLI mode).  Imported
+    here so cli.py doesn't carry a top-level `from tui import
+    ProgressBar` (would tighten coupling between the two modules
+    needlessly when the class only matters at this branch)."""
+    from tui import ProgressBar
+    return isinstance(widget, ProgressBar)
+
+
+def _widget_label(widget: object) -> str:
+    """Pull the human-readable label off a widget.  ProgressBar stores
+    it in `_label` (mutated by .label()); fall back to the class name
+    if the attribute is absent."""
+    return getattr(widget, '_label', type(widget).__name__)
+
+
 class Cli:
     """Headless rendering backend.  See module docstring for the contract.
 
@@ -119,19 +136,41 @@ class Cli:
         """Diagnostic ERROR → stderr with severity tag."""
         print(f'[ERROR] {message}', file=sys.stderr, flush=True)
 
-    # ─── Widget contract — no-ops in CLI mode ──────────────────────────────
+    # ─── Widget contract ───────────────────────────────────────────────────
 
     def add_widget(self, widget: object) -> int:
-        """Register a live widget.  CLI doesn't draw; just hands back an id
-        the widget can use later in del_widget()."""
+        """Register a live widget.
+
+        For ProgressBar, print a one-line `[start]` marker so the operator
+        sees that a long-running staged operation has begun.  Spinner is
+        silent here — it already prints its own `… done` line when it
+        finishes (see Spinner.done() in tui.py).  Throttled intermediate
+        progress is deferred (see UX-05 Path B "out of scope" notes).
+        """
         wid = self._next_widget_id
         self._next_widget_id += 1
         self._widget_ids[wid] = widget
+        if _is_progress_bar(widget):
+            self.print(f'{_widget_label(widget)} [start]')
         return wid
 
     def del_widget(self, wid: int) -> None:
-        """Deregister a widget.  No drawing to clean up."""
-        self._widget_ids.pop(wid, None)
+        """Deregister a widget.
+
+        For ProgressBar, print a one-line `[done: value/max]` marker.
+        Combined with the start line from add_widget, the operator gets
+        bracketed visibility on every staged loop.  Spinner is silent —
+        its own done() handler prints `… done` (and would race with us
+        if we printed too).  Note: ProgressBar.close(persist=True) ALSO
+        prints the bar's str() before calling del_widget; in CLI that
+        renders an unhelpful unicode-block bar but doesn't conflict
+        semantically with our [done] marker — both fire, in that order.
+        """
+        widget = self._widget_ids.pop(wid, None)
+        if widget is not None and _is_progress_bar(widget):
+            self.print(f'{_widget_label(widget)} [done: '
+                       f'{getattr(widget, "value", "?")}/'
+                       f'{getattr(widget, "_max", "?")}]')
 
     # ─── Prompt contract — blocks on stdin ─────────────────────────────────
 
