@@ -75,26 +75,30 @@ Athena-Build is one attempt at that glue, with the additional constraint that ev
 
 ### Intro
 
-The build system is a curses TUI driven by `build-system.sh`. There is one shipped pipeline (`autorun`) that runs the eight stages in order; you can also run any stage manually if you want to inspect intermediate state, retry a step, or experiment.
+The build system is a curses TUI driven by `build-system.sh`. There is one shipped pipeline (`autorun`) that drives the build through to a verified chroot; the final ISO step is left as a separate manual command on purpose, so you have a chance to inspect or fiddle with the chroot before it gets sealed into a squashfs.
 
-The eight stages, in order:
+The pipeline (eight stages, plus one optional side-channel):
 
 1. `build_cache` — pulls `Packages` and `Sources` indices from each configured mirror, GPG-verifies the `InRelease` signature against `debian-archive-keyring`, and assembles an in-memory APT cache.
 2. `parse_dependency` — resolves the package list in `config/pkg.list` into a closed dependency graph (binary deps + matching source packages).
 3. `source_download` — fetches `.dsc`, `.orig.tar.*`, and `.debian.tar.*` files for every selected source.
 4. `build_container` — builds a per-release Docker image carrying the build-deps for the source packages.
 5. `source_build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files into `repo/`.
-6. `build_chroot` — installs the built `.deb`s into a chroot under `buildroot/` in topo-sorted batches, handling the libc bootstrap cycle, debconf pre-seeds, and post-install patch overlays.
-7. `verify_chroot` — runs an 8-check verifier on the chroot. Fails loud if anything is broken; gates the next step.
+6. `build_chroot` — installs the built `.deb`s into a chroot under `buildroot/` in topo-sorted batches, handling the libc bootstrap cycle, post-install patch overlays, and the canonical libdevmapper/dmsetup/systemd cycle (ARCH-12).  Runs `verify_chroot` automatically as its tail end.
+7. `verify_chroot` — the 8-check verifier from step 6, also invokable on its own (e.g. after a manual edit of the chroot tree).  Fails loud; gates `build_iso`.
 8. `build_iso` — wraps the chroot into a squashfs, runs `grub-mkrescue` to produce a hybrid BIOS/EFI bootable ISO under `image/`.
 
-Each stage sets a `BuildFlags` bit on success; later stages refuse to run unless their prerequisites are set. `autorun` walks them in order and bails on the first failure.
+Plus, off to one side:
+
+- `tunnel_package` — for packages you've explicitly *chosen not* to build from source.  Pulls the prebuilt `.deb` straight from the base Debian repo and drops it into `repo/` alongside the from-source builds.  Reads the `Tunneled` list in `config/build.conf` (or accepts package names as args).  Not part of `autorun` — opt-in, run after `parse_dependency` and before `build_chroot`.
+
+Each stage sets a `BuildFlags` bit on success; later stages refuse to run unless their prerequisites are set.  `autorun` walks stages 1–6 in order (which gets you a verified chroot) and bails on the first failure; you then run `build_iso` once you're happy.
 
 ### Prerequisites
 
 A Debian-derived host. Development happens on Debian bookworm; trixie should work, current Ubuntu LTS likely too. You need:
 
-- **sudo**. The chroot install steps shell out to `mount --bind`, `chroot`, `dpkg`. Run the build as a normal user; the TUI will prompt once for your sudo password and zero it from memory after the chroot stages finish (see STA-07).
+- **sudo**. The chroot install steps shell out to `mount --bind`, `chroot`, `dpkg`. Run the build as a normal user; the TUI will prompt for your sudo password at the start of `build_chroot` (and again at the start of `build_iso`) and zero it from memory the instant each command exits — pass or fail (see STA-07).
 - **Docker Engine** (not Docker Desktop). The source-build container runs build-deps in isolation. The `Misc / Installing Docker` section at the bottom has the apt incantation for an up-to-date Engine.
 - **Python ≥ 3.9** plus `python3-apt`, `python3-debian`, `python3-gnupg`, `python3-requests`, `python3-psutil`, `python3-docker`. The wrapper `build-system.sh` checks `py_requirements.txt` and tells you what's missing.
 - **debian-archive-keyring** — used to GPG-verify mirror `InRelease` files. On a Debian host it's almost always there; on Ubuntu you may need to apt-install it (see `[Security]` in `config/build.conf` for the keyring path).
@@ -116,8 +120,10 @@ The wrapper will tell you about any missing Python deps. Install them and re-run
 From there:
 
 - `print config` shows what `config/build.conf` resolved to — which mirrors are active, whether snapshot pinning is on, what `[Build]` codename will be baked into `/etc/os-release`. Run this first to confirm you're building what you think you're building.
-- `autorun` runs the full eight-stage pipeline. Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
+- `autorun` runs stages 1–6 (cache → parse → download → container → source_build → chroot+verify). Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
+- When `autorun` finishes cleanly, run `build_iso` to produce the final image. (If you want to drop extra files into `buildroot/` first — custom motd, extra config — this is the moment.)
 - If a stage fails, fix the cause and re-run that stage by name (`source_build`, `build_chroot`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
+- TUI keys: arrows to scroll the active tab, `Tab` to cycle between tabs (console / log), `q`/`Q` to quit. Resize is handled automatically.
 
 The final ISO appears under `image/` named `athena-<version>-amd64.iso`. A sidecar `<iso>.user` file next to it carries the per-build random username for the live boot (see SEC-04).
 
@@ -151,13 +157,13 @@ Things that go wrong, ordered by how often they actually bite:
 
 **Patch fails to apply with "fuzz" or "hunk failed".** A file under `patch/source/<pkg>/<ver>/9001-*.patch` no longer applies to the upstream source — the upstream changed between when the patch was written and now. Either pin the package version in `config/pkg.list` to the version the patch was written against, or regenerate the patch (see the `Source Code Patching` section below). Both are valid; pinning is faster, regenerating is correct.
 
-**`build_chroot` aborts on a single package's `dpkg --configure` step.** Look for the dpkg transcript in `log/build-*.log`. Most often it's debconf prompting for input — the project pre-seeds debconf for the shipped package set (in `chroot.py`'s `_preseed_debconf`), but custom additions to `pkg.list` may not be pre-seeded. The fix is either to add the pre-seed, or to drop the package if you don't need it. STA-02 removed the old `--force-depends` mask, so a real configure failure is now visible rather than silently swallowed.
+**`build_chroot` aborts on a single package's `dpkg --configure` step.** Look for the dpkg transcript in `log/build-*.log`. The project runs every dpkg/apt invocation under `DEBIAN_FRONTEND=noninteractive` plus `DEBCONF_NONINTERACTIVE_SEEN=true`, and writes a minimal `/etc/debconf.conf` into the chroot before the first dpkg call (see `_init_dpkg_database` in `chroot.py`), so debconf takes its defaults instead of prompting. If a package still fails configure, it's almost always a real maintainer-script error — read the dpkg log for the actual cause; it's no longer being swallowed by `--force-depends` (STA-02 removed that mask).
 
 **`verify_chroot` reports "linux-image installed but no kernel in /boot/".** A kernel package was unpacked but its post-install hook didn't fire — usually because `/proc` wasn't bind-mounted at the right moment. Re-run `build_chroot` from clean (delete `buildroot/` first); the second pass typically catches it. STA-10 hardened the mount checks, so this should be rare on the current code.
 
 **Dep-graph cycle the libc-seed didn't break.** ARCH-12 handles the canonical libdevmapper ↔ dmsetup ↔ systemd cycle automatically by emitting a terminal "force-depends" batch. A custom `pkg.list` can introduce a *different* cycle that escapes the seed. The chroot builder will name the offending packages in the log; usually you can break the cycle by removing whichever one isn't actually needed, or by accepting the force-depends batch and letting `_configure_packages` recover.
 
-**The TUI window goes blank or won't take input after a resize.** The renderer was redrawing when the terminal changed size. Hit `r` (refresh) or close and re-open the terminal. There's a real bug here that's filed as part of the broader TUI rework — see ARCH-14.
+**The TUI window goes blank, fragments, or won't take input after a resize.** Curses got an inconsistent state from the resize. The TUI listens for `KEY_RESIZE` and is supposed to redraw itself; if it didn't, your only out is to close and re-open the terminal (the build state itself is fine — re-launch `build-system.sh` and your `BuildFlags` reset, but the cache/source/repo on disk is unchanged). The underlying issue is filed as ARCH-14 (TUI holistic rework).
 
 When in doubt, the on-disk log under `log/` has more than the TUI shows. Start there.
 
