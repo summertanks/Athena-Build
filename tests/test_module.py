@@ -1474,6 +1474,57 @@ def test_strip_build_version_rejects_malformed_filename():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# print_commands — dispatch + help screen
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _capture_console_print(callable_):
+    """Run callable_ with tui.console.print monkeypatched to capture lines.
+    Returns the captured output as one newline-joined string."""
+    import tui
+    captured = []
+    _orig = tui.console.print
+    tui.console.print = lambda *args, **kwargs: captured.append(
+        ' '.join(str(a) for a in args)
+    )
+    try:
+        callable_()
+    finally:
+        tui.console.print = _orig
+    return '\n'.join(captured)
+
+
+def test_print_help_lists_every_registered_category():
+    """`print help` mentions every category in CATEGORIES so adding a new
+    handler doesn't silently disappear from the help screen."""
+    import print_commands
+    output = _capture_console_print(lambda: print_commands._print_help(None))
+    for name in print_commands.CATEGORIES:
+        assert name in output, f"`print help` did not mention {name!r}"
+
+
+def test_print_dispatch_unknown_category_points_to_help():
+    """An unknown category prints a clear pointer to `print help` rather
+    than crashing or silently returning."""
+    import print_commands
+    output = _capture_console_print(
+        lambda: print_commands.dispatch(None, 'nonexistent-category')
+    )
+    assert 'nonexistent-category' in output
+    assert 'print help' in output
+
+
+def test_print_dispatch_empty_category_shows_help():
+    """No argument (= empty string) shows the help screen — saves the
+    operator from having to discover `print help` separately."""
+    import print_commands
+    output = _capture_console_print(
+        lambda: print_commands.dispatch(None, '')
+    )
+    for name in print_commands.CATEGORIES:
+        assert name in output, f"empty arg should also show help with {name!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # format_snapshot_timestamp — UI helper for cmd_build_cache
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1616,6 +1667,10 @@ def main() -> int:
         # snapshot UI helper
         test_format_snapshot_timestamp_well_formed,
         test_format_snapshot_timestamp_falls_back_on_malformed,
+        # print_commands
+        test_print_help_lists_every_registered_category,
+        test_print_dispatch_unknown_category_points_to_help,
+        test_print_dispatch_empty_category_shows_help,
     ]
     failures = 0
     for t in tests:

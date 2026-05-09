@@ -340,66 +340,13 @@ class BuildSession:
     def cmd_print(self, category: str = ''):
         """Display summary information about the current build state.
 
-        Usage: print <config|required|important|selected>
-
-          config    — active build configuration values
-          required  — packages with 'required' priority from the APT cache
-          important — packages with 'important' priority from the APT cache
-          selected  — all packages resolved by parse_dependency (needs dep check)
+        Thin dispatcher into print_commands.dispatch — the per-category
+        handlers and the help screen live there.  Empty or unknown
+        category prints the help screen.  See `print help` for the full
+        category list.
         """
-        if category not in ('config', 'required', 'important', 'selected'):
-            console.print("  Usage: print <config|required|important|selected>")
-            return
-
-        if category == 'config':
-            console.print("Build Configuration:")
-            console.print(f"    Arch                : {self.config.arch}")
-            console.print(f"    Release             : {self.config.release}")
-            console.print(f"    Base ID (default)   : {self.config.baseid}")
-            console.print(f"    Parent version      : {self.config.baseversion}")
-            console.print("    Mirrors             :")
-            for _m in self.config.mirrors:
-                console.print(f"      [{_m.id:8}] {_m.url}  {_m.suite}  {_m.component}")
-            if self.config.snapshot_enabled:
-                try:
-                    _resolved = utils.resolve_snapshot_timestamp(self.config)
-                except (RuntimeError, ValueError) as e:
-                    _resolved = f"<unresolved: {e}>"
-                console.print("    Snapshot            : enabled")
-                console.print(f"      Configured        : {self.config.snapshot_timestamp_config}")
-                console.print(f"      Resolved          : {_resolved}")
-            else:
-                console.print("    Snapshot            : disabled (live mirrors)")
-            console.print(f"    Build codename      : {self.config.build_codename}")
-            console.print(f"    Build version       : {self.config.build_version}")
-            console.print(f"    Config file         : {self.config.config_path}")
-            console.print(f"    Package list        : {self.config.pkglist_path}")
-            console.print(f"    Working dir         : {self.config.working_dir}")
-            return
-
-        if category == 'selected' and not self.flags.dep_check_ready:
-            console.print("Run 'parse_dependency' first")
-            return
-
-        if category == 'required':
-            pkgs = self.cache.required
-            console.print(f"Required packages ({len(pkgs)}):")
-            for pkg in sorted(pkgs):
-                console.print(f"  {pkg}")
-
-        elif category == 'important':
-            pkgs = self.cache.important
-            console.print(f"Important packages ({len(pkgs)}):")
-            for pkg in sorted(pkgs):
-                console.print(f"  {pkg}")
-
-        elif category == 'selected':
-            pkgs = self.dep_tree.selected_pkgs
-            # Filter out virtual-package alias entries — only show canonical names.
-            real_pkgs = {k: v for k, v in pkgs.items() if k == v['Package']}
-            console.print(f"Selected packages ({len(real_pkgs)}):")
-            for name in sorted(real_pkgs.keys()):
-                console.print(f"  {name:<40} {real_pkgs[name].version}")
+        import print_commands
+        print_commands.dispatch(self, category)
 
 
     # ---------------------------------------------------------------------------
@@ -1077,7 +1024,7 @@ def main(banner: str) -> None:
     tui.register_command('verify_chroot',     session.cmd_verify_chroot,      'Verify chroot health \u2014 8 checks, PASS/FAIL per test')
     tui.register_command('build_iso',         session.cmd_build_iso,          'Build bootable ISO from chroot (build_iso)')
     tui.register_command('autorun',           session.cmd_auto_run,           'Runs all commands in sequence')
-    tui.register_command('print',             session.cmd_print,              'Print info: print <config|required|important|selected>')
+    tui.register_command('print',             session.cmd_print,              'Print build state — try: print help')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Source Build System for Athena Linux...", tui.COLOR_HIGHLIGHT)
