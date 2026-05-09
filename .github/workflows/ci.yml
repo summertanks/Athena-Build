@@ -82,6 +82,7 @@ jobs:
               python3-gnupg \
               python3-requests \
               python3-psutil \
+              python3-docker \
               debian-archive-keyring
       - name: Run unit tests
         run: python3 tests/test_module.py
