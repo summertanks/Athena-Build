@@ -82,9 +82,9 @@ def _print_config(session, *_extras) -> None:
     tui.console.print("")
     tui.console.print(f"  Mirrors             : {len(cfg.mirrors)}  (use `print mirrors` for detail)")
     if cfg.snapshot_enabled:
-        tui.console.print(f"  Snapshot            : enabled    (use `print snapshot` for detail)")
+        tui.console.print("  Snapshot            : enabled    (use `print snapshot` for detail)")
     else:
-        tui.console.print(f"  Snapshot            : disabled (live mirrors)")
+        tui.console.print("  Snapshot            : disabled (live mirrors)")
     tui.console.print(f"  Tunneled packages   : {len(getattr(cfg, 'tunnel_packages', []))}  (use `print tunneled`)")
     tui.console.print(f"  Paths               : working dir {cfg.working_dir}  (use `print paths`)")
 
@@ -182,7 +182,7 @@ def _print_stats(session, *_extras) -> None:
     tui.console.print("Build statistics:")
     cfg = session.config
     tui.console.print(f"  Mirrors configured       : {len(cfg.mirrors)}")
-    tui.console.print(f"  Snapshot pinning         : "
+    tui.console.print("  Snapshot pinning         : "
                       f"{'enabled' if cfg.snapshot_enabled else 'disabled'}")
     if session.cache is not None:
         c = session.cache
@@ -191,7 +191,7 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print(f"  Cache: required priority : {len(c.required)}")
         tui.console.print(f"  Cache: important priority: {len(c.important)}")
     else:
-        tui.console.print(f"  Cache                    : not built (run build_cache)")
+        tui.console.print("  Cache                    : not built (run build_cache)")
     if session.dep_tree is not None and session.flags.dep_check_ready:
         dt = session.dep_tree
         canonical = sum(1 for k, v in dt.selected_pkgs.items()
@@ -200,10 +200,10 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print(f"  Dep tree: canonical pkgs : {canonical}")
         tui.console.print(f"  Dep tree: virtual aliases: {virtuals}")
         tui.console.print(f"  Dep tree: source pkgs    : {len(dt.selected_srcs)}")
-        tui.console.print(f"  Dep tree: download size  : "
+        tui.console.print("  Dep tree: download size  : "
                           f"{getattr(dt, 'download_size', 0) // (2**20)} MB")
     else:
-        tui.console.print(f"  Dep tree                 : not built (run parse_dependency)")
+        tui.console.print("  Dep tree                 : not built (run parse_dependency)")
 
 
 # ─── Package list views ─────────────────────────────────────────────────────
@@ -382,7 +382,7 @@ def _print_src(session, *extras) -> None:
         for b in sorted(s.binary):
             tui.console.print(f"      {b}")
     if getattr(s, 'files', None):
-        tui.console.print(f"  Files (.dsc / .orig.tar.* / .debian.tar.*):")
+        tui.console.print("  Files (.dsc / .orig.tar.* / .debian.tar.*):")
         for fname, meta in sorted(s.files.items()):
             _size = meta.get('size', '?')
             tui.console.print(f"      {fname}  ({_size} B)")
