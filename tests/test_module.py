@@ -2355,16 +2355,54 @@ def test_cli_widget_methods_are_no_ops_returning_stable_ids():
         restore()
 
 
-def test_cli_mark_and_trim_to_are_no_ops():
-    """mark/trim_to do nothing in CLI mode — can't unprint stdout."""
+def test_cli_console_mark_and_trim_to_are_no_ops():
+    """`console_mark`/`console_trim_to` are no-ops in CLI mode — can't
+    unprint stdout.  Method names must match the Tui surface (with the
+    `console_` prefix) because the Console facade in tui.py calls them
+    via `self._resolve().console_mark()` / `.console_trim_to()`.
+
+    REGRESSION: first cut named these `mark`/`trim_to` (no prefix) and
+    crashed at the parse_dependency multi-provider auto-pick path with
+    AttributeError.  Drive through the Console facade here, NOT a
+    direct method call, so the same kind of name-drift gets caught."""
     cli, _o, _e, restore = _fresh_cli()
     try:
-        m = cli.mark()
+        from tui import Console
+        c = Console()
+        m = c.mark()  # facade → cli.console_mark()
         assert isinstance(m, int)
-        cli.trim_to(m)  # must not raise
-        cli.trim_to(99999)  # must not raise on unknown mark
+        c.trim_to(m)  # facade → cli.console_trim_to(m)
+        c.trim_to(99999)  # facade no-op on unknown mark
     finally:
         restore()
+
+
+def test_cli_console_facade_exercise_full_surface():
+    """Drive every Console facade method against a Cli instance to catch
+    any future name-drift between Console._resolve() callers and the
+    Cli/Tui method names they call."""
+    cli, out, err, restore = _fresh_cli()
+    try:
+        from tui import Console
+        c = Console()
+        c.print('via facade')
+        c.print('with attr', 99)
+        c.info('info via facade')
+        c.warning('warn via facade')
+        c.error('err via facade')
+        m = c.mark()
+        c.trim_to(m)
+    finally:
+        out_v = out.getvalue()
+        err_v = err.getvalue()
+        restore()
+    # print → stdout
+    assert 'via facade' in out_v
+    assert 'with attr' in out_v
+    # info/warning/error → stderr (with severity tags)
+    assert 'info via facade' in err_v
+    assert 'warn via facade' in err_v
+    assert 'err via facade' in err_v
 
 
 def test_cli_prompt_reads_stdin():
@@ -2547,7 +2585,8 @@ def main() -> int:
         test_cli_help_lists_registered_commands,
         test_cli_eof_exits_repl_cleanly,
         test_cli_widget_methods_are_no_ops_returning_stable_ids,
-        test_cli_mark_and_trim_to_are_no_ops,
+        test_cli_console_mark_and_trim_to_are_no_ops,
+        test_cli_console_facade_exercise_full_surface,
         test_cli_prompt_reads_stdin,
         test_cli_keymode_prompt_reads_and_discards,
         test_cli_logging_handlers_bound_to_cli_after_init,
