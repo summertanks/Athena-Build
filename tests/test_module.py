@@ -1854,12 +1854,14 @@ class _FakePkg:
 
 
 class _FakeCache:
-    """Minimal Cache surface — package_hashtable + skip_src.  Versions are
-    simple strings so max() works lexically (sufficient for these tests)."""
+    """Minimal Cache surface — package_hashtable + skip_src.  Mirrors the
+    real shape:  Dict[name, Dict[version, List[Package]]]  — the inner
+    list carries the per-mirror records.  Versions are simple strings so
+    max() works lexically (sufficient for these tests)."""
     def __init__(self, pkgs_by_name, skip_src=()):
         # pkgs_by_name: {name: [_FakePkg, ...]}
         self.package_hashtable = {
-            name: {f"v{i}": p for i, p in enumerate(pkgs)}
+            name: {f"v{i}": [p] for i, p in enumerate(pkgs)}
             for name, pkgs in pkgs_by_name.items()
         }
         self.skip_src = list(skip_src)
@@ -1935,6 +1937,38 @@ def test_pull_recommends_extras_drops_alt_groups():
     dt.extras_src_names = set()
     added = dt.pull_recommends_extras()
     assert added == 0  # nothing pulled from an alt-recommend
+
+
+def test_pull_recommends_extras_handles_multi_mirror_version_buckets():
+    """REGRESSION: package_hashtable[name][version] is a List[Package]
+    (per-mirror), not a single Package.  pull_recommends_extras must index
+    into the inner list, not call .source on it directly.  The first run
+    against bookworm hit AttributeError on every recommend because the
+    method was treating the bucket as a Package."""
+    import dependencytree
+    seed = _FakePkg('firefox', source='firefox',
+                    filename='firefox_1.0_amd64.deb',
+                    recommends=['libnss3-tools'])
+    rec = _FakePkg('libnss3-tools', source='libnss3',
+                   filename='libnss3-tools_3.0_amd64.deb',
+                   recommends=[])
+    # Construct a hashtable matching the real production shape:
+    # the inner value is a LIST of packages (per-mirror), even when
+    # only one mirror ships this name+version.
+    cache = _FakeCache({'firefox': [seed], 'libnss3-tools': [rec]})
+    # Verify the test fixture itself exercises the multi-mirror shape:
+    _bucket = cache.package_hashtable['libnss3-tools']['v0']
+    assert isinstance(_bucket, list), \
+        "test fixture must mirror the real Dict[name,Dict[ver,List[Pkg]]] shape"
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = cache
+    dt.selected_pkgs = {'firefox': seed}
+    dt.selected_srcs = {}
+    dt.extras_pkg_names = set()
+    dt.extras_src_names = set()
+    added = dt.pull_recommends_extras()
+    assert added == 1
+    assert 'libnss3-tools' in dt.extras_pkg_names
 
 
 def test_pull_recommends_extras_skips_already_in_selected_pkgs():
@@ -2177,6 +2211,7 @@ def main() -> int:
         test_pull_recommends_extras_pulls_single_name_recommends,
         test_pull_recommends_extras_skips_when_source_in_skip_src,
         test_pull_recommends_extras_drops_alt_groups,
+        test_pull_recommends_extras_handles_multi_mirror_version_buckets,
         test_pull_recommends_extras_skips_already_in_selected_pkgs,
         test_derive_extras_src_names_marks_extras_only_sources,
         test_compute_install_batches_excludes_extras_pkg_names,

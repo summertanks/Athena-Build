@@ -577,11 +577,23 @@ class DependencyTree:
                         f"'{_seed_name}') not in package cache — skipped"
                     )
                     continue
-                # Pick latest version.  Same heuristic as elsewhere — the
-                # multi-mirror ingest stores all versions; max() over Version
-                # keys gives the highest.
+                # Pick latest version.  package_hashtable is structured as
+                #   Dict[name, Dict[Version, List[Package]]]
+                # — the inner List is per-mirror (same name+version can ship
+                # from main AND security).  max() over Version keys gives the
+                # highest version; pick the first Package from that bucket
+                # (any mirror's record is fine for the .recommends → source
+                # lookup; parse_sources will pick the right mirror later when
+                # mapping binary → source).
                 _ver = max(_candidates.keys())
-                _rec_pkg = _candidates[_ver]
+                _ver_bucket = _candidates[_ver]
+                if not _ver_bucket:
+                    logger.warning(
+                        f"pull_recommends_extras: '{_rec_name}' has empty "
+                        f"version bucket for {_ver} — skipped"
+                    )
+                    continue
+                _rec_pkg = _ver_bucket[0]
                 # Source-name lookup — if the recommend's source is on the
                 # skip list, refuse: we'd advertise something we never build.
                 try:
