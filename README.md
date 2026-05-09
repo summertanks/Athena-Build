@@ -16,6 +16,7 @@ The genesis of this project came from the conversation - while the Linux ecosyst
  - Can this be faster, YES. Is it worth making it faster (e.g. shifting to C, trading space with time, etc.) NO
  - It is NOT currently (or ever may be) supported by any of Debian Linux Houses (e.g. debian, ubuntu, etc)
  - Does it have Bugs - YES / MANY, please reach out to me and lets fix what you find.
+ - REMEMBER, and this is specifically important, its a source build platform, does nothing to upstream source packages. What you get is what you get. you well realise as I have (rather quickly) that just because source code is available doesnt mean it builds. Fixing that is completely on you. You will learn a whole new level of 'oh but it builds on my system'.
 
 ### Linux
 The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a clone of UNIX operating system called 'Minix' and was supposed to be compatible to ***System V***. 
