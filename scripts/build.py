@@ -1162,9 +1162,22 @@ class BuildSession:
 
 
 def main(banner: str) -> None:
-    """Initialise apt_pkg, BuildConfig, the TUI, and a BuildSession; register
-    every cmd_X handler as a TUI command; block until the user exits.
+    """Initialise apt_pkg, BuildConfig, the rendering backend (TUI or CLI),
+    and a BuildSession; register every cmd_X handler; block until the user
+    exits.
+
+    `--headless` flag (anywhere in argv) selects the CLI backend instead of
+    the curses TUI.  Both backends register themselves as `tui.tui_instance`
+    so every existing facade (Console, Spinner, ProgressBar, Prompt) works
+    unchanged.  See scripts/cli.py for the CLI backend's contract.
     """
+    # UX-05 Path B: detect --headless before BuildConfig sees argv.  Strip
+    # it after detection — BuildConfig uses argparse and would error on
+    # unknown flags.
+    _headless = '--headless' in sys.argv
+    if _headless:
+        sys.argv.remove('--headless')
+
     try:
         print("Initialising apt_pkg...")
         apt_pkg.init_system()
@@ -1183,15 +1196,28 @@ def main(banner: str) -> None:
         print(f"ERROR: load configuration - {config.error_str}, Exiting...")
         sys.exit(1)
 
-    print("Initialising TUI...")
-    try:
-        tui_inst = Tui(banner)
-        tui_inst.run()
-        # Tui.__init__ already registers itself as the module singleton.
-        signal.signal(signal.SIGINT, tui_inst.sig_shutdown)
-    except Exception as e:
-        print(f"FATAL: TUI initialisation failed: {e}")
-        Exit(1)
+    if _headless:
+        print("Initialising headless CLI backend...")
+        try:
+            from cli import Cli
+            tui_inst = Cli()
+            # Cli.__init__ registers itself as tui.tui_instance and binds
+            # logging.  No event-loop thread to spin up — wait() runs the
+            # REPL on the main thread.
+            signal.signal(signal.SIGINT, tui_inst.sig_shutdown)
+        except Exception as e:
+            print(f"FATAL: CLI initialisation failed: {e}")
+            sys.exit(1)
+    else:
+        print("Initialising TUI...")
+        try:
+            tui_inst = Tui(banner)
+            tui_inst.run()
+            # Tui.__init__ already registers itself as the module singleton.
+            signal.signal(signal.SIGINT, tui_inst.sig_shutdown)
+        except Exception as e:
+            print(f"FATAL: TUI initialisation failed: {e}")
+            Exit(1)
 
     # Attach a timestamped FileHandler to the 'athena' logger after the
     # Tui is constructed.  Tui.__init__ calls setup_logging() to (re)bind

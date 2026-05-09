@@ -2189,6 +2189,226 @@ def test_buildcontainer_build_signature_accepts_profile_override_kwargs():
            inspect.Parameter.KEYWORD_ONLY
 
 
+# ─── UX-05 Path B: headless CLI backend (scripts/cli.py) ────────────────────
+
+def _fresh_cli():
+    """Construct a Cli, capturing stdout/stderr.  Returns (cli, stdout_buf,
+    stderr_buf, restore) — call restore() after the test to put the
+    streams + tui_instance back."""
+    import io
+    import tui
+    from cli import Cli
+
+    _orig_tui_instance = tui.tui_instance
+    _orig_stdout = sys.stdout
+    _orig_stderr = sys.stderr
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
+    cli = Cli()  # registers itself as tui.tui_instance + binds logging
+
+    def restore():
+        sys.stdout = _orig_stdout
+        sys.stderr = _orig_stderr
+        tui.tui_instance = _orig_tui_instance
+
+    return cli, sys.stdout, sys.stderr, restore
+
+
+def test_cli_print_writes_to_stdout():
+    """Cli.print writes to stdout, ignoring the color attribute."""
+    cli, out, err, restore = _fresh_cli()
+    try:
+        cli.print('hello world')
+        cli.print('with color', attribute=99)
+    finally:
+        captured_out = out.getvalue()
+        captured_err = err.getvalue()
+        restore()
+    assert 'hello world' in captured_out
+    assert 'with color' in captured_out
+    assert captured_err == ''  # nothing on stderr from print()
+
+
+def test_cli_severity_methods_write_to_stderr_with_tags():
+    """INFO/WARNING/ERROR write to stderr with severity tags."""
+    cli, out, err, restore = _fresh_cli()
+    try:
+        cli.INFO('info-msg')
+        cli.WARNING('warn-msg')
+        cli.ERROR('err-msg')
+    finally:
+        out_v = out.getvalue()
+        err_v = err.getvalue()
+        restore()
+    assert '[INFO ]' in err_v and 'info-msg' in err_v
+    assert '[WARN ]' in err_v and 'warn-msg' in err_v
+    assert '[ERROR]' in err_v and 'err-msg' in err_v
+    assert out_v == ''  # nothing leaked to stdout
+
+
+def test_cli_registers_itself_as_tui_singleton():
+    """Cli.__init__ sets tui.tui_instance — that's how the Console facade
+    resolves to the CLI backend."""
+    import tui
+    cli, _o, _e, restore = _fresh_cli()
+    try:
+        assert tui.tui_instance is cli
+    finally:
+        restore()
+
+
+def test_cli_register_command_dispatches_via_wait():
+    """Registered handler is invoked when its name is typed at the prompt;
+    args after the name are forwarded as positional args."""
+    cli, out, err, restore = _fresh_cli()
+    captured_args = []
+    cli.register_command('echo', lambda *a: captured_args.append(a), 'echo args')
+    try:
+        # Drive the REPL with a scripted stdin.
+        import io
+        sys.stdin = io.StringIO('echo foo bar\nquit\n')
+        cli.wait()
+    finally:
+        sys.stdin = sys.__stdin__
+        restore()
+    assert captured_args == [('foo', 'bar')]
+
+
+def test_cli_unknown_command_does_not_crash_repl():
+    """Typing an unknown command prints a hint and continues the REPL."""
+    cli, out, err, restore = _fresh_cli()
+    try:
+        import io
+        sys.stdin = io.StringIO('nonexistent\nquit\n')
+        cli.wait()
+    finally:
+        out_v = out.getvalue()
+        sys.stdin = sys.__stdin__
+        restore()
+    assert 'Unknown command' in out_v
+    assert 'nonexistent' in out_v
+
+
+def test_cli_handler_exception_does_not_kill_repl():
+    """A handler raising mid-command logs the error to stderr and the REPL
+    keeps going — same forgiving model as Tui.shell()."""
+    cli, out, err, restore = _fresh_cli()
+    cli.register_command('boom', lambda: 1 / 0, 'crash')
+    survived = []
+    cli.register_command('survived', lambda: survived.append(True), 'after-boom')
+    try:
+        import io
+        sys.stdin = io.StringIO('boom\nsurvived\nquit\n')
+        cli.wait()
+    finally:
+        err_v = err.getvalue()
+        sys.stdin = sys.__stdin__
+        restore()
+    assert survived == [True], "REPL should have continued after the handler's exception"
+    assert 'ZeroDivisionError' in err_v
+
+
+def test_cli_help_lists_registered_commands():
+    """`help` prints the registered commands plus the built-in quit/help."""
+    cli, out, err, restore = _fresh_cli()
+    cli.register_command('foo', lambda: None, 'do foo')
+    cli.register_command('bar', lambda: None, 'do bar')
+    try:
+        import io
+        sys.stdin = io.StringIO('help\nquit\n')
+        cli.wait()
+    finally:
+        out_v = out.getvalue()
+        sys.stdin = sys.__stdin__
+        restore()
+    assert 'foo' in out_v and 'do foo' in out_v
+    assert 'bar' in out_v and 'do bar' in out_v
+    assert 'help' in out_v
+    assert 'quit' in out_v
+
+
+def test_cli_eof_exits_repl_cleanly():
+    """Ctrl+D (EOFError on input) exits the REPL with code 0."""
+    cli, out, err, restore = _fresh_cli()
+    try:
+        import io
+        sys.stdin = io.StringIO('')  # immediate EOF
+        cli.wait()
+    finally:
+        sys.stdin = sys.__stdin__
+        restore()
+    assert cli._exit_code == 0
+
+
+def test_cli_widget_methods_are_no_ops_returning_stable_ids():
+    """add_widget returns a unique int per call; del_widget never raises."""
+    cli, _o, _e, restore = _fresh_cli()
+    try:
+        wid1 = cli.add_widget(object())
+        wid2 = cli.add_widget(object())
+        assert wid1 != wid2
+        cli.del_widget(wid1)
+        cli.del_widget(wid2)
+        # Double-delete must be a no-op
+        cli.del_widget(wid1)
+    finally:
+        restore()
+
+
+def test_cli_mark_and_trim_to_are_no_ops():
+    """mark/trim_to do nothing in CLI mode — can't unprint stdout."""
+    cli, _o, _e, restore = _fresh_cli()
+    try:
+        m = cli.mark()
+        assert isinstance(m, int)
+        cli.trim_to(m)  # must not raise
+        cli.trim_to(99999)  # must not raise on unknown mark
+    finally:
+        restore()
+
+
+def test_cli_prompt_reads_stdin():
+    """prompt() reads a line from stdin and returns it (no masking)."""
+    cli, _o, _e, restore = _fresh_cli()
+    try:
+        import io
+        sys.stdin = io.StringIO('the answer\n')
+        response = cli.prompt('Q: ', masked=False, keymode=False)
+    finally:
+        sys.stdin = sys.__stdin__
+        restore()
+    assert response == 'the answer'
+
+
+def test_cli_keymode_prompt_reads_and_discards():
+    """keymode (PROMPT_PAUSE) returns empty string regardless of input."""
+    cli, _o, _e, restore = _fresh_cli()
+    try:
+        import io
+        sys.stdin = io.StringIO('whatever\n')
+        response = cli.prompt('Press enter: ', masked=False, keymode=True)
+    finally:
+        sys.stdin = sys.__stdin__
+        restore()
+    assert response == ''
+
+
+def test_cli_logging_handlers_bound_to_cli_after_init():
+    """After Cli.__init__ runs, the 'athena' logger has tab handlers
+    bound that route through the Cli instance.  Verifies that the
+    setup_logging contract works for both Tui and Cli backends."""
+    import logging
+    cli, _o, err, restore = _fresh_cli()
+    try:
+        logger = logging.getLogger('athena')
+        logger.warning('hello-from-logger')
+    finally:
+        err_v = err.getvalue()
+        restore()
+    # _LogTabHandler routes WARNING through cli.WARNING which writes to stderr.
+    assert 'hello-from-logger' in err_v
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2317,6 +2537,20 @@ def main() -> int:
         test_source_build_args_multiple_bracket_tokens_rejected,
         test_source_build_args_bracket_position_does_not_matter,
         test_buildcontainer_build_signature_accepts_profile_override_kwargs,
+        # UX-05 Path B: headless CLI backend
+        test_cli_print_writes_to_stdout,
+        test_cli_severity_methods_write_to_stderr_with_tags,
+        test_cli_registers_itself_as_tui_singleton,
+        test_cli_register_command_dispatches_via_wait,
+        test_cli_unknown_command_does_not_crash_repl,
+        test_cli_handler_exception_does_not_kill_repl,
+        test_cli_help_lists_registered_commands,
+        test_cli_eof_exits_repl_cleanly,
+        test_cli_widget_methods_are_no_ops_returning_stable_ids,
+        test_cli_mark_and_trim_to_are_no_ops,
+        test_cli_prompt_reads_stdin,
+        test_cli_keymode_prompt_reads_and_discards,
+        test_cli_logging_handlers_bound_to_cli_after_init,
     ]
     failures = 0
     for t in tests:
