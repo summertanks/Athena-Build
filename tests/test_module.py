@@ -1621,6 +1621,121 @@ def test_print_no_handler_crashes_on_uninitialized_session():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# UX-03 — autorun final summary
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_format_duration_seconds_only():
+    """Under a minute: just `Ns`."""
+    from build import BuildSession
+    assert BuildSession._format_duration(0) == '0s'
+    assert BuildSession._format_duration(7) == '7s'
+    assert BuildSession._format_duration(59) == '59s'
+
+
+def test_format_duration_minutes_seconds():
+    """Under an hour: `Mm SSs` with zero-padded seconds."""
+    from build import BuildSession
+    assert BuildSession._format_duration(60) == '1m 00s'
+    assert BuildSession._format_duration(125) == '2m 05s'
+    assert BuildSession._format_duration(3599) == '59m 59s'
+
+
+def test_format_duration_hours_minutes_seconds():
+    """An hour or more: `Hh MMm SSs` with zero-padding on minutes + seconds."""
+    from build import BuildSession
+    assert BuildSession._format_duration(3600) == '1h 00m 00s'
+    assert BuildSession._format_duration(7325) == '2h 02m 05s'
+    assert BuildSession._format_duration(36000) == '10h 00m 00s'
+
+
+def _build_autorun_session_stub(*, all_done: bool, source_build_done: bool):
+    """Construct a minimal BuildSession-shaped stub for exercising the
+    autorun summary helper without standing up TUI / config / cache."""
+    from build import BuildSession
+
+    class _Cfg:
+        arch = 'amd64'
+        build_version = '0.1'
+        dir_image = '/tmp/image'
+
+    class _Flags:
+        cache_ready           = True
+        dep_check_ready       = True
+        download_ready        = source_build_done or all_done
+        build_container_ready = source_build_done or all_done
+        source_build_ready    = source_build_done or all_done
+        chroot_ready          = all_done
+        chroot_verified       = all_done
+
+    class _Pkg:
+        def __init__(self, name): self._name = name
+        def __getitem__(self, k):
+            return self._name if k == 'Package' else None
+
+    class _Cache:
+        package_hashtable = {f'pkg{i}': None for i in range(32847)}
+
+    class _DT:
+        selected_pkgs = {f'pkg{i}': _Pkg(f'pkg{i}') for i in range(213)}
+        selected_srcs = {f'src{i}': None for i in range(31)}
+
+    sess = object.__new__(BuildSession)
+    sess.config = _Cfg()
+    sess.tui = None
+    sess.cache = _Cache()
+    sess.dep_tree = _DT()
+    sess.container = None
+    sess.flags = _Flags()
+    sess.last_source_build_counts = (
+        {'built': 26, 'tunneled': 2, 'failed': 0, 'skipped': 3, 'total': 31}
+        if source_build_done else None
+    )
+    return sess
+
+
+def test_autorun_summary_success_includes_counts_and_iso_path():
+    """Successful autorun summary surfaces wall time, all stage counts,
+    and the predicted ISO path so the operator knows where to look."""
+    import datetime as _dt
+    sess = _build_autorun_session_stub(all_done=True, source_build_done=True)
+    output = _capture_console_print(lambda: sess._print_autorun_summary(
+        _dt.datetime(2026, 5, 9, 12, 0, 0),
+        _dt.datetime(2026, 5, 9, 13, 5, 30),
+        3930,
+        None,
+    ))
+    assert 'SUCCESS' in output
+    assert '2026-05-09 12:00:00' in output
+    assert '2026-05-09 13:05:30' in output
+    assert '1h 05m 30s' in output
+    assert '32847 package names' in output
+    assert '213 canonical packages' in output
+    assert '31 source packages' in output
+    assert '26 built'    in output
+    assert '2 tunneled'  in output
+    assert 'verified'    in output
+    assert '/tmp/image/athena-0.1-amd64.iso' in output
+
+
+def test_autorun_summary_aborted_marks_stage_and_partial_state():
+    """Aborted autorun summary identifies the stage that didn't complete
+    and renders 'not built'/'not run' for stages downstream of the abort."""
+    import datetime as _dt
+    sess = _build_autorun_session_stub(all_done=False, source_build_done=False)
+    output = _capture_console_print(lambda: sess._print_autorun_summary(
+        _dt.datetime(2026, 5, 9, 12, 0, 0),
+        _dt.datetime(2026, 5, 9, 12, 30, 0),
+        1800,
+        'source_download',
+    ))
+    assert 'ABORTED' in output
+    assert "'source_download'" in output
+    assert '30m 00s' in output
+    assert 'Source build   : not run' in output
+    assert 'Chroot         : not built' in output
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # format_snapshot_timestamp — UI helper for cmd_build_cache
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1773,6 +1888,12 @@ def main() -> int:
         test_fmt_dep_with_constraint,
         test_fmt_dep_group_alternates_with_pipe,
         test_print_no_handler_crashes_on_uninitialized_session,
+        # UX-03 — autorun summary
+        test_format_duration_seconds_only,
+        test_format_duration_minutes_seconds,
+        test_format_duration_hours_minutes_seconds,
+        test_autorun_summary_success_includes_counts_and_iso_path,
+        test_autorun_summary_aborted_marks_stage_and_partial_state,
     ]
     failures = 0
     for t in tests:
