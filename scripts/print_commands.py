@@ -14,15 +14,45 @@ needed.
 Group field controls where a category appears in the help screen.  Add a
 new group by appending to :data:`_HELP_GROUP_ORDER` so the section shows up.
 """
+import datetime
 import os
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import NamedTuple, Optional, TYPE_CHECKING
 
 import tui
 import utils
 
 if TYPE_CHECKING:
     from build import BuildSession
+
+
+# ─── public types ────────────────────────────────────────────────────────────
+
+class AutorunTiming(NamedTuple):
+    """Wall-clock context the autorun summary needs from cmd_auto_run.
+
+    Operator-invoked `print summary` passes timing=None and the helper
+    renders a state snapshot without the timing rows.
+    """
+    started:    datetime.datetime
+    finished:   datetime.datetime
+    elapsed:    int
+    aborted_at: Optional[str]
+
+
+def format_duration(seconds: int) -> str:
+    """Render `seconds` as `Hh MMm SSs` / `Mm SSs` / `Ss`.
+
+    Public so cmd_auto_run can compose log lines with the same shape the
+    summary uses, and so unit tests pin the format.
+    """
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -204,6 +234,95 @@ def _print_stats(session, *_extras) -> None:
                           f"{getattr(dt, 'download_size', 0) // (2**20)} MB")
     else:
         tui.console.print("  Dep tree                 : not built (run parse_dependency)")
+
+
+def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
+    """Render the full pipeline summary used by cmd_auto_run and operator-
+    invoked ``print summary``.
+
+    When ``timing`` is provided (autorun-driven path), show SUCCESS / ABORTED
+    header and the wall-clock rows.  When ``timing`` is None (operator-driven
+    path), show only the per-stage state snapshot — useful as a diagnostic
+    view at any point in the pipeline.
+
+    Surfaces a ``ready for build_iso`` hint at the bottom when chroot is
+    verified.  Build_iso is intentionally not auto-invoked (see README §
+    Building Image / Intro for the rationale: the operator gets a chance to
+    inspect / edit the chroot tree before it is sealed into a squashfs).
+    """
+    cfg = session.config
+    tui.console.print("")
+    if timing is None:
+        tui.console.print("Pipeline summary (current state):", tui.COLOR_HIGHLIGHT)
+    elif timing.aborted_at is None:
+        tui.console.print("Autorun summary: SUCCESS", tui.COLOR_HIGHLIGHT)
+    else:
+        tui.console.print(
+            f"Autorun summary: ABORTED at '{timing.aborted_at}'",
+            tui.COLOR_ERROR,
+        )
+
+    if timing is not None:
+        _ts_fmt = "%Y-%m-%d %H:%M:%S"
+        tui.console.print(f"  Started        : {timing.started.strftime(_ts_fmt)}")
+        tui.console.print(f"  Finished       : {timing.finished.strftime(_ts_fmt)}")
+        tui.console.print(f"  Wall time      : {format_duration(timing.elapsed)}")
+        tui.console.print("")
+
+    # Cache
+    if session.cache is not None and session.flags.cache_ready:
+        _names = len(session.cache.package_hashtable)
+        tui.console.print(f"  Cache          : {_names} package names indexed")
+    else:
+        tui.console.print("  Cache          : not built")
+
+    # Dep tree
+    if session.dep_tree is not None and session.flags.dep_check_ready:
+        _canonical = sum(1 for k, v in session.dep_tree.selected_pkgs.items()
+                         if k == v['Package'])
+        _srcs = len(session.dep_tree.selected_srcs)
+        tui.console.print(
+            f"  Dep tree       : {_canonical} canonical packages, "
+            f"{_srcs} source packages"
+        )
+    else:
+        tui.console.print("  Dep tree       : not built")
+
+    # Source build
+    sb = getattr(session, 'last_source_build_counts', None)
+    if sb is not None:
+        tui.console.print(
+            f"  Source build   : {sb['built']} built, {sb['tunneled']} tunneled, "
+            f"{sb['failed']} failed, {sb['skipped']} skipped"
+        )
+    else:
+        tui.console.print("  Source build   : not run")
+
+    # Chroot
+    if session.flags.chroot_verified:
+        tui.console.print("  Chroot         : built and verified (8/8 checks passed)")
+    elif session.flags.chroot_ready:
+        tui.console.print("  Chroot         : built but verify failed — re-run verify_chroot")
+    else:
+        tui.console.print("  Chroot         : not built")
+
+    # Predicted ISO path + next-step hint.  Build_iso intentionally not
+    # auto-invoked — see docstring above.
+    tui.console.print("")
+    _iso_name = f"athena-{cfg.build_version}-{cfg.arch}.iso"
+    _iso_path = os.path.join(cfg.dir_image, _iso_name)
+    if session.flags.chroot_verified:
+        tui.console.print(f"  ISO target     : {_iso_path}", tui.COLOR_INFO)
+        tui.console.print("                   Ready — run `build_iso` to produce it.",
+                          tui.COLOR_HIGHLIGHT)
+    else:
+        tui.console.print(f"  ISO target     : {_iso_path}  (chroot must verify first)")
+
+
+def _print_summary(session, *_extras) -> None:
+    """Dispatch handler for ``print summary``.  Operator-invoked, so no
+    autorun timing is available — render the state-snapshot variant."""
+    summary(session, timing=None)
 
 
 # ─── Package list views ─────────────────────────────────────────────────────
@@ -456,6 +575,7 @@ CATEGORIES = {
     # Build state
     'state':     (_print_state,     'Build state',   'pipeline stage progress (which stages are done)'),
     'stats':     (_print_stats,     'Build state',   'high-level counts across cache, dep tree, sources'),
+    'summary':   (_print_summary,   'Build state',   'full pipeline summary (counts + chroot + ISO target)'),
 
     # Packages
     'required':  (_print_required,  'Packages',      "packages with 'required' priority from APT cache"),

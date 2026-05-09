@@ -965,10 +965,11 @@ class BuildSession:
         its flag to False at entry and sets it to True only on success, so
         checking the flag after the call is a reliable did-it-complete probe.
 
-        Emits a final summary (UX-03) on every exit path — success or
-        abort — with stage counts, source-build breakdown, predicted ISO
-        path, and total wall time.
+        Emits the final summary (UX-03) via print_commands.summary on every
+        exit path — success or abort — with stage counts, source-build
+        breakdown, predicted ISO path, and total wall time.
         """
+        import print_commands
         _steps = [
             (self.cmd_build_cache,       'cache_ready',           'build_cache'),
             (self.cmd_parse_dependency,  'dep_check_ready',       'parse_dependency'),
@@ -997,98 +998,12 @@ class BuildSession:
 
         _t1_dt = datetime.datetime.now()
         _elapsed = int(time.monotonic() - _t0)
-        self._print_autorun_summary(_t0_dt, _t1_dt, _elapsed, _aborted_at)
-
-    @staticmethod
-    def _format_duration(seconds: int) -> str:
-        """Render `seconds` as `Hh MMm SSs` / `Mm SSs` / `Ss`.  Used by the
-        autorun summary and any future stage-timing reporting."""
-        h, rem = divmod(seconds, 3600)
-        m, s = divmod(rem, 60)
-        if h:
-            return f"{h}h {m:02d}m {s:02d}s"
-        if m:
-            return f"{m}m {s:02d}s"
-        return f"{s}s"
-
-    def _print_autorun_summary(
-        self,
-        start_dt: datetime.datetime,
-        end_dt:   datetime.datetime,
-        elapsed:  int,
-        aborted_at: Optional[str],
-    ) -> None:
-        """Emit the UX-03 final summary at end of cmd_auto_run.
-
-        Counts come from session state populated by each stage:
-          - cache: len(self.cache.package_hashtable)            (build_cache)
-          - dep tree canonical/source counts                     (parse_dependency)
-          - last_source_build_counts dict                        (source_build)
-          - chroot_verified flag + last verify result            (build_chroot)
-        """
-        console.print("")
-        if aborted_at is None:
-            console.print("Autorun summary: SUCCESS", tui.COLOR_HIGHLIGHT)
-        else:
-            console.print(f"Autorun summary: ABORTED at '{aborted_at}'", tui.COLOR_ERROR)
-
-        # Timing
-        _ts_fmt = "%Y-%m-%d %H:%M:%S"
-        console.print(f"  Started        : {start_dt.strftime(_ts_fmt)}")
-        console.print(f"  Finished       : {end_dt.strftime(_ts_fmt)}")
-        console.print(f"  Wall time      : {self._format_duration(elapsed)}")
-        console.print("")
-
-        # Cache
-        if self.cache is not None and self.flags.cache_ready:
-            _names = len(self.cache.package_hashtable)
-            console.print(f"  Cache          : {_names} package names indexed")
-        else:
-            console.print("  Cache          : not built")
-
-        # Dep tree
-        if self.dep_tree is not None and self.flags.dep_check_ready:
-            _canonical = sum(1 for k, v in self.dep_tree.selected_pkgs.items()
-                             if k == v['Package'])
-            _srcs = len(self.dep_tree.selected_srcs)
-            console.print(
-                f"  Dep tree       : {_canonical} canonical packages, {_srcs} source packages"
-            )
-        else:
-            console.print("  Dep tree       : not built")
-
-        # Source build
-        sb = self.last_source_build_counts
-        if sb is not None:
-            console.print(
-                f"  Source build   : {sb['built']} built, {sb['tunneled']} tunneled, "
-                f"{sb['failed']} failed, {sb['skipped']} skipped"
-            )
-        else:
-            console.print("  Source build   : not run")
-
-        # Chroot
-        if self.flags.chroot_verified:
-            console.print("  Chroot         : built and verified (8/8 checks passed)")
-        elif self.flags.chroot_ready:
-            console.print("  Chroot         : built but verify failed — re-run verify_chroot")
-        else:
-            console.print("  Chroot         : not built")
-
-        # Predicted ISO path — autorun does NOT run build_iso, so this is
-        # informational: where the operator should expect the ISO to land
-        # once they invoke build_iso manually.
-        console.print("")
-        _iso_name = f"athena-{self.config.build_version}-{self.config.arch}.iso"
-        _iso_path = os.path.join(self.config.dir_image, _iso_name)
-        if self.flags.chroot_verified:
-            console.print(
-                f"  ISO target     : {_iso_path}",
-                tui.COLOR_INFO,
-            )
-            console.print("                   (run `build_iso` to produce it)")
-        else:
-            console.print(f"  ISO target     : {_iso_path}  (chroot must verify first)")
+        print_commands.summary(self, timing=print_commands.AutorunTiming(
+            started=_t0_dt,
+            finished=_t1_dt,
+            elapsed=_elapsed,
+            aborted_at=_aborted_at,
+        ))
     # ---------------------------------------------------------------------------
     # Entry point
     # ---------------------------------------------------------------------------
