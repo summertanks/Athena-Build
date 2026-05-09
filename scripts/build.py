@@ -720,20 +720,77 @@ class BuildSession:
     # Command: source_build
     # ---------------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_source_build_args(args):
+        """Pure-function argument parser for cmd_source_build.
+
+        Recognises:
+          - 'force' / 'recommended' as case-insensitive flag-words at any
+            position
+          - one optional `[profile,...]` bracket-token (override for both
+            DEB_BUILD_PROFILES and DEB_BUILD_OPTIONS); multiple bracket
+            tokens is a parse error
+          - everything else as a package name
+          - 'recommended' is mutually exclusive with named packages
+
+        Returns ``(err, force, recommended, names, profile_override)``.
+        On success ``err`` is None; on parse error ``err`` is a printable
+        string the caller should surface.  ``profile_override`` is None
+        when no bracket-token was given; an empty list when the operator
+        wrote `[]` (most-permissive build); a populated list otherwise.
+        """
+        _bracket_token = None
+        _other_args = []
+        for _a in args:
+            _s = _a.strip()
+            if _s.startswith('[') and _s.endswith(']'):
+                if _bracket_token is not None:
+                    return (
+                        f"Usage: only one [profiles] override per invocation "
+                        f"(saw {_bracket_token!r} and {_s[1:-1]!r})",
+                        False, False, [], None,
+                    )
+                _bracket_token = _s[1:-1]
+            else:
+                _other_args.append(_a)
+        _flags = {a.strip().lower() for a in _other_args}
+        _force = 'force' in _flags
+        _recommended = 'recommended' in _flags
+        _names = [a for a in _other_args
+                  if a.strip().lower() not in ('force', 'recommended')]
+        if _recommended and _names:
+            return (
+                "Usage: 'source_build recommended' is mutually exclusive with "
+                "named packages.  Use one or the other.",
+                False, False, [], None,
+            )
+        _profile_override = None
+        if _bracket_token is not None:
+            _profile_override = [
+                p.strip() for p in _bracket_token.split(',') if p.strip()
+            ]
+        return (None, _force, _recommended, _names, _profile_override)
+
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
-        Usage: source_build [force] [recommended | <pkg> ...]
+        Usage: source_build [force] [recommended | <pkg> ...] [[profile,...]]
 
-          force        — rebuild packages even if a valid result already exists
-          recommended  — build ONLY the EXTRAS-01 sources (depth-1 Recommends
-                         pulled into the repo by parse_dependency, but
-                         excluded from chroot install).  Mutually exclusive
-                         with named packages.
-          pkg ...      — limit the build to the named source packages
-          (no arg)     — build everything in selected_srcs MINUS the
-                         extras-only sources (those need explicit
-                         `recommended` mode)
+          force         — rebuild packages even if a valid result already exists
+          recommended   — build ONLY the EXTRAS-01 sources (depth-1 Recommends
+                          pulled into the repo by parse_dependency, but
+                          excluded from chroot install).  Mutually exclusive
+                          with named packages.
+          pkg ...       — limit the build to the named source packages
+          [profile,...] — bracket-delimited token (e.g. `[nocheck]`) overrides
+                          BOTH DEB_BUILD_PROFILES and DEB_BUILD_OPTIONS for
+                          this invocation only.  Use `[]` (empty) for the
+                          most permissive build (no profiles/options — docs
+                          and tests included).  Implies `force` because the
+                          .result cache wouldn't reflect the override.
+          (no arg)      — build everything in selected_srcs MINUS the
+                          extras-only sources (those need explicit
+                          `recommended` mode)
 
         Each package is built in a fresh container instance with its declared
         build-dependencies installed at runtime.  Result files (.result) and build
@@ -754,26 +811,36 @@ class BuildSession:
             console.print("Run 'build_container' first")
             return
 
-        # Parse args: 'force' and 'recommended' are flag-words (any position);
-        # everything else is treated as a package name.  'recommended' is
-        # mutually exclusive with named packages — `source_build recommended
-        # pkg1` is rejected with a usage hint instead of silently picking one
-        # mode.
-        _flags = {a.strip().lower() for a in args}
-        _force = 'force' in _flags
-        _recommended = 'recommended' in _flags
-        _names = [a for a in args if a.strip().lower() not in ('force', 'recommended')]
-        if _recommended and _names:
-            console.print(
-                "Usage: 'source_build recommended' is mutually exclusive with "
-                "named packages.  Use one or the other."
-            )
+        # Parse args via the static helper for testability.
+        _err, _force, _recommended, _names, _profile_override = \
+            self._parse_source_build_args(args)
+        if _err:
+            console.print(_err)
             return
+
+        # Profile override implies force, because the .result cache from a
+        # prior build under different profiles would otherwise short-circuit
+        # our rebuild.  Surface this to the operator before silently flipping.
+        if _profile_override is not None and not _force:
+            console.print(
+                f"Profile override [{','.join(_profile_override) or 'empty'}] "
+                f"implies force (cache key wouldn't reflect override)",
+                tui.COLOR_INFO,
+            )
+            _force = True
 
         if _force:
             console.print("Force mode: skipping build cache checks")
         if _recommended:
             console.print("Recommended mode: building EXTRAS-01 extras-only sources")
+        if _profile_override is not None:
+            console.print(
+                f"Profile override active: DEB_BUILD_PROFILES + "
+                f"DEB_BUILD_OPTIONS = '{' '.join(_profile_override)}' "
+                f"(was: profiles='{' '.join(sorted(self.config.build_profiles))}', "
+                f"options='{' '.join(sorted(self.config.build_options))}')",
+                tui.COLOR_INFO,
+            )
 
         # Pick the package set per the mode resolved above.
         if _names:
@@ -850,7 +917,11 @@ class BuildSession:
                 progress_bar.step(1)
                 continue
 
-            _build_result = self.container.build(_src_pkg)
+            _build_result = self.container.build(
+                _src_pkg,
+                profiles_override=_profile_override,
+                options_override=_profile_override,
+            )
 
             if _build_result:
                 logger.info(f"Building Package {_src_pkg.package} [PASS]")
@@ -1141,7 +1212,7 @@ def main(banner: str) -> None:
     tui.register_command('parse_dependency',  session.cmd_parse_dependency,   'Parse dependency tree for selected packages')
     tui.register_command('source_download',   session.cmd_source_download,    'Download source packages')
     tui.register_command('build_container',   session.cmd_init_container,     'Initialise Docker build container')
-    tui.register_command('source_build',      session.cmd_source_build,       'Build sources \u2014 try: source_build [force] [recommended | <pkg> \u2026]')
+    tui.register_command('source_build',      session.cmd_source_build,       'Build sources \u2014 try: source_build [force] [recommended | <pkg> \u2026] [[profile,\u2026]]')
     tui.register_command('tunnel_package',    session.cmd_tunnel_package,     'Download binary .debs from Debian repo (tunnel_package [pkg \u2026])')
     tui.register_command('build_chroot',      session.cmd_build_chroot,       'Build bootable chroot environment')
     tui.register_command('verify_chroot',     session.cmd_verify_chroot,      'Verify chroot health \u2014 8 checks, PASS/FAIL per test')
