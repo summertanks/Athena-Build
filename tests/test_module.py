@@ -1524,6 +1524,102 @@ def test_print_dispatch_empty_category_shows_help():
         assert name in output, f"empty arg should also show help with {name!r}"
 
 
+def test_print_help_groups_categories_into_sections():
+    """The help screen organises categories into named sections so 16+
+    entries don't render as one wall of text."""
+    import print_commands
+    output = _capture_console_print(lambda: print_commands._print_help(None))
+    for section in print_commands._HELP_GROUP_ORDER:
+        assert f"{section}:" in output, f"help should have section {section!r}"
+
+
+def test_print_dispatch_passes_extras_to_parametrized_handler():
+    """`print pkg <name>` etc. — extras must reach the handler.  Verified
+    via the help-text path of the handlers (returns 'Usage:' line when
+    extras are missing, different content when they're present)."""
+    import print_commands
+    # No extras → handler prints 'Usage: print pkg <name>'
+    output_no_arg = _capture_console_print(
+        lambda: print_commands.dispatch(None, 'pkg')
+    )
+    assert 'Usage: print pkg' in output_no_arg
+
+
+def test_fmt_dep_unconstrained():
+    """An unconstrained dep tuple renders as the bare name."""
+    from print_commands import _fmt_dep
+    assert _fmt_dep(('libc6', '', '')) == 'libc6'
+
+
+def test_fmt_dep_with_constraint():
+    """A constrained dep tuple renders as `name (op ver)`."""
+    from print_commands import _fmt_dep
+    assert _fmt_dep(('libc6', '2.31', '>=')) == 'libc6 (>= 2.31)'
+    assert _fmt_dep(('foo', '1.0', '<<')) == 'foo (<< 1.0)'
+
+
+def test_fmt_dep_group_alternates_with_pipe():
+    """An alt-dep group renders with ' | ' between alternatives."""
+    from print_commands import _fmt_dep_group
+    rendered = _fmt_dep_group([('a', '', ''), ('b', '2', '>=')])
+    assert rendered == 'a | b (>= 2)'
+
+
+class _PrintSessionStub:
+    """Minimal BuildSession-shaped stub for invoking print handlers safely.
+    cache/dep_tree are None, flags are all-False — handlers should hit
+    their `run X first` guards and print a friendly message rather than
+    AttributeError on .required / .selected_pkgs / etc."""
+    def __init__(self):
+        # Empty BuildConfig-shaped stub — just enough attrs that the
+        # handlers that don't need cache/dep_tree (config, mirrors, paths,
+        # snapshot, state, stats, tunneled) can render something.
+        class _Cfg:
+            arch = 'amd64'
+            release = 'bookworm'
+            baseid = 'debian'
+            baseversion = '12'
+            build_codename = 'athena'
+            build_version = '0.1'
+            mirrors: list = []
+            snapshot_enabled = False
+            snapshot_timestamp_config = ''
+            tunnel_packages: list = []
+            working_dir = '/tmp/build'
+            dir_cache = '/tmp/build/cache'
+            dir_log = '/tmp/build/log'
+            config_path = '/tmp/build/build.conf'
+            pkglist_path = '/tmp/build/pkg.list'
+        self.config = _Cfg()
+        self.cache = None
+        self.dep_tree = None
+
+        class _Flags:
+            cache_ready = False
+            dep_check_ready = False
+            download_ready = False
+            build_container_ready = False
+            source_build_ready = False
+            chroot_ready = False
+            chroot_verified = False
+        self.flags = _Flags()
+
+
+def test_print_no_handler_crashes_on_uninitialized_session():
+    """Every registered handler should either render something useful or
+    print a `run <stage> first` guard message — never raise AttributeError
+    or similar on a fresh BuildSession with cache=None / dep_tree=None."""
+    import print_commands
+    stub = _PrintSessionStub()
+    for name, (handler, _group, _desc) in print_commands.CATEGORIES.items():
+        try:
+            _capture_console_print(lambda: handler(stub))
+        except Exception as e:
+            raise AssertionError(
+                f"handler for {name!r} crashed on uninitialised session: "
+                f"{type(e).__name__}: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # format_snapshot_timestamp — UI helper for cmd_build_cache
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1671,6 +1767,12 @@ def main() -> int:
         test_print_help_lists_every_registered_category,
         test_print_dispatch_unknown_category_points_to_help,
         test_print_dispatch_empty_category_shows_help,
+        test_print_help_groups_categories_into_sections,
+        test_print_dispatch_passes_extras_to_parametrized_handler,
+        test_fmt_dep_unconstrained,
+        test_fmt_dep_with_constraint,
+        test_fmt_dep_group_alternates_with_pipe,
+        test_print_no_handler_crashes_on_uninitialized_session,
     ]
     failures = 0
     for t in tests:

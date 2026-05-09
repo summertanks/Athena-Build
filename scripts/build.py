@@ -337,16 +337,17 @@ class BuildSession:
     # Command: print
     # ---------------------------------------------------------------------------
 
-    def cmd_print(self, category: str = ''):
+    def cmd_print(self, category: str = '', *extras):
         """Display summary information about the current build state.
 
         Thin dispatcher into print_commands.dispatch — the per-category
         handlers and the help screen live there.  Empty or unknown
-        category prints the help screen.  See `print help` for the full
-        category list.
+        category prints the help screen.  Parametrized views (`print pkg
+        <name>`, `print src <name>`, `print deps <name>`) consume `*extras`.
+        See `print help` for the full category list.
         """
         import print_commands
-        print_commands.dispatch(self, category)
+        print_commands.dispatch(self, category, *extras)
 
 
     # ---------------------------------------------------------------------------
