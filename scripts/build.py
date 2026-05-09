@@ -260,14 +260,29 @@ class BuildSession:
         # them) but are tracked separately so build_chroot skips them and
         # source_build routes them to `source_build recommended`.  See
         # DependencyTree.pull_recommends_extras for the full contract.
+        # Outcome is reported on every code path — silent zero-extras would
+        # be indistinguishable from "toggle was off" in the operator's view.
         if self.config.include_recommends_in_repo:
             _added = self.dep_tree.pull_recommends_extras()
             if _added:
                 console.print(
-                    f"Pulled {_added} recommended package(s) into the repo "
+                    f"EXTRAS-01: pulled {_added} recommended package(s) into the repo "
                     f"(not chroot-installed; build with `source_build recommended`)",
                     tui.COLOR_INFO,
                 )
+            else:
+                console.print(
+                    "EXTRAS-01: 0 recommends added — every recommend was either "
+                    "already in the install closure or unresolvable in the cache. "
+                    "(Check the log tab for per-pkg WARNs if this is unexpected.)",
+                    tui.COLOR_INFO,
+                )
+        else:
+            console.print(
+                "EXTRAS-01: disabled — set [Build] IncludeRecommendsInRepo = true "
+                "to pull depth-1 Recommends into the repo.",
+                tui.COLOR_INFO,
+            )
 
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")
@@ -303,11 +318,14 @@ class BuildSession:
         # EXTRAS-01: now that selected_srcs has its full Source.pkgs lists
         # populated, identify which sources are extras-only so source_build
         # default skips them and `source_build recommended` builds only them.
+        # Always call derive_extras_src_names so the set is initialised — even
+        # the empty case must reset it for re-runs.
+        _extras_only = self.dep_tree.derive_extras_src_names()
         if self.dep_tree.extras_pkg_names:
-            _extras_only = self.dep_tree.derive_extras_src_names()
             console.print(
-                f"Of which {_extras_only} source(s) are extras-only "
-                f"(only built via `source_build recommended`)",
+                f"EXTRAS-01: of those, {_extras_only} source(s) are extras-only "
+                f"(only built via `source_build recommended`; the rest "
+                f"are mixed sources whose recommends fall out as side artefacts)",
                 tui.COLOR_INFO,
             )
 
