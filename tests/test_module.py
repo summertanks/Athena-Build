@@ -2035,6 +2035,99 @@ def test_compute_install_batches_excludes_extras_pkg_names():
         "EXTRAS-01: extras must be filtered out of install batches"
 
 
+def test_verify_dep_resolution_skips_extras():
+    """EXTRAS-01 REGRESSION: _verify_dep_resolution walked canonical_pkgs
+    including extras and demanded their (often-not-in-our-install-set)
+    deps resolve, blocking real builds at the chroot stage with errors
+    like 'ca-certificates depends: openssl — unresolved'.  Extras are
+    not chroot-installed; their transitive deps resolve via apt at
+    install-time on the booted system, so this gate must skip them.
+
+    Stub setup: 'foo' (selected) is fine; 'extra-y' (extras) depends on
+    'missing-dep' which is NOT in selected_pkgs.  Without the skip,
+    verify would raise; with the skip, it must complete cleanly."""
+    import dep_drift
+
+    class _Pkg:
+        def __init__(self, name, version='1.0',
+                     pre_depends=(), depends=(),
+                     alt_pre_depends=(), alt_depends=()):
+            self._fields = {'Package': name, 'Version': version}
+            self.version = version
+            self.pre_depends = list(pre_depends)
+            self.depends = list(depends)
+            self.alt_pre_depends = list(alt_pre_depends)
+            self.alt_depends = list(alt_depends)
+
+        def __getitem__(self, k): return self._fields[k]
+        def get(self, k, default=''): return self._fields.get(k, default)
+
+    foo = _Pkg('foo')
+    extra = _Pkg('extra-y',
+                 depends=[('missing-dep', '', '')])
+    selected_pkgs = {'foo': foo, 'extra-y': extra}
+
+    class _DT:
+        selected_pkgs = {'foo': foo, 'extra-y': extra}
+        extras_pkg_names = {'extra-y'}
+        @property
+        def canonical_pkgs(self):
+            return {k: v for k, v in self.selected_pkgs.items()
+                    if k == v['Package']}
+
+    class _Mixin(dep_drift._DepDriftMixin):
+        def __init__(self):
+            self._dependencytree = _DT()
+
+    # Should NOT raise — extra-y is in extras_pkg_names so the
+    # missing-dep violation is skipped.
+    _Mixin()._verify_dep_resolution()
+
+
+def test_verify_dep_resolution_still_catches_real_violations():
+    """The extras skip in _verify_dep_resolution must NOT mask genuine
+    install-set dep violations.  Stub: 'foo' (selected, install set)
+    depends on 'real-missing' which is NOT in selected — verify must
+    still raise."""
+    import dep_drift
+
+    class _Pkg:
+        def __init__(self, name, version='1.0',
+                     depends=()):
+            self._fields = {'Package': name, 'Version': version}
+            self.version = version
+            self.pre_depends = []
+            self.depends = list(depends)
+            self.alt_pre_depends = []
+            self.alt_depends = []
+
+        def __getitem__(self, k): return self._fields[k]
+        def get(self, k, default=''): return self._fields.get(k, default)
+
+    foo = _Pkg('foo', depends=[('real-missing', '', '')])
+
+    class _DT:
+        selected_pkgs = {'foo': foo}
+        extras_pkg_names = set()
+        @property
+        def canonical_pkgs(self):
+            return {k: v for k, v in self.selected_pkgs.items()
+                    if k == v['Package']}
+
+    class _Mixin(dep_drift._DepDriftMixin):
+        def __init__(self):
+            self._dependencytree = _DT()
+
+    try:
+        _Mixin()._verify_dep_resolution()
+    except RuntimeError as e:
+        assert 'real-missing' in str(e) or 'unresolved' in str(e)
+        return
+    raise AssertionError(
+        "verify must raise on a real install-set dep violation"
+    )
+
+
 def test_print_extras_lists_recommended_packages():
     """`print extras` enumerates the EXTRAS-01 entries with their source
     classification (extras-only vs mixed)."""
@@ -2608,6 +2701,8 @@ def main() -> int:
         test_pull_recommends_extras_skips_already_in_selected_pkgs,
         test_derive_extras_src_names_marks_extras_only_sources,
         test_compute_install_batches_excludes_extras_pkg_names,
+        test_verify_dep_resolution_skips_extras,
+        test_verify_dep_resolution_still_catches_real_violations,
         test_print_extras_lists_recommended_packages,
         test_print_extras_handles_empty_extras_set,
         # EXTRAS-01: source_build [profiles] override parsing

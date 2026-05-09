@@ -135,8 +135,21 @@ class _DepDriftMixin:
             except SystemError as e:
                 return False, f'check_dep error: {e}'
 
+        # EXTRAS-01: skip extras when verifying.  Extras are pulled into
+        # selected_pkgs so source_download fetches them and source_build
+        # (in `recommended` mode) can produce their .debs, but they are
+        # NOT installed in the chroot — `_compute_install_batches`
+        # filters them out via `extras_pkg_names`.  Their transitive
+        # depends therefore don't need to resolve in OUR install set;
+        # apt at install-time on the booted system resolves them via
+        # upstream Debian sources.  Verifying them here would block the
+        # chroot build on deps we never promised to satisfy (real
+        # example: ca-certificates → openssl, xauth → libx11-6).
+        _extras = getattr(self._dependencytree, 'extras_pkg_names', set())
         _violations = []
         for _pkg_name, _pkg_obj in self._dependencytree.canonical_pkgs.items():
+            if _pkg_name in _extras:
+                continue
             for _field in ('pre_depends', 'depends'):
                 for _dep in getattr(_pkg_obj, _field):
                     _ok, _why = _resolves(_dep)
