@@ -1474,6 +1474,27 @@ def test_strip_build_version_rejects_malformed_filename():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# format_snapshot_timestamp — UI helper for cmd_build_cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_format_snapshot_timestamp_well_formed():
+    """A valid Debian-snapshot timestamp renders as readable UTC."""
+    from utils import format_snapshot_timestamp
+    assert (format_snapshot_timestamp('20260506T120451Z')
+            == '2026-05-06 12:04:51 UTC')
+    assert (format_snapshot_timestamp('20250101T000000Z')
+            == '2025-01-01 00:00:00 UTC')
+
+
+def test_format_snapshot_timestamp_falls_back_on_malformed():
+    """Anything that doesn't match YYYYMMDDTHHMMSSZ is returned as-is so the
+    caller still has *something* to display."""
+    from utils import format_snapshot_timestamp
+    for bad in ('latest', '', 'not-a-timestamp', '20260506', '20260506T1204Z'):
+        assert format_snapshot_timestamp(bad) == bad
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STA-12 — Cache._GCC_BASE_RE pattern
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1592,6 +1613,9 @@ def main() -> int:
         test_gcc_base_re_matches_gcc_N_and_gcc_N_base,
         test_gcc_base_re_rejects_other_gcc_prefixed_packages,
         test_gcc_base_re_rejects_malformed_versions,
+        # snapshot UI helper
+        test_format_snapshot_timestamp_well_formed,
+        test_format_snapshot_timestamp_falls_back_on_malformed,
     ]
     failures = 0
     for t in tests:

@@ -333,6 +333,18 @@ def _validate_snapshot_timestamp(ts: str, mirrors: 'List[Mirror]') -> bool:
     return True
 
 
+def format_snapshot_timestamp(ts: str) -> str:
+    """Render a Debian-snapshot YYYYMMDDTHHMMSSZ string as a human-readable
+    UTC datetime, e.g. '20260506T120451Z' → '2026-05-06 12:04:51 UTC'.
+
+    Falls back to returning the input unchanged if it does not match the
+    expected snapshot format — caller can still display *something*.
+    """
+    if not _SNAPSHOT_TS_RE.match(ts):
+        return ts
+    return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]} UTC"
+
+
 def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
     """Resolve the effective snapshot timestamp for this build.
 
