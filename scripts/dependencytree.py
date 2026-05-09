@@ -1,11 +1,11 @@
 # Internal modules
 from collections import defaultdict
 from typing import Dict, List, Optional
-import re
 
 import package
 from package import Version
 from cache import Cache
+import utils
 
 # External Modules
 import apt_pkg
@@ -573,12 +573,18 @@ class DependencyTree:
 
             _bin_filename = (_bin_pkg.get('Filename') or '').rsplit('/', 1)[-1]
             if _bin_filename:
-                # Strip binNMU suffix (+bN) — dpkg-buildpackage produces files using
-                # the source version, which never carries the +bN rebuild suffix.
-                # Lookahead anchors to the arch field so +deb12uN and other legitimate
-                # upstream suffixes (which don't end with +b\d+ immediately before _arch)
-                # are left untouched.
-                _bin_filename = re.sub(r'\+b\d+(?=_\w+\.u?deb$)', '', _bin_filename)
+                # Strip binNMU suffix (+bN) so the recorded filename matches what
+                # dpkg-buildpackage produces from source.  utils.strip_build_version
+                # is the single source of truth (see STA-15); shared with
+                # BuildSystem._get_deb_files and tests/smoke_dep_drift.py.  Tolerate
+                # malformed APT entries that don't fit the name_ver_arch.ext shape
+                # by falling back to the original filename — historical behaviour.
+                try:
+                    _bin_filename = utils.strip_build_version(_bin_filename)
+                except ValueError:
+                    logger.warning(
+                        f"parse_sources: malformed Filename {_bin_filename!r} — "
+                        f"binNMU strip skipped")
                 if _bin_filename not in self.selected_srcs[_src_name].pkgs:
                     self.selected_srcs[_src_name].pkgs.append(_bin_filename)
 

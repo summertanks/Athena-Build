@@ -9,12 +9,12 @@ shared lifecycle rather than belonging to any one phase.
 """
 
 import os
-import re
 import subprocess
 
 import tui
 from tui import Prompt, PROMPT_PASSWORD, PROMPT_YESNO
 import dependencytree
+import utils
 from utils import BuildConfig
 
 from chroot import _ChrootMixin
@@ -168,17 +168,8 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         self._password = ''
         self._password_scrubbed = True
 
-    @staticmethod
-    def strip_build_version(file: str) -> str:
-        # stripping build revisions, because these do not reflect on source code builds
-        _name, _ext = os.path.splitext(file)
-        _name = _name.split('_')
-        if len(_name) != 3:
-            raise ValueError(f"Incorrectly formatted package filename: {file!r}")
-        _pkg_name = _name[0]
-        _version = _name[1]
-        _arch = _name[2]
-
-        _version = re.sub(r"\+b\d+$", "", _version)
-        file = _pkg_name + '_' + _version + '_' + _arch + _ext
-        return file
+    # Single source of truth lives in utils.strip_build_version.  Kept as a
+    # method on BuildSystem so the existing `self.strip_build_version` call
+    # in _ChrootMixin._get_deb_files (the mixin contract) continues to work
+    # without each mixin needing to import utils directly.
+    strip_build_version = staticmethod(utils.strip_build_version)

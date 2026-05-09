@@ -1414,6 +1414,66 @@ def test_buildconfig_creates_dir_gnupg_with_0700():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STA-15 / TEST-04 — strip_build_version edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_strip_build_version_strips_trailing_binNMU():
+    """`+bN` at the end of the version field is removed."""
+    from utils import strip_build_version
+    assert strip_build_version('foo_1.0-2+b1_amd64.deb') == 'foo_1.0-2_amd64.deb'
+    assert strip_build_version('foo_1.0-2+b15_amd64.deb') == 'foo_1.0-2_amd64.deb'
+
+
+def test_strip_build_version_preserves_point_release_suffix():
+    """`+debNuM` (Debian point-release) must not be stripped."""
+    from utils import strip_build_version
+    assert (strip_build_version('foo_1.0-2+deb12u1_amd64.deb')
+            == 'foo_1.0-2+deb12u1_amd64.deb')
+    assert (strip_build_version('foo_1.0-2+deb11u3_amd64.deb')
+            == 'foo_1.0-2+deb11u3_amd64.deb')
+
+
+def test_strip_build_version_strips_binNMU_after_point_release():
+    """Mixed suffix `+debNuM+bK` — only the trailing `+bK` is stripped."""
+    from utils import strip_build_version
+    assert (strip_build_version('foo_1.0-2+deb12u1+b3_amd64.deb')
+            == 'foo_1.0-2+deb12u1_amd64.deb')
+
+
+def test_strip_build_version_leaves_embedded_binNMU_alone():
+    """`+bN` not at the end of the version field is part of upstream — keep it."""
+    from utils import strip_build_version
+    # +b1 is in the middle of the version, not a buildd suffix
+    assert (strip_build_version('foo_1.0+b1-2_amd64.deb')
+            == 'foo_1.0+b1-2_amd64.deb')
+
+
+def test_strip_build_version_handles_udeb_extension():
+    """`.udeb` (debian-installer) extensions work the same way."""
+    from utils import strip_build_version
+    assert (strip_build_version('foo_1.0-2+b1_amd64.udeb')
+            == 'foo_1.0-2_amd64.udeb')
+
+
+def test_strip_build_version_no_change_when_no_binNMU():
+    """Version without `+bN` round-trips unchanged."""
+    from utils import strip_build_version
+    assert (strip_build_version('foo_1.0-2_amd64.deb')
+            == 'foo_1.0-2_amd64.deb')
+
+
+def test_strip_build_version_rejects_malformed_filename():
+    """Filenames not in `name_version_arch.ext` shape raise ValueError."""
+    from utils import strip_build_version
+    for bad in ('not-a-deb.deb', 'one_two.deb', 'a_b_c_d_amd64.deb'):
+        try:
+            strip_build_version(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1489,6 +1549,14 @@ def main() -> int:
         test_download_file_success_returns_size_and_empty_detail,
         # STA-03
         test_shipped_build_conf_has_snapshot_enabled,
+        # STA-15 / TEST-04
+        test_strip_build_version_strips_trailing_binNMU,
+        test_strip_build_version_preserves_point_release_suffix,
+        test_strip_build_version_strips_binNMU_after_point_release,
+        test_strip_build_version_leaves_embedded_binNMU_alone,
+        test_strip_build_version_handles_udeb_extension,
+        test_strip_build_version_no_change_when_no_binNMU,
+        test_strip_build_version_rejects_malformed_filename,
     ]
     failures = 0
     for t in tests:
