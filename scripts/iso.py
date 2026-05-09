@@ -176,7 +176,7 @@ class _IsoMixin:
             logger.debug(_line)
 
         if _proc.returncode != 0:
-            tui.console.print(f"ERROR: mksquashfs failed — see unified run log")
+            tui.console.print("ERROR: mksquashfs failed — see unified run log")
             logger.error(f"build_iso: mksquashfs exited {_proc.returncode}")
             return False
 
@@ -203,7 +203,7 @@ class _IsoMixin:
             logger.debug(_line)
 
         if _proc.returncode != 0:
-            tui.console.print(f"ERROR: grub-mkrescue failed — see unified run log")
+            tui.console.print("ERROR: grub-mkrescue failed — see unified run log")
             logger.error(f"build_iso: grub-mkrescue exited {_proc.returncode}")
             return False
 
