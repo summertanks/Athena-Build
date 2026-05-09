@@ -106,6 +106,25 @@ class BuildSession:
         console.print("Building Cache...", tui.COLOR_INFO)
         self.flags.cache_ready = False  # reset in case we're re-running
 
+        # Surface the snapshot pin up-front so the operator sees what point
+        # in time the cache is being built against — and, when 'latest' is
+        # the configured value, what date that resolved to.  resolve() is
+        # memoised, so the call inside Cache.__init__ a few lines below is
+        # a no-op cache hit.
+        if self.config.snapshot_enabled:
+            try:
+                _ts = utils.resolve_snapshot_timestamp(self.config)
+            except (RuntimeError, ValueError) as e:
+                console.print(f"ERROR: snapshot timestamp resolution failed — {e}",
+                              tui.COLOR_ERROR)
+                logger.error(f"resolve_snapshot_timestamp: {e}")
+                return
+            _human = utils.format_snapshot_timestamp(_ts) if _ts else '<unresolved>'
+            _suffix = ' (latest)' if self.config.snapshot_timestamp_config == 'latest' else ''
+            console.print(f"Snapshot timestamp: {_human}{_suffix}", tui.COLOR_HIGHLIGHT)
+        else:
+            console.print("Snapshot pinning: disabled (live mirrors)", tui.COLOR_INFO)
+
         try:
             self.cache = Cache(self.config)
         except Exception as e:
