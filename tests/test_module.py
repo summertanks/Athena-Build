@@ -2340,9 +2340,11 @@ def test_cli_eof_exits_repl_cleanly():
     assert cli._exit_code == 0
 
 
-def test_cli_widget_methods_are_no_ops_returning_stable_ids():
-    """add_widget returns a unique int per call; del_widget never raises."""
-    cli, _o, _e, restore = _fresh_cli()
+def test_cli_widget_methods_return_stable_ids_for_unknown_types():
+    """add_widget returns a unique int per call; del_widget never raises.
+    Bare objects (not ProgressBar/Spinner) pass through silently — only
+    typed widgets get start/finish markers."""
+    cli, out, _e, restore = _fresh_cli()
     try:
         wid1 = cli.add_widget(object())
         wid2 = cli.add_widget(object())
@@ -2352,7 +2354,49 @@ def test_cli_widget_methods_are_no_ops_returning_stable_ids():
         # Double-delete must be a no-op
         cli.del_widget(wid1)
     finally:
+        out_v = out.getvalue()
         restore()
+    # Bare object() is neither a ProgressBar nor a Spinner — must not
+    # leak any [start]/[done] markers to stdout.
+    assert '[start]' not in out_v
+    assert '[done' not in out_v
+
+
+def test_cli_progress_bar_prints_start_and_finish_markers():
+    """A ProgressBar's lifecycle in CLI mode emits two informational
+    lines on stdout: a `[start]` marker on construction and a
+    `[done: value/max]` marker on close().  Spinner is silent here —
+    its own done() handler prints `… done` separately."""
+    cli, out, _e, restore = _fresh_cli()
+    try:
+        from tui import ProgressBar
+        bar = ProgressBar(label='SmokeTest', maxvalue=10)  # → add_widget
+        for _ in range(10):
+            bar.step()
+        bar.close()  # → del_widget
+    finally:
+        out_v = out.getvalue()
+        restore()
+    assert 'SmokeTest [start]' in out_v
+    assert 'SmokeTest [done: 10/10]' in out_v
+
+
+def test_cli_spinner_does_not_print_start_marker():
+    """Spinner registration is silent — it prints its own `… done` line
+    on done().  CLI mode must NOT add a duplicate start/finish marker
+    for spinners (different widget shape, different lifecycle)."""
+    cli, out, _e, restore = _fresh_cli()
+    try:
+        from tui import Spinner
+        sp = Spinner('Spinning')
+        sp.done()
+    finally:
+        out_v = out.getvalue()
+        restore()
+    assert '[start]' not in out_v
+    assert '[done' not in out_v
+    # Spinner's own done() handler did print the completion line.
+    assert 'Spinning' in out_v and 'done' in out_v
 
 
 def test_cli_console_mark_and_trim_to_are_no_ops():
@@ -2584,7 +2628,9 @@ def main() -> int:
         test_cli_handler_exception_does_not_kill_repl,
         test_cli_help_lists_registered_commands,
         test_cli_eof_exits_repl_cleanly,
-        test_cli_widget_methods_are_no_ops_returning_stable_ids,
+        test_cli_widget_methods_return_stable_ids_for_unknown_types,
+        test_cli_progress_bar_prints_start_and_finish_markers,
+        test_cli_spinner_does_not_print_start_marker,
         test_cli_console_mark_and_trim_to_are_no_ops,
         test_cli_console_facade_exercise_full_surface,
         test_cli_prompt_reads_stdin,
