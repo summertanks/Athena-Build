@@ -245,6 +245,10 @@ class _StubDepTree:
         self.selected_pkgs = {
             spec[0]: _Pkg(*spec) for spec in pkg_specs
         }
+        # EXTRAS-01: chroot install filter reads dep_tree.extras_pkg_names;
+        # default empty so existing tests behave as before.
+        self.extras_pkg_names: set = set()
+        self.extras_src_names: set = set()
 
 
 class _StubConsole:
@@ -1832,6 +1836,235 @@ def test_gcc_base_re_rejects_malformed_versions():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# EXTRAS-01 — pull recommends into selected_pkgs as available-not-installed
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FakePkg:
+    """Minimal Package surface for EXTRAS-01 tests.  Carries the fields
+    DependencyTree.pull_recommends_extras and derive_extras_src_names
+    actually read: ['Package'], .recommends, .source, .get('Filename')."""
+    def __init__(self, name, source, filename=None, recommends=None):
+        self._fields = {'Package': name, 'Filename': filename or ''}
+        self.source = source
+        # parse_depends shape: each entry is a tuple (name, ver, op).
+        self.recommends = [(r, '', '') for r in (recommends or [])]
+
+    def __getitem__(self, k): return self._fields[k]
+    def get(self, k, default=''): return self._fields.get(k, default)
+
+
+class _FakeCache:
+    """Minimal Cache surface — package_hashtable + skip_src.  Versions are
+    simple strings so max() works lexically (sufficient for these tests)."""
+    def __init__(self, pkgs_by_name, skip_src=()):
+        # pkgs_by_name: {name: [_FakePkg, ...]}
+        self.package_hashtable = {
+            name: {f"v{i}": p for i, p in enumerate(pkgs)}
+            for name, pkgs in pkgs_by_name.items()
+        }
+        self.skip_src = list(skip_src)
+
+
+def _build_dep_tree_with_recommend(*, recommend_source='libnss3',
+                                   skip_src=()):
+    """Construct a DependencyTree containing one selected pkg `firefox` from
+    source `firefox` that recommends `libnss3-tools` from `recommend_source`.
+    Used by several EXTRAS-01 tests."""
+    import dependencytree
+    seed = _FakePkg('firefox', source='firefox',
+                    filename='pool/main/f/firefox/firefox_1.0_amd64.deb',
+                    recommends=['libnss3-tools'])
+    rec = _FakePkg('libnss3-tools', source=recommend_source,
+                   filename=f'pool/main/n/{recommend_source}/'
+                            f'libnss3-tools_3.0_amd64.deb',
+                   recommends=[])
+    cache = _FakeCache(
+        {'firefox': [seed], 'libnss3-tools': [rec]},
+        skip_src=skip_src,
+    )
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    # Bypass __init__ (avoids needing the full Cache constructor) — set the
+    # attributes pull_recommends_extras + derive_extras_src_names actually use.
+    dt._DependencyTree__cache = cache
+    dt.selected_pkgs = {'firefox': seed}
+    dt.selected_srcs = {}
+    dt.extras_pkg_names = set()
+    dt.extras_src_names = set()
+    return dt, seed, rec
+
+
+def test_pull_recommends_extras_pulls_single_name_recommends():
+    """A recommend whose source is NOT already in selected_srcs gets added
+    to selected_pkgs and tracked in extras_pkg_names."""
+    dt, _seed, _rec = _build_dep_tree_with_recommend()
+    added = dt.pull_recommends_extras()
+    assert added == 1
+    assert 'libnss3-tools' in dt.selected_pkgs
+    assert 'libnss3-tools' in dt.extras_pkg_names
+    assert 'firefox' not in dt.extras_pkg_names  # seed isn't an extra
+
+
+def test_pull_recommends_extras_skips_when_source_in_skip_src():
+    """Recommends whose source is on cache.skip_src are skipped with a WARN
+    (don't promise something we can't build/tunnel)."""
+    dt, _seed, _rec = _build_dep_tree_with_recommend(skip_src=['libnss3'])
+    added = dt.pull_recommends_extras()
+    assert added == 0
+    assert 'libnss3-tools' not in dt.selected_pkgs
+    assert dt.extras_pkg_names == set()
+
+
+def test_pull_recommends_extras_drops_alt_groups():
+    """OR-grouped recommends ('foo | bar') are silently dropped today by
+    package.py:201 (`if len(g) == 1`).  Document the gap with a test
+    asserting the current (drop) behaviour so any future widening is
+    conscious."""
+    import dependencytree
+    # Seed has an empty .recommends list — alt-groups don't make it into
+    # the parsed list at all.  This test pins that today's behaviour is
+    # "no alt-recommends in the data model".
+    seed = _FakePkg('firefox', source='firefox',
+                    filename='firefox_1.0_amd64.deb',
+                    recommends=[])  # parsed list ignores OR-groups
+    cache = _FakeCache({'firefox': [seed]})
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = cache
+    dt.selected_pkgs = {'firefox': seed}
+    dt.selected_srcs = {}
+    dt.extras_pkg_names = set()
+    dt.extras_src_names = set()
+    added = dt.pull_recommends_extras()
+    assert added == 0  # nothing pulled from an alt-recommend
+
+
+def test_pull_recommends_extras_skips_already_in_selected_pkgs():
+    """A recommend that is already in selected_pkgs (covered by the
+    required/important/manual closure) is NOT re-added or marked as extras."""
+    dt, _seed, _rec = _build_dep_tree_with_recommend()
+    # Pre-populate selected_pkgs with the recommend — simulate it being in
+    # the install closure already.
+    dt.selected_pkgs['libnss3-tools'] = _rec
+    added = dt.pull_recommends_extras()
+    assert added == 0
+    assert 'libnss3-tools' not in dt.extras_pkg_names
+
+
+def test_derive_extras_src_names_marks_extras_only_sources():
+    """A source whose every binary is in extras_pkg_names is in
+    extras_src_names.  A mixed source (some selected + some extras) is NOT."""
+    import dependencytree
+
+    class _StubSrc:
+        def __init__(self, pkgs): self.pkgs = pkgs
+
+    # firefox source: produces firefox.deb (selected) AND firefox-l10n-en.deb
+    # (extras).  Mixed → NOT in extras_src_names.
+    # libnss3 source: produces only libnss3-tools.deb (extras).  Extras-only.
+    seed_pkgs = {
+        'firefox':         _FakePkg('firefox',         source='firefox',
+                                    filename='firefox_1.0_amd64.deb'),
+        'firefox-l10n-en': _FakePkg('firefox-l10n-en', source='firefox',
+                                    filename='firefox-l10n-en_1.0_amd64.deb'),
+        'libnss3-tools':   _FakePkg('libnss3-tools',   source='libnss3',
+                                    filename='libnss3-tools_3.0_amd64.deb'),
+    }
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = _FakeCache({})
+    dt.selected_pkgs = seed_pkgs
+    dt.selected_srcs = {
+        'firefox': _StubSrc(['firefox_1.0_amd64.deb',
+                             'firefox-l10n-en_1.0_amd64.deb']),
+        'libnss3': _StubSrc(['libnss3-tools_3.0_amd64.deb']),
+    }
+    dt.extras_pkg_names = {'firefox-l10n-en', 'libnss3-tools'}
+    dt.extras_src_names = set()
+    n = dt.derive_extras_src_names()
+    assert n == 1
+    assert dt.extras_src_names == {'libnss3'}
+    assert 'firefox' not in dt.extras_src_names  # mixed — NOT extras-only
+
+
+def test_compute_install_batches_excludes_extras_pkg_names():
+    """EXTRAS-01: chroot install path skips packages in
+    dependencytree.extras_pkg_names so they never enter a batch."""
+    bs = _bare_buildsystem_with_deps([
+        ('foo', [], []),
+        ('bar', [], ['foo']),       # bar depends on foo
+        ('extra-y', [], ['foo']),   # an extra that also depends on foo
+    ])
+    bs._dependencytree.extras_pkg_names = {'extra-y'}
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    _all_named = {p for batch_pkgs, _force in batches for p in batch_pkgs}
+    assert 'foo' in _all_named
+    assert 'bar' in _all_named
+    assert 'extra-y' not in _all_named, \
+        "EXTRAS-01: extras must be filtered out of install batches"
+
+
+def test_print_extras_lists_recommended_packages():
+    """`print extras` enumerates the EXTRAS-01 entries with their source
+    classification (extras-only vs mixed)."""
+    import print_commands
+
+    class _StubSrc:
+        def __init__(self, pkgs): self.pkgs = pkgs
+
+    class _Pkg:
+        def __init__(self, name): self._n = name; self.version = '1.0'
+        def __getitem__(self, k): return self._n if k == 'Package' else None
+        def get(self, k, default=''): return default
+
+    class _DT:
+        selected_pkgs = {
+            'firefox':         _Pkg('firefox'),
+            'firefox-l10n-en': _Pkg('firefox-l10n-en'),
+            'libnss3-tools':   _Pkg('libnss3-tools'),
+        }
+        selected_srcs = {
+            'firefox': _StubSrc(['firefox_1.0_amd64.deb',
+                                 'firefox-l10n-en_1.0_amd64.deb']),
+            'libnss3': _StubSrc(['libnss3-tools_3.0_amd64.deb']),
+        }
+        extras_pkg_names = {'firefox-l10n-en', 'libnss3-tools'}
+        extras_src_names = {'libnss3'}
+
+    class _Sess:
+        dep_tree = _DT()
+        class flags: dep_check_ready = True
+        config = None  # not touched by _print_extras
+
+    output = _capture_console_print(
+        lambda: print_commands._print_extras(_Sess())
+    )
+    assert 'firefox-l10n-en' in output
+    assert 'libnss3-tools' in output
+    assert 'extras-only' in output  # libnss3
+    assert 'mixed source' in output  # firefox-l10n-en
+
+
+def test_print_extras_handles_empty_extras_set():
+    """When extras_pkg_names is empty, the view explains rather than
+    rendering an empty list."""
+    import print_commands
+
+    class _DT:
+        selected_pkgs = {}
+        selected_srcs = {}
+        extras_pkg_names = set()
+        extras_src_names = set()
+
+    class _Sess:
+        dep_tree = _DT()
+        class flags: dep_check_ready = True
+        config = None
+
+    output = _capture_console_print(
+        lambda: print_commands._print_extras(_Sess())
+    )
+    assert 'IncludeRecommendsInRepo' in output
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1940,6 +2173,15 @@ def main() -> int:
         test_autorun_summary_aborted_marks_stage_and_partial_state,
         test_print_summary_without_timing_renders_state_snapshot,
         test_print_summary_dispatch_through_handler,
+        # EXTRAS-01
+        test_pull_recommends_extras_pulls_single_name_recommends,
+        test_pull_recommends_extras_skips_when_source_in_skip_src,
+        test_pull_recommends_extras_drops_alt_groups,
+        test_pull_recommends_extras_skips_already_in_selected_pkgs,
+        test_derive_extras_src_names_marks_extras_only_sources,
+        test_compute_install_batches_excludes_extras_pkg_names,
+        test_print_extras_lists_recommended_packages,
+        test_print_extras_handles_empty_extras_set,
     ]
     failures = 0
     for t in tests:

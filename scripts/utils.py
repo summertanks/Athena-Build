@@ -540,6 +540,13 @@ class BuildConfig:
 
             self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback='bookworm')
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
+            # EXTRAS-01: when true, depth-1 Recommends of selected packages are
+            # pulled into selected_pkgs / selected_srcs (downloaded but not
+            # built by default; not installed in chroot).  See build.conf for
+            # the full operator-facing rationale.
+            self.include_recommends_in_repo = config_parser.getboolean(
+                'Build', 'IncludeRecommendsInRepo', fallback=True
+            )
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]
