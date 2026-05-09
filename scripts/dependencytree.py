@@ -64,6 +64,21 @@ class DependencyTree:
 
         self.selected_pkgs: Dict[str, package.Package] = {}
         self.selected_srcs: Dict[str, package.Source]  = {}
+        # EXTRAS-01: subset of selected_pkgs whose entries were pulled in via
+        # depth-1 Recommends-of-selected (rather than the required/important/
+        # manual closure).  Empty when [Build] IncludeRecommendsInRepo is off.
+        # build_chroot filters these out of the install batches; source_build
+        # default skips them; `source_build recommended` builds only them.
+        self.extras_pkg_names: set = set()
+        # Subset of selected_srcs.keys() whose every produced binary is in
+        # extras_pkg_names — i.e. sources that are here ONLY for the recommends
+        # (would not be in selected_srcs without IncludeRecommendsInRepo).
+        # Mixed sources (some selected binaries, some extras binaries) are NOT
+        # in this set — source_build builds them normally and the recommended
+        # binaries fall out as side artefacts of dpkg-buildpackage.  Derived
+        # by derive_extras_src_names() AFTER parse_sources has populated
+        # selected_srcs.
+        self.extras_src_names: set = set()
         self.arch = arch
         self.build_profiles = build_profiles
 
@@ -513,6 +528,137 @@ class DependencyTree:
                     _breaks = True
 
         return not _breaks
+
+    def pull_recommends_extras(self) -> int:
+        """EXTRAS-01: walk the current selected_pkgs and pull depth-1
+        Recommends into selected_pkgs as 'extras'.
+
+        Extras land in selected_pkgs (so source_download fetches their
+        upstream tarballs via the existing parse_sources path) and their
+        names are tracked in self.extras_pkg_names so build_chroot can
+        skip them and source_build can route between default / recommended
+        modes.
+
+        Behaviour:
+          - Depth-1 only: recommends of recommends are NOT followed.
+          - OR-grouped recommends ('foo | bar') are silently skipped —
+            today's package.recommends only carries single-name groups
+            (package.py:201 `if len(g) == 1`).  Documented gap; widening
+            this is a separate ticket.
+          - A recommend whose source is in cache.skip_src is skipped with
+            a WARN — promising it in the repo would lie since neither
+            source_build nor tunnel will produce a .deb for it.
+          - A recommend already in selected_pkgs (covered by required/
+            important/manual closure) is NOT marked as extras — the chroot
+            install set is the source of truth for "must install".
+
+        Caller is responsible for calling derive_extras_src_names()
+        AFTER parse_sources runs to populate self.extras_src_names.
+
+        Returns the number of new extras added to selected_pkgs.
+        """
+        # Snapshot — we'll mutate selected_pkgs while iterating.
+        _seed_names = [
+            name for name in self.selected_pkgs.keys()
+            if name == self.selected_pkgs[name]['Package']  # canonical only
+        ]
+        _added = 0
+        _skipped_skip_src = 0
+        for _seed_name in _seed_names:
+            _seed_pkg = self.selected_pkgs[_seed_name]
+            for _recommend_tuple in _seed_pkg.recommends:
+                _rec_name = _recommend_tuple[0]
+                if _rec_name in self.selected_pkgs:
+                    continue  # already in the install closure — nothing to do
+                _candidates = self.__cache.package_hashtable.get(_rec_name)
+                if not _candidates:
+                    logger.warning(
+                        f"pull_recommends_extras: '{_rec_name}' (recommended by "
+                        f"'{_seed_name}') not in package cache — skipped"
+                    )
+                    continue
+                # Pick latest version.  Same heuristic as elsewhere — the
+                # multi-mirror ingest stores all versions; max() over Version
+                # keys gives the highest.
+                _ver = max(_candidates.keys())
+                _rec_pkg = _candidates[_ver]
+                # Source-name lookup — if the recommend's source is on the
+                # skip list, refuse: we'd advertise something we never build.
+                try:
+                    _src_name = _rec_pkg.source
+                except Exception as e:
+                    logger.warning(
+                        f"pull_recommends_extras: cannot read source for "
+                        f"'{_rec_name}': {type(e).__name__}: {e} — skipped"
+                    )
+                    continue
+                if _src_name in self.__cache.skip_src:
+                    logger.warning(
+                        f"pull_recommends_extras: '{_rec_name}' skipped — "
+                        f"source '{_src_name}' is on cache.skip_src"
+                    )
+                    _skipped_skip_src += 1
+                    continue
+                # Add to selected_pkgs under the canonical name and mark as
+                # extras.  parse_sources() (called next by cmd_parse_dependency)
+                # will pick it up and pull the source into selected_srcs.
+                self.selected_pkgs[_rec_pkg['Package']] = _rec_pkg
+                self.extras_pkg_names.add(_rec_pkg['Package'])
+                _added += 1
+        logger.warning(
+            f"pull_recommends_extras: added {_added} recommends to "
+            f"selected_pkgs (skip_src skipped {_skipped_skip_src})"
+        )
+        return _added
+
+    def derive_extras_src_names(self) -> int:
+        """EXTRAS-01: after parse_sources has populated selected_srcs,
+        identify which sources are extras-only (every produced binary is
+        in extras_pkg_names) so source_build can route them to the
+        `recommended` mode and away from the default build run.
+
+        A source whose binaries are mixed (some selected, some extras) is
+        intentionally NOT in extras_src_names — it gets built in the
+        default source_build run and the recommended binaries fall out
+        as side artefacts of dpkg-buildpackage.
+
+        Returns the number of extras-only sources identified.
+        """
+        self.extras_src_names.clear()
+        if not self.extras_pkg_names:
+            return 0
+        # Map binary filename → canonical package name.  selected_srcs[src].pkgs
+        # holds filenames (e.g. 'foo_1.0_amd64.deb'); we need package names to
+        # check membership in extras_pkg_names.  Build a reverse index from
+        # selected_pkgs once.
+        _bin_filename_to_name = {}
+        for _name in self.selected_pkgs:
+            if _name != self.selected_pkgs[_name]['Package']:
+                continue  # virtuals — same canonical pkg, skip duplicates
+            _filename = (self.selected_pkgs[_name].get('Filename') or '')\
+                .rsplit('/', 1)[-1]
+            if _filename:
+                try:
+                    _filename = utils.strip_build_version(_filename)
+                except ValueError:
+                    pass  # malformed — fall back to original (matches parse_sources)
+                _bin_filename_to_name[_filename] = _name
+        for _src_name, _src in self.selected_srcs.items():
+            _src_bins = getattr(_src, 'pkgs', []) or []
+            if not _src_bins:
+                continue  # source has no binaries known yet — not extras-only
+            _pkg_names = [
+                _bin_filename_to_name.get(_fn) for _fn in _src_bins
+            ]
+            # All binaries known to us AND every one is in extras_pkg_names.
+            if all(n is not None and n in self.extras_pkg_names
+                   for n in _pkg_names):
+                self.extras_src_names.add(_src_name)
+        logger.info(
+            f"derive_extras_src_names: {len(self.extras_src_names)} "
+            f"extras-only source(s) identified"
+        )
+        return len(self.extras_src_names)
 
     def parse_sources(self) -> bool:
         _found = True

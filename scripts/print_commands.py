@@ -230,6 +230,14 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print(f"  Dep tree: canonical pkgs : {canonical}")
         tui.console.print(f"  Dep tree: virtual aliases: {virtuals}")
         tui.console.print(f"  Dep tree: source pkgs    : {len(dt.selected_srcs)}")
+        # EXTRAS-01: surface the extras counts so stats matches reality.
+        _extras_n = len(getattr(dt, 'extras_pkg_names', set()))
+        _extras_only_n = len(getattr(dt, 'extras_src_names', set()))
+        if _extras_n:
+            tui.console.print(
+                f"  Dep tree: extras (recom) : {_extras_n} pkg(s) "
+                f"from {_extras_only_n} extras-only source(s)"
+            )
         tui.console.print("  Dep tree: download size  : "
                           f"{getattr(dt, 'download_size', 0) // (2**20)} MB")
     else:
@@ -285,6 +293,17 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
             f"  Dep tree       : {_canonical} canonical packages, "
             f"{_srcs} source packages"
         )
+        # EXTRAS-01: extras row only when the toggle has actually pulled
+        # something — keeps the summary tight when off.
+        _extras_n = len(getattr(session.dep_tree, 'extras_pkg_names', set()))
+        if _extras_n:
+            _extras_only_n = len(
+                getattr(session.dep_tree, 'extras_src_names', set())
+            )
+            tui.console.print(
+                f"  Extras (recom) : {_extras_n} pkg(s) in repo, "
+                f"{_extras_only_n} extras-only source(s)"
+            )
     else:
         tui.console.print("  Dep tree       : not built")
 
@@ -348,14 +367,54 @@ def _print_important(session, *_extras) -> None:
 
 
 def _print_selected(session, *_extras) -> None:
-    """All packages resolved by parse_dependency (canonical names only)."""
+    """All packages resolved by parse_dependency (canonical names only).
+    Marks EXTRAS-01 entries with `(extra)` so the operator can tell at a
+    glance which are pulled in for the repo vs the chroot install."""
     if not _require_dep_check(session):
         return
     pkgs = session.dep_tree.selected_pkgs
     real_pkgs = {k: v for k, v in pkgs.items() if k == v['Package']}
+    _extras_set = getattr(session.dep_tree, 'extras_pkg_names', set())
     tui.console.print(f"Selected packages ({len(real_pkgs)}):")
     for name in sorted(real_pkgs.keys()):
-        tui.console.print(f"  {name:<40} {real_pkgs[name].version}")
+        _suffix = '  (extra)' if name in _extras_set else ''
+        tui.console.print(f"  {name:<40} {real_pkgs[name].version}{_suffix}")
+
+
+def _print_extras(session, *_extras) -> None:
+    """EXTRAS-01: depth-1 Recommends pulled in by parse_dependency.
+    These are downloaded by source_download, NOT built by default
+    source_build (use `source_build recommended`), and NOT installed
+    in the chroot."""
+    if not _require_dep_check(session):
+        return
+    extras_pkg_names = getattr(session.dep_tree, 'extras_pkg_names', set())
+    extras_src_names = getattr(session.dep_tree, 'extras_src_names', set())
+    if not extras_pkg_names:
+        tui.console.print(
+            "No recommended extras pulled "
+            "(check [Build] IncludeRecommendsInRepo in build.conf)"
+        )
+        return
+    # Map binary name → source name for display.  Walk selected_srcs and
+    # build a reverse index from each source's pkgs filename list.
+    _src_for_pkg = {}
+    for _src_name, _src in session.dep_tree.selected_srcs.items():
+        for _bin_filename in (getattr(_src, 'pkgs', []) or []):
+            # Filenames are 'name_ver_arch.deb' — first underscore-split chunk
+            # is the package name.
+            _pkg_name = _bin_filename.split('_', 1)[0]
+            _src_for_pkg[_pkg_name] = _src_name
+    tui.console.print(
+        f"Recommended extras ({len(extras_pkg_names)} pkg(s) from "
+        f"{len(extras_src_names)} extras-only source(s)):"
+    )
+    for name in sorted(extras_pkg_names):
+        _src = _src_for_pkg.get(name, '?')
+        _src_kind = 'extras-only' if _src in extras_src_names else 'mixed source'
+        tui.console.print(
+            f"  {name:<40} from {_src:<24} ({_src_kind})"
+        )
 
 
 def _print_tunneled(session, *_extras) -> None:
@@ -582,6 +641,7 @@ CATEGORIES = {
     'important': (_print_important, 'Packages',      "packages with 'important' priority from APT cache"),
     'selected':  (_print_selected,  'Packages',      'packages resolved by parse_dependency'),
     'tunneled':  (_print_tunneled,  'Packages',      'packages set to use prebuilt .debs (Tunneled list)'),
+    'extras':    (_print_extras,    'Packages',      'EXTRAS-01: depth-1 Recommends pulled into the repo (not chroot-installed)'),
     'pkg':       (_print_pkg,       'Packages',      'full package detail — usage: print pkg <name>'),
     'deps':      (_print_deps,      'Packages',      'flat dep list of a package — usage: print deps <name>'),
 

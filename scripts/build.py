@@ -254,6 +254,21 @@ class BuildSession:
         console.print(f"Total Selected Packages : {__num_total}", tui.COLOR_HIGHLIGHT)
         _spiner.done()
 
+        # --- EXTRAS-01: pull depth-1 Recommends as available-not-installed ----
+        # When [Build] IncludeRecommendsInRepo is on (default), recommends of
+        # the closure above land in selected_pkgs (so source_download fetches
+        # them) but are tracked separately so build_chroot skips them and
+        # source_build routes them to `source_build recommended`.  See
+        # DependencyTree.pull_recommends_extras for the full contract.
+        if self.config.include_recommends_in_repo:
+            _added = self.dep_tree.pull_recommends_extras()
+            if _added:
+                console.print(
+                    f"Pulled {_added} recommended package(s) into the repo "
+                    f"(not chroot-installed; build with `source_build recommended`)",
+                    tui.COLOR_INFO,
+                )
+
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")
         if not self.dep_tree.validate_selection():
@@ -284,6 +299,17 @@ class BuildSession:
             _resp = Prompt(PROMPT_YESNO, "There are one or more source parse failures, Proceed?").get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
+
+        # EXTRAS-01: now that selected_srcs has its full Source.pkgs lists
+        # populated, identify which sources are extras-only so source_build
+        # default skips them and `source_build recommended` builds only them.
+        if self.dep_tree.extras_pkg_names:
+            _extras_only = self.dep_tree.derive_extras_src_names()
+            console.print(
+                f"Of which {_extras_only} source(s) are extras-only "
+                f"(only built via `source_build recommended`)",
+                tui.COLOR_INFO,
+            )
 
         # Apply per-package skip_test flag from config (suppresses 'nocheck' build opt).
         for _pkg in self.config.skip_build_test:
@@ -679,10 +705,17 @@ class BuildSession:
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
-        Usage: source_build [force] [pkg ...]
+        Usage: source_build [force] [recommended | <pkg> ...]
 
-          force   — rebuild packages even if a valid result already exists
-          pkg ... — limit the build to the named source packages; builds all if omitted
+          force        — rebuild packages even if a valid result already exists
+          recommended  — build ONLY the EXTRAS-01 sources (depth-1 Recommends
+                         pulled into the repo by parse_dependency, but
+                         excluded from chroot install).  Mutually exclusive
+                         with named packages.
+          pkg ...      — limit the build to the named source packages
+          (no arg)     — build everything in selected_srcs MINUS the
+                         extras-only sources (those need explicit
+                         `recommended` mode)
 
         Each package is built in a fresh container instance with its declared
         build-dependencies installed at runtime.  Result files (.result) and build
@@ -703,14 +736,28 @@ class BuildSession:
             console.print("Run 'build_container' first")
             return
 
-        # Parse optional 'force' flag — must be the first argument if present.
-        _force = len(args) > 0 and args[0].strip().lower() == 'force'
-        _names = list(args[1:]) if _force else list(args)
+        # Parse args: 'force' and 'recommended' are flag-words (any position);
+        # everything else is treated as a package name.  'recommended' is
+        # mutually exclusive with named packages — `source_build recommended
+        # pkg1` is rejected with a usage hint instead of silently picking one
+        # mode.
+        _flags = {a.strip().lower() for a in args}
+        _force = 'force' in _flags
+        _recommended = 'recommended' in _flags
+        _names = [a for a in args if a.strip().lower() not in ('force', 'recommended')]
+        if _recommended and _names:
+            console.print(
+                "Usage: 'source_build recommended' is mutually exclusive with "
+                "named packages.  Use one or the other."
+            )
+            return
 
         if _force:
             console.print("Force mode: skipping build cache checks")
+        if _recommended:
+            console.print("Recommended mode: building EXTRAS-01 extras-only sources")
 
-        # Build a subset if package names were given; otherwise build everything.
+        # Pick the package set per the mode resolved above.
         if _names:
             packages = []
             for name in _names:
@@ -719,8 +766,24 @@ class BuildSession:
                     console.print(f"Unknown package: {name}")
                     return
                 packages.append(src)
+        elif _recommended:
+            # `recommended` mode: build only sources that exist purely for
+            # the recommends pull (extras_src_names is the set whose every
+            # binary lands in extras_pkg_names).
+            packages = [
+                self.dep_tree.selected_srcs[n]
+                for n in sorted(self.dep_tree.extras_src_names)
+                if n in self.dep_tree.selected_srcs
+            ]
         else:
-            packages = list(self.dep_tree.selected_srcs.values())
+            # Default: build the install closure — selected_srcs MINUS
+            # extras-only sources (mixed sources are kept; their recommended
+            # binaries fall out as side artefacts of dpkg-buildpackage).
+            _extras = self.dep_tree.extras_src_names
+            packages = [
+                _s for _name, _s in self.dep_tree.selected_srcs.items()
+                if _name not in _extras
+            ]
 
         if not packages:
             console.print("No source packages to build")
@@ -1060,7 +1123,7 @@ def main(banner: str) -> None:
     tui.register_command('parse_dependency',  session.cmd_parse_dependency,   'Parse dependency tree for selected packages')
     tui.register_command('source_download',   session.cmd_source_download,    'Download source packages')
     tui.register_command('build_container',   session.cmd_init_container,     'Initialise Docker build container')
-    tui.register_command('source_build',      session.cmd_source_build,       'Build source packages in parallel (source_build [pkg \u2026] [force])')
+    tui.register_command('source_build',      session.cmd_source_build,       'Build sources \u2014 try: source_build [force] [recommended | <pkg> \u2026]')
     tui.register_command('tunnel_package',    session.cmd_tunnel_package,     'Download binary .debs from Debian repo (tunnel_package [pkg \u2026])')
     tui.register_command('build_chroot',      session.cmd_build_chroot,       'Build bootable chroot environment')
     tui.register_command('verify_chroot',     session.cmd_verify_chroot,      'Verify chroot health \u2014 8 checks, PASS/FAIL per test')
