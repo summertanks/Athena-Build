@@ -17,7 +17,9 @@ def _load_arch_table() -> Optional[DpkgArchTable]:
     if _arch_table is None:
         try:
             _arch_table = DpkgArchTable.load_arch_table()
-        except Exception:
+        except (OSError, RuntimeError, ValueError, KeyError):
+            # Best-effort load — None is a documented return; arch checks
+            # downstream fall through to wildcard handling when this is None.
             pass
     return _arch_table
 
@@ -204,7 +206,8 @@ class Package(Packages):
             self.replaces    = _parse('Replaces')
             self.enhances    = _parse('Enhances')
             self.built_using = _parse('Built-Using')
-        except Exception as e:
+        except (ValueError, KeyError, AttributeError, SystemError) as e:
+            # SystemError covers apt_pkg.Error from parse_depends inside _parse.
             self._err_str = f"Failed to parse dependencies for package '{self.package}': {e}"
             tui.console.print(f"WARNING: {self._err_str}")
             return
@@ -554,6 +557,7 @@ class Source(Sources):
             if raw:
                 try:
                     all_deps.extend(apt_pkg.parse_src_depends(raw, architecture=arch))
-                except Exception as e:
+                except (SystemError, ValueError) as e:
+                    # apt_pkg.Error inherits from SystemError.
                     logger.warning(f"parse_src_depends({field}) for '{self.package}': {e}")
         return all_deps

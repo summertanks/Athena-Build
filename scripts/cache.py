@@ -56,7 +56,7 @@ class Cache:
 
         try:
             self._arch_table = DpkgArchTable.load_arch_table()
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, KeyError) as e:
             self.error_str = f"Failed to load dpkg arch table: {e}"
             logger.error(self.error_str)
             return
@@ -194,7 +194,7 @@ class Cache:
                 self.error_str = f"Cannot read release file: {e}"
                 logger.error(self.error_str)
                 return -1
-            except Exception as e:
+            except (ValueError, KeyError, AttributeError) as e:
                 self.error_str = f"Error parsing release file: {e}"
                 logger.error(self.error_str)
                 return -1
@@ -299,7 +299,7 @@ class Cache:
 
                 try:
                     _pkg = package.Package(_pkg_record)
-                except Exception as e:
+                except (ValueError, KeyError, AttributeError, SystemError) as e:
                     _first_line = _pkg_record.splitlines()[0] if _pkg_record else '<empty>'
                     logger.warning(f"Skipping record ({type(e).__name__}: {e}) — {_first_line}")
                     continue
@@ -321,7 +321,7 @@ class Cache:
                     for _provided_name, _provided_ver in _pkg.get_provides():
                         if _provided_name != _package_name:
                             self.package_hashtable[_provided_name][_provided_ver].append(_pkg)
-                except Exception as e:
+                except (ValueError, KeyError, AttributeError, SystemError) as e:
                     logger.warning(f"Skipping malformed provides for '{_pkg.package}': {e}")
 
                 if _pkg.priority == 'required':
@@ -341,7 +341,7 @@ class Cache:
 
                 try:
                     _src = package.Source(_src_record)
-                except Exception as e:
+                except (ValueError, KeyError, AttributeError, SystemError) as e:
                     logger.warning(f"Skipping malformed source record: {e}")
                     continue
                 if not _src.isvalid:
@@ -427,6 +427,9 @@ class Cache:
             try:
                 if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
                     result.extend(_pkgs)
-            except Exception:
+            except (SystemError, ValueError):
+                # apt_pkg.Error inherits from SystemError; ValueError covers
+                # str() of a Version that can't be coerced.  Silently skip
+                # constraint failures — the candidate just doesn't qualify.
                 pass
         return result
