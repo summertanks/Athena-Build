@@ -120,7 +120,7 @@ The wrapper will tell you about any missing Python deps. Install them and re-run
 
 From there:
 
-- `print config` shows what `config/build.conf` resolved to — which mirrors are active, whether snapshot pinning is on, what `[Build]` codename will be baked into `/etc/os-release`. Run this first to confirm you're building what you think you're building.
+- `print config` shows what `config/build.conf` resolved to — which mirrors are active, whether snapshot pinning is on, what `[Build]` codename will be baked into `/etc/os-release`. Run this first to confirm you're building what you think you're building.  (`print help` lists the other views.)
 - `autorun` runs stages 1–6 (cache → parse → download → container → source_build → chroot+verify). Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
 - When `autorun` finishes cleanly, run `build_iso` to produce the final image. (If you want to drop extra files into `buildroot/` first — custom motd, extra config — this is the moment.)
 - If a stage fails, fix the cause and re-run that stage by name (`source_build`, `build_chroot`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
