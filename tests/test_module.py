@@ -1589,10 +1589,13 @@ class _PrintSessionStub:
             snapshot_enabled = False
             snapshot_timestamp_config = ''
             tunnel_packages: list = []
+            include_recommends_in_repo = False
+            signing_key_uid = 'Athena Build <athena@local>'
             working_dir = '/tmp/build'
             dir_cache = '/tmp/build/cache'
             dir_image = '/tmp/build/image'
             dir_log = '/tmp/build/log'
+            dir_gnupg = '/tmp/build/gnupg'
             config_path = '/tmp/build/build.conf'
             pkglist_path = '/tmp/build/pkg.list'
         self.config = _Cfg()
@@ -2282,6 +2285,124 @@ def test_buildcontainer_build_signature_accepts_profile_override_kwargs():
            inspect.Parameter.KEYWORD_ONLY
 
 
+# ─── CONF-02 phase 1: signing key generate / verify (scripts/signing.py) ──
+
+def test_signing_parse_uid_helpers():
+    """_parse_uid_name and _parse_uid_email split 'Name <email>' uids."""
+    from signing import _parse_uid_name, _parse_uid_email
+    assert _parse_uid_name('Athena Build <athena@local>') == 'Athena Build'
+    assert _parse_uid_email('Athena Build <athena@local>') == 'athena@local'
+    # Bare strings pass through unchanged (used for both halves by gpg
+    # batch param file).
+    assert _parse_uid_name('Bare Name') == 'Bare Name'
+    assert _parse_uid_email('Bare Name') == 'Bare Name'
+
+
+def test_signing_parse_secret_keys_colons_extracts_fields():
+    """Hand-crafted gpg --with-colons output parses to the expected
+    key-info dict — fingerprint, primary uid, created, expires."""
+    from signing import parse_secret_keys_colons
+    sample = (
+        "sec:u:4096:1:ABC123DEF456:1700000000:0:::u:::scESC:::+::::::0:\n"
+        "fpr:::::::::ABCDEF1234567890ABCDEF1234567890ABCDEF12:\n"
+        "uid:u::::1700000000::1234abcd::Athena Build <athena@local>::::::::::0:\n"
+    )
+    keys = parse_secret_keys_colons(sample)
+    assert len(keys) == 1
+    assert keys[0]['fingerprint'] == \
+        'ABCDEF1234567890ABCDEF1234567890ABCDEF12'
+    assert keys[0]['uid'] == 'Athena Build <athena@local>'
+    assert keys[0]['created'] == '1700000000'
+    assert keys[0]['expires'] == '0'
+    assert keys[0]['keyid'] == 'ABC123DEF456'
+
+
+def test_signing_parse_secret_keys_colons_empty_input():
+    """Empty / no-key input returns []."""
+    from signing import parse_secret_keys_colons
+    assert parse_secret_keys_colons('') == []
+    # Lines that don't start with sec/fpr/uid are ignored.
+    assert parse_secret_keys_colons('tru:::1:1234567890:1:3:1:5\n') == []
+
+
+def test_signing_parse_secret_keys_colons_only_keeps_first_uid():
+    """Multiple uid records on the same key — keep only the primary."""
+    from signing import parse_secret_keys_colons
+    sample = (
+        "sec:u:4096:1:KEY1:1700000000:0:::u:::scESC:::+::::::0:\n"
+        "fpr:::::::::FP1:\n"
+        "uid:u::::1700000000::abcd::Primary UID <a@x>::::::::::0:\n"
+        "uid:u::::1700000000::efgh::Secondary <b@x>::::::::::0:\n"
+    )
+    keys = parse_secret_keys_colons(sample)
+    assert keys[0]['uid'] == 'Primary UID <a@x>'
+
+
+def test_signing_get_key_info_returns_none_when_homedir_absent():
+    """No homedir → no key state → None.  Doesn't raise."""
+    import tempfile
+    from signing import get_key_info
+    with tempfile.TemporaryDirectory() as tmp:
+        class _Cfg:
+            dir_gnupg = os.path.join(tmp, 'gnupg-does-not-exist-yet')
+            signing_key_uid = 'Athena <athena@local>'
+        assert get_key_info(_Cfg()) is None
+
+
+def test_signing_verify_key_returns_no_key_when_absent():
+    """verify_key on a missing key returns (False, 'no signing key …')
+    rather than raising — caller can surface the message verbatim."""
+    import tempfile
+    from signing import verify_key
+    with tempfile.TemporaryDirectory() as tmp:
+        class _Cfg:
+            dir_gnupg = os.path.join(tmp, 'gnupg-empty')
+            signing_key_uid = 'Athena <athena@local>'
+        ok, msg = verify_key(_Cfg())
+        assert ok is False
+        assert 'no signing key' in msg
+
+
+def test_signing_paths_compose_off_dir_gnupg():
+    """signing_home and signing_pubkey_path are stable functions of
+    config.dir_gnupg — downstream callers depend on these paths."""
+    from signing import signing_home, signing_pubkey_path
+    class _Cfg:
+        dir_gnupg = '/some/path/gnupg'
+    assert signing_home(_Cfg()) == '/some/path/gnupg/signing'
+    assert signing_pubkey_path(_Cfg()) == \
+        '/some/path/gnupg/signing/athena-archive-keyring.gpg'
+
+
+def test_signing_generate_and_verify_roundtrip_real_gpg():
+    """INTEGRATION: generate a real key in a tmp homedir, then sign+verify.
+    Uses RSA-2048 for test speed (~3s vs ~30s for production's 4096);
+    same code path either way.  Skipped silently if gpg isn't on PATH
+    (the broader codebase already requires gpg, so this should never
+    actually skip in a normal dev/CI environment)."""
+    import shutil
+    import tempfile
+    if shutil.which('gpg') is None:
+        return
+    from signing import generate_key, verify_key, get_key_info
+    with tempfile.TemporaryDirectory() as tmp:
+        class _Cfg:
+            dir_gnupg = os.path.join(tmp, 'gnupg')
+            signing_key_uid = 'Athena Test <test@athena.local>'
+        # Pre-condition: no key
+        assert get_key_info(_Cfg()) is None
+        # Generate (RSA-2048 for test speed)
+        assert generate_key(_Cfg(), _key_length=2048) is True
+        # Post-condition: key info available, fingerprint populated
+        info = get_key_info(_Cfg())
+        assert info is not None
+        assert len(info['fingerprint']) == 40, info  # SHA-1 hex = 40 chars
+        assert 'Athena Test' in info['uid']
+        # Verify roundtrip
+        ok, msg = verify_key(_Cfg())
+        assert ok, msg
+
+
 # ─── UX-05 Path B: headless CLI backend (scripts/cli.py) ────────────────────
 
 def _fresh_cli():
@@ -2714,6 +2835,15 @@ def main() -> int:
         test_source_build_args_multiple_bracket_tokens_rejected,
         test_source_build_args_bracket_position_does_not_matter,
         test_buildcontainer_build_signature_accepts_profile_override_kwargs,
+        # CONF-02 phase 1: signing key generate / verify
+        test_signing_parse_uid_helpers,
+        test_signing_parse_secret_keys_colons_extracts_fields,
+        test_signing_parse_secret_keys_colons_empty_input,
+        test_signing_parse_secret_keys_colons_only_keeps_first_uid,
+        test_signing_get_key_info_returns_none_when_homedir_absent,
+        test_signing_verify_key_returns_no_key_when_absent,
+        test_signing_paths_compose_off_dir_gnupg,
+        test_signing_generate_and_verify_roundtrip_real_gpg,
         # UX-05 Path B: headless CLI backend
         test_cli_print_writes_to_stdout,
         test_cli_severity_methods_write_to_stderr_with_tags,
