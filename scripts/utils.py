@@ -714,22 +714,44 @@ def download_file(url: str, filename: str) -> tuple:
 
     try:
         name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
+
+        # Probe size via HEAD first (kept per memory note: pre-`f1cf373`
+        # GET-only path returned 0 for some Debian mirrors and crashed the
+        # bar with maxvalue=0).  Take the larger of HEAD / GET content-length
+        # so whichever one knows wins, and fall back to a 1 MB seed if both
+        # are 0 — the bar will expand dynamically as bytes arrive.
         head = requests.head(url, timeout=10)
-        file_size = int(head.headers.get('content-length', 0))
+        head_size = int(head.headers.get('content-length', 0))
 
         with requests.get(url, stream=True, timeout=10) as response:
             response.raise_for_status()
+            get_size = int(response.headers.get('content-length', 0))
+            expected_size = max(head_size, get_size) or (1 << 20)
+            current_max  = expected_size
 
-            progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s', maxvalue=file_size)
+            progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s',
+                                           maxvalue=expected_size)
 
+            bytes_written = 0
             with open(filename, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+                        bytes_written += len(chunk)
+                        # If the stream out-runs the size hint (HEAD/GET
+                        # under-reported, or both were 0), grow the max so
+                        # the bar keeps animating instead of freezing at
+                        # 100% partway through.
+                        if bytes_written > current_max:
+                            current_max = int(bytes_written * 1.25)
+                            progress_bar.set_max(current_max)
                         progress_bar.step(len(chunk))
 
+            # Final correction so the persisted display matches reality
+            # (in case the size hint over-reported and the bar stopped short).
+            progress_bar.set_max(bytes_written)
             progress_bar.close()
-            return file_size, ''
+            return bytes_written, ''
 
     except HTTPError as e:
         # raise_for_status path — preserve the HTTP status line so the

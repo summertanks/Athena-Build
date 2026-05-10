@@ -243,14 +243,22 @@ class Cache:
                     return -1
                 tui.console.print(f'Downloaded {_src_url}')
 
+                # Wrap in a Spinner — Python's lzma module is single-threaded
+                # and CPU-bound; a 9 MB Packages.xz → 50 MB Packages takes
+                # 1-3s with no other UI feedback during the cache build.
+                # 1 MB copy buffer reduces Python-side overhead vs the
+                # default 16 KB.
+                _decompress_spinner = Spinner(f"Decompressing {os.path.basename(_compressed_dst)}")
                 try:
                     with _chosen_opener(_compressed_dst, 'rb') as f_in:
                         with open(_dst, 'wb') as f_out:
-                            shutil.copyfileobj(f_in, f_out)
+                            shutil.copyfileobj(f_in, f_out, length=1 << 20)
                 except (OSError, EOFError, lzma.LZMAError) as e:
+                    _decompress_spinner.done()
                     self.error_str = f"Failed to decompress {os.path.basename(_compressed_dst)}: {e}"
                     logger.error(self.error_str)
                     return -1
+                _decompress_spinner.done()
 
                 _mirror_files[_path.rsplit('/', 1)[-1]] = _dst
 
