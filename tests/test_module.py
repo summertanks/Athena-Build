@@ -630,7 +630,7 @@ def test_buildsystem_scrub_password_clears_field():
 
 
 def test_buildsystem_password_property_raises_after_scrub():
-    """The .password property is the surface area cmd_build_chroot uses;
+    """The .password property is the surface area cmd_build_chroot_live uses;
     a stale read after scrub must fail loudly so a missed cleanup in a
     handler cannot smuggle an empty password into a sudo subprocess
     call (which would silently fail authentication and corrupt the
@@ -940,7 +940,7 @@ def test_buildsession_constructible_with_stub_tui():
             for _name in ('cmd_build_cache', 'cmd_parse_dependency',
                           'cmd_source_download', 'cmd_init_container',
                           'cmd_source_build', 'cmd_tunnel_package',
-                          'cmd_build_chroot',
+                          'cmd_build_chroot_live', 'cmd_build_chroot_installer',
                           'cmd_build_iso_live', 'cmd_build_iso_installer',
                           'cmd_verify_chroot', 'cmd_auto_run',
                           'cmd_print',
@@ -974,7 +974,8 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_source',    'build',    'cmd_source_build'),
         ('cmd_package',   'tunnel',   'cmd_tunnel_package'),
         ('cmd_container', 'init',     'cmd_init_container'),
-        ('cmd_chroot',    'build',    'cmd_build_chroot'),
+        # cmd_chroot 'build' is now multi-token ('build live' / 'build
+        # installer') with default-to-live; covered by its own tests below.
         ('cmd_chroot',    'verify',   'cmd_verify_chroot'),
         # cmd_iso is multi-token ('build live' / 'build installer') —
         # not a verb-only dispatcher; covered by its own tests below.
@@ -1006,6 +1007,89 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
     # fallback when no Tui is registered; no need to stub it.
     _sess.cmd_cache('wat')
     assert _called == [], f"unknown verb must not invoke any handler, got {_called}"
+
+
+def test_cmd_chroot_build_no_subaction_defaults_to_live():
+    """Bare `chroot build` (no live/installer) routes to cmd_build_chroot_live
+    with no args — preserves today's autorun and the bare-`chroot build`
+    operator UX."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_build_chroot_live = (
+        lambda *a, **kw: _calls.append(('live', a, kw)))
+    _sess.cmd_build_chroot_installer = (
+        lambda *a, **kw: _calls.append(('installer', a, kw)))
+    _sess.cmd_chroot('build')
+    assert _calls == [('live', (), {})], _calls
+
+
+def test_cmd_chroot_build_live_explicit_forwards_to_live():
+    """`chroot build live [args]` routes to cmd_build_chroot_live with the
+    remaining args."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_build_chroot_live = (
+        lambda *a, **kw: _calls.append(('live', a, kw)))
+    _sess.cmd_build_chroot_installer = (
+        lambda *a, **kw: _calls.append(('installer', a, kw)))
+    _sess.cmd_chroot('build', 'live', 'with_debug')
+    assert _calls == [('live', ('with_debug',), {})], _calls
+
+
+def test_cmd_chroot_build_installer_forwards_to_installer():
+    """`chroot build installer [args]` routes to cmd_build_chroot_installer."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_build_chroot_live = (
+        lambda *a, **kw: _calls.append(('live', a, kw)))
+    _sess.cmd_build_chroot_installer = (
+        lambda *a, **kw: _calls.append(('installer', a, kw)))
+    _sess.cmd_chroot('build', 'installer', 'extra')
+    assert _calls == [('installer', ('extra',), {})], _calls
+
+
+def test_cmd_chroot_build_passthrough_args_to_live():
+    """`chroot build with_debug` (no live/installer keyword) is treated as
+    args to the live build, preserving the bare `chroot build with_debug`
+    UX from before the split."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_build_chroot_live = (
+        lambda *a, **kw: _calls.append(('live', a, kw)))
+    _sess.cmd_build_chroot_installer = (
+        lambda *a, **kw: _calls.append(('installer', a, kw)))
+    _sess.cmd_chroot('build', 'with_debug')
+    assert _calls == [('live', ('with_debug',), {})], _calls
+
+
+def test_cmd_build_chroot_installer_is_stub():
+    """The installer chroot handler is a COMP-01a stub: returns without
+    doing any work, prints an error referencing the plan doc."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    # Should not raise, returns None.  No prerequisites checked because the
+    # stub bails before any state is touched.
+    assert _sess.cmd_build_chroot_installer() is None
+    assert _sess.cmd_build_chroot_installer('with_debug') is None
 
 
 def test_cmd_iso_build_requires_subaction():
@@ -3352,6 +3436,12 @@ def main() -> int:
         test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
         test_cmd_iso_build_unknown_subaction_calls_neither_handler,
         test_cmd_build_iso_installer_is_stub,
+        # COMP-01c — chroot build live | chroot build installer split
+        test_cmd_chroot_build_no_subaction_defaults_to_live,
+        test_cmd_chroot_build_live_explicit_forwards_to_live,
+        test_cmd_chroot_build_installer_forwards_to_installer,
+        test_cmd_chroot_build_passthrough_args_to_live,
+        test_cmd_build_chroot_installer_is_stub,
         # ARCH-03
         test_console_with_explicit_tui_does_not_touch_singleton,
         test_console_singleton_fallback_when_tui_omitted,

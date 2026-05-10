@@ -722,7 +722,7 @@ class BuildSession:
         operator with PROMPT_YESNO to generate a key now.  If they
         accept, runs the same flow as `cmd_generate_signing_key`
         then re-verifies. If they decline, returns False so the caller 
-        (cmd_build_chroot) bails before any heavy chroot setup happens.
+        (cmd_build_chroot_live) bails before any heavy chroot setup happens.
 
         Returns True iff the key is verified at exit; the flag mirrors
         the return value.
@@ -782,21 +782,21 @@ class BuildSession:
         self.flags.signing_key_verified = True
         return True
 
-    def cmd_build_chroot(self, *args):
-        """Assemble the resolved package set into a bootable chroot environment.
+    def cmd_build_chroot_live(self, *args):
+        """Assemble the resolved package set into a bootable live chroot.
 
-        Usage: build_chroot [with_debug]
+        Usage: chroot build live [with_debug]   (or bare `chroot build [with_debug]`)
 
           with_debug — write /etc/systemd/journald.conf.d/50-console.conf so all
                        journal entries forward to /dev/console (ttyS0 in serial
                        boots).  Off by default — production images should not leak
                        logs onto the console.
 
-        Takes the .deb files produced by source_build from dir_repo and installs
+        Takes the .deb files produced by source build from dir_repo and installs
         them into a chroot tree at dir_chroot using dpkg.  The resulting chroot
-        can be packaged into an ISO or disk image.
+        can be packaged into a live ISO via `iso build live`.
 
-        Prerequisites: source_build must have completed (source_build_ready flag)
+        Prerequisites: source build must have completed (source_build_ready flag)
         AND the signing key must verify (signing_key_verified flag, gated up
         front via _ensure_signing_key_verified — see CONF-02 phase 3 for why).
         The sudo password is collected interactively at the start of this command.
@@ -842,6 +842,24 @@ class BuildSession:
             build_system.scrub_password()
 
 
+    def cmd_build_chroot_installer(self, *args):
+        """Build the d-i installer chroot under buildroot/installer/.
+
+        STUB — installer chroot build is COMP-01a (not yet implemented).
+        Once landed, this command will set up a build chroot with
+        debian-installer-utils + mklibs, run `make build_cdrom` against
+        the d-i source tree pointed at our repo, and capture the
+        resulting initrd.gz + vmlinuz + udeb manifest under
+        buildroot/installer/.  See docs/plans/comp-01-installer.md for
+        the full design.
+        """
+        console.print(
+            "ERROR: installer chroot build is not yet implemented "
+            "(tracked as COMP-01a; see docs/plans/comp-01-installer.md)"
+        )
+        logger.error("chroot build installer: not implemented (COMP-01a)")
+
+
     # -------------------------------Command: build_iso---------------------
     
     def cmd_build_iso_live(self, *args):
@@ -884,7 +902,7 @@ class BuildSession:
             logger.error(f"BuildSystem.for_iso() raised: {e}")
             return
 
-        # Same try/finally pattern as cmd_build_chroot — scrub the cached
+        # Same try/finally pattern as cmd_build_chroot_live — scrub the cached
         # sudo password on every exit path so it does not outlive the ISO
         # build command.
         try:
@@ -1456,11 +1474,21 @@ class BuildSession:
 
     def cmd_chroot(self, action: str = '', *args):
         _table = {
-            'build':  'install built .debs into buildroot/',
-            'verify': '8-check chroot health verifier',
+            'build [live]':    'install built .debs into buildroot/live (default sub-action)',
+            'build installer': 'build d-i installer chroot in buildroot/installer (COMP-01a)',
+            'verify':          '8-check chroot health verifier',
         }
         if action == 'build':
-            return self.cmd_build_chroot(*args)
+            # Default to live; explicit `live`/`installer` consumes the
+            # next token as the sub-action.  Anything else is treated as
+            # args to the live build (preserves `chroot build with_debug`).
+            if args and args[0] in ('live', 'installer'):
+                _sub = args[0]
+                _rest = args[1:]
+                if _sub == 'installer':
+                    return self.cmd_build_chroot_installer(*_rest)
+                return self.cmd_build_chroot_live(*_rest)
+            return self.cmd_build_chroot_live(*args)
         if action == 'verify':
             return self.cmd_verify_chroot(*args)
         return self._group_help('chroot', _table, action)
@@ -1513,7 +1541,7 @@ class BuildSession:
             (self.cmd_source_build,      'source_build_ready',    'source build'),
             # chroot build also runs chroot verify; chroot_verified is True
             # only when both build AND all 8 verify checks passed.
-            (self.cmd_build_chroot,      'chroot_verified',       'chroot build'),
+            (self.cmd_build_chroot_live, 'chroot_verified',       'chroot build'),
         ]
 
         _t0   = time.monotonic()
@@ -1623,7 +1651,7 @@ def main(banner: str) -> None:
     tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [live|installer|recommended]')
     tui.register_command('package',   session.cmd_package,   '\tPackages:   package tunnel')
     tui.register_command('container', session.cmd_container, '\tContainer:  container init')
-    tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build | chroot verify')
+    tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')
     tui.register_command('key',       session.cmd_key,       '\tSigning:    key generate | key verify')
     tui.register_command('autorun',   session.cmd_auto_run,  '\tRun all stages in sequence')

@@ -138,7 +138,7 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
     @property
     def password(self) -> str:
         """Validated sudo password collected at construction. Reused by callers
-        (e.g. cmd_build_chroot's verify step) to avoid prompting twice.
+        (e.g. cmd_build_chroot_live's verify step) to avoid prompting twice.
 
         Raises RuntimeError after scrub_password() has been called: a
         BuildSystem instance is single-use w.r.t. its sudo credential, and
