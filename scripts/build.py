@@ -140,6 +140,72 @@ class BuildSession:
         self.flags.cache_ready = True
 
 
+    # --------------------------------------Command: cache purge-------------------------------------
+
+    def cmd_cache_purge(self):
+        """Delete every regular file in the cache directory.
+
+        The cache holds re-downloadable mirror metadata (Packages, Sources,
+        InRelease — both compressed and decompressed) and the resolved
+        snapshot.timestamp marker.  Purging is safe — the next `cache build`
+        re-fetches everything from configured mirrors; the cost is a multi-GB
+        re-download.  Useful when mirror metadata has gone stale or a
+        previous run left orphan artefacts (e.g. the reverted UX-04
+        cache.pkl.gz / buildflags.json files).
+
+        Subdirectories (if any) are left intact — only top-level files go.
+        Resets cache_ready and dep_check_ready since the in-memory Cache
+        and DependencyTree (if any) now point at deleted files.
+        """
+        try:
+            _entries = [e for e in os.scandir(self.config.dir_cache)
+                        if e.is_file(follow_symlinks=False)]
+        except OSError as e:
+            console.print(f"ERROR: cannot read cache directory: {e}")
+            logger.error(f"cache purge scandir({self.config.dir_cache}): {e}")
+            return
+
+        if not _entries:
+            console.print(f"Cache directory already empty: {self.config.dir_cache}")
+            return
+
+        _total_bytes = sum(e.stat().st_size for e in _entries)
+        _mb = _total_bytes / (1024 * 1024)
+        _resp = Prompt(PROMPT_YESNO,
+            f"Delete {len(_entries)} file(s) ({_mb:.1f} MB) from "
+            f"{self.config.dir_cache}?").get_response()
+        if _resp.lower() not in ('y', 'yes'):
+            console.print("Cache purge cancelled.")
+            return
+
+        _deleted = 0
+        _failed  = 0
+        for _entry in _entries:
+            try:
+                os.unlink(_entry.path)
+                _deleted += 1
+            except OSError as e:
+                logger.error(f"cache purge: cannot delete {_entry.path}: {e}")
+                _failed += 1
+
+        # In-memory cache (and anything built off it) now points at deleted
+        # files; drop the references and reset prerequisite flags so the
+        # downstream guards trip cleanly until cache build runs again.
+        self.cache = None
+        self.dep_tree = None
+        self.flags.cache_ready = False
+        self.flags.dep_check_ready = False
+
+        if _failed:
+            console.print(
+                f"Cache purge: {_deleted} deleted, {_failed} failed "
+                "(see log)", tui.COLOR_WARNING)
+        else:
+            console.print(
+                f"Cache purge: {_deleted} file(s) deleted "
+                f"({_mb:.1f} MB freed)", tui.COLOR_INFO)
+
+
     # --------------------------------------Command: parse_dependency-------------------------------------
 
     def cmd_parse_dependency(self):
@@ -1278,9 +1344,14 @@ class BuildSession:
             console.print(f"  {group} {_action}\t{_desc}")
 
     def cmd_cache(self, action: str = '', *args):
-        _table = {'build': 'build apt cache from configured mirrors'}
+        _table = {
+            'build': 'build apt cache from configured mirrors',
+            'purge': 'delete every file in the cache directory (re-fetched on next build)',
+        }
         if action == 'build':
             return self.cmd_build_cache(*args)
+        if action == 'purge':
+            return self.cmd_cache_purge(*args)
         return self._group_help('cache', _table, action)
 
     def cmd_dep(self, action: str = '', *args):

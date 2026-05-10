@@ -994,14 +994,121 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
             f"{_group_name} {_verb} should forward to {_target_name}, got {_calls}")
 
     # Unknown verb: dispatcher must not raise and must not call any underlying
-    # handler.  cmd_cache only knows 'build'; 'wat' should print help and stop.
+    # handler.  cmd_cache only knows 'build' and 'purge'; 'wat' should print
+    # help and stop.
     _sess = BuildSession.__new__(BuildSession)
     _called = []
     _sess.cmd_build_cache = lambda *a, **kw: _called.append('build_cache')
+    _sess.cmd_cache_purge = lambda *a, **kw: _called.append('cache_purge')
     # _group_help calls console.print — that's a module-level facade with a
     # fallback when no Tui is registered; no need to stub it.
     _sess.cmd_cache('wat')
     assert _called == [], f"unknown verb must not invoke any handler, got {_called}"
+
+
+def test_cache_purge_deletes_files_and_resets_flags():
+    """`cache purge` deletes every regular file in dir_cache, drops the
+    in-memory Cache + DependencyTree references, and resets cache_ready
+    and dep_check_ready so downstream guards trip cleanly."""
+    import sys, tempfile
+    from unittest.mock import patch, MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession, BuildFlags
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Sentinel files: two top-level files (should be deleted) plus a
+        # subdirectory containing a file (should be left alone — purge
+        # only touches top-level regular files).
+        for _name in ('Packages.xz', 'snapshot.timestamp'):
+            with open(os.path.join(_tmp, _name), 'wb') as _f:
+                _f.write(b'x' * 1024)
+        os.mkdir(os.path.join(_tmp, 'subdir'))
+        with open(os.path.join(_tmp, 'subdir', 'keep.txt'), 'w') as _f:
+            _f.write('keep')
+
+        # Bypass __init__ — only need .config.dir_cache, .flags, the two
+        # state attrs, and the dispatcher to forward.
+        sess = BuildSession.__new__(BuildSession)
+        class _Cfg: pass
+        sess.config = _Cfg()
+        sess.config.dir_cache = _tmp
+        sess.flags = BuildFlags()
+        sess.flags.cache_ready = True
+        sess.flags.dep_check_ready = True
+        sess.cache = object()        # sentinel — must be cleared
+        sess.dep_tree = object()     # sentinel — must be cleared
+
+        _prompt_inst = MagicMock()
+        _prompt_inst.get_response.return_value = 'y'
+        with patch('build.Prompt', return_value=_prompt_inst):
+            sess.cmd_cache_purge()
+
+        # Top-level files gone.
+        assert not os.path.exists(os.path.join(_tmp, 'Packages.xz'))
+        assert not os.path.exists(os.path.join(_tmp, 'snapshot.timestamp'))
+        # Subdirectory and its contents preserved.
+        assert os.path.isdir(os.path.join(_tmp, 'subdir'))
+        assert os.path.isfile(os.path.join(_tmp, 'subdir', 'keep.txt'))
+        # State reset.
+        assert sess.cache is None
+        assert sess.dep_tree is None
+        assert sess.flags.cache_ready is False
+        assert sess.flags.dep_check_ready is False
+
+
+def test_cache_purge_cancelled_keeps_files_and_flags():
+    """Operator says 'n' → no files deleted, flags untouched."""
+    import sys, tempfile
+    from unittest.mock import patch, MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession, BuildFlags
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        with open(os.path.join(_tmp, 'Packages.xz'), 'wb') as _f:
+            _f.write(b'x' * 1024)
+
+        sess = BuildSession.__new__(BuildSession)
+        class _Cfg: pass
+        sess.config = _Cfg()
+        sess.config.dir_cache = _tmp
+        sess.flags = BuildFlags()
+        sess.flags.cache_ready = True
+        sess.cache = object()
+        _sentinel_cache = sess.cache
+
+        _prompt_inst = MagicMock()
+        _prompt_inst.get_response.return_value = 'n'
+        with patch('build.Prompt', return_value=_prompt_inst):
+            sess.cmd_cache_purge()
+
+        # File still present, flag untouched, cache reference intact.
+        assert os.path.isfile(os.path.join(_tmp, 'Packages.xz'))
+        assert sess.flags.cache_ready is True
+        assert sess.cache is _sentinel_cache
+
+
+def test_cache_purge_empty_dir_is_noop():
+    """Empty cache dir → noop, no Prompt invoked, no flag changes."""
+    import sys, tempfile
+    from unittest.mock import patch, MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession, BuildFlags
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        sess = BuildSession.__new__(BuildSession)
+        class _Cfg: pass
+        sess.config = _Cfg()
+        sess.config.dir_cache = _tmp
+        sess.flags = BuildFlags()
+        sess.flags.cache_ready = True
+
+        _prompt_inst = MagicMock()
+        with patch('build.Prompt', return_value=_prompt_inst) as mock_Prompt:
+            sess.cmd_cache_purge()
+
+        # Empty branch must not even construct the Prompt — confirm.
+        mock_Prompt.assert_not_called()
+        assert sess.flags.cache_ready is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3035,6 +3142,9 @@ def main() -> int:
         # ARCH-01
         test_buildsession_constructible_with_stub_tui,
         test_group_dispatchers_forward_to_underlying_cmd_methods,
+        test_cache_purge_deletes_files_and_resets_flags,
+        test_cache_purge_cancelled_keeps_files_and_flags,
+        test_cache_purge_empty_dir_is_noop,
         # ARCH-03
         test_console_with_explicit_tui_does_not_touch_singleton,
         test_console_singleton_fallback_when_tui_omitted,
