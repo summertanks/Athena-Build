@@ -18,6 +18,7 @@ VERBOSE="0"
 CONFIG_FILE="config/build.conf"
 PKG_REQ_FILE="config/pkg.list"
 HEADLESS="0"
+RESUME="0"
 
 usage() { \
         echo -e "Usage:"; \
@@ -25,6 +26,7 @@ usage() { \
         echo -e "\t -p|--pkg-list <filename> : File listing all packages included in distro"; \
         echo -e "\t -v|--verbose : Set verbosity high"; \
         echo -e "\t --headless : Skip the curses TUI; run a plain stdin/stdout REPL (UX-05)"; \
+        echo -e "\t --resume : Auto-run \`resume\` at startup (UX-04: load Cache + DependencyTree from disk, re-validate, verify chroot)"; \
 }
 
 BUILD_DIR=$(pwd)
@@ -37,7 +39,7 @@ set -o pipefail
 echo -e "Athena Linux Build System Check..."
 
 # Parsing args
-ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless' -- "$@") || exit
+ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless,resume' -- "$@") || exit
 eval "set -- $ARGS"
 
 while true; do
@@ -53,6 +55,9 @@ while true; do
 			shift 2;;
 		(--headless)
 			HEADLESS=1;
+			shift;;
+		(--resume)
+			RESUME=1;
 			shift;;
 		(-h|--help)
 			usage;
@@ -321,11 +326,15 @@ fi
 
 echo "All required Python packages found."
 
-# Forward --headless to build.py only when set; build.py:main strips it
-# from sys.argv before BuildConfig (which uses argparse) sees it.
+# Forward --headless / --resume to build.py only when set; build.py:main
+# strips them from sys.argv before BuildConfig (which uses argparse)
+# sees them.
 PY_EXTRA=()
 if [[ "$HEADLESS" == "1" ]]; then
     PY_EXTRA+=(--headless)
+fi
+if [[ "$RESUME" == "1" ]]; then
+    PY_EXTRA+=(--resume)
 fi
 
 python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$BUILD_DIR --config-file=$CONFIG_FILE "${PY_EXTRA[@]}"
