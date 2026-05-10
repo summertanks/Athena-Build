@@ -30,6 +30,7 @@ import subprocess
 import time
 import cache
 import sys
+import signing
 from typing import Optional
 
 import apt_pkg
@@ -65,31 +66,137 @@ class BuildFlags:
     Each flag is set to True at the end of its corresponding command handler
     and checked as a prerequisite by later stages.  This prevents commands
     from running on stale or missing state without repeating the earlier work.
+
+    UX-04: optionally autosaves to a JSON file on every flag change.  Pass
+    ``save_path=...`` to enable.  ``load(path)`` is the inverse — reads back
+    a persisted instance and returns one with autosave wired.  On load,
+    flags whose underlying state is in-memory-only (cache, dep tree,
+    container, signing-key verification) are RESET to False — they can't be
+    honestly restored across a process restart, and a misleading True would
+    crash downstream stages that dereference ``self.cache=None``.  Flags
+    backed by on-disk state (downloads, .debs, chroot tree) survive intact.
     """
 
-    def __init__(self):
-        self.cache_ready: bool = False             # build_cache completed
-        self.dep_check_ready: bool = False         # parse_dependency completed
-        self.download_ready: bool = False          # source_download completed
-        self.build_container_ready: bool = False   # build_container initialised
-        self.source_build_ready: bool = False      # source_build completed
-        # CONF-02 phase 3: signing key sign+verify roundtrip OK in this
-        # session.  Gated by cmd_build_chroot at the very top — the chroot
-        # bakes the public keyring in via _install_signing_keyring, so
-        # operators get a clear "no key, generate now?" prompt before the
-        # heavy chroot setup starts rather than discovering the absence at
-        # the verify step at the end.
-        self.signing_key_verified: bool = False
-        self.chroot_ready: bool = False            # build_chroot completed
-        self.chroot_verified: bool = False         # build_chroot + verify_chroot all checks passed
+    _FIELDS = [
+        'cache_ready', 'dep_check_ready', 'download_ready',
+        'build_container_ready', 'source_build_ready',
+        'signing_key_verified',
+        'chroot_ready', 'chroot_verified',
+    ]
+    # Flags whose underlying state lives only in this Python process
+    # (BuildSession.cache / .dep_tree / .container, or the in-session
+    # signing-verify result).  Reset on load — restoring True without
+    # the in-memory object means the next stage to read self.<X> trips
+    # on None.  Once UX-04 commit B (persistence of Cache + DependencyTree
+    # via pickle) lands, cache_ready / dep_check_ready will be backable
+    # by on-disk state and can move out of this set.
+    _IN_MEMORY_ONLY = {
+        'cache_ready', 'dep_check_ready', 'build_container_ready',
+        'signing_key_verified',
+    }
+    _FORMAT_VERSION = 1
+    _SAVE_FILENAME = 'buildflags.json'
+
+    def __init__(self, save_path: 'Optional[str]' = None):
+        # Order matters: _save_path / _autosave must exist BEFORE any
+        # field set, because __setattr__ consults them.  Bypass our own
+        # setattr for these privates via object.__setattr__.
+        object.__setattr__(self, '_save_path', save_path)
+        object.__setattr__(self, '_autosave', False)
+        for f in self._FIELDS:
+            object.__setattr__(self, f, False)
+        # All fields exist now — autosave is allowed.  Subsequent
+        # `self.cache_ready = True` calls in cmd_* trip __setattr__ →
+        # _save().  No-op when save_path is None (tests, stubs).
+        object.__setattr__(self, '_autosave', save_path is not None)
+
+    def __setattr__(self, name: str, value) -> None:
+        object.__setattr__(self, name, value)
+        if (self._autosave
+                and not name.startswith('_')
+                and name in self._FIELDS):
+            self._save()
+
+    def _save(self) -> None:
+        """Write current flag state to ``self._save_path`` as JSON.
+        Failures log at WARNING — they don't raise; a write failure
+        during a long build shouldn't abort the build."""
+        if not self._save_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._save_path), exist_ok=True)
+            payload = {
+                '_format_version': self._FORMAT_VERSION,
+                '_last_save': datetime.datetime.now().isoformat(timespec='seconds'),
+                'flags': {f: getattr(self, f) for f in self._FIELDS},
+            }
+            import json as _json
+            with open(self._save_path, 'w') as fh:
+                _json.dump(payload, fh, indent=2)
+        except OSError as e:
+            logger.warning(f"BuildFlags save failed ({self._save_path}): {e}")
+
+    @classmethod
+    def load(cls, save_path: str) -> 'BuildFlags':
+        """Load a persisted BuildFlags from disk; returns a fresh
+        all-False instance (with autosave wired) if the file is absent
+        or unparseable.
+
+        Resets ``_IN_MEMORY_ONLY`` flags to False on load — those reflect
+        Python-process state that doesn't survive a restart.
+        """
+        flags = cls(save_path=save_path)
+        if not os.path.exists(save_path):
+            return flags
+        try:
+            import json as _json
+            with open(save_path) as fh:
+                data = _json.load(fh)
+            if data.get('_format_version') != cls._FORMAT_VERSION:
+                logger.warning(
+                    "BuildFlags: unknown format_version "
+                    f"{data.get('_format_version')!r} in {save_path} — "
+                    "using defaults"
+                )
+                return flags
+            persisted = data.get('flags', {})
+            # Suspend autosave during load — no need to rewrite what we
+            # just read.
+            object.__setattr__(flags, '_autosave', False)
+            for f in cls._FIELDS:
+                if f in persisted and isinstance(persisted[f], bool):
+                    val = persisted[f]
+                    if f in cls._IN_MEMORY_ONLY and val:
+                        # Honest reset — see class docstring.
+                        val = False
+                    object.__setattr__(flags, f, val)
+            object.__setattr__(flags, '_autosave', True)
+            return flags
+        except (OSError, ValueError, KeyError) as e:
+            logger.warning(
+                f"BuildFlags: could not load {save_path}: "
+                f"{type(e).__name__}: {e} — using defaults"
+            )
+            return flags
+
+    @classmethod
+    def default_path(cls, config) -> str:
+        """Conventional location for the persisted flags file —
+        siblings the existing snapshot.timestamp under dir_cache."""
+        return os.path.join(config.dir_cache, cls._SAVE_FILENAME)
+
+    def restored_summary(self) -> str:
+        """One-line summary of which flags came back True from disk.
+        Empty string when none — caller should not print anything."""
+        _set = [f for f in self._FIELDS if getattr(self, f)]
+        return ', '.join(_set) if _set else ''
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""
-        fields = ['cache_ready', 'dep_check_ready', 'download_ready',
-                  'build_container_ready', 'source_build_ready',
-                  'signing_key_verified',
-                  'chroot_ready', 'chroot_verified']
-        return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
+        return '  '.join(
+            f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}"
+            for f in self._FIELDS
+        )
 
 class BuildSession:
     """Owns the full pipeline state and the cmd_* command handlers the TUI
@@ -104,10 +211,15 @@ class BuildSession:
         self.cache: 'Optional[Cache]' = None
         self.dep_tree: 'Optional[dependencytree.DependencyTree]' = None
         self.container: 'Optional[buildcontainer.BuildContainer]' = None
-        self.flags: BuildFlags = BuildFlags()
+        # UX-04: load persisted flags if a JSON file exists at the
+        # default path (dir_cache/buildflags.json).  Autosave is wired —
+        # subsequent flag flips in cmd_* will write back to the same
+        # path.  In-memory-only flags (cache_ready, dep_check_ready,
+        # build_container_ready, signing_key_verified) get reset on
+        # load — see BuildFlags class docstring.
+        self.flags: BuildFlags = BuildFlags.load(BuildFlags.default_path(config))
+
         # Counters from the most recent source_build run — populated by
-        # cmd_source_build, read by the autorun summary (UX-03).
-        # None until a source_build has actually run.
         self.last_source_build_counts: 'Optional[dict]' = None
 
     def cmd_build_cache(self):
@@ -120,11 +232,7 @@ class BuildSession:
         console.print("Building Cache...", tui.COLOR_INFO)
         self.flags.cache_ready = False  # reset in case we're re-running
 
-        # Surface the snapshot pin up-front so the operator sees what point
-        # in time the cache is being built against — and, when 'latest' is
-        # the configured value, what date that resolved to.  resolve() is
-        # memoised, so the call inside Cache.__init__ a few lines below is
-        # a no-op cache hit.
+        # preint current snapshot in readable format
         if self.config.snapshot_enabled:
             try:
                 _ts = utils.resolve_snapshot_timestamp(self.config)
@@ -133,12 +241,13 @@ class BuildSession:
                               tui.COLOR_ERROR)
                 logger.error(f"resolve_snapshot_timestamp: {e}")
                 return
-            _human = utils.format_snapshot_timestamp(_ts) if _ts else '<unresolved>'
+            _date_time = utils.format_snapshot_timestamp(_ts) if _ts else '<unresolved>'
             _suffix = ' (latest)' if self.config.snapshot_timestamp_config == 'latest' else ''
-            console.print(f"Snapshot timestamp: {_human}{_suffix}", tui.COLOR_HIGHLIGHT)
+            console.print(f"Snapshot timestamp: {_date_time}{_suffix}", tui.COLOR_HIGHLIGHT)
         else:
             console.print("Snapshot pinning: disabled (live mirrors)", tui.COLOR_INFO)
 
+        # build the cache
         try:
             self.cache = Cache(self.config)
         except Exception as e:
@@ -161,7 +270,9 @@ class BuildSession:
     def cmd_parse_dependency(self):
         """Resolve the full closure of packages needed to build the target system.
 
-        Runs three dependency-resolution passes in priority order:
+        Runs three dependency-resolution passes in priority order: This is technically 
+        unnecessary to have so many passes, initially created to help with debugging
+        but then just remained for sake of clarity.
 
           Pass I   — 'required' packages (essential base; every package they pull
                       in is also marked required so it survives any later pruning)
@@ -170,24 +281,24 @@ class BuildSession:
           Pass III — manually listed packages from the configured pkglist file
                       (distro-specific selections on top of the Debian base)
 
-        After resolution, validates the selection for Breaks/Conflicts, then
-        maps every selected binary package back to its source package so that
-        source_download and source_build know what to fetch and build.
+        After resolution, 
+            - validates the selection for Breaks/Conflicts, 
+            - maps every selected binary package back to its source package
+            - find patches
+            - source_download and source_build to fetch and build.
 
-        Patch files are discovered at this stage so that buildcontainer.build()
-        can mount them at container start time without a second disk scan.
         """
         if not self.flags.cache_ready:
             console.print("Cache not ready, Run 'build_cache' first")
             return
+        
+        self.flags.dep_check_ready = False
 
         _spiner = Spinner("Parsing Dependencies")
-        self.flags.dep_check_ready = False  # reset before the long parse
-
+        
         console.print("Preparing Parsing Tree...", tui.COLOR_INFO)
         self.dep_tree = dependencytree.DependencyTree(self.cache, select_recommended=False,
-                                                         arch=self.config.arch,
-                                                         build_profiles=self.config.build_profiles)
+                        arch=self.config.arch, build_profiles=self.config.build_profiles)
 
         # --- Pass I: required ---------------------------------------------------
         required_packages = self.cache.required
@@ -266,31 +377,16 @@ class BuildSession:
         # When [Build] IncludeRecommendsInRepo is on (default), recommends of
         # the closure above land in selected_pkgs (so source_download fetches
         # them) but are tracked separately so build_chroot skips them and
-        # source_build routes them to `source_build recommended`.  See
-        # DependencyTree.pull_recommends_extras for the full contract.
-        # Outcome is reported on every code path — silent zero-extras would
-        # be indistinguishable from "toggle was off" in the operator's view.
+        # source_build routes them to `source_build recommended`. 
+
         if self.config.include_recommends_in_repo:
             _added = self.dep_tree.pull_recommends_extras()
             if _added:
-                console.print(
-                    f"EXTRAS-01: pulled {_added} recommended package(s) into the repo "
-                    f"(not chroot-installed; build with `source_build recommended`)",
-                    tui.COLOR_INFO,
-                )
+                console.print(f"Pulled {_added} recommended package(s) into the repo ", tui.COLOR_INFO)
             else:
-                console.print(
-                    "EXTRAS-01: 0 recommends added — every recommend was either "
-                    "already in the install closure or unresolvable in the cache. "
-                    "(Check the log tab for per-pkg WARNs if this is unexpected.)",
-                    tui.COLOR_INFO,
-                )
+                console.print("Seems no recommends added — check logs if unexpected", tui.COLOR_INFO)
         else:
-            console.print(
-                "EXTRAS-01: disabled — set [Build] IncludeRecommendsInRepo = true "
-                "to pull depth-1 Recommends into the repo.",
-                tui.COLOR_INFO,
-            )
+            console.print("IncludeRecommendsInRepo: disabled", tui.COLOR_INFO)
 
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")
@@ -313,36 +409,26 @@ class BuildSession:
             logger.error(f"selected_packages.list write: {e}")
             return
 
-        # --- Source mapping -----------------------------------------------------
-        # Map each selected binary package to its upstream source.  This populates
-        # self.dep_tree.selected_srcs which all subsequent stages consume.
+        # --------------------- Source mapping -----------------------------------
         console.print("Parsing Source Packages...", tui.COLOR_INFO)
 
+        # Map each selected binary package to its upstream source. 
         if not self.dep_tree.parse_sources():
             _resp = Prompt(PROMPT_YESNO, "There are one or more source parse failures, Proceed?").get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
 
-        # EXTRAS-01: now that selected_srcs has its full Source.pkgs lists
-        # populated, identify which sources are extras-only so source_build
-        # default skips them and `source_build recommended` builds only them.
-        # Always call derive_extras_src_names so the set is initialised — even
-        # the empty case must reset it for re-runs.
+        # identify which sources are extras-only so source_build default skips them
         _extras_only = self.dep_tree.derive_extras_src_names()
         if self.dep_tree.extras_pkg_names:
-            console.print(
-                f"EXTRAS-01: of those, {_extras_only} source(s) are extras-only "
-                f"(only built via `source_build recommended`; the rest "
-                f"are mixed sources whose recommends fall out as side artefacts)",
-                tui.COLOR_INFO,
-            )
+            console.print(f"{_extras_only} source(s) are extras-only ", tui.COLOR_INFO)
 
         # Apply per-package skip_test flag from config (suppresses 'nocheck' build opt).
         for _pkg in self.config.skip_build_test:
             if _pkg in self.dep_tree.selected_srcs:
                 self.dep_tree.selected_srcs[_pkg].skip_test = True
 
-        # --- Patch discovery ----------------------------------------------------
+        # -------------------- Patch discovery --------------------------------------
         # Scan the patch tree for files matching <package>/<version>/*.patch.
         # Sorting by the first five characters preserves the numeric prefix ordering
         # (e.g. 9001-, 9002-) used to control application order.
@@ -354,19 +440,16 @@ class BuildSession:
                     _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
                     self.dep_tree.selected_srcs[_pkg].patch_list = sorted(_patch_files, key=lambda x: x[:5])
                     logger.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
-                    # CONF-05: soft DEP-3 header check on each discovered
-                    # patch.  Missing fields → log-tab warning only; the
-                    # patch is still applied at build time.  Keeps the
-                    # convention enforceable without blocking ad-hoc
-                    # one-off operator patches.
+                    # soft DEP-3 header check on each discovered patch. 
+                   
                     for _pf in _patch_files:
-                        _missing = utils.check_dep3_header(
-                            os.path.join(_patch_path, _pf))
+                        _missing = utils.check_dep3_header(os.path.join(_patch_path, _pf))
+                        
+                        # Missing fields → log-tab warning only; the patch is still applied at build time. 
+                        # Keeps the convention enforceable without blocking ad-hoc one-off operator patches.
                         if _missing:
-                            logger.warning(
-                                f"DEP-3: {_pkg}/{_ver}/{_pf} missing "
-                                f"header(s): {', '.join(_missing)}"
-                            )
+                            logger.warning(f"DEP-3: {_pkg}/{_ver}/{_pf} missing header(s): {', '.join(_missing)}")
+
             except OSError as e:
                 console.print(f"WARNING: cannot list patches for '{_pkg}'")
                 logger.warning(f"patch discovery {_patch_path}: {e}")
@@ -391,87 +474,64 @@ class BuildSession:
         self.flags.dep_check_ready = True
 
 
-    # ---------------------------------------------------------------------------
-    # Command: print
-    # ---------------------------------------------------------------------------
+    # ------------------------------ Command: print ---------------------------------
 
     def cmd_print(self, category: str = '', *extras):
         """Display summary information about the current build state.
 
-        Thin dispatcher into print_commands.dispatch — the per-category
-        handlers and the help screen live there.  Empty or unknown
-        category prints the help screen.  Parametrized views (`print pkg
+        Thin dispatcher into print_commands.dispatch — Parametrized views (`print pkg
         <name>`, `print src <name>`, `print deps <name>`) consume `*extras`.
         See `print help` for the full category list.
         """
+
         import print_commands
         print_commands.dispatch(self, category, *extras)
 
-
-    # ---------------------------------------------------------------------------
-    # Command: generate_signing_key  (CONF-02 phase 1)
-    # ---------------------------------------------------------------------------
+    # --------------------------------- Command: generate_signing_key ---------------
 
     def cmd_generate_signing_key(self, *args):
+        
         """Generate the project's signing keypair (one-time setup).
 
         Usage: generate_signing_key [force]
 
-          force — overwrite an existing key for the same UID.  Default
-                  refuses if a key already exists, since overwriting
-                  would invalidate every Release we've ever signed
-                  with the prior key.
+        force — overwrite an existing key for the same UID. 
+        carefull overwriting - would invalidate all previous Release.
 
-        Prompts for confirmation in either case; key generation is a
-        security-relevant action that takes ~30-60s for RSA-4096 and
-        is hard to back out of.
-
-        UID comes from `[Repo] SigningKeyUid` in build.conf.  Private
-        key lands under `<dir_gnupg>/signing/`; public key is exported
-        to `<dir_gnupg>/signing/athena-archive-keyring.gpg` for use by
-        cmd_index_repo (Phase 2) and the future chroot keyring install.
+        - UID comes from `[Repo] SigningKeyUid` in build.conf.  
+        - Private `<dir_gnupg>/signing/`
+        - public key is exported to `<dir_gnupg>/signing/athena-archive-keyring.gpg`
         """
-        import signing
+
+
         _force = 'force' in (a.strip().lower() for a in args)
 
         _existing = signing.get_key_info(self.config)
         if _existing and not _force:
             console.print(
-                f"Signing key already exists for "
-                f"'{self.config.signing_key_uid}':",
+                f"Signing key already exists for '{self.config.signing_key_uid}':",
                 tui.COLOR_WARNING,
             )
             console.print(f"  Fingerprint : {_existing['fingerprint']}")
             console.print(f"  UID         : {_existing['uid']}")
-            console.print(
-                "Add `force` to overwrite — note: any Release files "
-                "previously signed with the old key become unverifiable "
-                "against the new one."
-            )
+            console.print("Add `force` to overwrite — Use with CAUTION ")
             return
 
         # Confirm before any irreversible action — overwrite warning
         # explicitly calls out the cascade.
         if _existing:
-            _msg = (f"Overwrite existing signing key for "
-                    f"'{self.config.signing_key_uid}'?")
+            _msg = (f"Overwrite existing signing key for '{self.config.signing_key_uid}'?")
         else:
-            _msg = (f"Generate new signing key for "
-                    f"'{self.config.signing_key_uid}'? (~30-60s for RSA-4096)")
+            _msg = (f"Generate new signing key for '{self.config.signing_key_uid}'?")
         _resp = Prompt(PROMPT_YESNO, _msg).get_response()
+        
         if _resp.lower() not in ('y', 'yes'):
             console.print("Aborted.")
             return
 
-        console.print(
-            f"Generating signing key for '{self.config.signing_key_uid}'...",
-            tui.COLOR_INFO,
-        )
+        console.print(f"Generating signing key for '{self.config.signing_key_uid}'...", tui.COLOR_INFO)
         if not signing.generate_key(self.config):
-            console.print(
-                "ERROR: key generation failed — see log for the gpg stderr",
-                tui.COLOR_ERROR,
-            )
+            console.print("ERROR: key generation failed — see log for the gpg stderr", tui.COLOR_ERROR)
             return
 
         _info = signing.get_key_info(self.config)
@@ -486,26 +546,20 @@ class BuildSession:
         console.print(f"  Fingerprint : {_info['fingerprint']}")
         console.print(f"  UID         : {_info['uid']}")
         console.print(f"  Public key  : {signing.signing_pubkey_path(self.config)}")
-        console.print(
-            "Run `verify_signing_key` to confirm a sign+verify roundtrip "
-            "works end-to-end."
-        )
+        console.print("Run `verify_signing_key` to confirm")
 
 
-    # ---------------------------------------------------------------------------
-    # Command: verify_signing_key  (CONF-02 phase 1)
-    # ---------------------------------------------------------------------------
-
+    # -------------------------------- Command: verify_signing_key --------------
     def cmd_verify_signing_key(self):
-        """Sanity-check the signing key by performing a real gpg
-        sign+verify roundtrip against a small test payload.
-
-        Reports the key's fingerprint, uid, creation, expiration —
-        plus an OK/FAIL line for the roundtrip itself.  Catches:
-        missing key, expired key, missing pubkey, gpg-agent issues,
-        keys that grew a passphrase out-of-band.
         """
-        import signing
+        Sanity-check the signing key by performing a gpg sign+verify against a test payload.
+
+        Reports the key's fingerprint, uid, creation, expiration — plus an OK/FAIL .  
+        Catches: 
+            - missing key, expired key, missing pubkey, gpg-agent issues,
+            - keys that grew a passphrase out-of-band.
+        """
+
         _info = signing.get_key_info(self.config)
         if _info is None:
             console.print(
@@ -518,36 +572,22 @@ class BuildSession:
         console.print(f"  Fingerprint : {_info['fingerprint']}")
         console.print(f"  UID         : {_info['uid']}")
         console.print(f"  Created     : {_info['created']}  (gpg epoch seconds)")
-        console.print(
-            f"  Expires     : "
-            f"{_info['expires'] or '(never — manual rotation)'}"
-        )
+        console.print(f"  Expires     : {_info['expires'] or '(never — manual rotation)'}")
 
         _ok, _msg = signing.verify_key(self.config)
         if _ok:
-            console.print(
-                f"  Verification: OK — {_msg}",
-                tui.COLOR_HIGHLIGHT,
-            )
+            console.print(f"  Verification: OK — {_msg}", tui.COLOR_HIGHLIGHT)
         else:
-            console.print(
-                f"  Verification: FAIL — {_msg}",
-                tui.COLOR_ERROR,
-            )
+            console.print(f"  Verification: FAIL — {_msg}", tui.COLOR_ERROR)
 
 
-    # ---------------------------------------------------------------------------
-    # Command: source_download
-    # ---------------------------------------------------------------------------
-
+    # ---------------------------- Command: source_download ----------------------
     def cmd_source_download(self):
         """Download upstream source archives for all selected source packages.
 
         Fetches .dsc, .orig.tar.*, and .debian.tar.* files from the configured
         base mirror into dir_source.  Skips files that are already present and
-        have correct checksums.  Prompts if the total downloaded size does not
-        match the expected size reported by the APT indices (indicates a partial
-        or corrupt download).
+        have correct checksums. Checks for downloaded size mismatch
         """
         if not self.flags.dep_check_ready:
             console.print("Run 'parse_dependency' first")
@@ -575,9 +615,7 @@ class BuildSession:
         self.flags.download_ready = True
 
 
-    # ---------------------------------------------------------------------------
-    # Command: self.container
-    # ---------------------------------------------------------------------------
+    # ----------------------------- Command: self.container ----------------------
 
     def cmd_init_container(self):
         """Initialise the Docker build container image.
@@ -600,21 +638,15 @@ class BuildSession:
             logger.error(f"BuildContainer() raised: {e}")
 
 
-    # ---------------------------------------------------------------------------
-    # Internal helper: tunnel download
-    # ---------------------------------------------------------------------------
+    # ----------------------------- Internal helper: tunnel download -------------------------------
 
     def _do_tunnel(self, src_pkg) -> bool:
         """Download prebuilt binary .deb files for src_pkg from the base Debian repo.
 
-        Used when building a package from source is impractical (e.g. toolchain
-        bootstrap packages, packages with architecture-specific build failures).
-        Files are written directly into the repo directory alongside locally built
-        packages so the rest of the pipeline treats them identically.
+        Bypass for those stubborn packages that just dont want to build. Files are written directly 
+        into the repo directory alongside locally built packages
 
-        The result file written at the end uses the 'TUNNELED' tag (rather than
-        'PASS') so that check_build() can distinguish tunneled packages from
-        locally built ones if needed.
+        The result file written at the end uses the 'TUNNELED' tag 
 
         Args:
             src_pkg: Source package object with .pkgs (list of .deb filenames),
@@ -623,13 +655,13 @@ class BuildSession:
         Returns:
             True if every binary package was downloaded successfully, False otherwise.
         """
+
         if not src_pkg.pkgs:
             logger.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
             return False
 
-        # Construct the pool base URL from the source's origin mirror.  This
-        # matters for sources in bookworm-security, whose pool lives at a
-        # different baseid than main.
+        # Construct the pool base URL from the source's origin mirror.  
+        # This matters in bookworm-security, whose pool lives at a different baseid than main.
         if src_pkg._mirror is None:
             logger.error(f"tunnel {src_pkg.package}: source has no _mirror — cache ingest bug")
             return False
@@ -1511,6 +1543,21 @@ def main(banner: str) -> None:
     console.print(f"\tArch\t\t\t{config.arch}")
     console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
     console.print(f"\tBuild Distribution\t{config.build_codename} {config.build_version}")
+
+    # UX-04: surface restored flags from a prior session if any survived
+    # the load (in-memory-only ones get reset; on-disk ones — download,
+    # source_build, chroot — survive).  Tells the operator they can pick
+    # up where they left off rather than starting from scratch.
+    _restored = session.flags.restored_summary()
+    if _restored:
+        console.print(
+            f"Restored from prior session: {_restored}",
+            tui.COLOR_INFO,
+        )
+        console.print(
+            "  (in-memory state — cache, dep tree, container — was NOT "
+            "restored; re-run those stages or use `autorun`)"
+        )
 
     tui_inst.wait()
     Exit(0)

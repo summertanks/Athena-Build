@@ -2403,6 +2403,139 @@ def test_signing_generate_and_verify_roundtrip_real_gpg():
         assert ok, msg
 
 
+# ─── UX-04 commit A: BuildFlags JSON persistence ──────────────────────────
+
+def test_buildflags_no_save_path_does_not_write():
+    """BuildFlags() with no save_path is the historical behaviour —
+    autosave off, no file written even when flags flip."""
+    import tempfile
+    from build import BuildFlags
+    with tempfile.TemporaryDirectory() as tmp:
+        flags = BuildFlags()  # no save_path
+        flags.cache_ready = True
+        flags.dep_check_ready = True
+        # Nothing under tmp because we never gave a path
+        assert os.listdir(tmp) == []
+
+
+def test_buildflags_autosaves_on_flag_flip():
+    """When save_path is provided, every flag flip writes the JSON."""
+    import json
+    import tempfile
+    from build import BuildFlags
+    with tempfile.TemporaryDirectory() as tmp:
+        save_path = os.path.join(tmp, 'cache', 'buildflags.json')
+        flags = BuildFlags(save_path=save_path)
+        flags.cache_ready = True
+
+        assert os.path.exists(save_path)
+        with open(save_path) as fh:
+            data = json.load(fh)
+        assert data['_format_version'] == BuildFlags._FORMAT_VERSION
+        assert data['flags']['cache_ready'] is True
+        assert data['flags']['chroot_ready'] is False
+        assert '_last_save' in data
+
+
+def test_buildflags_load_absent_file_returns_fresh():
+    """load(path) where path doesn't exist returns a clean BuildFlags
+    with autosave wired (so subsequent flips would persist)."""
+    import tempfile
+    from build import BuildFlags
+    with tempfile.TemporaryDirectory() as tmp:
+        save_path = os.path.join(tmp, 'cache', 'buildflags.json')
+        flags = BuildFlags.load(save_path)
+        # Fresh — every flag False
+        assert all(getattr(flags, f) is False for f in BuildFlags._FIELDS)
+        # Autosave wired — set one flag, file appears
+        flags.source_build_ready = True
+        assert os.path.exists(save_path)
+
+
+def test_buildflags_load_present_file_restores_on_disk_flags_resets_in_memory():
+    """A persisted file with all flags True loads as: in-memory-only
+    flags False, on-disk flags True.  The reset is the honest answer
+    for state that doesn't survive a process restart."""
+    import json
+    import tempfile
+    from build import BuildFlags
+    with tempfile.TemporaryDirectory() as tmp:
+        save_path = os.path.join(tmp, 'buildflags.json')
+        # Hand-craft a payload with every flag set
+        payload = {
+            '_format_version': BuildFlags._FORMAT_VERSION,
+            '_last_save': '2026-05-09T12:00:00',
+            'flags': {f: True for f in BuildFlags._FIELDS},
+        }
+        with open(save_path, 'w') as fh:
+            json.dump(payload, fh)
+
+        flags = BuildFlags.load(save_path)
+        # On-disk-backed flags survived
+        for f in ('download_ready', 'source_build_ready',
+                  'chroot_ready', 'chroot_verified'):
+            assert getattr(flags, f) is True, f"{f} should have survived load"
+        # In-memory-only flags reset
+        for f in BuildFlags._IN_MEMORY_ONLY:
+            assert getattr(flags, f) is False, f"{f} should have been reset on load"
+
+
+def test_buildflags_load_bad_json_returns_fresh_with_warning():
+    """A corrupt JSON file falls back to a fresh instance — never
+    raises, doesn't crash the process."""
+    import tempfile
+    from build import BuildFlags
+    with tempfile.TemporaryDirectory() as tmp:
+        save_path = os.path.join(tmp, 'buildflags.json')
+        with open(save_path, 'w') as fh:
+            fh.write('{ this is not json ::')
+        flags = BuildFlags.load(save_path)
+        # Fresh
+        assert all(getattr(flags, f) is False for f in BuildFlags._FIELDS)
+
+
+def test_buildflags_load_bad_format_version_returns_fresh():
+    """A future / unknown format_version is refused with a warning;
+    falls back to defaults rather than misinterpreting the data."""
+    import json
+    import tempfile
+    from build import BuildFlags
+    with tempfile.TemporaryDirectory() as tmp:
+        save_path = os.path.join(tmp, 'buildflags.json')
+        payload = {
+            '_format_version': 99999,  # not what we know
+            'flags': {f: True for f in BuildFlags._FIELDS},
+        }
+        with open(save_path, 'w') as fh:
+            json.dump(payload, fh)
+        flags = BuildFlags.load(save_path)
+        assert all(getattr(flags, f) is False for f in BuildFlags._FIELDS)
+
+
+def test_buildflags_default_path_lives_under_dir_cache():
+    """default_path returns dir_cache/buildflags.json — siblings the
+    existing snapshot.timestamp file."""
+    from build import BuildFlags
+    class _Cfg:
+        dir_cache = '/tmp/some/cache'
+    assert BuildFlags.default_path(_Cfg()) == \
+        '/tmp/some/cache/buildflags.json'
+
+
+def test_buildflags_restored_summary_lists_set_flags():
+    """restored_summary() returns a comma-joined list of True flags;
+    empty string when all False."""
+    from build import BuildFlags
+    flags = BuildFlags()
+    assert flags.restored_summary() == ''
+    flags.download_ready = True
+    flags.source_build_ready = True
+    summary = flags.restored_summary()
+    assert 'download_ready' in summary
+    assert 'source_build_ready' in summary
+    assert 'cache_ready' not in summary  # still False
+
+
 # ─── CONF-02 phase 3: signing key gate at top of build_chroot ─────────────
 
 def _stub_session_for_signing_gate():
@@ -3064,6 +3197,15 @@ def main() -> int:
         test_signing_verify_key_returns_no_key_when_absent,
         test_signing_paths_compose_off_dir_gnupg,
         test_signing_generate_and_verify_roundtrip_real_gpg,
+        # UX-04 commit A: BuildFlags JSON persistence
+        test_buildflags_no_save_path_does_not_write,
+        test_buildflags_autosaves_on_flag_flip,
+        test_buildflags_load_absent_file_returns_fresh,
+        test_buildflags_load_present_file_restores_on_disk_flags_resets_in_memory,
+        test_buildflags_load_bad_json_returns_fresh_with_warning,
+        test_buildflags_load_bad_format_version_returns_fresh,
+        test_buildflags_default_path_lives_under_dir_cache,
+        test_buildflags_restored_summary_lists_set_flags,
         # CONF-02 phase 3: signing key gate at top of build_chroot
         test_signing_key_verified_flag_default_false,
         test_ensure_signing_key_verified_true_when_key_exists,
