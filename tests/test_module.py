@@ -940,7 +940,8 @@ def test_buildsession_constructible_with_stub_tui():
             for _name in ('cmd_build_cache', 'cmd_parse_dependency',
                           'cmd_source_download', 'cmd_init_container',
                           'cmd_source_build', 'cmd_tunnel_package',
-                          'cmd_build_chroot', 'cmd_build_iso',
+                          'cmd_build_chroot',
+                          'cmd_build_iso_live', 'cmd_build_iso_installer',
                           'cmd_verify_chroot', 'cmd_auto_run',
                           'cmd_print',
                           # Group dispatchers (noun-verb command surface).
@@ -975,7 +976,8 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_container', 'init',     'cmd_init_container'),
         ('cmd_chroot',    'build',    'cmd_build_chroot'),
         ('cmd_chroot',    'verify',   'cmd_verify_chroot'),
-        ('cmd_iso',       'build',    'cmd_build_iso'),
+        # cmd_iso is multi-token ('build live' / 'build installer') —
+        # not a verb-only dispatcher; covered by its own tests below.
         ('cmd_key',       'generate', 'cmd_generate_signing_key'),
         ('cmd_key',       'verify',   'cmd_verify_signing_key'),
     ]
@@ -1004,6 +1006,83 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
     # fallback when no Tui is registered; no need to stub it.
     _sess.cmd_cache('wat')
     assert _called == [], f"unknown verb must not invoke any handler, got {_called}"
+
+
+def test_cmd_iso_build_requires_subaction():
+    """`iso build` (no live/installer) prints usage and calls neither
+    underlying iso build handler."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _called = []
+    _sess.cmd_build_iso_live      = lambda *a, **kw: _called.append('live')
+    _sess.cmd_build_iso_installer = lambda *a, **kw: _called.append('installer')
+    _sess.cmd_iso('build')
+    assert _called == [], (
+        f"bare `iso build` must not invoke any handler, got {_called}")
+
+
+def test_cmd_iso_build_live_forwards_to_cmd_build_iso_live():
+    """`iso build live [args]` routes to cmd_build_iso_live(args), not
+    the installer handler."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_build_iso_live = (
+        lambda *a, **kw: _calls.append(('live', a, kw)))
+    _sess.cmd_build_iso_installer = (
+        lambda *a, **kw: _calls.append(('installer', a, kw)))
+    _sess.cmd_iso('build', 'live', 'force')
+    assert _calls == [('live', ('force',), {})], _calls
+
+
+def test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer():
+    """`iso build installer [args]` routes to cmd_build_iso_installer."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_build_iso_live = (
+        lambda *a, **kw: _calls.append(('live', a, kw)))
+    _sess.cmd_build_iso_installer = (
+        lambda *a, **kw: _calls.append(('installer', a, kw)))
+    _sess.cmd_iso('build', 'installer', 'extra')
+    assert _calls == [('installer', ('extra',), {})], _calls
+
+
+def test_cmd_iso_build_unknown_subaction_calls_neither_handler():
+    """`iso build wat` falls through to help, no handler invoked."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _called = []
+    _sess.cmd_build_iso_live = lambda *a, **kw: _called.append('live')
+    _sess.cmd_build_iso_installer = lambda *a, **kw: _called.append('installer')
+    _sess.cmd_iso('build', 'wat')
+    assert _called == [], _called
+
+
+def test_cmd_build_iso_installer_is_stub():
+    """The installer ISO handler is a COMP-01a stub: returns without doing
+    any work, prints an error referencing the plan doc."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    # Should not raise, returns None.  No prerequisites checked because the
+    # stub bails before any state is touched.
+    assert _sess.cmd_build_iso_installer() is None
+    assert _sess.cmd_build_iso_installer('force', 'extra') is None
 
 
 def test_cache_purge_deletes_files_and_resets_flags():
@@ -2420,34 +2499,93 @@ def test_print_extras_handles_empty_extras_set():
 
 # ─── EXTRAS-01: source_build [profiles] override parsing ────────────────────
 
-def test_source_build_args_no_args_is_default_mode():
-    """Bare `source_build` → no flags, no names, no override."""
+def test_source_build_args_no_args_defaults_to_live_subset():
+    """Bare `source build` → subset='live' (preserves today's UX), no
+    force, no names, no override."""
     from build import BuildSession
-    err, force, rec, names, override = \
+    err, force, subset, names, override = \
         BuildSession._parse_source_build_args(())
     assert err is None
-    assert (force, rec, names, override) == (False, False, [], None)
+    assert (force, subset, names, override) == (False, 'live', [], None)
+
+
+def test_source_build_args_live_subset_explicit():
+    """`source build live` is the explicit form of the bare default."""
+    from build import BuildSession
+    err, _f, subset, names, _o = \
+        BuildSession._parse_source_build_args(('live',))
+    assert err is None
+    assert subset == 'live' and names == []
+
+
+def test_source_build_args_installer_subset_recognised():
+    """`source build installer` parses to subset='installer'."""
+    from build import BuildSession
+    err, _f, subset, names, _o = \
+        BuildSession._parse_source_build_args(('installer',))
+    assert err is None
+    assert subset == 'installer' and names == []
+
+
+def test_source_build_args_recommended_subset_recognised():
+    """`source build recommended` parses to subset='recommended' (not the
+    old `_recommended is True` boolean)."""
+    from build import BuildSession
+    err, _f, subset, names, _o = \
+        BuildSession._parse_source_build_args(('recommended',))
+    assert err is None
+    assert subset == 'recommended' and names == []
 
 
 def test_source_build_args_force_flag_anywhere():
-    """`force` is detectable in any position, case-insensitive."""
+    """`force` is detectable in any position, case-insensitive.  Bare
+    `force` (no other args) defaults the subset to 'live'."""
     from build import BuildSession
     for argv in (('force',), ('Force',), ('foo', 'FORCE'), ('force', 'foo')):
-        err, force, _r, _n, _o = BuildSession._parse_source_build_args(argv)
+        err, force, _s, _n, _o = BuildSession._parse_source_build_args(argv)
         assert err is None and force is True, f"args={argv!r}"
+    # Bare `force` should still default subset to 'live' since there are
+    # no names and no other subset selector.
+    _, _, subset, names, _ = BuildSession._parse_source_build_args(('force',))
+    assert subset == 'live' and names == []
 
 
-def test_source_build_args_recommended_and_named_pkgs_mutually_exclusive():
-    """`recommended pkg1` is rejected — operator must pick one mode."""
+def test_source_build_args_subsets_mutually_exclusive():
+    """Two subset selectors at once → parse error."""
     from build import BuildSession
-    err, *_ = BuildSession._parse_source_build_args(('recommended', 'pkg1'))
-    assert err is not None and 'mutually exclusive' in err
+    for argv in (('live', 'installer'),
+                 ('installer', 'recommended'),
+                 ('live', 'recommended'),
+                 ('live', 'installer', 'recommended')):
+        err, *_ = BuildSession._parse_source_build_args(argv)
+        assert err is not None, f"args={argv!r}"
+        assert 'pick at most one' in err, f"args={argv!r}: {err!r}"
+
+
+def test_source_build_args_subset_and_named_pkgs_mutually_exclusive():
+    """`source build <subset> pkg1` is rejected for every subset word —
+    operator must pick the subset OR specific names, not both."""
+    from build import BuildSession
+    for _subset in ('live', 'installer', 'recommended'):
+        err, *_ = BuildSession._parse_source_build_args((_subset, 'pkg1'))
+        assert err is not None, _subset
+        assert 'mutually exclusive' in err, f"{_subset}: {err!r}"
+
+
+def test_source_build_args_named_pkgs_resolve_subset_to_empty():
+    """When named packages are given, subset is '' (caller branches on
+    `_names` first)."""
+    from build import BuildSession
+    err, _f, subset, names, _o = \
+        BuildSession._parse_source_build_args(('foo', 'bar'))
+    assert err is None
+    assert subset == '' and names == ['foo', 'bar']
 
 
 def test_source_build_args_bracket_token_extracts_profiles():
     """`[nocheck]` parses to ['nocheck']; commas + whitespace tolerated."""
     from build import BuildSession
-    err, _f, _r, names, override = \
+    err, _f, _s, names, override = \
         BuildSession._parse_source_build_args(('foo', '[nocheck]'))
     assert err is None
     assert names == ['foo']
@@ -2462,7 +2600,7 @@ def test_source_build_args_empty_bracket_means_no_profiles():
     """`[]` parses to an empty list — most-permissive build, distinct from
     None (no override)."""
     from build import BuildSession
-    err, _f, _r, _n, override = \
+    err, _f, _s, _n, override = \
         BuildSession._parse_source_build_args(('foo', '[]'))
     assert err is None
     assert override == []
@@ -2488,7 +2626,7 @@ def test_source_build_args_bracket_position_does_not_matter():
         ('force', '[nocheck]', 'foo'),
         ('foo', 'force', '[nocheck]'),
     ):
-        err, _f, _r, names, override = \
+        err, _f, _s, names, override = \
             BuildSession._parse_source_build_args(argv)
         assert err is None, f"args={argv!r}"
         assert names == ['foo'], f"args={argv!r}"
@@ -3208,6 +3346,12 @@ def main() -> int:
         test_cache_purge_deletes_files_and_resets_flags,
         test_cache_purge_cancelled_keeps_files_and_flags,
         test_cache_purge_empty_dir_is_noop,
+        # COMP-01c — iso build live | iso build installer split
+        test_cmd_iso_build_requires_subaction,
+        test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
+        test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
+        test_cmd_iso_build_unknown_subaction_calls_neither_handler,
+        test_cmd_build_iso_installer_is_stub,
         # ARCH-03
         test_console_with_explicit_tui_does_not_touch_singleton,
         test_console_singleton_fallback_when_tui_omitted,
@@ -3275,10 +3419,15 @@ def main() -> int:
         test_verify_dep_resolution_still_catches_real_violations,
         test_print_extras_lists_recommended_packages,
         test_print_extras_handles_empty_extras_set,
-        # EXTRAS-01: source_build [profiles] override parsing
-        test_source_build_args_no_args_is_default_mode,
+        # source build args parsing (EXTRAS-01 + COMP-01c subset selectors)
+        test_source_build_args_no_args_defaults_to_live_subset,
+        test_source_build_args_live_subset_explicit,
+        test_source_build_args_installer_subset_recognised,
+        test_source_build_args_recommended_subset_recognised,
         test_source_build_args_force_flag_anywhere,
-        test_source_build_args_recommended_and_named_pkgs_mutually_exclusive,
+        test_source_build_args_subsets_mutually_exclusive,
+        test_source_build_args_subset_and_named_pkgs_mutually_exclusive,
+        test_source_build_args_named_pkgs_resolve_subset_to_empty,
         test_source_build_args_bracket_token_extracts_profiles,
         test_source_build_args_empty_bracket_means_no_profiles,
         test_source_build_args_multiple_bracket_tokens_rejected,
