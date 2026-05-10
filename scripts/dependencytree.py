@@ -85,6 +85,43 @@ class DependencyTree:
         if lookahead is not None:
             self.add_lookahead(lookahead)
 
+    # ─── UX-04 commit B: pickling shape ────────────────────────────────────
+    # DependencyTree is persisted to dir_cache/deptree.pkl.gz so a re-launched
+    # TUI can skip the parse_dependency rebuild via `cmd_resume`.
+    #
+    # Two things need handling specially across pickle:
+    #   - self.__cache (the back-ref to the Cache instance) is dropped on
+    #     save and re-wired by persistence.load_dep_tree() after unpickle.
+    #     Leaving it in would either pickle Cache twice (huge file) or
+    #     create a stale ref to a Cache that's about to be replaced.
+    #   - self.__lookahead is a defaultdict(dict).  Inner dicts are fine;
+    #     the outer factory pickles cleanly because dict-the-class is
+    #     picklable (unlike a lambda).  But to be safe across Python
+    #     versions we convert to a plain dict on save and restore on load.
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Drop the back-ref — persistence.load_dep_tree re-wires it via
+        # the same name-mangled key.
+        state.pop('_DependencyTree__cache', None)
+        # Convert the lookahead defaultdict to plain dict; restore on load.
+        if '_DependencyTree__lookahead' in state:
+            state['_DependencyTree__lookahead'] = {
+                k: dict(v) for k, v in state['_DependencyTree__lookahead'].items()
+            }
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Restore the defaultdict shape for any code that adds a new key
+        # via __getitem__ assignment.
+        if '_DependencyTree__lookahead' in state:
+            new = defaultdict(dict)
+            for k, v in state['_DependencyTree__lookahead'].items():
+                new[k] = dict(v)
+            self._DependencyTree__lookahead = new
+        # __cache is intentionally NOT restored here — caller
+        # (persistence.load_dep_tree) sets it after unpickle.
+
     def add_lookahead(self, lookahead: List[str]):
         for _pkg_name in lookahead:
             if not _pkg_name or _pkg_name.isspace():

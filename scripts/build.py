@@ -262,6 +262,12 @@ class BuildSession:
 
         self.flags.cache_ready = True
 
+        # UX-04 commit B: persist the populated cache for `resume`.
+        # Failure logs WARNING (doesn't abort the build) — we'd just lose
+        # the resume shortcut, not any actual data.
+        import persistence
+        persistence.save_cache(self.cache, self.config)
+
 
     # ---------------------------------------------------------------------------
     # Command: parse_dependency
@@ -472,6 +478,13 @@ class BuildSession:
 
         console.print(f"Selected {len(self.dep_tree.selected_srcs)} source packages", tui.COLOR_HIGHLIGHT)
         self.flags.dep_check_ready = True
+
+        # UX-04 commit B: persist the dep tree for `resume`.  Same pattern
+        # as the cache save in cmd_build_cache — failure-log-WARN, don't
+        # abort.  cmd_tunnel_package mutates the tree later; if we want
+        # those mutations persisted too, repeat this call there.
+        import persistence
+        persistence.save_dep_tree(self.dep_tree, self.config)
 
 
     # ------------------------------ Command: print ---------------------------------
@@ -1446,6 +1459,156 @@ class BuildSession:
             elapsed=_elapsed,
             aborted_at=_aborted_at,
         ))
+
+    # ---------------------------------------------------------------------------
+    # Command: resume  (UX-04 commit B)
+    # ---------------------------------------------------------------------------
+
+    def cmd_resume(self):
+        """Continue a build from a prior session — load persisted Cache +
+        DependencyTree from disk to skip the slow build_cache + parse
+        rebuilds, then re-validate the on-disk artefacts (downloads,
+        container image, source builds) and verify (or re-verify) the
+        chroot.
+
+        Behaviour per stage:
+
+          build_cache         loaded from `<dir_cache>/cache.pkl.gz` if
+                              that file is present + SHA256 valid + format
+                              version matches.  Otherwise falls back to
+                              the normal cmd_build_cache rebuild.
+          parse_dependency    loaded from `<dir_cache>/deptree.pkl.gz`
+                              with the back-ref re-wired to the loaded
+                              cache.  Falls back to cmd_parse_dependency
+                              on miss.
+          source_download     ALWAYS re-runs — on-disk tarballs may have
+                              changed since last save; the cmd's per-file
+                              hash check is the truth.
+          build_container     ALWAYS re-runs — Docker state is opaque to
+                              the persistence layer; init is cheap on a
+                              cached image.
+          source_build        ALWAYS re-runs — the per-package .result
+                              files in dir_log are the truth; PASS/TUNNELED
+                              packages skip naturally.
+          build_chroot        SKIPPED if flags.chroot_ready already True
+                              from prior session.  Otherwise runs.
+          verify_chroot       runs at the end either way to confirm the
+                              on-disk chroot is coherent (or to re-verify
+                              after a build_chroot in this resume).
+
+        See UX-04 commit B in the TODO row for the design rationale and
+        the integrity model (SHA256 sidecar, NOT GPG-signed in v1).
+        """
+        import persistence
+        console.print("Resuming from prior session...", tui.COLOR_INFO)
+
+        # ── 1. Cache ──────────────────────────────────────────────────────
+        self.cache = persistence.load_cache(self.config)
+        if self.cache is None:
+            console.print(
+                "  Cache: no persisted file — running build_cache from scratch",
+                tui.COLOR_INFO,
+            )
+            self.cmd_build_cache()
+            if not self.flags.cache_ready:
+                console.print(
+                    "  Cache: build failed — cannot continue resume",
+                    tui.COLOR_ERROR,
+                )
+                return
+        else:
+            self.flags.cache_ready = True
+            console.print(
+                "  Cache: restored from disk "
+                f"({len(self.cache.package_hashtable)} package names)",
+                tui.COLOR_HIGHLIGHT,
+            )
+
+        # ── 2. DependencyTree ─────────────────────────────────────────────
+        self.dep_tree = persistence.load_dep_tree(self.config, self.cache)
+        if self.dep_tree is None:
+            console.print(
+                "  Dep tree: no persisted file — running parse_dependency",
+                tui.COLOR_INFO,
+            )
+            self.cmd_parse_dependency()
+            if not self.flags.dep_check_ready:
+                console.print(
+                    "  Dep tree: parse failed — cannot continue resume",
+                    tui.COLOR_ERROR,
+                )
+                return
+        else:
+            self.flags.dep_check_ready = True
+            _canonical = sum(
+                1 for k, v in self.dep_tree.selected_pkgs.items()
+                if k == v['Package']
+            )
+            console.print(
+                "  Dep tree: restored from disk "
+                f"({_canonical} canonical packages)",
+                tui.COLOR_HIGHLIGHT,
+            )
+
+        # ── 3-5. Re-validate on-disk artefacts ────────────────────────────
+        # Each cmd is internally idempotent on warm state; per-file hash
+        # checks (source_download), Docker image cache (build_container),
+        # and per-package .result files (source_build) are the truth.
+        console.print(
+            "Re-validating downloads / container / built .debs...",
+            tui.COLOR_INFO,
+        )
+        self.cmd_source_download()
+        if not self.flags.download_ready:
+            console.print(
+                "  source_download failed — resume aborted",
+                tui.COLOR_ERROR,
+            )
+            return
+        self.cmd_init_container()
+        if not self.flags.build_container_ready:
+            console.print(
+                "  build_container failed — resume aborted",
+                tui.COLOR_ERROR,
+            )
+            return
+        self.cmd_source_build()
+        if not self.flags.source_build_ready:
+            console.print(
+                "  source_build failed — resume aborted",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        # ── 6. Chroot ─────────────────────────────────────────────────────
+        # If the prior session already had a verified chroot, re-verify
+        # against the on-disk tree.  If chroot_ready was True but verify
+        # never passed (or chroot tree is missing), re-run build_chroot.
+        if self.flags.chroot_ready:
+            console.print(
+                "  Chroot: already built in prior session — re-running verify",
+                tui.COLOR_INFO,
+            )
+            self.cmd_verify_chroot()
+        else:
+            console.print(
+                "  Chroot: not built — running build_chroot",
+                tui.COLOR_INFO,
+            )
+            self.cmd_build_chroot()
+
+        if self.flags.chroot_verified:
+            console.print(
+                "Resume complete — chroot verified, ready for `build_iso`",
+                tui.COLOR_HIGHLIGHT,
+            )
+        else:
+            console.print(
+                "Resume complete with chroot verification NOT passing — "
+                "see verify_chroot output for the failed checks.",
+                tui.COLOR_ERROR,
+            )
+
     # ---------------------------------------------------------------------------
     # Entry point
     # ---------------------------------------------------------------------------
@@ -1467,6 +1630,13 @@ def main(banner: str) -> None:
     _headless = '--headless' in sys.argv
     if _headless:
         sys.argv.remove('--headless')
+    # UX-04 commit B: --resume autoruns cmd_resume after the TUI/CLI is up
+    # but before wait().  Operator can also type `resume` interactively
+    # at any point.  Strip same as --headless so BuildConfig doesn't see
+    # it.
+    _resume = '--resume' in sys.argv
+    if _resume:
+        sys.argv.remove('--resume')
 
     try:
         print("Initialising apt_pkg...")
@@ -1534,6 +1704,7 @@ def main(banner: str) -> None:
     tui.register_command('verify_chroot',     session.cmd_verify_chroot,      'Verify chroot health \u2014 8 checks, PASS/FAIL per test')
     tui.register_command('build_iso',         session.cmd_build_iso,          'Build bootable ISO from chroot (build_iso)')
     tui.register_command('autorun',           session.cmd_auto_run,           'Runs all commands in sequence')
+    tui.register_command('resume',            session.cmd_resume,             'Resume from disk: load Cache + DependencyTree, re-validate downloads/container/build, verify chroot (UX-04 commit B)')
     tui.register_command('print',             session.cmd_print,              'Print build state — try: print help')
     tui.register_command('generate_signing_key', session.cmd_generate_signing_key, 'Generate the project signing keypair (one-time setup; refuses overwrite without `force`)')
     tui.register_command('verify_signing_key',   session.cmd_verify_signing_key,   'Sign+verify roundtrip against the current signing key')
@@ -1556,8 +1727,20 @@ def main(banner: str) -> None:
         )
         console.print(
             "  (in-memory state — cache, dep tree, container — was NOT "
-            "restored; re-run those stages or use `autorun`)"
+            "restored; re-run those stages or use `autorun`/`resume`)"
         )
+
+    # UX-04 commit B: --resume on the command line auto-fires cmd_resume
+    # after registration is done, before handing control to wait() (the
+    # TUI event loop or CLI REPL).  Resume runs synchronously on the
+    # main thread; widgets / prompts within it work via the same backend
+    # as any operator-typed command.
+    if _resume:
+        console.print(
+            "--resume passed at startup; running `resume` automatically",
+            tui.COLOR_INFO,
+        )
+        session.cmd_resume()
 
     tui_inst.wait()
     Exit(0)
