@@ -1222,7 +1222,76 @@ class _ChrootMixin:
         else:
             tui.console.print("systemd-firstboot: root password / hostname / machine-id configured")
 
+        # CONF-02 phase 3: install our public signing keyring at the
+        # conventional /usr/share/keyrings/ location so a future apt
+        # source pinning via `[signed-by=...]` works without ceremony.
+        # Skipped silently when no signing key has been generated yet.
+        self._install_signing_keyring()
+
         tui.console.print("System configuration files written")
+
+    def _install_signing_keyring(self):
+        """CONF-02 phase 3: copy the project's exported public signing
+        keyring into the chroot at /usr/share/keyrings/.
+
+        This is the conventional location for distro-signing keys —
+        Debian itself ships at
+        ``/usr/share/keyrings/debian-archive-keyring.gpg``.  Once
+        installed, any future ``/etc/apt/sources.list.d/athena.list``
+        entry can pin via::
+
+            deb [signed-by=/usr/share/keyrings/athena-archive-keyring.gpg] ...
+
+        Skipped silently (with INFO) when no key exists yet — operator
+        can run ``generate_signing_key`` later and re-run build_chroot
+        to pick it up.  Wiring an actual sources.list.d entry pointing
+        at the Athena repo is deferred to CONF-02 phase 2 / COMP-02
+        (publish_repo) since it needs a real URL the booted system
+        can reach.
+        """
+        import signing
+        _src = signing.signing_pubkey_path(self._config)
+        if not os.path.exists(_src):
+            logger.info(
+                f"_install_signing_keyring: no keyring at {_src} — "
+                f"run `generate_signing_key` first; chroot continues "
+                f"without it"
+            )
+            return
+
+        _dest_dir = os.path.join(self._dir_chroot, 'usr/share/keyrings')
+        _dest = os.path.join(_dest_dir, 'athena-archive-keyring.gpg')
+
+        # mkdir -p — /usr/share/keyrings/ should exist from base packages
+        # but cheap insurance against a minimal chroot variant that omits it.
+        subprocess.run(
+            ['sudo', '-S', 'mkdir', '-p', _dest_dir],
+            input=self._password + '\n', capture_output=True, text=True,
+        )
+        _proc = subprocess.run(
+            ['sudo', '-S', 'cp', _src, _dest],
+            input=self._password + '\n', capture_output=True, text=True,
+        )
+        if _proc.returncode != 0:
+            tui.console.print(
+                "WARNING: failed to install signing keyring into chroot",
+                tui.COLOR_WARNING,
+            )
+            logger.error(
+                f"_install_signing_keyring cp: {_proc.stderr.strip()}"
+            )
+            return
+        # 0644 — world-readable (apt needs to read it as non-root in some
+        # paths), root-owned (the cp inherits root from sudo).
+        subprocess.run(
+            ['sudo', '-S', 'chmod', '0644', _dest],
+            input=self._password + '\n', capture_output=True, text=True,
+        )
+        tui.console.print(
+            "Installed Athena signing keyring at "
+            "/usr/share/keyrings/athena-archive-keyring.gpg",
+            tui.COLOR_INFO,
+        )
 
     def _write_chroot_file(self, rel_path: str, content: str):
         """Write content to rel_path inside the chroot as root.
