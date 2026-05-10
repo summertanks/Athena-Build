@@ -1502,8 +1502,10 @@ def test_download_file_returns_http_status_detail_on_404():
 
 
 def test_download_file_success_returns_size_and_empty_detail():
-    """Happy path: (size, '') so callers can keep using the size for their
-    accounting and treat empty detail as 'no error to surface'."""
+    """Happy path: (bytes_written, '') so callers can keep using the size
+    for their accounting and treat empty detail as 'no error to surface'.
+    Returns the actual bytes streamed, not the HEAD/GET hint — fixes the
+    case where a chunked-encoded mirror reports 0 in Content-Length."""
     from unittest.mock import patch, MagicMock
     import utils
 
@@ -1513,10 +1515,13 @@ def test_download_file_success_returns_size_and_empty_detail():
         def warning(s, m): pass
         def error(s, m): pass
     class _Bar:
-        def __init__(s, *a, **k): pass
-        def step(s, *a, **k): pass
+        def __init__(s, *a, **k): s._value = 0; s._max = max(1, k.get('maxvalue', 100))
+        def step(s, n=1): s._value = min(s._value + n, s._max)
         def label(s, *a, **k): pass
         def close(s, *a, **k): pass
+        def set_max(s, n): s._max = max(1, n)
+        @property
+        def value(s): return s._value
 
     saved_console = utils.tui.console
     saved_bar     = utils.tui.ProgressBar
@@ -1529,6 +1534,7 @@ def test_download_file_success_returns_size_and_empty_detail():
 
             mock_get = MagicMock()
             mock_get.__enter__.return_value = mock_get
+            mock_get.headers = {'content-length': '11'}
             mock_get.raise_for_status.return_value = None
             mock_get.iter_content.return_value = [b'hello world']
 
@@ -1538,6 +1544,63 @@ def test_download_file_success_returns_size_and_empty_detail():
 
             assert size == 11, size
             assert detail == '', repr(detail)
+    finally:
+        utils.tui.console = saved_console
+        utils.tui.ProgressBar = saved_bar
+
+
+def test_download_file_zero_content_length_does_not_freeze_bar():
+    """When BOTH HEAD and GET return Content-Length: 0 (or omit it), the
+    bar must not freeze at 1/1 — fall back to a 1 MB seed and grow as
+    bytes arrive.  Returns the actual bytes written, regardless of the
+    upstream hint."""
+    from unittest.mock import patch, MagicMock
+    import utils
+
+    class _Cap:
+        def print(s, m, *a, **k): pass
+        def info(s, m): pass
+        def warning(s, m): pass
+        def error(s, m): pass
+
+    _set_max_calls = []
+    class _Bar:
+        def __init__(s, *a, **k): s._value = 0; s._max = max(1, k.get('maxvalue', 100))
+        def step(s, n=1): s._value = min(s._value + n, s._max)
+        def label(s, *a, **k): pass
+        def close(s, *a, **k): pass
+        def set_max(s, n): s._max = max(1, n); _set_max_calls.append(n)
+        @property
+        def value(s): return s._value
+
+    saved_console = utils.tui.console
+    saved_bar     = utils.tui.ProgressBar
+    utils.tui.console = _Cap()
+    utils.tui.ProgressBar = _Bar
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            mock_head = MagicMock()
+            mock_head.headers = {}   # no content-length
+
+            mock_get = MagicMock()
+            mock_get.__enter__.return_value = mock_get
+            mock_get.headers = {}    # no content-length
+            mock_get.raise_for_status.return_value = None
+            # 2 MB total — exceeds the 1 MB seed, must trigger set_max growth.
+            _payload = [b'x' * 8192] * 256   # 2 MB in 8 KB chunks
+            mock_get.iter_content.return_value = _payload
+
+            with patch.object(utils.requests, 'head', return_value=mock_head), \
+                 patch.object(utils.requests, 'get', return_value=mock_get):
+                size, detail = utils.download_file('http://x.test/big', os.path.join(tmp, 'out'))
+
+            assert size == 2 * 1024 * 1024, size
+            assert detail == ''
+            # set_max called at least once during the stream (growth) plus
+            # once at the end (final correction).
+            assert len(_set_max_calls) >= 2, _set_max_calls
+            # Final correction matches actual bytes.
+            assert _set_max_calls[-1] == 2 * 1024 * 1024
     finally:
         utils.tui.console = saved_console
         utils.tui.ProgressBar = saved_bar
@@ -3164,6 +3227,7 @@ def main() -> int:
         # STA-09
         test_download_file_returns_http_status_detail_on_404,
         test_download_file_success_returns_size_and_empty_detail,
+        test_download_file_zero_content_length_does_not_freeze_bar,
         # STA-03
         test_shipped_build_conf_has_snapshot_enabled,
         # STA-15 / TEST-04
