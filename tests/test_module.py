@@ -2403,6 +2403,108 @@ def test_signing_generate_and_verify_roundtrip_real_gpg():
         assert ok, msg
 
 
+# ─── CONF-02 phase 3: install signing keyring into chroot ─────────────────
+
+def _stub_chroot_mixin_for_keyring_test(*, dir_gnupg, dir_chroot):
+    """Construct a _ChrootMixin instance wired only enough to exercise
+    _install_signing_keyring.  Bypass __init__ — set the four attrs the
+    method touches: _config (with dir_gnupg), _dir_chroot, _password."""
+    import chroot
+    class _Cfg:
+        pass
+    cfg = _Cfg()
+    cfg.dir_gnupg = dir_gnupg
+    inst = chroot._ChrootMixin.__new__(chroot._ChrootMixin)
+    inst._config = cfg
+    inst._dir_chroot = dir_chroot
+    inst._password = 'test-password-not-real'
+    return inst
+
+
+def test_install_signing_keyring_skips_when_no_key_generated():
+    """No keyring file at signing.signing_pubkey_path → method returns
+    silently with an INFO log; no subprocess invocations.  Operator may
+    not have generated a key yet — the chroot build must keep going."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        # No keyring file under tmp/signing/ — get_key_info would also
+        # return None.  This is the "operator hasn't run
+        # generate_signing_key yet" path.
+        inst = _stub_chroot_mixin_for_keyring_test(
+            dir_gnupg=tmp, dir_chroot=os.path.join(tmp, 'fake-chroot'),
+        )
+        with patch('subprocess.run') as mock_run:
+            inst._install_signing_keyring()
+            assert mock_run.call_count == 0, (
+                "no subprocess calls should fire when keyring is absent — "
+                "we only log INFO and return"
+            )
+
+
+def test_install_signing_keyring_invokes_cp_when_key_present():
+    """Keyring file exists → subprocess.run called with `sudo cp <src>
+    <chroot>/usr/share/keyrings/athena-archive-keyring.gpg`."""
+    import tempfile
+    from unittest.mock import patch, MagicMock
+    with tempfile.TemporaryDirectory() as tmp:
+        # Plant a fake keyring file at the path
+        # signing.signing_pubkey_path() will return.
+        signing_dir = os.path.join(tmp, 'signing')
+        os.makedirs(signing_dir, mode=0o700)
+        keyring_path = os.path.join(signing_dir, 'athena-archive-keyring.gpg')
+        with open(keyring_path, 'wb') as f:
+            f.write(b'fake-keyring-bytes')
+
+        chroot_path = os.path.join(tmp, 'fake-chroot')
+        inst = _stub_chroot_mixin_for_keyring_test(
+            dir_gnupg=tmp, dir_chroot=chroot_path,
+        )
+
+        # Mock subprocess.run; pretend every call succeeds (rc=0).
+        _success = MagicMock(returncode=0, stderr='', stdout='')
+        with patch('subprocess.run', return_value=_success) as mock_run:
+            inst._install_signing_keyring()
+
+        # Three subprocess invocations expected: mkdir -p, cp, chmod.
+        assert mock_run.call_count == 3
+        # Inspect the cp call (second invocation).
+        cp_args = mock_run.call_args_list[1][0][0]
+        assert cp_args[0:3] == ['sudo', '-S', 'cp']
+        assert cp_args[3] == keyring_path
+        assert cp_args[4] == os.path.join(
+            chroot_path, 'usr/share/keyrings/athena-archive-keyring.gpg'
+        )
+
+
+def test_install_signing_keyring_warns_on_cp_failure():
+    """If sudo cp returns non-zero (chroot read-only? mount issue?) the
+    method logs ERROR and returns — does NOT raise.  Build_chroot
+    continues; operator sees the WARNING in the log tab."""
+    import tempfile
+    from unittest.mock import patch, MagicMock
+    with tempfile.TemporaryDirectory() as tmp:
+        signing_dir = os.path.join(tmp, 'signing')
+        os.makedirs(signing_dir, mode=0o700)
+        with open(os.path.join(signing_dir, 'athena-archive-keyring.gpg'),
+                  'wb') as f:
+            f.write(b'bytes')
+        inst = _stub_chroot_mixin_for_keyring_test(
+            dir_gnupg=tmp, dir_chroot=os.path.join(tmp, 'chroot'),
+        )
+
+        # First call (mkdir) succeeds; second (cp) fails.
+        results = [
+            MagicMock(returncode=0, stderr='', stdout=''),
+            MagicMock(returncode=1, stderr='cp: cannot create — read-only', stdout=''),
+        ]
+        with patch('subprocess.run', side_effect=results) as mock_run:
+            # Must not raise.
+            inst._install_signing_keyring()
+        # mkdir + cp called; chmod NOT called (early return on cp failure).
+        assert mock_run.call_count == 2
+
+
 # ─── UX-05 Path B: headless CLI backend (scripts/cli.py) ────────────────────
 
 def _fresh_cli():
@@ -2844,6 +2946,10 @@ def main() -> int:
         test_signing_verify_key_returns_no_key_when_absent,
         test_signing_paths_compose_off_dir_gnupg,
         test_signing_generate_and_verify_roundtrip_real_gpg,
+        # CONF-02 phase 3: install signing keyring into chroot
+        test_install_signing_keyring_skips_when_no_key_generated,
+        test_install_signing_keyring_invokes_cp_when_key_present,
+        test_install_signing_keyring_warns_on_cp_failure,
         # UX-05 Path B: headless CLI backend
         test_cli_print_writes_to_stdout,
         test_cli_severity_methods_write_to_stderr_with_tags,

@@ -1193,6 +1193,25 @@ class BuildSession:
                _os_ok,
                _os_detail if _os_ok else 'missing — run build_bootable again')
 
+        # ── CONF-02 phase 3: signing keyring present? (informational) ──────────
+        # Not a check — non-gating because the chroot is still a valid live
+        # ISO without our keyring; the keyring matters for trusting future
+        # apt sources pointing at the Athena repo.  Surfaced here so the
+        # operator sees presence/absence at verify time without having to
+        # poke at the chroot tree manually.
+        _keyring = os.path.join(
+            chroot, 'usr/share/keyrings/athena-archive-keyring.gpg')
+        if os.path.exists(_keyring):
+            console.print(
+                f'  Athena signing keyring                        present',
+                tui.COLOR_INFO,
+            )
+        else:
+            console.print(
+                '  Athena signing keyring                        absent  '
+                '(run `generate_signing_key` then re-run `build_chroot`)'
+            )
+
         # ── Summary ──────────────────────────────────────────────────────────────
         _total_checks = _passed + _failed
         console.print('')
