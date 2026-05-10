@@ -73,6 +73,13 @@ class BuildFlags:
         self.download_ready: bool = False          # source_download completed
         self.build_container_ready: bool = False   # build_container initialised
         self.source_build_ready: bool = False      # source_build completed
+        # CONF-02 phase 3: signing key sign+verify roundtrip OK in this
+        # session.  Gated by cmd_build_chroot at the very top — the chroot
+        # bakes the public keyring in via _install_signing_keyring, so
+        # operators get a clear "no key, generate now?" prompt before the
+        # heavy chroot setup starts rather than discovering the absence at
+        # the verify step at the end.
+        self.signing_key_verified: bool = False
         self.chroot_ready: bool = False            # build_chroot completed
         self.chroot_verified: bool = False         # build_chroot + verify_chroot all checks passed
 
@@ -80,6 +87,7 @@ class BuildFlags:
         """Return a compact one-line status string for display in the TUI."""
         fields = ['cache_ready', 'dep_check_ready', 'download_ready',
                   'build_container_ready', 'source_build_ready',
+                  'signing_key_verified',
                   'chroot_ready', 'chroot_verified']
         return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
 
@@ -710,6 +718,100 @@ class BuildSession:
     # Command: build_bootable
     # ---------------------------------------------------------------------------
 
+    def _ensure_signing_key_verified(self) -> bool:
+        """CONF-02 phase 3: gate-keep the signing key before chroot work.
+
+        Runs `signing.verify_key` (a real sign+verify roundtrip).  On
+        success, sets `flags.signing_key_verified` and prints the key's
+        fingerprint + uid + creation/expiration so the operator sees
+        the identity that's about to be baked into the chroot.
+
+        On failure (no key, expired, agent issues, …), prompts the
+        operator with PROMPT_YESNO to generate a key now.  If they
+        accept, runs the same flow as `cmd_generate_signing_key`
+        (PROMPT_YESNO confirmation, RSA-4096, ~30-60s) then re-verifies.
+        If they decline, returns False so the caller (cmd_build_chroot)
+        bails before any heavy chroot setup happens.
+
+        Returns True iff the key is verified at exit; the flag mirrors
+        the return value.
+        """
+        import signing
+        _ok, _msg = signing.verify_key(self.config)
+        if _ok:
+            _info = signing.get_key_info(self.config)
+            console.print("Signing key verified:", tui.COLOR_HIGHLIGHT)
+            if _info is not None:
+                console.print(f"  Fingerprint : {_info['fingerprint']}")
+                console.print(f"  UID         : {_info['uid']}")
+                console.print(f"  Created     : {_info['created']}  (gpg epoch seconds)")
+                console.print(
+                    "  Expires     : "
+                    f"{_info['expires'] or '(never — manual rotation)'}"
+                )
+            self.flags.signing_key_verified = True
+            return True
+
+        # Verify failed — usually because no key has been generated yet,
+        # but could also be expired / agent issues / passphrase added
+        # out-of-band.  Surface the actual reason before the prompt so
+        # the operator can decide whether `generate` is the right fix.
+        console.print(
+            f"Signing key check FAILED — {_msg}",
+            tui.COLOR_WARNING,
+        )
+        console.print(
+            "build_chroot bakes the public keyring into the chroot at "
+            "/usr/share/keyrings/athena-archive-keyring.gpg, so a valid "
+            "key is required before the chroot setup can proceed."
+        )
+        _resp = Prompt(
+            PROMPT_YESNO,
+            "Generate a new signing key for "
+            f"'{self.config.signing_key_uid}' now? (~30-60s for RSA-4096)"
+        ).get_response()
+        if _resp.lower() not in ('y', 'yes'):
+            console.print(
+                "Aborted — signing_key_verified flag stays unset; "
+                "build_chroot will refuse until you run "
+                "`generate_signing_key` and re-try.",
+                tui.COLOR_ERROR,
+            )
+            self.flags.signing_key_verified = False
+            return False
+
+        console.print(
+            f"Generating signing key for '{self.config.signing_key_uid}'...",
+            tui.COLOR_INFO,
+        )
+        if not signing.generate_key(self.config):
+            console.print(
+                "ERROR: key generation failed — see log for the gpg stderr",
+                tui.COLOR_ERROR,
+            )
+            self.flags.signing_key_verified = False
+            return False
+
+        # Re-verify the freshly-generated key.  Belt-and-braces — also
+        # gives the operator the same "verified, fingerprint=…" output
+        # they'd get on a returning run.
+        _ok, _msg = signing.verify_key(self.config)
+        if not _ok:
+            console.print(
+                f"ERROR: newly-generated key failed verify — {_msg}",
+                tui.COLOR_ERROR,
+            )
+            self.flags.signing_key_verified = False
+            return False
+        _info = signing.get_key_info(self.config)
+        console.print("Signing key generated and verified:", tui.COLOR_HIGHLIGHT)
+        if _info is not None:
+            console.print(f"  Fingerprint : {_info['fingerprint']}")
+            console.print(f"  UID         : {_info['uid']}")
+            console.print(f"  Public key  : {signing.signing_pubkey_path(self.config)}")
+        self.flags.signing_key_verified = True
+        return True
+
     def cmd_build_chroot(self, *args):
         """Assemble the resolved package set into a bootable chroot environment.
 
@@ -724,11 +826,20 @@ class BuildSession:
         them into a chroot tree at dir_chroot using dpkg.  The resulting chroot
         can be packaged into an ISO or disk image.
 
-        Prerequisites: source_build must have completed (source_build_ready flag).
+        Prerequisites: source_build must have completed (source_build_ready flag)
+        AND the signing key must verify (signing_key_verified flag, gated up
+        front via _ensure_signing_key_verified — see CONF-02 phase 3 for why).
         The sudo password is collected interactively at the start of this command.
         """
         if not self.flags.source_build_ready:
             console.print("Run 'source_build' first")
+            return
+
+        # CONF-02 phase 3: signing-key gate.  Verify (or prompt-then-generate)
+        # the project signing key before any sudo / mount / dpkg work — fast
+        # to fail, easy to recover from, and the keyring is needed by
+        # generate_system_configs anyway so failing fast is honest.
+        if not self._ensure_signing_key_verified():
             return
 
         _debug = 'with_debug' in args

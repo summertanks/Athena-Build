@@ -200,6 +200,7 @@ def _print_state(session, *_extras) -> None:
         ('download_ready',        'source_download   ', 'fetch upstream source archives'),
         ('build_container_ready', 'build_container   ', 'init Docker build environment'),
         ('source_build_ready',    'source_build      ', 'run dpkg-buildpackage per source'),
+        ('signing_key_verified',  'signing key       ', 'verified at top of build_chroot (CONF-02 phase 3)'),
         ('chroot_ready',          'build_chroot      ', 'install built .debs into buildroot/'),
         ('chroot_verified',       'verify_chroot     ', '8-check verifier (passes ⇒ ISO ok)'),
     ]
