@@ -2403,6 +2403,124 @@ def test_signing_generate_and_verify_roundtrip_real_gpg():
         assert ok, msg
 
 
+# ─── CONF-02 phase 3: signing key gate at top of build_chroot ─────────────
+
+def _stub_session_for_signing_gate():
+    """Construct a BuildSession via object.__new__ (bypassing __init__)
+    with just the attrs `_ensure_signing_key_verified` touches.  Saves
+    + restores tui.tui_instance so the Prompt() construction inside the
+    helper can resolve the singleton."""
+    import build
+    import tui
+
+    class _Cfg:
+        signing_key_uid = 'Athena Build <athena@local>'
+        dir_gnupg = '/tmp/athena-test-gnupg-not-real'
+
+    sess = object.__new__(build.BuildSession)
+    sess.config = _Cfg()
+    sess.flags = build.BuildFlags()
+    sess.tui = None
+
+    return sess
+
+
+def test_signing_key_verified_flag_default_false():
+    """New BuildFlags must initialise signing_key_verified to False."""
+    from build import BuildFlags
+    flags = BuildFlags()
+    assert flags.signing_key_verified is False
+
+
+def test_ensure_signing_key_verified_true_when_key_exists():
+    """Key present + verify roundtrip succeeds → flag set, returns True,
+    no Prompt invoked.  Mocks signing.verify_key / get_key_info to keep
+    the test fast (no real gpg call required for this branch)."""
+    from unittest.mock import patch
+
+    sess = _stub_session_for_signing_gate()
+    with patch('signing.verify_key', return_value=(True, 'sign+verify OK')), \
+         patch('signing.get_key_info', return_value={
+             'fingerprint': 'AABBCC',
+             'uid': 'Athena Build <athena@local>',
+             'created': '1700000000',
+             'expires': '0',
+         }), \
+         patch('build.Prompt') as mock_prompt:
+        ok = sess._ensure_signing_key_verified()
+    assert ok is True
+    assert sess.flags.signing_key_verified is True
+    # Prompt MUST NOT be invoked on the success path.
+    mock_prompt.assert_not_called()
+
+
+def test_ensure_signing_key_verified_false_on_user_decline():
+    """No key + operator declines prompt → returns False, flag stays
+    False, generate_key NOT called.  build_chroot will bail."""
+    from unittest.mock import patch, MagicMock
+
+    sess = _stub_session_for_signing_gate()
+    _prompt_inst = MagicMock()
+    _prompt_inst.get_response.return_value = 'n'
+    with patch('signing.verify_key',
+               return_value=(False, 'no signing key')), \
+         patch('signing.generate_key') as mock_gen, \
+         patch('build.Prompt', return_value=_prompt_inst):
+        ok = sess._ensure_signing_key_verified()
+    assert ok is False
+    assert sess.flags.signing_key_verified is False
+    mock_gen.assert_not_called()
+
+
+def test_ensure_signing_key_verified_generates_then_verifies_on_accept():
+    """No key + operator accepts → generate_key called → re-verify
+    succeeds → returns True, flag set."""
+    from unittest.mock import patch, MagicMock
+
+    sess = _stub_session_for_signing_gate()
+    _prompt_inst = MagicMock()
+    _prompt_inst.get_response.return_value = 'y'
+    # First verify_key call returns False (no key); after generate, the
+    # second call returns True.  Use side_effect to script the sequence.
+    with patch('signing.verify_key',
+               side_effect=[(False, 'no signing key'),
+                            (True, 'sign+verify OK')]) as mock_verify, \
+         patch('signing.generate_key', return_value=True) as mock_gen, \
+         patch('signing.get_key_info', return_value={
+             'fingerprint': 'NEWFP', 'uid': 'Athena <a@b>',
+             'created': '1', 'expires': '0',
+         }), \
+         patch('signing.signing_pubkey_path',
+               return_value='/tmp/pub.gpg'), \
+         patch('build.Prompt', return_value=_prompt_inst):
+        ok = sess._ensure_signing_key_verified()
+    assert ok is True
+    assert sess.flags.signing_key_verified is True
+    assert mock_verify.call_count == 2     # before-generate + after
+    mock_gen.assert_called_once()
+
+
+def test_ensure_signing_key_verified_false_when_generate_fails():
+    """No key + operator accepts + generate fails → returns False, flag
+    stays False, re-verify NOT called (early return on generate failure)."""
+    from unittest.mock import patch, MagicMock
+
+    sess = _stub_session_for_signing_gate()
+    _prompt_inst = MagicMock()
+    _prompt_inst.get_response.return_value = 'y'
+    with patch('signing.verify_key',
+               return_value=(False, 'no signing key')) as mock_verify, \
+         patch('signing.generate_key', return_value=False) as mock_gen, \
+         patch('build.Prompt', return_value=_prompt_inst):
+        ok = sess._ensure_signing_key_verified()
+    assert ok is False
+    assert sess.flags.signing_key_verified is False
+    # verify_key called once (the initial check); generate failed before
+    # we'd re-verify.
+    assert mock_verify.call_count == 1
+    mock_gen.assert_called_once()
+
+
 # ─── CONF-02 phase 3: install signing keyring into chroot ─────────────────
 
 def _stub_chroot_mixin_for_keyring_test(*, dir_gnupg, dir_chroot):
@@ -2946,6 +3064,12 @@ def main() -> int:
         test_signing_verify_key_returns_no_key_when_absent,
         test_signing_paths_compose_off_dir_gnupg,
         test_signing_generate_and_verify_roundtrip_real_gpg,
+        # CONF-02 phase 3: signing key gate at top of build_chroot
+        test_signing_key_verified_flag_default_false,
+        test_ensure_signing_key_verified_true_when_key_exists,
+        test_ensure_signing_key_verified_false_on_user_decline,
+        test_ensure_signing_key_verified_generates_then_verifies_on_accept,
+        test_ensure_signing_key_verified_false_when_generate_fails,
         # CONF-02 phase 3: install signing keyring into chroot
         test_install_signing_keyring_skips_when_no_key_generated,
         test_install_signing_keyring_invokes_cp_when_key_present,
