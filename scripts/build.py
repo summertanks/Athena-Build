@@ -162,7 +162,7 @@ class BuildSession:
         can mount them at container start time without a second disk scan.
         """
         if not self.flags.cache_ready:
-            console.print("Cache not ready, Run 'build_cache' first")
+            console.print("Cache not ready, Run 'cache build' first")
             return
 
         _spiner = Spinner("Parsing Dependencies")
@@ -364,7 +364,7 @@ class BuildSession:
         least once.
         """
         if not self.flags.dep_check_ready:
-            console.print("Dependency tree not ready, run 'parse_dependency' first")
+            console.print("Dependency tree not ready, run 'dep parse' first")
             return
         self._refresh_patches()
 
@@ -491,7 +491,7 @@ class BuildSession:
         - Does a size verification
         """
         if not self.flags.dep_check_ready:
-            console.print("Run 'parse_dependency' first")
+            console.print("Run 'dep parse' first")
             return
 
         self.flags.download_ready = False  # reset before starting
@@ -608,7 +608,7 @@ class BuildSession:
         first).  Skips packages whose result file already says TUNNELED or PASS.
         """
         if not self.flags.dep_check_ready:
-            console.print("Run 'parse_dependency' first")
+            console.print("Run 'dep parse' first")
             return
 
         # Fall back to the config list if no names were given on the command line.
@@ -736,7 +736,7 @@ class BuildSession:
         The sudo password is collected interactively at the start of this command.
         """
         if not self.flags.source_build_ready:
-            console.print("Run 'source_build' first")
+            console.print("Run 'source build' first")
             return
 
         # Verify the project signing key before any sudo / mount / dpkg work
@@ -805,9 +805,9 @@ class BuildSession:
         _force = 'force' in args
         if not _force and not self.flags.chroot_verified:
             if self.flags.chroot_ready:
-                console.print("Chroot built but verification failed — re-run 'verify_chroot' after fixing")
+                console.print("Chroot built but verification failed — re-run 'chroot verify' after fixing")
             else:
-                console.print("Run 'build_chroot' first")
+                console.print("Run 'chroot build' first")
             return
 
         console.print("Initialising build system for ISO...")
@@ -938,11 +938,11 @@ class BuildSession:
         decide whether to continue with the partial package set.
         """
         if not self.flags.download_ready:
-            console.print("Run 'source_download' first")
+            console.print("Run 'source download' first")
             return
 
         if not self.flags.build_container_ready:
-            console.print("Run 'build_container' first")
+            console.print("Run 'container init' first")
             return
 
         # Parse args via the static helper for testability.
@@ -1245,7 +1245,7 @@ class BuildSession:
         Prerequisites: chroot must already be built (chroot_ready flag).
         """
         if not self.flags.chroot_ready:
-            console.print("Run 'build_chroot' first")
+            console.print("Run 'chroot build' first")
             return
 
         _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
@@ -1264,6 +1264,88 @@ class BuildSession:
             # as BuildSystem.scrub_password (Python strings are immutable).
             _password = ''
 
+    # --------------------------------------Group dispatchers-------------------------------------
+    # Each top-level command is a noun (cache, dep, patch, source, package,
+    # container, chroot, iso, key); the second token is the verb.  Mirrors
+    # the existing `print <category>` pattern.  The actual implementations
+    # remain on cmd_<old_name> methods unchanged — these are thin forwarders.
+
+    def _group_help(self, group: str, table: dict, unknown: str = '') -> None:
+        if unknown:
+            console.print(f"Unknown {group} action: '{unknown}'")
+        console.print(f"{group}: {' | '.join(table.keys())}")
+        for _action, _desc in table.items():
+            console.print(f"  {group} {_action}\t{_desc}")
+
+    def cmd_cache(self, action: str = '', *args):
+        _table = {'build': 'build apt cache from configured mirrors'}
+        if action == 'build':
+            return self.cmd_build_cache(*args)
+        return self._group_help('cache', _table, action)
+
+    def cmd_dep(self, action: str = '', *args):
+        _table = {'parse': 'resolve full dep closure for selected packages'}
+        if action == 'parse':
+            return self.cmd_parse_dependency(*args)
+        return self._group_help('dep', _table, action)
+
+    def cmd_patch(self, action: str = '', *args):
+        _table = {'refresh': 're-scan patch/source/ tree (after out-of-band edits)'}
+        if action == 'refresh':
+            return self.cmd_patch_refresh(*args)
+        return self._group_help('patch', _table, action)
+
+    def cmd_source(self, action: str = '', *args):
+        _table = {
+            'download': 'fetch source tarballs for selected sources',
+            'build':    'build sources: source build [force] [recommended | <pkg>…] [[profile,…]]',
+        }
+        if action == 'download':
+            return self.cmd_source_download(*args)
+        if action == 'build':
+            return self.cmd_source_build(*args)
+        return self._group_help('source', _table, action)
+
+    def cmd_package(self, action: str = '', *args):
+        _table = {'tunnel': 'pull prebuilt .debs from Debian repo (package tunnel [pkg…])'}
+        if action == 'tunnel':
+            return self.cmd_tunnel_package(*args)
+        return self._group_help('package', _table, action)
+
+    def cmd_container(self, action: str = '', *args):
+        _table = {'init': 'build the Docker build sandbox image'}
+        if action == 'init':
+            return self.cmd_init_container(*args)
+        return self._group_help('container', _table, action)
+
+    def cmd_chroot(self, action: str = '', *args):
+        _table = {
+            'build':  'install built .debs into buildroot/',
+            'verify': '8-check chroot health verifier',
+        }
+        if action == 'build':
+            return self.cmd_build_chroot(*args)
+        if action == 'verify':
+            return self.cmd_verify_chroot(*args)
+        return self._group_help('chroot', _table, action)
+
+    def cmd_iso(self, action: str = '', *args):
+        _table = {'build': 'wrap chroot into bootable hybrid BIOS/EFI ISO'}
+        if action == 'build':
+            return self.cmd_build_iso(*args)
+        return self._group_help('iso', _table, action)
+
+    def cmd_key(self, action: str = '', *args):
+        _table = {
+            'generate': 'generate the project signing keypair (`force` to overwrite)',
+            'verify':   'sign+verify roundtrip against the current signing key',
+        }
+        if action == 'generate':
+            return self.cmd_generate_signing_key(*args)
+        if action == 'verify':
+            return self.cmd_verify_signing_key(*args)
+        return self._group_help('key', _table, action)
+
     def cmd_auto_run(self):
         """Run the full build pipeline in sequence, bailing at the first
         step that does not set its progress flag.  Each step already resets
@@ -1276,14 +1358,14 @@ class BuildSession:
         """
         import print_commands
         _steps = [
-            (self.cmd_build_cache,       'cache_ready',           'build_cache'),
-            (self.cmd_parse_dependency,  'dep_check_ready',       'parse_dependency'),
-            (self.cmd_source_download,   'download_ready',        'source_download'),
-            (self.cmd_init_container,    'build_container_ready', 'build_container'),
-            (self.cmd_source_build,      'source_build_ready',    'source_build'),
-            # build_chroot also runs verify_chroot; chroot_verified is True
+            (self.cmd_build_cache,       'cache_ready',           'cache build'),
+            (self.cmd_parse_dependency,  'dep_check_ready',       'dep parse'),
+            (self.cmd_source_download,   'download_ready',        'source download'),
+            (self.cmd_init_container,    'build_container_ready', 'container init'),
+            (self.cmd_source_build,      'source_build_ready',    'source build'),
+            # chroot build also runs chroot verify; chroot_verified is True
             # only when both build AND all 8 verify checks passed.
-            (self.cmd_build_chroot,      'chroot_verified',       'build_chroot'),
+            (self.cmd_build_chroot,      'chroot_verified',       'chroot build'),
         ]
 
         _t0   = time.monotonic()
@@ -1387,20 +1469,17 @@ def main(banner: str) -> None:
 
     session = BuildSession(config, tui_inst)
 
-    tui.register_command('build_cache',       session.cmd_build_cache,        '\tBuild cache')
-    tui.register_command('parse_dependency',  session.cmd_parse_dependency,   '\tParse dependency tree for selected packages')
-    tui.register_command('patch_refresh',     session.cmd_patch_refresh,      '\tRe-scan patch/source/ tree (after out-of-band patch edits)')
-    tui.register_command('source_download',   session.cmd_source_download,    '\tDownload source packages')
-    tui.register_command('build_container',   session.cmd_init_container,     '\tInitialise Docker build container')
-    tui.register_command('source_build',      session.cmd_source_build,       '\tBuild sources: source_build [force] [recommended | <pkg> \u2026] [[profile,\u2026]]')
-    tui.register_command('tunnel_package',    session.cmd_tunnel_package,     '\tDownload binary .debs from Debian repo (tunnel_package [pkg \u2026])')
-    tui.register_command('build_chroot',      session.cmd_build_chroot,       '\tBuild bootable chroot environment')
-    tui.register_command('verify_chroot',     session.cmd_verify_chroot,      '\tVerify chroot health \u2014 8 checks, PASS/FAIL per test')
-    tui.register_command('build_iso',         session.cmd_build_iso,          '\tBuild bootable ISO from chroot (build_iso)')
-    tui.register_command('autorun',           session.cmd_auto_run,           '\tRuns all commands in sequence')
-    tui.register_command('print',             session.cmd_print,              '\tPrint build state — try: print help')
-    tui.register_command('generate_signing_key', session.cmd_generate_signing_key, '\tGenerate the project signing keypair (`force` to overwrite)')
-    tui.register_command('verify_signing_key',   session.cmd_verify_signing_key,   '\tSign+verify roundtrip against the current signing key')
+    tui.register_command('cache',     session.cmd_cache,     '\tCache:      cache build')
+    tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
+    tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
+    tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build')
+    tui.register_command('package',   session.cmd_package,   '\tPackages:   package tunnel')
+    tui.register_command('container', session.cmd_container, '\tContainer:  container init')
+    tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build | chroot verify')
+    tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build')
+    tui.register_command('key',       session.cmd_key,       '\tSigning:    key generate | key verify')
+    tui.register_command('autorun',   session.cmd_auto_run,  '\tRun all stages in sequence')
+    tui.register_command('print',     session.cmd_print,     '\tPrint build state — try: print help')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Source Build System for Athena Linux...", tui.COLOR_HIGHLIGHT)
