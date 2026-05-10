@@ -74,7 +74,7 @@ if [[ "$(id -u)" ==  0 ]]; then
 	echo "W: running as sudo"
 fi
 
-# Check sudo access — build_bootable and build_iso run dpkg and mksquashfs
+# Check sudo access — chroot build and iso build run dpkg and mksquashfs
 # as root via sudo.  -l lists the user's privileges; -n skips the password
 # prompt so this is non-interactive.  A warning (not a fatal error) is issued
 # here because the core build pipeline (cache/dependency/source) does not
@@ -84,7 +84,7 @@ if sudo -l -n 2>/dev/null | grep -q '(ALL'; then
 elif id -nG "$(whoami)" | grep -qw sudo; then
     echo "Sudo access: OK ($(whoami) is in sudo group — password will be required)"
 else
-    echo "E: $(whoami) does not have sudo access — build_bootable and build_iso require sudo" >&2
+    echo "E: $(whoami) does not have sudo access — chroot build and iso build require sudo" >&2
     exit 1
 fi
 
@@ -182,28 +182,28 @@ case "$PACKAGE" in
 esac
 echo "Using awk: ${PACKAGE:-unknown} — ${AWK_VERSION:-version unknown}"
 
-# Checking ISO build tools (required for build_iso command only)
+# Checking ISO build tools (required for `iso build` command only)
 echo "Checking ISO build tools..."
 ISO_TOOLS_OK=1
 
 if [ -x "$(command -v mksquashfs || true)" ]; then
     echo "Using mksquashfs $(mksquashfs -version 2>&1 | head -n1 || true)"
 else
-    echo "W: mksquashfs not found (install squashfs-tools) — build_iso will not work"
+    echo "W: mksquashfs not found (install squashfs-tools) — iso build will not work"
     ISO_TOOLS_OK=0
 fi
 
 if [ -x "$(command -v grub-mkrescue || true)" ]; then
     echo "Using grub-mkrescue $(grub-mkrescue --version 2>/dev/null | head -n1 || true)"
 else
-    echo "W: grub-mkrescue not found (install grub-pc-bin grub-efi-amd64-bin) — build_iso will not work"
+    echo "W: grub-mkrescue not found (install grub-pc-bin grub-efi-amd64-bin) — iso build will not work"
     ISO_TOOLS_OK=0
 fi
 
 if [ -x "$(command -v xorriso || true)" ]; then
     echo "Using xorriso $(xorriso --version 2>&1 | head -n1 || true)"
 else
-    echo "W: xorriso not found (install xorriso) — build_iso will not work"
+    echo "W: xorriso not found (install xorriso) — iso build will not work"
     ISO_TOOLS_OK=0
 fi
 

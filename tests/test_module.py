@@ -942,12 +942,66 @@ def test_buildsession_constructible_with_stub_tui():
                           'cmd_source_build', 'cmd_tunnel_package',
                           'cmd_build_chroot', 'cmd_build_iso',
                           'cmd_verify_chroot', 'cmd_auto_run',
-                          'cmd_print'):
+                          'cmd_print',
+                          # Group dispatchers (noun-verb command surface).
+                          'cmd_cache', 'cmd_dep', 'cmd_patch',
+                          'cmd_source', 'cmd_package', 'cmd_container',
+                          'cmd_chroot', 'cmd_iso', 'cmd_key'):
                 _fn = getattr(session, _name)
                 assert callable(_fn), f"{_name} not callable"
                 assert _fn.__self__ is session, f"{_name} not bound to this session"
     finally:
         _tui.tui_instance = saved
+
+
+def test_group_dispatchers_forward_to_underlying_cmd_methods():
+    """Each cmd_<group>(<verb>) forwards to the matching cmd_<old_name>.
+    Unknown verb falls through to _group_help (does not raise, does not
+    invoke any underlying handler).  This is the contract the noun-verb
+    command surface relies on."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    # Pairs: (group_method, verb, target_method).  One entry per registered
+    # action across all 9 groups.
+    _matrix = [
+        ('cmd_cache',     'build',    'cmd_build_cache'),
+        ('cmd_dep',       'parse',    'cmd_parse_dependency'),
+        ('cmd_patch',     'refresh',  'cmd_patch_refresh'),
+        ('cmd_source',    'download', 'cmd_source_download'),
+        ('cmd_source',    'build',    'cmd_source_build'),
+        ('cmd_package',   'tunnel',   'cmd_tunnel_package'),
+        ('cmd_container', 'init',     'cmd_init_container'),
+        ('cmd_chroot',    'build',    'cmd_build_chroot'),
+        ('cmd_chroot',    'verify',   'cmd_verify_chroot'),
+        ('cmd_iso',       'build',    'cmd_build_iso'),
+        ('cmd_key',       'generate', 'cmd_generate_signing_key'),
+        ('cmd_key',       'verify',   'cmd_verify_signing_key'),
+    ]
+
+    for _group_name, _verb, _target_name in _matrix:
+        # Bypass __init__ — we don't want to construct a real config; we
+        # only need the bound dispatcher methods, which are class-level.
+        _sess = BuildSession.__new__(BuildSession)
+        _calls = []
+        # Stamp the target with a recorder; the dispatcher should call it.
+        setattr(_sess, _target_name,
+                lambda *a, _name=_target_name, **kw: _calls.append((_name, a, kw)))
+        _dispatch = getattr(_sess, _group_name)
+        _dispatch(_verb, 'arg1', 'arg2')
+        assert _calls == [(_target_name, ('arg1', 'arg2'), {})], (
+            f"{_group_name} {_verb} should forward to {_target_name}, got {_calls}")
+
+    # Unknown verb: dispatcher must not raise and must not call any underlying
+    # handler.  cmd_cache only knows 'build'; 'wat' should print help and stop.
+    _sess = BuildSession.__new__(BuildSession)
+    _called = []
+    _sess.cmd_build_cache = lambda *a, **kw: _called.append('build_cache')
+    # _group_help calls console.print — that's a module-level facade with a
+    # fallback when no Tui is registered; no need to stub it.
+    _sess.cmd_cache('wat')
+    assert _called == [], f"unknown verb must not invoke any handler, got {_called}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1741,13 +1795,13 @@ def test_autorun_summary_aborted_marks_stage_and_partial_state():
         started=_dt.datetime(2026, 5, 9, 12, 0, 0),
         finished=_dt.datetime(2026, 5, 9, 12, 30, 0),
         elapsed=1800,
-        aborted_at='source_download',
+        aborted_at='source download',
     )
     output = _capture_console_print(
         lambda: print_commands.summary(sess, timing=timing)
     )
     assert 'ABORTED' in output
-    assert "'source_download'" in output
+    assert "'source download'" in output
     assert '30m 00s' in output
     assert 'Source build   : not run' in output
     assert 'Chroot         : not built' in output
@@ -2980,6 +3034,7 @@ def main() -> int:
         test_check_dep3_header_subject_satisfies_description,
         # ARCH-01
         test_buildsession_constructible_with_stub_tui,
+        test_group_dispatchers_forward_to_underlying_cmd_methods,
         # ARCH-03
         test_console_with_explicit_tui_does_not_touch_singleton,
         test_console_singleton_fallback_when_tui_omitted,
