@@ -12,7 +12,7 @@ Responsibilities:
   - Expose all of the above as interactive TUI commands
 
 Typical operator workflow:
-    build_cache → parse_dependency → source_download → build_container → source_build
+    cache build → dep parse → source download → container init → source build
 
 Each step sets a flag in _progress_flags so later commands can verify prerequisites
 without re-running earlier work.
@@ -844,21 +844,21 @@ class BuildSession:
 
     # -------------------------------Command: build_iso---------------------
     
-    def cmd_build_iso(self, *args):
-        """Build a bootable hybrid BIOS/EFI ISO from the assembled chroot.
+    def cmd_build_iso_live(self, *args):
+        """Build a bootable hybrid BIOS/EFI live ISO from the assembled chroot.
 
-        Usage: build_iso [force]
+        Usage: iso build live [force]
 
           force — skip the chroot_verified flag check.  After a manual
                   edit of the chroot tree (e.g. dropping in extra config
-                  files between `build_chroot` and `build_iso`) the
+                  files between `chroot build` and `iso build live`) the
                   in-memory chroot_verified flag is stale even though the
                   on-disk chroot may still be valid.  With force, we
                   re-run verify_chroot against the on-disk chroot using
                   the password just collected for ISO assembly, and
                   proceed only if all 8 checks still pass.
 
-        Packages the chroot produced by build_chroot into a squashfs live
+        Packages the chroot produced by chroot build into a squashfs live
         image, writes a GRUB configuration, and runs grub-mkrescue to
         produce a bootable ISO at dir_image/athena-VERSION-amd64.iso.
 
@@ -916,28 +916,58 @@ class BuildSession:
             build_system.scrub_password()
 
 
+    def cmd_build_iso_installer(self, *args):
+        """Build the installer ISO (debian-installer based).
+
+        STUB — installer ISO build is COMP-01a (not yet implemented).
+        Once `chroot build installer` lands and produces the d-i initrd +
+        kernel + udeb manifest under buildroot/installer/, this command
+        will wrap those plus the apt pool, isolinux/grub config, preseed,
+        and branding into a bootable installer ISO.  See
+        docs/plans/comp-01-installer.md for the full design.
+        """
+        console.print(
+            "ERROR: installer ISO build is not yet implemented "
+            "(tracked as COMP-01a; see docs/plans/comp-01-installer.md)"
+        )
+        logger.error("iso build installer: not implemented (COMP-01a)")
+
+
     # ---------------------------------------------------------------------------
     # Command: source_build
     # ---------------------------------------------------------------------------
+
+    # Subset selectors recognised by `source build` — live / installer /
+    # recommended are mutually exclusive; named pkgs are a fourth (also
+    # exclusive) mode.  'live' is the default when no subset and no names
+    # are given (preserves the bare `source build` UX).
+    _SOURCE_SUBSETS = ('live', 'installer', 'recommended')
 
     @staticmethod
     def _parse_source_build_args(args):
         """Pure-function argument parser for cmd_source_build.
 
         Recognises:
-          - 'force' / 'recommended' as case-insensitive flag-words at any
-            position
+          - 'force' as a case-insensitive flag-word at any position
+          - 'live' / 'installer' / 'recommended' as case-insensitive
+            subset selectors at any position; mutually exclusive with
+            each other AND with named packages
           - one optional `[profile,...]` bracket-token (override for both
             DEB_BUILD_PROFILES and DEB_BUILD_OPTIONS); multiple bracket
             tokens is a parse error
           - everything else as a package name
-          - 'recommended' is mutually exclusive with named packages
 
-        Returns ``(err, force, recommended, names, profile_override)``.
+        Default: bare `source build` (no subset, no names) resolves to
+        subset='live'.
+
+        Returns ``(err, force, subset, names, profile_override)``.
         On success ``err`` is None; on parse error ``err`` is a printable
-        string the caller should surface.  ``profile_override`` is None
-        when no bracket-token was given; an empty list when the operator
-        wrote `[]` (most-permissive build); a populated list otherwise.
+        string the caller should surface.  ``subset`` is one of
+        'live' / 'installer' / 'recommended' when a subset selector was
+        given (or no args at all); '' when named packages were given.
+        ``profile_override`` is None when no bracket-token was given; an
+        empty list when the operator wrote `[]` (most-permissive build);
+        a populated list otherwise.
         """
         _bracket_token = None
         _other_args = []
@@ -948,39 +978,56 @@ class BuildSession:
                     return (
                         f"Usage: only one [profiles] override per invocation "
                         f"(saw {_bracket_token!r} and {_s[1:-1]!r})",
-                        False, False, [], None,
+                        False, '', [], None,
                     )
                 _bracket_token = _s[1:-1]
             else:
                 _other_args.append(_a)
         _flags = {a.strip().lower() for a in _other_args}
         _force = 'force' in _flags
-        _recommended = 'recommended' in _flags
-        _names = [a for a in _other_args
-                  if a.strip().lower() not in ('force', 'recommended')]
-        if _recommended and _names:
+        _subset_words = sorted(_flags & set(BuildSession._SOURCE_SUBSETS))
+        if len(_subset_words) > 1:
             return (
-                "Usage: 'source_build recommended' is mutually exclusive with "
-                "named packages.  Use one or the other.",
-                False, False, [], None,
+                f"Usage: pick at most one of "
+                f"{'/'.join(BuildSession._SOURCE_SUBSETS)} "
+                f"(saw {', '.join(_subset_words)})",
+                False, '', [], None,
             )
+        _subset = _subset_words[0] if _subset_words else ''
+        _reserved = {'force'} | set(BuildSession._SOURCE_SUBSETS)
+        _names = [a for a in _other_args
+                  if a.strip().lower() not in _reserved]
+        if _subset and _names:
+            return (
+                f"Usage: 'source build {_subset}' is mutually exclusive with "
+                f"named packages.  Use one or the other.",
+                False, '', [], None,
+            )
+        # Default: bare `source build` resolves to live (preserves today's UX).
+        if not _subset and not _names:
+            _subset = 'live'
         _profile_override = None
         if _bracket_token is not None:
             _profile_override = [
                 p.strip() for p in _bracket_token.split(',') if p.strip()
             ]
-        return (None, _force, _recommended, _names, _profile_override)
+        return (None, _force, _subset, _names, _profile_override)
 
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
-        Usage: source_build [force] [recommended | <pkg> ...] [[profile,...]]
+        Usage: source build [force] [live | installer | recommended | <pkg> ...] [[profile,...]]
 
           force         — rebuild packages even if a valid result already exists
+          live          — build the install closure for the live ISO
+                          (selected_srcs MINUS extras-only sources).  This is
+                          the default when no subset and no names are given.
+          installer     — build the source set for the installer ISO
+                          (pkg_installer.list).  STUB until COMP-01a lands —
+                          today this errors out cleanly.
           recommended   — build ONLY the EXTRAS-01 sources (depth-1 Recommends
                           pulled into the repo by parse_dependency, but
-                          excluded from chroot install).  Mutually exclusive
-                          with named packages.
+                          excluded from chroot install).
           pkg ...       — limit the build to the named source packages
           [profile,...] — bracket-delimited token (e.g. `[nocheck]`) overrides
                           BOTH DEB_BUILD_PROFILES and DEB_BUILD_OPTIONS for
@@ -988,9 +1035,10 @@ class BuildSession:
                           most permissive build (no profiles/options — docs
                           and tests included).  Implies `force` because the
                           .result cache wouldn't reflect the override.
-          (no arg)      — build everything in selected_srcs MINUS the
-                          extras-only sources (those need explicit
-                          `recommended` mode)
+          (no arg)      — equivalent to `source build live`.
+
+        live / installer / recommended are mutually exclusive with each
+        other and with named packages.
 
         Each package is built in a fresh container instance with its declared
         build-dependencies installed at runtime.  Result files (.result) and build
@@ -1012,7 +1060,7 @@ class BuildSession:
             return
 
         # Parse args via the static helper for testability.
-        _err, _force, _recommended, _names, _profile_override = \
+        _err, _force, _subset, _names, _profile_override = \
             self._parse_source_build_args(args)
         if _err:
             console.print(_err)
@@ -1031,8 +1079,10 @@ class BuildSession:
 
         if _force:
             console.print("Force mode: skipping build cache checks")
-        if _recommended:
+        if _subset == 'recommended':
             console.print("Recommended mode: building EXTRAS-01 extras-only sources")
+        elif _subset == 'installer':
+            console.print("Installer mode: building installer ISO source set")
         if _profile_override is not None:
             console.print(
                 f"Profile override active: DEB_BUILD_PROFILES + "
@@ -1051,7 +1101,7 @@ class BuildSession:
                     console.print(f"Unknown package: {name}")
                     return
                 packages.append(src)
-        elif _recommended:
+        elif _subset == 'recommended':
             # `recommended` mode: build only sources that exist purely for
             # the recommends pull (extras_src_names is the set whose every
             # binary lands in extras_pkg_names).
@@ -1060,10 +1110,25 @@ class BuildSession:
                 for n in sorted(self.dep_tree.extras_src_names)
                 if n in self.dep_tree.selected_srcs
             ]
+        elif _subset == 'installer':
+            # COMP-01a not landed yet — pkg_installer.list and the
+            # installer source set don't exist in the dependency tree.
+            # Stub: error out cleanly until the installer pipeline lands.
+            console.print(
+                "ERROR: installer source set not configured — "
+                "pkg_installer.list is required (tracked as COMP-01a; "
+                "see docs/plans/comp-01-installer.md)"
+            )
+            logger.error(
+                "source build installer: not implemented "
+                "(COMP-01a — pkg_installer.list missing)"
+            )
+            return
         else:
-            # Default: build the install closure — selected_srcs MINUS
-            # extras-only sources (mixed sources are kept; their recommended
-            # binaries fall out as side artefacts of dpkg-buildpackage).
+            # Default: subset == 'live' — build the install closure
+            # (selected_srcs MINUS extras-only sources).  Mixed sources
+            # are kept; their recommended binaries fall out as side
+            # artefacts of dpkg-buildpackage.
             _extras = self.dep_tree.extras_src_names
             packages = [
                 _s for _name, _s in self.dep_tree.selected_srcs.items()
@@ -1369,7 +1434,7 @@ class BuildSession:
     def cmd_source(self, action: str = '', *args):
         _table = {
             'download': 'fetch source tarballs for selected sources',
-            'build':    'build sources: source build [force] [recommended | <pkg>…] [[profile,…]]',
+            'build':    'build sources: source build [force] [live | installer | recommended | <pkg>…] [[profile,…]]',
         }
         if action == 'download':
             return self.cmd_source_download(*args)
@@ -1401,9 +1466,21 @@ class BuildSession:
         return self._group_help('chroot', _table, action)
 
     def cmd_iso(self, action: str = '', *args):
-        _table = {'build': 'wrap chroot into bootable hybrid BIOS/EFI ISO'}
+        _table = {
+            'build live':      'wrap live chroot into bootable hybrid BIOS/EFI ISO',
+            'build installer': 'wrap d-i initrd+kernel+pool into installer ISO (COMP-01a)',
+        }
         if action == 'build':
-            return self.cmd_build_iso(*args)
+            if not args:
+                console.print("Usage: iso build <live | installer>")
+                return self._group_help('iso', _table)
+            _sub = args[0]
+            _rest = args[1:]
+            if _sub == 'live':
+                return self.cmd_build_iso_live(*_rest)
+            if _sub == 'installer':
+                return self.cmd_build_iso_installer(*_rest)
+            return self._group_help('iso', _table, f'build {_sub}')
         return self._group_help('iso', _table, action)
 
     def cmd_key(self, action: str = '', *args):
@@ -1543,11 +1620,11 @@ def main(banner: str) -> None:
     tui.register_command('cache',     session.cmd_cache,     '\tCache:      cache build')
     tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
-    tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build')
+    tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [live|installer|recommended]')
     tui.register_command('package',   session.cmd_package,   '\tPackages:   package tunnel')
     tui.register_command('container', session.cmd_container, '\tContainer:  container init')
     tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build | chroot verify')
-    tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build')
+    tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')
     tui.register_command('key',       session.cmd_key,       '\tSigning:    key generate | key verify')
     tui.register_command('autorun',   session.cmd_auto_run,  '\tRun all stages in sequence')
     tui.register_command('print',     session.cmd_print,     '\tPrint build state — try: print help')

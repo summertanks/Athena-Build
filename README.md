@@ -84,22 +84,22 @@ The pipeline (eight stages, plus one optional side-channel):
 2. `dep parse` — resolves the package list in `config/pkg.list` into a closed dependency graph (binary deps + matching source packages).
 3. `source download` — fetches `.dsc`, `.orig.tar.*`, and `.debian.tar.*` files for every selected source.
 4. `container init` — builds a per-release Docker image carrying the build-deps for the source packages.
-5. `source build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files into `repo/`.  Default mode skips *extras-only* sources (depth-1 Recommends pulled in by `dep parse` for the future apt-repo); `source build recommended` builds those.  A bracket-token like `source build live-boot-doc [nocheck]` overrides `DEB_BUILD_PROFILES` + `DEB_BUILD_OPTIONS` for that one build — useful when you want a `-doc` binary the default `nodoc` profile would skip.
+5. `source build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files into `repo/`.  Default mode (= `source build live`) builds the install closure for the live ISO and skips *extras-only* sources (depth-1 Recommends pulled in by `dep parse` for the future apt-repo); `source build recommended` builds those.  `source build installer` is reserved for the d-i source set — currently a stub (COMP-01a; see `docs/plans/comp-01-installer.md`).  A bracket-token like `source build live-boot-doc [nocheck]` overrides `DEB_BUILD_PROFILES` + `DEB_BUILD_OPTIONS` for that one build — useful when you want a `-doc` binary the default `nodoc` profile would skip.
 6. `chroot build` — installs the built `.deb`s into a chroot under `buildroot/` in topo-sorted batches, handling the libc bootstrap cycle, post-install patch overlays, and the canonical libdevmapper/dmsetup/systemd cycle (ARCH-12).  Runs `chroot verify` automatically as its tail end.
-7. `chroot verify` — the 8-check verifier from step 6, also invokable on its own (e.g. after a manual edit of the chroot tree).  Fails loud; gates `iso build`.
-8. `iso build` — wraps the chroot into a squashfs, runs `grub-mkrescue` to produce a hybrid BIOS/EFI bootable ISO under `image/`.
+7. `chroot verify` — the 8-check verifier from step 6, also invokable on its own (e.g. after a manual edit of the chroot tree).  Fails loud; gates `iso build live`.
+8. `iso build live` — wraps the chroot into a squashfs, runs `grub-mkrescue` to produce a hybrid BIOS/EFI bootable ISO under `image/`.  (`iso build installer` is the parallel installer-ISO path — stubbed today, lands with COMP-01a.)
 
 Plus, off to one side:
 
 - `package tunnel` — for packages you've explicitly *chosen not* to build from source.  Pulls the prebuilt `.deb` straight from the base Debian repo and drops it into `repo/` alongside the from-source builds.  Reads the `Tunneled` list in `config/build.conf` (or accepts package names as args).  Not part of `autorun` — opt-in, run after `dep parse` and before `chroot build`.
 
-Each stage sets a `BuildFlags` bit on success; later stages refuse to run unless their prerequisites are set.  `autorun` walks stages 1–6 in order (which gets you a verified chroot) and bails on the first failure; you then run `iso build` once you're happy.
+Each stage sets a `BuildFlags` bit on success; later stages refuse to run unless their prerequisites are set.  `autorun` walks stages 1–6 in order (which gets you a verified chroot) and bails on the first failure; you then run `iso build live` once you're happy.
 
 ### Prerequisites
 
 A Debian-derived host. Development happens on Debian bookworm; trixie should work, current Ubuntu LTS likely too. You need:
 
-- **sudo**. The chroot install steps shell out to `mount --bind`, `chroot`, `dpkg`. Run the build as a normal user; the TUI will prompt for your sudo password at the start of `chroot build` (and again at the start of `iso build`) and zero it from memory the instant each command exits — pass or fail (see STA-07).
+- **sudo**. The chroot install steps shell out to `mount --bind`, `chroot`, `dpkg`. Run the build as a normal user; the TUI will prompt for your sudo password at the start of `chroot build` (and again at the start of `iso build live`) and zero it from memory the instant each command exits — pass or fail (see STA-07).
 - **Docker Engine** (not Docker Desktop). The source-build container runs build-deps in isolation. The `Misc / Installing Docker` section at the bottom has the apt incantation for an up-to-date Engine.
 - **Python ≥ 3.9** plus `python3-apt`, `python3-debian`, `python3-gnupg`, `python3-requests`, `python3-psutil`, `python3-docker`. The wrapper `build-system.sh` checks `py_requirements.txt` and tells you what's missing.
 - **debian-archive-keyring** — used to GPG-verify mirror `InRelease` files. On a Debian host it's almost always there; on Ubuntu you may need to apt-install it (see `[Security]` in `config/build.conf` for the keyring path).
@@ -122,7 +122,7 @@ From there:
 
 - `print config` shows what `config/build.conf` resolved to — which mirrors are active, whether snapshot pinning is on, what `[Build]` codename will be baked into `/etc/os-release`. Run this first to confirm you're building what you think you're building.  (`print help` lists the other views.)
 - `autorun` runs stages 1–6 (cache → parse → download → container → source build → chroot+verify). Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
-- When `autorun` finishes cleanly, run `iso build` to produce the final image. (If you want to drop extra files into `buildroot/` first — custom motd, extra config — this is the moment.)
+- When `autorun` finishes cleanly, run `iso build live` to produce the final image. (If you want to drop extra files into `buildroot/` first — custom motd, extra config — this is the moment.)
 - If a stage fails, fix the cause and re-run that stage by name (`source build`, `chroot build`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
 - TUI keys: arrows to scroll the active tab, `Tab` to cycle between tabs (console / log), `q`/`Q` to quit. Resize is handled automatically.
 - `print extras` shows the depth-1 *Recommends* of your selected packages that have been pulled into `repo/` but kept *out* of the chroot install — there to support `apt install <thing>` from a booted Athena system later, not to bloat the live ISO.  Toggle off with `[Build] IncludeRecommendsInRepo = false` if you want a strictly minimal repo.  See §Working with the package set below.
@@ -143,8 +143,10 @@ You don't have to think about this on a normal `autorun` — the defaults do the
 print extras                          # what's in the extras pool, with source mapping
 print stats                           # counts incl. "extras (recom): N pkg(s) (toggle=on|off)"
 
-source build                          # build the install set (default — skips extras-only sources)
+source build                          # build the live install set (default — same as `source build live`)
+source build live                     # explicit form of the default
 source build recommended              # build ONLY the extras-only sources
+source build installer                # installer source set (STUB — see COMP-01a)
 source build foo                      # build a specific source
 source build force foo                # rebuild even if .result says PASS
 ```
