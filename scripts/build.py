@@ -1203,7 +1203,7 @@ class BuildSession:
             chroot, 'usr/share/keyrings/athena-archive-keyring.gpg')
         if os.path.exists(_keyring):
             console.print(
-                f'  Athena signing keyring                        present',
+                '  Athena signing keyring                        present',
                 tui.COLOR_INFO,
             )
         else:
