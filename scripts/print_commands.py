@@ -601,6 +601,40 @@ def _print_provides(session, *_extras) -> None:
             tui.console.print(f"      → {cn} ({ver})")
 
 
+# ─── Repo / signing views ──────────────────────────────────────────────────
+
+def _print_signing(session, *_extras) -> None:
+    """Show the project signing key's identity + on-disk state.
+
+    No active sign+verify roundtrip — that's what the
+    `verify_signing_key` command does (it actually exercises gpg).
+    This view just inspects what's there: configured UID, gnupg
+    homedir, and (if a key exists) its fingerprint, primary uid,
+    creation/expiration timestamps, and the path of the exported
+    public keyring.
+    """
+    import signing
+    cfg = session.config
+    tui.console.print("Signing key:")
+    tui.console.print(f"  UID configured : {cfg.signing_key_uid}")
+    tui.console.print(f"  Home dir       : {signing.signing_home(cfg)}")
+    info = signing.get_key_info(cfg)
+    if info is None:
+        tui.console.print(
+            "  Status         : NOT generated  "
+            "(run `generate_signing_key` to create)"
+        )
+        return
+    tui.console.print(f"  Fingerprint    : {info['fingerprint']}")
+    tui.console.print(f"  UID present    : {info['uid']}")
+    tui.console.print(f"  Created        : {info['created']}  (gpg epoch seconds)")
+    tui.console.print(
+        f"  Expires        : "
+        f"{info['expires'] or '(never — manual rotation)'}"
+    )
+    tui.console.print(f"  Public key     : {signing.signing_pubkey_path(cfg)}")
+
+
 # ─── Help screen ────────────────────────────────────────────────────────────
 
 def _print_help(_session=None, *_extras) -> None:
@@ -660,6 +694,9 @@ CATEGORIES = {
     # Relations
     'provides':  (_print_provides,  'Relations',     'virtual packages with multiple providers'),
 
+    # Repo
+    'signing':   (_print_signing,   'Repo',          'project signing key — identity + on-disk state (CONF-02)'),
+
     # Meta
     'help':      (_print_help,      'Meta',          'this help'),
 }
@@ -671,6 +708,7 @@ _HELP_GROUP_ORDER = [
     'Packages',
     'Sources',
     'Relations',
+    'Repo',
     'Meta',
 ]
 

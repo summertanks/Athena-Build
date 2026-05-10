@@ -547,6 +547,13 @@ class BuildConfig:
             self.include_recommends_in_repo = config_parser.getboolean(
                 'Build', 'IncludeRecommendsInRepo', fallback=True
             )
+            # CONF-02: identity for the project's signing key — used by
+            # generate_signing_key / verify_signing_key / print signing.
+            # Format 'Name <email>'.  See [Repo] section in build.conf.
+            self.signing_key_uid = config_parser.get(
+                'Repo', 'SigningKeyUid',
+                fallback='Athena Build <athena@local>'
+            ).strip()
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]

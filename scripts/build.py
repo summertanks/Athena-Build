@@ -401,6 +401,134 @@ class BuildSession:
 
 
     # ---------------------------------------------------------------------------
+    # Command: generate_signing_key  (CONF-02 phase 1)
+    # ---------------------------------------------------------------------------
+
+    def cmd_generate_signing_key(self, *args):
+        """Generate the project's signing keypair (one-time setup).
+
+        Usage: generate_signing_key [force]
+
+          force — overwrite an existing key for the same UID.  Default
+                  refuses if a key already exists, since overwriting
+                  would invalidate every Release we've ever signed
+                  with the prior key.
+
+        Prompts for confirmation in either case; key generation is a
+        security-relevant action that takes ~30-60s for RSA-4096 and
+        is hard to back out of.
+
+        UID comes from `[Repo] SigningKeyUid` in build.conf.  Private
+        key lands under `<dir_gnupg>/signing/`; public key is exported
+        to `<dir_gnupg>/signing/athena-archive-keyring.gpg` for use by
+        cmd_index_repo (Phase 2) and the future chroot keyring install.
+        """
+        import signing
+        _force = 'force' in (a.strip().lower() for a in args)
+
+        _existing = signing.get_key_info(self.config)
+        if _existing and not _force:
+            console.print(
+                f"Signing key already exists for "
+                f"'{self.config.signing_key_uid}':",
+                tui.COLOR_WARNING,
+            )
+            console.print(f"  Fingerprint : {_existing['fingerprint']}")
+            console.print(f"  UID         : {_existing['uid']}")
+            console.print(
+                "Add `force` to overwrite — note: any Release files "
+                "previously signed with the old key become unverifiable "
+                "against the new one."
+            )
+            return
+
+        # Confirm before any irreversible action — overwrite warning
+        # explicitly calls out the cascade.
+        if _existing:
+            _msg = (f"Overwrite existing signing key for "
+                    f"'{self.config.signing_key_uid}'?")
+        else:
+            _msg = (f"Generate new signing key for "
+                    f"'{self.config.signing_key_uid}'? (~30-60s for RSA-4096)")
+        _resp = Prompt(PROMPT_YESNO, _msg).get_response()
+        if _resp.lower() not in ('y', 'yes'):
+            console.print("Aborted.")
+            return
+
+        console.print(
+            f"Generating signing key for '{self.config.signing_key_uid}'...",
+            tui.COLOR_INFO,
+        )
+        if not signing.generate_key(self.config):
+            console.print(
+                "ERROR: key generation failed — see log for the gpg stderr",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        _info = signing.get_key_info(self.config)
+        if _info is None:
+            console.print(
+                "ERROR: key generation completed but the key is not "
+                "queryable — likely a gpg homedir permission issue",
+                tui.COLOR_ERROR,
+            )
+            return
+        console.print("Signing key generated:", tui.COLOR_HIGHLIGHT)
+        console.print(f"  Fingerprint : {_info['fingerprint']}")
+        console.print(f"  UID         : {_info['uid']}")
+        console.print(f"  Public key  : {signing.signing_pubkey_path(self.config)}")
+        console.print(
+            "Run `verify_signing_key` to confirm a sign+verify roundtrip "
+            "works end-to-end."
+        )
+
+
+    # ---------------------------------------------------------------------------
+    # Command: verify_signing_key  (CONF-02 phase 1)
+    # ---------------------------------------------------------------------------
+
+    def cmd_verify_signing_key(self):
+        """Sanity-check the signing key by performing a real gpg
+        sign+verify roundtrip against a small test payload.
+
+        Reports the key's fingerprint, uid, creation, expiration —
+        plus an OK/FAIL line for the roundtrip itself.  Catches:
+        missing key, expired key, missing pubkey, gpg-agent issues,
+        keys that grew a passphrase out-of-band.
+        """
+        import signing
+        _info = signing.get_key_info(self.config)
+        if _info is None:
+            console.print(
+                f"No signing key for '{self.config.signing_key_uid}' — "
+                f"run `generate_signing_key` first",
+                tui.COLOR_WARNING,
+            )
+            return
+        console.print("Signing key:", tui.COLOR_INFO)
+        console.print(f"  Fingerprint : {_info['fingerprint']}")
+        console.print(f"  UID         : {_info['uid']}")
+        console.print(f"  Created     : {_info['created']}  (gpg epoch seconds)")
+        console.print(
+            f"  Expires     : "
+            f"{_info['expires'] or '(never — manual rotation)'}"
+        )
+
+        _ok, _msg = signing.verify_key(self.config)
+        if _ok:
+            console.print(
+                f"  Verification: OK — {_msg}",
+                tui.COLOR_HIGHLIGHT,
+            )
+        else:
+            console.print(
+                f"  Verification: FAIL — {_msg}",
+                tui.COLOR_ERROR,
+            )
+
+
+    # ---------------------------------------------------------------------------
     # Command: source_download
     # ---------------------------------------------------------------------------
 
@@ -1245,6 +1373,8 @@ def main(banner: str) -> None:
     tui.register_command('build_iso',         session.cmd_build_iso,          'Build bootable ISO from chroot (build_iso)')
     tui.register_command('autorun',           session.cmd_auto_run,           'Runs all commands in sequence')
     tui.register_command('print',             session.cmd_print,              'Print build state — try: print help')
+    tui.register_command('generate_signing_key', session.cmd_generate_signing_key, 'Generate the project signing keypair (one-time setup; refuses overwrite without `force`)')
+    tui.register_command('verify_signing_key',   session.cmd_verify_signing_key,   'Sign+verify roundtrip against the current signing key')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Source Build System for Athena Linux...", tui.COLOR_HIGHLIGHT)

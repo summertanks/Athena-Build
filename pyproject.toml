@@ -59,6 +59,7 @@ py-modules  = [
     "iso",
     "package",
     "print_commands",
+    "signing",
     "tui",
     "utils",
 ]

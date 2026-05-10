@@ -126,6 +126,7 @@ From there:
 - If a stage fails, fix the cause and re-run that stage by name (`source_build`, `build_chroot`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
 - TUI keys: arrows to scroll the active tab, `Tab` to cycle between tabs (console / log), `q`/`Q` to quit. Resize is handled automatically.
 - `print extras` shows the depth-1 *Recommends* of your selected packages that have been pulled into `repo/` but kept *out* of the chroot install — there to support `apt install <thing>` from a booted Athena system later, not to bloat the live ISO.  Toggle off with `[Build] IncludeRecommendsInRepo = false` if you want a strictly minimal repo.  See §Working with the package set below.
+- `generate_signing_key` (one-time) creates the project's GPG keypair under `<dir_gnupg>/signing/`; `verify_signing_key` sign+verifies a test payload to confirm it's usable; `print signing` shows the key's fingerprint + uid + state.  The signed apt-repo (CONF-01/02 phase 2) builds on top of this; for now the key just sits there ready to be used.  See `[Repo] SigningKeyUid` in `config/build.conf` for the identity string.
 
 The final ISO appears under `image/` named `athena-<version>-amd64.iso`. A sidecar `<iso>.user` file next to it carries the per-build random username for the live boot (see SEC-04).
 
