@@ -21,7 +21,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/scripts/build.py",
-            "console": "integratedTerminal",
+            "console": "externalTerminal",
             "justMyCode": false,
             "args": [],
             "env": {

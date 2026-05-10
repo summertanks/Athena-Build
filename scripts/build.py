@@ -28,7 +28,6 @@ import glob
 import shutil
 import subprocess
 import time
-import cache
 import sys
 from typing import Optional
 
@@ -73,13 +72,7 @@ class BuildFlags:
         self.download_ready: bool = False          # source_download completed
         self.build_container_ready: bool = False   # build_container initialised
         self.source_build_ready: bool = False      # source_build completed
-        # CONF-02 phase 3: signing key sign+verify roundtrip OK in this
-        # session.  Gated by cmd_build_chroot at the very top — the chroot
-        # bakes the public keyring in via _install_signing_keyring, so
-        # operators get a clear "no key, generate now?" prompt before the
-        # heavy chroot setup starts rather than discovering the absence at
-        # the verify step at the end.
-        self.signing_key_verified: bool = False
+        self.signing_key_verified: bool = False    # signing key sign+verify roundtrip
         self.chroot_ready: bool = False            # build_chroot completed
         self.chroot_verified: bool = False         # build_chroot + verify_chroot all checks passed
 
@@ -105,9 +98,6 @@ class BuildSession:
         self.dep_tree: 'Optional[dependencytree.DependencyTree]' = None
         self.container: 'Optional[buildcontainer.BuildContainer]' = None
         self.flags: BuildFlags = BuildFlags()
-        # Counters from the most recent source_build run — populated by
-        # cmd_source_build, read by the autorun summary (UX-03).
-        # None until a source_build has actually run.
         self.last_source_build_counts: 'Optional[dict]' = None
 
     def cmd_build_cache(self):
@@ -120,11 +110,6 @@ class BuildSession:
         console.print("Building Cache...", tui.COLOR_INFO)
         self.flags.cache_ready = False  # reset in case we're re-running
 
-        # Surface the snapshot pin up-front so the operator sees what point
-        # in time the cache is being built against — and, when 'latest' is
-        # the configured value, what date that resolved to.  resolve() is
-        # memoised, so the call inside Cache.__init__ a few lines below is
-        # a no-op cache hit.
         if self.config.snapshot_enabled:
             try:
                 _ts = utils.resolve_snapshot_timestamp(self.config)
@@ -136,6 +121,7 @@ class BuildSession:
             _human = utils.format_snapshot_timestamp(_ts) if _ts else '<unresolved>'
             _suffix = ' (latest)' if self.config.snapshot_timestamp_config == 'latest' else ''
             console.print(f"Snapshot timestamp: {_human}{_suffix}", tui.COLOR_HIGHLIGHT)
+
         else:
             console.print("Snapshot pinning: disabled (live mirrors)", tui.COLOR_INFO)
 
@@ -154,9 +140,7 @@ class BuildSession:
         self.flags.cache_ready = True
 
 
-    # ---------------------------------------------------------------------------
-    # Command: parse_dependency
-    # ---------------------------------------------------------------------------
+    # --------------------------------------Command: parse_dependency-------------------------------------
 
     def cmd_parse_dependency(self):
         """Resolve the full closure of packages needed to build the target system.
@@ -186,8 +170,7 @@ class BuildSession:
 
         console.print("Preparing Parsing Tree...", tui.COLOR_INFO)
         self.dep_tree = dependencytree.DependencyTree(self.cache, select_recommended=False,
-                                                         arch=self.config.arch,
-                                                         build_profiles=self.config.build_profiles)
+                    arch=self.config.arch, build_profiles=self.config.build_profiles)
 
         # --- Pass I: required ---------------------------------------------------
         required_packages = self.cache.required
@@ -262,35 +245,16 @@ class BuildSession:
         console.print(f"Total Selected Packages : {__num_total}", tui.COLOR_HIGHLIGHT)
         _spiner.done()
 
-        # --- EXTRAS-01: pull depth-1 Recommends as available-not-installed ----
-        # When [Build] IncludeRecommendsInRepo is on (default), recommends of
-        # the closure above land in selected_pkgs (so source_download fetches
-        # them) but are tracked separately so build_chroot skips them and
-        # source_build routes them to `source_build recommended`.  See
-        # DependencyTree.pull_recommends_extras for the full contract.
-        # Outcome is reported on every code path — silent zero-extras would
-        # be indistinguishable from "toggle was off" in the operator's view.
+        # When [Build] IncludeRecommendsInRepo is on (default)
         if self.config.include_recommends_in_repo:
             _added = self.dep_tree.pull_recommends_extras()
             if _added:
                 console.print(
-                    f"EXTRAS-01: pulled {_added} recommended package(s) into the repo "
-                    f"(not chroot-installed; build with `source_build recommended`)",
-                    tui.COLOR_INFO,
-                )
+                    f"EXTRAS: pulled {_added} recommended package(s) into the repo ", tui.COLOR_INFO)
             else:
-                console.print(
-                    "EXTRAS-01: 0 recommends added — every recommend was either "
-                    "already in the install closure or unresolvable in the cache. "
-                    "(Check the log tab for per-pkg WARNs if this is unexpected.)",
-                    tui.COLOR_INFO,
-                )
+                console.print("EXTRAS: 0 recommends added — if unexpected check logs ", tui.COLOR_INFO)
         else:
-            console.print(
-                "EXTRAS-01: disabled — set [Build] IncludeRecommendsInRepo = true "
-                "to pull depth-1 Recommends into the repo.",
-                tui.COLOR_INFO,
-            )
+            console.print("EXTRAS: disabled — check IncludeRecommendsInRepo", tui.COLOR_INFO)
 
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")
@@ -323,19 +287,11 @@ class BuildSession:
             if _resp.lower() not in ('y', 'yes'):
                 return
 
-        # EXTRAS-01: now that selected_srcs has its full Source.pkgs lists
-        # populated, identify which sources are extras-only so source_build
+        # EXTRAS: identify which sources are extras-only so source_build
         # default skips them and `source_build recommended` builds only them.
-        # Always call derive_extras_src_names so the set is initialised — even
-        # the empty case must reset it for re-runs.
         _extras_only = self.dep_tree.derive_extras_src_names()
         if self.dep_tree.extras_pkg_names:
-            console.print(
-                f"EXTRAS-01: of those, {_extras_only} source(s) are extras-only "
-                f"(only built via `source_build recommended`; the rest "
-                f"are mixed sources whose recommends fall out as side artefacts)",
-                tui.COLOR_INFO,
-            )
+            console.print(f"EXTRAS: {_extras_only} source(s) are extras-only ", tui.COLOR_INFO)
 
         # Apply per-package skip_test flag from config (suppresses 'nocheck' build opt).
         for _pkg in self.config.skip_build_test:
@@ -343,36 +299,7 @@ class BuildSession:
                 self.dep_tree.selected_srcs[_pkg].skip_test = True
 
         # --- Patch discovery ----------------------------------------------------
-        # Scan the patch tree for files matching <package>/<version>/*.patch.
-        # Sorting by the first five characters preserves the numeric prefix ordering
-        # (e.g. 9001-, 9002-) used to control application order.
-        for _pkg in self.dep_tree.selected_srcs:
-            _ver = str(self.dep_tree.selected_srcs[_pkg].version)
-            _patch_path = os.path.join(self.config.dir_patch_source, _pkg, _ver)
-            try:
-                if os.path.exists(_patch_path):
-                    _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
-                    self.dep_tree.selected_srcs[_pkg].patch_list = sorted(_patch_files, key=lambda x: x[:5])
-                    logger.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
-                    # CONF-05: soft DEP-3 header check on each discovered
-                    # patch.  Missing fields → log-tab warning only; the
-                    # patch is still applied at build time.  Keeps the
-                    # convention enforceable without blocking ad-hoc
-                    # one-off operator patches.
-                    for _pf in _patch_files:
-                        _missing = utils.check_dep3_header(
-                            os.path.join(_patch_path, _pf))
-                        if _missing:
-                            logger.warning(
-                                f"DEP-3: {_pkg}/{_ver}/{_pf} missing "
-                                f"header(s): {', '.join(_missing)}"
-                            )
-            except OSError as e:
-                console.print(f"WARNING: cannot list patches for '{_pkg}'")
-                logger.warning(f"patch discovery {_patch_path}: {e}")
-
-        _patched = sum(1 for _s in self.dep_tree.selected_srcs.values() if _s.patch_list)
-        console.print(f"Found patches for {_patched} source package(s)", tui.COLOR_INFO)
+        self._refresh_patches()
 
         # Write source lists to disk for auditing.
         try:
@@ -391,9 +318,58 @@ class BuildSession:
         self.flags.dep_check_ready = True
 
 
-    # ---------------------------------------------------------------------------
-    # Command: print
-    # ---------------------------------------------------------------------------
+    # --------------------------------------Command: patch_refresh-------------------------------------
+
+    def _refresh_patches(self) -> int:
+        # Scan the patch tree for files matching <package>/<version>/*.patch and
+        # populate each Source's patch_list.  Sorting by the first five characters
+        # preserves the numeric prefix ordering (e.g. 9001-, 9002-) used to control
+        # application order.  Resets patch_list per source so removed patch files
+        # are reflected on re-runs (operator-driven `patch_refresh` after
+        # out-of-band changes to the patch tree).
+        for _pkg in self.dep_tree.selected_srcs:
+            _src = self.dep_tree.selected_srcs[_pkg]
+            _ver = str(_src.version)
+            _patch_path = os.path.join(self.config.dir_patch_source, _pkg, _ver)
+            _src.patch_list = []
+            try:
+                if os.path.exists(_patch_path):
+                    _patch_files = [f for f in os.listdir(_patch_path) if f.endswith('.patch')]
+                    _src.patch_list = sorted(_patch_files, key=lambda x: x[:5])
+                    logger.info(f"[patch] {_pkg} {_ver}: {_patch_files}")
+
+                    # soft DEP-3 header check on each discovered patch. Missing fields → log-tab warning only;
+                    # the patch is still applied at build time.  Keeps the convention enforceable
+                    # without blocking ad-hoc one-off operator patches.
+                    for _pf in _patch_files:
+                        _missing = utils.check_dep3_header(
+                            os.path.join(_patch_path, _pf))
+                        if _missing:
+                            logger.warning(f"DEP-3: {_pkg}/{_ver}/{_pf} missing header(s): {', '.join(_missing)}")
+
+            except OSError as e:
+                console.print(f"WARNING: cannot list patches for '{_pkg}'")
+                logger.warning(f"patch discovery {_patch_path}: {e}")
+
+        _patched = sum(1 for _s in self.dep_tree.selected_srcs.values() if _s.patch_list)
+        console.print(f"Found patches for {_patched} source package(s)", tui.COLOR_INFO)
+        return _patched
+
+    def cmd_patch_refresh(self):
+        """Re-scan the patch tree and refresh each Source's patch_list.
+
+        Use after editing patch/source/<pkg>/<ver>/ out-of-band so the next
+        source_build picks up the new patch set without re-running the full
+        parse_dependency stage.  Requires parse_dependency to have run at
+        least once.
+        """
+        if not self.flags.dep_check_ready:
+            console.print("Dependency tree not ready, run 'parse_dependency' first")
+            return
+        self._refresh_patches()
+
+
+    # --------------------------------------Command: print-------------------------------------
 
     def cmd_print(self, category: str = '', *extras):
         """Display summary information about the current build state.
@@ -408,28 +384,19 @@ class BuildSession:
         print_commands.dispatch(self, category, *extras)
 
 
-    # ---------------------------------------------------------------------------
-    # Command: generate_signing_key  (CONF-02 phase 1)
-    # ---------------------------------------------------------------------------
+    # ----------------------------------Command: generate_signing_key--------------------------
 
     def cmd_generate_signing_key(self, *args):
         """Generate the project's signing keypair (one-time setup).
 
         Usage: generate_signing_key [force]
 
-          force — overwrite an existing key for the same UID.  Default
-                  refuses if a key already exists, since overwriting
-                  would invalidate every Release we've ever signed
-                  with the prior key.
+          force — overwrite an existing key for the same UID. use with caution,
+          it invalidates previously signed repos. Prompts for confirmation in either case; 
 
-        Prompts for confirmation in either case; key generation is a
-        security-relevant action that takes ~30-60s for RSA-4096 and
-        is hard to back out of.
-
-        UID comes from `[Repo] SigningKeyUid` in build.conf.  Private
-        key lands under `<dir_gnupg>/signing/`; public key is exported
-        to `<dir_gnupg>/signing/athena-archive-keyring.gpg` for use by
-        cmd_index_repo (Phase 2) and the future chroot keyring install.
+        - UID comes from `[Repo] SigningKeyUid` in build.conf.  
+        - Private is under `<dir_gnupg>/signing/`; 
+        - Public key is exported to `<dir_gnupg>/signing/athena-archive-keyring.gpg` f
         """
         import signing
         _force = 'force' in (a.strip().lower() for a in args)
@@ -443,66 +410,50 @@ class BuildSession:
             )
             console.print(f"  Fingerprint : {_existing['fingerprint']}")
             console.print(f"  UID         : {_existing['uid']}")
-            console.print(
-                "Add `force` to overwrite — note: any Release files "
-                "previously signed with the old key become unverifiable "
-                "against the new one."
-            )
+            console.print("Add `force` to overwrite — Use with Caution ")
             return
 
         # Confirm before any irreversible action — overwrite warning
-        # explicitly calls out the cascade.
         if _existing:
-            _msg = (f"Overwrite existing signing key for "
-                    f"'{self.config.signing_key_uid}'?")
+            _msg = (f"Overwrite existing signing key for '{self.config.signing_key_uid}'?")
         else:
-            _msg = (f"Generate new signing key for "
-                    f"'{self.config.signing_key_uid}'? (~30-60s for RSA-4096)")
+            _msg = (f"Generate new signing key for '{self.config.signing_key_uid}'?")
+
         _resp = Prompt(PROMPT_YESNO, _msg).get_response()
         if _resp.lower() not in ('y', 'yes'):
             console.print("Aborted.")
             return
 
-        console.print(
-            f"Generating signing key for '{self.config.signing_key_uid}'...",
-            tui.COLOR_INFO,
-        )
+        console.print(f"Generating signing key for '{self.config.signing_key_uid}'...",tui.COLOR_INFO,)
+        
         if not signing.generate_key(self.config):
-            console.print(
-                "ERROR: key generation failed — see log for the gpg stderr",
-                tui.COLOR_ERROR,
-            )
+            console.print("ERROR: key generation failed — see log for the gpg stderr", tui.COLOR_ERROR,)
             return
 
         _info = signing.get_key_info(self.config)
         if _info is None:
-            console.print(
-                "ERROR: key generation completed but the key is not "
-                "queryable — likely a gpg homedir permission issue",
-                tui.COLOR_ERROR,
-            )
+            console.print("ERROR: key generation completed but the key is not "
+                "queryable — likely a gpg homedir permission issue", tui.COLOR_ERROR,)
             return
+        
         console.print("Signing key generated:", tui.COLOR_HIGHLIGHT)
         console.print(f"  Fingerprint : {_info['fingerprint']}")
         console.print(f"  UID         : {_info['uid']}")
         console.print(f"  Public key  : {signing.signing_pubkey_path(self.config)}")
-        console.print(
-            "Run `verify_signing_key` to confirm a sign+verify roundtrip "
-            "works end-to-end."
-        )
+        console.print("Run `verify_signing_key` to confirm a sign+verify roundtrip")
 
 
-    # ---------------------------------------------------------------------------
-    # Command: verify_signing_key  (CONF-02 phase 1)
-    # ---------------------------------------------------------------------------
+    # ------------------------------------Command: verify_signing_key----------------------
+
 
     def cmd_verify_signing_key(self):
         """Sanity-check the signing key by performing a real gpg
         sign+verify roundtrip against a small test payload.
 
         Reports the key's fingerprint, uid, creation, expiration —
-        plus an OK/FAIL line for the roundtrip itself.  Catches:
-        missing key, expired key, missing pubkey, gpg-agent issues,
+        plus an OK/FAIL line for the roundtrip itself.  
+        
+        Catches: missing key, expired key, missing pubkey, gpg-agent issues,
         keys that grew a passphrase out-of-band.
         """
         import signing
@@ -518,36 +469,26 @@ class BuildSession:
         console.print(f"  Fingerprint : {_info['fingerprint']}")
         console.print(f"  UID         : {_info['uid']}")
         console.print(f"  Created     : {_info['created']}  (gpg epoch seconds)")
-        console.print(
-            f"  Expires     : "
-            f"{_info['expires'] or '(never — manual rotation)'}"
-        )
+        console.print(f"  Expires     : {_info['expires'] or '(never — manual rotation)'}")
 
         _ok, _msg = signing.verify_key(self.config)
         if _ok:
-            console.print(
-                f"  Verification: OK — {_msg}",
-                tui.COLOR_HIGHLIGHT,
-            )
+            console.print(f"  Verification: OK — {_msg}", tui.COLOR_HIGHLIGHT)
         else:
-            console.print(
-                f"  Verification: FAIL — {_msg}",
-                tui.COLOR_ERROR,
-            )
+            console.print(f"  Verification: FAIL — {_msg}", tui.COLOR_ERROR)
 
 
-    # ---------------------------------------------------------------------------
-    # Command: source_download
-    # ---------------------------------------------------------------------------
+    # -----------------------------------Command: source_download--------------------
 
     def cmd_source_download(self):
         """Download upstream source archives for all selected source packages.
 
-        Fetches .dsc, .orig.tar.*, and .debian.tar.* files from the configured
-        base mirror into dir_source.  Skips files that are already present and
-        have correct checksums.  Prompts if the total downloaded size does not
-        match the expected size reported by the APT indices (indicates a partial
-        or corrupt download).
+        - Fetches .dsc, .orig.tar.*, and .debian.tar.* files from the configured
+        base mirror into dir_source.  
+        
+        - Skips files that are already present and have correct checksums. 
+         
+        - Does a size verification
         """
         if not self.flags.dep_check_ready:
             console.print("Run 'parse_dependency' first")
@@ -575,10 +516,7 @@ class BuildSession:
         self.flags.download_ready = True
 
 
-    # ---------------------------------------------------------------------------
-    # Command: self.container
-    # ---------------------------------------------------------------------------
-
+    # -----------------------------Command: self.container------------------------
     def cmd_init_container(self):
         """Initialise the Docker build container image.
 
@@ -600,17 +538,12 @@ class BuildSession:
             logger.error(f"BuildContainer() raised: {e}")
 
 
-    # ---------------------------------------------------------------------------
-    # Internal helper: tunnel download
-    # ---------------------------------------------------------------------------
+    # --------------------------Internal helper: tunnel download------------------
 
     def _do_tunnel(self, src_pkg) -> bool:
         """Download prebuilt binary .deb files for src_pkg from the base Debian repo.
 
-        Used when building a package from source is impractical (e.g. toolchain
-        bootstrap packages, packages with architecture-specific build failures).
-        Files are written directly into the repo directory alongside locally built
-        packages so the rest of the pipeline treats them identically.
+        Used when building a package from source is being to stubborn
 
         The result file written at the end uses the 'TUNNELED' tag (rather than
         'PASS') so that check_build() can distinguish tunneled packages from
@@ -649,10 +582,7 @@ class BuildSession:
             logger.info(f"tunnel {src_pkg.package}: downloading {_url}")
             _bytes, _detail = utils.download_file(_url, _dest)
             if _bytes < 0:
-                logger.error(
-                    f"tunnel {src_pkg.package}: failed to download {_filename}: "
-                    f"{_detail or 'unknown'}"
-                )
+                logger.error(f"tunnel {src_pkg.package}: failed to download {_filename}: {_detail or 'unknown'}")
                 _success = False
 
         # Write a result file so check_build() can skip re-tunneling on the next run.
@@ -666,9 +596,7 @@ class BuildSession:
         return _success
 
 
-    # ---------------------------------------------------------------------------
-    # Command: tunnel_package
-    # ---------------------------------------------------------------------------
+    # --------------------------Command: tunnel_package--------------------------
 
     def cmd_tunnel_package(self, *args):
         """Download prebuilt binary .debs from the base Debian repo for named packages.
@@ -700,6 +628,7 @@ class BuildSession:
 
         _success = _failed = 0
         progress_bar = ProgressBar(label='Tunnel', itr_label='pkgs', maxvalue=len(packages))
+        
         for _src_pkg in packages:
             _result = self._do_tunnel(_src_pkg)
             if _result:
@@ -714,24 +643,20 @@ class BuildSession:
         console.print(f"Tunnel complete: {_success} tunneled, {_failed} failed")
 
 
-    # ---------------------------------------------------------------------------
-    # Command: build_bootable
-    # ---------------------------------------------------------------------------
+    # ------------------------------------Command: build_bootable------------
 
     def _ensure_signing_key_verified(self) -> bool:
         """CONF-02 phase 3: gate-keep the signing key before chroot work.
 
         Runs `signing.verify_key` (a real sign+verify roundtrip).  On
         success, sets `flags.signing_key_verified` and prints the key's
-        fingerprint + uid + creation/expiration so the operator sees
-        the identity that's about to be baked into the chroot.
+        fingerprint + uid + creation/expiration
 
         On failure (no key, expired, agent issues, …), prompts the
         operator with PROMPT_YESNO to generate a key now.  If they
         accept, runs the same flow as `cmd_generate_signing_key`
-        (PROMPT_YESNO confirmation, RSA-4096, ~30-60s) then re-verifies.
-        If they decline, returns False so the caller (cmd_build_chroot)
-        bails before any heavy chroot setup happens.
+        then re-verifies. If they decline, returns False so the caller 
+        (cmd_build_chroot) bails before any heavy chroot setup happens.
 
         Returns True iff the key is verified at exit; the flag mirrors
         the return value.
@@ -745,10 +670,7 @@ class BuildSession:
                 console.print(f"  Fingerprint : {_info['fingerprint']}")
                 console.print(f"  UID         : {_info['uid']}")
                 console.print(f"  Created     : {_info['created']}  (gpg epoch seconds)")
-                console.print(
-                    "  Expires     : "
-                    f"{_info['expires'] or '(never — manual rotation)'}"
-                )
+                console.print("  Expires     : {_info['expires'] or '(never — manual rotation)'}")
             self.flags.signing_key_verified = True
             return True
 
@@ -756,39 +678,22 @@ class BuildSession:
         # but could also be expired / agent issues / passphrase added
         # out-of-band.  Surface the actual reason before the prompt so
         # the operator can decide whether `generate` is the right fix.
-        console.print(
-            f"Signing key check FAILED — {_msg}",
-            tui.COLOR_WARNING,
-        )
-        console.print(
-            "build_chroot bakes the public keyring into the chroot at "
-            "/usr/share/keyrings/athena-archive-keyring.gpg, so a valid "
-            "key is required before the chroot setup can proceed."
-        )
-        _resp = Prompt(
-            PROMPT_YESNO,
-            "Generate a new signing key for "
-            f"'{self.config.signing_key_uid}' now? (~30-60s for RSA-4096)"
-        ).get_response()
+        console.print(f"Signing key check FAILED — {_msg}", tui.COLOR_WARNING)
+        
+        console.print( "valid key is required before the chroot setup can proceed.")
+        
+        _resp = Prompt(PROMPT_YESNO, "Generate a new signing key for "
+                       "'{self.config.signing_key_uid}' now?").get_response()
+        
         if _resp.lower() not in ('y', 'yes'):
-            console.print(
-                "Aborted — signing_key_verified flag stays unset; "
-                "build_chroot will refuse until you run "
-                "`generate_signing_key` and re-try.",
-                tui.COLOR_ERROR,
-            )
+            console.print("Aborted — signing key is mandatory", tui.COLOR_ERROR)
             self.flags.signing_key_verified = False
             return False
 
-        console.print(
-            f"Generating signing key for '{self.config.signing_key_uid}'...",
-            tui.COLOR_INFO,
-        )
+        console.print( f"Generating signing key for '{self.config.signing_key_uid}'...", tui.COLOR_INFO)
+
         if not signing.generate_key(self.config):
-            console.print(
-                "ERROR: key generation failed — see log for the gpg stderr",
-                tui.COLOR_ERROR,
-            )
+            console.print( "ERROR: key generation failed — see log for the gpg stderr", tui.COLOR_ERROR)
             self.flags.signing_key_verified = False
             return False
 
@@ -797,18 +702,17 @@ class BuildSession:
         # they'd get on a returning run.
         _ok, _msg = signing.verify_key(self.config)
         if not _ok:
-            console.print(
-                f"ERROR: newly-generated key failed verify — {_msg}",
-                tui.COLOR_ERROR,
-            )
+            console.print(f"ERROR: newly-generated key failed verify — {_msg}",tui.COLOR_ERROR)
             self.flags.signing_key_verified = False
             return False
+        
         _info = signing.get_key_info(self.config)
         console.print("Signing key generated and verified:", tui.COLOR_HIGHLIGHT)
         if _info is not None:
             console.print(f"  Fingerprint : {_info['fingerprint']}")
             console.print(f"  UID         : {_info['uid']}")
             console.print(f"  Public key  : {signing.signing_pubkey_path(self.config)}")
+        
         self.flags.signing_key_verified = True
         return True
 
@@ -835,10 +739,7 @@ class BuildSession:
             console.print("Run 'source_build' first")
             return
 
-        # CONF-02 phase 3: signing-key gate.  Verify (or prompt-then-generate)
-        # the project signing key before any sudo / mount / dpkg work — fast
-        # to fail, easy to recover from, and the keyring is needed by
-        # generate_system_configs anyway so failing fast is honest.
+        # Verify the project signing key before any sudo / mount / dpkg work
         if not self._ensure_signing_key_verified():
             return
 
@@ -855,11 +756,7 @@ class BuildSession:
             return
 
         # Bracket the BuildSystem's lifetime so the cached sudo password is
-        # scrubbed on every exit path — success, build failure, KeyboardInterrupt.
-        # Python strings are immutable so this only drops the reference (the GC
-        # reclaims it later), but it shrinks the window in which the password is
-        # reachable from this process's heap from "for the rest of the TUI
-        # session" to "until this command returns".
+        # scrubbed on every exit path — success, build failure, 
         try:
             console.print("Building chroot environment...")
             _result = build_system.build_chroot(debug=_debug)
@@ -879,10 +776,8 @@ class BuildSession:
             build_system.scrub_password()
 
 
-    # ---------------------------------------------------------------------------
-    # Command: build_iso
-    # ---------------------------------------------------------------------------
-
+    # -------------------------------Command: build_iso---------------------
+    
     def cmd_build_iso(self, *args):
         """Build a bootable hybrid BIOS/EFI ISO from the assembled chroot.
 
@@ -1492,19 +1387,20 @@ def main(banner: str) -> None:
 
     session = BuildSession(config, tui_inst)
 
-    tui.register_command('build_cache',       session.cmd_build_cache,        'Build cache')
-    tui.register_command('parse_dependency',  session.cmd_parse_dependency,   'Parse dependency tree for selected packages')
-    tui.register_command('source_download',   session.cmd_source_download,    'Download source packages')
-    tui.register_command('build_container',   session.cmd_init_container,     'Initialise Docker build container')
-    tui.register_command('source_build',      session.cmd_source_build,       'Build sources \u2014 try: source_build [force] [recommended | <pkg> \u2026] [[profile,\u2026]]')
-    tui.register_command('tunnel_package',    session.cmd_tunnel_package,     'Download binary .debs from Debian repo (tunnel_package [pkg \u2026])')
-    tui.register_command('build_chroot',      session.cmd_build_chroot,       'Build bootable chroot environment')
-    tui.register_command('verify_chroot',     session.cmd_verify_chroot,      'Verify chroot health \u2014 8 checks, PASS/FAIL per test')
-    tui.register_command('build_iso',         session.cmd_build_iso,          'Build bootable ISO from chroot (build_iso)')
-    tui.register_command('autorun',           session.cmd_auto_run,           'Runs all commands in sequence')
-    tui.register_command('print',             session.cmd_print,              'Print build state — try: print help')
-    tui.register_command('generate_signing_key', session.cmd_generate_signing_key, 'Generate the project signing keypair (one-time setup; refuses overwrite without `force`)')
-    tui.register_command('verify_signing_key',   session.cmd_verify_signing_key,   'Sign+verify roundtrip against the current signing key')
+    tui.register_command('build_cache',       session.cmd_build_cache,        '\tBuild cache')
+    tui.register_command('parse_dependency',  session.cmd_parse_dependency,   '\tParse dependency tree for selected packages')
+    tui.register_command('patch_refresh',     session.cmd_patch_refresh,      '\tRe-scan patch/source/ tree (after out-of-band patch edits)')
+    tui.register_command('source_download',   session.cmd_source_download,    '\tDownload source packages')
+    tui.register_command('build_container',   session.cmd_init_container,     '\tInitialise Docker build container')
+    tui.register_command('source_build',      session.cmd_source_build,       '\tBuild sources: source_build [force] [recommended | <pkg> \u2026] [[profile,\u2026]]')
+    tui.register_command('tunnel_package',    session.cmd_tunnel_package,     '\tDownload binary .debs from Debian repo (tunnel_package [pkg \u2026])')
+    tui.register_command('build_chroot',      session.cmd_build_chroot,       '\tBuild bootable chroot environment')
+    tui.register_command('verify_chroot',     session.cmd_verify_chroot,      '\tVerify chroot health \u2014 8 checks, PASS/FAIL per test')
+    tui.register_command('build_iso',         session.cmd_build_iso,          '\tBuild bootable ISO from chroot (build_iso)')
+    tui.register_command('autorun',           session.cmd_auto_run,           '\tRuns all commands in sequence')
+    tui.register_command('print',             session.cmd_print,              '\tPrint build state — try: print help')
+    tui.register_command('generate_signing_key', session.cmd_generate_signing_key, '\tGenerate the project signing keypair (`force` to overwrite)')
+    tui.register_command('verify_signing_key',   session.cmd_verify_signing_key,   '\tSign+verify roundtrip against the current signing key')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Source Build System for Athena Linux...", tui.COLOR_HIGHLIGHT)
