@@ -126,61 +126,6 @@ class Cache:
     def is_valid(self) -> bool:
         return self._config_valid
 
-    # ─── UX-04 commit B: pickling shape ────────────────────────────────────
-    # Cache is persisted to dir_cache/cache.pkl.gz so a re-launched TUI can
-    # skip the ~30-60s rebuild via `cmd_resume`.  Two shapes need handling
-    # specially across pickle:
-    #   - _arch_table is a python-debian DpkgArchTable; not guaranteed to
-    #     round-trip safely across versions.  Drop on save, regenerate on
-    #     load (cheap — just a stdlib + apt-paths lookup).
-    #   - package_hashtable / source_hashtable are defaultdicts whose
-    #     factories are LAMBDAS.  Lambdas don't pickle.  Convert to plain
-    #     dicts on save, restore the defaultdict shape on load (cmd_*
-    #     handlers index via .get() or `name in hashtable` so the
-    #     defaultdict behavior matters less than people think — but keep
-    #     it for invariant preservation).
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state.pop('_arch_table', None)
-        # Convert defaultdicts → plain dicts (and the inner defaultdicts
-        # for package_hashtable too).  Pickle handles the inner Package /
-        # Source objects (debian.deb822 wrappers — they ARE picklable).
-        if isinstance(state.get('package_hashtable'), dict):
-            state['package_hashtable'] = {
-                name: dict(versions)
-                for name, versions in state['package_hashtable'].items()
-            }
-        if isinstance(state.get('source_hashtable'), dict):
-            state['source_hashtable'] = dict(state['source_hashtable'])
-        return state
-
-    def __setstate__(self, state):
-        from collections import defaultdict
-        self.__dict__.update(state)
-        # Re-impose the defaultdict shape for downstream code that still
-        # expects "look up an unknown name and get an empty bucket".
-        if 'package_hashtable' in state:
-            new = defaultdict(lambda: defaultdict(list))
-            for name, versions in state['package_hashtable'].items():
-                bucket = defaultdict(list)
-                bucket.update(versions)
-                new[name] = bucket
-            self.package_hashtable = new
-        if 'source_hashtable' in state:
-            new = defaultdict(list)
-            new.update(state['source_hashtable'])
-            self.source_hashtable = new
-        # Recreate the dpkg arch table — cheap stdlib lookup.  If the host
-        # somehow can't load it on restore, leave it absent and let the
-        # next .arch_table access fail with a clear error.
-        try:
-            self._arch_table = DpkgArchTable.load_arch_table()
-        except (OSError, RuntimeError, ValueError, KeyError) as e:
-            logger.warning(
-                f"Cache.__setstate__: could not restore _arch_table: {e}"
-            )
-
     def __get_files(self) -> int:
         """Fetch InRelease + Packages + Sources for every configured mirror.
 

@@ -58,7 +58,6 @@ py-modules  = [
     "dependencytree",
     "iso",
     "package",
-    "persistence",
     "print_commands",
     "signing",
     "tui",
