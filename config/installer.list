@@ -58,16 +58,24 @@ grub-installer
 # cdrom-detect locates the install media; mountmedia actually mounts
 # it at /cdrom; cdrom-retriever pulls files out of /cdrom for
 # base-installer's pool reads.  All three needed for our file:///cdrom
-# install path (the locked COMP-01b decision).  iso-scan is for
-# USB-with-ISO-file boots (common installer-from-USB pattern) — kept
-# in v1 so a USB stick with the ISO copied as a regular file boots
-# correctly.
+# install path (the locked COMP-01b decision).
+#
+# DO NOT add iso-scan here.  iso-scan and cdrom-detect both have
+# Installer-Menu-Item: 1300 AND iso-scan declares Provides: cdrom-detect.
+# When both are installed, main-menu picks iso-scan as the "provider"
+# of cdrom-detect and the real cdrom-detect never runs — iso-scan then
+# fails ("Failed to find an installer ISO image") because it's looking
+# for an ISO image *file* on a block device, not for the boot CD itself.
+# Caught 2026-05-11 in a VMware install.
+#
+# To support USB-stick-with-ISO-file install later: ship a separate
+# installer.list variant (or build flavor) that has iso-scan INSTEAD
+# OF cdrom-detect.  Don't ship both.
 hw-detect
 disk-detect
 cdrom-detect
 mountmedia
 cdrom-retriever
-iso-scan
 
 # ─── Preseed runtime ───────────────────────────────────────────────
 # preseed-common loads /preseed.cfg (baked into the initrd by Phase 5's
@@ -92,18 +100,35 @@ cdebconf-priority
 # modprobe the drivers needed for /dev/sr0 (CD) or /dev/sd* (USB) to
 # appear, and cdrom-detect reports "No device or installation media
 # (like CD-ROM) was detected".
+#
+# Naming gotcha: `scsi-core-modules` is just the SCSI plumbing (sd_mod,
+# scsi_mod, sg).  The actual HOST CONTROLLER drivers (mpt3sas, vmw_pvscsi,
+# BusLogic, virtio_blk, nvme, megaraid, hv_storvsc, xen-blkfront, etc.)
+# live in a SEPARATE udeb called `scsi-modules`.  Caught 2026-05-11 when
+# installer booted in a VMware VM, couldn't see /dev/sda or /dev/sr0,
+# and fell through to iso-scan's "no device" dialog.
+#
 #   cdrom-core-modules  — sr_mod + cdrom.ko (the actual CD driver)
-#   scsi-core-modules   — SCSI subsystem (sr_mod attaches here)
-#   ata-modules         — PATA + SATA generic ATA (libata)
-#   sata-modules        — SATA-specific (ahci, etc.)
+#   scsi-core-modules   — sd_mod + scsi_mod + scsi_transport_* (plumbing)
+#   scsi-modules        — actual HBA drivers: mpt3sas, vmw_pvscsi,
+#                         BusLogic, virtio_blk/scsi, nvme, megaraid,
+#                         hv_storvsc, xen-blkfront, qla*, aic*, lpfc,
+#                         and ~80 other host controllers
+#   ata-modules         — libata + ata_generic (framework)
+#   sata-modules        — ahci, ata_piix, sata_* (SATA-specific)
 #   usb-modules         — USB controllers (xhci, ehci, uhci, ohci)
 #   usb-storage-modules — USB mass storage (USB-CD, USB-stick install)
+#   isofs-modules       — isofs.ko (ISO9660 filesystem).  Without this
+#                         the kernel CANNOT mount any CDROM — cdrom-detect
+#                         finds /dev/sr0 but the mount fails.
 cdrom-core-modules
 scsi-core-modules
+scsi-modules
 ata-modules
 sata-modules
 usb-modules
 usb-storage-modules
+isofs-modules
 
 # ─── Target-side debs (NOT udebs — for the apt pool) ───────────────
 # These are deb names that grub-installer apt-pulls onto the TARGET at

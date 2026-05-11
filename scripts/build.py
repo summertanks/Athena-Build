@@ -1288,7 +1288,12 @@ class BuildSession:
             return
 
         try:
-            _version = self.config.build_version.strip('"').strip("'")
+            _version  = self.config.build_version.strip('"').strip("'")
+            _codename = self.config.build_codename.strip('"').strip("'")
+            # Suite == codename for our single-suite distro.  If we ever
+            # ship multiple suites (e.g. athena-stable / athena-testing),
+            # the suite would come from a separate config field.
+            _suite    = _codename
             _iso_basename = f"athena-installer-{_version}-amd64.iso"
             console.print(
                 f"Building installer ISO {_iso_basename}..."
@@ -1300,6 +1305,9 @@ class BuildSession:
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
                 iso_basename=_iso_basename,
+                suite=_suite,
+                codename=_codename,
+                version=_version,
             )
             if not _ok:
                 console.print(

@@ -30,8 +30,13 @@ logger = logging.getLogger('athena')
 # `installer/branding/debconf-overrides.dat` is intentionally absent: it's
 # applied via a first-boot hook (Phase 6), not by chroot-build cp.
 _OVERLAY_MAP = [
-    ('preseed/preseed.cfg',    'preseed.cfg'),
-    ('cdebconf/cdebconf.conf', 'etc/cdebconf.conf'),
+    ('preseed/preseed.cfg',          'preseed.cfg'),
+    ('cdebconf/cdebconf.conf',       'etc/cdebconf.conf'),
+    # Debug hook — tails d-i's per-step syslog to /dev/ttyS0 for QEMU
+    # serial capture.  Skipped automatically if the source file is
+    # absent (operator removes it for a non-debug ISO).
+    ('debug/syslog-to-serial.sh',
+     'lib/debian-installer-startup.d/S99-syslog-to-serial'),
 ]
 
 
@@ -341,7 +346,12 @@ def _apply_installer_overlay(
                     f"rc={_r.returncode}, stderr={_r.stderr.strip()}"
                 )
                 return False
-        _r = _sudo(['cp', _src, _dst], password)
+        # `cp -p` preserves mode + ownership + timestamps.  Needed for
+        # data-layer files where the executable bit matters (e.g. the
+        # debug syslog-to-serial.sh script lands under
+        # /lib/debian-installer-startup.d/ where rootskel run-parts
+        # expects executables).
+        _r = _sudo(['cp', '-p', _src, _dst], password)
         if _r.returncode != 0:
             tui.console.print(
                 f"ERROR: cp {_src} → {_dst} failed: "

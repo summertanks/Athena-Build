@@ -12,9 +12,17 @@ contents — operator can rewrite freely.
 
 | File              | Purpose                                             |
 |-------------------|-----------------------------------------------------|
-| `info`            | One-line text identifier shown by some installers; cdrom-detect grep's this to confirm the disc is an installer image.  Without it, cdrom-detect rejects the disc and the installer reports "No device or installation media was detected". |
+| `info`            | One-line text identifier shown by some installers; cdrom-detect parses the QUOTED portion as the codename and uses it to locate `/cdrom/dists/<codename>/Release`.  Without a matching dists/<codename>/, cdrom-detect rejects the disc with "Error reading Release file; unable to determine distribution".  Supports `${codename}` and `${version}` placeholders — the engine substitutes them at iso-build time from `build.conf [Build] CODENAME` and `VERSION` so .disk/info stays in sync with the dists/ subdir name that `_generate_apt_repo` produces. |
 | `base_installable`| Empty sentinel file.  base-installer checks `if [ -f /cdrom/.disk/base_installable ]` before debootstrapping — its presence asserts "this disc contains a debootstrappable base system". |
 | `base_components` | Single line `main`.  base-installer reads this to know which debootstrap components are present in `/cdrom/pool/`.  Athena's single-component repo always has just `main`. |
+
+## Placeholder substitution
+
+`${codename}` and `${version}` in any file under `installer/disk/` are
+substituted at iso-build time with values from `build.conf`.  Uses
+`string.Template.safe_substitute` — unknown placeholders pass through
+unchanged.  Operator can add `${codename}` / `${version}` wherever
+useful.
 
 ## Authoritative reference
 

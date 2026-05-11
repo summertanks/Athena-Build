@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import string
 import subprocess
 from typing import Optional
 
@@ -51,6 +52,9 @@ def build_installer_iso(
     installer_dir: str,
     password: str,
     iso_basename: str,
+    suite: str = 'athena',
+    codename: str = 'athena',
+    version: str = '0.1',
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -90,10 +94,13 @@ def build_installer_iso(
     if not _stage_grub_cfg(_staging, installer_dir):
         return False
 
-    if not _stage_disk_info(_staging, installer_dir):
+    if not _stage_disk_info(_staging, installer_dir, codename, version):
         return False
 
     if not _stage_pool(dir_repo, _staging, password):
+        return False
+
+    if not _generate_apt_repo(_staging, suite, codename, version, password):
         return False
 
     _iso_path = os.path.join(dir_image, iso_basename)
@@ -348,21 +355,29 @@ def _stage_grub_cfg(staging: str, installer_dir: str) -> bool:
     return True
 
 
-def _stage_disk_info(staging: str, installer_dir: str) -> bool:
-    """Copy installer/disk/* → staging/.disk/* (excluding *.md READMEs).
+def _stage_disk_info(
+    staging: str, installer_dir: str, codename: str, version: str,
+) -> bool:
+    """Copy installer/disk/* → staging/.disk/* (excluding *.md READMEs)
+    with `${codename}` and `${version}` placeholder substitution.
 
     These files are d-i's "is this an installer disc?" marker convention:
-    cdrom-detect rejects a disc without /cdrom/.disk/info; base-installer
-    looks for /cdrom/.disk/base_installable before debootstrapping;
-    /cdrom/.disk/base_components tells base-installer which debootstrap
-    components are in /cdrom/pool/.
+    cdrom-detect parses the quoted codename out of /cdrom/.disk/info and
+    uses it to locate /cdrom/dists/<codename>/Release; base-installer
+    looks for /cdrom/.disk/base_installable; /cdrom/.disk/base_components
+    tells base-installer which debootstrap components are in /cdrom/pool/.
 
-    Walks installer/disk/ at iso-build time (the engine doesn't bake any
-    contents in code).  Skips *.md so the README doesn't end up on the
-    ISO.  If installer/disk/ is absent, that's a hard error — cdrom-
-    detect would silently reject the disc; better to fail loud at
-    iso-build than have the operator boot and see "No installation
-    media".
+    The codename in .disk/info MUST match the suite under dists/ for
+    cdrom-detect to find the Release file.  Both come from the same
+    source (`build.conf [Build] CODENAME`): _generate_apt_repo names
+    dists/<codename>/ and this helper substitutes ${codename} in
+    .disk/info.  Caught 2026-05-11 — earlier static .disk/info said
+    "athena" but the build's actual codename was "thor", so
+    cdrom-detect reported "Error reading Release file".
+
+    If installer/disk/ is absent, that's a hard error — cdrom-detect
+    would silently reject the disc; better to fail loud at iso-build
+    than have the operator boot and see "No installation media".
     """
     _src_dir = os.path.join(installer_dir, 'disk')
     if not os.path.isdir(_src_dir):
@@ -379,6 +394,7 @@ def _stage_disk_info(staging: str, installer_dir: str) -> bool:
         tui.console.print(f"ERROR: mkdir {_dst_dir}: {e}")
         logger.error(f"_stage_disk_info mkdir: {e}")
         return False
+    _vars = {'codename': codename, 'version': version}
     _shipped = 0
     for _entry in sorted(os.listdir(_src_dir)):
         if _entry.endswith('.md'):
@@ -388,7 +404,15 @@ def _stage_disk_info(staging: str, installer_dir: str) -> bool:
         if not os.path.isfile(_src):
             continue
         try:
-            shutil.copy2(_src, _dst)
+            # Read source, substitute ${codename} / ${version} placeholders,
+            # write to dest.  string.Template.safe_substitute leaves
+            # unknown $variables untouched — operator-friendly.  Binary
+            # files would break here, but .disk/ entries are all text.
+            with open(_src, 'r', encoding='utf-8', errors='replace') as fh:
+                _content = fh.read()
+            _content = string.Template(_content).safe_substitute(_vars)
+            with open(_dst, 'w', encoding='utf-8') as fh:
+                fh.write(_content)
         except OSError as e:
             tui.console.print(f"ERROR: copy {_src} → {_dst}: {e}")
             logger.error(f"_stage_disk_info copy {_src}: {e}")
@@ -401,7 +425,10 @@ def _stage_disk_info(staging: str, installer_dir: str) -> bool:
         )
         logger.error(f"_stage_disk_info: {_src_dir} has no non-README files")
         return False
-    tui.console.print(f"Disk markers: {_shipped} file(s) → .disk/")
+    tui.console.print(
+        f"Disk markers: {_shipped} file(s) → .disk/ "
+        f"(codename={codename}, version={version})"
+    )
     return True
 
 
@@ -446,6 +473,315 @@ def _bytes_in_dir(d: str) -> int:
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
     return 0
+
+
+def _generate_apt_repo(
+    staging: str, suite: str, codename: str, version: str, password: str,
+) -> bool:
+    """Generate apt-repo metadata under staging/dists/<suite>/.
+
+    Layout produced (Debian apt-repo convention):
+      dists/<suite>/Release                                        (top-level)
+      dists/<suite>/main/binary-amd64/{Release,Packages,Packages.gz,Packages.xz}
+      dists/<suite>/main/debian-installer/binary-amd64/{Release,Packages,Packages.gz,Packages.xz}
+      dists/<suite>/main/source/{Release,Sources,Sources.gz,Sources.xz}
+
+    Pool layout stays FLAT — apt reads Filename: from each Packages
+    record, which points into pool/ relative to the apt root.  No need
+    to restructure into pool/<comp>/<initial>/<src>/.
+
+    UNSIGNED for v1.  The target's apt sources.list will need
+    `[trusted=yes]` to bypass signature verification.  Signing the
+    Release file lands with CONF-02 phase 2 (the signing key from
+    CONF-02 phase 1 is already in place).
+
+    Tools used:
+      dpkg-scanpackages  — scans pool/ for .debs / .udebs, emits Packages
+      dpkg-scansources   — scans pool/ for .dsc, emits Sources
+      apt-ftparchive release — generates the top-level Release with
+                               SHA256 hashes of every Packages/Sources
+
+    All three are standard Debian utilities in dpkg-dev + apt-utils.
+    """
+    _COMPONENT = 'main'
+    _ARCH = 'amd64'
+
+    _suite_base   = os.path.join(staging, 'dists', suite)
+    _comp_base    = os.path.join(_suite_base, _COMPONENT)
+    _binary_dir   = os.path.join(_comp_base, f'binary-{_ARCH}')
+    _udeb_dir     = os.path.join(_comp_base, 'debian-installer', f'binary-{_ARCH}')
+    _source_dir   = os.path.join(_comp_base, 'source')
+
+    tui.console.print(f"Generating apt-repo metadata in dists/{suite}/...")
+
+    # Step 1: directory hierarchy.  Made user-owned (no sudo) so the
+    # subsequent sudo-driven dpkg-scanpackages output can write into them
+    # — the parent staging tree is user-owned too.  Files inside will
+    # become root-owned via the sudo invocation, which is fine.
+    for _d in (_binary_dir, _udeb_dir, _source_dir):
+        try:
+            os.makedirs(_d, exist_ok=True)
+        except OSError as e:
+            tui.console.print(f"ERROR: mkdir {_d}: {e}")
+            logger.error(f"_generate_apt_repo mkdir {_d}: {e}")
+            return False
+
+    # Step 2: regular .deb Packages index.  -m tolerates multiple
+    # versions of the same package without warning (we have multiple
+    # kernel ABIs etc. in repo/).  Run from staging/ so Filename:
+    # entries are relative paths like `pool/foo.deb`.
+    if not _scan_packages_to(
+            staging, 'pool', os.path.join(_binary_dir, 'Packages'),
+            password, udeb=False):
+        return False
+
+    # Step 3: udeb Packages index (Section: debian-installer records).
+    # dpkg-scanpackages -t udeb filters to .udeb files only.
+    if not _scan_packages_to(
+            staging, 'pool', os.path.join(_udeb_dir, 'Packages'),
+            password, udeb=True):
+        return False
+
+    # Step 4: source Sources index.  dpkg-scansources walks pool/ for
+    # .dsc files (which our source-build pipeline lands alongside .debs).
+    if not _scan_sources_to(
+            staging, 'pool', os.path.join(_source_dir, 'Sources'),
+            password):
+        return False
+
+    # Step 5: per-component Release files.  These pin Suite/Codename/
+    # Component/Architecture on each binary-arch / source dir so apt can
+    # verify they match what the top-level Release advertises.
+    for _dir, _arch_label in (
+        (_binary_dir, _ARCH),
+        (_udeb_dir,   _ARCH),
+        (_source_dir, 'source'),
+    ):
+        if not _write_subdir_release(
+                _dir, suite, codename, _COMPONENT, _arch_label, password):
+            return False
+
+    # Step 6: top-level dists/<suite>/Release.  apt-ftparchive release
+    # walks the sub-tree, hashes every Packages/Sources/Packages.gz/...,
+    # and emits the SHA256: block apt verifies.  -o flags carry the
+    # distro identity fields; without them apt-ftparchive emits empty
+    # Suite/Codename and apt refuses the repo.
+    if not _generate_top_release(
+            staging, suite, codename, version,
+            os.path.join(_suite_base, 'Release'), password):
+        return False
+
+    tui.console.print(
+        f"apt-repo: dists/{suite}/ ready (unsigned — target sources.list "
+        f"needs [trusted=yes])",
+        tui.COLOR_HIGHLIGHT,
+    )
+    return True
+
+
+def _scan_packages_to(
+    staging: str, pool_subdir: str, output_path: str,
+    password: str, udeb: bool,
+) -> bool:
+    """sudo dpkg-scanpackages -m [-t udeb] <pool_subdir> > <output> + compress.
+
+    Run with cwd=staging so Packages records carry relative Filename
+    entries (matching the layout apt walks via /cdrom/pool/...).
+    """
+    _flag = '-t udeb' if udeb else ''
+    _label = 'udebs' if udeb else 'debs'
+    tui.console.print(f"Scanning {pool_subdir}/ for {_label}...")
+    _shell = (
+        f'cd {staging} && '
+        f'dpkg-scanpackages -m {_flag} {pool_subdir} 2>/dev/null '
+        f'> {output_path}'
+    )
+    _r = _sudo(['bash', '-c', _shell], password)
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: dpkg-scanpackages ({_label}) failed: "
+            f"{_r.stderr.strip()[:200]}"
+        )
+        logger.error(
+            f"_scan_packages_to {_label}: rc={_r.returncode}, "
+            f"stderr={_r.stderr.strip()}"
+        )
+        return False
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        tui.console.print(
+            f"ERROR: Packages output {output_path} is missing or empty"
+        )
+        logger.error(f"_scan_packages_to {_label}: empty output at {output_path}")
+        return False
+    _n = _count_records(output_path)
+    tui.console.print(f"  → {_n} {_label} indexed")
+    return _compress_index(output_path, password)
+
+
+def _scan_sources_to(
+    staging: str, pool_subdir: str, output_path: str, password: str,
+) -> bool:
+    """sudo dpkg-scansources <pool_subdir> > <output> + compress.
+
+    Same cwd trick as _scan_packages_to.  dpkg-scansources tolerates
+    pool/ subdirs with no .dsc — emits an empty Sources, still useful.
+    """
+    tui.console.print(f"Scanning {pool_subdir}/ for sources...")
+    _shell = (
+        f'cd {staging} && '
+        f'dpkg-scansources {pool_subdir} 2>/dev/null '
+        f'> {output_path}'
+    )
+    _r = _sudo(['bash', '-c', _shell], password)
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: dpkg-scansources failed: {_r.stderr.strip()[:200]}"
+        )
+        logger.error(
+            f"_scan_sources_to: rc={_r.returncode}, stderr={_r.stderr.strip()}"
+        )
+        return False
+    _n = _count_records(output_path) if os.path.exists(output_path) else 0
+    tui.console.print(f"  → {_n} sources indexed")
+    return _compress_index(output_path, password)
+
+
+def _compress_index(path: str, password: str) -> bool:
+    """gzip -9k + xz -9k to produce Packages.gz / Packages.xz (or
+    Sources.gz / Sources.xz).  -k keeps the original uncompressed file
+    — apt accepts any of the three forms but the uncompressed one is
+    what's hashed in the per-subdir Release."""
+    for _tool in (['gzip', '-9', '-k', '-f', path],
+                  ['xz',   '-9', '-k', '-f', path]):
+        _r = _sudo(_tool, password)
+        if _r.returncode != 0:
+            tui.console.print(
+                f"ERROR: {_tool[0]} compress {path}: "
+                f"{_r.stderr.strip()[:200]}"
+            )
+            logger.error(
+                f"_compress_index {_tool[0]} {path}: rc={_r.returncode}, "
+                f"stderr={_r.stderr.strip()}"
+            )
+            return False
+    return True
+
+
+def _count_records(path: str) -> int:
+    """Count Packages/Sources records.  Each record is a Package: (or
+    a Source: stanza in Sources files) at column 0; records are
+    separated by a blank line.  Sources records use 'Package: <name>'
+    too (the field is named Package even in Sources)."""
+    try:
+        with open(path, 'r', errors='replace') as fh:
+            _content = fh.read()
+    except OSError:
+        return 0
+    return _content.count('\nPackage: ') + (
+        1 if _content.startswith('Package: ') else 0
+    )
+
+
+def _write_subdir_release(
+    target_dir: str, suite: str, codename: str, component: str,
+    arch_label: str, password: str,
+) -> bool:
+    """Write a minimal per-subdir Release file pinning Suite/Codename/
+    Component/Architecture.  apt cross-checks these against the top-level
+    Release; mismatch → apt refuses the repo with a useful error.
+    """
+    _content = (
+        f"Origin: Athena\n"
+        f"Label: Athena\n"
+        f"Archive: {suite}\n"
+        f"Suite: {suite}\n"
+        f"Codename: {codename}\n"
+        f"Component: {component}\n"
+        f"Architecture: {arch_label}\n"
+        f"Description: Athena installer media — {component}/{arch_label}\n"
+    )
+    _path = os.path.join(target_dir, 'Release')
+    # Write via sudo tee so the file lands root-owned next to the other
+    # root-owned index files in this subdir.
+    _shell = f"cat > {_path}"
+    _r = subprocess.run(
+        ['sudo', '-S', 'bash', '-c', _shell],
+        input=password + '\n' + _content,
+        capture_output=True, text=True,
+    )
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: write {_path}: {_r.stderr.strip()[:200]}"
+        )
+        logger.error(
+            f"_write_subdir_release {_path}: rc={_r.returncode}, "
+            f"stderr={_r.stderr.strip()}"
+        )
+        return False
+    return True
+
+
+def _generate_top_release(
+    staging: str, suite: str, codename: str, version: str,
+    output_path: str, password: str,
+) -> bool:
+    """apt-ftparchive release dists/<suite>/ > dists/<suite>/Release.
+
+    The -o flags pin distro identity — apt-ftparchive emits empty
+    Suite/Codename/etc. otherwise and apt then refuses the repo with
+    "Repository ... does not have a Release file."
+
+    NOT using `bash -c` for this call: some -o values can contain
+    spaces (e.g. Description="Athena installer disc"), and shell
+    word-splitting would chop them into separate tokens — apt-ftparchive
+    then chokes with "Invalid operation installer".  Caught in
+    production 2026-05-11.  Pass argv directly to subprocess.run with
+    cwd= and stdout=file_handle for redirection.
+    """
+    _opts = [
+        '-o', 'APT::FTPArchive::Release::Origin=Athena',
+        '-o', 'APT::FTPArchive::Release::Label=Athena',
+        '-o', f'APT::FTPArchive::Release::Suite={suite}',
+        '-o', f'APT::FTPArchive::Release::Codename={codename}',
+        '-o', f'APT::FTPArchive::Release::Version={version}',
+        '-o', 'APT::FTPArchive::Release::Architectures=amd64',
+        '-o', 'APT::FTPArchive::Release::Components=main',
+        '-o', 'APT::FTPArchive::Release::Description=Athena installer disc',
+    ]
+    _argv = (
+        ['sudo', '-S', 'apt-ftparchive'] + _opts +
+        ['release', f'dists/{suite}']
+    )
+    try:
+        with open(output_path, 'wb') as fh:
+            _r = subprocess.run(
+                _argv,
+                input=(password + '\n').encode('utf-8'),
+                stdout=fh,
+                stderr=subprocess.PIPE,
+                cwd=staging,
+            )
+    except OSError as e:
+        tui.console.print(f"ERROR: open {output_path} for write: {e}")
+        logger.error(f"_generate_top_release open: {e}")
+        return False
+    _stderr = (_r.stderr or b'').decode('utf-8', errors='replace').strip()
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: apt-ftparchive release failed (rc={_r.returncode}): "
+            f"{_stderr[:200]}"
+        )
+        logger.error(
+            f"_generate_top_release: rc={_r.returncode}, stderr={_stderr}"
+        )
+        return False
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        tui.console.print(
+            f"ERROR: top-level Release at {output_path} is missing or empty"
+        )
+        logger.error(f"_generate_top_release: empty output at {output_path}")
+        return False
+    return True
 
 
 def _run_grub_mkrescue(staging: str, iso_path: str) -> bool:
