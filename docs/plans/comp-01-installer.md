@@ -1,220 +1,230 @@
-# Plan — COMP-01: debian-installer-based Athena installer
+# Plan — COMP-01: Installer ISO via parallel udeb dep tree (d-i from source)
 
-## Status: PLANNED (2026-05-10) — ready to execute
+## Status: PLANNED (2026-05-10) — Phase 1 done, Phase 2+ ready to execute
 
-User decision after evaluating UI options (custom Python curses, Textual rewrite, dialog/whiptail, Calamares, debian-installer): **go with debian-installer (d-i)**.
+**Architectural pivot from the original plan.** Earlier version of this document (commit `9221bf3`) proposed building the installer by source-building `debian-installer` upstream and running its `make build_cdrom` against our repo — i.e. importing Debian's full d-i build pipeline. The user rejected that approach in favour of **rebuilding d-i's runtime from source through Athena's existing pipeline**.
 
-Reasoning summary from the discussion:
-- Custom Python TUI (reuse `tui.py`) and Textual rewrite both require shipping the Python interpreter + curses/textual + transitive deps in `pkg_installer.list` — significant source-build surface.
-- Calamares is too heavy (Qt + X server on installer ISO) and contradicts the TUI design intent.
-- d-i is C + shell, runs from initrd, no Python interpreter required.
-- d-i is battle-tested across every Debian derivative (Ubuntu, Mint, Tails, Kali) and configurable via preseed, debconf strings, late_command, and theme udebs.
+This document supersedes the original plan in full.
+
+## Why the pivot
+
+The original plan was rejected after walking through the alternatives:
+
+1. **Importing vanilla d-i** — heavy (50+ udeb sources, complex Make-based assembly, inherits d-i's whole build infrastructure). Discarded.
+2. **Shell + whiptail installer running on the live system** — small but doesn't give the d-i look the user wants; needs the live ISO to also be the installer ISO. Discarded.
+3. **Mixed deb+udeb installer chroot** — model violation; udeb deps reference udeb names, deb deps reference deb names; no clean dep namespace. Discarded.
+4. **Parallel udeb dep tree built from source through our pipeline** — adopted. Same source corpus produces both `.deb` and `.udeb` outputs (already happens today — `dpkg-buildpackage` reads `debian/control` binary stanzas and emits everything declared); the udeb world becomes a parallel dep tree resolved against `dists/<suite>/main/debian-installer/binary-amd64/Packages` (in the same signed Release file — STA-01 covers it).
 
 ## Locked decisions
 
 | Axis | Decision |
 |---|---|
-| **Installer tech** | debian-installer (d-i) |
-| **Interactivity** | Mostly preseeded; operator answers hostname, root pw, user account, target disk (~5 screens) |
-| **Partition recipe** | Whole-disk: ESP + ext4 root, no swap |
-| **Firmware** | Both UEFI and BIOS (detect at install time) |
-| **Apt pool on installer ISO** | Full pool from our repo on ISO; preseed `mirror/protocol=file`, `mirror/file/directory=/cdrom` |
-| **No Debian fallback** | Ever — `apt-setup/use_mirror=false`, no `*.debian.org` anywhere on installer ISO or installed system. Re-adding Debian sources is a manual operator action. |
-| **Installed system sources.list** | `deb [trusted=yes] file:///var/cache/athena-repo <suite> main` — pool copied to disk at install time via late_command |
-| **Branding** | Strings + colors + boot splash (custom theme udeb; requires Athena logo asset) |
-
-## Context
-
-COMP-01 (P1) is the missing installer for Athena. Today the build pipeline produces a live ISO (rootfs + bootloader, no installer). To ship Athena as something a user installs onto disk, an installer ISO with the d-i flow is needed.
-
-The constraint that drove the technology choice: Athena is self-contained (see memory `project_self_contained_repo.md`). The installer must not reference `deb.debian.org` at any point. Its apt pool is exactly what's in our repo — built by `source build` or imported by `package tunnel`.
-
-The constraint that ruled out Python: `pkg_installer.list` should be small, since these packages are above-and-beyond `required` + `important` and cannot rely on `selected` (user-mutable). Shipping a Python installer means adding python3 + ~30-50 transitive deps. d-i adds ~30-50 udebs but they're micro-packages (typically <100 KB each) rather than full interpreters and libraries.
+| **Architecture** | Parallel udeb dep tree built through our existing source-build pipeline. Two distinct dep graphs over a single source corpus. |
+| **Installer ramdisk content** | Pure udeb closure. No debs in the installer chroot. No systemd. |
+| **Installer init** | `rootskel` + busybox init as PID 1. Starts cdebconf + main-menu + the d-i step udebs. Authentic d-i minimal-init model. |
+| **UI layer** | `cdebconf-text-udeb` (or `cdebconf-newt-udeb`) — d-i's actual UI engine. |
+| **Customization** | Source patches under `patch/source/cdebconf/<version>/` (and similar for other udeb sources). Post-install patch flow deferred — only source patches for now. |
+| **Branding** | Custom theme udeb (custom source package shipping splash + cdebconf colors). Placeholder graphics generated programmatically; refine later. |
+| **Operator config file** | Keep filename `installer.list` (no rename). Contents become MIXED — udeb names AND deb names. The resolver dispatches per-entry. |
+| **`installer.list` semantics** | Each entry resolved against both indices: udeb match → `udeb_selected`; deb match → `deb_selected` extras (lands in pool); both match → both happen. |
+| **`efibootmgr`/`grub-pc-bin`** | In BOTH `live.list` AND `installer.list`. Defensive duplication: live.list ensures they're on every installed system; installer.list ensures the pool has them when grub-installer asks at install time. |
+| **`apt-setup-udeb` writes target sources.list** | `deb [trusted=yes] file:///var/cache/athena-repo athena main` after late_command-style copy of pool to disk. No Debian fallback (per project memory `project_self_contained_repo.md`). |
+| **Partitioning** | `partman-auto` recipe for whole-disk ESP + ext4, no swap (locked from prior planning). |
+| **Firmware** | UEFI + BIOS, both. |
 
 ## Pipeline shape
 
 ```
-buildroot/live/        chroot build live      iso build live      ← existing path, renamed
-buildroot/installer/   chroot build installer iso build installer ← new path
+config:
+  pkg.list        - deb seeds (kernel, grub-efi, essentials, user choices)
+  live.list       - deb seeds (live extras + efibootmgr + grub-pc-bin)
+  installer.list  - mixed (udeb seeds + efibootmgr + grub-pc-bin)
+
+cache build:
+  fetch dists/<suite>/main/binary-amd64/Packages              -> package_hashtable
+  fetch dists/<suite>/main/debian-installer/binary-amd64/Packages -> udeb_hashtable
+  Same signed Release file - single GPG verify path (STA-01)
+
+dep parse:
+  Pass I-III: deb required + important + pkg.list -> selected_pkgs
+  Pass IV:    live.list -> live_exclusive_pkg_names (deb)
+  Pass V:     installer.list per-entry dispatch:
+                udeb names -> udeb_selected_pkgs (parallel tree)
+                deb names  -> selected_pkgs as installer_exclusive
+  udeb tree: udeb_required + udeb_important + udeb seeds
+             -> udeb_selected_pkgs + udeb_selected_srcs
+
+source download / source build:
+  Union of selected_srcs + udeb_selected_srcs (deduped by source name)
+  source build installer = sources whose outputs are in udeb closure
+                          (or whose only deb outputs are installer extras)
+
+chroot build live:
+  apt/dpkg installs deb closure into buildroot/live/
+
+chroot build installer:
+  dpkg installs udeb closure into buildroot/installer/
+  rootskel sets PID 1 -> busybox init -> cdebconf + main-menu
+
+iso build live:
+  buildroot/live -> squashfs -> hybrid bootable ISO with apt pool
+
+iso build installer:
+  buildroot/installer -> initrd -> hybrid bootable ISO with kernel + apt pool
 ```
 
-| Command | Behaviour |
-|---|---|
-| `source build live` | Existing — builds packages destined for live ISO rootfs |
-| `source build installer` | **New** — builds `debian-installer` source package + all required udebs + custom theme udeb |
-| `chroot build live` | Existing logic, renamed |
-| `chroot build installer` | **New** — sets up build chroot with `debian-installer-utils`, `mklibs`, etc.; runs `make build_cdrom` against d-i source tree pointed at our repo; output: `initrd.gz` + `vmlinuz` + udeb manifest |
-| `iso build live` | Existing logic, renamed; gated on `buildroot/live/` existing |
-| `iso build installer` | **New** — wraps `initrd.gz` + `vmlinuz` + full `pool/` + isolinux/grub config + preseed.cfg + branding theme into hybrid bootable ISO; gated on `buildroot/installer/` existing |
+## Sub-phases
 
-## New artifacts in repo
+### Phase 1 (DONE 2026-05-10, commit `c17c238`) — File split + dep-tree exclusives
 
-| Path | Purpose |
-|---|---|
-| `pkg_installer.list` | List of source packages d-i needs (debian-installer + udebs + theme). Above-and-beyond `pkg_required` and `pkg_important`. Never derived from `selected` |
-| `installer/preseed.cfg` | Preseed answers — baked into installer initrd at build time |
-| `installer/branding/strings.po` | gettext catalog overriding visible debconf prompts to say Athena |
-| `installer/branding/theme/` | Boot splash PNG, isolinux/grub theme files |
-| `installer/late_command.sh` | Shell run in target chroot before reboot — copies pool to `/var/cache/athena-repo`, writes sources.list, runs `apt update` |
-| `installer/athena-theme/` | Source tree for the custom udeb that ships branding + theme |
-| `installer/isolinux.cfg` / `installer/grub.cfg` | Boot menu config (Install / Expert install entries) |
+- Split `pkg.list` into `pkg.list` + `live.list` + `installer.list`
+- BuildConfig: `--live-list` / `--installer-list` argparse flags + paths
+- DependencyTree: `live_exclusive_pkg_names` / `installer_exclusive_pkg_names` / `*_src_names` fields
+- `cmd_parse_dependency` Pass IV (live) + Pass V (installer)
+- `derive_subset_exclusive_src_names()` mirror of `derive_extras_src_names`
+- `print live` / `print installer` views; `print selected` annotates per-subset
+- 7 new tests; 163/163 pass
 
-## Preseed sketch (key lines)
+NOTE: under the parallel-universe model, `installer_exclusive_pkg_names` will be repurposed once the udeb tree lands. For Phase 1 it tracks "deb things in installer.list closure beyond pkg" which is fine but incomplete — the new authoritative tracking becomes `udeb_selected_pkgs`.
 
-```
-d-i debian-installer/locale string en_US.UTF-8
-d-i keyboard-configuration/xkb-keymap select us
-d-i time/zone string Etc/UTC
-d-i netcfg/choose_interface select auto
-d-i netcfg/get_hostname string  # ← operator answers
-d-i mirror/protocol string file
-d-i mirror/file/directory string /cdrom
-d-i apt-setup/use_mirror boolean false
-d-i apt-setup/services-select multiselect
-d-i apt-setup/security_host string
-d-i partman-auto/method string regular
-d-i partman-auto/expert_recipe string \
-  athena-root :: \
-    538 538 1075 free $primary{ } method{ efi } format{ } . \
-    1000 10000 -1 ext4 $primary{ } $bootable{ } method{ format } \
-                       format{ } use_filesystem{ } filesystem{ ext4 } \
-                       mountpoint{ / } .
-d-i partman-auto/choose_recipe select athena-root
-d-i partman/confirm boolean true
-d-i partman-partitioning/confirm_write_new_label boolean true
-d-i partman/choose_partition select finish
-d-i partman/confirm_nooverwrite boolean true
-d-i passwd/root-password password  # ← operator answers
-d-i passwd/user-fullname string    # ← operator answers
-d-i passwd/username string         # ← operator answers
-d-i tasksel/first multiselect
-d-i pkgsel/include string  # bare base; rest comes from pkg_required/important on the ISO
-d-i grub-installer/bootdev string default
-d-i preseed/late_command string /cdrom/late_command.sh
-d-i finish-install/reboot_in_progress note
-```
+### Phase 2 — Cache parses udeb index
 
-Operator screens (in order): hostname → user account → root password → disk picker → confirm. ~5 screens, then unattended through to reboot.
+- `Cache._release_url` flow extended to fetch `dists/<suite>/main/debian-installer/binary-amd64/Packages` per mirror
+- New `Cache.udeb_hashtable: Dict[name, Dict[Version, List[Package]]]` parallel to `package_hashtable`
+- `Cache.udeb_required` / `Cache.udeb_important` populated from udeb Priority tags (sparse — bookworm has 3 of each)
+- `Package` records carrying `Section: debian-installer` go into `udeb_hashtable`; everything else stays in `package_hashtable`
+- Same signed Release file → no new GPG verify path
+- Tests: udeb index fetch + parse + bucketing
 
-## late_command.sh sketch
+**Estimate: 3-4 days**
 
-```bash
-#!/bin/sh
-set -e
-TARGET=/target
-mkdir -p $TARGET/var/cache/athena-repo
-cp -a /cdrom/pool   $TARGET/var/cache/athena-repo/
-cp -a /cdrom/dists  $TARGET/var/cache/athena-repo/
-cat > $TARGET/etc/apt/sources.list <<EOF
-deb [trusted=yes] file:///var/cache/athena-repo athena main
-EOF
-in-target apt-get update
-# (no upgrade — pool is already what we want)
-```
+### Phase 3 — Parallel udeb DependencyTree
 
-## Phased execution plan
+- `BuildSession.udeb_dep_tree` instance, parallel to `dep_tree`
+- `cmd_parse_dependency` runs the udeb tree resolution after the deb tree:
+  - Seeds = `Cache.udeb_required + Cache.udeb_important + udeb_names_from_installer_list`
+  - Resolves transitively against `udeb_hashtable`
+- `installer.list` per-entry dispatch:
+  - if `name in udeb_hashtable` → seed for udeb tree
+  - if `name in package_hashtable` → already handled by Pass V (lands in deb extras)
+  - if both → both
+- `udeb_dep_tree.selected_srcs` merged into the unified source corpus
+- `parse_sources` walks both deb+udeb selected_pkgs to build the union source list
+- New `print udebs` view
+- Repurpose `installer_exclusive_*` data: keep for deb-extras tracking; add new fields for udeb tracking
+- Tests: parallel tree resolves correctly; mixed installer.list dispatches per-entry
 
-### Phase 1 (1-2 weeks) — Vanilla d-i, no preseed, no branding
+**Estimate: 4-5 days**
 
-- Add `pkg_installer.list` with the d-i source set; verify all build cleanly through existing source-build pipeline
-- Add `chroot build installer` — sets up the d-i build chroot, runs `make build_cdrom`, captures `initrd.gz` + `vmlinuz`
-- Add `iso build installer` — wraps initrd + kernel + pool into a hybrid ISO
-- Verify: ISO boots in QEMU, d-i comes up and walks through stock screens, install completes with stock Debian-flavored prompts
+### Phase 4 — Source build preserves .udeb outputs; repo ingests them
 
-### Phase 2 (3-5 days) — Preseed + apt-source rewrite
+- Verify `buildcontainer.build()` keeps `.udeb` files alongside `.deb` outputs (likely already does — `dpkg-buildpackage` emits both into the parent dir; we copy `*.deb`/`*.udeb` patterns)
+- Ensure `repo/` ingestion preserves both extensions
+- `source build installer` filter resolves to "sources exclusive to udeb closure" (sources whose every output is in udeb_selected, or whose only deb outputs are installer extras)
+- Source-mapping: a source like `cdebconf` produces both `cdebconf*.deb` and `cdebconf*-udeb` files — `selected_srcs[cdebconf].pkgs` should list both. Today's parser may need a small extension to track udeb filenames.
+- Tests: building cdebconf produces `.udeb` artefacts; they land in `repo/`; `source build installer` filter selects the right source set
 
-- Write `installer/preseed.cfg` with the locked recipe
-- Write `installer/late_command.sh`; bake both into initrd at d-i build time
-- Verify: install completes with only the 5 operator screens; installed system has working `apt update` against `/var/cache/athena-repo`; `/etc/apt/sources.list` contains zero Debian references
+**Estimate: 1-2 days**
 
-### Phase 3 (1 week) — Pipeline command surface
+### Phase 5 — `chroot build installer` from udeb closure
 
-- Rename `chroot build` → `chroot build live`; rename `iso build` → `iso build live`
-- Add `source build installer` filter (parallel to existing `recommended`)
-- Wire prerequisite gates (`iso build installer` requires `buildroot/installer/`; `iso build live` requires `buildroot/live/`)
-- Update README, TODO.md row for COMP-01, build-system.sh
-- Tests in `tests/test_module.py` for the new dispatchers and gates
+- New `BuildSystem` codepath (or chroot.py extension) for installing udebs into `buildroot/installer/`
+- Use `dpkg -i --force-depends` (or `udpkg` if available — but `udpkg` itself is a udeb, so we need a bootstrap step)
+- Install order: udeb topo-sorted via udeb dep tree (similar to `_compute_install_batches` for debs but operating on udeb_dep_tree)
+- `rootskel` provides the PID-1 init scaffolding — verify it lands in `/init` or wherever the initrd expects
+- Configure cdebconf + main-menu autostart
+- Skip the chroot-build steps that don't apply (no apt-setup, no kernel install — kernel is added at iso-mastering time)
+- Tests: installer chroot directory layout, init script presence, key udebs unpacked
 
-### Phase 4 (3-5 days) — Branding
+**Estimate: 1 week**
 
-- String catalog: `installer/branding/strings.po` rewriting visible prompts to say Athena
-- Custom theme udeb (`athena-theme/`) for boot splash + cdebconf colors
-- Add to `pkg_installer.list`; preseed pulls it in
-- Requires: Athena logo asset (PNG, ~640×480 for boot splash)
+### Phase 6 — Branding (cdebconf customization + theme udeb)
 
-### Phase 5 (1-2 weeks) — Hardware testing
+- Source patches under `patch/source/cdebconf/<version>/9001-athena-strings.patch`:
+  - Rewrite visible debconf templates: "Debian" → "Athena"
+  - Set cdebconf color theme via patched defaults
+- Custom source package: `athena-installer-theme/`
+  - Builds an `athena-installer-theme-udeb`
+  - Ships boot splash PNG (placeholder graphics generated by build script)
+  - Ships overrides for cdebconf colors / strings
+  - Adds itself to udeb closure via installer.list
+- Placeholder graphics: ImageMagick-generated 640×480 dark background with "Athena Installer" centered
+- Boot menu (isolinux/grub.cfg) themed with same palette
+- Tests: theme udeb builds, lands in udeb closure, splash file present in chroot
 
-- QEMU coverage for UEFI + BIOS
-- Real hardware: at least one BIOS box and one UEFI box
-- Edge cases: small disk (< partition recipe min), USB-only install media, no network, network present
+**Estimate: 3-5 days**
 
-**Total elapsed: 5-7 weeks**
+### Phase 7 — `iso build installer`
+
+- Wrap `buildroot/installer/` as a compressed initrd (cpio.gz or initramfs)
+- Bundle kernel (already built) + initrd + branding splash + isolinux/grub.cfg
+- Bundle the regular `repo/` apt pool — installer reads from `/cdrom/pool` at install time
+- Hybrid BIOS/EFI ISO via xorriso (same machinery as `iso build live`)
+- Likely opportunity to merge `iso build live` and `iso build installer` into a single `iso build` parameterized by `--target=live|installer` once both implementations exist and the diff is small. Defer the merge decision to end of Phase 7.
+- Tests: ISO size sanity, boot artifacts present
+
+**Estimate: 3-5 days**
+
+### Phase 8 — Hardware testing
+
+- QEMU UEFI + BIOS smoke tests
+- Real hardware: at least one BIOS box + one UEFI box
+- Edge cases: small disk, no network, USB-only install media
+- Validate target boots cleanly after install completes
+
+**Estimate: 1-2 weeks**
+
+## Total scope
+
+**~5-7 weeks elapsed**, same envelope as the original plan — but built on infrastructure we own end-to-end instead of inheriting d-i's build system.
 
 ## Files to modify
 
-- `scripts/build.py` — `cmd_chroot` and `cmd_iso` dispatchers gain `live` / `installer` action variants; `cmd_source` gains `installer` filter; new prerequisite gates; new prerequisite error strings
-- `scripts/parsing.py` — recognise `pkg_installer.list` as a new package category; handle `Section: debian-installer` udeb packages distinctly from regular .debs
-- `scripts/cache.py` — likely no changes; pool format is unchanged
-- `build-system.sh` — message strings updated for renamed commands (`chroot build` → `chroot build live`, etc.)
-- `README.md` — document the installer ISO build flow + the two-pipeline split
-- `TODO.md` — replace COMP-01 row with sub-phase breakdown; track Phase 1-5 separately
-- `tests/test_module.py` — new dispatcher tests for `chroot live` / `chroot installer` / `iso live` / `iso installer` / `source build installer`; gate tests asserting `iso build installer` errors when `buildroot/installer/` is absent
+- `scripts/cache.py` — udeb index fetch + parse + `udeb_hashtable` field (Phase 2)
+- `scripts/dependencytree.py` — confirm class works as parallel instance against either hashtable; possibly small extensions (Phase 3)
+- `scripts/build.py` — `cmd_parse_dependency` runs udeb tree resolution; `cmd_source_build` understands installer subset; `cmd_build_chroot_installer` no longer a stub (Phases 3, 4, 5)
+- `scripts/buildcontainer.py` — verify `.udeb` outputs preserved (Phase 4)
+- `scripts/chroot.py` — new udeb-install codepath for installer chroot (Phase 5)
+- `scripts/iso.py` — installer ISO mastering (Phase 7)
+- `scripts/print_commands.py` — `print udebs` view (Phase 3)
+- `scripts/utils.py` — possibly extend BuildConfig for installer-specific paths
+- `tests/test_module.py` — coverage per phase
 
 ## Files to create
 
-- `pkg_installer.list` — at repo root alongside `pkg_required.list` / `pkg_important.list`
-- `installer/preseed.cfg`
-- `installer/late_command.sh`
-- `installer/branding/strings.po`
-- `installer/branding/theme/` (boot splash assets)
-- `installer/athena-theme/` (custom udeb source tree — debian/, control, postinst, etc.)
-- `installer/isolinux.cfg`
-- `installer/grub.cfg`
-
-## Existing code to reuse
-
-- `scripts/utils.run_cmd_with_logging` (or current equivalent) — for invoking `make build_cdrom`, `xorriso`, etc.
-- The existing chroot bootstrap helpers in `scripts/buildcontainer.py` (or wherever chroot setup lives) — likely shared between `chroot build live` and `chroot build installer`. Worth extracting a `chroot bootstrap` primitive that both call before they layer their own package set.
-- The existing ISO mastering logic — `iso build live` and `iso build installer` differ in payload (rootfs vs initrd+kernel) but share the xorriso invocation, hybrid boot config, and pool inclusion steps
-- `tui.Console` / `Spinner` / `ProgressBar` / `Prompt` — used for the *build host* operator UX of running `chroot build installer` etc.; the installer running on the *target* uses d-i's cdebconf, not these
+- `patch/source/cdebconf/<version>/9001-athena-strings.patch` (Phase 6)
+- `athena-installer-theme/` source tree (Phase 6) — debian/control declaring udeb output, postinst, splash assets
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| d-i source packages may pull build deps not currently in `pkg_required` | Phase 1 is the discovery phase — expect to grow `pkg_required` to absorb d-i build deps. Plan: start with a vanilla `make build_cdrom`, observe failures, iterate |
-| d-i is strict about apt repo `Release` file signing | If our repo isn't signed today, use `[trusted=yes]` in `sources.list` as an interim. Signing is separate work (likely a separate ticket — check TODO for one tracking repo signing) |
-| Late_command shell is fragile — easy to ship a broken installer | Keep `late_command.sh` short; do anything complex in a proper post-install script that runs from a systemd `oneshot` on first boot |
-| `pkg_required` cannot include the installer's own runtime deps cleanly — they're udebs, not regular .debs | Two parallel package universes (d-i udebs vs target-system .debs). The parser needs to handle `Section: debian-installer` packages. Verify what `parsing.py` does with udebs today |
-| Theme udeb requires C/shell + dh_installdebconf — outside the existing source-build idiom | Phase 4 spike before committing to a logo budget. Could also defer theme udeb and ship strings-only branding for v1 |
-| QEMU testing won't catch firmware quirks | Phase 5 budgets real-hardware time. Plan: at minimum one BIOS + one UEFI host |
-| Pool size on installer ISO could exceed reasonable USB stick sizes | If pool grows past ~4 GB, consider splitting `selected` into core/extra and shipping only core on the installer; rest fetched after install. Defer until measured |
+| `dpkg -i --force-depends` for udebs in non-d-i environment hits unexpected file conflicts | Phase 5 spike: install one udeb manually first, observe |
+| `rootskel` assumes specific init context not present in our chroot | Phase 5 spike: check rootskel's `/init` script assumptions |
+| Source build pipeline silently drops `.udeb` outputs today | Phase 4 verification — small fix if so |
+| udeb dep cycles different from deb dep cycles | Existing `_compute_install_batches` handles deb cycles; udeb version may need similar tuning |
+| Cdebconf source patches don't survive upstream version bumps | Standard quilt-patch refresh — DEP-3 headers required (CONF-05) |
+| Installer ramdisk too large (initrd > some threshold) | Spike at end of Phase 7; if blocking, move some udeb-pulled deps to "load on demand from /cdrom" |
 
-## Verification
+## Verification gates
 
-End-to-end smoke for each phase:
+End-to-end smoke after each phase:
 
-**Phase 1:** `iso build installer && qemu-system-x86_64 -cdrom buildroot/installer/athena-installer.iso` → d-i boots, walks the stock flow, install completes, target boots into base system.
-
-**Phase 2:** Same as Phase 1 but operator only sees 5 screens; post-install: `cat /target/etc/apt/sources.list` shows `file:///var/cache/athena-repo` and zero Debian references; `apt-get update` in target succeeds.
-
-**Phase 3:** `cache build && dep parse && source download && source build installer && container init && chroot build installer && iso build installer` runs clean. Same sequence with `live` everywhere produces working live ISO. `iso build installer` fails cleanly when `buildroot/installer/` is missing.
-
-**Phase 4:** Boot menu shows Athena splash; every visible debconf prompt says Athena (grep d-i transcript for "debian", expect zero matches outside compatibility strings).
-
-**Phase 5:** Install on real hardware (BIOS + UEFI), boot installed system, verify network + user login + apt update.
+- **Phase 2**: `cache build` produces `udeb_hashtable` with ~440 entries from bookworm
+- **Phase 3**: `dep parse` produces `udeb_selected_pkgs` with the closure of `installer.list`'s udeb seeds
+- **Phase 4**: `source build cdebconf` produces both `.deb` and `.udeb` artefacts in `repo/`
+- **Phase 5**: `chroot build installer` produces `buildroot/installer/` with key udebs unpacked + init scripts present
+- **Phase 6**: branded splash + Athena strings visible in any test render
+- **Phase 7**: `iso build installer` ISO boots in QEMU; cdebconf comes up; main-menu visible
+- **Phase 8**: install completes on real hardware; target boots
 
 Automated:
-- `tests/test_module.py` — new dispatcher tests for the 4 renamed/new commands; gate assertions
-- All existing 100+ tests pass unchanged
-- F541-grep on diff before push (per memory `feedback_check_f_strings_before_push.md`)
+- New tests in `tests/test_module.py` per phase
+- All existing tests pass unchanged
+- F541-grep before push (per memory)
 
 ## Open questions to resolve at execution time
 
-When Phase 1 starts, these need answering:
-
-1. **Does our repo's `Release` file already include the metadata d-i needs?** — `Codename`, `Suite`, `Components`, `Architectures`. Check before committing to "use our repo as d-i mirror" works at all.
-2. **What's the exact udeb set?** — Phase 1 discovery. Vanilla d-i pulls a known set; ours may differ if we want to skip components (e.g. wifi support if Athena doesn't ship wifi firmware).
-3. **Suite/codename naming** — installer expects e.g. `bookworm` or `athena-1.0`. Pick a stable naming scheme before writing preseed.
-4. **Where does the Athena logo come from?** — Phase 4 prerequisite. If no logo exists, Phase 4 either gets a placeholder or branding is downgraded to strings-only for v1.
-5. **Does `parsing.py` already handle `Section: debian-installer` udebs, or does it skip them?** — Phase 1 spike question.
+1. **`udpkg` vs `dpkg --force-depends`** for udeb install in chroot build. udpkg is purpose-built but bootstrapping it (it's a udeb) into the chroot is its own dance. Try `dpkg --force-depends` first; fall back to udpkg if file/directory layout misbehaves.
+2. **Initrd format**: cpio.gz vs squashfs-as-initrd vs initramfs. d-i traditionally uses initrd.gz; Phase 7 picks based on size and boot speed.
+3. **Boot menu layout**: single ISO with two entries (Try / Install) vs separate ISOs (live + installer). Today's plan keeps two ISOs (`iso build live` and `iso build installer`); single-ISO with dual menu is a possible end-of-phase-7 simplification.
