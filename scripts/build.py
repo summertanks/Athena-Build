@@ -41,6 +41,7 @@ from cache import Cache
 import buildcontainer
 import dependencytree
 import buildsystem
+import installer_chroot
 import signal
 
 
@@ -73,15 +74,19 @@ class BuildFlags:
         self.build_container_ready: bool = False   # build_container initialised
         self.source_build_ready: bool = False      # source_build completed
         self.signing_key_verified: bool = False    # signing key sign+verify roundtrip
-        self.chroot_ready: bool = False            # build_chroot completed
+        self.chroot_ready: bool = False            # build_chroot completed (live)
         self.chroot_verified: bool = False         # build_chroot + verify_chroot all checks passed
+        # COMP-01b phase 5: installer chroot built from udeb closure.
+        # Independent of chroot_ready/_verified — the two chroots have
+        # different lifecycles (live = squashfs payload; installer = initrd).
+        self.chroot_installer_ready: bool = False  # build_chroot installer completed
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""
         fields = ['cache_ready', 'dep_check_ready', 'download_ready',
                   'build_container_ready', 'source_build_ready',
                   'signing_key_verified',
-                  'chroot_ready', 'chroot_verified']
+                  'chroot_ready', 'chroot_verified', 'chroot_installer_ready']
         return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
 
 class BuildSession:
@@ -1077,21 +1082,90 @@ class BuildSession:
 
 
     def cmd_build_chroot_installer(self, *args):
-        """Build the d-i installer chroot under buildroot/installer/.
+        """Build the d-i installer chroot from the udeb closure.
 
-        STUB — installer chroot build is COMP-01a (not yet implemented).
-        Once landed, this command will set up a build chroot with
-        debian-installer-utils + mklibs, run `make build_cdrom` against
-        the d-i source tree pointed at our repo, and capture the
-        resulting initrd.gz + vmlinuz + udeb manifest under
-        buildroot/installer/.  See docs/plans/comp-01-installer.md for
-        the full design.
+        Usage: chroot build installer
+
+        Wipes + (re)creates dir_chroot_installer, then `dpkg --unpack`s
+        every udeb in udeb_dep_tree.selected_pkgs into it.  Postinsts
+        are NOT run at chroot-build time — they run at first boot under
+        rootskel + main-menu (this matches how d-i itself works; see
+        project memory project_installer_from_source).
+
+        After unpack, applies the data-layer overlays from installer/
+        per the engine mapping in installer_chroot._OVERLAY_MAP.  All
+        configuration (preseed, cdebconf overrides, branding) lives in
+        installer/ and can be edited without touching this engine code.
+
+        Prerequisites:
+          - dep_check_ready (so udeb_dep_tree is populated)
+          - source_build_ready (so the .udeb files exist in repo/)
+        Collects sudo password — dpkg --root + the wipe/bootstrap need
+        root to set file ownerships correctly inside the chroot.
+
+        On success sets self.flags.chroot_installer_ready.
         """
-        console.print(
-            "ERROR: installer chroot build is not yet implemented "
-            "(tracked as COMP-01a; see docs/plans/comp-01-installer.md)"
+        if not self.flags.dep_check_ready:
+            console.print("Run 'dep parse' first")
+            return
+        if not self.flags.source_build_ready:
+            console.print(
+                "Run 'source build installer' first (need .udeb files in repo/)"
+            )
+            return
+        if self.udeb_dep_tree is None:
+            console.print(
+                "Udeb dep tree not built — re-run 'dep parse' (it populates "
+                "udeb_dep_tree alongside the deb tree)"
+            )
+            return
+        if not self.udeb_dep_tree.selected_pkgs:
+            console.print(
+                "Udeb closure is empty — check installer.list contains udeb "
+                "names and cache has the d-i Packages index"
+            )
+            return
+
+        self.flags.chroot_installer_ready = False  # reset before work
+
+        # Sudo password — same pattern as cmd_build_chroot_live's BuildSystem.
+        # Collect once + validate via `sudo -v`; scrub on every exit path.
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _r = subprocess.run(
+            ['sudo', '-S', '-v'],
+            input=_password + '\n',
+            capture_output=True, text=True,
         )
-        logger.error("chroot build installer: not implemented (COMP-01a)")
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("chroot build installer: sudo -v failed")
+            _password = '*' * len(_password)
+            return
+
+        try:
+            console.print("Building installer chroot from udeb closure...")
+            _ok = installer_chroot.build_installer_chroot(
+                udeb_tree=self.udeb_dep_tree,
+                dir_repo=self.config.dir_repo,
+                dir_chroot_installer=self.config.dir_chroot_installer,
+                installer_dir=os.path.join(self.config.working_dir, 'installer'),
+                password=_password,
+            )
+            if not _ok:
+                console.print(
+                    "ERROR: installer chroot build failed — check log for details"
+                )
+                logger.error("build_installer_chroot returned False")
+                return
+
+            self.flags.chroot_installer_ready = True
+            console.print(
+                f"Installer chroot ready at {self.config.dir_chroot_installer}",
+                tui.COLOR_HIGHLIGHT,
+            )
+        finally:
+            # Single-use credential; overwrite the in-memory copy.
+            _password = '*' * len(_password)  # noqa: F841
 
 
     # -------------------------------Command: build_iso---------------------
@@ -1763,7 +1837,7 @@ class BuildSession:
     def cmd_chroot(self, action: str = '', *args):
         _table = {
             'build [live]':    'install built .debs into buildroot/live (default sub-action)',
-            'build installer': 'build d-i installer chroot in buildroot/installer (COMP-01a)',
+            'build installer': 'unpack udeb closure into buildroot-installer/ (no postinst configure)',
             'verify':          '8-check chroot health verifier',
         }
         if action == 'build':

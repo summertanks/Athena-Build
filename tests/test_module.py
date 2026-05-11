@@ -1078,18 +1078,170 @@ def test_cmd_chroot_build_passthrough_args_to_live():
     assert _calls == [('live', ('with_debug',), {})], _calls
 
 
-def test_cmd_build_chroot_installer_is_stub():
-    """The installer chroot handler is a COMP-01a stub: returns without
-    doing any work, prints an error referencing the plan doc."""
+def test_cmd_build_chroot_installer_bails_on_unmet_prereqs():
+    """Phase 5: cmd_build_chroot_installer is no longer a stub — it runs
+    the udeb-unpack pipeline.  But it must bail BEFORE any sudo prompt
+    if the prereqs (dep_check_ready, source_build_ready, udeb_dep_tree)
+    aren't met, so test invocations don't hang on Prompt input.
+
+    This test pins the contract: no flags set → bails cleanly with None,
+    no exception, no sudo prompt."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-
+    from build import BuildSession, BuildFlags
     _sess = BuildSession.__new__(BuildSession)
-    # Should not raise, returns None.  No prerequisites checked because the
-    # stub bails before any state is touched.
+    _sess.flags = BuildFlags()
+    _sess.udeb_dep_tree = None
+    # No flags set, no udeb tree → bails on the first prereq check.
     assert _sess.cmd_build_chroot_installer() is None
-    assert _sess.cmd_build_chroot_installer('with_debug') is None
+    # Setting dep_check_ready without source_build_ready bails on second check.
+    _sess.flags.dep_check_ready = True
+    assert _sess.cmd_build_chroot_installer() is None
+    # Setting source_build_ready without udeb tree bails on third check.
+    _sess.flags.source_build_ready = True
+    assert _sess.cmd_build_chroot_installer() is None
+
+
+def test_installer_chroot_overlay_map_is_data_not_code():
+    """The engine overlay map MUST be a small list of (src, dst) tuples
+    holding only path strings — no code, no string formatting based on
+    runtime state.  This pins the data-layer contract: adding a new
+    file mapping is an append to this list + an entry in
+    installer/README.md, never a code change."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _OVERLAY_MAP
+    assert isinstance(_OVERLAY_MAP, list)
+    for _entry in _OVERLAY_MAP:
+        assert isinstance(_entry, tuple) and len(_entry) == 2, _entry
+        _src, _dst = _entry
+        assert isinstance(_src, str) and isinstance(_dst, str), _entry
+        # Targets must be relative (chroot-relative); absolute would
+        # silently break os.path.join with the chroot root.
+        assert not _dst.startswith('/'), (
+            f"overlay dst must be relative to chroot root, got {_dst!r}")
+        # Sources must be relative to installer_dir.
+        assert not _src.startswith('/'), (
+            f"overlay src must be relative to installer_dir, got {_src!r}")
+
+
+def test_installer_chroot_resolve_udeb_files_skips_virtual_aliases():
+    """_resolve_udeb_files must skip entries where the dict key differs
+    from pkg['Package'] — those are virtual-package aliases (same
+    canonical package re-keyed under a Provides name).  Without the
+    skip, the SAME udeb would appear N times in the unpack list."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _resolve_udeb_files
+    # Use _FakePkg from the EXTRAS-01 test fixtures (mimics enough of
+    # Package's surface — __getitem__, .source, .version etc.).
+    pkg = _FakePkg('cdebconf-text-udeb', source='cdebconf')
+    pkg.version = '0.270'
+    pkg.arch = 'amd64'
+    class _UdebTree:
+        # canonical key + a virtual alias pointing at the same Package
+        selected_pkgs = {
+            'cdebconf-text-udeb':         pkg,
+            'cdebconf-frontend-provider': pkg,  # virtual — should be skipped
+        }
+    out = _resolve_udeb_files(_UdebTree(), '/nonexistent/repo')
+    # Both keys would otherwise produce a candidate path; virtual must
+    # be skipped → at most one missing-file warning, never two duplicate
+    # path entries.  Since /nonexistent/repo has no files, out is [].
+    assert out == []
+
+
+def test_installer_chroot_resolve_udeb_files_strips_version_epoch():
+    """udeb filenames don't include epoch ('2:1.0-1' on the Package
+    record → 'foo_1.0-1_amd64.udeb' on disk).  _resolve must match what
+    dpkg-buildpackage actually emitted."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _resolve_udeb_files
+
+    with tempfile.TemporaryDirectory() as _repo:
+        # Drop a fake udeb file with the epoch-stripped name.
+        _fake_path = os.path.join(_repo, 'foo-udeb_1.0-1_amd64.udeb')
+        with open(_fake_path, 'wb') as fh:
+            fh.write(b'')
+        pkg = _FakePkg('foo-udeb', source='foo')
+        pkg.version = '2:1.0-1'   # epoch in the Package record
+        pkg.arch = 'amd64'
+        class _UdebTree:
+            selected_pkgs = {'foo-udeb': pkg}
+        out = _resolve_udeb_files(_UdebTree(), _repo)
+        assert out == [_fake_path], out
+
+
+def test_installer_chroot_resolve_udeb_files_logs_missing_silently():
+    """Missing-on-disk udebs are logged + skipped (not raised).  This
+    is the documented contract — caller (build_installer_chroot)
+    checks the result-list length and surfaces an error if empty."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _resolve_udeb_files
+    pkg = _FakePkg('nonexistent-udeb', source='nonexistent')
+    pkg.version = '1.0'
+    pkg.arch = 'amd64'
+    class _UdebTree:
+        selected_pkgs = {'nonexistent-udeb': pkg}
+    # Should not raise; should return [].
+    out = _resolve_udeb_files(_UdebTree(), '/nonexistent/repo')
+    assert out == []
+
+
+def test_buildconfig_exposes_dir_chroot_installer_derived_from_dir_chroot():
+    """Phase 5: BuildConfig must derive dir_chroot_installer as
+    `<dir_chroot>-installer` so that renaming the Chroot config entry
+    automatically renames the installer path too.  Pins the derivation
+    so a future refactor doesn't accidentally hardcode the installer
+    path or place it inside dir_chroot (which would land the installer
+    chroot inside the live chroot — bad).
+
+    Uses the project's real build.conf to avoid maintaining a parallel
+    minimal fixture as BuildConfig's required-section set evolves."""
+    import sys, tempfile, shutil
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import BuildConfig
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir, exist_ok=True)
+        # Copy the project's actual build.conf — same shape BuildConfig
+        # is exercised against in production.
+        shutil.copy(os.path.join(_ROOT, 'config', 'build.conf'),
+                    os.path.join(_cfg_dir, 'build.conf'))
+        for _name in ('pkg.list', 'live.list', 'installer.list'):
+            with open(os.path.join(_cfg_dir, _name), 'w') as f: f.write('')
+        _saved_argv = sys.argv
+        sys.argv = ['build.py',
+                    '--working-dir',    _tmp,
+                    '--config-file',    os.path.join(_cfg_dir, 'build.conf'),
+                    '--pkg-list',       os.path.join(_cfg_dir, 'pkg.list'),
+                    '--live-list',      os.path.join(_cfg_dir, 'live.list'),
+                    '--installer-list', os.path.join(_cfg_dir, 'installer.list')]
+        try:
+            cfg = BuildConfig()
+        finally:
+            sys.argv = _saved_argv
+        assert cfg.error_str == '', (
+            f"BuildConfig fixture failed to load: {cfg.error_str}")
+        # The installer dir must sit NEXT TO the live chroot, not INSIDE it.
+        assert cfg.dir_chroot_installer == cfg.dir_chroot + '-installer'
+        assert not cfg.dir_chroot_installer.startswith(cfg.dir_chroot + os.sep)
+
+
+def test_build_flags_carries_chroot_installer_ready_default_false():
+    """Phase 5: a new flag bit was added — pin it default-False so a
+    stale BuildFlags instance from before the field landed (or a future
+    refactor that drops it) re-fails at this test boundary."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildFlags
+    f = BuildFlags()
+    assert hasattr(f, 'chroot_installer_ready')
+    assert f.chroot_installer_ready is False
+    # __str__ summary includes it (so `print state` surfaces it)
+    assert 'chroot_installer' in str(f)
 
 
 def test_cmd_iso_build_requires_subaction():
@@ -4304,7 +4456,13 @@ def main() -> int:
         test_cmd_chroot_build_live_explicit_forwards_to_live,
         test_cmd_chroot_build_installer_forwards_to_installer,
         test_cmd_chroot_build_passthrough_args_to_live,
-        test_cmd_build_chroot_installer_is_stub,
+        test_cmd_build_chroot_installer_bails_on_unmet_prereqs,
+        test_installer_chroot_overlay_map_is_data_not_code,
+        test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
+        test_installer_chroot_resolve_udeb_files_strips_version_epoch,
+        test_installer_chroot_resolve_udeb_files_logs_missing_silently,
+        test_buildconfig_exposes_dir_chroot_installer_derived_from_dir_chroot,
+        test_build_flags_carries_chroot_installer_ready_default_false,
         # ARCH-03
         test_console_with_explicit_tui_does_not_touch_singleton,
         test_console_singleton_fallback_when_tui_omitted,

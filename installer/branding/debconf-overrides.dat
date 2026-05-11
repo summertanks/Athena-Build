@@ -1,0 +1,8 @@
+# installer/branding/debconf-overrides.dat
+#
+# Athena-specific debconf template overrides.  Applied via
+# debconf-set-selections at first boot of the installer (mechanism
+# TBD — Phase 6).  v1 ships this file empty so the installer renders
+# with stock "Debian installer" strings.
+#
+# Format: debconf-set-selections.  See ./README.md for examples.

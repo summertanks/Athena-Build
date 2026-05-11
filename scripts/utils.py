@@ -630,6 +630,13 @@ class BuildConfig:
             self.dir_config = os.path.join(self.working_dir, config_parser.get('Directories', 'Config'))
             self.dir_image = os.path.join(self.working_dir, config_parser.get('Directories', 'Image'))
             self.dir_chroot = os.path.join(self.working_dir, config_parser.get('Directories', 'Chroot'))
+            # COMP-01b phase 5: installer chroot lives as a sibling of the
+            # live chroot (NOT a subdir — would land inside live's content).
+            # Derived from dir_chroot so a single Chroot= config rename
+            # cascades automatically.  Operator can override the parent
+            # via build.conf [Directories] Chroot; the installer dir
+            # always sits next to it as `<chroot>-installer/`.
+            self.dir_chroot_installer = self.dir_chroot + '-installer'
             
             self.dir_patch = os.path.join(self.working_dir, config_parser.get('Directories', 'Patch'))
             self.dir_patch_source = os.path.join(self.dir_patch, 'source')
@@ -667,6 +674,7 @@ class BuildConfig:
 
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_chroot_installer).mkdir(parents=True, exist_ok=True)
 
             # gpg refuses any homedir whose mode is broader than 0700,
             # so create with mode 0700 directly.  os.makedirs respects
@@ -679,7 +687,7 @@ class BuildConfig:
                 self.dir_download, self.dir_log, self.dir_cache, self.dir_temp,
                 self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
-                self.dir_image, self.dir_chroot, self.dir_gnupg,
+                self.dir_image, self.dir_chroot, self.dir_chroot_installer, self.dir_gnupg,
             ):
                 if not os.access(_dir, os.W_OK):
                     raise PermissionError(f'Build directory is not writable: {_dir}')
