@@ -84,7 +84,7 @@ The pipeline (eight stages, plus one optional side-channel):
 2. `dep parse` — resolves the package list in `config/pkg.list` into a closed dependency graph (binary deps + matching source packages).
 3. `source download` — fetches `.dsc`, `.orig.tar.*`, and `.debian.tar.*` files for every selected source.
 4. `container init` — builds a per-release Docker image carrying the build-deps for the source packages.
-5. `source build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files into `repo/`.  Default mode (= `source build live`) builds the install closure for the live ISO and skips *extras-only* sources (depth-1 Recommends pulled in by `dep parse` for the future apt-repo); `source build recommended` builds those.  `source build installer` is reserved for the d-i source set — currently a stub (COMP-01a; see `docs/plans/comp-01-installer.md`).  A bracket-token like `source build live-boot-doc [nocheck]` overrides `DEB_BUILD_PROFILES` + `DEB_BUILD_OPTIONS` for that one build — useful when you want a `-doc` binary the default `nodoc` profile would skip.
+5. `source build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files (and `.udeb`s, when the source declares them) into `repo/`.  Default mode (= `source build pkg`) builds the **pkg.list closure only** — the user-choices layer minus live extras, installer udebs, and Recommends-only extras.  Layered subsets: `source build live` builds the live extras (live-boot, live-config, …); `source build installer` builds the udeb closure for the installer ramdisk + the installer-exclusive deb extras; `source build recommended` builds the depth-1 Recommends pulled in by `dep parse` for the future apt-repo.  A bracket-token like `source build live-boot-doc [nocheck]` overrides `DEB_BUILD_PROFILES` + `DEB_BUILD_OPTIONS` for that one build — useful when you want a `-doc` binary the default `nodoc` profile would skip.
 6. `chroot build` — installs the built `.deb`s into a chroot under `buildroot/` in topo-sorted batches, handling the libc bootstrap cycle, post-install patch overlays, and the canonical libdevmapper/dmsetup/systemd cycle (ARCH-12).  Runs `chroot verify` automatically as its tail end.  Bare `chroot build` is shorthand for `chroot build live` (today's default); `chroot build installer` is the d-i installer-chroot path — currently a stub (COMP-01a).
 7. `chroot verify` — the 8-check verifier from step 6, also invokable on its own (e.g. after a manual edit of the chroot tree).  Fails loud; gates `iso build live`.
 8. `iso build live` — wraps the chroot into a squashfs, runs `grub-mkrescue` to produce a hybrid BIOS/EFI bootable ISO under `image/`.  (`iso build installer` is the parallel installer-ISO path — stubbed today, lands with COMP-01a.)
@@ -121,7 +121,7 @@ The wrapper will tell you about any missing Python deps. Install them and re-run
 From there:
 
 - `print config` shows what `config/build.conf` resolved to — which mirrors are active, whether snapshot pinning is on, what `[Build]` codename will be baked into `/etc/os-release`. Run this first to confirm you're building what you think you're building.  (`print help` lists the other views.)
-- `autorun` runs stages 1–6 (cache → parse → download → container → source build → chroot+verify). Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
+- `autorun` runs stages 1–7 (cache → parse → download → container → source build (pkg) → source build live → chroot+verify). Phase 4 of COMP-01b split source build into the `pkg` and `live` arms; both must run before chroot build live. Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
 - When `autorun` finishes cleanly, run `iso build live` to produce the final image. (If you want to drop extra files into `buildroot/` first — custom motd, extra config — this is the moment.)
 - If a stage fails, fix the cause and re-run that stage by name (`source build`, `chroot build`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
 - TUI keys: arrows to scroll the active tab, `Tab` to cycle between tabs (console / log), `q`/`Q` to quit. Resize is handled automatically.
@@ -143,13 +143,16 @@ You don't have to think about this on a normal `autorun` — the defaults do the
 print extras                          # what's in the extras pool, with source mapping
 print stats                           # counts incl. "extras (recom): N pkg(s) (toggle=on|off)"
 
-source build                          # build the live install set (default — same as `source build live`)
-source build live                     # explicit form of the default
+source build                          # build pkg.list closure only (Phase 4 default)
+source build pkg                      # explicit form of the default
+source build live                     # build live-exclusive sources only
+source build installer                # build udeb closure + installer-exclusive deb extras
 source build recommended              # build ONLY the extras-only sources
-source build installer                # installer source set (STUB — see COMP-01a)
 source build foo                      # build a specific source
 source build force foo                # rebuild even if .result says PASS
 ```
+
+For a complete live ISO you need `source build` followed by `source build live`. autorun chains both before chroot build.
 
 #### Overriding build profiles per invocation
 
@@ -168,7 +171,7 @@ The bracket-token replaces *both* `DEB_BUILD_PROFILES` and `DEB_BUILD_OPTIONS` f
 | `source build foo []` | rebuild `foo` with NO profiles/options at all (most permissive — runs tests, generates docs) |
 | `source build foo [nocheck]` | rebuild `foo` with profiles/options = `nocheck` only |
 | `source build foo [nocheck,nodoc]` | rebuild `foo` with both |
-| `source build [nocheck]` | rebuild all install-set sources with the override |
+| `source build [nocheck]` | rebuild all pkg-layer sources with the override |
 | `source build recommended [nocheck]` | rebuild all extras-only sources with the override |
 
 The override implies `force` — a prior `.result` file reflects the *old* profiles, so the cache check would falsely short-circuit the rebuild.  The TUI prints a clear note when this auto-flip happens so you're not surprised.

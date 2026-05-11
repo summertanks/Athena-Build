@@ -748,11 +748,21 @@ class BuildSession:
         """Download upstream source archives for all selected source packages.
 
         - Fetches .dsc, .orig.tar.*, and .debian.tar.* files from the configured
-        base mirror into dir_source.  
-        
-        - Skips files that are already present and have correct checksums. 
-         
+        base mirror into dir_source.
+
+        - Skips files that are already present and have correct checksums.
+
         - Does a size verification
+
+        Phase 4 (COMP-01b): downloads from BOTH the deb tree AND the udeb
+        tree.  Without the udeb pass, sources that exist only in the udeb
+        closure (base-installer, debian-installer-utils, debootstrap,
+        depthcharge-tools-installer, …) never land in dir_source, and a
+        later `source build installer` fails with "cp: cannot stat
+        /source/<pkg>*: No such file or directory" inside the build
+        container.  Sources shared between trees (cdebconf, etc.) are
+        skipped in the second pass via the existing on-disk sha check;
+        size accounting double-counts them slightly — cosmetic only.
         """
         if not self.flags.dep_check_ready:
             console.print("Run 'dep parse' first")
@@ -760,15 +770,26 @@ class BuildSession:
 
         self.flags.download_ready = False  # reset before starting
 
-        _src_download_size = self.dep_tree.download_size
-        console.print(f"Total download is about {_src_download_size // (2**20)} MB")
+        _deb_size  = self.dep_tree.download_size
+        _udeb_size = (self.udeb_dep_tree.download_size
+                      if self.udeb_dep_tree is not None else 0)
+        _src_download_size = _deb_size + _udeb_size
+        console.print(
+            f"Total download is about {_src_download_size // (2**20)} MB "
+            f"(deb: {_deb_size // (2**20)} MB, udeb: {_udeb_size // (2**20)} MB)"
+        )
 
         _total, _used, _free = shutil.disk_usage(self.config.dir_source)
         console.print(f"Disk space — Total: {_total // (2**30)} GiB, "
                       f"Used: {_used // (2**30)} GiB, Free: {_free // (2**30)} GiB")
 
-        console.print("Starting downloads...")
+        console.print("Starting downloads (deb tree)...")
         _downloaded_size = utils.download_source(self.dep_tree, self.config.dir_source)
+
+        if self.udeb_dep_tree is not None and self.udeb_dep_tree.selected_srcs:
+            console.print("Starting downloads (udeb tree)...")
+            _downloaded_size += utils.download_source(
+                self.udeb_dep_tree, self.config.dir_source)
 
         # A size mismatch usually means a network interruption or a package whose
         # expected size in the index differs from what the mirror actually served.
@@ -1153,11 +1174,14 @@ class BuildSession:
     # Command: source_build
     # ---------------------------------------------------------------------------
 
-    # Subset selectors recognised by `source build` — live / installer /
-    # recommended are mutually exclusive; named pkgs are a fourth (also
-    # exclusive) mode.  'live' is the default when no subset and no names
-    # are given (preserves the bare `source build` UX).
-    _SOURCE_SUBSETS = ('live', 'installer', 'recommended')
+    # Subset selectors recognised by `source build` — pkg / live /
+    # installer / recommended are mutually exclusive; named pkgs are a
+    # fifth (also exclusive) mode.  'pkg' is the default when no subset
+    # and no names are given (Phase 4 — used to be 'live' pre-pivot).
+    # 'pkg' = pkg.list closure only; 'live' = live extras only; 'installer'
+    # = udeb closure + installer.list deb-arm extras; 'recommended' = extras
+    # pulled by depth-1 Recommends.
+    _SOURCE_SUBSETS = ('pkg', 'live', 'installer', 'recommended')
 
     @staticmethod
     def _parse_source_build_args(args):
@@ -1219,9 +1243,14 @@ class BuildSession:
                 f"named packages.  Use one or the other.",
                 False, '', [], None,
             )
-        # Default: bare `source build` resolves to live (preserves today's UX).
+        # Default: bare `source build` resolves to pkg (Phase 4 of COMP-01b
+        # — used to be 'live' pre-pivot when bare meant "build everything for
+        # the live ISO").  Now bare = pkg-layer only; operator runs explicit
+        # 'source build live' for live extras and 'source build installer'
+        # for the installer udeb closure.  autorun chains pkg + live for the
+        # live ISO workflow.
         if not _subset and not _names:
-            _subset = 'live'
+            _subset = 'pkg'
         _profile_override = None
         if _bracket_token is not None:
             _profile_override = [
@@ -1232,29 +1261,41 @@ class BuildSession:
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
-        Usage: source build [force] [live | installer | recommended | <pkg> ...] [[profile,...]]
+        Usage: source build [force] [pkg | live | installer | recommended | <pkg> ...] [[profile,...]]
+
+        Phase 4 of COMP-01b rewired the subset selectors to layered
+        semantics matching the parallel-universe architecture:
 
           force         — rebuild packages even if a valid result already exists
-          live          — build the install closure for the live ISO
-                          (selected_srcs MINUS extras-only sources).  This is
-                          the default when no subset and no names are given.
-          installer     — build the source set for the installer ISO
-                          (pkg_installer.list).  STUB until COMP-01a lands —
-                          today this errors out cleanly.
+          pkg           — build the pkg.list closure ONLY (no live, installer,
+                          or extras).  This is the default when no subset and
+                          no names are given.
+          live          — build live-exclusive sources only (sources pulled
+                          in solely by live.list).  Mixed sources are NOT
+                          here — they're under 'pkg'.
+          installer     — build the udeb closure's source set + installer-
+                          exclusive deb sources (efibootmgr, grub-pc-bin
+                          equivalents).  Many sources overlap with pkg/live
+                          (cdebconf produces both .deb and .udeb outputs)
+                          and are deduped via shared source_hashtable.
           recommended   — build ONLY the EXTRAS-01 sources (depth-1 Recommends
                           pulled into the repo by parse_dependency, but
                           excluded from chroot install).
-          pkg ...       — limit the build to the named source packages
+          <pkg>...      — limit the build to the named source packages
           [profile,...] — bracket-delimited token (e.g. `[nocheck]`) overrides
                           BOTH DEB_BUILD_PROFILES and DEB_BUILD_OPTIONS for
                           this invocation only.  Use `[]` (empty) for the
                           most permissive build (no profiles/options — docs
                           and tests included).  Implies `force` because the
                           .result cache wouldn't reflect the override.
-          (no arg)      — equivalent to `source build live`.
+          (no arg)      — equivalent to `source build pkg`.
 
-        live / installer / recommended are mutually exclusive with each
+        pkg / live / installer / recommended are mutually exclusive with each
         other and with named packages.
+
+        For a complete live ISO: source build → source build live.
+        For a complete installer ISO: source build → source build installer.
+        autorun chains pkg + live for the live workflow.
 
         Each package is built in a fresh container instance with its declared
         build-dependencies installed at runtime.  Result files (.result) and build
@@ -1295,10 +1336,16 @@ class BuildSession:
 
         if _force:
             console.print("Force mode: skipping build cache checks")
-        if _subset == 'recommended':
-            console.print("Recommended mode: building EXTRAS-01 extras-only sources")
+        if _subset == 'pkg':
+            console.print("Pkg mode: building pkg.list closure only "
+                          "(no live, installer, or extras)")
+        elif _subset == 'live':
+            console.print("Live mode: building live-exclusive sources only")
         elif _subset == 'installer':
-            console.print("Installer mode: building installer ISO source set")
+            console.print("Installer mode: building udeb closure + "
+                          "installer-exclusive deb sources")
+        elif _subset == 'recommended':
+            console.print("Recommended mode: building EXTRAS-01 extras-only sources")
         if _profile_override is not None:
             console.print(
                 f"Profile override active: DEB_BUILD_PROFILES + "
@@ -1309,46 +1356,74 @@ class BuildSession:
             )
 
         # Pick the package set per the mode resolved above.
+        # COMP-01b phase 4: subset semantics rewired to the parallel-universe
+        # spec.  Each subset is now a tightly-scoped slice of the unified
+        # source corpus; chroot build live needs source build + source build
+        # live; chroot build installer needs source build + source build
+        # installer.  Sources frequently overlap between deb and udeb worlds
+        # (e.g. cdebconf produces both .deb and .udeb outputs from one
+        # dpkg-buildpackage run) — looking up via dep_tree first then udeb
+        # tree returns the same Source instance either way (shared via
+        # source_hashtable), so building once produces both kinds of
+        # artefacts at the same time.
         if _names:
             packages = []
             for name in _names:
-                src = self.dep_tree.selected_srcs.get(name)
+                src = (self.dep_tree.selected_srcs.get(name)
+                       or (self.udeb_dep_tree.selected_srcs.get(name)
+                           if self.udeb_dep_tree is not None else None))
                 if src is None:
                     console.print(f"Unknown package: {name}")
                     return
                 packages.append(src)
         elif _subset == 'recommended':
-            # `recommended` mode: build only sources that exist purely for
-            # the recommends pull (extras_src_names is the set whose every
-            # binary lands in extras_pkg_names).
+            # `recommended` mode: sources whose every binary is in
+            # extras_pkg_names (Recommends-only).  Unchanged from Phase 1.
             packages = [
                 self.dep_tree.selected_srcs[n]
                 for n in sorted(self.dep_tree.extras_src_names)
                 if n in self.dep_tree.selected_srcs
             ]
+        elif _subset == 'live':
+            # 'live' mode: live-exclusive sources only (sources whose every
+            # binary is in live_exclusive_pkg_names — i.e. sources that
+            # exist in the closure SOLELY because of live.list).  Mixed
+            # sources are NOT here — they get built under 'pkg'.
+            packages = [
+                self.dep_tree.selected_srcs[n]
+                for n in sorted(self.dep_tree.live_exclusive_src_names)
+                if n in self.dep_tree.selected_srcs
+            ]
         elif _subset == 'installer':
-            # COMP-01a not landed yet — pkg_installer.list and the
-            # installer source set don't exist in the dependency tree.
-            # Stub: error out cleanly until the installer pipeline lands.
-            console.print(
-                "ERROR: installer source set not configured — "
-                "pkg_installer.list is required (tracked as COMP-01a; "
-                "see docs/plans/comp-01-installer.md)"
-            )
-            logger.error(
-                "source build installer: not implemented "
-                "(COMP-01a — pkg_installer.list missing)"
-            )
-            return
+            # 'installer' mode: union of (a) the udeb closure's source set
+            # (cdebconf, partman-base, hw-detect, etc. — produce udebs that
+            # land in the installer ramdisk) and (b) installer-exclusive
+            # deb sources (the deb-arm of installer.list — efibootmgr,
+            # grub-pc-bin — needed in repo/ for grub-installer to apt-pull
+            # onto the target at install time).
+            _src_names_set = set(self.dep_tree.installer_exclusive_src_names)
+            if self.udeb_dep_tree is not None:
+                _src_names_set |= set(self.udeb_dep_tree.selected_srcs.keys())
+            packages = []
+            for _name in sorted(_src_names_set):
+                _s = (self.dep_tree.selected_srcs.get(_name)
+                      or (self.udeb_dep_tree.selected_srcs.get(_name)
+                          if self.udeb_dep_tree is not None else None))
+                if _s:
+                    packages.append(_s)
         else:
-            # Default: subset == 'live' — build the install closure
-            # (selected_srcs MINUS extras-only sources).  Mixed sources
-            # are kept; their recommended binaries fall out as side
-            # artefacts of dpkg-buildpackage.
-            _extras = self.dep_tree.extras_src_names
+            # subset == 'pkg' (the new bare-`source build` default).
+            # Build the pkg.list closure ONLY: selected_srcs minus
+            # everything credited to live/installer/extras.  Result is a
+            # source set whose binaries are exactly what pkg.list pulls in
+            # (with required+important folded in) — the "user choices"
+            # layer.
+            _exclude = (self.dep_tree.live_exclusive_src_names |
+                        self.dep_tree.installer_exclusive_src_names |
+                        self.dep_tree.extras_src_names)
             packages = [
                 _s for _name, _s in self.dep_tree.selected_srcs.items()
-                if _name not in _extras
+                if _name not in _exclude
             ]
 
         if not packages:
@@ -1731,12 +1806,20 @@ class BuildSession:
         breakdown, predicted ISO path, and total wall time.
         """
         import print_commands
+        # COMP-01b phase 4: bare `source build` now builds pkg.list closure
+        # only.  For a complete live ISO, we need pkg + live extras; chain
+        # both before chroot build.  Each step uses the source_build_ready
+        # flag, which cmd_source_build resets at entry — so bailing on either
+        # subset's failure works the same way as before.
         _steps = [
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',       'dep parse'),
             (self.cmd_source_download,   'download_ready',        'source download'),
             (self.cmd_init_container,    'build_container_ready', 'container init'),
-            (self.cmd_source_build,      'source_build_ready',    'source build'),
+            (self.cmd_source_build,                                  # bare = pkg
+                                          'source_build_ready',    'source build'),
+            (lambda: self.cmd_source_build('live'),                  # live extras
+                                          'source_build_ready',    'source build live'),
             # chroot build also runs chroot verify; chroot_verified is True
             # only when both build AND all 8 verify checks passed.
             (self.cmd_build_chroot_live, 'chroot_verified',       'chroot build'),

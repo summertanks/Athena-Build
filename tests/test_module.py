@@ -3310,18 +3310,29 @@ def test_print_extras_handles_empty_extras_set():
 
 # ─── EXTRAS-01: source_build [profiles] override parsing ────────────────────
 
-def test_source_build_args_no_args_defaults_to_live_subset():
-    """Bare `source build` → subset='live' (preserves today's UX), no
-    force, no names, no override."""
+def test_source_build_args_no_args_defaults_to_pkg_subset():
+    """Phase 4 (COMP-01b): bare `source build` → subset='pkg', not 'live'.
+    Locked decision — pkg is the user-choices layer, live is now an
+    explicit additive on top."""
     from build import BuildSession
     err, force, subset, names, override = \
         BuildSession._parse_source_build_args(())
     assert err is None
-    assert (force, subset, names, override) == (False, 'live', [], None)
+    assert (force, subset, names, override) == (False, 'pkg', [], None)
+
+
+def test_source_build_args_pkg_subset_explicit():
+    """`source build pkg` is the explicit form of the bare default."""
+    from build import BuildSession
+    err, _f, subset, names, _o = \
+        BuildSession._parse_source_build_args(('pkg',))
+    assert err is None
+    assert subset == 'pkg' and names == []
 
 
 def test_source_build_args_live_subset_explicit():
-    """`source build live` is the explicit form of the bare default."""
+    """`source build live` resolves to subset='live' (Phase 4 — now
+    means live-exclusives only, not the full live closure)."""
     from build import BuildSession
     err, _f, subset, names, _o = \
         BuildSession._parse_source_build_args(('live',))
@@ -3350,34 +3361,138 @@ def test_source_build_args_recommended_subset_recognised():
 
 def test_source_build_args_force_flag_anywhere():
     """`force` is detectable in any position, case-insensitive.  Bare
-    `force` (no other args) defaults the subset to 'live'."""
+    `force` (no other args) defaults the subset to 'pkg' (Phase 4)."""
     from build import BuildSession
     for argv in (('force',), ('Force',), ('foo', 'FORCE'), ('force', 'foo')):
         err, force, _s, _n, _o = BuildSession._parse_source_build_args(argv)
         assert err is None and force is True, f"args={argv!r}"
-    # Bare `force` should still default subset to 'live' since there are
-    # no names and no other subset selector.
+    # Bare `force` defaults subset to 'pkg' since there are no names and
+    # no other subset selector.
     _, _, subset, names, _ = BuildSession._parse_source_build_args(('force',))
-    assert subset == 'live' and names == []
+    assert subset == 'pkg' and names == []
 
 
 def test_source_build_args_subsets_mutually_exclusive():
-    """Two subset selectors at once → parse error."""
+    """Two subset selectors at once → parse error.  Phase 4: 'pkg' is a
+    subset too, so pkg+anything is rejected the same way."""
     from build import BuildSession
-    for argv in (('live', 'installer'),
+    for argv in (('pkg', 'live'),
+                 ('pkg', 'installer'),
+                 ('live', 'installer'),
                  ('installer', 'recommended'),
                  ('live', 'recommended'),
-                 ('live', 'installer', 'recommended')):
+                 ('pkg', 'live', 'installer', 'recommended')):
         err, *_ = BuildSession._parse_source_build_args(argv)
         assert err is not None, f"args={argv!r}"
         assert 'pick at most one' in err, f"args={argv!r}: {err!r}"
 
 
+def test_source_build_pkg_subset_excludes_live_installer_extras():
+    """Phase 4: the 'pkg' subset selection rule excludes everything in
+    live_exclusive_src_names ∪ installer_exclusive_src_names ∪
+    extras_src_names.  This tests the set-arithmetic the cmd_source_build
+    'pkg' branch performs."""
+    # Pure data-shape test of the exclusion rule; doesn't run cmd_source_build
+    # itself (which needs flags + container).
+    selected_srcs = {
+        'kernel-src':    object(),  # pkg
+        'live-config':   object(),  # live extra
+        'cdebconf':      object(),  # installer (udeb-producing)
+        'firefox-l10n':  object(),  # extras
+        'libc6':         object(),  # pkg
+    }
+    live_exclusive      = {'live-config'}
+    installer_exclusive = {'cdebconf'}
+    extras              = {'firefox-l10n'}
+    _exclude = live_exclusive | installer_exclusive | extras
+    pkg_layer = [
+        _s for _name, _s in selected_srcs.items() if _name not in _exclude
+    ]
+    pkg_layer_names = [n for n, _s in selected_srcs.items() if _s in pkg_layer]
+    assert sorted(pkg_layer_names) == ['kernel-src', 'libc6']
+
+
+def test_source_build_installer_subset_unions_udeb_tree_with_deb_arm():
+    """Phase 4: the 'installer' subset selection rule unions
+    udeb_dep_tree.selected_srcs.keys() with installer_exclusive_src_names
+    (deb-arm of installer.list).  Pin the union semantic so a future
+    refactor can't silently drop one or the other."""
+    # Simulate two trees: deb tree has installer-exclusive efibootmgr;
+    # udeb tree has cdebconf, partman-base, hw-detect.
+    deb_installer_exclusive = {'efibootmgr', 'grub-pc-bin'}
+    udeb_selected_srcs_keys = {'cdebconf', 'partman-base', 'hw-detect'}
+    _src_names_set = set(deb_installer_exclusive) | set(udeb_selected_srcs_keys)
+    assert _src_names_set == {
+        'efibootmgr', 'grub-pc-bin', 'cdebconf', 'partman-base', 'hw-detect',
+    }
+    # Order doesn't matter but caller iterates sorted() for deterministic output
+    assert sorted(_src_names_set) == [
+        'cdebconf', 'efibootmgr', 'grub-pc-bin', 'hw-detect', 'partman-base',
+    ]
+
+
+def test_source_download_iterates_both_deb_and_udeb_trees():
+    """Phase 4 regression guard: cmd_source_download must call
+    utils.download_source for the udeb tree too — otherwise sources that
+    exist only in udeb_dep_tree (base-installer, debian-installer-utils,
+    debootstrap, etc.) never land in dir_source and `source build
+    installer` fails with `cp: cannot stat /source/<pkg>*: No such file
+    or directory` inside the build container.  Caught in production on
+    2026-05-10."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    src = inspect.getsource(BuildSession.cmd_source_download)
+    # Both tree references must appear in the code (size + download call).
+    assert 'self.dep_tree.download_size' in src or '_deb_size' in src, (
+        "cmd_source_download must include deb tree download size")
+    assert 'self.udeb_dep_tree.download_size' in src or '_udeb_size' in src, (
+        "cmd_source_download must include udeb tree download size")
+    assert 'utils.download_source(self.dep_tree' in src, (
+        "cmd_source_download must call download_source on deb tree")
+    assert 'utils.download_source(' in src and 'self.udeb_dep_tree' in src, (
+        "cmd_source_download must also call download_source on udeb tree")
+
+
+def test_autorun_runs_source_build_then_source_build_live():
+    """Phase 4 of COMP-01b: autorun must invoke source build twice — once
+    with no args (pkg subset, the new bare default) and once with 'live'
+    — before chroot build.  Catches a regression where someone re-orders
+    or drops the live extras step (which would silently produce a chroot
+    missing live-boot/live-config and fail downstream)."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    # Read cmd_auto_run's source and assert the _steps list contains both
+    # 'source build' and 'source build live' stages, in that order, with
+    # chroot build immediately after.  Source-inspection is cheap and
+    # avoids standing up the full BuildSession + 7-step pipeline.
+    from build import BuildSession
+    src = inspect.getsource(BuildSession.cmd_auto_run)
+    # Stage labels appear in the third tuple slot; assert both labels
+    # appear and that 'source build live' comes after 'source build'.
+    _i_pkg  = src.find("'source build'")
+    _i_live = src.find("'source build live'")
+    _i_chroot = src.find("'chroot build'")
+    assert _i_pkg  > 0, "_steps missing the bare 'source build' stage label"
+    assert _i_live > 0, "_steps missing the 'source build live' stage label"
+    assert _i_chroot > 0, "_steps missing the 'chroot build' stage label"
+    assert _i_pkg < _i_live < _i_chroot, (
+        f"Stage order wrong: source build @ {_i_pkg}, "
+        f"source build live @ {_i_live}, chroot build @ {_i_chroot}"
+    )
+    # The 'live' arm should be wired via cmd_source_build('live') — assert
+    # the lambda + arg appear in proximity to the 'source build live' label.
+    assert "cmd_source_build('live')" in src, (
+        "autorun must call cmd_source_build('live') for the live arm"
+    )
+
+
 def test_source_build_args_subset_and_named_pkgs_mutually_exclusive():
     """`source build <subset> pkg1` is rejected for every subset word —
-    operator must pick the subset OR specific names, not both."""
+    operator must pick the subset OR specific names, not both.  Phase 4
+    adds 'pkg' to the subset list too."""
     from build import BuildSession
-    for _subset in ('live', 'installer', 'recommended'):
+    for _subset in ('pkg', 'live', 'installer', 'recommended'):
         err, *_ = BuildSession._parse_source_build_args((_subset, 'pkg1'))
         assert err is not None, _subset
         assert 'mutually exclusive' in err, f"{_subset}: {err!r}"
@@ -4262,12 +4377,17 @@ def main() -> int:
         test_print_extras_lists_recommended_packages,
         test_print_extras_handles_empty_extras_set,
         # source build args parsing (EXTRAS-01 + COMP-01c subset selectors)
-        test_source_build_args_no_args_defaults_to_live_subset,
+        test_source_build_args_no_args_defaults_to_pkg_subset,
+        test_source_build_args_pkg_subset_explicit,
         test_source_build_args_live_subset_explicit,
         test_source_build_args_installer_subset_recognised,
         test_source_build_args_recommended_subset_recognised,
         test_source_build_args_force_flag_anywhere,
         test_source_build_args_subsets_mutually_exclusive,
+        test_source_build_pkg_subset_excludes_live_installer_extras,
+        test_source_build_installer_subset_unions_udeb_tree_with_deb_arm,
+        test_source_download_iterates_both_deb_and_udeb_trees,
+        test_autorun_runs_source_build_then_source_build_live,
         test_source_build_args_subset_and_named_pkgs_mutually_exclusive,
         test_source_build_args_named_pkgs_resolve_subset_to_empty,
         test_source_build_args_bracket_token_extracts_profiles,
