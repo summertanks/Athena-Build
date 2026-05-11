@@ -1147,6 +1147,150 @@ def test_iso_installer_stage_grub_cfg_errors_when_data_layer_missing():
             assert _stage_grub_cfg(_stage, _installer_empty) is False
 
 
+def test_iso_installer_count_records_zero_one_many():
+    """_count_records is what the operator-facing progress line uses
+    after dpkg-scanpackages.  Must handle empty file, single record,
+    multiple records correctly."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _count_records
+    with tempfile.NamedTemporaryFile('w', delete=False) as fh:
+        _path = fh.name
+    try:
+        # Empty
+        assert _count_records(_path) == 0
+        # Single record (starts at col 0)
+        with open(_path, 'w') as fh:
+            fh.write("Package: foo\nVersion: 1.0\n")
+        assert _count_records(_path) == 1
+        # Two records
+        with open(_path, 'w') as fh:
+            fh.write("Package: foo\nVersion: 1.0\n\nPackage: bar\nVersion: 2.0\n")
+        assert _count_records(_path) == 2
+        # Missing file → 0, no raise
+    finally:
+        os.unlink(_path)
+    assert _count_records('/nonexistent/file') == 0
+
+
+def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
+    """Pin the order of operations in _generate_apt_repo: mkdir
+    binary-amd64 + debian-installer/binary-amd64 + source, then
+    dpkg-scanpackages (twice — debs and udebs), then dpkg-scansources,
+    then per-subdir Release writes, then apt-ftparchive release.
+
+    Drives the helper with subprocess.run / _sudo mocked so no actual
+    repo or sudo is needed.  Asserts on the sequence of commands fired."""
+    import sys, tempfile
+    from unittest.mock import patch, MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import iso_installer, tui as _tui
+
+    # Stub Tui so the helper's tui.console.print() calls don't crash
+    # (_with_stub_tui decorator is defined further down in this file;
+    # inline the same pattern here).
+    class _StubTui:
+        def __init__(self):
+            self._next_id = 0; self._widgets = {}
+        def add_widget(self, w):
+            wid = self._next_id; self._next_id += 1
+            self._widgets[wid] = w; return wid
+        def del_widget(self, wid): self._widgets.pop(wid, None)
+        def print(self, *_a, **_kw): pass
+    _saved_tui = _tui.tui_instance
+    _tui.tui_instance = _StubTui()
+
+    _calls = []
+    def _fake_sudo(cmd, password):
+        _calls.append(tuple(cmd))
+        # Side-effect: when bash shell-cmd writes to a file via redirect,
+        # actually create the file so subsequent file-existence/size
+        # checks pass.
+        if cmd[0] == 'bash' and len(cmd) > 1 and '> ' in cmd[2]:
+            _target = cmd[2].split('> ')[1].strip().split()[0]
+            try:
+                with open(_target, 'w') as fh:
+                    fh.write("Package: stub\nVersion: 1.0\n")
+            except OSError:
+                pass
+        _r = MagicMock()
+        _r.returncode = 0
+        _r.stderr = ''
+        return _r
+
+    # The per-subdir Release writer uses subprocess.run directly (with
+    # stdin), not _sudo — patch it separately.
+    def _fake_subprocess_run(cmd, *a, **kw):
+        _calls.append(tuple(cmd))
+        # cat > /path writes stdin to file (the _write_subdir_release path).
+        if cmd[:2] == ['sudo', '-S'] and 'cat >' in (cmd[3] if len(cmd) > 3 else ''):
+            _path = cmd[3].split('cat >')[1].strip()
+            try:
+                _input = kw.get('input', '')
+                # input is "password\n<content>"
+                _, _, _content = _input.partition('\n')
+                with open(_path, 'w') as fh:
+                    fh.write(_content)
+            except OSError:
+                pass
+        # apt-ftparchive release: real apt-ftparchive writes to stdout;
+        # the helper redirects via stdout=<file handle> kwarg.  Mirror
+        # by writing a stub Release to that handle so size > 0 check passes.
+        elif (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
+              cmd[2] == 'apt-ftparchive'):
+            _stdout = kw.get('stdout')
+            if _stdout is not None and hasattr(_stdout, 'write'):
+                _stdout.write(b'Suite: stub\nCodename: stub\n')
+        _r = MagicMock()
+        _r.returncode = 0
+        _r.stderr = b''
+        return _r
+
+    try:
+        with tempfile.TemporaryDirectory() as _staging:
+            # Pre-create pool so the cwd=staging cd works.
+            os.makedirs(os.path.join(_staging, 'pool'), exist_ok=True)
+            with patch.object(iso_installer, '_sudo', side_effect=_fake_sudo), \
+                 patch.object(iso_installer.subprocess, 'run',
+                              side_effect=_fake_subprocess_run):
+                _ok = iso_installer._generate_apt_repo(
+                    _staging, 'athena', 'athena', '0.1', 'pw')
+            _assert_paths_staging = _staging  # keep for asserts below
+            _assert_dirs_exist = all(os.path.isdir(p) for p in (
+                os.path.join(_staging, 'dists', 'athena', 'main', 'binary-amd64'),
+                os.path.join(_staging, 'dists', 'athena', 'main',
+                             'debian-installer', 'binary-amd64'),
+                os.path.join(_staging, 'dists', 'athena', 'main', 'source'),
+            ))
+    finally:
+        _tui.tui_instance = _saved_tui
+    assert _ok is True
+    assert _assert_dirs_exist, (
+        "dists/<suite>/main/{binary-amd64,debian-installer/binary-amd64,source} not created"
+    )
+    # Sanity-check the call sequence carries dpkg-scanpackages (deb +
+    # udeb) + dpkg-scansources + apt-ftparchive release.  The scan
+    # helpers use `bash -c` (shell redirection for file output); the
+    # apt-ftparchive release helper goes via subprocess.run argv
+    # directly (avoids word-splitting issues — see fix 2026-05-11).
+    _shell_strings = [' '.join(c) for c in _calls if c and 'bash' in c[0]]
+    _joined_shell = '\n'.join(_shell_strings)
+    assert 'dpkg-scanpackages -m  pool' in _joined_shell, (
+        f"missing deb scan call; got:\n{_joined_shell}")
+    assert 'dpkg-scanpackages -m -t udeb pool' in _joined_shell, (
+        f"missing udeb scan call; got:\n{_joined_shell}")
+    assert 'dpkg-scansources pool' in _joined_shell, "missing source scan"
+    # apt-ftparchive lands as argv (no shell wrapper).
+    _any_ftparchive = any(
+        len(c) >= 3 and c[0] == 'sudo' and c[2] == 'apt-ftparchive'
+        for c in _calls
+    )
+    assert _any_ftparchive, (
+        f"missing top-level Release generation via argv apt-ftparchive; "
+        f"got calls: {[c[:4] for c in _calls if c and c[0]=='sudo']}"
+    )
+
+
 def test_iso_installer_stage_disk_info_errors_when_dir_missing():
     """Phase 7 cdrom-detect fix: installer/disk/ MUST be present —
     without /cdrom/.disk/info, cdrom-detect rejects the disc and the
@@ -1160,7 +1304,8 @@ def test_iso_installer_stage_disk_info_errors_when_dir_missing():
         os.makedirs(_stage, exist_ok=True)
         with tempfile.TemporaryDirectory() as _installer_empty:
             # installer_dir has no disk/ subdir → must return False
-            assert _stage_disk_info(_stage, _installer_empty) is False
+            assert _stage_disk_info(_stage, _installer_empty,
+                                     'athena', '0.1') is False
 
 
 def test_iso_installer_stage_disk_info_copies_files_skipping_readme():
@@ -1182,7 +1327,8 @@ def test_iso_installer_stage_disk_info_copies_files_skipping_readme():
                 fh.write('main\n')
             with open(os.path.join(_src, 'README.md'), 'w') as fh:
                 fh.write('# docs — should not be shipped\n')
-            assert _stage_disk_info(_stage, _installer) is True
+            assert _stage_disk_info(_stage, _installer,
+                                     'athena', '0.1') is True
             _disk = os.path.join(_stage, '.disk')
             assert sorted(os.listdir(_disk)) == [
                 'base_components', 'base_installable', 'info'
@@ -1193,6 +1339,56 @@ def test_iso_installer_stage_disk_info_copies_files_skipping_readme():
             # info content preserved verbatim
             with open(os.path.join(_disk, 'info')) as fh:
                 assert fh.read() == 'Athena 0.1 amd64 INSTALLER\n'
+
+
+def test_iso_installer_stage_disk_info_substitutes_codename_and_version():
+    """REGRESSION (2026-05-11): cdrom-detect parses the quoted codename
+    out of .disk/info to locate dists/<codename>/Release.  When
+    .disk/info had a hardcoded "athena" but build.conf [Build] CODENAME
+    was "thor", the dists/ subdir was thor/ and cdrom-detect couldn't
+    find the Release file → "Error reading Release file; unable to
+    determine distribution".  Fix: substitute ${codename} / ${version}
+    placeholders at iso-build time.
+
+    This test pins that .disk/info content with placeholders gets
+    substituted with the actual codename + version values."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_disk_info
+    with tempfile.TemporaryDirectory() as _stage:
+        with tempfile.TemporaryDirectory() as _installer:
+            _src = os.path.join(_installer, 'disk')
+            os.makedirs(_src)
+            with open(os.path.join(_src, 'info'), 'w') as fh:
+                fh.write('Athena ${version} "${codename}" - amd64 INSTALLER\n')
+            with open(os.path.join(_src, 'base_installable'), 'w') as fh:
+                fh.write('')
+            assert _stage_disk_info(_stage, _installer, 'thor', '0.1') is True
+            with open(os.path.join(_stage, '.disk', 'info')) as fh:
+                _result = fh.read()
+            assert _result == 'Athena 0.1 "thor" - amd64 INSTALLER\n', (
+                f"placeholder substitution failed; got: {_result!r}")
+
+
+def test_iso_installer_stage_disk_info_safe_substitute_leaves_unknown_vars():
+    """${codename} and ${version} are substituted.  Other $variables
+    (e.g. ${foo}) are LEFT UNCHANGED — string.Template.safe_substitute
+    semantics.  Operator can use other $-prefixed strings in
+    .disk/info content without them being mangled."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_disk_info
+    with tempfile.TemporaryDirectory() as _stage:
+        with tempfile.TemporaryDirectory() as _installer:
+            _src = os.path.join(_installer, 'disk')
+            os.makedirs(_src)
+            with open(os.path.join(_src, 'info'), 'w') as fh:
+                fh.write('${codename} ${unknown} ${version} $not_a_var\n')
+            assert _stage_disk_info(_stage, _installer, 'thor', '0.1') is True
+            with open(os.path.join(_stage, '.disk', 'info')) as fh:
+                _result = fh.read()
+            # Known placeholders substituted; unknown ones unchanged.
+            assert _result == 'thor ${unknown} 0.1 $not_a_var\n', _result
 
 
 def test_iso_installer_stage_disk_info_errors_when_only_readme():
@@ -1209,7 +1405,8 @@ def test_iso_installer_stage_disk_info_errors_when_only_readme():
             os.makedirs(_src)
             with open(os.path.join(_src, 'README.md'), 'w') as fh:
                 fh.write('# only docs\n')
-            assert _stage_disk_info(_stage, _installer) is False
+            assert _stage_disk_info(_stage, _installer,
+                                     'athena', '0.1') is False
 
 
 def test_iso_installer_stage_grub_cfg_copies_when_present():
@@ -4701,10 +4898,14 @@ def main() -> int:
         test_cmd_build_chroot_installer_bails_on_unmet_prereqs,
         test_installer_chroot_dpkg_unpack_carries_required_force_flags,
         test_iso_installer_kernel_pkg_regex_matches_real_kernels_only,
+        test_iso_installer_count_records_zero_one_many,
+        test_iso_installer_generate_apt_repo_invokes_correct_pipeline,
         test_iso_installer_stage_grub_cfg_errors_when_data_layer_missing,
         test_iso_installer_stage_grub_cfg_copies_when_present,
         test_iso_installer_stage_disk_info_errors_when_dir_missing,
         test_iso_installer_stage_disk_info_copies_files_skipping_readme,
+        test_iso_installer_stage_disk_info_substitutes_codename_and_version,
+        test_iso_installer_stage_disk_info_safe_substitute_leaves_unknown_vars,
         test_iso_installer_stage_disk_info_errors_when_only_readme,
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
