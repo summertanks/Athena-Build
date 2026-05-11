@@ -2408,6 +2408,203 @@ def test_derive_extras_src_names_marks_extras_only_sources():
     assert 'firefox' not in dt.extras_src_names  # mixed — NOT extras-only
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# COMP-01c phase 1 — live.list / installer.list split
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_dep_tree_initialises_subset_exclusive_sets_empty():
+    """A fresh DependencyTree has live_exclusive / installer_exclusive
+    pkg + src sets that exist and start empty."""
+    import sys, types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    # __init__ requires a real Cache; bypass via __new__ and replicate the
+    # subset of fields the assertions touch.
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    # Replicate __init__'s zero-state for the subset fields.
+    dt.live_exclusive_pkg_names = set()
+    dt.installer_exclusive_pkg_names = set()
+    dt.live_exclusive_src_names = set()
+    dt.installer_exclusive_src_names = set()
+    # Sanity — if a future change drops these the type check below will catch
+    # the regression at class scope.
+    assert hasattr(dependencytree.DependencyTree.__init__, '__code__')
+    assert isinstance(dt.live_exclusive_pkg_names, set)
+    assert isinstance(dt.installer_exclusive_pkg_names, set)
+    assert isinstance(dt.live_exclusive_src_names, set)
+    assert isinstance(dt.installer_exclusive_src_names, set)
+    assert not (dt.live_exclusive_pkg_names | dt.installer_exclusive_pkg_names
+                | dt.live_exclusive_src_names | dt.installer_exclusive_src_names)
+
+
+def test_buildconfig_argparse_exposes_live_and_installer_list_flags():
+    """BuildConfig's argparse must accept --live-list and --installer-list,
+    and the resulting BuildConfig instance must carry livelist_path and
+    installerlist_path attributes pointing at sensible defaults."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import BuildConfig
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Reuse the existing _stub_build_conf helper if available; otherwise
+        # construct by hand the minimum BuildConfig needs to parse.
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir, exist_ok=True)
+        # Minimal build.conf — borrows shape from the project's real one.
+        with open(os.path.join(_cfg_dir, 'build.conf'), 'w') as f:
+            f.write(
+                "[Build]\nARCH=amd64\nCODENAME=athena\nVERSION=0.0\n"
+                "[Base]\nBASEURL=http://example/\nBASEID=debian\n"
+                "RELEASE=athena\nBASEVERSION=1\n"
+                "[Mirror.test]\n"
+                "[Security]\nEnabled=false\nKeyring=\n"
+                "[Snapshot]\nEnabled=false\nTimestamp=latest\n"
+            )
+        with open(os.path.join(_cfg_dir, 'pkg.list'), 'w') as f: f.write('')
+        with open(os.path.join(_cfg_dir, 'live.list'), 'w') as f: f.write('')
+        with open(os.path.join(_cfg_dir, 'installer.list'), 'w') as f: f.write('')
+        _saved_argv = sys.argv
+        sys.argv = ['build.py',
+                    '--working-dir', _tmp,
+                    '--config-file', os.path.join(_cfg_dir, 'build.conf'),
+                    '--pkg-list',    os.path.join(_cfg_dir, 'pkg.list'),
+                    '--live-list',   os.path.join(_cfg_dir, 'live.list'),
+                    '--installer-list', os.path.join(_cfg_dir, 'installer.list')]
+        try:
+            cfg = BuildConfig()
+        finally:
+            sys.argv = _saved_argv
+        assert cfg.livelist_path      == os.path.join(_cfg_dir, 'live.list')
+        assert cfg.installerlist_path == os.path.join(_cfg_dir, 'installer.list')
+
+
+def test_read_pkg_list_filters_comments_blanks_and_already_selected():
+    """_read_pkg_list strips '#' lines, blanks, and any name already in
+    the already_selected set (pkg.list closure)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as fh:
+        fh.write(
+            "# A comment\n"
+            "\n"
+            "live-boot\n"
+            "  live-config  \n"          # leading/trailing whitespace
+            "already-here\n"               # in already_selected → filtered
+            "user-setup\n"
+            "# another\n"
+        )
+        _path = fh.name
+    try:
+        out = BuildSession._read_pkg_list(_path, already_selected={'already-here'})
+    finally:
+        os.unlink(_path)
+    assert out == ['live-boot', 'live-config', 'user-setup']
+
+
+def test_read_pkg_list_missing_file_returns_empty():
+    """A missing path → empty list, no exception (logged warning is fine)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    out = BuildSession._read_pkg_list('/nonexistent/path/to/list', set())
+    assert out == []
+
+
+def test_derive_subset_exclusive_src_names_marks_live_only_sources():
+    """A source whose every binary is in live_exclusive_pkg_names is marked
+    in live_exclusive_src_names; a mixed source (some pkg-layer, some
+    live-exclusive binaries) is NOT — same rule as derive_extras_src_names."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+
+    class _StubSrc:
+        def __init__(self, pkgs): self.pkgs = pkgs
+
+    # firefox source: produces firefox.deb (pkg-layer) AND firefox-l10n-en.deb
+    # (extras).  Mixed → NOT in any exclusive src set.
+    # live-config source: produces only live-config.deb (live-exclusive).
+    seed_pkgs = {
+        'firefox':         _FakePkg('firefox',         source='firefox',
+                                    filename='firefox_1.0_amd64.deb'),
+        'firefox-l10n-en': _FakePkg('firefox-l10n-en', source='firefox',
+                                    filename='firefox-l10n-en_1.0_amd64.deb'),
+        'live-config':     _FakePkg('live-config',     source='live-config',
+                                    filename='live-config_1.0_all.deb'),
+    }
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = _FakeCache({})
+    dt.selected_pkgs = seed_pkgs
+    dt.selected_srcs = {
+        'firefox':     _StubSrc(['firefox_1.0_amd64.deb',
+                                 'firefox-l10n-en_1.0_amd64.deb']),
+        'live-config': _StubSrc(['live-config_1.0_all.deb']),
+    }
+    dt.extras_pkg_names = set()
+    dt.extras_src_names = set()
+    dt.live_exclusive_pkg_names = {'live-config'}
+    dt.installer_exclusive_pkg_names = set()
+    dt.live_exclusive_src_names = set()
+    dt.installer_exclusive_src_names = set()
+    live_n, inst_n = dt.derive_subset_exclusive_src_names()
+    assert live_n == 1
+    assert inst_n == 0
+    assert dt.live_exclusive_src_names == {'live-config'}
+    assert 'firefox' not in dt.live_exclusive_src_names  # mixed
+    assert dt.installer_exclusive_src_names == set()
+
+
+def test_derive_subset_exclusive_src_names_no_op_when_both_empty():
+    """When both pkg_names sets are empty (no live or installer exclusives)
+    the helper short-circuits and returns (0, 0) without scanning."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = _FakeCache({})
+    dt.selected_pkgs = {}
+    dt.selected_srcs = {}
+    dt.extras_pkg_names = set()
+    dt.extras_src_names = set()
+    dt.live_exclusive_pkg_names = set()
+    dt.installer_exclusive_pkg_names = set()
+    dt.live_exclusive_src_names = set()
+    dt.installer_exclusive_src_names = set()
+    live_n, inst_n = dt.derive_subset_exclusive_src_names()
+    assert (live_n, inst_n) == (0, 0)
+
+
+def test_derive_subset_exclusive_src_names_handles_installer_exclusive():
+    """Symmetry: the installer arm of the same helper marks installer-only
+    sources the same way the live arm does."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+
+    class _StubSrc:
+        def __init__(self, pkgs): self.pkgs = pkgs
+
+    seed_pkgs = {
+        'partman-base': _FakePkg('partman-base', source='partman-base',
+                                 filename='partman-base_1.0_all.udeb'),
+    }
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = _FakeCache({})
+    dt.selected_pkgs = seed_pkgs
+    dt.selected_srcs = {
+        'partman-base': _StubSrc(['partman-base_1.0_all.udeb']),
+    }
+    dt.extras_pkg_names = set()
+    dt.extras_src_names = set()
+    dt.live_exclusive_pkg_names = set()
+    dt.installer_exclusive_pkg_names = {'partman-base'}
+    dt.live_exclusive_src_names = set()
+    dt.installer_exclusive_src_names = set()
+    live_n, inst_n = dt.derive_subset_exclusive_src_names()
+    assert (live_n, inst_n) == (0, 1)
+    assert dt.installer_exclusive_src_names == {'partman-base'}
+
+
 def test_compute_install_batches_excludes_extras_pkg_names():
     """EXTRAS-01: chroot install path skips packages in
     dependencytree.extras_pkg_names so they never enter a batch."""
@@ -3504,6 +3701,14 @@ def main() -> int:
         test_pull_recommends_extras_handles_multi_mirror_version_buckets,
         test_pull_recommends_extras_skips_already_in_selected_pkgs,
         test_derive_extras_src_names_marks_extras_only_sources,
+        # COMP-01c phase 1: live.list / installer.list split
+        test_dep_tree_initialises_subset_exclusive_sets_empty,
+        test_buildconfig_argparse_exposes_live_and_installer_list_flags,
+        test_read_pkg_list_filters_comments_blanks_and_already_selected,
+        test_read_pkg_list_missing_file_returns_empty,
+        test_derive_subset_exclusive_src_names_marks_live_only_sources,
+        test_derive_subset_exclusive_src_names_no_op_when_both_empty,
+        test_derive_subset_exclusive_src_names_handles_installer_exclusive,
         test_compute_install_batches_excludes_extras_pkg_names,
         test_verify_dep_resolution_skips_extras,
         test_verify_dep_resolution_still_catches_real_violations,

@@ -1,0 +1,8 @@
+# Packages required exclusively for the debian-installer (d-i) ISO —
+# over and above pkg.list.  Currently empty: the d-i source set
+# (debian-installer + udebs + custom theme) lands as part of COMP-01a.
+# See docs/plans/comp-01-installer.md for the design.
+#
+# When populated, anything pulled in by pkg.list's closure should NOT
+# be listed here: the dependency tree marks installer_exclusive as
+# "what the installer needs that pkg does not already cover".

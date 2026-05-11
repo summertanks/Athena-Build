@@ -4,15 +4,6 @@ linux-image-amd64
 # Bootloader
 grub-efi-amd64
 
-# Live boot support (mounts squashfs root + overlayfs at boot)
-live-boot
-live-boot-initramfs-tools
-
-# Live session configuration — creates live user, autologin, locale at boot
-live-config
-live-config-systemd
-user-setup
-
 # Essential Packages
 base-files
 base-passwd

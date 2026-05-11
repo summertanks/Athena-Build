@@ -377,16 +377,26 @@ def _print_important(session, *_extras) -> None:
 
 def _print_selected(session, *_extras) -> None:
     """All packages resolved by parse_dependency (canonical names only).
-    Marks EXTRAS-01 entries with `(extra)` so the operator can tell at a
-    glance which are pulled in for the repo vs the chroot install."""
+    Marks EXTRAS-01 entries with `(extra)`, COMP-01c live-exclusive with
+    `(live)`, and installer-exclusive with `(installer)` so the operator
+    can tell at a glance which subset each entry belongs to."""
     if not _require_dep_check(session):
         return
     pkgs = session.dep_tree.selected_pkgs
     real_pkgs = {k: v for k, v in pkgs.items() if k == v['Package']}
-    _extras_set = getattr(session.dep_tree, 'extras_pkg_names', set())
+    _extras_set    = getattr(session.dep_tree, 'extras_pkg_names',           set())
+    _live_set      = getattr(session.dep_tree, 'live_exclusive_pkg_names',   set())
+    _installer_set = getattr(session.dep_tree, 'installer_exclusive_pkg_names', set())
     tui.console.print(f"Selected packages ({len(real_pkgs)}):")
     for name in sorted(real_pkgs.keys()):
-        _suffix = '  (extra)' if name in _extras_set else ''
+        if name in _extras_set:
+            _suffix = '  (extra)'
+        elif name in _live_set:
+            _suffix = '  (live)'
+        elif name in _installer_set:
+            _suffix = '  (installer)'
+        else:
+            _suffix = ''
         tui.console.print(f"  {name:<40} {real_pkgs[name].version}{_suffix}")
 
 
@@ -421,6 +431,68 @@ def _print_extras(session, *_extras) -> None:
     for name in sorted(extras_pkg_names):
         _src = _src_for_pkg.get(name, '?')
         _src_kind = 'extras-only' if _src in extras_src_names else 'mixed source'
+        tui.console.print(
+            f"  {name:<40} from {_src:<24} ({_src_kind})"
+        )
+
+
+def _print_live_exclusive(session, *_extras) -> None:
+    """COMP-01c phase 1: packages pulled in by live.list that are NOT
+    already in pkg.list's closure.  These ride on top of pkg's install set
+    to make a complete live system."""
+    if not _require_dep_check(session):
+        return
+    live_pkgs = getattr(session.dep_tree, 'live_exclusive_pkg_names', set())
+    live_srcs = getattr(session.dep_tree, 'live_exclusive_src_names', set())
+    if not live_pkgs:
+        tui.console.print(
+            "No live-exclusive packages "
+            "(live.list empty, or every entry already pulled by pkg.list)"
+        )
+        return
+    _src_for_pkg = {}
+    for _src_name, _src in session.dep_tree.selected_srcs.items():
+        for _bin_filename in (getattr(_src, 'pkgs', []) or []):
+            _pkg_name = _bin_filename.split('_', 1)[0]
+            _src_for_pkg[_pkg_name] = _src_name
+    tui.console.print(
+        f"Live-exclusive ({len(live_pkgs)} pkg(s) from "
+        f"{len(live_srcs)} live-only source(s)):"
+    )
+    for name in sorted(live_pkgs):
+        _src = _src_for_pkg.get(name, '?')
+        _src_kind = 'live-only src' if _src in live_srcs else 'mixed src'
+        tui.console.print(
+            f"  {name:<40} from {_src:<24} ({_src_kind})"
+        )
+
+
+def _print_installer_exclusive(session, *_extras) -> None:
+    """COMP-01c phase 1: packages pulled in by installer.list that are NOT
+    already in pkg.list's closure.  Currently empty by design — d-i source
+    set lands as part of COMP-01a."""
+    if not _require_dep_check(session):
+        return
+    inst_pkgs = getattr(session.dep_tree, 'installer_exclusive_pkg_names', set())
+    inst_srcs = getattr(session.dep_tree, 'installer_exclusive_src_names', set())
+    if not inst_pkgs:
+        tui.console.print(
+            "No installer-exclusive packages "
+            "(installer.list empty — see COMP-01a)"
+        )
+        return
+    _src_for_pkg = {}
+    for _src_name, _src in session.dep_tree.selected_srcs.items():
+        for _bin_filename in (getattr(_src, 'pkgs', []) or []):
+            _pkg_name = _bin_filename.split('_', 1)[0]
+            _src_for_pkg[_pkg_name] = _src_name
+    tui.console.print(
+        f"Installer-exclusive ({len(inst_pkgs)} pkg(s) from "
+        f"{len(inst_srcs)} installer-only source(s)):"
+    )
+    for name in sorted(inst_pkgs):
+        _src = _src_for_pkg.get(name, '?')
+        _src_kind = 'installer-only src' if _src in inst_srcs else 'mixed src'
         tui.console.print(
             f"  {name:<40} from {_src:<24} ({_src_kind})"
         )
@@ -685,6 +757,8 @@ CATEGORIES = {
     'selected':  (_print_selected,  'Packages',      'packages resolved by parse_dependency'),
     'tunneled':  (_print_tunneled,  'Packages',      'packages set to use prebuilt .debs (Tunneled list)'),
     'extras':    (_print_extras,    'Packages',      'EXTRAS-01: depth-1 Recommends pulled into the repo (not chroot-installed)'),
+    'live':      (_print_live_exclusive,      'Packages', 'COMP-01c: packages live needs over and above pkg.list'),
+    'installer': (_print_installer_exclusive, 'Packages', 'COMP-01c: packages installer needs over and above pkg.list (empty until COMP-01a)'),
     'pkg':       (_print_pkg,       'Packages',      'full package detail — usage: print pkg <name>'),
     'deps':      (_print_deps,      'Packages',      'flat dep list of a package — usage: print deps <name>'),
 
