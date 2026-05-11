@@ -1,0 +1,14 @@
+# Packages required exclusively for live boot — over and above pkg.list.
+#
+# Anything pulled in by pkg.list's closure should NOT be listed here:
+# the dependency tree marks live_exclusive as "what live needs that pkg
+# does not already cover", so duplicating entries is harmless but noisy.
+
+# Live boot support (mounts squashfs root + overlayfs at boot)
+live-boot
+live-boot-initramfs-tools
+
+# Live session configuration — creates live user, autologin, locale at boot
+live-config
+live-config-systemd
+user-setup

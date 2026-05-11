@@ -100,6 +100,36 @@ class BuildSession:
         self.flags: BuildFlags = BuildFlags()
         self.last_source_build_counts: 'Optional[dict]' = None
 
+    @staticmethod
+    def _read_pkg_list(path: str, already_selected: set) -> list:
+        """Read a pkg-list file (one package per line, # comments, blanks
+        ignored) and return entries NOT already in ``already_selected``.
+
+        Used by Pass IV (live.list) and Pass V (installer.list) to feed
+        only the new requests into resolve_packages — entries that are
+        already in the closure are no-ops and skipping them keeps the
+        resolve_packages invocation tight.
+
+        Missing or unreadable file → empty list + a warning logged; the
+        caller treats that as "no exclusive packages".  installer.list
+        starts empty by design (COMP-01a populates it).
+        """
+        try:
+            _raw = utils.readfile(path).split('\n')
+        except OSError as e:
+            console.print(f"WARNING: cannot read pkg list {path} — treating as empty")
+            logger.warning(f"_read_pkg_list({path}): {e}")
+            return []
+        _out = []
+        for _line in _raw:
+            _name = _line.strip()
+            if not _name or _name.startswith('#'):
+                continue
+            if _name in already_selected:
+                continue
+            _out.append(_name)
+        return _out
+
     def cmd_build_cache(self):
         """Fetch and parse the upstream APT package indices into an in-memory cache.
 
@@ -211,7 +241,7 @@ class BuildSession:
     def cmd_parse_dependency(self):
         """Resolve the full closure of packages needed to build the target system.
 
-        Runs three dependency-resolution passes in priority order:
+        Runs five dependency-resolution passes in priority order:
 
           Pass I   — 'required' packages (essential base; every package they pull
                       in is also marked required so it survives any later pruning)
@@ -219,10 +249,17 @@ class BuildSession:
                       avoids excessive manual intervention on a bare system)
           Pass III — manually listed packages from the configured pkglist file
                       (distro-specific selections on top of the Debian base)
+          Pass IV  — packages from live.list — what the live system needs over
+                      and above pkg.list.  Anything new lands in
+                      live_exclusive_pkg_names.
+          Pass V   — packages from installer.list — what the installer system
+                      needs over and above pkg.list.  Anything new (and not
+                      already credited to live_exclusive in this pass ordering)
+                      lands in installer_exclusive_pkg_names.
 
         After resolution, validates the selection for Breaks/Conflicts, then
         maps every selected binary package back to its source package so that
-        source_download and source_build know what to fetch and build.
+        source download and source build know what to fetch and build.
 
         Patch files are discovered at this stage so that buildcontainer.build()
         can mount them at container start time without a second disk scan.
@@ -308,6 +345,47 @@ class BuildSession:
 
         __num_total = self.dep_tree.selected_count
         console.print(f"Dependencies for manually added packages : {__num_total - __num_required}")
+
+        # --- Pass IV: live.list ------------------------------------------------
+        # Snapshot pkg.list closure here — anything pulled in beyond this point
+        # by live.list / installer.list goes into the corresponding exclusive
+        # set.  Required + important + pkg.list are ALL in pkg_closure (as
+        # intended — exclusivity is computed against everything pkg.list
+        # transitively needs, not just the literal pkg.list lines).
+        _pkg_closure = set(self.dep_tree.selected_pkgs.keys())
+
+        console.print("Pass IV: Checking dependency for live-only packages", tui.COLOR_INFO)
+        _live_list = self._read_pkg_list(self.config.livelist_path,
+                                         already_selected=_pkg_closure)
+        if _live_list:
+            self.dep_tree.resolve_packages(_live_list)
+        self.dep_tree.live_exclusive_pkg_names = (
+            set(self.dep_tree.selected_pkgs.keys()) - _pkg_closure
+        )
+        console.print(
+            f"Live-exclusive packages : {len(self.dep_tree.live_exclusive_pkg_names)}"
+        )
+
+        # --- Pass V: installer.list -------------------------------------------
+        # KNOWN LIMITATION (phase 1): linear ordering means a package needed
+        # by BOTH live and installer (and not pkg) ends up in live_exclusive
+        # only — because Pass IV runs first.  installer.list is empty today
+        # so the issue is latent; revisit when COMP-01a populates it.
+        console.print("Pass V: Checking dependency for installer-only packages", tui.COLOR_INFO)
+        _installer_list = self._read_pkg_list(self.config.installerlist_path,
+                                              already_selected=set(self.dep_tree.selected_pkgs.keys()))
+        if _installer_list:
+            self.dep_tree.resolve_packages(_installer_list)
+        self.dep_tree.installer_exclusive_pkg_names = (
+            set(self.dep_tree.selected_pkgs.keys())
+            - _pkg_closure
+            - self.dep_tree.live_exclusive_pkg_names
+        )
+        console.print(
+            f"Installer-exclusive packages : {len(self.dep_tree.installer_exclusive_pkg_names)}"
+        )
+
+        __num_total = self.dep_tree.selected_count
         console.print(f"Total Selected Packages : {__num_total}", tui.COLOR_HIGHLIGHT)
         _spiner.done()
 
@@ -358,6 +436,17 @@ class BuildSession:
         _extras_only = self.dep_tree.derive_extras_src_names()
         if self.dep_tree.extras_pkg_names:
             console.print(f"EXTRAS: {_extras_only} source(s) are extras-only ", tui.COLOR_INFO)
+
+        # COMP-01c phase 1: derive live/installer-exclusive *source* names
+        # so future source-build / chroot-build subset filters can route
+        # them.  Phase 1 just records the sets; behaviour change lands later.
+        _live_only, _installer_only = self.dep_tree.derive_subset_exclusive_src_names()
+        if _live_only or _installer_only:
+            console.print(
+                f"SUBSETS: {_live_only} live-exclusive src, "
+                f"{_installer_only} installer-exclusive src",
+                tui.COLOR_INFO,
+            )
 
         # Apply per-package skip_test flag from config (suppresses 'nocheck' build opt).
         for _pkg in self.config.skip_build_test:

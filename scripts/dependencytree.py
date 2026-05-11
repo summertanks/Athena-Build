@@ -79,6 +79,23 @@ class DependencyTree:
         # by derive_extras_src_names() AFTER parse_sources has populated
         # selected_srcs.
         self.extras_src_names: set = set()
+
+        # COMP-01c phase 1: live.list / installer.list split.  After Pass III
+        # (pkg.list) resolves, snapshot pkg_closure; Pass IV/V resolve_packages
+        # against live.list / installer.list and the deltas land here.
+        # "Exclusive" = needed by live (or installer) but NOT in pkg.list's
+        # closure — anything pkg.list already pulls in is the source of truth
+        # for "must install".  Mirror of extras_pkg_names / extras_src_names
+        # but indexed on a different axis.
+        # KNOWN LIMITATION: in this phase live runs before installer; if a
+        # package were needed by BOTH live and installer (and not pkg), it
+        # would only show up in live_exclusive.  installer.list is empty
+        # today so the issue is latent — revisit when COMP-01a populates it.
+        self.live_exclusive_pkg_names: set = set()
+        self.installer_exclusive_pkg_names: set = set()
+        self.live_exclusive_src_names: set = set()
+        self.installer_exclusive_src_names: set = set()
+
         self.arch = arch
         self.build_profiles = build_profiles
 
@@ -671,6 +688,58 @@ class DependencyTree:
             f"extras-only source(s) identified"
         )
         return len(self.extras_src_names)
+
+    def derive_subset_exclusive_src_names(self) -> tuple:
+        """COMP-01c phase 1: after parse_sources has populated selected_srcs,
+        identify which sources are exclusive to live or installer (every
+        produced binary lives in the corresponding *_exclusive_pkg_names).
+
+        Mirrors derive_extras_src_names: a source whose binaries are mixed
+        (some pkg-layer binaries, some live/installer-exclusive) is NOT
+        marked exclusive — it gets built in the pkg-layer source build run
+        and the live/installer binaries fall out as side artefacts of
+        dpkg-buildpackage.
+
+        Returns ``(live_count, installer_count)``.
+        """
+        self.live_exclusive_src_names.clear()
+        self.installer_exclusive_src_names.clear()
+        if not (self.live_exclusive_pkg_names or
+                self.installer_exclusive_pkg_names):
+            return 0, 0
+        # Reuse the same binary-filename → canonical-pkg-name index
+        # construction as derive_extras_src_names; factor later if a
+        # third caller arrives.
+        _bin_filename_to_name = {}
+        for _name in self.selected_pkgs:
+            if _name != self.selected_pkgs[_name]['Package']:
+                continue
+            _filename = (self.selected_pkgs[_name].get('Filename') or '')\
+                .rsplit('/', 1)[-1]
+            if _filename:
+                try:
+                    _filename = utils.strip_build_version(_filename)
+                except ValueError:
+                    pass
+                _bin_filename_to_name[_filename] = _name
+        for _src_name, _src in self.selected_srcs.items():
+            _src_bins = getattr(_src, 'pkgs', []) or []
+            if not _src_bins:
+                continue
+            _pkg_names = [_bin_filename_to_name.get(_fn) for _fn in _src_bins]
+            if all(n is not None and n in self.live_exclusive_pkg_names
+                   for n in _pkg_names):
+                self.live_exclusive_src_names.add(_src_name)
+            if all(n is not None and n in self.installer_exclusive_pkg_names
+                   for n in _pkg_names):
+                self.installer_exclusive_src_names.add(_src_name)
+        logger.info(
+            f"derive_subset_exclusive_src_names: "
+            f"live={len(self.live_exclusive_src_names)}, "
+            f"installer={len(self.installer_exclusive_src_names)}"
+        )
+        return (len(self.live_exclusive_src_names),
+                len(self.installer_exclusive_src_names))
 
     def parse_sources(self) -> bool:
         _found = True
