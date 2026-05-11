@@ -96,6 +96,12 @@ class BuildSession:
         self.tui: 'Tui' = tui_inst
         self.cache: 'Optional[Cache]' = None
         self.dep_tree: 'Optional[dependencytree.DependencyTree]' = None
+        # COMP-01b phase 3: parallel dep tree resolved against the udeb
+        # world (Cache.udeb_hashtable via Cache.udeb_view()).  Populated
+        # by cmd_parse_dependency after the deb passes complete.  Stays
+        # None until then; consumers MUST gate on dep_check_ready before
+        # touching it.
+        self.udeb_dep_tree: 'Optional[dependencytree.DependencyTree]' = None
         self.container: 'Optional[buildcontainer.BuildContainer]' = None
         self.flags: BuildFlags = BuildFlags()
         self.last_source_build_counts: 'Optional[dict]' = None
@@ -241,25 +247,35 @@ class BuildSession:
     def cmd_parse_dependency(self):
         """Resolve the full closure of packages needed to build the target system.
 
-        Runs five dependency-resolution passes in priority order:
+        Runs SIX dependency-resolution passes — five against the deb world
+        (Cache.package_hashtable) and a final one against the udeb world
+        (Cache.udeb_hashtable, accessed via Cache.udeb_view()):
 
           Pass I   — 'required' packages (essential base; every package they pull
                       in is also marked required so it survives any later pruning)
           Pass II  — 'important' packages (strongly recommended by Debian policy;
                       avoids excessive manual intervention on a bare system)
-          Pass III — manually listed packages from the configured pkglist file
-                      (distro-specific selections on top of the Debian base)
+          Pass III — manually listed packages from pkg.list (user-selected base)
           Pass IV  — packages from live.list — what the live system needs over
                       and above pkg.list.  Anything new lands in
                       live_exclusive_pkg_names.
-          Pass V   — packages from installer.list — what the installer system
-                      needs over and above pkg.list.  Anything new (and not
-                      already credited to live_exclusive in this pass ordering)
-                      lands in installer_exclusive_pkg_names.
+          Pass V   — installer.list deb arm — entries that exist in the deb
+                      cache (e.g. efibootmgr, grub-pc-bin) get pulled into the
+                      deb tree and credited to installer_exclusive_pkg_names.
+          Pass VI  — installer.list udeb arm + Cache.udeb_required +
+                      Cache.udeb_important resolved against udeb_hashtable
+                      via a parallel udeb_dep_tree.  Produces the udeb closure
+                      that becomes the installer ramdisk content.
+
+        installer.list is mixed-universe — each entry is dispatched per its
+        membership in the deb / udeb hashtables (deb match → Pass V; udeb
+        match → Pass VI; both → both).
 
         After resolution, validates the selection for Breaks/Conflicts, then
         maps every selected binary package back to its source package so that
-        source download and source build know what to fetch and build.
+        source download and source build know what to fetch and build.  Both
+        trees' selected_pkgs are mapped to sources via parse_sources;
+        downstream consumers iterate over the union (Phase 4 work).
 
         Patch files are discovered at this stage so that buildcontainer.build()
         can mount them at container start time without a second disk scan.
@@ -366,28 +382,102 @@ class BuildSession:
             f"Live-exclusive packages : {len(self.dep_tree.live_exclusive_pkg_names)}"
         )
 
-        # --- Pass V: installer.list -------------------------------------------
-        # KNOWN LIMITATION (phase 1): linear ordering means a package needed
-        # by BOTH live and installer (and not pkg) ends up in live_exclusive
-        # only — because Pass IV runs first.  installer.list is empty today
-        # so the issue is latent; revisit when COMP-01a populates it.
-        console.print("Pass V: Checking dependency for installer-only packages", tui.COLOR_INFO)
-        _installer_list = self._read_pkg_list(self.config.installerlist_path,
-                                              already_selected=set(self.dep_tree.selected_pkgs.keys()))
-        if _installer_list:
-            self.dep_tree.resolve_packages(_installer_list)
+        # --- Pass V: installer.list (mixed deb + udeb per-entry dispatch) ----
+        # Phase 3 (COMP-01b): installer.list contains BOTH udeb names (for
+        # the installer ramdisk) AND deb names like efibootmgr/grub-pc-bin
+        # (for the target system to apt-pull at install time).  Each entry
+        # is looked up in both hashtables:
+        #   - udeb match → goes into the udeb seed set (Pass VI below)
+        #   - deb match  → goes into the deb dep tree (this pass) and ends
+        #                  up in installer_exclusive_pkg_names
+        #   - both match → both happen
+        console.print("Pass V: Dispatching installer.list (deb arm)", tui.COLOR_INFO)
+        _installer_raw = self._read_pkg_list(
+            self.config.installerlist_path, already_selected=set())
+        _udeb_table = self.cache.udeb_hashtable
+        _deb_table  = self.cache.package_hashtable
+        _installer_deb_names: list = []
+        _installer_udeb_names: list = []
+        _installer_unknown: list = []
+        for _name in _installer_raw:
+            _in_deb  = _name in _deb_table
+            _in_udeb = _name in _udeb_table
+            if _in_deb:
+                _installer_deb_names.append(_name)
+            if _in_udeb:
+                _installer_udeb_names.append(_name)
+            if not (_in_deb or _in_udeb):
+                _installer_unknown.append(_name)
+        if _installer_unknown:
+            console.print(
+                f"WARNING: installer.list has {len(_installer_unknown)} "
+                f"name(s) not in deb or udeb cache: "
+                f"{', '.join(_installer_unknown[:5])}"
+                f"{'…' if len(_installer_unknown) > 5 else ''}"
+            )
+            logger.warning(
+                f"installer.list unknown names: {_installer_unknown}"
+            )
+        # Filter deb arm to entries not already in the closure (Pass IV may
+        # have pulled some in transitively).
+        _installer_deb_new = [
+            n for n in _installer_deb_names
+            if n not in self.dep_tree.selected_pkgs
+        ]
+        if _installer_deb_new:
+            self.dep_tree.resolve_packages(_installer_deb_new)
         self.dep_tree.installer_exclusive_pkg_names = (
             set(self.dep_tree.selected_pkgs.keys())
             - _pkg_closure
             - self.dep_tree.live_exclusive_pkg_names
         )
         console.print(
-            f"Installer-exclusive packages : {len(self.dep_tree.installer_exclusive_pkg_names)}"
+            f"Installer-exclusive deb packages : {len(self.dep_tree.installer_exclusive_pkg_names)}"
         )
 
         __num_total = self.dep_tree.selected_count
-        console.print(f"Total Selected Packages : {__num_total}", tui.COLOR_HIGHLIGHT)
+        console.print(f"Total Selected (deb) Packages : {__num_total}", tui.COLOR_HIGHLIGHT)
         _spiner.done()
+
+        # --- Pass VI: udeb world (parallel dep tree) -------------------------
+        # Build a parallel DependencyTree against Cache.udeb_view() (which
+        # presents udeb_hashtable as package_hashtable).  Seeds = the
+        # udeb-priority required + important sets + every udeb-bound name
+        # in installer.list.  Resolves transitively through the udeb dep
+        # graph into udeb_dep_tree.selected_pkgs.
+        console.print("Pass VI: Resolving udeb (installer ramdisk) tree", tui.COLOR_INFO)
+        _udeb_spiner = Spinner("Resolving udeb dependencies")
+        _udeb_view = self.cache.udeb_view()
+        self.udeb_dep_tree = dependencytree.DependencyTree(
+            _udeb_view, select_recommended=False,
+            arch=self.config.arch,
+            build_profiles=self.config.build_profiles,
+            # COMP-01b phase 3: udeb world commonly has multi-Package-name
+            # "providers" that are really just kernel-ABI variants of the
+            # same module (ext4-modules-6.1.0-{NN}-amd64-di etc.).  Auto-
+            # pick the highest version across names instead of prompting.
+            auto_pick_highest_when_ambiguous=True,
+        )
+        _udeb_seeds_required = list(self.cache.udeb_required)
+        _udeb_seeds_important = list(self.cache.udeb_important)
+        if _udeb_seeds_required:
+            self.udeb_dep_tree.resolve_packages(_udeb_seeds_required)
+        if _udeb_seeds_important:
+            self.udeb_dep_tree.resolve_packages(_udeb_seeds_important)
+        _udeb_seeds_from_list = [
+            n for n in _installer_udeb_names
+            if n not in self.udeb_dep_tree.selected_pkgs
+        ]
+        if _udeb_seeds_from_list:
+            self.udeb_dep_tree.resolve_packages(_udeb_seeds_from_list)
+        console.print(
+            f"Udeb closure: {self.udeb_dep_tree.selected_count} udeb(s) "
+            f"(seeds: {len(_udeb_seeds_required)} required + "
+            f"{len(_udeb_seeds_important)} important + "
+            f"{len(_installer_udeb_names)} from installer.list)",
+            tui.COLOR_HIGHLIGHT,
+        )
+        _udeb_spiner.done()
 
         # When [Build] IncludeRecommendsInRepo is on (default)
         if self.config.include_recommends_in_repo:
@@ -430,6 +520,25 @@ class BuildSession:
             _resp = Prompt(PROMPT_YESNO, "There are one or more source parse failures, Proceed?").get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
+
+        # COMP-01b phase 3: parse_sources for the udeb tree too.  Sources
+        # are universal (same source produces both .deb and .udeb), so the
+        # shared source_hashtable already has the records we need.
+        # udeb_dep_tree.selected_srcs is populated independently; downstream
+        # consumers (source download / source build) will iterate over the
+        # UNION of both trees' selected_srcs in Phase 4.
+        if self.udeb_dep_tree is not None:
+            console.print("Parsing Udeb Source Packages...", tui.COLOR_INFO)
+            if not self.udeb_dep_tree.parse_sources():
+                _resp = Prompt(PROMPT_YESNO,
+                               "There are one or more udeb source parse failures, Proceed?"
+                               ).get_response()
+                if _resp.lower() not in ('y', 'yes'):
+                    return
+            console.print(
+                f"Udeb sources: {len(self.udeb_dep_tree.selected_srcs)} ",
+                tui.COLOR_HIGHLIGHT,
+            )
 
         # EXTRAS: identify which sources are extras-only so source_build
         # default skips them and `source_build recommended` builds only them.

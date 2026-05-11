@@ -641,3 +641,60 @@ class Cache:
                 # constraint failures — the candidate just doesn't qualify.
                 pass
         return result
+
+    def udeb_view(self) -> 'UdebCacheView':
+        """COMP-01b phase 3: return a thin Cache-shaped view that exposes
+        udeb_hashtable as package_hashtable.  Lets the existing
+        DependencyTree class be instantiated against the udeb world
+        unchanged (DependencyTree only reads .get_packages,
+        .package_hashtable, .skip_src, .source_hashtable from its cache).
+        """
+        return UdebCacheView(self)
+
+
+class UdebCacheView:
+    """Cache wrapper for udeb-world resolution.
+
+    DependencyTree was written against Cache and only ever touches:
+      - cache.get_packages(name, version, constraint)
+      - cache.package_hashtable
+      - cache.skip_src
+      - cache.source_hashtable
+
+    This view makes the udeb dimension look identical to a Cache, so the
+    same DependencyTree code path resolves either world based on which
+    cache it was constructed with.  source_hashtable + skip_src are
+    shared (sources are universal — same source produces both .deb and
+    .udeb outputs); package_hashtable is swapped to udeb_hashtable.
+
+    Not a subclass of Cache because Cache's __init__ does heavy lifting
+    (mirror parsing, downloads).  Composition keeps the view cheap.
+    """
+
+    def __init__(self, real_cache: 'Cache'):
+        self._real = real_cache
+        # Direct attribute hand-offs — DependencyTree accesses these as
+        # plain attributes, not via getters.
+        self.package_hashtable = real_cache.udeb_hashtable
+        self.skip_src          = real_cache.skip_src
+        self.source_hashtable  = real_cache.source_hashtable
+
+    def get_packages(self, package_name: str,
+                     version: Optional[Version] = None,
+                     constraint: str = '') -> List[Package]:
+        """Same semantics as Cache.get_packages but against the udeb table."""
+        if version is None:
+            result: List[Package] = []
+            for _pkgs in self.package_hashtable.get(package_name, {}).values():
+                result.extend(_pkgs)
+            return result
+
+        _constraint = constraint if constraint in Cache._VALID_CONSTRAINTS else '>='
+        result = []
+        for _pkg_version, _pkgs in self.package_hashtable.get(package_name, {}).items():
+            try:
+                if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
+                    result.extend(_pkgs)
+            except (SystemError, ValueError):
+                pass
+        return result

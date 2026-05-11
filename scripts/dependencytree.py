@@ -54,10 +54,20 @@ class DependencyTree:
     _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
 
     def __init__(self, cache: Cache, select_recommended: bool, arch: str,
-                 build_profiles: frozenset = frozenset(), lookahead=None):
+                 build_profiles: frozenset = frozenset(), lookahead=None,
+                 auto_pick_highest_when_ambiguous: bool = False):
 
         self.__recommended = select_recommended
         self.__cache = cache
+        # COMP-01b phase 3: when True, multi-Package-name candidates that
+        # _auto_pick_candidate refuses to auto-pick (different names) get
+        # an additional fallback — pick the candidate with the highest
+        # version across names.  Used by the udeb tree where kernel-ABI
+        # variants like ext4-modules-6.1.0-{39..47}-amd64-di present as
+        # multiple "providers" but really just want the latest.  Off by
+        # default for the deb tree because there genuine alternatives
+        # (mawk vs gawk for `awk`) need operator input.
+        self._auto_pick_highest_when_ambiguous = auto_pick_highest_when_ambiguous
         # Dict[name_or_virtual, Dict[Version, Package]]
         # Mirrors package_hashtable structure — multiple versions per name co-exist without overwrite
         self.__lookahead: Dict[str, Dict[Version, package.Package]] = defaultdict(dict)
@@ -120,6 +130,16 @@ class DependencyTree:
             # only on genuine alternative providers (different Package
             # names like mawk vs gawk for `awk`).
             _auto, _collapsed = _auto_pick_candidate(_candidates)
+            if _auto is None and self._auto_pick_highest_when_ambiguous and _collapsed:
+                # COMP-01b phase 3 udeb-tree fallback: multiple providers
+                # with different Package names — pick the highest version
+                # across names (typical for kernel-ABI udeb variants).
+                _auto = max(_collapsed, key=lambda p: p.version)
+                logger.info(
+                    f"add_lookahead: highest-version fallback picked "
+                    f"{_auto.package} {_auto.version} from "
+                    f"{len(_collapsed)} multi-name providers of '{_pkg_name}'"
+                )
             if _auto is not None:
                 _selected = _auto
                 if len(_candidates) > 1:
@@ -282,6 +302,16 @@ class DependencyTree:
         # Prompt only when names differ (genuine alternative providers).
         elif len(_pkg_candidates) > 1:
             _auto, _collapsed = _auto_pick_candidate(_pkg_candidates)
+            if _auto is None and self._auto_pick_highest_when_ambiguous and _collapsed:
+                # COMP-01b phase 3 udeb-tree fallback: highest-version
+                # across multi-name providers (typical for kernel-ABI
+                # udeb variants — see __init__ docstring).
+                _auto = max(_collapsed, key=lambda p: p.version)
+                logger.info(
+                    f"highest-version fallback picked {_auto.package} "
+                    f"{_auto.version} from {len(_collapsed)} multi-name "
+                    f"providers of '{package_name}'"
+                )
             if _auto is not None:
                 _selected_pkg = _auto
                 logger.info(
