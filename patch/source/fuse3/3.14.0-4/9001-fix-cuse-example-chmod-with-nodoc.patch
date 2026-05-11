@@ -1,0 +1,31 @@
+Description: Gate cuse_client.c chmod on file presence (nodoc-safe)
+ With DEB_BUILD_PROFILES=nodoc set, dh_installexamples skips installing
+ the upstream examples into debian/libfuse3-dev/usr/share/doc/libfuse3-dev/
+ examples/.  override_dh_fixperms then fails because it unconditionally
+ chmods cuse_client.c regardless of whether it was actually staged:
+ .
+   chmod a-x debian/libfuse3-dev/usr/share/doc/libfuse3-dev/examples/cuse_client.c
+   chmod: cannot access '...': No such file or directory
+   make[1]: *** [debian/rules:31: override_dh_fixperms] Error 1
+ .
+ Wrap the chmod in `if [ -f ... ]` so the rule is a no-op when the
+ examples directory wasn't populated.  Both the nodoc profile (Athena's
+ default per [Source] BuildProfiles in build.conf) and full builds (no
+ profiles) work unchanged.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-10
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -28,7 +28,7 @@ override_dh_compress:
+
+ override_dh_fixperms:
+ 	dh_fixperms
+-	chmod a-x debian/libfuse3-dev/usr/share/doc/libfuse3-dev/examples/cuse_client.c
++	if [ -f debian/libfuse3-dev/usr/share/doc/libfuse3-dev/examples/cuse_client.c ]; then chmod a-x debian/libfuse3-dev/usr/share/doc/libfuse3-dev/examples/cuse_client.c; fi
+
+ ifeq ($(DEB_BUILD_ARCH),linux)
+ 	chmod 0755 debian/fuse3/bin/fusermount3
