@@ -1,5 +1,16 @@
 # Linux kernel
 linux-image-amd64
+# Kernel headers — needed only by DKMS / out-of-tree module compiles.
+# Not required for a vanilla running system; kept for developer/admin
+# convenience.
+linux-headers-amd64
+# Free firmware blobs the kernel recommends.  Covers BSD-licensed
+# firmware for various NICs, GPUs, and storage controllers.  No
+# non-free-firmware component needed.  For non-free firmware blobs
+# (firmware-iwlwifi, firmware-misc-nonfree) or CPU microcode
+# (intel-microcode, amd64-microcode), add 'non-free-firmware' to
+# the [Mirror.*] Component lines in build.conf — separate work.
+firmware-linux-free
 
 # Bootloader
 grub-efi-amd64

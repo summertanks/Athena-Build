@@ -1,8 +1,114 @@
 # Packages required exclusively for the debian-installer (d-i) ISO —
-# over and above pkg.list.  Currently empty: the d-i source set
-# (debian-installer + udebs + custom theme) lands as part of COMP-01a.
-# See docs/plans/comp-01-installer.md for the design.
+# over and above pkg.list.
 #
-# When populated, anything pulled in by pkg.list's closure should NOT
-# be listed here: the dependency tree marks installer_exclusive as
-# "what the installer needs that pkg does not already cover".
+# Mixed-universe list: each name is dispatched per which hashtable
+# carries it.  udeb names → udeb_dep_tree closure (installer ramdisk).
+# deb names → deb dep tree's installer_exclusive set (pool extras
+# the installer apt-pulls onto the target at install time).  Both →
+# both.  Resolver warns on names in neither index.
+
+# ─── Cdebconf frontend ─────────────────────────────────────────────
+# cdebconf-udeb is the engine — pulled transitively by base-installer's
+# closure.  But the engine needs a frontend PLUGIN to render prompts;
+# without one, cdebconf's debconf.c:241 main() loops "Cannot initialize
+# debconf frontend".  cdebconf-udeb's baked-in /etc/cdebconf.conf says
+# driver="newt", so we need cdebconf-newt-udeb in the chroot.
+cdebconf-newt-udeb
+
+# ─── Orchestrator + ramdisk core ───────────────────────────────────
+# main-menu sequences install steps by walking dpkg status for udebs
+# carrying Installer-Menu-Item: NNNN.  Without it there's no install
+# flow at all.
+main-menu
+# rootskel ships /sbin/init + the S20/S60/S70 run-parts scripts that
+# bootstrap cdebconf and exec main-menu.
+rootskel
+# udpkg is the d-i package handler used by main-menu to invoke each
+# step udeb's postinst as the step (`udpkg --configure <pkg>`).
+udpkg
+# busybox-udeb provides the shell + utils used by the init scripts.
+busybox-udeb
+
+# ─── Partitioning chain ────────────────────────────────────────────
+# partman-base is the partitioning framework + UI; the other partman-*
+# udebs plug in filesystem support + recipe steps.  Per the locked
+# COMP-01b decision (whole-disk ESP + ext4 + no swap, UEFI+BIOS), we
+# need: base + auto (guided recipe) + target (mounter) + ext3 (ext4
+# is handled by the same udeb) + efi (ESP) + basicfilesystems (FAT
+# for the ESP).
+partman-base
+partman-auto
+partman-target
+partman-ext3
+partman-efi
+partman-basicfilesystems
+
+# ─── Install workflow steps ────────────────────────────────────────
+# base-installer is in required → already pulled.  apt-setup-udeb
+# writes the target's /etc/apt/sources.list at install time; user-setup-
+# udeb creates the first user account; grub-installer runs grub-install
+# on the target.
+apt-setup-udeb
+user-setup-udeb
+grub-installer
+
+# ─── Hardware + media detection ────────────────────────────────────
+# hw-detect modprobes drivers for storage/network etc. at boot.
+# disk-detect feeds partman with the available block devices.
+# cdrom-detect locates the install media; mountmedia actually mounts
+# it at /cdrom; cdrom-retriever pulls files out of /cdrom for
+# base-installer's pool reads.  All three needed for our file:///cdrom
+# install path (the locked COMP-01b decision).  iso-scan is for
+# USB-with-ISO-file boots (common installer-from-USB pattern) — kept
+# in v1 so a USB stick with the ISO copied as a regular file boots
+# correctly.
+hw-detect
+disk-detect
+cdrom-detect
+mountmedia
+cdrom-retriever
+iso-scan
+
+# ─── Preseed runtime ───────────────────────────────────────────────
+# preseed-common loads /preseed.cfg (baked into the initrd by Phase 5's
+# overlay) and pre-answers debconf questions per its contents.  v1
+# preseed.cfg is empty so this is benign but cheap to include.
+preseed-common
+
+# ─── Installer environment polish ──────────────────────────────────
+# installation-locale sets up LANG/LC_* in the installer's env so
+# cdebconf prompts render UTF-8 correctly.  cdebconf-priority lets the
+# operator filter low/medium/high/critical questions — defaulted to
+# high, the standard d-i behaviour.  Both small, both pulled in
+# essentially every real installer build.
+installation-locale
+cdebconf-priority
+
+# ─── Kernel module udebs (storage / CD / USB detection) ────────────
+# Listed by VIRTUAL name (each ABI's *-modules-X-amd64-di udeb
+# Provides: the virtual name).  Auto-pick-highest-when-ambiguous (the
+# udeb-tree DependencyTree flag) picks the latest kernel ABI — keeps
+# installer.list ABI-independent.  Without these, hw-detect can't
+# modprobe the drivers needed for /dev/sr0 (CD) or /dev/sd* (USB) to
+# appear, and cdrom-detect reports "No device or installation media
+# (like CD-ROM) was detected".
+#   cdrom-core-modules  — sr_mod + cdrom.ko (the actual CD driver)
+#   scsi-core-modules   — SCSI subsystem (sr_mod attaches here)
+#   ata-modules         — PATA + SATA generic ATA (libata)
+#   sata-modules        — SATA-specific (ahci, etc.)
+#   usb-modules         — USB controllers (xhci, ehci, uhci, ohci)
+#   usb-storage-modules — USB mass storage (USB-CD, USB-stick install)
+cdrom-core-modules
+scsi-core-modules
+ata-modules
+sata-modules
+usb-modules
+usb-storage-modules
+
+# ─── Target-side debs (NOT udebs — for the apt pool) ───────────────
+# These are deb names that grub-installer apt-pulls onto the TARGET at
+# install time.  Listed here defensively so they stay in the pool even
+# if live.list ever drops them.  Already in live.list under the locked
+# COMP-01b decision.
+efibootmgr
+grub-pc-bin
