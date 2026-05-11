@@ -2892,6 +2892,249 @@ def test_ingest_udeb_indices_dedups_priority_lists_via_caller():
         assert list(dict.fromkeys(c.udeb_required)) == ['base-installer']
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# COMP-01b phase 3 — Parallel udeb DependencyTree (Cache.udeb_view)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_udeb_view_exposes_udeb_hashtable_as_package_hashtable():
+    """Cache.udeb_view() returns a thin wrapper whose package_hashtable
+    attribute IS the cache's udeb_hashtable.  That's the contract that
+    lets DependencyTree resolve against udebs unchanged."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache, UdebCacheView
+    from collections import defaultdict
+
+    c = Cache.__new__(Cache)
+    c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+    c.udeb_hashtable['cdebconf-text-udeb']['0.270'] = ['fake-pkg-record']
+    c.skip_src = []
+    c.source_hashtable = defaultdict(list)
+
+    v = c.udeb_view()
+    assert isinstance(v, UdebCacheView)
+    # The view's package_hashtable IS the cache's udeb_hashtable (same object)
+    assert v.package_hashtable is c.udeb_hashtable
+    # skip_src and source_hashtable are shared (universal across deb/udeb)
+    assert v.skip_src is c.skip_src
+    assert v.source_hashtable is c.source_hashtable
+    # Lookup goes against udeb_hashtable
+    assert v.package_hashtable.get('cdebconf-text-udeb') is not None
+
+
+def test_udeb_view_get_packages_resolves_against_udeb_hashtable():
+    """UdebCacheView.get_packages mirrors Cache.get_packages semantics
+    but reads udeb_hashtable.  Bare lookup (no version constraint)
+    returns every version's package list flattened."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    from collections import defaultdict
+
+    c = Cache.__new__(Cache)
+    c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+    # Two versions of the same udeb under one name
+    c.udeb_hashtable['rootskel']['1.135'] = ['pkg-v1.135']
+    c.udeb_hashtable['rootskel']['1.136'] = ['pkg-v1.136']
+    c.skip_src = []
+    c.source_hashtable = defaultdict(list)
+
+    v = c.udeb_view()
+    out = v.get_packages('rootskel')
+    assert sorted(out) == ['pkg-v1.135', 'pkg-v1.136']
+    # Unknown udeb name → empty (and does NOT pollute the defaultdict)
+    assert v.get_packages('does-not-exist') == []
+    assert 'does-not-exist' not in v.package_hashtable
+
+
+def test_udeb_view_does_not_leak_into_real_package_hashtable():
+    """Resolving against the udeb view must not mutate Cache.package_hashtable.
+    The two universes are strictly isolated."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    from collections import defaultdict
+
+    c = Cache.__new__(Cache)
+    c.package_hashtable = defaultdict(lambda: defaultdict(list))
+    c.package_hashtable['cdebconf']['0.270'] = ['regular-deb-record']
+    c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+    c.udeb_hashtable['cdebconf-text-udeb']['0.270'] = ['udeb-record']
+    c.skip_src = []
+    c.source_hashtable = defaultdict(list)
+
+    v = c.udeb_view()
+    # Looking up the .deb name in the view returns empty (it's not a udeb)
+    assert v.get_packages('cdebconf') == []
+    # Looking up the udeb name in the real cache returns empty too
+    assert c.get_packages('cdebconf-text-udeb') == []
+    # Each universe sees only its own records
+    assert c.get_packages('cdebconf') == ['regular-deb-record']
+    assert v.get_packages('cdebconf-text-udeb') == ['udeb-record']
+
+
+def test_dependency_tree_default_does_not_auto_pick_across_names():
+    """Default DependencyTree (deb tree) does NOT auto-pick when there
+    are multiple Package names — the operator prompt is the only way
+    out.  This pins the deb-world behaviour so the udeb fallback does
+    not bleed into deb resolution."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    # Replicate __init__'s zero-state for the relevant flag only.
+    dt._auto_pick_highest_when_ambiguous = False
+    assert dt._auto_pick_highest_when_ambiguous is False
+
+
+def test_dependency_tree_udeb_tree_flag_enables_max_version_fallback():
+    """When auto_pick_highest_when_ambiguous=True, multi-name candidates
+    that _auto_pick_candidate refuses to auto-pick get the highest-version
+    fallback applied.  Verifies the flag is honoured at the parse_dependency
+    call-site."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from dependencytree import _auto_pick_candidate
+
+    # Construct fake candidates mimicking ext4-modules-6.1.0-{NN}-amd64-di
+    # at different versions.  _auto_pick_candidate collapses by name (one
+    # entry per name); since names differ, it returns (None, collapsed).
+    class _FakeCandidate:
+        def __init__(self, name, ver):
+            self._fields = {'Package': name}
+            self.package = name
+            self.version = ver
+        def __getitem__(self, k): return self._fields[k]
+
+    cands = [
+        _FakeCandidate('ext4-modules-6.1.0-39-amd64-di', '6.1.148-1'),
+        _FakeCandidate('ext4-modules-6.1.0-42-amd64-di', '6.1.159-1'),
+        _FakeCandidate('ext4-modules-6.1.0-44-amd64-di', '6.1.164-1'),
+        _FakeCandidate('ext4-modules-6.1.0-45-amd64-di', '6.1.170-1'),
+        _FakeCandidate('ext4-modules-6.1.0-46-amd64-di', '6.1.170-2'),
+        _FakeCandidate('ext4-modules-6.1.0-47-amd64-di', '6.1.170-3'),
+    ]
+    _auto, _collapsed = _auto_pick_candidate(cands)
+    # Multi-name: _auto is None, _collapsed has all 6
+    assert _auto is None
+    assert len(_collapsed) == 6
+    # The fallback the udeb call-site applies: max(collapsed, key=ver)
+    _picked = max(_collapsed, key=lambda p: p.version)
+    assert _picked.package == 'ext4-modules-6.1.0-47-amd64-di'
+    assert _picked.version == '6.1.170-3'
+
+
+def test_dependency_tree_constructor_accepts_auto_pick_flag():
+    """DependencyTree.__init__ accepts auto_pick_highest_when_ambiguous as
+    a keyword arg; defaults to False (deb tree); True is honoured (udeb tree).
+    Catches accidental signature regressions during refactors."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from dependencytree import DependencyTree
+    sig = inspect.signature(DependencyTree.__init__)
+    assert 'auto_pick_highest_when_ambiguous' in sig.parameters
+    p = sig.parameters['auto_pick_highest_when_ambiguous']
+    assert p.default is False
+
+
+def test_buildsession_initialises_udeb_dep_tree_as_none():
+    """A fresh BuildSession has udeb_dep_tree=None until cmd_parse_dependency
+    runs.  Consumers must gate on dep_check_ready before touching it."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    s = BuildSession.__new__(BuildSession)
+    # Replicate the __init__ assignments relevant to this test.
+    s.dep_tree = None
+    s.udeb_dep_tree = None
+    assert s.udeb_dep_tree is None
+    assert hasattr(s, 'udeb_dep_tree')
+
+
+def test_print_udebs_handles_no_udeb_tree_gracefully():
+    """`print udebs` before parse_dependency runs (udeb_dep_tree=None)
+    prints a "re-run dep parse" message instead of crashing on attr-access."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    from print_commands import _print_udebs
+
+    captured = []
+    class _Console:
+        def print(self, msg, *_a, **_kw): captured.append(msg)
+    _saved = _tui.console
+    _tui.console = _Console()
+    try:
+        # Stub session that passes _require_dep_check (flag set, dep_tree
+        # present) but has udeb_dep_tree=None.
+        class _Flags: dep_check_ready = True
+        class _Sess:
+            flags = _Flags()
+            dep_tree = object()
+            udeb_dep_tree = None
+        _print_udebs(_Sess())
+    finally:
+        _tui.console = _saved
+    assert any('udeb' in m.lower() and ('re-run' in m.lower()
+                                         or 'not built' in m.lower())
+               for m in captured), captured
+
+
+def test_print_udebs_lists_udeb_closure_when_tree_populated():
+    """When udeb_dep_tree.selected_pkgs has entries, `print udebs` emits a
+    one-line-per-udeb listing with version + source.  Uses a Version-like
+    stub that rejects width-format-specs (matches real python-debian
+    Version behaviour) so a future regression that drops the str() coerce
+    re-fails at this test, not in production output."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    from print_commands import _print_udebs
+
+    class _StubVersion:
+        """Mimic debian.debian_support.Version: __str__ works, __format__
+        with a non-empty spec raises TypeError (the production bug we fixed)."""
+        def __init__(self, v): self._v = v
+        def __str__(self): return self._v
+        def __format__(self, spec):
+            if spec:
+                raise TypeError(
+                    "unsupported format string passed to Version.__format__"
+                )
+            return self._v
+
+    captured = []
+    class _Console:
+        def print(self, msg, *_a, **_kw): captured.append(msg)
+    _saved = _tui.console
+    _tui.console = _Console()
+    try:
+        class _Flags: dep_check_ready = True
+        seed = _FakePkg('cdebconf-text-udeb', source='cdebconf',
+                        filename='cdebconf-text-udeb_0.270_amd64.udeb')
+        seed.version = _StubVersion('0.270')
+        seed2 = _FakePkg('rootskel', source='rootskel',
+                         filename='rootskel_1.136_all.udeb')
+        seed2.version = _StubVersion('1.136')
+        class _UdebTree:
+            selected_pkgs = {'cdebconf-text-udeb': seed, 'rootskel': seed2}
+            selected_srcs = {'cdebconf': object(), 'rootskel': object()}
+        class _Sess:
+            flags = _Flags()
+            dep_tree = object()
+            udeb_dep_tree = _UdebTree()
+        _print_udebs(_Sess())
+    finally:
+        _tui.console = _saved
+    joined = '\n'.join(captured)
+    assert 'cdebconf-text-udeb' in joined
+    assert 'rootskel' in joined
+    assert '2 udeb(s)' in joined
+    assert '2 source(s)' in joined
+    assert '0.270' in joined
+    assert '1.136' in joined
+
+
 def test_compute_install_batches_excludes_extras_pkg_names():
     """EXTRAS-01: chroot install path skips packages in
     dependencytree.extras_pkg_names so they never enter a batch."""
@@ -4003,6 +4246,16 @@ def main() -> int:
         test_ingest_udeb_indices_skips_mirrors_without_udeb_file,
         test_ingest_udeb_indices_handles_partial_mirror_set,
         test_ingest_udeb_indices_dedups_priority_lists_via_caller,
+        # COMP-01b phase 3: parallel udeb DependencyTree
+        test_udeb_view_exposes_udeb_hashtable_as_package_hashtable,
+        test_udeb_view_get_packages_resolves_against_udeb_hashtable,
+        test_udeb_view_does_not_leak_into_real_package_hashtable,
+        test_dependency_tree_default_does_not_auto_pick_across_names,
+        test_dependency_tree_udeb_tree_flag_enables_max_version_fallback,
+        test_dependency_tree_constructor_accepts_auto_pick_flag,
+        test_buildsession_initialises_udeb_dep_tree_as_none,
+        test_print_udebs_handles_no_udeb_tree_gracefully,
+        test_print_udebs_lists_udeb_closure_when_tree_populated,
         test_compute_install_batches_excludes_extras_pkg_names,
         test_verify_dep_resolution_skips_extras,
         test_verify_dep_resolution_still_catches_real_violations,

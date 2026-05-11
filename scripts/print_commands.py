@@ -467,6 +467,39 @@ def _print_live_exclusive(session, *_extras) -> None:
         )
 
 
+def _print_udebs(session, *_extras) -> None:
+    """COMP-01b phase 3: udeb closure (the installer ramdisk content).
+    Drawn from the parallel udeb_dep_tree resolved against the d-i Packages
+    index.  Empty until parse_dependency runs."""
+    if not _require_dep_check(session):
+        return
+    udeb_tree = getattr(session, 'udeb_dep_tree', None)
+    if udeb_tree is None:
+        tui.console.print("Udeb tree not built — re-run 'dep parse'")
+        return
+    pkgs = udeb_tree.selected_pkgs
+    real_pkgs = {k: v for k, v in pkgs.items() if k == v['Package']}
+    srcs = getattr(udeb_tree, 'selected_srcs', {})
+    if not real_pkgs:
+        tui.console.print(
+            "Udeb closure is empty (installer.list has no udeb entries; "
+            "check installer.list and Cache.udeb_required/important)"
+        )
+        return
+    tui.console.print(
+        f"Udeb closure ({len(real_pkgs)} udeb(s) from {len(srcs)} source(s)):"
+    )
+    for name in sorted(real_pkgs.keys()):
+        # Version is python-debian's Version class which raises on format
+        # specifiers like {:<24}; coerce to str first.
+        _ver = str(real_pkgs[name].version)
+        try:
+            _src = real_pkgs[name].source or '?'
+        except Exception:
+            _src = '?'
+        tui.console.print(f"  {name:<40} {_ver:<24} ← {_src}")
+
+
 def _print_installer_exclusive(session, *_extras) -> None:
     """COMP-01c phase 1: packages pulled in by installer.list that are NOT
     already in pkg.list's closure.  Currently empty by design — d-i source
@@ -758,7 +791,8 @@ CATEGORIES = {
     'tunneled':  (_print_tunneled,  'Packages',      'packages set to use prebuilt .debs (Tunneled list)'),
     'extras':    (_print_extras,    'Packages',      'EXTRAS-01: depth-1 Recommends pulled into the repo (not chroot-installed)'),
     'live':      (_print_live_exclusive,      'Packages', 'COMP-01c: packages live needs over and above pkg.list'),
-    'installer': (_print_installer_exclusive, 'Packages', 'COMP-01c: packages installer needs over and above pkg.list (empty until COMP-01a)'),
+    'installer': (_print_installer_exclusive, 'Packages', 'COMP-01c: deb-arm of installer.list (efibootmgr/grub-pc-bin etc.)'),
+    'udebs':     (_print_udebs,                'Packages', 'COMP-01b phase 3: udeb closure for installer ramdisk'),
     'pkg':       (_print_pkg,       'Packages',      'full package detail — usage: print pkg <name>'),
     'deps':      (_print_deps,      'Packages',      'flat dep list of a package — usage: print deps <name>'),
 
