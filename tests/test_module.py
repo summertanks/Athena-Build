@@ -1102,6 +1102,35 @@ def test_cmd_build_chroot_installer_bails_on_unmet_prereqs():
     assert _sess.cmd_build_chroot_installer() is None
 
 
+def test_installer_chroot_dpkg_unpack_carries_required_force_flags():
+    """REGRESSION (2026-05-11): _dpkg_unpack must invoke dpkg with at
+    least --force-depends + --force-overwrite + --no-triggers, with
+    --unpack (not -i).  Drop any one of these and the unpack fails on
+    real udebs:
+      - --force-depends: udeb deps reference other udebs not on host
+      - --force-overwrite: d-i udebs ship overlapping files by design
+                           (busybox-udeb's /sbin/depmod stub vs
+                           kmod-udeb's real /sbin/depmod)
+      - --no-triggers: trigger machinery is irrelevant + would run
+                       host hooks against the chroot
+      - --unpack vs -i: skip configure (postinsts need cdebconf at runtime)
+    Tests via inspect.getsource — actual dpkg invocation requires sudo
+    and is exercised by manual smoke."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _dpkg_unpack
+    src = inspect.getsource(_dpkg_unpack)
+    for _flag in ('--force-depends', '--force-overwrite',
+                  '--no-triggers', '--unpack'):
+        assert _flag in src, f"_dpkg_unpack missing {_flag}"
+    # Confirm we are NOT using `-i` (configure step), which would try to
+    # run postinsts that need cdebconf at chroot-build time.
+    assert "'-i'" not in src and '"-i"' not in src, (
+        "_dpkg_unpack must use --unpack, not -i — postinsts require "
+        "cdebconf running which only happens at first boot"
+    )
+
+
 def test_installer_chroot_overlay_map_is_data_not_code():
     """The engine overlay map MUST be a small list of (src, dst) tuples
     holding only path strings — no code, no string formatting based on
@@ -1133,11 +1162,11 @@ def test_installer_chroot_resolve_udeb_files_skips_virtual_aliases():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from installer_chroot import _resolve_udeb_files
-    # Use _FakePkg from the EXTRAS-01 test fixtures (mimics enough of
-    # Package's surface — __getitem__, .source, .version etc.).
-    pkg = _FakePkg('cdebconf-text-udeb', source='cdebconf')
-    pkg.version = '0.270'
-    pkg.arch = 'amd64'
+    pkg = _FakePkg(
+        'cdebconf-text-udeb',
+        source='cdebconf',
+        filename='pool/main/c/cdebconf/cdebconf-text-udeb_0.270_amd64.udeb',
+    )
     class _UdebTree:
         # canonical key + a virtual alias pointing at the same Package
         selected_pkgs = {
@@ -1151,24 +1180,31 @@ def test_installer_chroot_resolve_udeb_files_skips_virtual_aliases():
     assert out == []
 
 
-def test_installer_chroot_resolve_udeb_files_strips_version_epoch():
-    """udeb filenames don't include epoch ('2:1.0-1' on the Package
-    record → 'foo_1.0-1_amd64.udeb' on disk).  _resolve must match what
-    dpkg-buildpackage actually emitted."""
+def test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix():
+    """REGRESSION (2026-05-11): the Packages index records a binNMU
+    version like `1.35.0-4+b7` but dpkg-buildpackage emits the file
+    *without* the binNMU suffix (`busybox-udeb_1.35.0-4_amd64.udeb`).
+    _resolve must apply utils.strip_build_version to the Filename
+    field, matching what chroot.py's _get_deb_files does for the deb
+    world.  Caught when chroot build installer reported four udebs
+    missing on the first real run, all with +bN suffixes."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from installer_chroot import _resolve_udeb_files
 
     with tempfile.TemporaryDirectory() as _repo:
-        # Drop a fake udeb file with the epoch-stripped name.
-        _fake_path = os.path.join(_repo, 'foo-udeb_1.0-1_amd64.udeb')
+        # File on disk: binNMU stripped (this is what dpkg-buildpackage emits)
+        _fake_path = os.path.join(_repo, 'busybox-udeb_1.35.0-4_amd64.udeb')
         with open(_fake_path, 'wb') as fh:
             fh.write(b'')
-        pkg = _FakePkg('foo-udeb', source='foo')
-        pkg.version = '2:1.0-1'   # epoch in the Package record
-        pkg.arch = 'amd64'
+        # Package record: binNMU preserved (this is what Packages index has)
+        pkg = _FakePkg(
+            'busybox-udeb',
+            source='busybox',
+            filename='pool/main/b/busybox/busybox-udeb_1.35.0-4+b7_amd64.udeb',
+        )
         class _UdebTree:
-            selected_pkgs = {'foo-udeb': pkg}
+            selected_pkgs = {'busybox-udeb': pkg}
         out = _resolve_udeb_files(_UdebTree(), _repo)
         assert out == [_fake_path], out
 
@@ -1180,9 +1216,11 @@ def test_installer_chroot_resolve_udeb_files_logs_missing_silently():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from installer_chroot import _resolve_udeb_files
-    pkg = _FakePkg('nonexistent-udeb', source='nonexistent')
-    pkg.version = '1.0'
-    pkg.arch = 'amd64'
+    pkg = _FakePkg(
+        'nonexistent-udeb',
+        source='nonexistent',
+        filename='pool/main/n/nonexistent/nonexistent-udeb_1.0_amd64.udeb',
+    )
     class _UdebTree:
         selected_pkgs = {'nonexistent-udeb': pkg}
     # Should not raise; should return [].
@@ -1190,13 +1228,26 @@ def test_installer_chroot_resolve_udeb_files_logs_missing_silently():
     assert out == []
 
 
-def test_buildconfig_exposes_dir_chroot_installer_derived_from_dir_chroot():
-    """Phase 5: BuildConfig must derive dir_chroot_installer as
-    `<dir_chroot>-installer` so that renaming the Chroot config entry
-    automatically renames the installer path too.  Pins the derivation
-    so a future refactor doesn't accidentally hardcode the installer
-    path or place it inside dir_chroot (which would land the installer
-    chroot inside the live chroot — bad).
+def test_installer_chroot_resolve_udeb_files_skips_record_without_filename():
+    """If a Package record has no Filename field (rare — malformed
+    index), _resolve warns + skips.  Empty filename is treated as
+    'no filename'."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _resolve_udeb_files
+    pkg = _FakePkg('orphan-udeb', source='orphan', filename='')
+    class _UdebTree:
+        selected_pkgs = {'orphan-udeb': pkg}
+    out = _resolve_udeb_files(_UdebTree(), '/repo')
+    assert out == []
+
+
+def test_buildconfig_chroot_paths_under_shared_buildroot_parent():
+    """Phase 5 (revised 2026-05-11): the [Directories] Chroot value is
+    a PARENT dir holding both child chroots — `<parent>/live` and
+    `<parent>/installer`.  Pins the derivation so a future refactor
+    doesn't accidentally flatten one of them into the parent
+    (which would land the OTHER chroot inside the first one's content tree).
 
     Uses the project's real build.conf to avoid maintaining a parallel
     minimal fixture as BuildConfig's required-section set evolves."""
@@ -1225,8 +1276,12 @@ def test_buildconfig_exposes_dir_chroot_installer_derived_from_dir_chroot():
             sys.argv = _saved_argv
         assert cfg.error_str == '', (
             f"BuildConfig fixture failed to load: {cfg.error_str}")
-        # The installer dir must sit NEXT TO the live chroot, not INSIDE it.
-        assert cfg.dir_chroot_installer == cfg.dir_chroot + '-installer'
+        # Both chroots share a parent (dir_buildroot) and live under it as siblings.
+        assert hasattr(cfg, 'dir_buildroot')
+        assert cfg.dir_chroot           == os.path.join(cfg.dir_buildroot, 'live')
+        assert cfg.dir_chroot_installer == os.path.join(cfg.dir_buildroot, 'installer')
+        # Neither chroot is INSIDE the other.
+        assert not cfg.dir_chroot.startswith(cfg.dir_chroot_installer + os.sep)
         assert not cfg.dir_chroot_installer.startswith(cfg.dir_chroot + os.sep)
 
 
@@ -4457,11 +4512,13 @@ def main() -> int:
         test_cmd_chroot_build_installer_forwards_to_installer,
         test_cmd_chroot_build_passthrough_args_to_live,
         test_cmd_build_chroot_installer_bails_on_unmet_prereqs,
+        test_installer_chroot_dpkg_unpack_carries_required_force_flags,
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
-        test_installer_chroot_resolve_udeb_files_strips_version_epoch,
+        test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
         test_installer_chroot_resolve_udeb_files_logs_missing_silently,
-        test_buildconfig_exposes_dir_chroot_installer_derived_from_dir_chroot,
+        test_installer_chroot_resolve_udeb_files_skips_record_without_filename,
+        test_buildconfig_chroot_paths_under_shared_buildroot_parent,
         test_build_flags_carries_chroot_installer_ready_default_false,
         # ARCH-03
         test_console_with_explicit_tui_does_not_touch_singleton,
