@@ -13,13 +13,10 @@ Reference: docs/plans/comp-01-installer.md; project memory
 project_installer_from_source.md.
 """
 
-import glob
 import logging
 import os
-import re
-import shutil
 import subprocess
-from typing import List, Optional
+from typing import List
 
 import tui
 import utils
@@ -110,9 +107,18 @@ def _sudo(cmd_args: List[str], password: str) -> subprocess.CompletedProcess:
 def _wipe_and_create(dir_chroot_installer: str, password: str) -> bool:
     """rm -rf the installer chroot dir then recreate it empty.
 
-    Done via sudo because a prior partial run may have left root-owned
-    files inside.  os.path.exists check is informational only — `rm -rf`
-    is a no-op on a missing path.
+    `rm -rf` runs under sudo because a prior partial run may have left
+    root-owned files inside.  But the RE-CREATE step uses plain
+    os.makedirs so the top-level chroot dir is user-owned — same
+    pattern the live chroot already uses.  If we sudo-mkdir'd here, the
+    recreated dir would be root-owned, and BuildConfig's next startup
+    would fail its `os.access(dir, os.W_OK)` check (caught in
+    production 2026-05-11).
+
+    Operator can wipe a stale root-owned chroot manually with
+    `sudo rm -rf <dir>`; BuildConfig recreates it user-owned on the
+    next launch.  `rm -rf` is a no-op on a missing path so the first
+    call here on a fresh install just succeeds without any wipe work.
     """
     tui.console.print(f"Wiping {dir_chroot_installer}...")
     _r = _sudo(['rm', '-rf', dir_chroot_installer], password)
@@ -126,15 +132,14 @@ def _wipe_and_create(dir_chroot_installer: str, password: str) -> bool:
             f"rc={_r.returncode}, stderr={_r.stderr.strip()}"
         )
         return False
-    _r = _sudo(['mkdir', '-p', dir_chroot_installer], password)
-    if _r.returncode != 0:
+    try:
+        os.makedirs(dir_chroot_installer, exist_ok=True)
+    except OSError as e:
         tui.console.print(
-            f"ERROR: failed to create {dir_chroot_installer}: "
-            f"{_r.stderr.strip()[:200]}"
+            f"ERROR: failed to create {dir_chroot_installer}: {e}"
         )
         logger.error(
-            f"_wipe_and_create mkdir -p {dir_chroot_installer}: "
-            f"rc={_r.returncode}, stderr={_r.stderr.strip()}"
+            f"_wipe_and_create os.makedirs {dir_chroot_installer}: {e}"
         )
         return False
     return True
@@ -180,19 +185,21 @@ def _bootstrap_dpkg(dir_chroot_installer: str, password: str) -> bool:
     return True
 
 
-# Version epochs (e.g. "2:1.0-1") are stripped from .deb/.udeb filenames
-# by dpkg-deb conventions.  This matches what dpkg-buildpackage emits and
-# what apt downloads.
-_EPOCH_RE = re.compile(r'^\d+:')
-
-
 def _resolve_udeb_files(udeb_tree, dir_repo: str) -> List[str]:
     """Map udeb_tree.selected_pkgs canonical names → absolute .udeb paths in
     repo/.
 
-    Returns the list of resolved paths.  Missing-on-disk udebs are logged
-    + skipped (warning); they don't fail the whole resolve — caller will
-    notice if the list is too short.
+    Uses the Filename field from the udeb's Packages-index record and
+    strips any binNMU suffix (+bN) via utils.strip_build_version — same
+    pattern as chroot.py's _get_deb_files for the deb world.  This
+    matches what dpkg-buildpackage actually emits: a source rebuild of
+    `foo` whose index version is `1.0-2+b7` produces a file named
+    `foo_1.0-2_amd64.udeb` on disk (no `+b7`).  Constructing the
+    filename from the version field would miss the rename.
+
+    Returns the list of resolved paths.  Missing-on-disk udebs are
+    logged + skipped (warning); they don't fail the whole resolve —
+    caller will notice if the list is too short.
     """
     _files: List[str] = []
     for _name in udeb_tree.selected_pkgs:
@@ -201,27 +208,29 @@ def _resolve_udeb_files(udeb_tree, dir_repo: str) -> List[str]:
         # multiple keys would be unpacked multiple times.
         if _name != _pkg['Package']:
             continue
-        _ver = str(_pkg.version)
-        # Strip epoch for filename matching.
-        _ver_for_file = _EPOCH_RE.sub('', _ver)
-        _arch = _pkg.arch
-        # Most udebs are arch-specific; some (e.g. base-installer) are 'all'.
-        _candidate = os.path.join(
-            dir_repo, f"{_name}_{_ver_for_file}_{_arch}.udeb"
-        )
-        if os.path.exists(_candidate):
-            _files.append(_candidate)
+        _filename = os.path.basename(_pkg.get('Filename') or '')
+        if not _filename:
+            logger.warning(
+                f"_resolve_udeb_files: {_name} has no Filename field — skipping"
+            )
             continue
-        # Fallback: glob by name+version, accept any arch (handles a few
-        # udebs where Packages says amd64 but the build emitted all).
-        _glob_pat = os.path.join(dir_repo, f"{_name}_{_ver_for_file}_*.udeb")
-        _matches = glob.glob(_glob_pat)
-        if _matches:
-            _files.append(_matches[0])
+        # Strip +bN binNMU suffix so the recorded filename matches what
+        # dpkg-buildpackage actually produced.  utils.strip_build_version
+        # is the single source of truth shared with the deb pipeline
+        # (STA-15) — tolerates udeb extension.
+        try:
+            _filename = utils.strip_build_version(_filename)
+        except ValueError:
+            logger.warning(
+                f"_resolve_udeb_files: malformed Filename {_filename!r} for "
+                f"{_name} — using original (binNMU strip skipped)"
+            )
+        _filepath = os.path.join(dir_repo, _filename)
+        if os.path.exists(_filepath):
+            _files.append(_filepath)
             continue
         logger.warning(
-            f"_resolve_udeb_files: missing {_name} {_ver} ({_arch}) — "
-            f"expected {_candidate}"
+            f"_resolve_udeb_files: missing {_name} — expected {_filepath}"
         )
     return _files
 
@@ -235,6 +244,14 @@ def _dpkg_unpack(
     `--force-depends`: udebs declare deps on other udebs (cdebconf-udeb,
         libc6-udeb, libreadline8-udeb) that aren't installed on the host —
         but ARE in the install set itself.
+    `--force-overwrite`: d-i udebs SHIP OVERLAPPING FILES BY DESIGN.
+        Classic case: busybox-udeb ships /sbin/depmod (a busybox applet
+        stub), kmod-udeb ships the real /sbin/depmod.  Same for
+        modprobe, insmod, and many other utility paths.  d-i's own
+        udpkg ignores file conflicts entirely; under dpkg we need this
+        flag to mirror that permissiveness.  Caught in production
+        2026-05-11 — dpkg rejected the kmod-udeb unpack until this flag
+        landed.
     `--no-triggers`: trigger machinery is irrelevant for udebs and would
         try to run host hooks against the chroot.
     `--unpack` (not -i): skip configure.  Postinsts use db_input which
@@ -243,7 +260,7 @@ def _dpkg_unpack(
 
     Logs stdout/stderr in full to the file logger; returns False if
     dpkg exits non-zero AND we can't attribute the failure to
-    --force-depends warnings.
+    --force-depends/--force-overwrite warnings.
     """
     tui.console.print(
         f"Unpacking {len(udeb_files)} udeb(s) into {dir_chroot_installer}..."
@@ -252,6 +269,7 @@ def _dpkg_unpack(
         'dpkg',
         '--root=' + dir_chroot_installer,
         '--force-depends',
+        '--force-overwrite',
         '--no-triggers',
         '--unpack',
     ] + udeb_files
