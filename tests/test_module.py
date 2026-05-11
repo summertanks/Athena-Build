@@ -943,6 +943,7 @@ def test_buildsession_constructible_with_stub_tui():
                           'cmd_build_chroot_live', 'cmd_build_chroot_installer',
                           'cmd_build_iso_live', 'cmd_build_iso_installer',
                           'cmd_verify_chroot', 'cmd_auto_run',
+                          'cmd_auto_run_live', 'cmd_auto_run_installer',
                           'cmd_print',
                           # Group dispatchers (noun-verb command surface).
                           'cmd_cache', 'cmd_dep', 'cmd_patch',
@@ -1100,6 +1101,135 @@ def test_cmd_build_chroot_installer_bails_on_unmet_prereqs():
     # Setting source_build_ready without udeb tree bails on third check.
     _sess.flags.source_build_ready = True
     assert _sess.cmd_build_chroot_installer() is None
+
+
+def test_iso_installer_kernel_pkg_regex_matches_real_kernels_only():
+    """REGRESSION (2026-05-11): the iso_installer kernel finder must
+    match real kernel packages (linux-image-<ABI>-amd64_*.deb) and
+    skip meta/flavor variants — meta packages are empty + have no
+    /boot/vmlinuz, so extracting them produces an unusable kernel
+    candidate.  Caught when iso build installer picked
+    linux-image-rt-amd64 (an empty preempt-rt meta) and failed."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _KERNEL_PKG_RE
+    # Real kernels — should match
+    for _real in (
+        'linux-image-6.1.0-45-amd64_6.1.170-1_amd64.deb',
+        'linux-image-6.1.0-47-amd64_6.1.170-3_amd64.deb',
+        'linux-image-5.10.0-23-amd64_5.10.179-1_amd64.deb',
+    ):
+        assert _KERNEL_PKG_RE.match(_real), f"{_real} should match"
+    # Meta packages / non-amd64 flavors — should NOT match
+    for _meta in (
+        'linux-image-amd64_6.1.170-3_amd64.deb',
+        'linux-image-rt-amd64_6.1.170-3_amd64.deb',
+        'linux-image-cloud-amd64_6.1.170-3_amd64.deb',
+        'linux-image-6.1.0-47-cloud-amd64_6.1.170-3_amd64.deb',
+        'linux-image-6.1.0-47-rt-amd64_6.1.170-3_amd64.deb',
+        'linux-image-6.1.0-47-amd64-dbg_6.1.170-3_amd64.deb',
+    ):
+        assert not _KERNEL_PKG_RE.match(_meta), f"{_meta} should NOT match"
+
+
+def test_iso_installer_stage_grub_cfg_errors_when_data_layer_missing():
+    """Phase 7: iso_installer is data-driven from installer/boot/grub.cfg.
+    If the operator deletes the data-layer grub.cfg, the engine MUST
+    error with a clear message — not silently produce an unbootable ISO.
+    Pins the data-layer contract: deletions are loud."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_grub_cfg
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(os.path.join(_stage, 'boot', 'grub'), exist_ok=True)
+        with tempfile.TemporaryDirectory() as _installer_empty:
+            # installer_dir has no boot/grub.cfg → must return False
+            assert _stage_grub_cfg(_stage, _installer_empty) is False
+
+
+def test_iso_installer_stage_disk_info_errors_when_dir_missing():
+    """Phase 7 cdrom-detect fix: installer/disk/ MUST be present —
+    without /cdrom/.disk/info, cdrom-detect rejects the disc and the
+    installer reports 'No device or installation media (like CD-ROM)
+    was detected'.  Fail loud at iso-build time so this never silently
+    ships."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_disk_info
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(_stage, exist_ok=True)
+        with tempfile.TemporaryDirectory() as _installer_empty:
+            # installer_dir has no disk/ subdir → must return False
+            assert _stage_disk_info(_stage, _installer_empty) is False
+
+
+def test_iso_installer_stage_disk_info_copies_files_skipping_readme():
+    """installer/disk/* files copied verbatim to staging/.disk/* —
+    except *.md (READMEs aren't shipped on the installer disc)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_disk_info
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(_stage, exist_ok=True)
+        with tempfile.TemporaryDirectory() as _installer:
+            _src = os.path.join(_installer, 'disk')
+            os.makedirs(_src)
+            with open(os.path.join(_src, 'info'), 'w') as fh:
+                fh.write('Athena 0.1 amd64 INSTALLER\n')
+            with open(os.path.join(_src, 'base_installable'), 'w') as fh:
+                fh.write('')   # empty sentinel
+            with open(os.path.join(_src, 'base_components'), 'w') as fh:
+                fh.write('main\n')
+            with open(os.path.join(_src, 'README.md'), 'w') as fh:
+                fh.write('# docs — should not be shipped\n')
+            assert _stage_disk_info(_stage, _installer) is True
+            _disk = os.path.join(_stage, '.disk')
+            assert sorted(os.listdir(_disk)) == [
+                'base_components', 'base_installable', 'info'
+            ], (
+                "README.md should NOT be copied to .disk/; "
+                f"got {sorted(os.listdir(_disk))}"
+            )
+            # info content preserved verbatim
+            with open(os.path.join(_disk, 'info')) as fh:
+                assert fh.read() == 'Athena 0.1 amd64 INSTALLER\n'
+
+
+def test_iso_installer_stage_disk_info_errors_when_only_readme():
+    """A disk/ dir with only README.md (no info/base_installable) is
+    effectively empty for engine purposes — should fail same as a
+    missing dir, with a clearer error message."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_disk_info
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(_stage, exist_ok=True)
+        with tempfile.TemporaryDirectory() as _installer:
+            _src = os.path.join(_installer, 'disk')
+            os.makedirs(_src)
+            with open(os.path.join(_src, 'README.md'), 'w') as fh:
+                fh.write('# only docs\n')
+            assert _stage_disk_info(_stage, _installer) is False
+
+
+def test_iso_installer_stage_grub_cfg_copies_when_present():
+    """Symmetric: a present grub.cfg under installer/boot/ is copied
+    verbatim to staging/boot/grub/grub.cfg.  Engine never modifies it
+    (data-vs-code contract)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_grub_cfg
+    _content = "set timeout=5\nmenuentry 'Test' { linux /boot/vmlinuz }\n"
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(os.path.join(_stage, 'boot', 'grub'), exist_ok=True)
+        with tempfile.TemporaryDirectory() as _installer:
+            os.makedirs(os.path.join(_installer, 'boot'), exist_ok=True)
+            _src = os.path.join(_installer, 'boot', 'grub.cfg')
+            with open(_src, 'w') as fh: fh.write(_content)
+            assert _stage_grub_cfg(_stage, _installer) is True
+            _dst = os.path.join(_stage, 'boot', 'grub', 'grub.cfg')
+            with open(_dst) as fh:
+                assert fh.read() == _content, "engine must copy data layer verbatim"
 
 
 def test_installer_chroot_dpkg_unpack_carries_required_force_flags():
@@ -1362,18 +1492,20 @@ def test_cmd_iso_build_unknown_subaction_calls_neither_handler():
     assert _called == [], _called
 
 
-def test_cmd_build_iso_installer_is_stub():
-    """The installer ISO handler is a COMP-01a stub: returns without doing
-    any work, prints an error referencing the plan doc."""
+def test_cmd_build_iso_installer_bails_on_unmet_prereqs():
+    """Phase 7: cmd_build_iso_installer is no longer a stub — it runs
+    the mastering pipeline.  But it must bail BEFORE any sudo prompt if
+    chroot_installer_ready is False, so test invocations don't hang on
+    Prompt input.  Mirrors the prereq-bail test for
+    cmd_build_chroot_installer."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-
+    from build import BuildSession, BuildFlags
     _sess = BuildSession.__new__(BuildSession)
-    # Should not raise, returns None.  No prerequisites checked because the
-    # stub bails before any state is touched.
+    _sess.flags = BuildFlags()
+    # chroot_installer_ready is False by default → must bail cleanly.
     assert _sess.cmd_build_iso_installer() is None
-    assert _sess.cmd_build_iso_installer('force', 'extra') is None
+    assert _sess.cmd_build_iso_installer('force') is None
 
 
 def test_cache_purge_deletes_files_and_resets_flags():
@@ -3682,22 +3814,77 @@ def test_source_download_iterates_both_deb_and_udeb_trees():
         "cmd_source_download must also call download_source on udeb tree")
 
 
-def test_autorun_runs_source_build_then_source_build_live():
-    """Phase 4 of COMP-01b: autorun must invoke source build twice — once
-    with no args (pkg subset, the new bare default) and once with 'live'
-    — before chroot build.  Catches a regression where someone re-orders
-    or drops the live extras step (which would silently produce a chroot
-    missing live-boot/live-config and fail downstream)."""
+def test_autorun_installer_runs_source_build_then_source_build_installer():
+    """Phase 7 of COMP-01b: autorun installer pipeline shape.  Mirrors
+    autorun live but the second source-build call uses 'installer' and
+    the chroot step is cmd_build_chroot_installer."""
     import sys, inspect
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    # Read cmd_auto_run's source and assert the _steps list contains both
-    # 'source build' and 'source build live' stages, in that order, with
-    # chroot build immediately after.  Source-inspection is cheap and
-    # avoids standing up the full BuildSession + 7-step pipeline.
     from build import BuildSession
-    src = inspect.getsource(BuildSession.cmd_auto_run)
-    # Stage labels appear in the third tuple slot; assert both labels
-    # appear and that 'source build live' comes after 'source build'.
+    src = inspect.getsource(BuildSession.cmd_auto_run_installer)
+    _i_pkg       = src.find("'source build'")
+    _i_installer = src.find("'source build installer'")
+    _i_chroot    = src.find("'chroot build installer'")
+    assert _i_pkg       > 0, "_steps missing 'source build' stage"
+    assert _i_installer > 0, "_steps missing 'source build installer' stage"
+    assert _i_chroot    > 0, "_steps missing 'chroot build installer' stage"
+    assert _i_pkg < _i_installer < _i_chroot, (
+        f"Stage order wrong: source build @ {_i_pkg}, "
+        f"source build installer @ {_i_installer}, "
+        f"chroot build installer @ {_i_chroot}"
+    )
+    assert "cmd_source_build('installer')" in src
+    assert "cmd_build_chroot_installer" in src
+    # Gates on chroot_installer_ready (not chroot_verified — that's
+    # live-only).  Pin the flag name so a future refactor doesn't
+    # silently swap to the wrong one.
+    assert "'chroot_installer_ready'" in src
+
+
+def test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each():
+    """cmd_auto_run is now a dispatcher: bare → live (preserves UX);
+    'live' → live; 'installer' → installer; anything else → help."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _calls = []
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.cmd_auto_run_live      = lambda *a, **kw: _calls.append(('live', a))
+    _sess.cmd_auto_run_installer = lambda *a, **kw: _calls.append(('installer', a))
+
+    # Bare → live
+    _sess.cmd_auto_run()
+    assert _calls == [('live', ())], _calls
+    # Explicit 'live'
+    _calls.clear()
+    _sess.cmd_auto_run('live')
+    assert _calls == [('live', ())], _calls
+    # Explicit 'installer'
+    _calls.clear()
+    _sess.cmd_auto_run('installer')
+    assert _calls == [('installer', ())], _calls
+    # Unknown action → neither handler invoked (falls through to _group_help)
+    _calls.clear()
+    _sess.cmd_auto_run('wat')
+    assert _calls == [], (
+        f"unknown autorun action must not invoke either handler, got {_calls}")
+
+
+def test_autorun_live_runs_source_build_then_source_build_live():
+    """Phase 4 of COMP-01b: autorun live must invoke source build twice
+    — once with no args (pkg subset, the new bare default) and once
+    with 'live' — before chroot build.  Catches a regression where
+    someone re-orders or drops the live extras step (which would
+    silently produce a chroot missing live-boot/live-config and fail
+    downstream).
+
+    Phase 7 follow-up: source moved from cmd_auto_run (now a dispatcher)
+    to cmd_auto_run_live — inspect the latter."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    src = inspect.getsource(BuildSession.cmd_auto_run_live)
     _i_pkg  = src.find("'source build'")
     _i_live = src.find("'source build live'")
     _i_chroot = src.find("'chroot build'")
@@ -3711,7 +3898,7 @@ def test_autorun_runs_source_build_then_source_build_live():
     # The 'live' arm should be wired via cmd_source_build('live') — assert
     # the lambda + arg appear in proximity to the 'source build live' label.
     assert "cmd_source_build('live')" in src, (
-        "autorun must call cmd_source_build('live') for the live arm"
+        "autorun_live must call cmd_source_build('live') for the live arm"
     )
 
 
@@ -4505,7 +4692,7 @@ def main() -> int:
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
         test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
         test_cmd_iso_build_unknown_subaction_calls_neither_handler,
-        test_cmd_build_iso_installer_is_stub,
+        test_cmd_build_iso_installer_bails_on_unmet_prereqs,
         # COMP-01c — chroot build live | chroot build installer split
         test_cmd_chroot_build_no_subaction_defaults_to_live,
         test_cmd_chroot_build_live_explicit_forwards_to_live,
@@ -4513,6 +4700,12 @@ def main() -> int:
         test_cmd_chroot_build_passthrough_args_to_live,
         test_cmd_build_chroot_installer_bails_on_unmet_prereqs,
         test_installer_chroot_dpkg_unpack_carries_required_force_flags,
+        test_iso_installer_kernel_pkg_regex_matches_real_kernels_only,
+        test_iso_installer_stage_grub_cfg_errors_when_data_layer_missing,
+        test_iso_installer_stage_grub_cfg_copies_when_present,
+        test_iso_installer_stage_disk_info_errors_when_dir_missing,
+        test_iso_installer_stage_disk_info_copies_files_skipping_readme,
+        test_iso_installer_stage_disk_info_errors_when_only_readme,
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
@@ -4624,7 +4817,9 @@ def main() -> int:
         test_source_build_installer_subset_unions_udeb_tree_with_deb_arm,
         test_refresh_patches_iterates_both_deb_and_udeb_trees,
         test_source_download_iterates_both_deb_and_udeb_trees,
-        test_autorun_runs_source_build_then_source_build_live,
+        test_autorun_installer_runs_source_build_then_source_build_installer,
+        test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each,
+        test_autorun_live_runs_source_build_then_source_build_live,
         test_source_build_args_subset_and_named_pkgs_mutually_exclusive,
         test_source_build_args_named_pkgs_resolve_subset_to_empty,
         test_source_build_args_bracket_token_extracts_profiles,

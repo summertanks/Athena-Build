@@ -42,6 +42,7 @@ import buildcontainer
 import dependencytree
 import buildsystem
 import installer_chroot
+import iso_installer
 import signal
 
 
@@ -1243,20 +1244,71 @@ class BuildSession:
 
 
     def cmd_build_iso_installer(self, *args):
-        """Build the installer ISO (debian-installer based).
+        """Build the installer ISO from buildroot/installer/ + repo/.
 
-        STUB — installer ISO build is COMP-01a (not yet implemented).
-        Once `chroot build installer` lands and produces the d-i initrd +
-        kernel + udeb manifest under buildroot/installer/, this command
-        will wrap those plus the apt pool, isolinux/grub config, preseed,
-        and branding into a bootable installer ISO.  See
-        docs/plans/comp-01-installer.md for the full design.
+        Usage: iso build installer
+
+        Mastering steps (delegated to iso_installer.build_installer_iso):
+          1. Wipe + create dir_image/staging-installer/
+          2. Find kernel — first try installer chroot's /boot/vmlinuz-*,
+             fall back to extracting from repo/linux-image-*-amd64*.deb
+          3. Build monolithic cpio.gz initrd from buildroot/installer/
+          4. Copy installer/boot/grub.cfg → staging/boot/grub/grub.cfg
+          5. Copy repo/ → staging/pool/ (for /cdrom/pool runtime read)
+          6. grub-mkrescue produces hybrid BIOS+EFI ISO
+
+        All configurable bits (boot menu, kernel cmdline) live in
+        installer/boot/grub.cfg — operator edits there without touching
+        engine code.
+
+        Prerequisites:
+          - chroot_installer_ready (so buildroot/installer/ exists)
+
+        Collects sudo password — initrd cpio reads root-owned chroot
+        content, pool copy preserves ownership.
         """
-        console.print(
-            "ERROR: installer ISO build is not yet implemented "
-            "(tracked as COMP-01a; see docs/plans/comp-01-installer.md)"
+        if not self.flags.chroot_installer_ready:
+            console.print(
+                "Run 'chroot build installer' first (need "
+                "buildroot/installer/ populated with the udeb closure)"
+            )
+            return
+
+        # Sudo password — same pattern as cmd_build_chroot_installer.
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _r = subprocess.run(
+            ['sudo', '-S', '-v'],
+            input=_password + '\n',
+            capture_output=True, text=True,
         )
-        logger.error("iso build installer: not implemented (COMP-01a)")
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("iso build installer: sudo -v failed")
+            _password = '*' * len(_password)
+            return
+
+        try:
+            _version = self.config.build_version.strip('"').strip("'")
+            _iso_basename = f"athena-installer-{_version}-amd64.iso"
+            console.print(
+                f"Building installer ISO {_iso_basename}..."
+            )
+            _ok = iso_installer.build_installer_iso(
+                dir_chroot_installer=self.config.dir_chroot_installer,
+                dir_repo=self.config.dir_repo,
+                dir_image=self.config.dir_image,
+                installer_dir=os.path.join(self.config.working_dir, 'installer'),
+                password=_password,
+                iso_basename=_iso_basename,
+            )
+            if not _ok:
+                console.print(
+                    "ERROR: installer ISO build failed — check log for details"
+                )
+                logger.error("build_installer_iso returned False")
+                return
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
 
 
     # ---------------------------------------------------------------------------
@@ -1858,7 +1910,7 @@ class BuildSession:
     def cmd_iso(self, action: str = '', *args):
         _table = {
             'build live':      'wrap live chroot into bootable hybrid BIOS/EFI ISO',
-            'build installer': 'wrap d-i initrd+kernel+pool into installer ISO (COMP-01a)',
+            'build installer': 'wrap installer chroot + kernel + pool into hybrid BIOS+EFI ISO',
         }
         if action == 'build':
             if not args:
@@ -1884,22 +1936,36 @@ class BuildSession:
             return self.cmd_verify_signing_key(*args)
         return self._group_help('key', _table, action)
 
-    def cmd_auto_run(self):
-        """Run the full build pipeline in sequence, bailing at the first
-        step that does not set its progress flag.  Each step already resets
-        its flag to False at entry and sets it to True only on success, so
-        checking the flag after the call is a reliable did-it-complete probe.
+    def cmd_auto_run(self, action: str = '', *args):
+        """Group dispatcher: bare `autorun` → autorun live (preserves
+        existing UX); explicit `autorun live` or `autorun installer`
+        run their respective pipelines.
 
-        Emits the final summary (UX-03) via print_commands.summary on every
-        exit path — success or abort — with stage counts, source-build
-        breakdown, predicted ISO path, and total wall time.
+        Both pipelines share the early stages (cache → dep parse →
+        source download → container init → source build pkg) and diverge
+        at the subset-specific source build + chroot build.  Neither
+        runs `iso build *` — operator runs that separately after a clean
+        autorun.
         """
-        import print_commands
-        # COMP-01b phase 4: bare `source build` now builds pkg.list closure
-        # only.  For a complete live ISO, we need pkg + live extras; chain
-        # both before chroot build.  Each step uses the source_build_ready
-        # flag, which cmd_source_build resets at entry — so bailing on either
-        # subset's failure works the same way as before.
+        _table = {
+            'live':      'cache→parse→download→container→source build (+live)→chroot build live',
+            'installer': 'cache→parse→download→container→source build (+installer)→chroot build installer',
+        }
+        if action in ('', 'live'):
+            return self.cmd_auto_run_live(*args)
+        if action == 'installer':
+            return self.cmd_auto_run_installer(*args)
+        return self._group_help('autorun', _table, action)
+
+    def cmd_auto_run_live(self):
+        """Run the full pipeline to a verified live chroot.
+
+        bare `source build` now builds pkg.list closure only (Phase 4 of
+        COMP-01b).  For a complete live ISO, we need pkg + live extras;
+        chain both before chroot build.  Each step uses the
+        source_build_ready flag, which cmd_source_build resets at entry —
+        so bailing on either subset's failure works the same way.
+        """
         _steps = [
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',       'dep parse'),
@@ -1913,23 +1979,56 @@ class BuildSession:
             # only when both build AND all 8 verify checks passed.
             (self.cmd_build_chroot_live, 'chroot_verified',       'chroot build'),
         ]
+        self._run_autorun_steps('autorun live', _steps)
 
-        _t0   = time.monotonic()
+    def cmd_auto_run_installer(self):
+        """Run the full pipeline to a built installer chroot.
+
+        Parallel to cmd_auto_run_live but diverges at the subset-specific
+        source build (installer subset = udeb closure + installer-exclusive
+        deb sources) and chroot build (unpack udebs into buildroot/installer/
+        via dpkg --unpack).  Stops at chroot_installer_ready; operator
+        runs `iso build installer` separately to produce the ISO.
+        """
+        _steps = [
+            (self.cmd_build_cache,       'cache_ready',                'cache build'),
+            (self.cmd_parse_dependency,  'dep_check_ready',            'dep parse'),
+            (self.cmd_source_download,   'download_ready',             'source download'),
+            (self.cmd_init_container,    'build_container_ready',      'container init'),
+            (self.cmd_source_build,                                       # bare = pkg
+                                          'source_build_ready',         'source build'),
+            (lambda: self.cmd_source_build('installer'),                  # udeb closure
+                                          'source_build_ready',         'source build installer'),
+            (self.cmd_build_chroot_installer,
+                                          'chroot_installer_ready',     'chroot build installer'),
+        ]
+        self._run_autorun_steps('autorun installer', _steps)
+
+    def _run_autorun_steps(self, label: str, _steps: list) -> None:
+        """Common driver shared by cmd_auto_run_{live,installer}.
+
+        Walks _steps sequentially, calls each function, gates on its
+        success flag.  On the first failure logs + breaks.  Emits the
+        UX-03 summary (via print_commands.summary) on every exit path,
+        carrying the stage label that aborted (if any) + total wall time.
+        """
+        import print_commands
+        _t0    = time.monotonic()
         _t0_dt = datetime.datetime.now()
         _aborted_at: Optional[str] = None
 
         for _fn, _flag, _name in _steps:
             _fn()
             if not getattr(self.flags, _flag):
-                console.print(f"autorun: '{_name}' did not complete — aborting")
-                logger.error(f"autorun aborted at '{_name}' (flag {_flag} not set)")
+                console.print(f"{label}: '{_name}' did not complete — aborting")
+                logger.error(f"{label} aborted at '{_name}' (flag {_flag} not set)")
                 _aborted_at = _name
                 break
 
         if _aborted_at is None:
-            console.print("autorun: all stages complete")
+            console.print(f"{label}: all stages complete")
 
-        _t1_dt = datetime.datetime.now()
+        _t1_dt   = datetime.datetime.now()
         _elapsed = int(time.monotonic() - _t0)
         print_commands.summary(self, timing=print_commands.AutorunTiming(
             started=_t0_dt,
@@ -2024,7 +2123,7 @@ def main(banner: str) -> None:
     tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')
     tui.register_command('key',       session.cmd_key,       '\tSigning:    key generate | key verify')
-    tui.register_command('autorun',   session.cmd_auto_run,  '\tRun all stages in sequence')
+    tui.register_command('autorun',   session.cmd_auto_run,  '\tAutorun:    autorun [live] | autorun installer')
     tui.register_command('print',     session.cmd_print,     '\tPrint build state — try: print help')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
