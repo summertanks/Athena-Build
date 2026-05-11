@@ -3431,6 +3431,27 @@ def test_source_build_installer_subset_unions_udeb_tree_with_deb_arm():
     ]
 
 
+def test_refresh_patches_iterates_both_deb_and_udeb_trees():
+    """Phase 4 regression guard: _refresh_patches must walk the udeb tree
+    too — otherwise a source that exists only in udeb_dep_tree (e.g.
+    fuse3 pulled because libfuse3-3-udeb is a d-i udeb dep) gets an
+    empty patch_list even when patch/source/<pkg>/<ver>/*.patch is on
+    disk, and `source build <pkg>` fails because the build container
+    runs the unpatched debian/rules.  Caught in production 2026-05-10."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    src = inspect.getsource(BuildSession._refresh_patches)
+    # Both tree references must appear: the deb tree (always) and the
+    # udeb tree (Phase 4).  Use string substring rather than a real
+    # invocation since _refresh_patches reads BuildConfig + filesystem;
+    # the contract is "iterate the union", which we can pin via source.
+    assert 'self.dep_tree.selected_srcs' in src, (
+        "_refresh_patches must include deb tree")
+    assert 'self.udeb_dep_tree' in src and 'selected_srcs' in src, (
+        "_refresh_patches must walk udeb tree's sources too")
+
+
 def test_source_download_iterates_both_deb_and_udeb_trees():
     """Phase 4 regression guard: cmd_source_download must call
     utils.download_source for the udeb tree too — otherwise sources that
@@ -4386,6 +4407,7 @@ def main() -> int:
         test_source_build_args_subsets_mutually_exclusive,
         test_source_build_pkg_subset_excludes_live_installer_extras,
         test_source_build_installer_subset_unions_udeb_tree_with_deb_arm,
+        test_refresh_patches_iterates_both_deb_and_udeb_trees,
         test_source_download_iterates_both_deb_and_udeb_trees,
         test_autorun_runs_source_build_then_source_build_live,
         test_source_build_args_subset_and_named_pkgs_mutually_exclusive,

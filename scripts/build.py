@@ -591,8 +591,23 @@ class BuildSession:
         # application order.  Resets patch_list per source so removed patch files
         # are reflected on re-runs (operator-driven `patch_refresh` after
         # out-of-band changes to the patch tree).
-        for _pkg in self.dep_tree.selected_srcs:
-            _src = self.dep_tree.selected_srcs[_pkg]
+        #
+        # Phase 4 (COMP-01b): walks BOTH the deb tree AND the udeb tree.
+        # Without the udeb pass, sources that live only in the udeb closure
+        # (e.g. fuse3 → libfuse3-3-udeb pulled by a d-i udeb) never get
+        # their patches discovered — `source build fuse3` then fails because
+        # patch_list is empty even though patch/source/fuse3/<ver>/*.patch
+        # exists on disk.  Caught in production 2026-05-10.  Both trees
+        # share Source instances via source_hashtable, so the union dict
+        # naturally dedupes and each Source's patch_list is set exactly once.
+        _unified_srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _name, _src in self.udeb_dep_tree.selected_srcs.items():
+                if _name not in _unified_srcs:
+                    _unified_srcs[_name] = _src
+
+        for _pkg in _unified_srcs:
+            _src = _unified_srcs[_pkg]
             _ver = str(_src.version)
             _patch_path = os.path.join(self.config.dir_patch_source, _pkg, _ver)
             _src.patch_list = []
@@ -615,7 +630,7 @@ class BuildSession:
                 console.print(f"WARNING: cannot list patches for '{_pkg}'")
                 logger.warning(f"patch discovery {_patch_path}: {e}")
 
-        _patched = sum(1 for _s in self.dep_tree.selected_srcs.values() if _s.patch_list)
+        _patched = sum(1 for _s in _unified_srcs.values() if _s.patch_list)
         console.print(f"Found patches for {_patched} source package(s)", tui.COLOR_INFO)
         return _patched
 
