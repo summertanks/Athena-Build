@@ -98,6 +98,13 @@ class Mirror:
     def sources_path(self) -> str:
         return f'{self.component}/source/Sources'
 
+    @property
+    def udeb_packages_path(self) -> str:
+        # COMP-01b phase 2: d-i (udeb) Packages index.  Only main typically
+        # publishes this; updates/security mirrors won't have it.  Cache
+        # treats this path as OPTIONAL — missing-from-Release is fine.
+        return f'{self.component}/debian-installer/binary-{self.arch}/Packages'
+
     def with_snapshot(self, ts):
         """Return a copy of this Mirror rewritten to snapshot.debian.org.
 
