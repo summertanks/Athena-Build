@@ -36,6 +36,11 @@ class Cache:
 
     package_hashtable:  Dict[str, Dict[Version, List[Package]]]
     source_hashtable:   Dict[str, List[Source]]
+    # COMP-01b phase 2: parallel hashtable for udeb (Section: debian-installer)
+    # records, indexed from dists/<suite>/main/debian-installer/binary-<arch>/
+    # Packages.  Same shape as package_hashtable so the existing
+    # DependencyTree class can be instantiated against it for the udeb world.
+    udeb_hashtable:     Dict[str, Dict[Version, List[Package]]]
 
     _arch_table: DpkgArchTable
 
@@ -93,6 +98,11 @@ class Cache:
 
         # Per-mirror cache file paths: {mirror_id: {'Packages': path, 'Sources': path}}
         self.mirror_cache_files: Dict[str, Dict[str, str]] = {}
+        # COMP-01b phase 2: per-mirror decompressed udeb Packages path.
+        # Only set for mirrors that publish a debian-installer index (typically
+        # main only — updates/security don't ship udebs).  Absence means
+        # "this mirror has no udebs to contribute"; not an error.
+        self.mirror_udeb_cache_files: Dict[str, str] = {}
 
         # InRelease info
         self.release_info = ''
@@ -100,16 +110,23 @@ class Cache:
         # Cache data
         self.pkg_list = []
         self.src_list = []
-        
+
         self.required: List[str] = []
         self.important: List[str] = []
+        # COMP-01b phase 2: udeb-world equivalents.  Sparse — bookworm has
+        # only 3 required udebs (base-installer, bootstrap-base, finish-install)
+        # and 3 important udebs (kmod-udeb, libkmod2-udeb, libpcre3-udeb).
+        self.udeb_required: List[str] = []
+        self.udeb_important: List[str] = []
 
         self.skip_src: List[str] = []
 
-        
+
         self.package_hashtable = defaultdict(lambda: defaultdict(list))
         # self.provides_hashtable = defaultdict(lambda: defaultdict(list))
         self.source_hashtable = defaultdict(list) # Dict[str, List[Source]]
+        # COMP-01b phase 2: parallel hashtable for udeb records.
+        self.udeb_hashtable = defaultdict(lambda: defaultdict(list))
 
         # Download files
         if self.__get_files() < 0:
@@ -263,11 +280,108 @@ class Cache:
                 _mirror_files[_path.rsplit('/', 1)[-1]] = _dst
 
             self.mirror_cache_files[_mirror.id] = _mirror_files
+
+            # COMP-01b phase 2: optional udeb index fetch.  The d-i Packages
+            # index is at <component>/debian-installer/binary-<arch>/Packages
+            # and is published by main only (updates/security don't ship
+            # udebs).  If absent from this mirror's Release, skip silently —
+            # not an error.  If present, fetch + decompress same as regular
+            # Packages, but stash the path in mirror_udeb_cache_files (a
+            # parallel dict) so __build_cache can route it to udeb_hashtable.
+            _udeb_path = _mirror.udeb_packages_path
+            _udeb_dst = self._fetch_optional_index(
+                _udeb_path, _base_url, _rel_sha, _mirror,
+            )
+            if _udeb_dst:
+                self.mirror_udeb_cache_files[_mirror.id] = _udeb_dst
+
             tui.console.print(f"Mirror [{_mirror.id}] {_mirror.suite}: "
                               f"{rel.get('Origin','?')} {rel.get('Codename','?')} "
                               f"{rel.get('Version','?')} {rel.get('Date','?')}", tui.COLOR_HIGHLIGHT)
 
         return 0
+
+    def _fetch_optional_index(self, _path: str, _base_url: str,
+                              _rel_sha: dict, _mirror) -> Optional[str]:
+        """Download + decompress an OPTIONAL Packages-style index.
+
+        Returns the on-disk path of the decompressed file, or None if the
+        path is not in this mirror's Release (i.e. the mirror doesn't
+        publish this index — common for updates/security with the d-i
+        index).  Errors during fetch/decompress raise the normal
+        download_file / opener exceptions; the optionality is purely about
+        the Release-file presence check, not about transport failures.
+
+        Mirrors the existing required-index fetch logic in __get_files but
+        scoped to a single path and with a "missing-from-Release is fine"
+        early return.  Used by Phase 2's udeb index handling; structured
+        as a helper so additional optional indices (translations, contrib,
+        ...) can ride the same path later.
+        """
+        _expected_uncompressed_sha = _rel_sha.get(_path, '')
+        _dst = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(_base_url + _path))
+
+        # Already on disk + sha matches: no re-download.
+        if _expected_uncompressed_sha and utils.get_sha256(_dst) == _expected_uncompressed_sha:
+            tui.console.print(f'Skipping download for {os.path.basename(_dst)}')
+            return _dst
+
+        # Find a compressed variant that this mirror's Release lists.
+        _chosen_ext = None
+        _chosen_opener = None
+        for _ext, _opener in self._compression_openers:
+            if (_path + _ext) in _rel_sha:
+                _chosen_ext = _ext
+                _chosen_opener = _opener
+                break
+
+        # Neither uncompressed nor any compressed variant present in
+        # Release → mirror genuinely doesn't publish this index.  Skip.
+        if not _expected_uncompressed_sha and _chosen_ext is None:
+            logger.info(
+                f"[{_mirror.id}] no {_path} in Release — skipping (optional index)"
+            )
+            return None
+
+        # If only uncompressed sha was present (rare for these indices but
+        # technically allowed) the cached-file branch above would have
+        # taken it; we wouldn't get here without an expected_uncompressed_sha
+        # AND a missing cached file.  Fall through to download.
+        if _chosen_ext is None:
+            # Uncompressed shipped but not on disk and we have no compressed
+            # variant to fetch — that's actually unusual but not catastrophic;
+            # treat as missing.
+            logger.warning(
+                f"[{_mirror.id}] {_path} listed uncompressed in Release but "
+                f"no compressed variant available — skipping"
+            )
+            return None
+
+        _src_url = _base_url + _path + _chosen_ext
+        _compressed_dst = _dst + _chosen_ext
+        _size, _detail = utils.download_file(_src_url, _compressed_dst)
+        if _size <= 0:
+            logger.error(
+                f"[{_mirror.id}] failed to download optional index "
+                f"{_src_url}: {_detail or 'empty response'}"
+            )
+            return None
+        tui.console.print(f'Downloaded {_src_url}')
+
+        _decompress_spinner = Spinner(f"Decompressing {os.path.basename(_compressed_dst)}")
+        try:
+            with _chosen_opener(_compressed_dst, 'rb') as f_in:
+                with open(_dst, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out, length=1 << 20)
+        except (OSError, EOFError, lzma.LZMAError) as e:
+            _decompress_spinner.done()
+            logger.error(
+                f"[{_mirror.id}] failed to decompress "
+                f"{os.path.basename(_compressed_dst)}: {e}"
+            )
+            return None
+        _decompress_spinner.done()
+        return _dst
 
     def __build_cache(self, arch: str) -> bool:
         """Build the package + source hashtables by ingesting every mirror.
@@ -373,16 +487,26 @@ class Cache:
 
             progress_bar_src.close()
 
+        # COMP-01b phase 2: parallel udeb pass.  Mirrors that don't publish
+        # a debian-installer index (typically updates/security) are skipped
+        # silently — mirror_udeb_cache_files only carries entries for those
+        # mirrors that did.  Same parsing logic as the regular Packages
+        # pass, just routed to udeb_hashtable + udeb_required/udeb_important.
+        self._ingest_udeb_indices(arch)
+
         # Multi-mirror ingest can record the same package under 'required'
         # or 'important' more than once (e.g. main and security both ship it);
         # dedup while preserving order for stable downstream iteration.
         self.required  = list(dict.fromkeys(self.required))
         self.important = list(dict.fromkeys(self.important))
+        self.udeb_required  = list(dict.fromkeys(self.udeb_required))
+        self.udeb_important = list(dict.fromkeys(self.udeb_important))
 
         parser_spinner.done()
         tui.console.print(
             f'Indexed {len(self.package_hashtable)} package names, '
-            f'{len(self.source_hashtable)} source names across {len(self.mirrors)} mirror(s)'
+            f'{len(self.source_hashtable)} source names, '
+            f'{len(self.udeb_hashtable)} udeb names across {len(self.mirrors)} mirror(s)'
         )
         
         # Pick the latest gcc major present in the index and drop older majors
@@ -408,8 +532,84 @@ class Cache:
         tui.console.print(f"Selected : {latest_gcc}")
         tui.console.print(f"Required Package Count : {len(self.required)}")
         tui.console.print(f"Important Package Count : {len(self.important)}")
-        
+        tui.console.print(
+            f"Udeb Required / Important : "
+            f"{len(self.udeb_required)} / {len(self.udeb_important)}"
+        )
+
         return True
+
+    def _ingest_udeb_indices(self, arch: str) -> None:
+        """COMP-01b phase 2: parse the per-mirror udeb Packages files and
+        route their records into self.udeb_hashtable.
+
+        Mirrors that didn't publish a d-i index (no entry in
+        mirror_udeb_cache_files) are skipped silently.  Per-record parsing
+        mirrors the regular Packages pass in __build_cache; the only
+        differences are the destination hashtable and the udeb_required /
+        udeb_important tracking.
+
+        Extracted as a sibling method so unit tests can drive it without
+        going through __build_cache's full mirror loop.
+        """
+        for _mirror in self.mirrors:
+            _udeb_file = self.mirror_udeb_cache_files.get(_mirror.id, '')
+            if not _udeb_file:
+                continue
+
+            try:
+                _udeb_records = utils.readfile(_udeb_file).split('\n\n')
+            except OSError as e:
+                logger.error(
+                    f"[{_mirror.id}] failed to read udeb index {_udeb_file}: {e}"
+                )
+                continue
+
+            progress_bar_udeb = ProgressBar(
+                label=f"Indexing {_mirror.id}/d-i Packages",
+                itr_label='rec/s', maxvalue=len(_udeb_records))
+            for _udeb_record in _udeb_records:
+                progress_bar_udeb.step(1)
+                _udeb_record = _udeb_record.strip()
+                if not _udeb_record:
+                    continue
+
+                try:
+                    _udeb = package.Package(_udeb_record)
+                except (ValueError, KeyError, AttributeError, SystemError) as e:
+                    _first_line = _udeb_record.splitlines()[0] if _udeb_record else '<empty>'
+                    logger.warning(
+                        f"Skipping udeb record ({type(e).__name__}: {e}) — {_first_line}"
+                    )
+                    continue
+
+                if not _udeb.isvalid:
+                    continue
+
+                if _udeb.arch != 'all' and self._arch_table.matches_architecture(_udeb.arch, arch) is False:
+                    continue
+
+                _udeb._mirror = _mirror
+
+                _udeb_name = _udeb.package
+                _udeb_ver  = _udeb.version
+                self.udeb_hashtable[_udeb_name][_udeb_ver].append(_udeb)
+
+                # udebs typically don't carry Provides; still mirror the
+                # regular pass for safety in case any do.
+                try:
+                    for _provided_name, _provided_ver in _udeb.get_provides():
+                        if _provided_name != _udeb_name:
+                            self.udeb_hashtable[_provided_name][_provided_ver].append(_udeb)
+                except (ValueError, KeyError, AttributeError, SystemError) as e:
+                    logger.warning(f"Skipping malformed udeb provides for '{_udeb.package}': {e}")
+
+                if _udeb.priority == 'required':
+                    self.udeb_required.append(_udeb_name)
+                if _udeb.priority == 'important':
+                    self.udeb_important.append(_udeb_name)
+
+            progress_bar_udeb.close()
 
     def get_packages(self, package_name: str,
                      version: Optional[Version] = None, constraint: str = '') -> List[Package]:

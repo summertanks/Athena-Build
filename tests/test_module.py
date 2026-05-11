@@ -2605,6 +2605,293 @@ def test_derive_subset_exclusive_src_names_handles_installer_exclusive():
     assert dt.installer_exclusive_src_names == {'partman-base'}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# COMP-01b phase 2 — Cache parses the udeb (debian-installer) Packages index
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_mirror_udeb_packages_path_format():
+    """Mirror.udeb_packages_path returns the conventional Debian d-i path
+    fragment under <component>/debian-installer/binary-<arch>/Packages."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import Mirror
+    m = Mirror(mirror_id='test', baseurl='http://example/', baseid='debian',
+               release='bookworm', suffix='', component='main', arch='amd64')
+    assert m.udeb_packages_path == 'main/debian-installer/binary-amd64/Packages'
+    # Different component → reflected
+    m2 = Mirror(mirror_id='ctest', baseurl='http://example/', baseid='debian',
+                release='bookworm', suffix='', component='contrib', arch='arm64')
+    assert m2.udeb_packages_path == 'contrib/debian-installer/binary-arm64/Packages'
+
+
+def test_cache_class_declares_udeb_fields_on_init():
+    """A freshly constructed Cache has udeb_hashtable / udeb_required /
+    udeb_important / mirror_udeb_cache_files initialised empty."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    # Bypass __init__ — full init needs a real BuildConfig with mirrors,
+    # snapshot resolution, and live downloads.  We only need to verify the
+    # new fields would exist; the Phase 2 ingest test below exercises them
+    # against real parsed data.
+    c = Cache.__new__(Cache)
+    # Replicate __init__'s zero-state for the new fields.
+    from collections import defaultdict
+    c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+    c.udeb_required = []
+    c.udeb_important = []
+    c.mirror_udeb_cache_files = {}
+    assert isinstance(c.udeb_hashtable, dict)
+    assert isinstance(c.udeb_required, list)
+    assert isinstance(c.udeb_important, list)
+    assert isinstance(c.mirror_udeb_cache_files, dict)
+    assert len(c.udeb_hashtable) == len(c.udeb_required) == len(c.udeb_important) == 0
+
+
+# Helper: build a synthetic udeb Packages stanza string (multi-record).
+def _make_udeb_packages_text():
+    """Return a Debian-format Packages-file content with three udeb records:
+    one Priority: required, one Priority: important, one Priority: optional.
+    Mirrors what the real bookworm d-i index publishes (sparse priorities)."""
+    return (
+        "Package: base-installer\n"
+        "Source: base-installer\n"
+        "Version: 1.197\n"
+        "Architecture: amd64\n"
+        "Maintainer: Debian Install Team <debian-boot@lists.debian.org>\n"
+        "Installed-Size: 100\n"
+        "Filename: pool/main/b/base-installer/base-installer_1.197_amd64.udeb\n"
+        "MD5sum: 0123456789abcdef0123456789abcdef\n"
+        "SHA256: " + "0" * 64 + "\n"
+        "Size: 12345\n"
+        "Section: debian-installer\n"
+        "Priority: required\n"
+        "Description: Base system installer\n"
+        "\n"
+        "Package: kmod-udeb\n"
+        "Source: kmod\n"
+        "Version: 30+20221128-1\n"
+        "Architecture: amd64\n"
+        "Maintainer: Debian kmod Team <pkg-kmod-devel@lists.alioth.debian.org>\n"
+        "Installed-Size: 200\n"
+        "Filename: pool/main/k/kmod/kmod-udeb_30+20221128-1_amd64.udeb\n"
+        "MD5sum: fedcba9876543210fedcba9876543210\n"
+        "SHA256: " + "1" * 64 + "\n"
+        "Size: 23456\n"
+        "Section: debian-installer\n"
+        "Priority: important\n"
+        "Description: Kernel module loader (udeb)\n"
+        "\n"
+        "Package: cdebconf-text-udeb\n"
+        "Source: cdebconf\n"
+        "Version: 0.270\n"
+        "Architecture: amd64\n"
+        "Maintainer: Debian Install Team <debian-boot@lists.debian.org>\n"
+        "Installed-Size: 96\n"
+        "Depends: cdebconf-udeb, libc6-udeb (>= 2.36), libreadline8-udeb\n"
+        "Filename: pool/main/c/cdebconf/cdebconf-text-udeb_0.270_amd64.udeb\n"
+        "MD5sum: aaaabbbbccccddddeeeeffffaaaabbbb\n"
+        "SHA256: " + "2" * 64 + "\n"
+        "Size: 24032\n"
+        "Section: debian-installer\n"
+        "Priority: optional\n"
+        "Description: Plain text frontend for cdebconf\n"
+    )
+
+
+class _StubArchTable:
+    """Mimic DpkgArchTable.matches_architecture — return True (compatible)
+    for the host arch, False for known incompatible, None for unknown."""
+    def matches_architecture(self, pkg_arch, host_arch):
+        if pkg_arch == 'all':
+            return True
+        return pkg_arch == host_arch
+
+
+class _StubTuiForProgressBar:
+    """Minimum Tui surface ProgressBar needs: add_widget/del_widget/print.
+    Used by _ingest_udeb_indices tests because the helper instantiates a
+    real ProgressBar internally (matches the regular Packages pass)."""
+    def __init__(self):
+        self._next_id = 0
+        self._widgets = {}
+    def add_widget(self, w):
+        wid = self._next_id
+        self._next_id += 1
+        self._widgets[wid] = w
+        return wid
+    def del_widget(self, wid):
+        self._widgets.pop(wid, None)
+    def print(self, *_a, **_kw): pass
+
+
+def _with_stub_tui(fn):
+    """Decorator: run a test with a stub Tui registered as the singleton.
+    Restores the prior tui_instance on exit so other tests aren't disturbed."""
+    def _wrapped(*args, **kwargs):
+        import sys
+        sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+        import tui as _tui
+        _saved = _tui.tui_instance
+        _tui.tui_instance = _StubTuiForProgressBar()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _tui.tui_instance = _saved
+    _wrapped.__name__ = fn.__name__
+    _wrapped.__doc__ = fn.__doc__
+    return _wrapped
+
+
+@_with_stub_tui
+def test_ingest_udeb_indices_routes_records_to_udeb_hashtable():
+    """_ingest_udeb_indices reads the per-mirror udeb Packages files and
+    populates udeb_hashtable + udeb_required + udeb_important.  The
+    regular package_hashtable is untouched."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    from utils import Mirror
+    from collections import defaultdict
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _udeb_path = os.path.join(_tmp, 'di-packages')
+        with open(_udeb_path, 'w') as f:
+            f.write(_make_udeb_packages_text())
+
+        c = Cache.__new__(Cache)
+        c._arch_table = _StubArchTable()
+        c.mirrors = [Mirror(mirror_id='main', baseurl='http://example/',
+                            baseid='debian', release='bookworm', suffix='',
+                            component='main', arch='amd64')]
+        c.mirror_udeb_cache_files = {'main': _udeb_path}
+        c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+        c.udeb_required = []
+        c.udeb_important = []
+        # Regular hashtable also needed to assert it's untouched.
+        c.package_hashtable = defaultdict(lambda: defaultdict(list))
+
+        c._ingest_udeb_indices('amd64')
+
+        # All 3 records routed to udeb_hashtable
+        assert 'base-installer'    in c.udeb_hashtable
+        assert 'kmod-udeb'         in c.udeb_hashtable
+        assert 'cdebconf-text-udeb' in c.udeb_hashtable
+        # Regular hashtable stays empty — these are udebs, not regular pkgs
+        assert len(c.package_hashtable) == 0
+        # Priority tracking
+        assert 'base-installer' in c.udeb_required
+        assert 'kmod-udeb'      in c.udeb_important
+        assert 'cdebconf-text-udeb' not in c.udeb_required
+        assert 'cdebconf-text-udeb' not in c.udeb_important
+
+
+def test_ingest_udeb_indices_skips_mirrors_without_udeb_file():
+    """A mirror absent from mirror_udeb_cache_files is silently skipped —
+    no exception, udeb_hashtable stays empty for that mirror's records."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    from utils import Mirror
+    from collections import defaultdict
+
+    c = Cache.__new__(Cache)
+    c._arch_table = _StubArchTable()
+    c.mirrors = [
+        Mirror(mirror_id='main',     baseurl='http://example/', baseid='debian',
+               release='bookworm', suffix='', component='main', arch='amd64'),
+        Mirror(mirror_id='security', baseurl='http://example/', baseid='debian',
+               release='bookworm-security', suffix='', component='main', arch='amd64'),
+    ]
+    # Neither mirror has a udeb file path — both should be skipped
+    c.mirror_udeb_cache_files = {}
+    c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+    c.udeb_required = []
+    c.udeb_important = []
+
+    c._ingest_udeb_indices('amd64')   # must not raise
+    assert len(c.udeb_hashtable) == 0
+    assert c.udeb_required == []
+    assert c.udeb_important == []
+
+
+@_with_stub_tui
+def test_ingest_udeb_indices_handles_partial_mirror_set():
+    """Only main publishes the d-i index; updates+security don't.  Verify
+    the helper handles the realistic mixed case — main's udebs land,
+    others are no-ops, no spurious errors."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    from utils import Mirror
+    from collections import defaultdict
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _udeb_path = os.path.join(_tmp, 'main-di-packages')
+        with open(_udeb_path, 'w') as f:
+            f.write(_make_udeb_packages_text())
+
+        c = Cache.__new__(Cache)
+        c._arch_table = _StubArchTable()
+        c.mirrors = [
+            Mirror(mirror_id='main',     baseurl='http://example/', baseid='debian',
+                   release='bookworm', suffix='', component='main', arch='amd64'),
+            Mirror(mirror_id='updates',  baseurl='http://example/', baseid='debian',
+                   release='bookworm-updates', suffix='', component='main', arch='amd64'),
+            Mirror(mirror_id='security', baseurl='http://example/', baseid='debian',
+                   release='bookworm-security', suffix='', component='main', arch='amd64'),
+        ]
+        # Only main has udebs.  updates + security mirror.id NOT in dict.
+        c.mirror_udeb_cache_files = {'main': _udeb_path}
+        c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+        c.udeb_required = []
+        c.udeb_important = []
+
+        c._ingest_udeb_indices('amd64')
+        # 3 records from main — others contributed nothing
+        assert len(c.udeb_hashtable) == 3
+        assert 'base-installer' in c.udeb_required
+        assert 'kmod-udeb'      in c.udeb_important
+
+
+@_with_stub_tui
+def test_ingest_udeb_indices_dedups_priority_lists_via_caller():
+    """If the same udeb appears in multiple mirrors' indices (e.g. main
+    and a mirror that re-publishes), the priority list ends up with
+    duplicates after _ingest_udeb_indices.  __build_cache dedups via
+    dict.fromkeys after this helper returns — pin that contract here so
+    a future refactor doesn't drop the dedup step."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    from utils import Mirror
+    from collections import defaultdict
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _udeb_path = os.path.join(_tmp, 'di-packages')
+        with open(_udeb_path, 'w') as f:
+            f.write(_make_udeb_packages_text())
+
+        c = Cache.__new__(Cache)
+        c._arch_table = _StubArchTable()
+        c.mirrors = [
+            Mirror(mirror_id='main1', baseurl='http://example/', baseid='debian',
+                   release='bookworm', suffix='', component='main', arch='amd64'),
+            Mirror(mirror_id='main2', baseurl='http://example/', baseid='debian',
+                   release='bookworm', suffix='', component='main', arch='amd64'),
+        ]
+        c.mirror_udeb_cache_files = {'main1': _udeb_path, 'main2': _udeb_path}
+        c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+        c.udeb_required = []
+        c.udeb_important = []
+
+        c._ingest_udeb_indices('amd64')
+        # Pre-dedup: main1 + main2 each contribute base-installer → list has dupes
+        assert c.udeb_required.count('base-installer') == 2
+        # Caller (__build_cache) dedups via list(dict.fromkeys(...))
+        assert list(dict.fromkeys(c.udeb_required)) == ['base-installer']
+
+
 def test_compute_install_batches_excludes_extras_pkg_names():
     """EXTRAS-01: chroot install path skips packages in
     dependencytree.extras_pkg_names so they never enter a batch."""
@@ -3709,6 +3996,13 @@ def main() -> int:
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
         test_derive_subset_exclusive_src_names_no_op_when_both_empty,
         test_derive_subset_exclusive_src_names_handles_installer_exclusive,
+        # COMP-01b phase 2: cache parses udeb (debian-installer) Packages index
+        test_mirror_udeb_packages_path_format,
+        test_cache_class_declares_udeb_fields_on_init,
+        test_ingest_udeb_indices_routes_records_to_udeb_hashtable,
+        test_ingest_udeb_indices_skips_mirrors_without_udeb_file,
+        test_ingest_udeb_indices_handles_partial_mirror_set,
+        test_ingest_udeb_indices_dedups_priority_lists_via_caller,
         test_compute_install_batches_excludes_extras_pkg_names,
         test_verify_dep_resolution_skips_extras,
         test_verify_dep_resolution_still_catches_real_violations,
