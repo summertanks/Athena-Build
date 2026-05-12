@@ -56,6 +56,7 @@ def build_installer_iso(
     codename: str = 'athena',
     version: str = '0.1',
     base_include_pkgs: Optional[list] = None,
+    deb_whitelist=None,
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -101,7 +102,7 @@ def build_installer_iso(
     if not _stage_base_include(_staging, base_include_pkgs):
         return False
 
-    if not _stage_pool(dir_repo, _staging, password):
+    if not _stage_pool(dir_repo, _staging, password, deb_whitelist):
         return False
 
     if not _generate_apt_repo(_staging, suite, codename, version, password):
@@ -470,33 +471,222 @@ def _stage_base_include(staging: str, pkgs: Optional[list]) -> bool:
     return True
 
 
-def _stage_pool(dir_repo: str, staging: str, password: str) -> bool:
-    """Copy repo/ → staging/pool/.
+def _parse_deb_filename(filename: str) -> tuple:
+    """Extract `(name, version)` from a `.deb` / `.udeb` filename.
+
+    Debian binary filename convention: `<name>_<version>_<arch>.{deb,udeb}`
+    where neither name nor version contains an underscore (policy
+    requirement).  Versions with an epoch are encoded `1%3a2.3-4` in
+    the filename (the `%3a` is the URL encoding of `:`).
+
+    For files that don't match (e.g. `Packages.gz` accidentally in
+    pool/), returns `('', '')` so the caller can skip them.
+    """
+    _base = filename
+    if _base.endswith('.udeb'):
+        _base = _base[:-len('.udeb')]
+    elif _base.endswith('.deb'):
+        _base = _base[:-len('.deb')]
+    else:
+        return '', ''
+    _parts = _base.split('_')
+    if len(_parts) < 3:
+        return '', ''
+    # filename version → control-file version: decode the epoch.
+    _ver = _parts[1].replace('%3a', ':')
+    return _parts[0], _ver
+
+
+# Backwards-compat shim — older tests/callers may still reach for the
+# name-only parser.  Wraps the new tuple-returning helper.
+def _parse_deb_package_name(filename: str) -> str:
+    return _parse_deb_filename(filename)[0]
+
+
+def _debian_version_cmp(a: str, b: str) -> int:
+    """Compare two Debian version strings.  Returns -1/0/1.
+
+    Uses apt_pkg.version_compare when available (canonical Debian
+    semantics: epoch → upstream → debian-revision, with the segment
+    grammar from policy 5.6.12).  Falls back to a simple lexicographic
+    compare if apt_pkg isn't importable — degraded but never wrong
+    for the common case of source-built packages with identical
+    everything-except-the-revision (`6.1.170-1` vs `6.1.170-3` etc.).
+    """
+    try:
+        import apt_pkg
+        apt_pkg.init_system()
+        return apt_pkg.version_compare(a, b)
+    except Exception:
+        if a == b:
+            return 0
+        return -1 if a < b else 1
+
+
+def _select_pool_files(
+    dir_repo: str, deb_whitelist,
+) -> tuple:
+    """Decide which files in repo/ ship on the installer ISO.
+
+    `deb_whitelist` is one of:
+      - set/iterable of canonical package names: keep .deb iff its
+        package name is in the set AND it's not a dbgsym variant.
+        When repo/ holds multiple versions of the same package (our
+        source-build pipeline can leave older binaries behind), only
+        the highest version per name survives — measured by Debian
+        version-compare semantics.
+      - None: legacy blanket-copy — every regular file kept.
+
+    Rules when whitelist is a set:
+      - Every `.udeb` is kept (anna may fetch any of them at install
+        time — see docs/plans/comp-02-robust-build.md for the
+        udeb-pool analysis).
+      - `.deb` is kept iff its package name is in the whitelist AND
+        does NOT end in `-dbgsym`.
+      - When the same package name has multiple .deb files, only the
+        highest version is kept; older versions are counted into
+        skipped.
+      - Anything else (sources, stray files) is skipped.
+
+    Returns `(kept_list, skipped_count)`.
+
+    Design note: this filter intentionally does NOT cross-walk
+    versions against any external metadata (cache versions, base_include,
+    etc.).  Our source-build pipeline produces filenames whose version
+    form differs from Debian's apt indices (epoch stripped, no binNMU
+    suffix) — pinning by cache version was fragile.  Pinning by
+    "latest in repo/ per name" is robust to source-build version
+    drift and still achieves the goal: drop older builds of the same
+    package.
+    """
+    try:
+        _entries = sorted(os.listdir(dir_repo))
+    except OSError:
+        return [], 0
+    if deb_whitelist is None:
+        _kept = [
+            n for n in _entries
+            if os.path.isfile(os.path.join(dir_repo, n))
+        ]
+        return _kept, 0
+    _udebs = []
+    _by_name = {}   # canonical_name → (version_str, filename)
+    _skipped = 0
+    for _name in _entries:
+        _full = os.path.join(dir_repo, _name)
+        if not os.path.isfile(_full):
+            continue
+        if _name.endswith('.udeb'):
+            _udebs.append(_name)
+            continue
+        if not _name.endswith('.deb'):
+            _skipped += 1
+            continue
+        _pkg, _ver = _parse_deb_filename(_name)
+        if not _pkg or _pkg.endswith('-dbgsym'):
+            _skipped += 1
+            continue
+        if _pkg not in deb_whitelist:
+            _skipped += 1
+            continue
+        _existing = _by_name.get(_pkg)
+        if _existing is None:
+            _by_name[_pkg] = (_ver, _name)
+        elif _debian_version_cmp(_existing[0], _ver) < 0:
+            # Newer version wins; the older one becomes dead weight.
+            _skipped += 1
+            _by_name[_pkg] = (_ver, _name)
+        else:
+            _skipped += 1
+    _kept = _udebs + [_fn for _ver, _fn in _by_name.values()]
+    return _kept, _skipped
+
+
+def _stage_pool(
+    dir_repo: str, staging: str, password: str,
+    deb_whitelist=None,
+) -> bool:
+    """Copy a filtered subset of repo/ → staging/pool/.
 
     The installer reads from /cdrom/pool at runtime (matches the locked
     COMP-01b decision: file:///cdrom apt source, no network repo
-    fallback).  Uses cp -a to preserve modes/timestamps + sudo so any
-    root-owned files in repo/ get faithful copies.
+    fallback).
 
-    This is the largest step by far — multi-GB pool can take several
-    minutes.
+    When `deb_whitelist` is provided (the normal case from
+    cmd_build_iso_installer), only packages the target system will
+    actually install plus their Recommends and every .udeb get shipped.
+    See `_select_pool_files` for the rules.  Without filtering, repo/
+    can be 5+ GB containing dbgsym packages, unused kernel flavors
+    (-rt, -cloud), old ABIs, live-exclusive packages — all dead weight
+    on an installer ISO.
+
+    Uses rsync --files-from for the copy: handles arbitrary file counts
+    without hitting ARG_MAX, preserves modes/timestamps like cp -a,
+    runs under sudo for root-owned files in repo/.
     """
     _dst = os.path.join(staging, 'pool')
-    _bytes = _bytes_in_dir(dir_repo)
-    _mb = _bytes // (2 ** 20)
-    tui.console.print(
-        f"Copying apt pool ({_mb} MB) — may take a few minutes..."
-    )
-    _r = _sudo(['cp', '-a', dir_repo + '/.', _dst], password)
-    if _r.returncode != 0:
+    _kept, _skipped = _select_pool_files(dir_repo, deb_whitelist)
+    if not _kept:
         tui.console.print(
-            f"ERROR: pool copy failed: {_r.stderr.strip()[:200]}"
+            f"ERROR: pool selection produced 0 files from {dir_repo} — "
+            "whitelist likely too aggressive or repo/ is empty"
         )
         logger.error(
-            f"_stage_pool cp -a {dir_repo} {_dst}: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
+            f"_stage_pool: 0 files selected from {dir_repo} "
+            f"(whitelist size {len(deb_whitelist) if deb_whitelist else 'None'})"
         )
         return False
+    # Estimate the kept-set size for the operator-facing log line.
+    _bytes = 0
+    for _name in _kept:
+        try:
+            _bytes += os.path.getsize(os.path.join(dir_repo, _name))
+        except OSError:
+            pass
+    _mb = _bytes // (2 ** 20)
+    if deb_whitelist is not None:
+        tui.console.print(
+            f"Copying apt pool ({_mb} MB, {len(_kept)} files; "
+            f"{_skipped} filtered out) — may take a few minutes..."
+        )
+    else:
+        tui.console.print(
+            f"Copying apt pool ({_mb} MB, {len(_kept)} files) — "
+            "may take a few minutes..."
+        )
+    # Ensure the destination exists.  The previous blanket `cp -a
+    # repo/. pool` created `pool/` implicitly as part of the directory
+    # copy; the new file-by-file form with `-t pool` requires the
+    # target to already exist.  Caught 2026-05-12.
+    try:
+        os.makedirs(_dst, exist_ok=True)
+    except OSError as e:
+        tui.console.print(f"ERROR: mkdir {_dst}: {e}")
+        logger.error(f"_stage_pool mkdir {_dst}: {e}")
+        return False
+    # Copy in batches via `sudo cp -a -t <dst> -- <files...>`.  Batched
+    # so we don't hit ARG_MAX with 1500+ filenames, and chunk-by-chunk
+    # so a single failure surfaces with the offending batch rather than
+    # an opaque whole-pool error.  cp -a is universally available;
+    # rsync is not (caught 2026-05-12: `sudo: rsync: command not found`
+    # on the host running the build).
+    _BATCH = 200
+    for _i in range(0, len(_kept), _BATCH):
+        _chunk = _kept[_i:_i + _BATCH]
+        _args = ['cp', '-a', '-t', _dst, '--']
+        _args.extend(os.path.join(dir_repo, _n) for _n in _chunk)
+        _r = _sudo(_args, password)
+        if _r.returncode != 0:
+            tui.console.print(
+                f"ERROR: pool copy failed at batch {_i // _BATCH + 1} "
+                f"of {(len(_kept) + _BATCH - 1) // _BATCH}: "
+                f"{_r.stderr.strip()[:200]}"
+            )
+            logger.error(
+                f"_stage_pool cp batch {_i}-{_i + len(_chunk)}: "
+                f"rc={_r.returncode}, stderr={_r.stderr.strip()}"
+            )
+            return False
     return True
 
 

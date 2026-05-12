@@ -184,6 +184,33 @@ churn.  Each is a Python helper that mutates unpacked udeb content.
   or ensure `/target/etc/mtab` is a regular file via base_include
   (probably the former; matches modern Debian).
 
+### `dpkg: warning: trying to overwrite '/sbin/depmod' ... busybox-udeb`
+
+- **Evidence in `chroot build installer` output (2026-05-12)**:
+  ```
+  dpkg: warning: trying to overwrite '/sbin/depmod', which is also in package busybox-udeb (1:1.35.0-4)
+  dpkg: warning: trying to overwrite '/sbin/insmod', which is also in package busybox-udeb (1:1.35.0-4)
+  dpkg: warning: trying to overwrite '/sbin/lsmod', which is also in package busybox-udeb (1:1.35.0-4)
+  dpkg: warning: trying to overwrite '/sbin/modinfo', which is also in package busybox-udeb (1:1.35.0-4)
+  dpkg: warning: trying to overwrite '/sbin/modprobe', which is also in package busybox-udeb (1:1.35.0-4)
+  dpkg: warning: trying to overwrite '/sbin/rmmod', which is also in package busybox-udeb (1:1.35.0-4)
+  ```
+- **Cause**: `kmod-udeb` ships real `/sbin/depmod` / `insmod` / `lsmod` /
+  `modinfo` / `modprobe` / `rmmod` binaries; `busybox-udeb` ships the
+  same names as multicall stubs.  Our chroot-build's `dpkg --unpack`
+  runs with `--force-overwrite` so the second package's files win —
+  cosmetically that's the kmod versions overwriting busybox stubs,
+  which is the right outcome.  The warnings are noise.
+- **Functional impact**: none — install completes, modules load
+  correctly at install time (verified 2026-05-12 install ran through
+  partman + bootstrap-base + grub-installer + finish-install).
+- **Fix**: COMP-02 phase E — either (a) add a `--force-overwrite`
+  exception list to dpkg invocation so these specific overlaps don't
+  warn, or (b) drop `busybox-udeb` from `config/installer.list` if
+  `kmod-udeb`'s tools cover everything we need (check via
+  `Depends:` chain — busybox-udeb might be pulled in transitively
+  even if we drop the seed).
+
 ### `cat: can't open '/tmp/apt-setup.components'`
 
 - **Evidence in log**: line 1685.

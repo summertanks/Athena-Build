@@ -1313,14 +1313,37 @@ class BuildSession:
             console.print(
                 f"Building installer ISO {_iso_basename}..."
             )
-            # Canonical names only (virtuals skipped); Recommends-only
-            # extras dropped so target install set tracks pkg.list closure,
-            # not the full ISO pool.  See _stage_base_include for context.
-            _base_include = sorted({
+            # base_include and pool_whitelist for the installer ISO
+            # both drop `live_exclusive_pkg_names` — packages that
+            # only exist in selected_pkgs because Pass IV resolved
+            # `live.list` and pulled them in transitively.  The
+            # installer ISO has nothing to do with live boot; those
+            # binaries (live-boot, live-config, live-tools, etc.)
+            # should not ship on the installer disc or end up on the
+            # installed target.
+            #
+            # This was wrong earlier when pkg.list was incomplete:
+            # busybox isn't in stock Debian's required/important set,
+            # we didn't list it explicitly, so it got pulled in only
+            # via live.list's transitive deps and got classified as
+            # live-exclusive — base-installer's install_kernel then
+            # failed when this filter dropped it from the target set
+            # (caught 2026-05-12).  Fix: pkg.list now lists every
+            # binary d-i actually apt-installs at install time (audit
+            # walked buildroot/installer/ for apt-install callsites);
+            # busybox is in pkg_closure after Pass III; Pass IV's
+            # live.list resolution finds it already present and
+            # doesn't add it to live_exclusive.
+            _live_excl = self.dep_tree.live_exclusive_pkg_names
+            _extras    = self.dep_tree.extras_pkg_names
+            _canonical = {
                 _name for _name in self.dep_tree.selected_pkgs
                 if _name == self.dep_tree.selected_pkgs[_name]['Package']
-                and _name not in self.dep_tree.extras_pkg_names
-            })
+            }
+            _base_include = sorted(_canonical - _extras - _live_excl)
+            # Pool keeps Recommends-only extras so the operator can
+            # apt-install them post-install via the cdrom: source.
+            _pool_whitelist = _canonical - _live_excl
             _ok = iso_installer.build_installer_iso(
                 dir_chroot_installer=self.config.dir_chroot_installer,
                 dir_repo=self.config.dir_repo,
@@ -1332,6 +1355,7 @@ class BuildSession:
                 codename=_codename,
                 version=_version,
                 base_include_pkgs=_base_include,
+                deb_whitelist=_pool_whitelist,
             )
             if not _ok:
                 console.print(

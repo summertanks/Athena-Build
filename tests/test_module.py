@@ -1454,6 +1454,288 @@ def test_iso_installer_stage_base_include_noop_on_empty_or_none():
         assert not os.path.exists(_path)
 
 
+def test_iso_installer_parse_deb_filename_handles_normal_filenames():
+    """Debian binary filename convention is `<name>_<version>_<arch>.{deb,udeb}`
+    with no underscores allowed in name or version.  Helper splits on
+    `_` and returns `(name, version)`.  Epoch `%3a` in filename is
+    decoded back to `:` so it matches the Version field in apt
+    metadata."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _parse_deb_filename
+    assert _parse_deb_filename('acl_2.3.1-3_amd64.deb') == \
+        ('acl', '2.3.1-3')
+    assert _parse_deb_filename(
+        'linux-image-6.1.0-47-amd64_6.1.170-3_amd64.deb'
+    ) == ('linux-image-6.1.0-47-amd64', '6.1.170-3')
+    assert _parse_deb_filename(
+        'cdebconf-newt-udeb_0.270_amd64.udeb'
+    ) == ('cdebconf-newt-udeb', '0.270')
+    # Epoch decoding: filename `pkg_1%3a2.3-4_arch.deb` ↔ Version `1:2.3-4`.
+    assert _parse_deb_filename(
+        'libfoo_1%3a2.3-4_amd64.deb'
+    ) == ('libfoo', '1:2.3-4')
+    # Malformed / non-deb filenames return ('', '') so callers skip them.
+    assert _parse_deb_filename('Packages.gz') == ('', '')
+    assert _parse_deb_filename('garbage_only_two') == ('', '')
+    assert _parse_deb_filename('') == ('', '')
+
+
+def test_iso_installer_select_pool_files_includes_udebs_unconditionally():
+    """Every .udeb in the source dir is kept regardless of whitelist —
+    anna may fetch any of them at install time and we don't currently
+    know which (cdrom-detect queues some dynamically based on hardware
+    + apt-cdrom-setup dependencies)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _select_pool_files
+    with tempfile.TemporaryDirectory() as _repo:
+        for _name in (
+            'apt-cdrom-setup_0.270_amd64.udeb',
+            'thor-support_0.1_amd64.udeb',
+            'eject-udeb_2.38.1-5_amd64.udeb',
+        ):
+            with open(os.path.join(_repo, _name), 'w') as fh:
+                fh.write('')
+        # Empty set whitelist — no deb names allowed.  Udebs still kept.
+        _kept, _skipped = _select_pool_files(_repo, deb_whitelist=set())
+        assert len(_kept) == 3, _kept
+        assert _skipped == 0
+        assert all(n.endswith('.udeb') for n in _kept)
+
+
+def test_iso_installer_select_pool_files_drops_dbgsym_unconditionally():
+    """dbgsym packages are debug symbols, ~25% of pool size, never
+    needed on an installed system.  Even when their parent is in the
+    whitelist, the dbgsym variant is dropped."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _select_pool_files
+    with tempfile.TemporaryDirectory() as _repo:
+        for _name in (
+            'acl_2.3.1-3_amd64.deb',
+            'acl-dbgsym_2.3.1-3_amd64.deb',
+            'libc6_2.36-9_amd64.deb',
+            'libc6-dbgsym_2.36-9_amd64.deb',
+        ):
+            with open(os.path.join(_repo, _name), 'w') as fh:
+                fh.write('')
+        _kept, _skipped = _select_pool_files(
+            _repo, deb_whitelist={'acl', 'libc6'},
+        )
+        assert sorted(_kept) == [
+            'acl_2.3.1-3_amd64.deb', 'libc6_2.36-9_amd64.deb',
+        ], _kept
+        assert _skipped == 2
+
+
+def test_iso_installer_select_pool_files_filters_by_whitelist():
+    """Only debs whose canonical name is in the whitelist ship.
+    Unused kernel flavors (linux-image-rt-*, linux-image-cloud-*),
+    -unsigned kernel variants, and old kernel ABIs all get dropped
+    because they aren't in `selected_pkgs`.  This test uses a tight
+    whitelist that excludes live-* — in the real cmd_build_iso_installer
+    derivation those WOULD be in the whitelist (canonical selected_pkgs
+    keeps live-exclusive on the ISO so apt-install can find them at
+    install time)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _select_pool_files
+    with tempfile.TemporaryDirectory() as _repo:
+        _keep = (
+            'grub-pc_2.06-13_amd64.deb',
+            'linux-image-6.1.0-47-amd64_6.1.170-3_amd64.deb',
+            'systemd_252.39_amd64.deb',
+        )
+        _drop = (
+            'live-boot_20230131_all.deb',
+            'live-config_11.0.3_all.deb',
+            'linux-image-rt-amd64_6.1.170-3_amd64.deb',
+            'linux-image-cloud-amd64_6.1.170-3_amd64.deb',
+            'linux-image-6.1.0-47-amd64-unsigned_6.1.170-3_amd64.deb',
+            'linux-image-6.1.0-45-amd64_6.1.170-1_amd64.deb',
+        )
+        for _name in _keep + _drop:
+            with open(os.path.join(_repo, _name), 'w') as fh:
+                fh.write('')
+        _kept, _skipped = _select_pool_files(
+            _repo,
+            deb_whitelist={
+                'grub-pc',
+                'linux-image-6.1.0-47-amd64',
+                'systemd',
+            },
+        )
+        assert sorted(_kept) == sorted(_keep), _kept
+        assert _skipped == len(_drop), _skipped
+
+
+def test_iso_installer_select_pool_files_keeps_highest_version_per_name():
+    """Source builds can leave multiple versions of the same package
+    in repo/ (e.g. linux-image-amd64 _6.1.170-1_ and _6.1.170-3_ after
+    an iterative kernel rebuild).  The helper keeps only the highest
+    version per name — using Debian version-compare semantics, not
+    string compare — so older builds get dropped without us having to
+    cross-walk cache versions."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _select_pool_files
+    with tempfile.TemporaryDirectory() as _repo:
+        for _name in (
+            'linux-image-amd64_6.1.170-1_amd64.deb',
+            'linux-image-amd64_6.1.170-3_amd64.deb',
+        ):
+            with open(os.path.join(_repo, _name), 'w') as fh:
+                fh.write('')
+        _kept, _skipped = _select_pool_files(
+            _repo, deb_whitelist={'linux-image-amd64'},
+        )
+        assert _kept == ['linux-image-amd64_6.1.170-3_amd64.deb'], _kept
+        assert _skipped == 1
+
+
+def test_iso_installer_select_pool_files_uses_debian_version_order():
+    """`6.1.170-10` is NEWER than `6.1.170-9` under Debian semantics
+    even though string-compare disagrees.  Pin this so a future drop
+    of apt_pkg dependency doesn't silently revert to lexicographic
+    compare and ship the wrong build."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    try:
+        import apt_pkg  # noqa: F401
+    except ImportError:
+        # apt_pkg unavailable on the test host — degraded path uses
+        # string compare which would FAIL this test.  Skip cleanly so
+        # we don't false-fail on non-Debian dev hosts.
+        return
+    from iso_installer import _select_pool_files
+    with tempfile.TemporaryDirectory() as _repo:
+        for _name in (
+            'pkg_6.1.170-9_amd64.deb',
+            'pkg_6.1.170-10_amd64.deb',
+        ):
+            with open(os.path.join(_repo, _name), 'w') as fh:
+                fh.write('')
+        _kept, _skipped = _select_pool_files(
+            _repo, deb_whitelist={'pkg'},
+        )
+        assert _kept == ['pkg_6.1.170-10_amd64.deb'], _kept
+        assert _skipped == 1
+
+
+def test_iso_installer_select_pool_files_legacy_mode_keeps_everything():
+    """When deb_whitelist is None, the helper keeps every regular
+    file — preserves the previous blanket-copy behaviour for callers
+    that don't have a dep tree."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _select_pool_files
+    with tempfile.TemporaryDirectory() as _repo:
+        for _name in (
+            'foo_1_amd64.deb', 'bar-dbgsym_1_amd64.deb',
+            'baz_1_amd64.udeb', 'random.txt',
+        ):
+            with open(os.path.join(_repo, _name), 'w') as fh:
+                fh.write('')
+        _kept, _skipped = _select_pool_files(_repo, deb_whitelist=None)
+        assert sorted(_kept) == [
+            'bar-dbgsym_1_amd64.deb', 'baz_1_amd64.udeb',
+            'foo_1_amd64.deb', 'random.txt',
+        ], _kept
+
+
+def test_iso_installer_base_include_and_pool_filter_agree():
+    """Invariant: every package in base_include must exist in the pool
+    whitelist.  debootstrap reads base_include as `--include` and
+    fails with `base-installer/debootstrap-failed` if any entry isn't
+    findable in /cdrom/pool.
+
+    Filter rules (verified working 2026-05-12 after the pkg.list audit
+    that added busybox/zstd/eject/etc. explicitly so they're in
+    pkg_closure, not in live_exclusive):
+      - base_include = canonical - extras - live_exclusive
+      - pool_whitelist = canonical - live_exclusive
+      - Live-exclusive binaries (live-boot, live-config, live-tools)
+        ship neither on the installer pool nor on the target.
+      - Recommends-only extras (eject etc. when not explicit in
+        pkg.list) ship in the pool so the operator can apt-install
+        them post-install, but aren't in base_include.
+
+    Both lists are derived inside cmd_build_iso_installer; this test
+    re-derives them and asserts the set relationships hold."""
+    class _FakeSelected(dict):
+        def __getitem__(self, name):
+            return {'Package': name, 'Version': '1.0'}
+        def __contains__(self, name):
+            return name in dict.keys(self) or name in self._names
+        def __iter__(self):
+            return iter(self._names)
+        def __init__(self, names):
+            self._names = list(names)
+            super().__init__()
+
+    _names = [
+        'bash', 'libc6', 'systemd',          # required closure
+        'busybox',                            # explicit in pkg.list now
+        'live-boot', 'live-config',          # live-exclusive
+        'pkg-recommends-only',                # extras (Recommends-only)
+        'grub-pc',                            # installer-exclusive
+    ]
+    _selected = _FakeSelected(_names)
+    _extras = {'pkg-recommends-only'}
+    _live_excl = {'live-boot', 'live-config'}
+
+    _canonical = {
+        n for n in _selected if n == _selected[n]['Package']
+    }
+    _base_include = sorted(_canonical - _extras - _live_excl)
+    _pool_whitelist = _canonical - _live_excl
+
+    # Every base_include entry must be in the pool.
+    _missing = [n for n in _base_include if n not in _pool_whitelist]
+    assert not _missing, (
+        f"base_include entries missing from pool_whitelist: {_missing}.  "
+        "debootstrap will fail at install time.  Filters must agree."
+    )
+    # busybox in pkg_closure (pkg.list) → in both lists.
+    assert 'busybox' in _base_include
+    assert 'busybox' in _pool_whitelist
+    # Live-exclusive in NEITHER (post pkg.list audit, anything d-i
+    # needs at install time is explicit in pkg.list so live_exclusive
+    # only contains true live-only binaries).
+    assert 'live-boot' not in _base_include
+    assert 'live-boot' not in _pool_whitelist
+    # Extras in pool only.
+    assert 'pkg-recommends-only' in _pool_whitelist
+    assert 'pkg-recommends-only' not in _base_include
+
+
+def test_iso_installer_build_iso_installer_passes_pool_whitelist():
+    """build.py:cmd_build_iso_installer must derive a pool whitelist
+    of canonical selected_pkgs names minus live_exclusive_pkg_names,
+    and pass it to build_installer_iso.  Pin the derivation so a
+    future refactor doesn't silently revert to a blanket copy.
+
+    Live-exclusive packages are intentionally excluded: with the
+    post-2026-05-12 pkg.list audit, every package d-i apt-installs at
+    install time is explicit in pkg.list, so live_exclusive only
+    contains true live-only binaries that have no business shipping
+    on an installer ISO."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _src = inspect.getsource(BuildSession.cmd_build_iso_installer)
+    assert 'deb_whitelist=' in _src, (
+        "cmd_build_iso_installer must pass deb_whitelist to build_installer_iso"
+    )
+    assert 'live_exclusive_pkg_names' in _src, (
+        "live-exclusive must be subtracted from base_include AND pool"
+    )
+    assert "selected_pkgs[_name]['Package']" in _src, (
+        "the whitelist must filter to canonical names (skip provides aliases)"
+    )
+
+
 def test_iso_installer_stage_grub_cfg_copies_when_present():
     """Symmetric: a present grub.cfg under installer/boot/ is copied
     verbatim to staging/boot/grub/grub.cfg.  Engine never modifies it
@@ -5199,6 +5481,15 @@ def main() -> int:
         test_iso_installer_stage_base_include_writes_one_name_per_line,
         test_iso_installer_stage_base_include_creates_disk_dir_if_missing,
         test_iso_installer_stage_base_include_noop_on_empty_or_none,
+        test_iso_installer_parse_deb_filename_handles_normal_filenames,
+        test_iso_installer_select_pool_files_includes_udebs_unconditionally,
+        test_iso_installer_select_pool_files_drops_dbgsym_unconditionally,
+        test_iso_installer_select_pool_files_filters_by_whitelist,
+        test_iso_installer_select_pool_files_keeps_highest_version_per_name,
+        test_iso_installer_select_pool_files_uses_debian_version_order,
+        test_iso_installer_select_pool_files_legacy_mode_keeps_everything,
+        test_iso_installer_base_include_and_pool_filter_agree,
+        test_iso_installer_build_iso_installer_passes_pool_whitelist,
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
