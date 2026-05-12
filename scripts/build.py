@@ -81,13 +81,21 @@ class BuildFlags:
         # Independent of chroot_ready/_verified — the two chroots have
         # different lifecycles (live = squashfs payload; installer = initrd).
         self.chroot_installer_ready: bool = False  # build_chroot installer completed
+        # Set on a successful `iso build live` / `iso build installer`.  Lets
+        # `autorun live` / `autorun installer` gate the ISO-build step the
+        # same way they gate every other stage — without these the autorun
+        # step driver has no flag to check, so a silent ISO-build failure
+        # would not be caught.
+        self.iso_live_ready: bool = False
+        self.iso_installer_ready: bool = False
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""
         fields = ['cache_ready', 'dep_check_ready', 'download_ready',
                   'build_container_ready', 'source_build_ready',
                   'signing_key_verified',
-                  'chroot_ready', 'chroot_verified', 'chroot_installer_ready']
+                  'chroot_ready', 'chroot_verified', 'chroot_installer_ready',
+                  'iso_live_ready', 'iso_installer_ready']
         return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
 
 class BuildSession:
@@ -1145,12 +1153,14 @@ class BuildSession:
 
         try:
             console.print("Building installer chroot from udeb closure...")
+            _codename = self.config.build_codename.strip('"').strip("'")
             _ok = installer_chroot.build_installer_chroot(
                 udeb_tree=self.udeb_dep_tree,
                 dir_repo=self.config.dir_repo,
                 dir_chroot_installer=self.config.dir_chroot_installer,
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
+                codename=_codename,
             )
             if not _ok:
                 console.print(
@@ -1203,6 +1213,7 @@ class BuildSession:
                 console.print("Run 'chroot build' first")
             return
 
+        self.flags.iso_live_ready = False  # reset before work; set True only on success
         console.print("Initialising build system for ISO...")
         try:
             build_system = buildsystem.BuildSystem.for_iso(self.config)
@@ -1239,6 +1250,8 @@ class BuildSession:
             if not _result:
                 console.print("ERROR: ISO build failed — check logs for details")
                 logger.error("build_iso() returned False")
+                return
+            self.flags.iso_live_ready = True
         finally:
             build_system.scrub_password()
 
@@ -1274,6 +1287,8 @@ class BuildSession:
             )
             return
 
+        self.flags.iso_installer_ready = False  # reset before work; set True only on success
+
         # Sudo password — same pattern as cmd_build_chroot_installer.
         _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
         _r = subprocess.run(
@@ -1298,6 +1313,14 @@ class BuildSession:
             console.print(
                 f"Building installer ISO {_iso_basename}..."
             )
+            # Canonical names only (virtuals skipped); Recommends-only
+            # extras dropped so target install set tracks pkg.list closure,
+            # not the full ISO pool.  See _stage_base_include for context.
+            _base_include = sorted({
+                _name for _name in self.dep_tree.selected_pkgs
+                if _name == self.dep_tree.selected_pkgs[_name]['Package']
+                and _name not in self.dep_tree.extras_pkg_names
+            })
             _ok = iso_installer.build_installer_iso(
                 dir_chroot_installer=self.config.dir_chroot_installer,
                 dir_repo=self.config.dir_repo,
@@ -1308,6 +1331,7 @@ class BuildSession:
                 suite=_suite,
                 codename=_codename,
                 version=_version,
+                base_include_pkgs=_base_include,
             )
             if not _ok:
                 console.print(
@@ -1315,6 +1339,7 @@ class BuildSession:
                 )
                 logger.error("build_installer_iso returned False")
                 return
+            self.flags.iso_installer_ready = True
         finally:
             _password = '*' * len(_password)  # noqa: F841
 
@@ -1951,13 +1976,12 @@ class BuildSession:
 
         Both pipelines share the early stages (cache → dep parse →
         source download → container init → source build pkg) and diverge
-        at the subset-specific source build + chroot build.  Neither
-        runs `iso build *` — operator runs that separately after a clean
-        autorun.
+        at the subset-specific source build + chroot build, then converge
+        on `iso build *` to produce the bootable image.
         """
         _table = {
-            'live':      'cache→parse→download→container→source build (+live)→chroot build live',
-            'installer': 'cache→parse→download→container→source build (+installer)→chroot build installer',
+            'live':      'cache→parse→download→container→source build (+live)→chroot build live→iso build live',
+            'installer': 'cache→parse→download→container→source build (+installer)→chroot build installer→iso build installer',
         }
         if action in ('', 'live'):
             return self.cmd_auto_run_live(*args)
@@ -1966,7 +1990,7 @@ class BuildSession:
         return self._group_help('autorun', _table, action)
 
     def cmd_auto_run_live(self):
-        """Run the full pipeline to a verified live chroot.
+        """Run the full pipeline through to a bootable live ISO.
 
         bare `source build` now builds pkg.list closure only (Phase 4 of
         COMP-01b).  For a complete live ISO, we need pkg + live extras;
@@ -1986,17 +2010,17 @@ class BuildSession:
             # chroot build also runs chroot verify; chroot_verified is True
             # only when both build AND all 8 verify checks passed.
             (self.cmd_build_chroot_live, 'chroot_verified',       'chroot build'),
+            (self.cmd_build_iso_live,    'iso_live_ready',        'iso build live'),
         ]
         self._run_autorun_steps('autorun live', _steps)
 
     def cmd_auto_run_installer(self):
-        """Run the full pipeline to a built installer chroot.
+        """Run the full pipeline through to a bootable installer ISO.
 
         Parallel to cmd_auto_run_live but diverges at the subset-specific
         source build (installer subset = udeb closure + installer-exclusive
         deb sources) and chroot build (unpack udebs into buildroot/installer/
-        via dpkg --unpack).  Stops at chroot_installer_ready; operator
-        runs `iso build installer` separately to produce the ISO.
+        via dpkg --unpack), then converges on iso build installer.
         """
         _steps = [
             (self.cmd_build_cache,       'cache_ready',                'cache build'),
@@ -2009,6 +2033,8 @@ class BuildSession:
                                           'source_build_ready',         'source build installer'),
             (self.cmd_build_chroot_installer,
                                           'chroot_installer_ready',     'chroot build installer'),
+            (self.cmd_build_iso_installer,
+                                          'iso_installer_ready',        'iso build installer'),
         ]
         self._run_autorun_steps('autorun installer', _steps)
 

@@ -13,7 +13,26 @@ linux-headers-amd64
 firmware-linux-free
 
 # Bootloader
-grub-efi-amd64
+#
+# COMP-02 phase C TODO: replace `grub-pc` with `grub-pc-bin` +
+# `grub-efi-amd64-bin` (binaries, no conflict) and let grub-installer
+# pick the meta-package at install time.  That requires fixing
+# apt-cdrom-setup first so `apt-install grub-pc` actually works.
+# See docs/plans/comp-02-robust-build.md.
+#
+# `grub-pc` is the BIOS-mode bootloader.  Pre-installing it here (so
+# debootstrap pulls it into /target via --include base_include) makes
+# grub-installer's `apt-install grub-pc` step succeed as "already the
+# newest version" instead of failing on broken in-target apt sources.
+# Without this, grub-installer exits 10, corrupts main-menu's debconf
+# DB, and the installer enters a respawn loop (caught 2026-05-12 after
+# extensive apt-cdrom-setup debugging).
+#
+# For EFI targets we'd want `grub-efi-amd64` instead — they Conflict,
+# so only one meta-package can be in the pkg list.  When EFI support
+# is on the roadmap, this becomes a build-config switch or the
+# installer flow needs to decide post-detection.
+grub-pc
 
 # Essential Packages
 base-files

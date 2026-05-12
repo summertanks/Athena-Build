@@ -1409,6 +1409,51 @@ def test_iso_installer_stage_disk_info_errors_when_only_readme():
                                      'athena', '0.1') is False
 
 
+def test_iso_installer_stage_base_include_writes_one_name_per_line():
+    """A populated list lands in staging/.disk/base_include — one
+    package name per line, in caller-supplied order, ending with \\n.
+    base-installer reads this raw and appends to debootstrap --include."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_base_include
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(os.path.join(_stage, '.disk'), exist_ok=True)
+        _pkgs = ['bash', 'coreutils', 'libc6']
+        assert _stage_base_include(_stage, _pkgs) is True
+        _path = os.path.join(_stage, '.disk', 'base_include')
+        assert os.path.isfile(_path)
+        with open(_path, 'r') as fh:
+            _content = fh.read()
+        assert _content == 'bash\ncoreutils\nlibc6\n', _content
+
+
+def test_iso_installer_stage_base_include_creates_disk_dir_if_missing():
+    """Helper creates staging/.disk/ on the fly so the orchestrator can
+    call it in any order relative to _stage_disk_info."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_base_include
+    with tempfile.TemporaryDirectory() as _stage:
+        # No .disk/ pre-created — helper must mkdir.
+        assert _stage_base_include(_stage, ['hello']) is True
+        assert os.path.isfile(os.path.join(_stage, '.disk', 'base_include'))
+
+
+def test_iso_installer_stage_base_include_noop_on_empty_or_none():
+    """Empty list / None → no file written, success returned.  Lets the
+    orchestrator pass through when caller has no list to provide."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_base_include
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(os.path.join(_stage, '.disk'), exist_ok=True)
+        _path = os.path.join(_stage, '.disk', 'base_include')
+        assert _stage_base_include(_stage, None) is True
+        assert not os.path.exists(_path)
+        assert _stage_base_include(_stage, []) is True
+        assert not os.path.exists(_path)
+
+
 def test_iso_installer_stage_grub_cfg_copies_when_present():
     """Symmetric: a present grub.cfg under installer/boot/ is copied
     verbatim to staging/boot/grub/grub.cfg.  Engine never modifies it
@@ -1567,6 +1612,188 @@ def test_installer_chroot_resolve_udeb_files_skips_record_without_filename():
         selected_pkgs = {'orphan-udeb': pkg}
     out = _resolve_udeb_files(_UdebTree(), '/repo')
     assert out == []
+
+
+def test_installer_chroot_runtime_dirs_creates_tmp_var_tmp_root():
+    """No udeb ships /tmp, /var/tmp, /root but every d-i script assumes
+    they exist (caught 2026-05-11 — bootstrap-base.postinst dies via
+    set -e on /tmp writes, then on `db_get mirror/protocol` after that).
+    Helper sudo-mkdirs them with the right modes."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _create_runtime_dirs, _RUNTIME_DIRS
+    with tempfile.TemporaryDirectory() as _chroot:
+        _calls = []
+        class _Result:
+            returncode = 0
+            stderr = ''
+        def _fake_sudo(cmd, _pw):
+            _calls.append(cmd)
+            if cmd[0] == 'mkdir':
+                os.makedirs(cmd[-1], exist_ok=True)
+            return _Result()
+        with patch('installer_chroot._sudo', side_effect=_fake_sudo):
+            assert _create_runtime_dirs(_chroot, 'pw') is True
+        # Every dir in _RUNTIME_DIRS got mkdir'd + chmod'd.
+        for _rel, _mode in _RUNTIME_DIRS:
+            assert os.path.isdir(os.path.join(_chroot, _rel)), _rel
+        assert sum(1 for c in _calls if c[0] == 'mkdir') == len(_RUNTIME_DIRS)
+        assert sum(1 for c in _calls if c[0] == 'chmod') == len(_RUNTIME_DIRS)
+
+
+def test_installer_chroot_runtime_dirs_includes_tmp_with_sticky_mode():
+    """Pin the specific entries so a future edit doesn't accidentally
+    drop /tmp from the list and re-introduce the bootstrap-base loop."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _RUNTIME_DIRS
+    _by_path = dict(_RUNTIME_DIRS)
+    assert _by_path.get('tmp') == '1777', _RUNTIME_DIRS
+    assert _by_path.get('var/tmp') == '1777', _RUNTIME_DIRS
+    assert _by_path.get('root') == '0700', _RUNTIME_DIRS
+
+
+def test_installer_chroot_overlay_map_carries_preseed_loader():
+    """Stock d-i has no auto-loader for /preseed.cfg.  The S25-load-preseed
+    overlay script is what makes our preseed values actually take effect
+    (caught 2026-05-12 — apt-setup/disable-cdrom-entries was a no-op for
+    a full ISO build because nothing was reading /preseed.cfg).  Pin the
+    entry so a future overlay-map refactor doesn't silently drop it."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _OVERLAY_MAP
+    _by_src = dict(_OVERLAY_MAP)
+    assert _by_src.get('preseed/load-preseed.sh') == \
+        'lib/debian-installer-startup.d/S25-load-preseed', _OVERLAY_MAP
+
+
+def test_installer_preseed_loader_script_is_executable():
+    """The loader has to be executable for run-parts in
+    /sbin/debian-installer-startup to run it.  cp -p in
+    _apply_installer_overlay preserves mode, so the source file's mode
+    matters."""
+    _path = os.path.join(_ROOT, 'installer', 'preseed', 'load-preseed.sh')
+    assert os.path.isfile(_path), _path
+    assert os.access(_path, os.X_OK), (
+        f"{_path} must be executable (chmod +x) so run-parts will exec "
+        f"the copy at /lib/debian-installer-startup.d/S25-load-preseed"
+    )
+    with open(_path, 'r') as fh:
+        _content = fh.read()
+    assert 'debconf-set-selections /preseed.cfg' in _content, _content
+
+
+def test_installer_chroot_overlay_map_carries_athena_stubs_templates():
+    """The mirror/protocol stub-template overlay must stay in
+    _OVERLAY_MAP — without it, bootstrap-base.postinst's unguarded
+    `db_get mirror/protocol` returns 10 (missing template) and trips
+    set -e (caught 2026-05-11).  Pins the entry so a future overlay
+    map refactor doesn't drop it."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _OVERLAY_MAP
+    _by_src = dict(_OVERLAY_MAP)
+    assert _by_src.get('templates/athena-stubs.templates') == \
+        'var/lib/dpkg/info/athena-stubs.templates', _OVERLAY_MAP
+
+
+def test_installer_chroot_athena_stubs_file_declares_mirror_protocol():
+    """The shipped stub-templates file must declare mirror/protocol
+    — that's the question bootstrap-base.postinst queries unguarded."""
+    _path = os.path.join(
+        _ROOT, 'installer', 'templates', 'athena-stubs.templates'
+    )
+    assert os.path.isfile(_path), _path
+    with open(_path, 'r') as fh:
+        _content = fh.read()
+    assert 'Template: mirror/protocol' in _content, _content
+
+
+
+def test_installer_chroot_install_debootstrap_script_copies_sid_to_codename():
+    """For a derivative codename ('thor'), the helper sudo-copies
+    /usr/share/debootstrap/scripts/sid → scripts/<codename> so
+    debootstrap recognises our suite at install time.  Without this,
+    bootstrap-base exits 10 with no log output (caught on first
+    VMware install — d-i loops on the step-selection menu)."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import (
+        _install_debootstrap_codename_script,
+        _DEBOOTSTRAP_SCRIPTS_DIR,
+    )
+    with tempfile.TemporaryDirectory() as _chroot:
+        _scripts_dir = os.path.join(_chroot, _DEBOOTSTRAP_SCRIPTS_DIR)
+        os.makedirs(_scripts_dir)
+        with open(os.path.join(_scripts_dir, 'sid'), 'w') as fh:
+            fh.write('# pretend sid script\n')
+        _calls = []
+        class _Result:
+            returncode = 0
+            stderr = ''
+        def _fake_sudo(cmd, _pw):
+            _calls.append(cmd)
+            # Mimic the cp the helper would have run (sudo path skipped).
+            if cmd[0] == 'cp':
+                import shutil
+                shutil.copy(cmd[-2], cmd[-1])
+            return _Result()
+        with patch('installer_chroot._sudo', side_effect=_fake_sudo):
+            assert _install_debootstrap_codename_script(
+                _chroot, 'thor', 'pw') is True
+        assert os.path.isfile(os.path.join(_scripts_dir, 'thor'))
+        with open(os.path.join(_scripts_dir, 'thor')) as fh:
+            assert fh.read() == '# pretend sid script\n'
+        # The sudo call list should record the cp.
+        assert any(c[0] == 'cp' for c in _calls), _calls
+
+
+def test_installer_chroot_install_debootstrap_script_skips_upstream_suite():
+    """When the codename is one upstream debootstrap-udeb already ships
+    a script for (sid, bookworm, trixie, …), the helper is a no-op —
+    stomping an upstream script with sid's content would be wrong."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import (
+        _install_debootstrap_codename_script,
+        _DEBOOTSTRAP_SCRIPTS_DIR,
+    )
+    with tempfile.TemporaryDirectory() as _chroot:
+        _scripts_dir = os.path.join(_chroot, _DEBOOTSTRAP_SCRIPTS_DIR)
+        os.makedirs(_scripts_dir)
+        with open(os.path.join(_scripts_dir, 'sid'), 'w') as fh:
+            fh.write('upstream sid content\n')
+        # bookworm already exists with its own content; the helper must
+        # NOT overwrite it.
+        with open(os.path.join(_scripts_dir, 'bookworm'), 'w') as fh:
+            fh.write('upstream bookworm content\n')
+        with patch('installer_chroot._sudo') as _mock_sudo:
+            assert _install_debootstrap_codename_script(
+                _chroot, 'bookworm', 'pw') is True
+            _mock_sudo.assert_not_called()
+        with open(os.path.join(_scripts_dir, 'bookworm')) as fh:
+            assert fh.read() == 'upstream bookworm content\n'
+
+
+def test_installer_chroot_install_debootstrap_script_errors_when_sid_missing():
+    """If the chroot has no /usr/share/debootstrap/scripts/sid at all,
+    something upstream went wrong (debootstrap-udeb absent or unpacked
+    elsewhere) — fail loud rather than silently producing an ISO that
+    will hang at bootstrap-base."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import (
+        _install_debootstrap_codename_script,
+        _DEBOOTSTRAP_SCRIPTS_DIR,
+    )
+    with tempfile.TemporaryDirectory() as _chroot:
+        os.makedirs(os.path.join(_chroot, _DEBOOTSTRAP_SCRIPTS_DIR))
+        # No 'sid' file.
+        assert _install_debootstrap_codename_script(
+            _chroot, 'thor', 'pw') is False
 
 
 def test_buildconfig_chroot_paths_under_shared_buildroot_parent():
@@ -4038,6 +4265,68 @@ def test_autorun_installer_runs_source_build_then_source_build_installer():
     assert "'chroot_installer_ready'" in src
 
 
+def test_autorun_live_chains_iso_build_after_chroot():
+    """`autorun live` ends with `iso build live` so the operator gets
+    a bootable ISO, not just a verified chroot.  Pin the order
+    (chroot before iso) and the gating flag (iso_live_ready) so a
+    future refactor doesn't drop the iso step."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    src = inspect.getsource(BuildSession.cmd_auto_run_live)
+    _i_chroot = src.find("'chroot build'")
+    _i_iso    = src.find("'iso build live'")
+    assert _i_iso > 0, "_steps missing the 'iso build live' stage label"
+    assert _i_chroot < _i_iso, (
+        f"iso build live must run AFTER chroot build (chroot @ {_i_chroot}, "
+        f"iso @ {_i_iso})"
+    )
+    assert "cmd_build_iso_live" in src, (
+        "autorun live must call cmd_build_iso_live"
+    )
+    assert "'iso_live_ready'" in src, (
+        "autorun live must gate on iso_live_ready flag"
+    )
+
+
+def test_autorun_installer_chains_iso_build_after_chroot():
+    """`autorun installer` ends with `iso build installer` so the
+    operator gets a bootable installer ISO end-to-end.  Symmetric to
+    test_autorun_live_chains_iso_build_after_chroot."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    src = inspect.getsource(BuildSession.cmd_auto_run_installer)
+    _i_chroot = src.find("'chroot build installer'")
+    _i_iso    = src.find("'iso build installer'")
+    assert _i_iso > 0, "_steps missing the 'iso build installer' stage label"
+    assert _i_chroot < _i_iso, (
+        f"iso build installer must run AFTER chroot build installer "
+        f"(chroot @ {_i_chroot}, iso @ {_i_iso})"
+    )
+    assert "cmd_build_iso_installer" in src, (
+        "autorun installer must call cmd_build_iso_installer"
+    )
+    assert "'iso_installer_ready'" in src, (
+        "autorun installer must gate on iso_installer_ready flag"
+    )
+
+
+def test_buildflags_carry_iso_ready_state():
+    """iso_live_ready and iso_installer_ready start False so
+    a never-built ISO doesn't appear ready, and they're listed in
+    __str__ so the status line surfaces them."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildFlags
+    _flags = BuildFlags()
+    assert _flags.iso_live_ready is False
+    assert _flags.iso_installer_ready is False
+    _s = str(_flags)
+    assert 'iso_live' in _s, _s
+    assert 'iso_installer' in _s, _s
+
+
 def test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each():
     """cmd_auto_run is now a dispatcher: bare → live (preserves UX);
     'live' → live; 'installer' → installer; anything else → help."""
@@ -4907,11 +5196,23 @@ def main() -> int:
         test_iso_installer_stage_disk_info_substitutes_codename_and_version,
         test_iso_installer_stage_disk_info_safe_substitute_leaves_unknown_vars,
         test_iso_installer_stage_disk_info_errors_when_only_readme,
+        test_iso_installer_stage_base_include_writes_one_name_per_line,
+        test_iso_installer_stage_base_include_creates_disk_dir_if_missing,
+        test_iso_installer_stage_base_include_noop_on_empty_or_none,
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
         test_installer_chroot_resolve_udeb_files_logs_missing_silently,
         test_installer_chroot_resolve_udeb_files_skips_record_without_filename,
+        test_installer_chroot_install_debootstrap_script_copies_sid_to_codename,
+        test_installer_chroot_install_debootstrap_script_skips_upstream_suite,
+        test_installer_chroot_install_debootstrap_script_errors_when_sid_missing,
+        test_installer_chroot_runtime_dirs_creates_tmp_var_tmp_root,
+        test_installer_chroot_runtime_dirs_includes_tmp_with_sticky_mode,
+        test_installer_chroot_overlay_map_carries_athena_stubs_templates,
+        test_installer_chroot_athena_stubs_file_declares_mirror_protocol,
+        test_installer_chroot_overlay_map_carries_preseed_loader,
+        test_installer_preseed_loader_script_is_executable,
         test_buildconfig_chroot_paths_under_shared_buildroot_parent,
         test_build_flags_carries_chroot_installer_ready_default_false,
         # ARCH-03
@@ -5019,6 +5320,9 @@ def main() -> int:
         test_refresh_patches_iterates_both_deb_and_udeb_trees,
         test_source_download_iterates_both_deb_and_udeb_trees,
         test_autorun_installer_runs_source_build_then_source_build_installer,
+        test_autorun_live_chains_iso_build_after_chroot,
+        test_autorun_installer_chains_iso_build_after_chroot,
+        test_buildflags_carry_iso_ready_state,
         test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each,
         test_autorun_live_runs_source_build_then_source_build_live,
         test_source_build_args_subset_and_named_pkgs_mutually_exclusive,
