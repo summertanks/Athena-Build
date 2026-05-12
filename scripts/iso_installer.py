@@ -55,6 +55,7 @@ def build_installer_iso(
     suite: str = 'athena',
     codename: str = 'athena',
     version: str = '0.1',
+    base_include_pkgs: Optional[list] = None,
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -95,6 +96,9 @@ def build_installer_iso(
         return False
 
     if not _stage_disk_info(_staging, installer_dir, codename, version):
+        return False
+
+    if not _stage_base_include(_staging, base_include_pkgs):
         return False
 
     if not _stage_pool(dir_repo, _staging, password):
@@ -428,6 +432,40 @@ def _stage_disk_info(
     tui.console.print(
         f"Disk markers: {_shipped} file(s) → .disk/ "
         f"(codename={codename}, version={version})"
+    )
+    return True
+
+
+def _stage_base_include(staging: str, pkgs: Optional[list]) -> bool:
+    """Write staging/.disk/base_include — one package name per line.
+
+    base-installer reads /cdrom/.disk/base_include during bootstrap-base
+    and appends those names to debootstrap's --include list.  Without
+    this file, debootstrap installs only Priority: required + important,
+    so the target ends up with a minimal stub instead of the same package
+    set the ISO ships.
+
+    Caught 2026-05-11 — first ISO boot reached bootstrap-base and
+    reported "succeeded but requested to be left unconfigured" because
+    base-installer had no list of what we actually want on the target.
+    Generating this from dep_tree.selected_pkgs at iso-build time keeps
+    target install set == ISO pool closure, no manual list to drift.
+    """
+    if not pkgs:
+        tui.console.print("base_include: skipped (no package list provided)")
+        return True
+    _path = os.path.join(staging, '.disk', 'base_include')
+    try:
+        os.makedirs(os.path.dirname(_path), exist_ok=True)
+        with open(_path, 'w', encoding='utf-8') as fh:
+            for _name in pkgs:
+                fh.write(_name + '\n')
+    except OSError as e:
+        tui.console.print(f"ERROR: write {_path}: {e}")
+        logger.error(f"_stage_base_include {_path}: {e}")
+        return False
+    tui.console.print(
+        f"base_include: {len(pkgs)} package(s) → .disk/base_include"
     )
     return True
 
