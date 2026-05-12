@@ -52,6 +52,15 @@ apt-setup-udeb
 user-setup-udeb
 grub-installer
 
+# ─── Disc-eject helper ─────────────────────────────────────────────
+# eject-udeb provides /bin/eject inside the installer ramdisk so
+# finish-install.d/15cdrom-detect can eject /dev/sr0 at the end of
+# install.  The `eject` deb is on the target system (via pkg.list)
+# but the installer chroot needs this udeb separately.  Caught
+# 2026-05-12 — install completes cleanly but the disc doesn't
+# auto-eject and `eject: not found` shows in the syslog.
+eject-udeb
+
 # ─── Hardware + media detection ────────────────────────────────────
 # hw-detect modprobes drivers for storage/network etc. at boot.
 # disk-detect feeds partman with the available block devices.

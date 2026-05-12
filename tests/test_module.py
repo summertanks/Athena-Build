@@ -4018,6 +4018,128 @@ def test_udeb_view_does_not_leak_into_real_package_hashtable():
     assert v.get_packages('cdebconf-text-udeb') == ['udeb-record']
 
 
+def test_parse_dependency_reuses_lookahead_for_multi_version_same_name():
+    """parse_dependency's lookahead-Case-I must fire when the cache
+    returns MULTIPLE VERSIONS of the same Package name and that name
+    is in __lookahead — not just when there's exactly one matching
+    candidate.  Regression test for 2026-05-12 bug:
+
+    `sudo` prompted twice within a single Pass III resolve_packages call
+    because:
+      - add_lookahead('sudo') prompted, user picked sudo (real); wrote
+        __lookahead['sudo'] = {<latest ver>: sudo_pkg}.
+      - parse_dependency('sudo') then asked cache.get_packages('sudo')
+        which returned 4 entries: sudo at bookworm + bookworm-security
+        versions, PLUS sudo-ldap at the same two versions (both Provide
+        sudo).
+      - Both sudo Package records had ['Package']='sudo', and 'sudo' was
+        in __lookahead → _selected_pkg_lookahead = [sudo_v1, sudo_v2],
+        length 2.
+      - Old Case I's strict `len == 1` check fell through, multi-cand
+        prompt path fired → second prompt for the same name.
+
+    Fix: collapse _selected_pkg_lookahead by Package name (highest version
+    per name).  Case I matches when one Package name remains."""
+    import sys
+    from collections import defaultdict
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    import tui
+
+    class _Pkg:
+        """Minimal Package surface used by parse_dependency's early
+        returns + lookahead check."""
+        def __init__(self, name, ver, provides=None):
+            self._fields = {'Package': name, 'Version': ver}
+            self.package = name
+            self.version = ver
+            self._provides = provides or []
+            self.conflicts = []
+            self.depends = []
+            self.pre_depends = []
+            self.recommends = []
+            self.alt_depends = []
+            self.breaks = []
+            self.constraints_satisfied = True
+        def __getitem__(self, k): return self._fields[k]
+        def get_provides(self): return list(self._provides)
+        def add_constraint(self, v, o): pass
+
+    sudo_v1     = _Pkg('sudo',      '1.9.13p3-1+deb12u2')
+    sudo_v2     = _Pkg('sudo',      '1.9.13p3-1+deb12u3')
+    sudoldap_v1 = _Pkg('sudo-ldap', '1.9.13p3-1+deb12u2',
+                        provides=[('sudo', '1.9.13p3-1+deb12u2')])
+    sudoldap_v2 = _Pkg('sudo-ldap', '1.9.13p3-1+deb12u3',
+                        provides=[('sudo', '1.9.13p3-1+deb12u3')])
+
+    class _Cache:
+        def __init__(self):
+            # Mirrors what Cache populates: 'sudo' key holds both the
+            # real sudo records AND sudo-ldap records (because sudo-ldap
+            # Provides sudo).  4 entries total.
+            self.package_hashtable = {
+                'sudo': {
+                    sudo_v1.version: [sudo_v1, sudoldap_v1],
+                    sudo_v2.version: [sudo_v2, sudoldap_v2],
+                },
+            }
+            self.skip_src = []
+        def get_packages(self, name, ver=None, op=''):
+            result = []
+            for _vlist in self.package_hashtable.get(name, {}).values():
+                result.extend(_vlist)
+            return result
+
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = _Cache()
+    dt._DependencyTree__lookahead = defaultdict(dict)
+    dt._DependencyTree__recommended = False
+    dt.selected_pkgs = {}
+    dt.selected_srcs = {}
+    dt.extras_pkg_names = set()
+    dt.live_exclusive_pkg_names = set()
+    dt.installer_exclusive_pkg_names = set()
+    dt._auto_pick_highest_when_ambiguous = False
+    dt.arch = 'amd64'
+    dt.build_profiles = frozenset()
+
+    # Simulate add_lookahead having picked sudo (the real package, latest
+    # version): __lookahead['sudo'] = {v2_str: sudo_v2}.
+    dt._DependencyTree__lookahead['sudo'][sudo_v2.version] = sudo_v2
+
+    # If parse_dependency tries to prompt, fail with a clear message —
+    # the lookahead choice must be reused.  Patch
+    # dependencytree.Prompt (the module's local import binding) rather
+    # than tui.Prompt — dependencytree did `from tui import Prompt` so
+    # patching the source module wouldn't be seen by the consumer.
+    _orig_prompt = dependencytree.Prompt
+    _prompt_calls = []
+    class _RaisingPrompt:
+        def __init__(self, *args, **kwargs):
+            _prompt_calls.append((args, kwargs))
+        def get_response(self):
+            raise AssertionError(
+                "parse_dependency should NOT prompt — lookahead already "
+                f"disambiguated 'sudo'.  Prompt args: {_prompt_calls[-1]}"
+            )
+    dependencytree.Prompt = _RaisingPrompt
+    try:
+        result = dt.parse_dependency('sudo')
+    finally:
+        dependencytree.Prompt = _orig_prompt
+
+    # No prompts fired.
+    assert _prompt_calls == [], (
+        f"parse_dependency prompted {len(_prompt_calls)} time(s); "
+        "Case I lookahead-reuse should have short-circuited"
+    )
+    # Case I picked the latest sudo (real, not sudo-ldap).
+    assert result is sudo_v2, (
+        f"expected sudo_v2 ({sudo_v2.version}), got {result and result.package} "
+        f"{result and result.version}"
+    )
+
+
 def test_dependency_tree_default_does_not_auto_pick_across_names():
     """Default DependencyTree (deb tree) does NOT auto-pick when there
     are multiple Package names — the operator prompt is the only way
@@ -5587,6 +5709,7 @@ def main() -> int:
         test_udeb_view_exposes_udeb_hashtable_as_package_hashtable,
         test_udeb_view_get_packages_resolves_against_udeb_hashtable,
         test_udeb_view_does_not_leak_into_real_package_hashtable,
+        test_parse_dependency_reuses_lookahead_for_multi_version_same_name,
         test_dependency_tree_default_does_not_auto_pick_across_names,
         test_dependency_tree_udeb_tree_flag_enables_max_version_fallback,
         test_dependency_tree_constructor_accepts_auto_pick_flag,
