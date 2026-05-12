@@ -53,13 +53,22 @@ working install captured 2026-05-12 on VMware BIOS-mode VM.
 
 ## Latent — would surprise an operator
 
-### `eject` binary missing on target
+### ~~`eject` binary missing on target~~ *(fixed pending next build)*
 
-- **Symptom**: CD does not auto-eject at end of install.  Operator must
-  manually eject before reboot, otherwise BIOS may boot from CD again.
+- **Symptom**: CD did not auto-eject at end of install.  Operator had
+  to manually eject before reboot, otherwise BIOS may boot from CD again.
 - **Evidence in log**: line 1927 — `finish-install:
   /usr/lib/finish-install.d/15cdrom-detect: line 21: eject: not found`.
-- **Fix**: COMP-02 phase E — add `eject` to `config/pkg.list`.
+- **Root cause**: TWO `eject` packages: the `eject` deb (target system,
+  `/usr/bin/eject`) and the `eject-udeb` udeb (installer ramdisk,
+  `/bin/eject`).  `15cdrom-detect` runs INSIDE the installer chroot,
+  so it needed the udeb.  Adding `eject` to pkg.list put it on the
+  installed target but didn't help the chroot.
+- **Fix shipped 2026-05-12**:
+  - `config/pkg.list`: `eject` (target system has it for post-install)
+  - `config/installer.list`: `eject-udeb` (installer ramdisk has
+    `/bin/eject` so `15cdrom-detect` can eject before reboot)
+- **Verification**: pending next `chroot build installer` + boot test.
 
 ### Installer ISO is BIOS-only
 

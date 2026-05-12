@@ -282,6 +282,26 @@ class DependencyTree:
 
         # At this point, if lookahead is available use that to select packages.
         _selected_pkg_lookahead = [pkg for pkg in _pkg_candidates if pkg['Package'] in self.__lookahead]
+        # Collapse the lookahead-matched candidates to one entry per Package
+        # name (highest version wins, same rule the prompt path uses).  This
+        # lets Case I fire when the cache returns multiple versions of the
+        # same Package — common when the cache layers bookworm +
+        # bookworm-security and both index the same Package (e.g. sudo).
+        # Without this collapse the old Case I (`len == 1`) missed those
+        # cases and fell into the multi-candidate prompt even though
+        # add_lookahead had already disambiguated.  Caught 2026-05-12 —
+        # `sudo` prompted twice within the same Pass III resolve_packages
+        # because package_hashtable['sudo'] returned [sudo v1, sudo v2,
+        # sudo-ldap v1, sudo-ldap v2]; add_lookahead's choice put 'sudo'
+        # in __lookahead, and the filter matched BOTH sudo v1 and sudo v2.
+        if _selected_pkg_lookahead:
+            _la_by_name: Dict[str, list] = defaultdict(list)
+            for _pkg in _selected_pkg_lookahead:
+                _la_by_name[_pkg['Package']].append(_pkg)
+            _selected_pkg_lookahead = [
+                max(_versions, key=lambda p: p.version)
+                for _versions in _la_by_name.values()
+            ]
 
         # Case - I  : Incase one candidate and already in lookahead, simplified
         if len(_selected_pkg_lookahead) == 1:
