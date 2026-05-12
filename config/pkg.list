@@ -88,3 +88,42 @@ dbus
 
 # simplifying package selection
 dialog
+
+# d-i runtime apt-install dependencies — packages that base-installer,
+# grub-installer, hw-detect, finish-install, etc. call `apt-install`
+# on at install time.  Listing them explicitly here puts them in
+# pkg_closure (Pass III) so they're definitely on the target AND not
+# accidentally classified as `live_exclusive` (which happens when
+# live.list's transitive deps happen to mention them first — caught
+# 2026-05-12 with busybox).  See audit in conversation 2026-05-12
+# (apt-install callsite walk through buildroot/installer/).
+
+# FATAL apt-installs — d-i scripts abort if these aren't on target.
+# busybox, zstd: base-installer/library.sh kernel install path
+# grub-common, dmsetup: grub-installer
+busybox
+zstd
+grub-common
+dmsetup
+
+# TOLERANT (|| true) but their absence shows up as warnings/cosmetic
+# issues at finish-install or in main-menu.  Adding them silences
+# `eject: not found`, `Falling back to package description for
+# os-prober-udeb`, and the queued-but-no-source warnings from
+# cdrom-detect / hw-detect for pciutils + usbutils.
+eject
+os-prober
+pciutils
+usbutils
+
+# Filesystems other than ext4 — partman finish queues these via
+# apt-install when the user picks the corresponding fs.  dosfstools is
+# needed for the EFI System Partition (vfat); pre-installing means
+# COMP-02 phase D (EFI support) doesn't need a separate add.
+dosfstools
+
+# sudo is already a Recommends of several packages so it'd come in
+# via extras; explicit here so it's in base_include (the target's
+# install set) — gives a usable default for `user-setup-apply` to wire
+# up admin sudo without depending on apt-install succeeding mid-install.
+sudo
