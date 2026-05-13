@@ -1,0 +1,51 @@
+Description: Install Athena archive keyring before apt-cdrom add
+ Athena ships a project signing key (Athena Build <athena@local>) and
+ signs dists/<suite>/Release with it (Release.gpg + InRelease).  The
+ matching pubkey rides on the disc at /cdrom/.disk/archive-key.gpg
+ (placed there by scripts/iso_installer.py:_export_pubkey_to_staging).
+ .
+ For apt-cdrom add inside the target chroot to accept the signed
+ Release, the pubkey must already be in /target/etc/apt/trusted.gpg.d/
+ — apt-cdrom verifies signatures using the keyring as it exists at the
+ moment of the call, not via any later step.  This patch inserts that
+ install step into base-installer's configure_apt, between the
+ 00NoMountCDROM apt-config write and the apt-cdrom add invocation.
+ .
+ Without this patch: apt-cdrom add still appears to succeed at writing
+ sources.list, but apt-setup's later verification step runs apt-get
+ update which gets "NO_PUBKEY" → "does not have a Release file" → rc=100
+ → apt-setup discards 40cdrom's output → final /target/etc/apt/sources.list
+ has no cdrom entry → post-install apt-get install <pkg> fails with
+ "Unable to locate package".  Diagnosed end-to-end 2026-05-13 via a
+ local apt-cdrom repro under /tmp/apt-cdrom-repro/ — see Phase C
+ diagnosis in docs/known-issues.md.
+ .
+ Guard with `[ -f /cdrom/.disk/archive-key.gpg ]` so the patch is a
+ no-op on stock Debian discs (which use the debian-archive-keyring
+ deb baked into the base set instead).  This means we can drop our
+ patched base-installer onto a stock disc without breaking it.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-13
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/library.sh
++++ b/library.sh
+@@ -872,6 +872,16 @@ configure_apt () {
+ }
+ EOT
+
++		# Install Athena archive keyring so apt-cdrom can verify our
++		# signed Release.  Without this the apt-cdrom add below
++		# appears to succeed but the later apt-setup verify step
++		# fails with NO_PUBKEY → "does not have a Release file".
++		if [ -f /cdrom/.disk/archive-key.gpg ]; then
++			mkdir -p /target/etc/apt/trusted.gpg.d
++			cp /cdrom/.disk/archive-key.gpg \
++			   /target/etc/apt/trusted.gpg.d/athena-archive-keyring.gpg
++		fi
++
+ 		# Scan CD-ROM or CD image; start with clean sources.list
+ 		# Prevent apt-cdrom from prompting
+ 		: > $APT_SOURCES

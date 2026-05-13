@@ -1736,6 +1736,176 @@ def test_iso_installer_build_iso_installer_passes_pool_whitelist():
     )
 
 
+def test_iso_installer_sign_release_files_runs_both_gpg_invocations():
+    """COMP-02 phase C: _sign_release_files must produce Release.gpg
+    (detached, --armor) AND InRelease (clearsigned).  Pin the two gpg
+    invocations so a future refactor doesn't accidentally drop one;
+    older apt clients fall back to Release+Release.gpg when InRelease
+    is absent, and dropping InRelease would silently regress modern
+    clients."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _sign_release_files
+    with tempfile.TemporaryDirectory() as _stage, \
+         tempfile.TemporaryDirectory() as _gpgdir:
+        _suite_dir = os.path.join(_stage, 'dists', 'thor')
+        os.makedirs(_suite_dir)
+        with open(os.path.join(_suite_dir, 'Release'), 'w') as fh:
+            fh.write('Suite: thor\n')
+        _calls = []
+        def _fake_run(cmd, *_a, **_k):
+            _calls.append(tuple(cmd))
+            class _R: returncode = 0; stderr = ''; stdout = ''
+            # Pretend gpg wrote the output file so the helper sees success.
+            if '--output' in cmd:
+                _out = cmd[cmd.index('--output') + 1]
+                with open(_out, 'w') as fh: fh.write('FAKE-SIGNATURE\n')
+            return _R()
+        with patch('iso_installer.subprocess.run', side_effect=_fake_run):
+            assert _sign_release_files(
+                _stage, 'thor', _gpgdir, 'pw') is True
+        # Exactly two gpg calls.
+        _gpg_calls = [c for c in _calls if c[0] == 'gpg']
+        assert len(_gpg_calls) == 2, _gpg_calls
+        # First: detach-sign with --armor → Release.gpg
+        _detach = _gpg_calls[0]
+        assert '--detach-sign' in _detach, _detach
+        assert '--armor' in _detach, _detach
+        assert _detach[-1].endswith('/Release'), _detach
+        _out_idx = _detach.index('--output')
+        assert _detach[_out_idx + 1].endswith('/Release.gpg'), _detach
+        # Second: clearsign → InRelease
+        _clear = _gpg_calls[1]
+        assert '--clearsign' in _clear, _clear
+        assert _clear[-1].endswith('/Release'), _clear
+        _out_idx = _clear.index('--output')
+        assert _clear[_out_idx + 1].endswith('/InRelease'), _clear
+        # Both invocations use --batch --yes (don't prompt).
+        for _c in _gpg_calls:
+            assert '--batch' in _c and '--yes' in _c, _c
+
+
+def test_iso_installer_sign_release_files_errors_when_release_missing():
+    """_sign_release_files must bail loud if Release file is absent —
+    no point running gpg against nothing.  The error message must point
+    the operator at _generate_apt_repo (the upstream step)."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _sign_release_files
+    with tempfile.TemporaryDirectory() as _stage, \
+         tempfile.TemporaryDirectory() as _gpgdir:
+        # Don't create dists/thor/Release
+        with patch('iso_installer.subprocess.run') as _mock:
+            assert _sign_release_files(
+                _stage, 'thor', _gpgdir, 'pw') is False
+            _mock.assert_not_called()
+
+
+def test_iso_installer_sign_release_files_errors_when_homedir_missing():
+    """Without a signing homedir gpg has no key to use — bail loud with
+    a hint about 'signing keygen' rather than producing a cryptic gpg
+    error message."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _sign_release_files
+    with tempfile.TemporaryDirectory() as _stage:
+        _suite_dir = os.path.join(_stage, 'dists', 'thor')
+        os.makedirs(_suite_dir)
+        with open(os.path.join(_suite_dir, 'Release'), 'w') as fh:
+            fh.write('Suite: thor\n')
+        with patch('iso_installer.subprocess.run') as _mock:
+            assert _sign_release_files(
+                _stage, 'thor', '/nonexistent/gpgdir', 'pw') is False
+            _mock.assert_not_called()
+
+
+def test_iso_installer_export_pubkey_to_staging_copies_to_disk_archive_key():
+    """COMP-02 phase C: _export_pubkey_to_staging must land the pubkey
+    at .disk/archive-key.gpg with mode 0644.  Our base-installer patch
+    (patch/source/base-installer/1.213/9001-install-athena-archive-keyring)
+    reads from that exact path; renaming or moving it would silently
+    break the install-time keyring install."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _export_pubkey_to_staging
+    with tempfile.TemporaryDirectory() as _stage, \
+         tempfile.NamedTemporaryFile('wb', delete=False) as _pubkey_fh:
+        _pubkey_fh.write(b'-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE\n')
+        _pubkey_path = _pubkey_fh.name
+    try:
+        os.makedirs(os.path.join(_stage, '.disk'))
+        assert _export_pubkey_to_staging(_stage, _pubkey_path, 'pw') is True
+        _dst = os.path.join(_stage, '.disk', 'archive-key.gpg')
+        assert os.path.isfile(_dst), _dst
+        with open(_dst, 'rb') as fh:
+            assert fh.read().startswith(b'-----BEGIN PGP'), 'content not copied'
+        _mode = os.stat(_dst).st_mode & 0o777
+        assert _mode == 0o644, oct(_mode)
+    finally:
+        os.unlink(_pubkey_path)
+
+
+def test_iso_installer_export_pubkey_to_staging_errors_when_pubkey_missing():
+    """Bail loud if the project pubkey isn't where signing.py says it
+    should be — sets the operator up to run 'signing keygen' rather
+    than ship an ISO that fails apt-cdrom verify at install time."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _export_pubkey_to_staging
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(os.path.join(_stage, '.disk'))
+        assert _export_pubkey_to_staging(
+            _stage, '/nonexistent/pubkey.gpg', 'pw') is False
+
+
+def test_iso_installer_export_pubkey_to_staging_errors_when_disk_dir_missing():
+    """_stage_disk_info must run before _export_pubkey_to_staging; the
+    helper must fail loud if it hasn't (rather than silently mkdir + copy
+    and skip the .disk/info disc-marker contract _stage_disk_info enforces)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _export_pubkey_to_staging
+    with tempfile.TemporaryDirectory() as _stage, \
+         tempfile.NamedTemporaryFile('wb', delete=False) as _pubkey_fh:
+        _pubkey_fh.write(b'KEY')
+        _pubkey_path = _pubkey_fh.name
+    try:
+        # No .disk/ in _stage.
+        assert _export_pubkey_to_staging(_stage, _pubkey_path, 'pw') is False
+    finally:
+        os.unlink(_pubkey_path)
+
+
+def test_base_installer_athena_keyring_patch_exists_and_is_dep3_clean():
+    """The quilt patch on base-installer 1.213 is the install-time half
+    of phase C — without it the disc's signed Release is unusable
+    because /target's apt has no trust anchor at apt-cdrom-add time.
+    Pin the path so a future re-pack of patch/source/ doesn't drop it,
+    and pin DEP-3 cleanliness so the patch keeps its provenance header."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    _path = os.path.join(
+        _ROOT, 'patch', 'source', 'base-installer', '1.213',
+        '9001-install-athena-archive-keyring.patch'
+    )
+    assert os.path.isfile(_path), _path
+    _missing = utils.check_dep3_header(_path)
+    assert not _missing, f"DEP-3 fields missing: {_missing}"
+    with open(_path) as fh:
+        _content = fh.read()
+    # Pin the key path apt + base-installer agree on.
+    assert '/cdrom/.disk/archive-key.gpg' in _content, _content
+    assert (
+        '/target/etc/apt/trusted.gpg.d/athena-archive-keyring.gpg' in _content
+    ), _content
+    # And pin the placement — must be inside library.sh, not e.g. debian/rules.
+    assert '+++ b/library.sh' in _content, _content
+
+
 def test_iso_installer_stage_grub_cfg_copies_when_present():
     """Symmetric: a present grub.cfg under installer/boot/ is copied
     verbatim to staging/boot/grub/grub.cfg.  Engine never modifies it
@@ -5817,6 +5987,14 @@ def main() -> int:
         test_iso_installer_select_pool_files_legacy_mode_keeps_everything,
         test_iso_installer_base_include_and_pool_filter_agree,
         test_iso_installer_build_iso_installer_passes_pool_whitelist,
+        # COMP-02 phase C — sign Release + ship + install pubkey
+        test_iso_installer_sign_release_files_runs_both_gpg_invocations,
+        test_iso_installer_sign_release_files_errors_when_release_missing,
+        test_iso_installer_sign_release_files_errors_when_homedir_missing,
+        test_iso_installer_export_pubkey_to_staging_copies_to_disk_archive_key,
+        test_iso_installer_export_pubkey_to_staging_errors_when_pubkey_missing,
+        test_iso_installer_export_pubkey_to_staging_errors_when_disk_dir_missing,
+        test_base_installer_athena_keyring_patch_exists_and_is_dep3_clean,
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
