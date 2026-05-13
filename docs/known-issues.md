@@ -14,12 +14,13 @@ Phase B — main-menu boots cleanly, install runs through
 
 ## Critical — affects installed system
 
-### apt-cdrom-setup chain is broken end-to-end
+### ~~apt-cdrom-setup chain is broken end-to-end~~ *(fix pending next build, 2026-05-13)*
 
-- **Symptom**: `/target/etc/apt/sources.list` ends up empty or broken on
-  the installed system.  Running `apt-get update` post-install reports
-  "does not have a Release file".  Running `apt-get install <pkg>`
-  reports "Unable to locate package".
+- **Symptom (as observed in 2026-05-13 reference log)**:
+  `/target/etc/apt/sources.list` ends up empty/broken on the installed
+  system.  Running `apt-get update` post-install reports "does not have
+  a Release file".  Running `apt-get install <pkg>` reports "Unable to
+  locate package".
 - **Evidence in log**:
   - line 1506: `base-installer: Please use apt-cdrom to make this CD-ROM
     recognized by APT. apt-get update cannot be used to add new CD-ROMs`
@@ -31,17 +32,39 @@ Phase B — main-menu boots cleanly, install runs through
   - lines ~1916-1928 (downstream): `Package open-vm-tools is not available`
     and `Unable to locate package intel-microcode` — `hw-detect` /
     `finish-install` apt-installing on the target via the broken sources.
-    Same root cause; resolves with phase C.
-- **Reproduction**: install Athena from current ISO; on first boot of
-  installed target run `apt-get update`.
+    Same root cause.
+- **Root cause (diagnosed 2026-05-13 via local apt-cdrom repro under
+  /tmp/apt-cdrom-repro/)**: apt rejects our unsigned Release file.
+  apt-cdrom add appears to succeed at writing sources.list, but apt's
+  later acquire of `dists/<suite>/Release` fails the verification step
+  → `Err:2 ... thor Release / Please use apt-cdrom...` → apt-get update
+  exits 100 → apt-setup's verify discards 40cdrom's output → final
+  /target sources.list has no cdrom entry → post-install apt fails.
 - **Workaround in place**: `config/pkg.list` pre-installs `grub-pc` via
-  `.disk/base_include` so `grub-installer`'s `apt-install grub-pc` step
-  succeeds as "already the newest version" rather than failing on broken
-  apt sources.  This bypasses the immediate install-time blocker but
-  leaves the installed system without working apt sources.
-- **Fix**: COMP-02 phase C — proper diagnosis + either patch
-  apt-cdrom-setup via `debian/patches/` or fork as
-  `athena-apt-cdrom-setup`.  See docs/plans/comp-02-robust-build.md.
+  `.disk/base_include` so `grub-installer`'s `apt-install grub-pc`
+  step succeeds as "already the newest version" rather than failing on
+  broken apt sources.  This bypasses the immediate install-time
+  blocker but leaves the installed system without working apt sources.
+- **Fix shipped 2026-05-13 (verification pending next install)**:
+  1. `scripts/iso_installer.py:_sign_release_files` — runs `gpg
+     --detach-sign` → `dists/<suite>/Release.gpg` and `gpg --clearsign`
+     → `dists/<suite>/InRelease`.  Uses the project key already in
+     `gnupg/signing/` (from CONF-02 phase 1).
+  2. `scripts/iso_installer.py:_export_pubkey_to_staging` — copies the
+     pubkey to `.disk/archive-key.gpg` on the disc.
+  3. `patch/source/base-installer/1.213/9001-install-athena-archive-keyring.patch`
+     — quilt patch that adds 4 lines to base-installer's `library.sh`
+     configure_apt: copy `/cdrom/.disk/archive-key.gpg` to
+     `/target/etc/apt/trusted.gpg.d/athena-archive-keyring.gpg` BEFORE
+     the chroot's `apt-cdrom add` call.  Guarded with `[ -f ... ]` so
+     it's a no-op on stock Debian discs.
+- **Verified on local repro 2026-05-13**: signed Release →
+  `apt-cdrom add` reports `gpgv: Good signature` → `apt-get update`
+  returns 0 → `Hit:1 cdrom://... thor InRelease` → `apt-cache policy
+  adduser` resolves to `cdrom://... thor/main amd64`.
+- **Full install verification**: pending — operator must run
+  `patch refresh && source build base-installer && chroot build
+  installer && iso build installer` and boot the rebuilt ISO.
 
 ### `91security` apt-setup generator returns error code 1
 

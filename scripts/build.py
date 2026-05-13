@@ -1287,6 +1287,14 @@ class BuildSession:
             )
             return
 
+        # Verify the project signing key BEFORE any sudo work — apt on the
+        # installed target verifies our Release against this key, and
+        # _sign_release_files inside build_installer_iso will fail loud if
+        # the key isn't present.  Failing here is cheaper.
+        import signing
+        if not self._ensure_signing_key_verified():
+            return
+
         self.flags.iso_installer_ready = False  # reset before work; set True only on success
 
         # Sudo password — same pattern as cmd_build_chroot_installer.
@@ -1356,6 +1364,8 @@ class BuildSession:
                 version=_version,
                 base_include_pkgs=_base_include,
                 deb_whitelist=_pool_whitelist,
+                signing_homedir=signing.signing_home(self.config),
+                signing_pubkey_path=signing.signing_pubkey_path(self.config),
             )
             if not _ok:
                 console.print(

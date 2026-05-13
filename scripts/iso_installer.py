@@ -57,6 +57,8 @@ def build_installer_iso(
     version: str = '0.1',
     base_include_pkgs: Optional[list] = None,
     deb_whitelist=None,
+    signing_homedir: Optional[str] = None,
+    signing_pubkey_path: Optional[str] = None,
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -107,6 +109,21 @@ def build_installer_iso(
 
     if not _generate_apt_repo(_staging, suite, codename, version, password):
         return False
+
+    # Sign Release with the project key and ship the matching pubkey at
+    # .disk/archive-key.gpg.  Without these the target's apt rejects our
+    # unsigned Release with "does not have a Release file" and the whole
+    # apt-cdrom-setup chain falls apart (caught 2026-05-13 — see Phase C
+    # diagnosis in docs/known-issues.md).  Both params None ⇒ skip
+    # signing (useful for tests).
+    if signing_homedir is not None:
+        if not _sign_release_files(
+                _staging, suite, signing_homedir, password):
+            return False
+    if signing_pubkey_path is not None:
+        if not _export_pubkey_to_staging(
+                _staging, signing_pubkey_path, password):
+            return False
 
     _iso_path = os.path.join(dir_image, iso_basename)
     if not _run_grub_mkrescue(_staging, _iso_path):
@@ -718,10 +735,11 @@ def _generate_apt_repo(
     record, which points into pool/ relative to the apt root.  No need
     to restructure into pool/<comp>/<initial>/<src>/.
 
-    UNSIGNED for v1.  The target's apt sources.list will need
-    `[trusted=yes]` to bypass signature verification.  Signing the
-    Release file lands with CONF-02 phase 2 (the signing key from
-    CONF-02 phase 1 is already in place).
+    The Release file is unsigned at the end of this function — signing
+    happens in _sign_release_files, invoked from build_installer_iso
+    after the apt-repo is laid out.  Splitting the steps keeps each
+    helper focused on one job and makes the failure modes distinct
+    (apt-ftparchive failure vs gpg failure).
 
     Tools used:
       dpkg-scanpackages  — scans pool/ for .debs / .udebs, emits Packages
@@ -800,8 +818,8 @@ def _generate_apt_repo(
         return False
 
     tui.console.print(
-        f"apt-repo: dists/{suite}/ ready (unsigned — target sources.list "
-        f"needs [trusted=yes])",
+        f"apt-repo: dists/{suite}/ ready (unsigned — _sign_release_files "
+        "will sign next)",
         tui.COLOR_HIGHLIGHT,
     )
     return True
@@ -1009,6 +1027,146 @@ def _generate_top_release(
         )
         logger.error(f"_generate_top_release: empty output at {output_path}")
         return False
+    return True
+
+
+def _sign_release_files(
+    staging: str, suite: str, signing_homedir: str, password: str,
+) -> bool:
+    """Sign dists/<suite>/Release with our project key.
+
+    Produces two artifacts apt verifies on the target:
+      Release.gpg  — detached signature, classic v1 format
+      InRelease    — clearsigned (signature inline), modern preferred format
+
+    apt fetches InRelease first; if absent, falls back to
+    Release + Release.gpg.  Shipping both maximises compatibility with
+    older apt versions that don't speak InRelease.  Both files MUST be
+    signed by a key the target trusts — we ship the matching pubkey at
+    .disk/archive-key.gpg so the install-time hook can install it into
+    /target/etc/apt/trusted.gpg.d/ before its apt-cdrom add call.
+
+    Caught 2026-05-13: without these, apt-get update on the target said
+    "does not have a Release file" — apt-setup's verify step then
+    discarded 40cdrom's output and the installed target's sources.list
+    never got a working cdrom entry, so any post-install apt-get
+    install failed with "Unable to locate package".  See Phase C
+    diagnosis in docs/known-issues.md.
+    """
+    _release = os.path.join(staging, 'dists', suite, 'Release')
+    if not os.path.isfile(_release):
+        tui.console.print(
+            f"ERROR: {_release} missing — apt-repo generation must run first"
+        )
+        logger.error(f"_sign_release_files: {_release} absent")
+        return False
+    if not os.path.isdir(signing_homedir):
+        tui.console.print(
+            f"ERROR: signing homedir {signing_homedir} absent — run "
+            "'signing keygen' (or whatever sets up the project key) first"
+        )
+        logger.error(f"_sign_release_files: {signing_homedir} absent")
+        return False
+    _release_gpg = _release + '.gpg'
+    _inrelease   = os.path.join(os.path.dirname(_release), 'InRelease')
+    # gpg refuses to overwrite by default; remove any stale signatures
+    # from a previous build run first.
+    for _f in (_release_gpg, _inrelease):
+        if os.path.exists(_f):
+            try:
+                os.unlink(_f)
+            except OSError as e:
+                tui.console.print(f"ERROR: rm {_f}: {e}")
+                logger.error(f"_sign_release_files rm {_f}: {e}")
+                return False
+    # Detached, ASCII-armored signature → Release.gpg.  --batch + --yes
+    # so gpg never prompts (we always overwrite the previously-removed file).
+    _argv = [
+        'gpg', '--homedir', signing_homedir,
+        '--batch', '--yes',
+        '--output', _release_gpg,
+        '--detach-sign', '--armor',
+        _release,
+    ]
+    _r = subprocess.run(_argv, capture_output=True, text=True)
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: gpg --detach-sign Release: {_r.stderr.strip()[:200]}"
+        )
+        logger.error(
+            f"_sign_release_files detach-sign: rc={_r.returncode}, "
+            f"stderr={_r.stderr.strip()}"
+        )
+        return False
+    # Clearsigned (signature wraps the original content) → InRelease.
+    _argv = [
+        'gpg', '--homedir', signing_homedir,
+        '--batch', '--yes',
+        '--output', _inrelease,
+        '--clearsign',
+        _release,
+    ]
+    _r = subprocess.run(_argv, capture_output=True, text=True)
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: gpg --clearsign Release: {_r.stderr.strip()[:200]}"
+        )
+        logger.error(
+            f"_sign_release_files clearsign: rc={_r.returncode}, "
+            f"stderr={_r.stderr.strip()}"
+        )
+        return False
+    tui.console.print(
+        f"Release signed: dists/{suite}/Release.gpg + InRelease"
+    )
+    return True
+
+
+def _export_pubkey_to_staging(
+    staging: str, signing_pubkey_path: str, password: str,
+) -> bool:
+    """Copy the project pubkey to staging/.disk/archive-key.gpg.
+
+    The install-time hook (base-installer quilt patch, see
+    patch/source/base-installer/) reads this and copies it to
+    /target/etc/apt/trusted.gpg.d/athena-archive-keyring.gpg BEFORE
+    running its apt-cdrom add call.  Without the keyring installed,
+    apt rejects our signed Release with "NO_PUBKEY" and the chain
+    falls apart the same way an unsigned Release would.
+
+    The pubkey was already exported by signing.generate_key at project
+    setup time (CONF-02 phase 1); we just copy it onto the disc.  The
+    .disk/ directory is created earlier by _stage_disk_info, so we
+    just need a write into an existing user-owned dir — no sudo.
+    """
+    if not os.path.isfile(signing_pubkey_path):
+        tui.console.print(
+            f"ERROR: pubkey {signing_pubkey_path} missing — run "
+            "'signing keygen' (or whatever sets up the project key) first"
+        )
+        logger.error(
+            f"_export_pubkey_to_staging: {signing_pubkey_path} absent"
+        )
+        return False
+    _dst_dir = os.path.join(staging, '.disk')
+    if not os.path.isdir(_dst_dir):
+        tui.console.print(
+            f"ERROR: {_dst_dir} missing — _stage_disk_info must run first"
+        )
+        logger.error(f"_export_pubkey_to_staging: {_dst_dir} absent")
+        return False
+    _dst = os.path.join(_dst_dir, 'archive-key.gpg')
+    try:
+        shutil.copyfile(signing_pubkey_path, _dst)
+        os.chmod(_dst, 0o644)
+    except OSError as e:
+        tui.console.print(f"ERROR: copy pubkey to {_dst}: {e}")
+        logger.error(f"_export_pubkey_to_staging copy: {e}")
+        return False
+    tui.console.print(
+        "Pubkey exported: .disk/archive-key.gpg "
+        f"({os.path.getsize(_dst)} bytes)"
+    )
     return True
 
 
