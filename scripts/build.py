@@ -646,6 +646,60 @@ class BuildSession:
 
         _patched = sum(1 for _s in _unified_srcs.values() if _s.patch_list)
         console.print(f"Found patches for {_patched} source package(s)", tui.COLOR_INFO)
+
+        # Invalidate stale .result files when a patch is newer than the
+        # last successful build.  Without this, autorun's source-build
+        # step happily skips packages with `[SKIPPED] already built`
+        # even after the operator drops a new patch in
+        # patch/source/<pkg>/<ver>/ — and the patch never takes effect.
+        # Caught 2026-05-13 with the base-installer Phase C keyring
+        # patch: the patch was on disk, _refresh_patches discovered it,
+        # but check_build saw the May-10 .result + .udeb and skipped
+        # the rebuild.  Install booted the unpatched base-installer →
+        # `gpgv: Can't check signature: No public key`.
+        #
+        # Mtime-based: catches added / modified patches.  Does NOT catch
+        # patch removal — for that the operator uses `source build <pkg>
+        # force` to override check_build.  Removal-detection would
+        # require persisting the previous build's patch list and isn't
+        # worth the schema for an uncommon case.
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        _invalidated = []
+        for _pkg, _src in _unified_srcs.items():
+            if not _src.patch_list:
+                continue
+            _result_file = os.path.join(_buildlog, _pkg + '.result')
+            if not os.path.exists(_result_file):
+                continue
+            try:
+                _result_mtime = os.path.getmtime(_result_file)
+            except OSError:
+                continue
+            _patch_dir = os.path.join(
+                self.config.dir_patch_source, _pkg, str(_src.version),
+            )
+            _newer = any(
+                os.path.getmtime(os.path.join(_patch_dir, _pf)) > _result_mtime
+                for _pf in _src.patch_list
+                if os.path.exists(os.path.join(_patch_dir, _pf))
+            )
+            if not _newer:
+                continue
+            try:
+                os.remove(_result_file)
+                _invalidated.append(_pkg)
+            except OSError as e:
+                logger.warning(
+                    f"[patch] {_pkg}: cannot remove stale {_result_file}: {e}"
+                )
+        if _invalidated:
+            _names = ', '.join(sorted(_invalidated))
+            console.print(
+                f"Invalidated {len(_invalidated)} stale .result file(s) — "
+                f"these will rebuild next source_build: {_names}",
+                tui.COLOR_INFO,
+            )
+            logger.info(f"[patch] invalidated stale .result: {_names}")
         return _patched
 
     def cmd_patch_refresh(self):
