@@ -6,7 +6,9 @@ an issue is fixed, move its entry to the bottom under "Fixed" with the
 commit hash that closed it.
 
 The reference run is the installer log at `log/athena.log` from a
-working install captured 2026-05-12 on VMware BIOS-mode VM.
+working install captured 2026-05-13 on VMware BIOS-mode VM (post
+Phase B — main-menu boots cleanly, install runs through
+`finish-install.d/20final-message`).
 
 ---
 
@@ -19,12 +21,17 @@ working install captured 2026-05-12 on VMware BIOS-mode VM.
   "does not have a Release file".  Running `apt-get install <pkg>`
   reports "Unable to locate package".
 - **Evidence in log**:
-  - line 1473: `base-installer: Please use apt-cdrom to make this CD-ROM
+  - line 1506: `base-installer: Please use apt-cdrom to make this CD-ROM
     recognized by APT. apt-get update cannot be used to add new CD-ROMs`
     (configure_apt's apt-cdrom add inside the chroot fails)
-  - line 1678: same error from apt-setup-udeb's verification step
-  - line 1682: `apt-setup: warning: /usr/lib/apt-setup/generators/40cdrom
+  - line 1509: `E: The repository ... does not have a Release file.`
+  - lines 1675-1678: same errors from apt-setup-udeb's verification step
+  - line 1679: `apt-setup: warning: /usr/lib/apt-setup/generators/40cdrom
     output did not verify`
+  - lines ~1916-1928 (downstream): `Package open-vm-tools is not available`
+    and `Unable to locate package intel-microcode` — `hw-detect` /
+    `finish-install` apt-installing on the target via the broken sources.
+    Same root cause; resolves with phase C.
 - **Reproduction**: install Athena from current ISO; on first boot of
   installed target run `apt-get update`.
 - **Workaround in place**: `config/pkg.list` pre-installs `grub-pc` via
@@ -40,7 +47,7 @@ working install captured 2026-05-12 on VMware BIOS-mode VM.
 
 - **Symptom**: discarded silently by apt-setup; no security updates
   configured in `/target/etc/apt/sources.list.d/`.
-- **Evidence in log**: line 1683 — `apt-setup: warning:
+- **Evidence in log**: line 1682 — `apt-setup: warning:
   /usr/lib/apt-setup/generators/91security returned error code 1;
   discarding output`.
 - **Severity**: Low for us — no network mirror model.  But it would
@@ -52,23 +59,6 @@ working install captured 2026-05-12 on VMware BIOS-mode VM.
 ---
 
 ## Latent — would surprise an operator
-
-### ~~`eject` binary missing on target~~ *(fixed pending next build)*
-
-- **Symptom**: CD did not auto-eject at end of install.  Operator had
-  to manually eject before reboot, otherwise BIOS may boot from CD again.
-- **Evidence in log**: line 1927 — `finish-install:
-  /usr/lib/finish-install.d/15cdrom-detect: line 21: eject: not found`.
-- **Root cause**: TWO `eject` packages: the `eject` deb (target system,
-  `/usr/bin/eject`) and the `eject-udeb` udeb (installer ramdisk,
-  `/bin/eject`).  `15cdrom-detect` runs INSIDE the installer chroot,
-  so it needed the udeb.  Adding `eject` to pkg.list put it on the
-  installed target but didn't help the chroot.
-- **Fix shipped 2026-05-12**:
-  - `config/pkg.list`: `eject` (target system has it for post-install)
-  - `config/installer.list`: `eject-udeb` (installer ramdisk has
-    `/bin/eject` so `15cdrom-detect` can eject before reboot)
-- **Verification**: pending next `chroot build installer` + boot test.
 
 ### Installer ISO is BIOS-only
 
@@ -83,56 +73,40 @@ working install captured 2026-05-12 on VMware BIOS-mode VM.
 
 ---
 
-## Build-process — engine-side workarounds we want to remove
+## Build-process — accepted Python helpers (not pending work)
 
-These are not user-visible but make the build fragile to upstream
-churn.  Each is a Python helper that mutates unpacked udeb content.
+These are Python helpers in `scripts/installer_chroot.py` that perform
+actions stock d-i does at image-build time (in its own Makefile) but
+that no udeb in our closure ships.  Per the locked Phase B priority
+hierarchy (2026-05-12):
 
-### `_create_runtime_dirs` (scripts/installer_chroot.py)
+> build-pipeline action in installer_chroot.py
+>     > stock kernel-cmdline knob
+>         > custom Athena udeb
+>             > quilt patch on stock source
 
-- **What it patches**: chroot's `/tmp`, `/var/tmp`, `/root` — none
-  shipped by any udeb in our closure.
-- **Symptom if removed**: `bootstrap-base.postinst` and several other
-  d-i scripts fail because they `> /tmp/some.tmp` and the redirect
-  errors.  Caught 2026-05-11 via `sh -x` trace.
-- **Fix**: COMP-02 phase B — `athena-installer-stubs-udeb` ships the
-  dirs via `debian/dirs`.
+these helpers are **priority #1** — the preferred solution, not a
+workaround to remove.  Listed here so future-us doesn't re-open them
+as "tech debt" without re-reading the decision.
 
-### `_install_debootstrap_codename_script` (scripts/installer_chroot.py)
+### `_create_runtime_dirs`
 
-- **What it patches**: sudo-cp the chroot's
-  `/usr/share/debootstrap/scripts/sid` to `scripts/<codename>` so
-  `debootstrap` recognizes our derivative codename.
-- **Symptom if removed**: `bootstrap-base` exits 10 silently (no script
-  for suite) — main-menu loops on the step-selection menu.  Caught
-  2026-05-11 on first VMware install attempt.
-- **Fix**: COMP-02 phase B — `athena-debootstrap-codenames-udeb`
-  ships `scripts/<codename>` via `debian/install`.  Codename read from
-  the udeb's own `debian/changelog`.
+- **Action**: chmods `/tmp`, `/var/tmp`, `/root` into the unpacked
+  chroot — none ships in any udeb in our closure.
+- **Why a helper, not a custom udeb**: stock d-i creates these in its
+  build/Makefile (line 351), not via udeb postinst.  Mirroring stock
+  is the documented goal.
 
-### `installer/templates/athena-stubs.templates` (overlay)
+### `_install_debootstrap_codename_script`
 
-- **What it patches**: drops a `.templates` file into
-  `/var/lib/dpkg/info/` declaring `mirror/protocol` (which would
-  normally come from `choose-mirror-udeb`, not shipped in our
-  cdrom-only model).
-- **Symptom if removed**: `bootstrap-base.postinst`'s unguarded
-  `db_get mirror/protocol` returns 10 → `set -e` exits → bootstrap-base
-  silent exit 10.  Caught 2026-05-11.
-- **Fix**: COMP-02 phase B — `athena-installer-stubs-udeb` ships this
-  via its own `debian/templates`.
-
-### `installer/preseed/load-preseed.sh` (overlay → `S25-load-preseed`)
-
-- **What it patches**: shell script in
-  `/lib/debian-installer-startup.d/` that runs
-  `debconf-set-selections /preseed.cfg` at boot, because stock d-i has
-  no auto-loader for `/preseed.cfg` in the initrd.
-- **Currently not load-bearing**: our `preseed.cfg` is empty so the
-  script is a no-op.  Kept as a hook for future preseed work.
-- **Fix**: COMP-02 phase B — try `auto=true file=/preseed.cfg` kernel
-  cmdline first (stock d-i mechanism).  If that works, remove the
-  overlay entirely.  Otherwise ship as a tiny udeb.
+- **Action**: copies `/usr/share/debootstrap/scripts/sid` to
+  `scripts/<codename>` so debootstrap recognises our derivative
+  codename.
+- **Why a helper, not a custom udeb**: codename is read from
+  `BuildConfig` at build time (see `cmd_build_chroot_installer`).
+  Wrapping that in a udeb would mean either (a) hard-coding the
+  codename in the udeb's debian/install (fragile) or (b) generating
+  the udeb at build time (more moving parts than the helper).
 
 ---
 
@@ -140,7 +114,10 @@ churn.  Each is a Python helper that mutates unpacked udeb content.
 
 ### `depmod: WARNING: could not open modules.builtin.modinfo`
 
-- **Evidence in log**: line 145.
+- **Evidence in log**: line 187.  Note: this is `hw-detect` re-running
+  depmod in-target.  Our `_run_depmod` build-pipeline helper ran
+  cleanly at chroot-build time (rc=0).  Same warning in both contexts;
+  upstream packaging issue rather than ours.
 - **Cause**: `kernel-image-6.1.0-47-amd64-di` udeb (built from
   `linux-signed-amd64` source) doesn't include the modinfo file.
   Modules still load — depmod just can't compute reverse-deps for the
@@ -150,30 +127,27 @@ churn.  Each is a Python helper that mutates unpacked udeb content.
 
 ### `mount: mounting none on /sys/firmware/efi/efivars failed`
 
-- **Evidence in log**: line 146.
+- **Evidence in log**: line 188.
 - **Cause**: BIOS-mode VM — no EFI variables to mount.  Expected on
   non-EFI hardware.
 - **Fix**: None needed for BIOS; gets exercised correctly once COMP-02
   phase D adds EFI support.
 
-### `cat: can't open '/etc/default-release'`
+### `Falling back to the package description for *-udeb` (×many)
 
-- **Evidence in log**: line 117.
-- **Cause**: Some d-i script tries to read the Debian release identifier;
-  we don't ship that file.
-- **Fix**: COMP-02 phase E — `athena-installer-stubs-udeb` ships
-  `/etc/default-release` with content `thor` (or whatever the codename
-  is at build time).
-
-### `Falling back to the package description for ext4-modules-...-di` (×4)
-
-- **Evidence in log**: lines 133-136.
-- **Cause**: `ext4-modules-X-di` and `fat-modules-X-di` udebs ship
-  templates but their `Description:` fields aren't getting loaded into
-  cdebconf's runtime DB.
-- **Fix**: COMP-02 phase E — investigate; likely the templates files
-  use a description format cdebconf doesn't accept, or the udebs aren't
-  marked correctly for template registration.
+- **Evidence in log**: lines 24, 26-32, 53-55, 89, 103-148, 168-175,
+  191-193, 1644-1646, 1687-1693 — repeated for `brltty-udeb`,
+  `ext4-modules-X-di`, `fat-modules-X-di`, `os-prober-udeb`.  Roughly
+  20+ occurrences across the install.
+- **Cause**: These udebs ship templates but their `Description:` fields
+  aren't getting loaded into cdebconf's runtime DB.  Likely the
+  templates files use a description format cdebconf doesn't accept, or
+  the udebs aren't marked correctly for template registration.
+  brltty-udeb and os-prober-udeb are new since the 2026-05-12 reference
+  run (added by stock-cdrom seed completeness in COMP-02 phase B); the
+  ext4/fat-modules occurrences are unchanged.
+- **Fix**: COMP-02 phase E — investigate per-udeb; likely a single
+  fix across all four.
 
 ### `dpkg-divert: warning: ... use --no-rename` (~20+ occurrences)
 
@@ -222,14 +196,14 @@ churn.  Each is a Python helper that mutates unpacked udeb content.
 
 ### `cat: can't open '/tmp/apt-setup.components'`
 
-- **Evidence in log**: line 1685.
+- **Evidence in log**: line 1684.
 - **Cause**: Downstream of `40cdrom` failure — apt-setup couldn't write
   its components list because `40cdrom`'s verification failed.
 - **Fix**: Auto-resolves when COMP-02 phase C fixes apt-cdrom-setup.
 
 ### `dpkg-query: no packages found matching xserver-xorg-core` / `task-desktop`
 
-- **Evidence in log**: lines 1889, 1890.
+- **Evidence in log**: lines 1898, 1899.
 - **Cause**: `finish-install` runs `hw-detect` which probes for X
   server config; we don't ship X.
 - **Fix**: None needed — expected for a server install.
@@ -238,4 +212,75 @@ churn.  Each is a Python helper that mutates unpacked udeb content.
 
 ## Fixed
 
-*(empty — populate as COMP-02 phases land)*
+### ~~`eject` binary missing on target~~ — 2026-05-13
+
+- **Was**: `15cdrom-detect` ran inside the installer chroot and called
+  `eject`, but the chroot only had `eject` on the target side (via
+  pkg.list `eject` deb).  Disc didn't auto-eject before reboot.
+- **Fix shipped**: `config/installer.list:eject-udeb` (installer
+  ramdisk has `/bin/eject`).
+- **Verified 2026-05-13** at log line 1931:
+  `cdrom-detect: Unmounting and ejecting '/dev/sr0'` — clean eject,
+  no `eject: not found` anywhere in the log.
+
+### ~~Phase B sudo-password leak via `_sudo_write` → `tee`~~ — 2026-05-13
+
+- **Was**: `_sudo_write` passed `password\\ncontent` as stdin to
+  `sudo -S tee`.  When sudo's credential cache was hot (every call
+  after the first auth in the build run), `sudo -S` did NOT consume
+  the password line — `tee` wrote `password\\ncontent` to the
+  destination.  Operator's plaintext sudo password landed at line 1
+  of `/var/lib/dpkg/status`, plus `/etc/lsb-release`,
+  `/etc/default-release`, and `/var/lib/dpkg/info/athena-stubs.templates`
+  — all shipped on the installer ISO.  Also broke main-menu via
+  `parser_rfc822: Iek!` segfault (line 1 wasn't valid RFC-822).
+- **Fix shipped**: `_sudo_write` now does `sudo -S -v` first
+  (consumes the password line — that's `-v`'s entire purpose), then
+  runs the actual `sudo tee` (no `-S`) with clean stdin = content
+  only.
+- **Regression test**:
+  `tests/test_module.py::test_installer_chroot_sudo_write_does_not_leak_password_to_tee`
+  asserts the password never appears in tee's stdin or on disk.
+- **Verified 2026-05-13**: clean install through `finish-install.d/
+  20final-message`; no `parser_rfc822` warning.
+- **Operator follow-up if you ran the broken build**: rotate sudo
+  password, wipe `image/athena-installer-*.iso`, wipe
+  `buildroot/installer/`, scan for the leaked password elsewhere
+  (`grep -r '<old-pw>' image/ buildroot/ log/`).
+
+### ~~`installer/templates/athena-stubs.templates` (overlay)~~ — 2026-05-12
+
+- Replaced by `_write_athena_stub_template` Python helper in
+  `scripts/installer_chroot.py`.  Build-pipeline action writes the
+  template content to `/var/lib/dpkg/info/athena-stubs.templates`
+  directly during the installer chroot build (priority #1 in the
+  Phase B hierarchy — preferred over a custom udeb).
+- Why moved here from "build-process workarounds": the workaround
+  *itself* is gone (the overlay file deleted, the _OVERLAY_MAP entry
+  gone), replaced by a stock-d-i-image-build-conformant helper.
+
+### ~~`installer/preseed/load-preseed.sh` (overlay → `S25-load-preseed`)~~ — 2026-05-12
+
+- Replaced by `auto=true preseed/file=/preseed.cfg` on the kernel
+  cmdline in `installer/boot/grub.cfg`.  This is the stock d-i
+  mechanism — `preseed-common.udeb` (already in installer.list) reads
+  these cmdline params at boot and runs `debconf-set-selections
+  /preseed.cfg` before any consumer udeb queries the values.
+- Priority #2 in the Phase B hierarchy (stock cmdline knob), chosen
+  over priority #3 (custom udeb) because preseed-common is already
+  doing exactly this job — we just needed to invoke it.
+
+### ~~`cat: can't open '/etc/default-release'`~~ — 2026-05-12
+
+- Replaced by `_write_release_files` Python helper.  Writes
+  `/etc/default-release` (codename) and `/etc/lsb-release` (distrib
+  info) at chroot-build time, matching stock d-i Makefile lines
+  517-533.
+
+### ~~Stock d-i image-build steps we were skipping~~ — 2026-05-12
+
+- `_run_depmod`: indexes kernel modules per kernel ABI under
+  `<chroot>/lib/modules/`.  Matches stock d-i Makefile lines 467-475.
+- `_register_self_in_dpkg_status`: appends a dummy
+  `Package: debian-installer` stanza so `dpkg-query -W debian-installer`
+  succeeds.  Matches stock d-i Makefile lines 564-573.

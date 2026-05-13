@@ -31,37 +31,12 @@ logger = logging.getLogger('athena')
 # applied via a first-boot hook (Phase 6), not by chroot-build cp.
 _OVERLAY_MAP = [
     ('preseed/preseed.cfg',          'preseed.cfg'),
-    # COMP-02 phase B TODO: try the stock d-i kernel-cmdline mechanism
-    # `auto=true file=/preseed.cfg` first — if that works the loader
-    # overlay goes away entirely.  Otherwise repackage as a tiny udeb.
-    # See docs/plans/comp-02-robust-build.md.
-    #
-    # Stock d-i ships no auto-loader for /preseed.cfg in the initrd
-    # root — its content only takes effect when a script invokes
-    # debconf-set-selections on it.  S25-load-preseed runs after
-    # S20templates (which loads ALL .templates files including
-    # apt-cdrom-setup's) and before the udebs that consume the values.
-    # See installer/preseed/load-preseed.sh for the full why.
-    ('preseed/load-preseed.sh',
-     'lib/debian-installer-startup.d/S25-load-preseed'),
     ('cdebconf/cdebconf.conf',       'etc/cdebconf.conf'),
     # Debug hook — tails d-i's per-step syslog to /dev/ttyS0 for QEMU
     # serial capture.  Skipped automatically if the source file is
     # absent (operator removes it for a non-debug ISO).
     ('debug/syslog-to-serial.sh',
      'lib/debian-installer-startup.d/S99-syslog-to-serial'),
-    # COMP-02 phase B TODO: replace with `athena-installer-stubs-udeb`
-    # source package shipping this in its own debian/templates.  See
-    # docs/plans/comp-02-robust-build.md.
-    #
-    # Stub templates for questions an upstream udeb would normally
-    # define (mirror/protocol from choose-mirror-udeb, etc.).  We drop
-    # this into /var/lib/dpkg/info/ so S20templates' debconf-loadtemplate
-    # picks it up at boot — same path the real udebs use.  See the
-    # .templates file itself for the specific bugs each stub works
-    # around.
-    ('templates/athena-stubs.templates',
-     'var/lib/dpkg/info/athena-stubs.templates'),
 ]
 
 
@@ -109,6 +84,24 @@ def build_installer_chroot(
         return False
 
     if not _create_runtime_dirs(dir_chroot_installer, password):
+        return False
+
+    # Stock d-i image-build actions that aren't done by any udeb's
+    # postinst (deferred-postinst model: udebs are unpacked here but
+    # their maintainer scripts only run at first boot under
+    # rootskel + main-menu).  Each action is what stock d-i's
+    # installer/build/Makefile does after the dpkg --unpack pass.
+    if not _write_athena_stub_template(dir_chroot_installer, password):
+        return False
+
+    if not _run_depmod(dir_chroot_installer, password):
+        return False
+
+    if not _write_release_files(dir_chroot_installer, codename, password):
+        return False
+
+    if not _register_self_in_dpkg_status(
+            dir_chroot_installer, codename, password):
         return False
 
     if not _apply_installer_overlay(
@@ -516,6 +509,296 @@ def _install_debootstrap_codename_script(
     tui.console.print(
         f"Debootstrap script: sid → {codename} (so debootstrap recognises "
         "our suite)"
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Stock d-i image-build conformance helpers
+#
+# Each helper here mirrors one action stock d-i's installer/build/Makefile
+# performs against $(TREE) AFTER the dpkg --unpack pass and BEFORE the
+# initrd is packed.  Our priority hierarchy (locked 2026-05-12):
+#
+#   1. Build-pipeline action in installer_chroot.py (this file)  ← preferred
+#   2. Stock kernel-cmdline knob via installer/boot/grub.cfg
+#   3. Custom Athena udeb (minimise — every custom udeb is one more
+#      thing to maintain across kernel/d-i refreshes)
+#   4. Quilt patch on stock source (last resort — patches rot fast)
+#
+# Each helper here is option 1 for an action that stock does in its
+# Makefile and we previously did via overlay file or skipped entirely.
+# ---------------------------------------------------------------------------
+
+
+# Stub template for debconf questions that an upstream udeb would
+# normally define but we don't ship.  Currently just mirror/protocol —
+# bootstrap-base.postinst's UNGUARDED `db_get mirror/protocol` returns
+# 10 → set -e exits → bootstrap-base silent-loops on
+# "succeeded but requested to be left unconfigured".  In stock d-i the
+# template comes from choose-mirror-udeb; we don't ship it because we
+# only support file:///cdrom installs.
+#
+# Lives in /var/lib/dpkg/info/ so rootskel's S20templates run-part
+# picks it up via debconf-loadtemplate at boot — same path the real
+# udebs use.  Caught 2026-05-11 — diagnosed by patching the postinst
+# with `set -x` to /dev/ttyS0 since the failure happened before any
+# base-installer logger call.
+_ATHENA_STUB_TEMPLATES = """\
+Template: mirror/protocol
+Type: string
+Default: file
+Description: Mirror protocol (Athena stub)
+ file:///cdrom is Athena's only repo source.  This template exists
+ solely so bootstrap-base.postinst's UNGUARDED `db_get mirror/protocol`
+ (line 77 of d-i's bootstrap-base postinst, where the `|| true` is on
+ the next line — too late to suppress the error) doesn't return 10 and
+ trip `set -e`, killing the postinst before debootstrap is invoked.
+ .
+ In stock d-i this template is provided by choose-mirror-udeb, which
+ we don't ship — we only support file:///cdrom installs.
+"""
+
+
+def _sudo_write(path: str, content: str, password: str) -> bool:
+    """sudo-write content to path so the destination is root-owned
+    (matches what dpkg --unpack would produce).
+
+    Critical: tee READS STDIN.  Earlier version of this helper passed
+    `password\\ncontent` as stdin to `sudo -S tee`, expecting sudo to
+    consume the password line.  But when sudo's credential cache is hot
+    (which happens after the FIRST auth in build_installer_chroot —
+    every subsequent sudo call sees a fresh timestamp), `sudo -S` does
+    NOT consume the password line — it passes stdin straight through to
+    tee, which then writes `password\\ncontent` to the destination.
+    This leaked the operator's sudo password into /var/lib/dpkg/status
+    (broke main-menu parse — "Iek! Don't find end of field"), and into
+    /etc/lsb-release / /etc/default-release / athena-stubs.templates
+    (would have shipped on the installer ISO).  Caught 2026-05-13.
+
+    Fix: refresh sudo's timestamp via `sudo -S -v` first (sudo -v DOES
+    consume the password line, whether cache was hot or cold — that's
+    `-v`'s entire purpose).  Then run the actual tee under plain
+    `sudo` (no -S) — tee receives clean stdin = content only.
+    """
+    _refresh = subprocess.run(
+        ['sudo', '-S', '-v'],
+        input=password + '\n',
+        capture_output=True, text=True,
+    )
+    if _refresh.returncode != 0:
+        tui.console.print(
+            f"ERROR: sudo refresh for write {path}: "
+            f"{_refresh.stderr.strip()[:200]}"
+        )
+        logger.error(
+            f"_sudo_write sudo -v: rc={_refresh.returncode}, "
+            f"stderr={_refresh.stderr.strip()}"
+        )
+        return False
+    _r = subprocess.run(
+        ['sudo', 'tee', path],
+        input=content,
+        capture_output=True, text=True,
+    )
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: write {path}: {_r.stderr.strip()[:200]}"
+        )
+        logger.error(
+            f"_sudo_write {path}: rc={_r.returncode}, "
+            f"stderr={_r.stderr.strip()}"
+        )
+        return False
+    return True
+
+
+def _write_athena_stub_template(
+    dir_chroot_installer: str, password: str
+) -> bool:
+    """Write /var/lib/dpkg/info/athena-stubs.templates.
+
+    Replaces the prior installer/templates/athena-stubs.templates
+    overlay (deleted 2026-05-12) so all stub-template content lives in
+    one place — version-controlled Python rather than a side-car file
+    that operators might assume they can edit for rebrand purposes.
+    """
+    _dst = os.path.join(
+        dir_chroot_installer, 'var/lib/dpkg/info/athena-stubs.templates'
+    )
+    if not _sudo_write(_dst, _ATHENA_STUB_TEMPLATES, password):
+        return False
+    tui.console.print(
+        "Stub templates: athena-stubs.templates → "
+        "/var/lib/dpkg/info/ (mirror/protocol)"
+    )
+    return True
+
+
+def _run_depmod(dir_chroot_installer: str, password: str) -> bool:
+    """Run `depmod -a -b <chroot> <kver>` for each kernel under
+    <chroot>/lib/modules/.
+
+    Stock d-i's installer/build/Makefile runs depmod after the unpack
+    pass so that the initrd's modules.dep / modules.alias / etc. files
+    are up to date — without this, hw-detect's modprobe of (say)
+    vmw_pvscsi succeeds on the file but kmod can't compute the right
+    soft-dep chain, and certain modules silently fail to load.
+    Caught 2026-05-12 as a cosmetic-but-suspicious "depmod: WARNING"
+    line in the install log; promoted to a real step because the same
+    log later showed modules that depmod's index would have surfaced.
+
+    Multiple kernel versions present → depmod each in turn (rare but
+    possible when an old + new kernel-image udeb both land in the
+    closure during a kernel refresh).  Missing /lib/modules entirely
+    is NOT an error: a non-cdrom flavour (rescue.cfg, hd-media without
+    kernel) legitimately has no kernel udebs and just skips this step.
+    """
+    _modules_dir = os.path.join(dir_chroot_installer, 'lib/modules')
+    if not os.path.isdir(_modules_dir):
+        tui.console.print(
+            "depmod: no /lib/modules in chroot — skipping (non-kernel flavour)"
+        )
+        logger.info(
+            f"_run_depmod: {_modules_dir} absent — no kernel udeb in closure"
+        )
+        return True
+    try:
+        _kvers = sorted(
+            _e for _e in os.listdir(_modules_dir)
+            if os.path.isdir(os.path.join(_modules_dir, _e))
+        )
+    except OSError as e:
+        tui.console.print(f"ERROR: listdir {_modules_dir}: {e}")
+        logger.error(f"_run_depmod listdir {_modules_dir}: {e}")
+        return False
+    if not _kvers:
+        tui.console.print(
+            "depmod: /lib/modules empty — skipping (no kernel modules)"
+        )
+        logger.info(f"_run_depmod: {_modules_dir} present but empty")
+        return True
+    for _kver in _kvers:
+        _r = _sudo(
+            ['depmod', '-a', '-b', dir_chroot_installer, _kver], password
+        )
+        # depmod may warn about modules.builtin.modinfo missing (the
+        # kernel-image-*-di udeb in linux-signed-amd64 doesn't ship
+        # that file).  That's cosmetic — modules still load.  We only
+        # fail on hard errors.
+        logger.info(
+            f"_run_depmod {_kver}: rc={_r.returncode}, "
+            f"stderr_tail={_r.stderr.strip().splitlines()[-3:] if _r.stderr.strip() else []}"
+        )
+        if _r.returncode != 0:
+            tui.console.print(
+                f"ERROR: depmod -a -b {dir_chroot_installer} {_kver}: "
+                f"{_r.stderr.strip()[:200]}"
+            )
+            logger.error(
+                f"_run_depmod {_kver}: rc={_r.returncode}, "
+                f"stderr={_r.stderr.strip()}"
+            )
+            return False
+    tui.console.print(
+        f"depmod: indexed {len(_kvers)} kernel(s): {', '.join(_kvers)}"
+    )
+    return True
+
+
+def _write_release_files(
+    dir_chroot_installer: str, codename: str, password: str
+) -> bool:
+    """Write /etc/default-release and /etc/lsb-release.
+
+    `/etc/default-release` carries the bare codename (e.g. `thor`) — read
+    by various d-i scripts that need to know which suite the installer
+    targets (apt-setup's release picker, archive-key trust checks).
+    Stock d-i echoes $(DEBIAN_RELEASE) to this file from the Makefile.
+    Caught 2026-05-12 as a cosmetic install-log warning
+    "cat: can't open '/etc/default-release'" — promoted to a real step
+    once the audit identified it as a stock action we'd skipped.
+
+    `/etc/lsb-release` carries minimal distrib info so d-i scripts that
+    grep it for branding render the Athena name rather than falling
+    through to "Debian GNU/Linux".  We use the codename as both
+    RELEASE and CODENAME — Athena tracks sid so there's no separate
+    point-release identifier to record.
+    """
+    _default_release = os.path.join(
+        dir_chroot_installer, 'etc/default-release'
+    )
+    if not _sudo_write(_default_release, codename + '\n', password):
+        return False
+    _lsb = (
+        'DISTRIB_ID=Athena\n'
+        'DISTRIB_DESCRIPTION="Athena Linux installer"\n'
+        f'DISTRIB_RELEASE={codename}\n'
+        f'DISTRIB_CODENAME={codename}\n'
+    )
+    _lsb_path = os.path.join(dir_chroot_installer, 'etc/lsb-release')
+    if not _sudo_write(_lsb_path, _lsb, password):
+        return False
+    tui.console.print(
+        f"Release files: /etc/default-release ({codename}) + "
+        "/etc/lsb-release written"
+    )
+    return True
+
+
+def _register_self_in_dpkg_status(
+    dir_chroot_installer: str, codename: str, password: str
+) -> bool:
+    """Append a `Package: debian-installer` stanza to /var/lib/dpkg/status.
+
+    Stock d-i's image-build Makefile (lines 568-573) writes a 4-field
+    dummy `debian-installer` entry so `dpkg-query -W debian-installer`
+    returns a result for scripts that probe it.  We keep the package
+    name `debian-installer` (not athena-installer) so stock d-i scripts
+    that string-compare on it continue to work.
+
+    Format matches stock VERBATIM — 4 fields + trailing blank line.
+    Caught 2026-05-13: an earlier 9-field stanza with multi-line
+    Description and Maintainer-with-angle-brackets tripped the lean
+    libdebian-installer RFC-822 parser ("Iek! Don't find end of field")
+    and segfaulted main-menu at startup.  The parser tolerates the
+    standard 4 stock fields without issue.
+
+    Separator handling: normalise existing trailing newlines so we always
+    get exactly one blank line between the previous stanza and ours.
+    dpkg writes status with a trailing blank line by convention, but
+    nothing in our flow guarantees that, so we strip+re-add explicitly.
+    """
+    _stanza = (
+        'Package: debian-installer\n'
+        'Status: install ok installed\n'
+        f'Version: {codename}\n'
+        'Description: athena installation image\n'
+        '\n'  # trailing blank line — stanza terminator per stock
+    )
+    _status = os.path.join(dir_chroot_installer, 'var/lib/dpkg/status')
+    _r = _sudo(['cat', _status], password)
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: read {_status}: {_r.stderr.strip()[:200]}"
+        )
+        logger.error(
+            f"_register_self_in_dpkg_status cat {_status}: "
+            f"rc={_r.returncode}, stderr={_r.stderr.strip()}"
+        )
+        return False
+    _existing = _r.stdout
+    if 'Package: debian-installer\n' in _existing:
+        tui.console.print(
+            "dpkg status: debian-installer stanza already present — skipping"
+        )
+        return True
+    # Strip any trailing newlines + add exactly one blank-line separator.
+    _normalised = _existing.rstrip('\n') + '\n\n' if _existing else ''
+    if not _sudo_write(_status, _normalised + _stanza, password):
+        return False
+    tui.console.print(
+        "dpkg status: added dummy debian-installer stanza"
     )
     return True
 

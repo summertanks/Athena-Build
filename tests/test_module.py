@@ -1936,60 +1936,265 @@ def test_installer_chroot_runtime_dirs_includes_tmp_with_sticky_mode():
     assert _by_path.get('root') == '0700', _RUNTIME_DIRS
 
 
-def test_installer_chroot_overlay_map_carries_preseed_loader():
-    """Stock d-i has no auto-loader for /preseed.cfg.  The S25-load-preseed
-    overlay script is what makes our preseed values actually take effect
-    (caught 2026-05-12 — apt-setup/disable-cdrom-entries was a no-op for
-    a full ISO build because nothing was reading /preseed.cfg).  Pin the
-    entry so a future overlay-map refactor doesn't silently drop it."""
+def test_installer_chroot_athena_stub_template_declares_mirror_protocol():
+    """The _ATHENA_STUB_TEMPLATES constant must declare mirror/protocol
+    — that's the question bootstrap-base.postinst queries unguarded
+    (caught 2026-05-11).  After the 2026-05-12 refactor the stub content
+    lives in installer_chroot.py instead of an overlay file, so pin the
+    content here to guard against accidental edit."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _OVERLAY_MAP
-    _by_src = dict(_OVERLAY_MAP)
-    assert _by_src.get('preseed/load-preseed.sh') == \
-        'lib/debian-installer-startup.d/S25-load-preseed', _OVERLAY_MAP
+    from installer_chroot import _ATHENA_STUB_TEMPLATES
+    assert 'Template: mirror/protocol' in _ATHENA_STUB_TEMPLATES, \
+        _ATHENA_STUB_TEMPLATES
+    assert 'Type: string' in _ATHENA_STUB_TEMPLATES, _ATHENA_STUB_TEMPLATES
+    assert 'Default: file' in _ATHENA_STUB_TEMPLATES, _ATHENA_STUB_TEMPLATES
 
 
-def test_installer_preseed_loader_script_is_executable():
-    """The loader has to be executable for run-parts in
-    /sbin/debian-installer-startup to run it.  cp -p in
-    _apply_installer_overlay preserves mode, so the source file's mode
-    matters."""
-    _path = os.path.join(_ROOT, 'installer', 'preseed', 'load-preseed.sh')
-    assert os.path.isfile(_path), _path
-    assert os.access(_path, os.X_OK), (
-        f"{_path} must be executable (chmod +x) so run-parts will exec "
-        f"the copy at /lib/debian-installer-startup.d/S25-load-preseed"
-    )
-    with open(_path, 'r') as fh:
-        _content = fh.read()
-    assert 'debconf-set-selections /preseed.cfg' in _content, _content
+def _fake_sudo_write_run(cmd, *_a, **_k):
+    """Mock for installer_chroot._sudo_write's two subprocess.run calls:
+      1. `sudo -S -v` — refreshes sudo timestamp, consumes password line.
+      2. `sudo tee <path>` — writes raw stdin content to path.
+    Tests expecting password-less stdin to tee depend on this split."""
+    class _R:
+        returncode = 0
+        stderr = ''
+    if cmd[:3] == ['sudo', '-S', '-v']:
+        # Refresh — no side effect beyond returning 0.
+        return _R()
+    if cmd[:2] == ['sudo', 'tee'] and len(cmd) >= 3:
+        # Tee — stdin is raw content (NOT prefixed with password — that's
+        # the whole point of the fix).
+        with open(cmd[2], 'w') as fh:
+            fh.write(_k.get('input', ''))
+        return _R()
+    raise AssertionError(f"unexpected subprocess.run call: {cmd}")
 
 
-def test_installer_chroot_overlay_map_carries_athena_stubs_templates():
-    """The mirror/protocol stub-template overlay must stay in
-    _OVERLAY_MAP — without it, bootstrap-base.postinst's unguarded
-    `db_get mirror/protocol` returns 10 (missing template) and trips
-    set -e (caught 2026-05-11).  Pins the entry so a future overlay
-    map refactor doesn't drop it."""
-    import sys
+def test_installer_chroot_sudo_write_does_not_leak_password_to_tee():
+    """Regression for 2026-05-13 password leak — `_sudo_write` MUST NOT
+    include the password in tee's stdin, because sudo -S does not
+    consume stdin when its credential cache is hot.  The bug shipped the
+    operator's plaintext sudo password to /var/lib/dpkg/status,
+    /etc/lsb-release, /etc/default-release, and athena-stubs.templates
+    inside the installer ramdisk."""
+    import sys, tempfile
+    from unittest.mock import patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _OVERLAY_MAP
-    _by_src = dict(_OVERLAY_MAP)
-    assert _by_src.get('templates/athena-stubs.templates') == \
-        'var/lib/dpkg/info/athena-stubs.templates', _OVERLAY_MAP
+    from installer_chroot import _sudo_write
+    _calls = []
+    def _capturing_run(cmd, *_a, **_k):
+        _calls.append((tuple(cmd), _k.get('input', '')))
+        class _R: returncode = 0; stderr = ''
+        if cmd[:2] == ['sudo', 'tee']:
+            with open(cmd[2], 'w') as fh:
+                fh.write(_k.get('input', ''))
+        return _R()
+    with tempfile.TemporaryDirectory() as _d:
+        _path = os.path.join(_d, 'leak-check.txt')
+        _SECRET = 'secret-sudo-pw-do-not-leak'
+        with patch('installer_chroot.subprocess.run', side_effect=_capturing_run):
+            assert _sudo_write(_path, 'expected file content', _SECRET) is True
+        # The tee call's stdin must NOT contain the password anywhere.
+        _tee_calls = [c for c in _calls if c[0][:2] == ('sudo', 'tee')]
+        assert len(_tee_calls) == 1, _tee_calls
+        assert _SECRET not in _tee_calls[0][1], (
+            f"password leaked into tee stdin: {_tee_calls[0][1]!r}"
+        )
+        # Also, the on-disk file must NOT contain the password.
+        with open(_path) as fh:
+            _disk = fh.read()
+        assert _SECRET not in _disk, f"password leaked to disk: {_disk!r}"
+        assert _disk == 'expected file content', _disk
+        # The refresh call MUST carry the password (that's `-v`'s job).
+        _refresh_calls = [c for c in _calls if c[0][:3] == ('sudo', '-S', '-v')]
+        assert len(_refresh_calls) == 1, _refresh_calls
+        assert _refresh_calls[0][1] == _SECRET + '\n', _refresh_calls
 
 
-def test_installer_chroot_athena_stubs_file_declares_mirror_protocol():
-    """The shipped stub-templates file must declare mirror/protocol
-    — that's the question bootstrap-base.postinst queries unguarded."""
-    _path = os.path.join(
-        _ROOT, 'installer', 'templates', 'athena-stubs.templates'
+def test_installer_chroot_write_athena_stub_template_writes_to_dpkg_info():
+    """_write_athena_stub_template lands the stub file at
+    /var/lib/dpkg/info/athena-stubs.templates so rootskel's
+    S20templates run-part picks it up via debconf-loadtemplate at boot
+    — same path the real udebs use."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import (
+        _write_athena_stub_template,
+        _ATHENA_STUB_TEMPLATES,
     )
-    assert os.path.isfile(_path), _path
-    with open(_path, 'r') as fh:
+    with tempfile.TemporaryDirectory() as _chroot:
+        os.makedirs(os.path.join(_chroot, 'var/lib/dpkg/info'))
+        with patch('installer_chroot.subprocess.run',
+                   side_effect=_fake_sudo_write_run):
+            assert _write_athena_stub_template(_chroot, 'pw') is True
+        _written = os.path.join(
+            _chroot, 'var/lib/dpkg/info/athena-stubs.templates'
+        )
+        assert os.path.isfile(_written), _written
+        with open(_written) as fh:
+            _content = fh.read()
+        assert _content == _ATHENA_STUB_TEMPLATES, _content
+
+
+def test_installer_chroot_run_depmod_skips_when_no_modules_dir():
+    """Non-kernel installer flavours (rescue, hd-media without kernel)
+    legitimately have no /lib/modules — _run_depmod must skip rather
+    than fail.  Pin the no-op behaviour so a future "fail closed" rewrite
+    doesn't break those flavours."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _run_depmod
+    with tempfile.TemporaryDirectory() as _chroot:
+        # No /lib/modules at all.
+        with patch('installer_chroot._sudo') as _mock_sudo:
+            assert _run_depmod(_chroot, 'pw') is True
+            _mock_sudo.assert_not_called()
+
+
+def test_installer_chroot_run_depmod_indexes_each_kernel_present():
+    """When /lib/modules/<kver> dirs exist, _run_depmod must call
+    `depmod -a -b <chroot> <kver>` for each kver.  Caught 2026-05-12 as
+    a cosmetic "depmod: WARNING" install-log line — promoted to a real
+    build-pipeline step (was missing from our pipeline; stock d-i runs
+    it in its image-build Makefile)."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _run_depmod
+    with tempfile.TemporaryDirectory() as _chroot:
+        os.makedirs(os.path.join(_chroot, 'lib/modules/6.1.0-39-amd64'))
+        os.makedirs(os.path.join(_chroot, 'lib/modules/6.1.0-42-amd64'))
+        _calls = []
+        class _R: returncode = 0; stderr = ''; stdout = ''
+        def _fake_sudo(cmd, _pw):
+            _calls.append(cmd)
+            return _R()
+        with patch('installer_chroot._sudo', side_effect=_fake_sudo):
+            assert _run_depmod(_chroot, 'pw') is True
+        _depmod_cmds = [c for c in _calls if c[0] == 'depmod']
+        assert len(_depmod_cmds) == 2, _calls
+        # Each call must be `depmod -a -b <chroot> <kver>`.
+        _kvers = sorted(c[-1] for c in _depmod_cmds)
+        assert _kvers == ['6.1.0-39-amd64', '6.1.0-42-amd64'], _kvers
+        for _c in _depmod_cmds:
+            assert _c[1] == '-a' and _c[2] == '-b' and _c[3] == _chroot, _c
+
+
+def test_installer_chroot_write_release_files_emits_codename_and_lsb():
+    """Stock d-i image-build writes /etc/default-release (bare codename)
+    and /etc/lsb-release (distrib info).  Caught 2026-05-12 as cosmetic
+    install-log warnings ("cat: can't open '/etc/default-release'") —
+    promoted to a real step after stock-conformance audit."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _write_release_files
+    with tempfile.TemporaryDirectory() as _chroot:
+        os.makedirs(os.path.join(_chroot, 'etc'))
+        with patch('installer_chroot.subprocess.run',
+                   side_effect=_fake_sudo_write_run):
+            assert _write_release_files(_chroot, 'thor', 'pw') is True
+        with open(os.path.join(_chroot, 'etc/default-release')) as fh:
+            assert fh.read().strip() == 'thor'
+        with open(os.path.join(_chroot, 'etc/lsb-release')) as fh:
+            _lsb = fh.read()
+        assert 'DISTRIB_ID=Athena' in _lsb, _lsb
+        assert 'DISTRIB_CODENAME=thor' in _lsb, _lsb
+        assert 'DISTRIB_RELEASE=thor' in _lsb, _lsb
+
+
+def test_installer_chroot_register_self_appends_debian_installer_stanza():
+    """Stock d-i image-build adds a dummy `Package: debian-installer`
+    stanza to /var/lib/dpkg/status so `dpkg-query -W debian-installer`
+    returns a result.  We replicate it under that exact name (not
+    "athena-installer") so stock d-i scripts that string-compare the
+    package name continue to work."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _register_self_in_dpkg_status
+    with tempfile.TemporaryDirectory() as _chroot:
+        _status = os.path.join(_chroot, 'var/lib/dpkg/status')
+        os.makedirs(os.path.dirname(_status))
+        # Pre-existing content (representative — one unrelated stanza).
+        with open(_status, 'w') as fh:
+            fh.write(
+                'Package: foo\nStatus: install ok installed\n'
+                'Version: 1.0\nArchitecture: amd64\n'
+            )
+        def _fake_sudo(cmd, _pw):
+            class _R:
+                returncode = 0
+                stderr = ''
+                stdout = ''
+            if cmd[0] == 'cat':
+                with open(cmd[1]) as fh:
+                    _R.stdout = fh.read()
+            return _R()
+        with patch('installer_chroot._sudo', side_effect=_fake_sudo), \
+             patch('installer_chroot.subprocess.run',
+                   side_effect=_fake_sudo_write_run):
+            assert _register_self_in_dpkg_status(
+                _chroot, 'thor', 'pw') is True
+        with open(_status) as fh:
+            _content = fh.read()
+        assert 'Package: foo' in _content, _content        # original preserved
+        assert 'Package: debian-installer\n' in _content, _content
+        assert 'Version: thor\n' in _content, _content
+        # Password leak regression — must not appear in the on-disk file.
+        assert 'pw' not in _content, _content
+
+
+def test_installer_chroot_register_self_idempotent_on_repeat():
+    """A second invocation must not duplicate the debian-installer stanza
+    — otherwise rerunning `chroot build installer` after a partial run
+    would compound stanzas every time."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _register_self_in_dpkg_status
+    with tempfile.TemporaryDirectory() as _chroot:
+        _status = os.path.join(_chroot, 'var/lib/dpkg/status')
+        os.makedirs(os.path.dirname(_status))
+        with open(_status, 'w') as fh:
+            fh.write(
+                'Package: debian-installer\nStatus: install ok installed\n'
+                'Version: thor\nArchitecture: all\n'
+            )
+        _writes = []
+        def _fake_sudo(cmd, _pw):
+            class _R:
+                returncode = 0; stderr = ''; stdout = ''
+            if cmd[0] == 'cat':
+                with open(cmd[1]) as fh:
+                    _R.stdout = fh.read()
+            return _R()
+        def _fake_run(cmd, *_a, **_k):
+            _writes.append(cmd)
+            class _R: returncode = 0; stderr = ''
+            return _R()
+        with patch('installer_chroot._sudo', side_effect=_fake_sudo), \
+             patch('installer_chroot.subprocess.run', side_effect=_fake_run):
+            assert _register_self_in_dpkg_status(
+                _chroot, 'thor', 'pw') is True
+        # No tee write occurred — the helper noticed the stanza already
+        # present and returned True without touching the file.
+        assert _writes == [], _writes
+
+
+def test_installer_grub_cfg_has_preseed_kernel_cmdline():
+    """grub.cfg's kernel cmdline must carry `auto=true preseed/file=
+    /preseed.cfg` so preseed-common.udeb loads /preseed.cfg at boot
+    (stock d-i mechanism).  Replaces the prior load-preseed.sh overlay
+    (deleted 2026-05-12)."""
+    _path = os.path.join(_ROOT, 'installer', 'boot', 'grub.cfg')
+    with open(_path) as fh:
         _content = fh.read()
-    assert 'Template: mirror/protocol' in _content, _content
+    assert 'auto=true' in _content, _content
+    assert 'preseed/file=/preseed.cfg' in _content, _content
 
 
 
@@ -5622,10 +5827,16 @@ def main() -> int:
         test_installer_chroot_install_debootstrap_script_errors_when_sid_missing,
         test_installer_chroot_runtime_dirs_creates_tmp_var_tmp_root,
         test_installer_chroot_runtime_dirs_includes_tmp_with_sticky_mode,
-        test_installer_chroot_overlay_map_carries_athena_stubs_templates,
-        test_installer_chroot_athena_stubs_file_declares_mirror_protocol,
-        test_installer_chroot_overlay_map_carries_preseed_loader,
-        test_installer_preseed_loader_script_is_executable,
+        # COMP-02 phase B — stock d-i image-build conformance helpers
+        test_installer_chroot_sudo_write_does_not_leak_password_to_tee,
+        test_installer_chroot_athena_stub_template_declares_mirror_protocol,
+        test_installer_chroot_write_athena_stub_template_writes_to_dpkg_info,
+        test_installer_chroot_run_depmod_skips_when_no_modules_dir,
+        test_installer_chroot_run_depmod_indexes_each_kernel_present,
+        test_installer_chroot_write_release_files_emits_codename_and_lsb,
+        test_installer_chroot_register_self_appends_debian_installer_stanza,
+        test_installer_chroot_register_self_idempotent_on_repeat,
+        test_installer_grub_cfg_has_preseed_kernel_cmdline,
         test_buildconfig_chroot_paths_under_shared_buildroot_parent,
         test_build_flags_carries_chroot_installer_ready_default_false,
         # ARCH-03
