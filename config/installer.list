@@ -139,6 +139,97 @@ usb-modules
 usb-storage-modules
 isofs-modules
 
+# ─── Stock d-i seed: pkg-lists/base ────────────────────────────────
+# Verbatim from debian-installer 20230607+deb12u13 pkg-lists/base.  These
+# are the udebs stock d-i puts in EVERY image flavour (cdrom, netboot,
+# hd-media, etc.) — the "minimum installer" set.  Most are pulled
+# transitively by main-menu/rootskel/anna anyway, but seeding them
+# explicitly hardens us against upstream Recommends/Depends churn and
+# makes our installer.list a strict superset of stock's base.
+# Caught 2026-05-12 during stock-seed audit: even udebs we never expect
+# to need on a cdrom flavour (e.g. wget-udeb is netboot-shaped) are kept
+# because they may matter on other targets we add later (USB, PXE).
+anna
+archdetect
+cdebconf-udeb
+di-utils
+di-utils-reboot
+di-utils-shell
+libdebconfclient0-udeb
+libdebian-installer4-udeb
+lowmemcheck
+rescue-check
+env-preseed
+pciutils-udeb
+screen-udeb
+wget-udeb
+ca-certificates-udeb
+kmod-udeb
+haveged-udeb
+wireless-regdb-udeb
+udev-udeb
+
+# ─── Stock d-i seed: pkg-lists/cdrom/common ────────────────────────
+# Verbatim from pkg-lists/cdrom/common — cdrom-flavour additions on top
+# of base.  Localechooser (language picker on first menu), load-cdrom
+# (loads the cdrom-detect/cdrom-retriever pair which we already seed
+# explicitly above), cdrom-checker (md5sum verification of the disc),
+# bogl-bterm-udeb + di-utils-terminfo (bterm renderer for non-Latin
+# scripts), cdebconf-newt-terminal (newt frontend's terminal handling),
+# cdebconf-text-udeb (text frontend for serial consoles — our build
+# host already uses it via console=ttyS0), brltty-udeb (braille support
+# for accessibility), initrd-preseed + file-preseed (preseed loaders —
+# we currently only use file-preseed for /preseed.cfg but seeding both
+# makes our installer accept network/initrd preseeds in future
+# flavours), nano-udeb (rescue editor), media-retriever (generic media
+# retrieval — paired with cdrom-retriever for hd-media flavours),
+# save-logs (operator can ALT+F4 → save-logs to dump /var/log/installer
+# to USB/floppy at any point), libfribidi0-udeb (bidi text for RTL
+# locales).
+localechooser
+load-cdrom
+cdrom-checker
+bogl-bterm-udeb
+di-utils-terminfo
+cdebconf-newt-terminal
+cdebconf-text-udeb
+brltty-udeb
+initrd-preseed
+file-preseed
+nano-udeb
+media-retriever
+save-logs
+libfribidi0-udeb
+
+# ─── Stock d-i seed: pkg-lists/cdrom/amd64.cfg + cd_drivers ────────
+# Verbatim from pkg-lists/cdrom/amd64.cfg.  console-setup-pc-ekmap is
+# the PC keyboard layout map (US/UK/DE/etc. — needed for the keyboard
+# step in main-menu), console-setup-udeb is the runtime keymap loader,
+# kbd-udeb provides /usr/bin/loadkeys.  The *-modules entries are
+# kernel-driver bundles listed by VIRTUAL name (per-ABI udebs Provides:
+# the virtual name; auto-pick-highest selects the latest kernel ABI in
+# the dep tree).  Without these, hw-detect can't probe a working
+# subset of hardware; on amd64 in particular fat-modules is needed to
+# mount the ESP at install time (partman-efi formats it).
+#
+# Note: stock's pkg-lists/cdrom/amd64.cfg names scsi-common-modules but
+# bookworm's kernel-udeb packaging split that into scsi-core-modules
+# (plumbing) + scsi-modules (HBAs); both are already seeded above under
+# the existing "Kernel module udebs" section so scsi-common-modules is
+# implicitly covered.
+console-setup-pc-ekmap
+console-setup-udeb
+kbd-udeb
+fat-modules
+input-modules
+fb-modules
+serial-modules
+usb-serial-modules
+uinput-modules
+firewire-core-modules
+mmc-modules
+acpi-modules
+
 # ─── Target-side debs (NOT udebs — for the apt pool) ───────────────
 # These are deb names that grub-installer apt-pulls onto the TARGET at
 # install time.  Listed here defensively so they stay in the pool even
