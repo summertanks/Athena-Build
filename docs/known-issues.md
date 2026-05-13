@@ -7,77 +7,38 @@ commit hash that closed it.
 
 The reference run is the installer log at `log/athena.log` from a
 working install captured 2026-05-13 on VMware BIOS-mode VM (post
-Phase B — main-menu boots cleanly, install runs through
-`finish-install.d/20final-message`).
+Phases B + C — main-menu boots cleanly, apt-cdrom signs and verifies
+end-to-end, install runs through `finish-install.d/95umount`).
 
 ---
 
 ## Critical — affects installed system
 
-### ~~apt-cdrom-setup chain is broken end-to-end~~ *(fix pending next build, 2026-05-13)*
+*(`apt-cdrom-setup chain` and `91security` entries moved to Fixed
+2026-05-13 — Phase C signing + base-installer keyring patch verified
+end-to-end in the 15:57 reference install.)*
 
-- **Symptom (as observed in 2026-05-13 reference log)**:
-  `/target/etc/apt/sources.list` ends up empty/broken on the installed
-  system.  Running `apt-get update` post-install reports "does not have
-  a Release file".  Running `apt-get install <pkg>` reports "Unable to
-  locate package".
-- **Evidence in log**:
-  - line 1506: `base-installer: Please use apt-cdrom to make this CD-ROM
-    recognized by APT. apt-get update cannot be used to add new CD-ROMs`
-    (configure_apt's apt-cdrom add inside the chroot fails)
-  - line 1509: `E: The repository ... does not have a Release file.`
-  - lines 1675-1678: same errors from apt-setup-udeb's verification step
-  - line 1679: `apt-setup: warning: /usr/lib/apt-setup/generators/40cdrom
-    output did not verify`
-  - lines ~1916-1928 (downstream): `Package open-vm-tools is not available`
-    and `Unable to locate package intel-microcode` — `hw-detect` /
-    `finish-install` apt-installing on the target via the broken sources.
-    Same root cause.
-- **Root cause (diagnosed 2026-05-13 via local apt-cdrom repro under
-  /tmp/apt-cdrom-repro/)**: apt rejects our unsigned Release file.
-  apt-cdrom add appears to succeed at writing sources.list, but apt's
-  later acquire of `dists/<suite>/Release` fails the verification step
-  → `Err:2 ... thor Release / Please use apt-cdrom...` → apt-get update
-  exits 100 → apt-setup's verify discards 40cdrom's output → final
-  /target sources.list has no cdrom entry → post-install apt fails.
-- **Workaround in place**: `config/pkg.list` pre-installs `grub-pc` via
-  `.disk/base_include` so `grub-installer`'s `apt-install grub-pc`
-  step succeeds as "already the newest version" rather than failing on
-  broken apt sources.  This bypasses the immediate install-time
-  blocker but leaves the installed system without working apt sources.
-- **Fix shipped 2026-05-13 (verification pending next install)**:
-  1. `scripts/iso_installer.py:_sign_release_files` — runs `gpg
-     --detach-sign` → `dists/<suite>/Release.gpg` and `gpg --clearsign`
-     → `dists/<suite>/InRelease`.  Uses the project key already in
-     `gnupg/signing/` (from CONF-02 phase 1).
-  2. `scripts/iso_installer.py:_export_pubkey_to_staging` — copies the
-     pubkey to `.disk/archive-key.gpg` on the disc.
-  3. `patch/source/base-installer/1.213/9001-install-athena-archive-keyring.patch`
-     — quilt patch that adds 4 lines to base-installer's `library.sh`
-     configure_apt: copy `/cdrom/.disk/archive-key.gpg` to
-     `/target/etc/apt/trusted.gpg.d/athena-archive-keyring.gpg` BEFORE
-     the chroot's `apt-cdrom add` call.  Guarded with `[ -f ... ]` so
-     it's a no-op on stock Debian discs.
-- **Verified on local repro 2026-05-13**: signed Release →
-  `apt-cdrom add` reports `gpgv: Good signature` → `apt-get update`
-  returns 0 → `Hit:1 cdrom://... thor InRelease` → `apt-cache policy
-  adduser` resolves to `cdrom://... thor/main amd64`.
-- **Full install verification**: pending — operator must run
-  `patch refresh && source build base-installer && chroot build
-  installer && iso build installer` and boot the rebuilt ISO.
+### `50mirror` + `91security` generators return error 1
 
-### `91security` apt-setup generator returns error code 1
-
-- **Symptom**: discarded silently by apt-setup; no security updates
-  configured in `/target/etc/apt/sources.list.d/`.
-- **Evidence in log**: line 1682 — `apt-setup: warning:
-  /usr/lib/apt-setup/generators/91security returned error code 1;
-  discarding output`.
-- **Severity**: Low for us — no network mirror model.  But it would
-  matter if we add a network mirror later.
-- **Fix**: COMP-02 phase E (cosmetic / latent cleanup).  Likely
-  related to the broken apt-cdrom-setup chain; may auto-resolve once
-  phase C lands.
+- **Symptom**: `apt-setup: warning: /usr/lib/apt-setup/generators/50mirror
+  returned error code 1; discarding output` (log line 1697) and same
+  for `91security` (log line 1698).  Phase C ruled out the
+  Release-signing chain as the cause (those resolved cleanly).
+- **Root cause**: We don't ship a network mirror (cdrom-only
+  architecture per `project_self_contained_repo`).  `50mirror` fails
+  with `choose-mirror is not available; cannot offer network mirror`
+  (line 1696) because the `choose-mirror-bin` udeb isn't seeded.
+  `50mirror` would normally write `/tmp/apt-setup.components`; without
+  it, `91security` reads an absent file and exits non-zero too
+  (`cat: can't open '/tmp/apt-setup.components'`, line 1700).  Same
+  for `92updates` / `93backports` — all read the same file.
+- **Severity**: Low.  An installed cdrom-only target wouldn't get
+  security updates over the network anyway; the missing entries are
+  semantically correct.
+- **Fix**: COMP-02 phase E — either (a) silence the generators by
+  shipping stub `/tmp/apt-setup.components` with `main` so they no-op
+  cleanly, or (b) accept the warnings as documented architecture noise.
+  Lean (b) — they're informational and the install completes fine.
 
 ---
 
@@ -219,10 +180,10 @@ as "tech debt" without re-reading the decision.
 
 ### `cat: can't open '/tmp/apt-setup.components'`
 
-- **Evidence in log**: line 1684.
-- **Cause**: Downstream of `40cdrom` failure — apt-setup couldn't write
-  its components list because `40cdrom`'s verification failed.
-- **Fix**: Auto-resolves when COMP-02 phase C fixes apt-cdrom-setup.
+- **Evidence in log**: line 1700.
+- **Cause**: Downstream of `50mirror` failing (no network mirror — see
+  the dedicated entry under Critical above).  Same root cause; same
+  fix path.
 
 ### `dpkg-query: no packages found matching xserver-xorg-core` / `task-desktop`
 
@@ -231,9 +192,46 @@ as "tech debt" without re-reading the decision.
   server config; we don't ship X.
 - **Fix**: None needed — expected for a server install.
 
+### `Unable to locate package intel-microcode` / `open-vm-tools`
+
+- **Evidence in log**: lines 1922-1940.  `finish-install`'s `hw-detect`
+  probes for hypervisor-specific tools (open-vm-tools for VMware) and
+  CPU-microcode packages and apt-installs them on the target.
+- **Cause**: Neither package is in our pool — not in pkg.list or any
+  transitive Recommends/Depends we resolve.  apt correctly reports
+  "not available" because the package legitimately isn't on the disc.
+- **Fix**: COMP-02 phase E — decide per-package whether to ship.
+  Lean: ship `intel-microcode` (security-relevant, ~1MB) but skip
+  `open-vm-tools` (VMware-specific guest tooling; user can install
+  manually if needed).  Add to pkg.list under a comment that
+  documents the hw-detect callsite.
+
 ---
 
 ## Fixed
+
+### ~~apt-cdrom-setup chain broken end-to-end~~ — 2026-05-13
+
+- **Was**: apt rejected our unsigned Release with "does not have a
+  Release file" → `apt-setup` discarded `40cdrom` output → final
+  `/target/etc/apt/sources.list` had no cdrom entry → post-install
+  `apt-get install <pkg>` failed with "Unable to locate package".
+- **Fix shipped** (commits `42e03ea` + `32be5bd`):
+  1. `_sign_release_files` in `scripts/iso_installer.py` — gpg
+     --detach-sign → `Release.gpg`, --clearsign → `InRelease`.
+  2. `_export_pubkey_to_staging` — pubkey at `.disk/archive-key.gpg`.
+  3. `patch/source/base-installer/1.213/9001-install-athena-archive-keyring.patch`
+     — quilt patch on `library.sh:configure_apt` that copies the
+     keyring into `/target/etc/apt/trusted.gpg.d/` before
+     `apt-cdrom add`.
+  4. `_refresh_patches` mtime-invalidates stale `.result` files so
+     autorun's source-build step rebuilds packages with new patches.
+- **Verified 2026-05-13 in reference run**:
+  - line 1501: `base-installer: gpgv: Good signature from "Athena Build"`
+  - line 1519: `Hit:1 cdrom://... thor InRelease` (was `Err:2`)
+  - line 1672: same Good signature reported by `apt-setup-udeb`
+  - no `40cdrom output did not verify` anywhere
+  - install ran through `finish-install.d/95umount` (last hook).
 
 ### ~~`eject` binary missing on target~~ — 2026-05-13
 
