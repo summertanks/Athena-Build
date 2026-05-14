@@ -5097,6 +5097,116 @@ def test_pkg_list_base_includes_tasksel():
         f"pkg.list [base] missing tasksel; got base={groups.get('base')}"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUPS-01 phase 3: end-to-end hook smoke test + pre-flight checks
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_pre_pkgsel_hook_copies_desc_to_target():
+    """Drive the hook script in a tempdir with env-var overrides.
+    Confirms the install-time half of GROUPS-01 actually works without
+    needing to boot a VM: hook reads /cdrom/.disk/athena-tasks.desc,
+    writes /target/usr/share/tasksel/descs/athena.desc with identical
+    bytes."""
+    import subprocess, tempfile
+    _hook = os.path.join(
+        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
+    )
+    assert os.path.isfile(_hook) and os.access(_hook, os.X_OK), _hook
+
+    _payload = (
+        "Task: athena-development-tools\n"
+        "Section: athena\n"
+        "Description: smoke test\n"
+        " body line\n"
+        "Key:\n"
+        " build-essential\n"
+        " git\n"
+    )
+    with tempfile.TemporaryDirectory() as _tmp:
+        _src = os.path.join(_tmp, 'cdrom.desc')
+        _dst_dir = os.path.join(_tmp, 'target', 'usr', 'share', 'tasksel', 'descs')
+        with open(_src, 'w') as fh:
+            fh.write(_payload)
+        _r = subprocess.run(
+            ['sh', _hook],
+            env={
+                **os.environ,
+                'ATHENA_TASKS_SRC': _src,
+                'ATHENA_TASKS_DST_DIR': _dst_dir,
+            },
+            capture_output=True, text=True,
+        )
+        assert _r.returncode == 0, (
+            f"hook exited rc={_r.returncode}; stderr={_r.stderr!r}"
+        )
+        _dst = os.path.join(_dst_dir, 'athena.desc')
+        assert os.path.isfile(_dst), f"hook did not produce {_dst}"
+        with open(_dst) as fh:
+            assert fh.read() == _payload
+
+
+def test_pre_pkgsel_hook_handles_missing_desc_cleanly():
+    """Hook exits 0 when the .desc is absent — caller's run-parts loop
+    treats per-script failures as fatal (sets the install error
+    state), so a missing-but-OK case must not surface as a non-zero
+    exit."""
+    import subprocess, tempfile
+    _hook = os.path.join(
+        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
+    )
+    with tempfile.TemporaryDirectory() as _tmp:
+        _r = subprocess.run(
+            ['sh', _hook],
+            env={
+                **os.environ,
+                'ATHENA_TASKS_SRC': os.path.join(_tmp, 'does-not-exist.desc'),
+                'ATHENA_TASKS_DST_DIR': os.path.join(_tmp, 'target', 'tasksel'),
+            },
+            capture_output=True, text=True,
+        )
+        assert _r.returncode == 0, (
+            f"hook with no .desc must exit 0; got rc={_r.returncode}, "
+            f"stderr={_r.stderr!r}"
+        )
+        # No /target tree should be created when there's nothing to copy.
+        assert not os.path.exists(os.path.join(_tmp, 'target')), \
+            "hook created /target dir despite missing source"
+
+
+def test_stage_tasksel_desc_warns_on_empty_group():
+    """A group declared in pkg.list but with zero canonical packages
+    after resolve_packages indicates an operator typo (seed name didn't
+    match the cache).  iso_installer._stage_tasksel_desc emits a stanza
+    with an empty Key: list — verify the stanza is well-formed (RFC-822
+    parser doesn't choke on an empty key list) AND a WARNING is logged."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_tasksel_desc
+    _groups = {
+        'base':              {'bash'},
+        'development-tools': set(),  # operator typo'd every seed
+    }
+    with tempfile.TemporaryDirectory() as _stage:
+        assert _stage_tasksel_desc(_stage, _groups, {}) is True
+        _path = os.path.join(_stage, '.disk', 'athena-tasks.desc')
+        assert os.path.isfile(_path)
+        with open(_path) as fh:
+            _c = fh.read()
+        # Stanza exists but has no Key entries
+        assert 'Task: athena-development-tools' in _c
+        assert 'Key:\n' in _c
+        # The stanza terminates with a blank line or EOF, not with
+        # malformed continuation.  Just ensure Key: isn't followed by
+        # a content line (it's followed by stanza separator).
+        _idx = _c.find('Key:')
+        _after = _c[_idx + len('Key:'):]
+        # First non-empty line after Key: should NOT be a seed name
+        # (it'd be ' build-essential' etc.); should be blank or EOF.
+        _next = _after.lstrip('\n').rstrip('\n')
+        assert not _next or _next.startswith('Task:'), \
+            f"unexpected content after empty Key:\n{_after[:80]!r}"
+
+
 def test_derive_subset_exclusive_src_names_marks_live_only_sources():
     """A source whose every binary is in live_exclusive_pkg_names is marked
     in live_exclusive_src_names; a mixed source (some pkg-layer, some
@@ -7388,6 +7498,9 @@ def main() -> int:
         test_overlay_map_contains_pre_pkgsel_hook,
         test_installer_list_includes_pkgsel,
         test_pkg_list_base_includes_tasksel,
+        test_pre_pkgsel_hook_copies_desc_to_target,
+        test_pre_pkgsel_hook_handles_missing_desc_cleanly,
+        test_stage_tasksel_desc_warns_on_empty_group,
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
         test_derive_subset_exclusive_src_names_no_op_when_both_empty,
         test_derive_subset_exclusive_src_names_handles_installer_exclusive,

@@ -149,3 +149,17 @@ sudo
 # pre-pkgsel.d-athena-tasks hook (in the initrd) copies from
 # /cdrom/.disk/athena-tasks.desc.  See GROUPS-01 phase 2.
 tasksel
+
+
+[development-tools]
+## Description: Compiler toolchain, version control, and a handful of editors / diagnostics.
+# Pulled in by tasksel at install time on operator selection.  Closure
+# is dominated by build-essential (~100 MB on top of [base]).  Useful
+# as a tractable end-to-end test of the GROUPS-01 install path before
+# graduating to heavier groups like a desktop environment.
+build-essential
+git
+vim
+less
+htop
+strace
