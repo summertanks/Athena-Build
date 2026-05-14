@@ -17,13 +17,23 @@ Both methods access `self._dependencytree`, `self._dir_repo`, and
 import logging
 import os
 import subprocess
+from typing import TYPE_CHECKING, Callable
 
 import tui
+
+if TYPE_CHECKING:
+    import dependencytree
 
 logger = logging.getLogger('athena')
 
 
 class _DepDriftMixin:
+    # Instance attributes set by `BuildSystem.__init__` (the composer
+    # that mixes this in).  Type-only stubs for mypy; no runtime
+    # assignment here.
+    _dependencytree: 'dependencytree.DependencyTree'
+    _dir_repo: str
+    strip_build_version: Callable[[str], str]
 
     def _check_dep_drift(self):
         """Patch Package dep fields from the on-disk .debs and verify resolution.

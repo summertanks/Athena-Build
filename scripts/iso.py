@@ -12,8 +12,12 @@ import os
 import secrets
 import shutil
 import subprocess
+from typing import TYPE_CHECKING
 
 import tui
+
+if TYPE_CHECKING:
+    from utils import BuildConfig
 
 logger = logging.getLogger('athena')
 
@@ -42,6 +46,14 @@ _LIVE_USERNAMES = [
 
 
 class _IsoMixin:
+    # Instance attributes set by `BuildSystem.__init__` (the composer
+    # that mixes this in).  Type-only stubs for mypy; no runtime
+    # assignment here.
+    _dir_chroot: str
+    _dir_image: str
+    _dir_log: str
+    _password: str
+    _config: 'BuildConfig'
 
     def build_iso(self) -> bool:
         """Create a bootable hybrid BIOS/EFI ISO from the assembled chroot.
