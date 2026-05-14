@@ -100,7 +100,7 @@ class Mirror:
 
     @property
     def udeb_packages_path(self) -> str:
-        # COMP-01b phase 2: d-i (udeb) Packages index.  Only main typically
+        # d-i (udeb) Packages index.  Only main typically
         # publishes this; updates/security mirrors won't have it.  Cache
         # treats this path as OPTIONAL — missing-from-Release is fine.
         return f'{self.component}/debian-installer/binary-{self.arch}/Packages'
@@ -556,7 +556,7 @@ class BuildConfig:
 
             self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback='bookworm')
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
-            # EXTRAS-01: when true, depth-1 Recommends of selected packages are
+            # When true, depth-1 Recommends of selected packages are
             # pulled into selected_pkgs / selected_srcs (downloaded but not
             # built by default; not installed in chroot).  See build.conf for
             # the full operator-facing rationale.
@@ -578,10 +578,10 @@ class BuildConfig:
             # BuildOptions  → DEB_BUILD_OPTIONS  (how the build itself
             # behaves: nodoc, nocheck, parallel=N, …).
             # The two share names like nodoc / nocheck but are distinct
-            # namespaces with distinct semantics.  Pre-CONF-04 a single
-            # `BuildProfiles` was set into BOTH env vars, which made
-            # values like `parallel=4` (only valid as an option) attempt
-            # to be a profile and triggered apt warnings.
+            # namespaces with distinct semantics.  An earlier
+            # implementation set a single `BuildProfiles` into BOTH env
+            # vars, which made values like `parallel=4` (only valid as
+            # an option) attempt to be a profile and triggered apt warnings.
             #
             # Backward compat: when BuildOptions is missing, mirror
             # BuildProfiles so existing build.conf files keep working.
@@ -632,8 +632,8 @@ class BuildConfig:
             self.dir_repo = os.path.join(self.working_dir, config_parser.get('Directories', 'Repo'))
             self.dir_config = os.path.join(self.working_dir, config_parser.get('Directories', 'Config'))
             self.dir_image = os.path.join(self.working_dir, config_parser.get('Directories', 'Image'))
-            # COMP-01b phase 5 (revised 2026-05-11): the [Directories] Chroot
-            # value is the PARENT directory holding both chroots.  Live lands
+            # The [Directories] Chroot value is the PARENT directory holding
+            # both chroots.  Live lands
             # at <parent>/live and installer at <parent>/installer — siblings
             # under one root.  Operator overrides the parent via build.conf;
             # both child paths follow.  This keeps the live chroot OUTSIDE

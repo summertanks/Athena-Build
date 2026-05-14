@@ -292,7 +292,7 @@ class Tui:
             print(f'TUI: failed to start shell thread — {e}\r')
             sys.exit(1)
 
-        # ARCH-07: bind the 'athena' stdlib logger to this Tui so any module
+        # Bind the 'athena' stdlib logger to this Tui so any module
         # using `logging.getLogger('athena')` ends up routed to the same
         # console/log tabs as `tui.console.X`.
         setup_logging(self)
@@ -1430,7 +1430,7 @@ console = Console()
 
 
 # ---------------------------------------------------------------------------
-# Logging adapter (ARCH-07)
+# Logging adapter
 # ---------------------------------------------------------------------------
 #
 # The codebase has historically split output four ways:

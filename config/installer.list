@@ -32,7 +32,7 @@ busybox-udeb
 # ─── Partitioning chain ────────────────────────────────────────────
 # partman-base is the partitioning framework + UI; the other partman-*
 # udebs plug in filesystem support + recipe steps.  Per the locked
-# COMP-01b decision (whole-disk ESP + ext4 + no swap, UEFI+BIOS), we
+# decision (whole-disk ESP + ext4 + no swap, UEFI+BIOS), we
 # need: base + auto (guided recipe) + target (mounter) + ext3 (ext4
 # is handled by the same udeb) + efi (ESP) + basicfilesystems (FAT
 # for the ESP).
@@ -67,7 +67,7 @@ eject-udeb
 # cdrom-detect locates the install media; mountmedia actually mounts
 # it at /cdrom; cdrom-retriever pulls files out of /cdrom for
 # base-installer's pool reads.  All three needed for our file:///cdrom
-# install path (the locked COMP-01b decision).
+# install path (the locked decision).
 #
 # DO NOT add iso-scan here.  iso-scan and cdrom-detect both have
 # Installer-Menu-Item: 1300 AND iso-scan declares Provides: cdrom-detect.
@@ -234,6 +234,6 @@ acpi-modules
 # These are deb names that grub-installer apt-pulls onto the TARGET at
 # install time.  Listed here defensively so they stay in the pool even
 # if live.list ever drops them.  Already in live.list under the locked
-# COMP-01b decision.
+# decision.
 efibootmgr
 grub-pc-bin

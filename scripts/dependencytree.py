@@ -59,7 +59,7 @@ class DependencyTree:
 
         self.__recommended = select_recommended
         self.__cache = cache
-        # COMP-01b phase 3: when True, multi-Package-name candidates that
+        # When True, multi-Package-name candidates that
         # _auto_pick_candidate refuses to auto-pick (different names) get
         # an additional fallback — pick the candidate with the highest
         # version across names.  Used by the udeb tree where kernel-ABI
@@ -74,7 +74,7 @@ class DependencyTree:
 
         self.selected_pkgs: Dict[str, package.Package] = {}
         self.selected_srcs: Dict[str, package.Source]  = {}
-        # EXTRAS-01: subset of selected_pkgs whose entries were pulled in via
+        # Subset of selected_pkgs whose entries were pulled in via
         # depth-1 Recommends-of-selected (rather than the required/important/
         # manual closure).  Empty when [Build] IncludeRecommendsInRepo is off.
         # build_chroot filters these out of the install batches; source_build
@@ -90,17 +90,16 @@ class DependencyTree:
         # selected_srcs.
         self.extras_src_names: set = set()
 
-        # COMP-01c phase 1: live.list / installer.list split.  After Pass III
-        # (pkg.list) resolves, snapshot pkg_closure; Pass IV/V resolve_packages
+        # live.list / installer.list split.  After Pass III (pkg.list)
+        # resolves, snapshot pkg_closure; Pass IV/V resolve_packages
         # against live.list / installer.list and the deltas land here.
         # "Exclusive" = needed by live (or installer) but NOT in pkg.list's
         # closure — anything pkg.list already pulls in is the source of truth
         # for "must install".  Mirror of extras_pkg_names / extras_src_names
         # but indexed on a different axis.
-        # KNOWN LIMITATION: in this phase live runs before installer; if a
-        # package were needed by BOTH live and installer (and not pkg), it
-        # would only show up in live_exclusive.  installer.list is empty
-        # today so the issue is latent — revisit when COMP-01a populates it.
+        # KNOWN LIMITATION: live runs before installer; if a package were
+        # needed by BOTH live and installer (and not pkg), it would only
+        # show up in live_exclusive.
         self.live_exclusive_pkg_names: set = set()
         self.installer_exclusive_pkg_names: set = set()
         self.live_exclusive_src_names: set = set()
@@ -154,9 +153,9 @@ class DependencyTree:
             # names like mawk vs gawk for `awk`).
             _auto, _collapsed = _auto_pick_candidate(_candidates)
             if _auto is None and self._auto_pick_highest_when_ambiguous and _collapsed:
-                # COMP-01b phase 3 udeb-tree fallback: multiple providers
-                # with different Package names — pick the highest version
-                # across names (typical for kernel-ABI udeb variants).
+                # Udeb-tree fallback: multiple providers with different
+                # Package names — pick the highest version across names
+                # (typical for kernel-ABI udeb variants).
                 _auto = max(_collapsed, key=lambda p: p.version)
                 logger.info(
                     f"add_lookahead: highest-version fallback picked "
@@ -360,9 +359,9 @@ class DependencyTree:
         elif len(_pkg_candidates) > 1:
             _auto, _collapsed = _auto_pick_candidate(_pkg_candidates)
             if _auto is None and self._auto_pick_highest_when_ambiguous and _collapsed:
-                # COMP-01b phase 3 udeb-tree fallback: highest-version
-                # across multi-name providers (typical for kernel-ABI
-                # udeb variants — see __init__ docstring).
+                # Udeb-tree fallback: highest-version across multi-name
+                # providers (typical for kernel-ABI udeb variants — see
+                # __init__ docstring).
                 _auto = max(_collapsed, key=lambda p: p.version)
                 logger.info(
                     f"highest-version fallback picked {_auto.package} "
@@ -649,8 +648,8 @@ class DependencyTree:
         return not _breaks
 
     def pull_recommends_extras(self) -> int:
-        """EXTRAS-01: walk the current selected_pkgs and pull depth-1
-        Recommends into selected_pkgs as 'extras'.
+        """Walk the current selected_pkgs and pull depth-1 Recommends
+        into selected_pkgs as 'extras'.
 
         Extras land in selected_pkgs (so source_download fetches their
         upstream tarballs via the existing parse_sources path) and their
@@ -743,8 +742,8 @@ class DependencyTree:
         return _added
 
     def derive_extras_src_names(self) -> int:
-        """EXTRAS-01: after parse_sources has populated selected_srcs,
-        identify which sources are extras-only (every produced binary is
+        """After parse_sources has populated selected_srcs, identify
+        which sources are extras-only (every produced binary is
         in extras_pkg_names) so source_build can route them to the
         `recommended` mode and away from the default build run.
 
@@ -792,8 +791,8 @@ class DependencyTree:
         return len(self.extras_src_names)
 
     def derive_subset_exclusive_src_names(self) -> tuple:
-        """COMP-01c phase 1: after parse_sources has populated selected_srcs,
-        identify which sources are exclusive to live or installer (every
+        """After parse_sources has populated selected_srcs, identify
+        which sources are exclusive to live or installer (every
         produced binary lives in the corresponding *_exclusive_pkg_names).
 
         Mirrors derive_extras_src_names: a source whose binaries are mixed
@@ -907,7 +906,7 @@ class DependencyTree:
             if _bin_filename:
                 # Strip binNMU suffix (+bN) so the recorded filename matches what
                 # dpkg-buildpackage produces from source.  utils.strip_build_version
-                # is the single source of truth (see STA-15); shared with
+                # is the single source of truth, shared with
                 # BuildSystem._get_deb_files and tests/smoke_dep_drift.py.  Tolerate
                 # malformed APT entries that don't fit the name_ver_arch.ext shape
                 # by falling back to the original filename — historical behaviour.

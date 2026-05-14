@@ -53,9 +53,9 @@ class BuildContainer:
             #
             # Loopback (127.0.0.1, ::1, localhost) and unix:// sockets are
             # under operator control on the build machine.  Anything else —
-            # tcp:// to a remote host without TLS — is the failure mode the
-            # SEC-02 audit flagged: a network-reachable daemon is a
-            # privilege-escalation primitive.  Require either loopback /
+            # tcp:// to a remote host without TLS — is the failure mode:
+            # a network-reachable daemon is a privilege-escalation
+            # primitive.  Require either loopback /
             # unix sockets, or an explicit tls=true marker in the URL
             # confirming the operator has set up cert auth.
             self._guard_docker_server(docker_server)
@@ -131,7 +131,7 @@ class BuildContainer:
     @staticmethod
     def _guard_docker_server(docker_server: str) -> None:
         """Refuse to talk to a daemon that's reachable from the network
-        without TLS.  See SEC-02 in TODO.md and docs/security.md.
+        without TLS.  See docs/security.md.
 
         Acceptable targets:
           - unix:///path/to/socket  — same host, filesystem-protected
@@ -221,8 +221,8 @@ class BuildContainer:
             logger.error(f"DSC not found for {src_pkg.package}")
             return False
 
-        # DEB_BUILD_OPTIONS and DEB_BUILD_PROFILES are different namespaces
-        # (CONF-04): options control build-time behaviour (nodoc, nocheck,
+        # DEB_BUILD_OPTIONS and DEB_BUILD_PROFILES are different namespaces:
+        # options control build-time behaviour (nodoc, nocheck,
         # parallel=N), profiles activate Build-Depends annotations like
         # `<!nodoc>` and `<!stage1>`.  Source.build_depends has already had
         # `_active_profiles` applied above for build-dep filtering; the env

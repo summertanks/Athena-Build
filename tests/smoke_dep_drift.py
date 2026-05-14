@@ -186,7 +186,7 @@ def drift_report(cfg, dt):
         # Strip Debian binNMU suffix '+bN' so we look up '...-2_amd64.deb'
         # instead of '...-2+b2_amd64.deb'.  utils.strip_build_version is the
         # single source of truth shared with parse_sources and
-        # BuildSystem._get_deb_files (see STA-15).  Tolerate malformed entries.
+        # BuildSystem._get_deb_files.  Tolerate malformed entries.
         try:
             filename = utils.strip_build_version(filename)
         except ValueError:

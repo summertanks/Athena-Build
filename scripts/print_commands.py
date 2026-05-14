@@ -282,7 +282,7 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print(f"  Dep tree: canonical pkgs : {canonical}")
         tui.console.print(f"  Dep tree: virtual aliases: {virtuals}")
         tui.console.print(f"  Dep tree: source pkgs    : {len(dt.selected_srcs)}")
-        # EXTRAS-01: always surface the extras counts so the operator can
+        # Always surface the extras counts so the operator can
         # tell "toggle off" from "toggle on, 0 pulled" from "toggle on,
         # N pulled".  Suppressing the row when 0 made the failure mode
         # invisible and confused the operator on the first real run.
@@ -349,7 +349,7 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
             f"  Dep tree       : {_canonical} canonical packages, "
             f"{_srcs} source packages"
         )
-        # EXTRAS-01: extras row only when the toggle has actually pulled
+        # Extras row only when the toggle has actually pulled
         # something — keeps the summary tight when off.
         _extras_n = len(getattr(session.dep_tree, 'extras_pkg_names', set()))
         if _extras_n:
@@ -447,7 +447,7 @@ def _print_important(session, *_extras) -> None:
 
 def _print_selected(session, *_extras) -> None:
     """All packages resolved by parse_dependency (canonical names only).
-    Marks EXTRAS-01 entries with `(extra)`, COMP-01c live-exclusive with
+    Marks Recommends-only extras with `(extra)`, live-exclusive with
     `(live)`, and installer-exclusive with `(installer)` so the operator
     can tell at a glance which subset each entry belongs to."""
     if not _require_dep_check(session):
@@ -471,10 +471,9 @@ def _print_selected(session, *_extras) -> None:
 
 
 def _print_extras(session, *_extras) -> None:
-    """EXTRAS-01: depth-1 Recommends pulled in by parse_dependency.
-    These are downloaded by source_download, NOT built by default
-    source_build (use `source_build recommended`), and NOT installed
-    in the chroot."""
+    """Depth-1 Recommends pulled in by parse_dependency.  These are
+    downloaded by source_download, NOT built by default `source_build`
+    (use `source build recommended`), and NOT installed in the chroot."""
     if not _require_dep_check(session):
         return
     extras_pkg_names = getattr(session.dep_tree, 'extras_pkg_names', set())
@@ -507,9 +506,9 @@ def _print_extras(session, *_extras) -> None:
 
 
 def _print_live_exclusive(session, *_extras) -> None:
-    """COMP-01c phase 1: packages pulled in by live.list that are NOT
-    already in pkg.list's closure.  These ride on top of pkg's install set
-    to make a complete live system."""
+    """Packages pulled in by live.list that are NOT already in
+    pkg.list's closure.  These ride on top of pkg's install set to make
+    a complete live system."""
     if not _require_dep_check(session):
         return
     live_pkgs = getattr(session.dep_tree, 'live_exclusive_pkg_names', set())
@@ -538,9 +537,9 @@ def _print_live_exclusive(session, *_extras) -> None:
 
 
 def _print_udebs(session, *_extras) -> None:
-    """COMP-01b phase 3: udeb closure (the installer ramdisk content).
-    Drawn from the parallel udeb_dep_tree resolved against the d-i Packages
-    index.  Empty until parse_dependency runs."""
+    """Udeb closure (the installer ramdisk content).  Drawn from the
+    parallel udeb_dep_tree resolved against the d-i Packages index.
+    Empty until parse_dependency runs."""
     if not _require_dep_check(session):
         return
     udeb_tree = getattr(session, 'udeb_dep_tree', None)
@@ -571,17 +570,16 @@ def _print_udebs(session, *_extras) -> None:
 
 
 def _print_installer_exclusive(session, *_extras) -> None:
-    """COMP-01c phase 1: packages pulled in by installer.list that are NOT
-    already in pkg.list's closure.  Currently empty by design — d-i source
-    set lands as part of COMP-01a."""
+    """Packages pulled in by installer.list that are NOT already in
+    pkg.list's closure.  Ride on top of pkg's install set for the
+    installer ISO target."""
     if not _require_dep_check(session):
         return
     inst_pkgs = getattr(session.dep_tree, 'installer_exclusive_pkg_names', set())
     inst_srcs = getattr(session.dep_tree, 'installer_exclusive_src_names', set())
     if not inst_pkgs:
         tui.console.print(
-            "No installer-exclusive packages "
-            "(installer.list empty — see COMP-01a)"
+            "No installer-exclusive packages (installer.list empty)"
         )
         return
     _src_for_pkg = {}
@@ -859,10 +857,10 @@ CATEGORIES = {
     'important': (_print_important, 'Packages',      "packages with 'important' priority from APT cache"),
     'selected':  (_print_selected,  'Packages',      'packages resolved by parse_dependency'),
     'tunneled':  (_print_tunneled,  'Packages',      'packages set to use prebuilt .debs (Tunneled list)'),
-    'extras':    (_print_extras,    'Packages',      'EXTRAS-01: depth-1 Recommends pulled into the repo (not chroot-installed)'),
-    'live':      (_print_live_exclusive,      'Packages', 'COMP-01c: packages live needs over and above pkg.list'),
-    'installer': (_print_installer_exclusive, 'Packages', 'COMP-01c: deb-arm of installer.list (efibootmgr/grub-pc-bin etc.)'),
-    'udebs':     (_print_udebs,                'Packages', 'COMP-01b phase 3: udeb closure for installer ramdisk'),
+    'extras':    (_print_extras,    'Packages',      'depth-1 Recommends pulled into the repo (not chroot-installed)'),
+    'live':      (_print_live_exclusive,      'Packages', 'packages live needs over and above pkg.list'),
+    'installer': (_print_installer_exclusive, 'Packages', 'deb-arm of installer.list (efibootmgr/grub-pc-bin etc.)'),
+    'udebs':     (_print_udebs,                'Packages', 'udeb closure for installer ramdisk'),
     'pkg':       (_print_pkg,       'Packages',      'full package detail — usage: print pkg <name>'),
     'deps':      (_print_deps,      'Packages',      'flat dep list of a package — usage: print deps <name>'),
 
