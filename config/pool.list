@@ -1,0 +1,83 @@
+# Pool extras — packages that ship in the apt pool on the installer
+# ISO but are NEVER installed in any chroot (live, installer ramdisk,
+# or target debootstrap).  Available to apt at install time and
+# post-install via the cdrom: source.
+#
+# Contract:
+#   1. Each entry is resolved by `dependencytree.resolve_packages` in
+#      Pass VII (see scripts/build.py) the same way pkg.list /
+#      live.list / installer.list deb-arm entries are.  All transitive
+#      Depends are pulled in and end up in `selected_pkgs` → built by
+#      the source-build pipeline → land in `repo/` → ship in
+#      `staging/pool/`.
+#   2. Pass VII calls resolve_packages with `check_conflicts=False`
+#      and `validate_selection` skips Breaks/Conflicts where either
+#      side is in `pool_extras_pkg_names`.  This lets mutually-
+#      conflicting packages (e.g. `grub-pc` + `grub-efi-amd64`)
+#      coexist in the pool — apt on the target enforces conflicts at
+#      install time, picking exactly one.
+#   3. `cmd_build_iso_installer` subtracts pool extras from
+#      `base_include` so debootstrap does NOT install them on the
+#      target.  They stay in `_pool_whitelist` so the .debs ship in
+#      the cdrom pool.
+#
+# What this is for:
+#   - Mutually-exclusive packages where install-time selection
+#     happens on the target (not at build time).  Canonical example:
+#     bootloader metas where grub-installer picks `grub-pc` (BIOS) or
+#     `grub-efi-amd64` (EFI) based on firmware mode.
+#   - Optional packages we want available on a fresh install without
+#     network access — operator can `apt-get install <name>` from the
+#     cdrom source post-install.
+#
+# History (2026-05-13 / -14):
+#   - Phase D (commit 875200e) swapped `grub-pc` (META) for
+#     `grub-pc-bin` + `grub-efi-amd64-bin` in `pkg.list` so an EFI
+#     install would have both `-bin` packages available.  Side
+#     effect: the META .debs (built by the grub2 source build, so
+#     present in `repo/`) stopped getting copied into
+#     `staging/pool/` because `_pool_whitelist = selected_pkgs -
+#     live_excl` no longer included them.  Both BIOS
+#     (`apt-install grub-pc`) and EFI (`apt-install grub-efi-amd64`)
+#     `grub-installer` runs failed with "no installation candidate".
+#   - First fix attempt (the file existed in an earlier shape) was a
+#     manifest of names whose `.deb`s already happened to be in
+#     `repo/` — bypassed the resolver entirely.  Worked for the grub
+#     case but had no path to add packages whose source we hadn't
+#     built yet (e.g. open-vm-tools).  Redesigned 2026-05-14 to go
+#     through the resolver with conflicts disabled — same dep
+#     resolution as everything else in the build, plus the conflict
+#     bypass for genuinely-pool-only entries.
+
+# ─── Bootloader metas ──────────────────────────────────────────────
+# grub-installer apt-installs whichever fits the target's firmware
+# mode at install time.  The Conflict between them is enforced by
+# apt on the target — both .debs sit indexed in /cdrom/pool side by
+# side here.
+grub-pc
+grub-efi-amd64
+
+# ─── VMware guest tooling ──────────────────────────────────────────
+# `finish-install`'s `hw-detect` runs `apt-install open-vm-tools` on
+# VMware hypervisors.  Available in the pool here so that probe
+# succeeds on VMware targets (no-op on bare-metal / non-VMware
+# hypervisors).  Source builds normally — small dependency closure
+# (libdrm2, libmspack0, libtirpc3, libxmlsec1, ethtool, zerofree on
+# top of what we already ship).
+open-vm-tools
+
+# ─── Console keymap configuration ──────────────────────────────────
+# `base-installer`'s `apt-install` queues both `console-setup` and
+# `keyboard-configuration` for /target so the installed system has a
+# working console keymap matching the locale picked at install time.
+# `keyboard-configuration` Depends `xkb-data (>= 2.35.1~) (<< 2.35.1A)`
+# — `xkb-data` lives in source package `xkeyboard-config`, which
+# Pass VII will pull into the source-build pipeline.  Without these
+# in the pool, base-installer logs `Failed to install
+# keyboard-configuration into /target/: 100` and `Failed to install
+# console-setup into /target/: 100` (verified 2026-05-14 install
+# run, both BIOS and EFI).  Not pre-installed in pkg.list because
+# the live image doesn't need them — they're target-side only.
+console-setup
+keyboard-configuration
+xkb-data

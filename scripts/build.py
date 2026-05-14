@@ -280,6 +280,15 @@ class BuildSession:
                       Cache.udeb_important resolved against udeb_hashtable
                       via a parallel udeb_dep_tree.  Produces the udeb closure
                       that becomes the installer ramdisk content.
+          Pass VII — pool.list — packages that ship in the apt pool on
+                      the installer ISO but are NEVER installed in any
+                      chroot.  Resolved with `check_conflicts=False`
+                      so mutually-conflicting metas (e.g. `grub-pc` +
+                      `grub-efi-amd64`, picked at install time by
+                      grub-installer based on firmware mode) coexist
+                      in selected_pkgs.  validate_selection skips
+                      Breaks/Conflicts involving any pool extra; apt
+                      enforces them at install time on the target.
 
         installer.list is mixed-universe — each entry is dispatched per its
         membership in the deb / udeb hashtables (deb match → Pass V; udeb
@@ -492,6 +501,43 @@ class BuildSession:
             tui.COLOR_HIGHLIGHT,
         )
         _udeb_spiner.done()
+
+        # --- Pass VII: pool.list (deb-only, conflicts not enforced) ----------
+        # Pool extras: shipped in the apt pool on the installer ISO but
+        # never installed in any chroot.  Goes through the resolver
+        # normally (Depends pulled in transitively) BUT with
+        # `check_conflicts=False` so mutually-conflicting bootloader
+        # metas (grub-pc + grub-efi-amd64) coexist in selected_pkgs.
+        # `validate_selection` skips Breaks/Conflicts where either side
+        # is in `pool_extras_pkg_names` — see dependencytree.py for the
+        # membership-based bypass and pool.list for the contract.
+        console.print("Pass VII: Resolving pool.list (deb arm, conflicts disabled)", tui.COLOR_INFO)
+        _pool_raw = self._read_pkg_list(
+            self.config.poollist_path, already_selected=set())
+        _pool_deb_names = []
+        _pool_unknown   = []
+        for _name in _pool_raw:
+            if _name in _deb_table:
+                _pool_deb_names.append(_name)
+            else:
+                _pool_unknown.append(_name)
+        if _pool_unknown:
+            console.print(
+                f"WARNING: pool.list has {len(_pool_unknown)} name(s) not in deb cache: "
+                f"{', '.join(_pool_unknown[:5])}{'…' if len(_pool_unknown) > 5 else ''}"
+            )
+            logger.warning(f"pool.list unknown names: {_pool_unknown}")
+        _pre_pool_closure = set(self.dep_tree.selected_pkgs.keys())
+        if _pool_deb_names:
+            self.dep_tree.resolve_packages(
+                _pool_deb_names, check_conflicts=False)
+        self.dep_tree.pool_extras_pkg_names = (
+            set(self.dep_tree.selected_pkgs.keys()) - _pre_pool_closure
+        )
+        console.print(
+            "Pool extras (shipped in pool, not installed) : "
+            f"{len(self.dep_tree.pool_extras_pkg_names)}"
+        )
 
         # When [Build] IncludeRecommendsInRepo is on (default)
         if self.config.include_recommends_in_repo:
@@ -1398,13 +1444,23 @@ class BuildSession:
             # doesn't add it to live_exclusive.
             _live_excl = self.dep_tree.live_exclusive_pkg_names
             _extras    = self.dep_tree.extras_pkg_names
+            # COMP-02 phase D follow-up: pool extras (from pool.list,
+            # resolved in Pass VII) ship in /cdrom/pool but are NOT
+            # installed in any chroot — drop them from base_include so
+            # debootstrap doesn't pull them onto the target.  They
+            # remain in _pool_whitelist so they're indexed in the
+            # cdrom apt pool, available for `apt-get install` on the
+            # target post-install (or by grub-installer at install
+            # time, the case that motivated the file).
+            _pool_extras = self.dep_tree.pool_extras_pkg_names
             _canonical = {
                 _name for _name in self.dep_tree.selected_pkgs
                 if _name == self.dep_tree.selected_pkgs[_name]['Package']
             }
-            _base_include = sorted(_canonical - _extras - _live_excl)
-            # Pool keeps Recommends-only extras so the operator can
-            # apt-install them post-install via the cdrom: source.
+            _base_include = sorted(_canonical - _extras - _live_excl - _pool_extras)
+            # Pool keeps Recommends-only extras AND pool extras so the
+            # operator (or grub-installer) can apt-install them
+            # post-install via the cdrom: source.
             _pool_whitelist = _canonical - _live_excl
             _ok = iso_installer.build_installer_iso(
                 dir_chroot_installer=self.config.dir_chroot_installer,

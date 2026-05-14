@@ -47,7 +47,8 @@ end-to-end in the 15:57 reference install.)*
 *(`Installer ISO is BIOS-only` moved to Fixed 2026-05-13 — Phase D
 shipped bin-only `grub-pc-bin` + `grub-efi-amd64-bin` so
 `grub-installer` picks the right meta-package at install time.
-Verification pending next EFI-mode boot.)*
+Phase D follow-up 2026-05-14: shipped `config/pool.list` to inject
+the meta `.deb`s into the cdrom pool — see Fixed below.)*
 
 ---
 
@@ -127,11 +128,36 @@ as "tech debt" without re-reading the decision.
 - **Fix**: COMP-02 phase E — investigate per-udeb; likely a single
   fix across all four.
 
-*(`dpkg-divert ... use --no-rename` moved to Fixed 2026-05-13 — Phase E
-quilt patch on `debian-installer-utils 1.146` swaps both `divert()`
-and `undivert()` helpers in `chroot-setup.sh` from `--rename` to
-`--no-rename`.  Verification pending next install — should drop the
-~23 warnings from the install log.)*
+### `dpkg-divert: warning: ... use --no-rename` (~23 occurrences)
+
+- **Evidence in log**: spread across base-installer, apt-setup, and
+  finish-install steps — every chroot_setup() call emits one.
+- **Cause**: `chroot-setup.sh` (in `debian-installer-utils 1.146`)
+  calls `dpkg-divert --rename` against `/sbin/start-stop-daemon`
+  (Essential file from `dpkg`).  Modern dpkg warns on every such call.
+- **DO NOT "fix" this with `--no-rename`**.  The Phase E patch that
+  did this (commit `34905d9`) was reverted because it bricks
+  `grub-installer`.  Why: stock `chroot-setup.sh` writes the daemon
+  stub directly OVER the original path:
+  ```
+  if [ -e /target/sbin/start-stop-daemon ]; then
+      divert /sbin/start-stop-daemon          # --rename: real → .REAL
+  fi
+  cat > /target/sbin/start-stop-daemon <<EOF  # writes stub at ORIGINAL
+  ```
+  With `--rename`, the real binary is moved to `.REAL` first, then the
+  stub overwrites the (now-empty) original path safely; `undivert`
+  later moves `.REAL` back.  With `--no-rename`, divert only creates a
+  metadata record — the real binary is **not moved** — so the `cat >`
+  destroys it.  `undivert` then `rm`s the stub, leaving no
+  start-stop-daemon at all.  After the first chroot_setup→cleanup
+  cycle the binary is permanently gone, and `grub-installer` (which
+  runs `chroot /target dpkg ...` directly without going through
+  in-target → no fresh stub) fails with `dpkg: 'start-stop-daemon'
+  not found in PATH`.  Verified on the 2026-05-14 install run.
+- **Fix**: Either suppress the warning at the dpkg-divert call sites
+  (a different patch — e.g. `2>/dev/null` or `--quiet --no-warnings`
+  if dpkg supports it), or accept it as documented noise.
 
 ### `/target/etc/mtab won't be updated since it is a symlink` (~30+)
 
@@ -183,19 +209,22 @@ and `undivert()` helpers in `chroot-setup.sh` from `--rename` to
   server config; we don't ship X.
 - **Fix**: None needed — expected for a server install.
 
-### `Unable to locate package intel-microcode` / `open-vm-tools`
+### `Unable to locate package intel-microcode`
 
 - **Evidence in log**: lines 1922-1940.  `finish-install`'s `hw-detect`
-  probes for hypervisor-specific tools (open-vm-tools for VMware) and
-  CPU-microcode packages and apt-installs them on the target.
-- **Cause**: Neither package is in our pool — not in pkg.list or any
-  transitive Recommends/Depends we resolve.  apt correctly reports
-  "not available" because the package legitimately isn't on the disc.
-- **Fix**: COMP-02 phase E — decide per-package whether to ship.
-  Lean: ship `intel-microcode` (security-relevant, ~1MB) but skip
-  `open-vm-tools` (VMware-specific guest tooling; user can install
-  manually if needed).  Add to pkg.list under a comment that
-  documents the hw-detect callsite.
+  probes for hypervisor-specific tools and CPU-microcode packages and
+  apt-installs them on the target.
+- **Cause**: Not in our pool — `intel-microcode` lives in
+  `non-free-firmware`, which our cache snapshot doesn't index.
+- **Fix**: COMP-02 phase E — enable `non-free-firmware` in the cache
+  mirror config and add `intel-microcode` to `config/pool.list` (or
+  `config/pkg.list` if we want it pre-installed on every Intel
+  target).  Tracked under `docs/plans/comp-02-robust-build.md`
+  § Phase E Deferred.
+
+*(`open-vm-tools` moved to Fixed 2026-05-14 — added to `config/pool.list`
+so `hw-detect`'s `apt-install open-vm-tools` succeeds on VMware
+targets.  Verification pending next install on a VMware host.)*
 
 ---
 
@@ -216,22 +245,77 @@ and `undivert()` helpers in `chroot-setup.sh` from `--rename` to
 - **Verification**: pending — boot the rebuilt ISO in EFI-mode VM
   and confirm `grub-installer` picks `grub-efi-amd64`.
 
-### ~~`dpkg-divert ... use --no-rename` (~23 occurrences)~~ — 2026-05-13 *(verification pending)*
+### ~~grub-installer fails: `Package grub-pc / grub-efi-amd64 has no installation candidate`~~ — 2026-05-14 *(verification pending)*
 
-- **Was**: `chroot-setup.sh` (in `debian-installer-utils 1.146`,
-  shipped as the `di-utils` udeb) called `dpkg-divert --rename`
-  against `/sbin/start-stop-daemon` (Essential file from `dpkg`).
-  Modern dpkg warns on every such call.  ~23 warnings in the
-  reference install log spread across base-installer, apt-setup,
-  and finish-install steps.
-- **Fix shipped** (commit `34905d9`):
-  `patch/source/debian-installer-utils/1.146/9001-dpkg-divert-no-rename.patch`
-  swaps both `divert()` and `undivert()` helpers from `--rename` to
-  `--no-rename`.  Functional behaviour during install is identical
-  (the .REAL stub still receives daemon start attempts, which it
-  ignores); only the rename machinery differs.
-- **Verification**: pending — next install log should show zero
-  `use --no-rename` warnings.
+- **Was**: Phase D regression — swapping `grub-pc` (META) for
+  `grub-pc-bin` in `pkg.list` removed the META from `selected_pkgs`,
+  which is the input to `_pool_whitelist`.  `_select_pool_files`
+  then dropped `grub-pc_*.deb` and `grub-efi-amd64_*.deb` from
+  `staging/pool/` (even though both .debs are present in `repo/` as
+  side artefacts of the grub2 source build).  At install time
+  `grub-installer` calls `apt-install grub-pc` (BIOS) /
+  `apt-install grub-efi-amd64` (EFI) against `/cdrom/pool`, gets
+  "no installation candidate", and aborts.  The 2026-05-14 install
+  reproduced this on **both** modes (`log/athena_bios.log` line
+  1829, `log/athena_efi.log` line 1840).
+- **Why we couldn't simply `installer.list` them**: the metas
+  Conflict with each other.  Putting both in `installer.list` would
+  send them through `dependencytree.resolve_packages` →
+  `validate_selection`, which fires DEPENDENCY HELL on the
+  install-time conflict.  But install-time conflict is a property
+  of the *target system* — both .debs can sit indexed in a pool
+  side-by-side; only one ever gets installed.
+- **Fix shipped**: new `config/pool.list` — a third tier of package
+  selection alongside `pkg.list` (installed in live + installer +
+  target) and `installer.list` (installed in installer ramdisk and
+  /target).  Pool entries are resolved through the normal dep tree
+  in a new **Pass VII** (so all transitive Depends are pulled in
+  and source-built), but with `check_conflicts=False`.
+  `validate_selection` skips Breaks/Conflicts where either side is
+  in `pool_extras_pkg_names`.  `cmd_build_iso_installer` subtracts
+  pool extras from `_base_include` so debootstrap doesn't put them
+  on the target — they ship in `/cdrom/pool` only, available to apt
+  at install time and post-install.  Seeded with `grub-pc` +
+  `grub-efi-amd64` + `open-vm-tools` + `console-setup` +
+  `keyboard-configuration` + `xkb-data`.  See `config/pool.list` for
+  the contract and the failure-mode story inline; see
+  `scripts/dependencytree.py:validate_selection` for the
+  membership-based bypass.
+- **`shim-signed` still missing**: the EFI log also shows
+  `Additionally installing shim-signed to go with grub-efi-amd64` →
+  `Package 'shim-signed' has no installation candidate`.
+  shim-signed isn't in our cache or build pipeline (separate Microsoft-
+  signed source).  Without it, EFI installs work but Secure Boot
+  doesn't.  Deferred — see the `intel-microcode` / `open-vm-tools`
+  pattern under `docs/plans/comp-02-robust-build.md` § Phase E
+  Deferred for the same kind of "needs upstream source we don't
+  ship" follow-up.
+- **Verification**: pending — rebuild ISO and boot in both BIOS and
+  EFI VMs.  Both should now reach `finish-install`.
+
+### ~~`Failed to install keyboard-configuration / console-setup into /target/: 100`~~ — 2026-05-14 *(verification pending)*
+
+- **Was**: `base-installer`'s `apt-install` queues both packages for
+  /target's console keymap, but neither was in our cdrom pool —
+  `console-setup` (.deb sat in `repo/` from a side-build but wasn't
+  in `_pool_whitelist`); `xkb-data` wasn't built at all (its source
+  package is `xkeyboard-config`).  Verified on the 2026-05-14
+  install run: `keyboard-configuration : Depends: xkb-data
+  (>= 2.35.1~) but it is not installable` →
+  `Failed to install keyboard-configuration into /target/: 100` →
+  `Package 'console-setup' has no installation candidate` →
+  `Failed to install console-setup into /target/: 100`.  Pre-dated
+  the Phase D regression (same in the 2026-05-13 reference run);
+  was just drowned out by the grub-installer crash before now.
+- **Fix shipped**: add `console-setup`, `keyboard-configuration`,
+  `xkb-data` to `config/pool.list`.  Pass VII pulls the transitive
+  closure through the source-build pipeline (including the
+  `xkeyboard-config` source build that produces `xkb-data`), and
+  `_pool_whitelist` ships them in `/cdrom/pool` so base-installer's
+  in-target apt finds them.  Same shape as the bootloader metas /
+  open-vm-tools — target-side only, no live image bloat.
+- **Verification**: pending — rebuild ISO, install, and confirm
+  base-installer no longer logs the two `Failed to install` lines.
 
 ### ~~apt-cdrom-setup chain broken end-to-end~~ — 2026-05-13
 

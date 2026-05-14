@@ -179,6 +179,43 @@ Each is fragile to upstream churn.
 - Document any extra udeb seeds needed (probably none — `partman-efi` and
   `grub-installer` are already in `installer.list`).
 
+#### Phase D follow-up — `pool.list` for the bootloader metas (2026-05-14)
+
+The Phase D pkg.list swap (`grub-pc` → `grub-pc-bin` +
+`grub-efi-amd64-bin`, commit `875200e`) made the `-bin` packages
+present on live + installer + target, but accidentally dropped the
+`grub-pc` and `grub-efi-amd64` **meta** `.deb`s from `staging/pool/` —
+they're built by the grub2 source build (so present in `repo/`) but
+weren't in `selected_pkgs` after the pkg.list change, so
+`_pool_whitelist` filtered them out.  At install time
+`grub-installer`'s `apt-install grub-pc` (BIOS) and
+`apt-install grub-efi-amd64` (EFI) failed with "no installation
+candidate" — verified on the 2026-05-14 install run for **both**
+modes (`log/athena_bios.log:1829`, `log/athena_efi.log:1840`).
+
+The fix can't go through `installer.list` because the metas Conflict
+with each other and `validate_selection` fires DEPENDENCY HELL.  But
+install-time conflict is a property of the *target* — both .debs can
+sit indexed in a pool side-by-side.  Solution: new `config/pool.list`
+— a third tier of package selection alongside `pkg.list` and
+`installer.list`.  Pool entries are resolved through the normal dep
+tree in a new **Pass VII** (so all transitive Depends are pulled in
+and source-built) but with `check_conflicts=False`, and
+`validate_selection` skips Breaks/Conflicts where either side is in
+`pool_extras_pkg_names`.  `cmd_build_iso_installer` subtracts pool
+extras from `_base_include` so debootstrap doesn't put them on the
+target — they ship in `/cdrom/pool` only, available to apt at install
+time and post-install.  Seeded with `grub-pc` + `grub-efi-amd64`
+(bootloader metas) + `open-vm-tools` (VMware guest tooling that
+`hw-detect` apt-installs on the target).
+
+**`shim-signed` is not yet in the pipeline** (separate Microsoft-
+signed source, not in our cache).  The EFI log shows
+`Additionally installing shim-signed to go with grub-efi-amd64` →
+`no installation candidate`, but EFI installs work without it (just
+no Secure Boot).  Tracked under the same kind of "needs upstream
+source we don't ship" follow-up as `intel-microcode` below.
+
 ### Phase E — Cosmetic / latent cleanup (status as of 2026-05-13)
 
 #### Shipped
@@ -187,7 +224,12 @@ Each is fragile to upstream churn.
 |---|---|---|
 | `eject: not found` at finish-install | Added `eject-udeb` to `installer.list` (separate from target-side `eject` in `pkg.list`). | `c2533ff` |
 | `/etc/default-release` missing in installer | `_write_release_files` Python helper in `installer_chroot.py` writes both `/etc/default-release` and `/etc/lsb-release`. | `eed8f2b` |
-| `dpkg-divert: --no-rename` warnings (~23/run) | Quilt patch on `debian-installer-utils 1.146`: `chroot-setup.sh` `divert()` and `undivert()` use `--no-rename`. | `34905d9` |
+
+#### Reverted
+
+| Issue | Attempted fix | Why reverted |
+|---|---|---|
+| `dpkg-divert: --no-rename` warnings (~23/run) | Quilt patch on `debian-installer-utils 1.146` swapping `chroot-setup.sh` `divert()`/`undivert()` from `--rename` to `--no-rename` (commit `34905d9`). | **Bricked grub-installer.**  Stock `chroot-setup.sh` writes the daemon stub directly OVER the original path: with `--rename`, the real binary is moved to `.REAL` first so the stub overwrites the (now-empty) original safely; with `--no-rename`, divert only creates a metadata record — the real binary is **not moved** — so the `cat > /target/sbin/start-stop-daemon` destroys it.  After the first chroot_setup→cleanup cycle the binary is permanently gone, and `grub-installer` (which runs `chroot /target dpkg ...` directly without going through in-target → no fresh stub gets written) fails with `dpkg: 'start-stop-daemon' not found in PATH`.  Verified on the 2026-05-14 install run.  See `docs/known-issues.md` § cosmetic noise for the standing entry — alternative fix paths require a different mechanism (e.g. silencing the warning at the call site, not changing the divert mode). |
 
 #### Deferred (track + pick up later)
 
@@ -228,15 +270,15 @@ priority order — top items have higher impact / smaller scope.
 - **Symptom**: `in-target` wrapper tries to write `/etc/mtab` but
   modern Debian symlinks it to `/proc/self/mounts` (the kernel-managed
   mount list).  Each `in-target` invocation logs the warning.
-- **Why deferred**: `in-target` lives in `debian-installer-utils`
-  (same source as our existing dpkg-divert patch).  Either suppress
-  the legacy mtab write in our patch series or unsymlink
-  `/target/etc/mtab` via a base-installer hook.  Both routes need
-  understanding which downstream readers (if any) actually read mtab.
-- **Pick-up**: either (a) extend our existing
-  `9001-dpkg-divert-no-rename.patch` family with a `9002-skip-mtab-symlink.patch`
-  that gates the mtab write on `! -L /etc/mtab`, or (b) drop the
-  symlink in base-installer's configure step.  (a) is cleaner.
+- **Why deferred**: `in-target` lives in `debian-installer-utils`.
+  Either suppress the legacy mtab write via a quilt patch on that
+  source or unsymlink `/target/etc/mtab` via a base-installer hook.
+  Both routes need understanding which downstream readers (if any)
+  actually read mtab.
+- **Pick-up**: either (a) add a quilt patch on
+  `debian-installer-utils 1.146` that gates the mtab write on
+  `! -L /etc/mtab`, or (b) drop the symlink in base-installer's
+  configure step.  (a) is cleaner.
 
 ##### `dpkg: trying to overwrite '/sbin/depmod' ... busybox-udeb` (chroot-build only)
 
@@ -279,15 +321,10 @@ priority order — top items have higher impact / smaller scope.
   This silences `91security` and `92updates`.  Minimal effort but
   unclear benefit.
 
-##### `open-vm-tools` not in pool
-
-- **Symptom**: `hw-detect` apt-installs `open-vm-tools` on a VMware
-  guest; fails with `not available` (log line 1928).
-- **Why deferred**: VMware-specific guest tooling; operator who needs
-  it can `apt install` post-install.  Skipping entirely is a defensible
-  decision for a base server install.
-- **Pick-up**: decision rather than work.  Either ship and call it
-  done, or formally close as wontfix.
+*(`open-vm-tools` moved out of Deferred 2026-05-14 — now in
+`config/pool.list` so `hw-detect`'s `apt-install open-vm-tools`
+succeeds on VMware targets without bloating the live/installer
+image.  See the Phase D follow-up section above.)*
 
 ### Phase F — CI gate (1-2 days)
 

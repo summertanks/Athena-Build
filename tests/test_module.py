@@ -1879,30 +1879,218 @@ def test_iso_installer_export_pubkey_to_staging_errors_when_disk_dir_missing():
         os.unlink(_pubkey_path)
 
 
-def test_di_utils_dpkg_divert_no_rename_patch_exists_and_is_dep3_clean():
-    """COMP-02 phase E: silence the ~23 `dpkg-divert: warning:
-    diverting file '/sbin/start-stop-daemon' from an Essential package
-    with rename is dangerous` warnings that filled the install log
-    before this patch.  Pin the path so a future re-pack of
-    patch/source/ doesn't drop it, and pin DEP-3 cleanliness so the
-    patch keeps its provenance header."""
+def test_pool_list_pins_target_only_packages():
+    """COMP-02 phase D follow-up: `config/pool.list` ships packages
+    that base-installer / hw-detect / finish-install apt-install on
+    /target but which we don't want pre-installed in the live image.
+    Pin the current set so a future config rework doesn't drop them:
+      - grub-pc + grub-efi-amd64: bootloader metas (firmware-mode-
+        dependent; grub-installer picks one at install time).
+      - open-vm-tools: hw-detect apt-installs on VMware guests.
+      - console-setup + keyboard-configuration + xkb-data:
+        base-installer apt-installs for /target's console keymap;
+        verified 2026-05-14 these were missing and `Failed to
+        install keyboard-configuration into /target/: 100` fired."""
+    _path = os.path.join(_ROOT, 'config', 'pool.list')
+    assert os.path.isfile(_path), _path
+    with open(_path) as fh:
+        _names = {
+            _line.strip() for _line in fh
+            if _line.strip() and not _line.lstrip().startswith('#')
+        }
+    assert 'grub-pc' in _names, _names
+    assert 'grub-efi-amd64' in _names, _names
+    assert 'open-vm-tools' in _names, _names
+    assert 'console-setup' in _names, _names
+    assert 'keyboard-configuration' in _names, _names
+    assert 'xkb-data' in _names, _names
+
+
+def test_buildconfig_exposes_poollist_path():
+    """`pool.list` is plumbed through BuildConfig the same way
+    `pkg.list`/`live.list`/`installer.list` are; pin the attribute name
+    so cmd_build_iso_installer's `self.config.poollist_path` keeps
+    resolving."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import utils
-    _path = os.path.join(
-        _ROOT, 'patch', 'source', 'debian-installer-utils', '1.146',
-        '9001-dpkg-divert-no-rename.patch'
+    # BuildConfig parses argv at construct time; install a stable argv
+    # that points at the working tree's config so the parser is happy.
+    _saved_argv = sys.argv[:]
+    sys.argv = ['build.py', '--working-dir', _ROOT]
+    try:
+        _cfg = utils.BuildConfig()
+    finally:
+        sys.argv = _saved_argv
+    assert hasattr(_cfg, 'poollist_path'), \
+        "BuildConfig.poollist_path missing"
+    assert _cfg.poollist_path.endswith('config/pool.list'), \
+        _cfg.poollist_path
+
+
+def test_read_pkg_list_handles_pool_list_format():
+    """`Build._read_pkg_list` is the shared parser for pkg/live/installer/
+    pool lists.  Confirm pool.list parses to the expected name set
+    (no surprises from the comment block)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _names = BuildSession._read_pkg_list(
+        os.path.join(_ROOT, 'config', 'pool.list'),
+        already_selected=set(),
     )
-    assert os.path.isfile(_path), _path
-    _missing = utils.check_dep3_header(_path)
-    assert not _missing, f"DEP-3 fields missing: {_missing}"
-    with open(_path) as fh:
-        _content = fh.read()
-    # Pin both the file being patched AND the swap (--rename → --no-rename).
-    assert '+++ b/chroot-setup.sh' in _content, _content
-    assert '--no-rename "$1"' in _content, _content
-    assert '-\tchroot /target dpkg-divert --quiet --add' in _content, _content
-    assert '-\tchroot /target dpkg-divert --quiet --remove' in _content, _content
+    assert 'grub-pc' in _names, _names
+    assert 'grub-efi-amd64' in _names, _names
+    assert 'open-vm-tools' in _names, _names
+    assert 'console-setup' in _names, _names
+    assert 'keyboard-configuration' in _names, _names
+    assert 'xkb-data' in _names, _names
+    # No accidental comment lines bleeding through.
+    for _n in _names:
+        assert not _n.startswith('#'), _n
+
+
+def _make_pool_dep_tree_stub():
+    """Shared fixture for pool.list dep-tree tests.
+
+    Builds a DependencyTree without invoking __init__ (which needs a real
+    Cache) — replicates only the fields the assertions touch.  Two
+    conflicting Package stubs (`grub-pc` + `grub-efi-amd64`) and a
+    minimal Cache so add_lookahead can resolve them without prompting.
+    """
+    import sys
+    from collections import defaultdict
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+
+    class _Pkg:
+        def __init__(self, name, ver, conflicts=None, breaks=None):
+            self._fields = {'Package': name, 'Version': ver}
+            self.package = name
+            self.version = ver
+            self._provides = []
+            self.conflicts = conflicts or []
+            self.depends = []
+            self.pre_depends = []
+            self.recommends = []
+            self.alt_depends = []
+            self.breaks = breaks or []
+            self.constraints_satisfied = True
+        def __getitem__(self, k): return self._fields[k]
+        def get_provides(self): return list(self._provides)
+        def add_constraint(self, v, o): pass
+
+    grub_pc  = _Pkg('grub-pc',         '2.06-13+deb12u1',
+                    conflicts=[[('grub-efi-amd64', '', '')]])
+    grub_efi = _Pkg('grub-efi-amd64',  '2.06-13+deb12u1',
+                    conflicts=[[('grub-pc',        '', '')]])
+
+    class _Cache:
+        def __init__(self):
+            self.package_hashtable = {
+                'grub-pc':        {grub_pc.version:  [grub_pc]},
+                'grub-efi-amd64': {grub_efi.version: [grub_efi]},
+            }
+            self.skip_src = []
+        def get_packages(self, name, ver=None, op=''):
+            result = []
+            for _vlist in self.package_hashtable.get(name, {}).values():
+                result.extend(_vlist)
+            return result
+
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = _Cache()
+    dt._DependencyTree__lookahead = defaultdict(dict)
+    dt._DependencyTree__recommended = False
+    dt.selected_pkgs = {}
+    dt.selected_srcs = {}
+    dt.extras_pkg_names = set()
+    dt.live_exclusive_pkg_names = set()
+    dt.installer_exclusive_pkg_names = set()
+    dt.pool_extras_pkg_names = set()
+    dt.pool_extras_src_names = set()
+    dt._auto_pick_highest_when_ambiguous = False
+    dt.arch = 'amd64'
+    dt.build_profiles = frozenset()
+    return dt, grub_pc, grub_efi, dependencytree
+
+
+def test_resolve_packages_check_conflicts_false_skips_lookahead_check():
+    """Pass VII calls resolve_packages(check_conflicts=False) so two
+    mutually-conflicting metas (`grub-pc` + `grub-efi-amd64`) can both
+    enter the lookahead.  With the default (True), the second name
+    would be rejected at lookahead time.  Confirm both end up in the
+    lookahead when the flag is False."""
+    dt, grub_pc, grub_efi, _ = _make_pool_dep_tree_stub()
+    # Add both via add_lookahead with conflict-check disabled.
+    dt.add_lookahead(['grub-pc', 'grub-efi-amd64'], check_conflicts=False)
+    _la = dt._DependencyTree__lookahead
+    assert 'grub-pc'        in _la, _la
+    assert 'grub-efi-amd64' in _la, _la
+    # Sanity: with check_conflicts=True (the default), the second name
+    # should NOT be added because it conflicts with the first.
+    dt2, _, _, _ = _make_pool_dep_tree_stub()
+    dt2.add_lookahead(['grub-pc', 'grub-efi-amd64'], check_conflicts=True)
+    _la2 = dt2._DependencyTree__lookahead
+    assert 'grub-pc' in _la2, _la2
+    assert 'grub-efi-amd64' not in _la2, \
+        f"default check_conflicts should reject second conflicting entry, got {dict(_la2)}"
+
+
+def test_validate_selection_skips_conflict_when_pool_extra():
+    """validate_selection bypasses Conflicts when EITHER side is in
+    pool_extras_pkg_names — apt enforces them on the target.  Both
+    grub metas in pool_extras: validate_selection returns True (no
+    DEPENDENCY HELL fired) even though they Conflict."""
+    dt, grub_pc, grub_efi, _ = _make_pool_dep_tree_stub()
+    dt.selected_pkgs = {
+        'grub-pc':        grub_pc,
+        'grub-efi-amd64': grub_efi,
+    }
+    dt.pool_extras_pkg_names = {'grub-pc', 'grub-efi-amd64'}
+    assert dt.validate_selection() is True
+
+
+def test_validate_selection_skips_break_when_pool_extra():
+    """Same membership-based bypass applies to Breaks (weaker form of
+    Conflicts in Debian semantics)."""
+    dt, _, _, _ = _make_pool_dep_tree_stub()
+    # Build two packages that Break each other.
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    class _Pkg:
+        def __init__(self, name, ver, breaks=None):
+            self._fields = {'Package': name, 'Version': ver}
+            self.package = name
+            self.version = ver
+            self.conflicts = []
+            self.depends = []
+            self.pre_depends = []
+            self.recommends = []
+            self.alt_depends = []
+            self.breaks = breaks or []
+            self.constraints_satisfied = True
+        def __getitem__(self, k): return self._fields[k]
+        def get_provides(self): return []
+        def add_constraint(self, v, o): pass
+    a = _Pkg('a', '1', breaks=[[('b', '', '')]])
+    b = _Pkg('b', '1', breaks=[[('a', '', '')]])
+    dt.selected_pkgs = {'a': a, 'b': b}
+    dt.pool_extras_pkg_names = {'a'}  # Only a is pool extra; bypass still fires.
+    assert dt.validate_selection() is True
+
+
+def test_validate_selection_still_fires_on_non_pool_conflicts():
+    """Sanity: when neither side of the conflict is a pool extra,
+    validate_selection still returns False (DEPENDENCY HELL fires).
+    Without this guarantee the bypass would be over-broad."""
+    dt, grub_pc, grub_efi, _ = _make_pool_dep_tree_stub()
+    dt.selected_pkgs = {
+        'grub-pc':        grub_pc,
+        'grub-efi-amd64': grub_efi,
+    }
+    dt.pool_extras_pkg_names = set()  # No pool extras → no bypass.
+    assert dt.validate_selection() is False
 
 
 def test_base_installer_athena_keyring_patch_exists_and_is_dep3_clean():
@@ -6123,8 +6311,14 @@ def main() -> int:
         test_iso_installer_export_pubkey_to_staging_copies_to_disk_archive_key,
         test_iso_installer_export_pubkey_to_staging_errors_when_pubkey_missing,
         test_iso_installer_export_pubkey_to_staging_errors_when_disk_dir_missing,
+        test_pool_list_pins_target_only_packages,
+        test_buildconfig_exposes_poollist_path,
+        test_read_pkg_list_handles_pool_list_format,
+        test_resolve_packages_check_conflicts_false_skips_lookahead_check,
+        test_validate_selection_skips_conflict_when_pool_extra,
+        test_validate_selection_skips_break_when_pool_extra,
+        test_validate_selection_still_fires_on_non_pool_conflicts,
         test_base_installer_athena_keyring_patch_exists_and_is_dep3_clean,
-        test_di_utils_dpkg_divert_no_rename_patch_exists_and_is_dep3_clean,
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
