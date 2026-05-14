@@ -975,6 +975,7 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_source',    'build',    'cmd_source_build'),
         ('cmd_package',   'tunnel',   'cmd_tunnel_package'),
         ('cmd_container', 'init',     'cmd_init_container'),
+        ('cmd_container', 'purge',    'cmd_container_purge'),
         # cmd_chroot 'build' is now multi-token ('build live' / 'build
         # installer') with default-to-live; covered by its own tests below.
         ('cmd_chroot',    'verify',   'cmd_verify_chroot'),
@@ -991,6 +992,7 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_clean',     'buildroot', 'cmd_clean_buildroot'),
         ('cmd_clean',     'image',     'cmd_clean_image'),
         ('cmd_clean',     'download',  'cmd_clean_download'),
+        ('cmd_clean',     'container', 'cmd_container_purge'),
         ('cmd_clean',     'all',       'cmd_clean_all'),
     ]
 
@@ -3034,6 +3036,149 @@ def test_cmd_clean_repo_resets_source_build_ready_and_drops_counts():
         _sess.cmd_clean_repo('force')
     assert _sess.flags.source_build_ready is False
     assert _sess.last_source_build_counts is None
+
+
+class _StubDockerImage:
+    def __init__(self, image_id, tags, short_id='img1234'):
+        self.id = image_id
+        self.tags = tags
+        self.short_id = short_id
+
+
+class _StubDockerContainer:
+    def __init__(self, image, short_id='c1234'):
+        self.image = image
+        self.short_id = short_id
+        self.removed = False
+    def remove(self, force=False):
+        self.removed = True
+
+
+class _StubDockerClient:
+    """Minimal Docker client surface the purge code touches."""
+    def __init__(self, containers=None, images=None):
+        self._containers = containers or []
+        self._images = images or []
+        self.images_removed = []
+        # Mirror docker SDK shape: client.containers.list(), client.images.list().
+        self.containers = type('CMgr', (), {
+            'list': lambda _self, **kw: list(self._containers),
+        })()
+        self.containers.list = lambda **kw: list(self._containers)
+        self.images = type('IMgr', (), {})()
+        self.images.list = lambda **kw: list(self._images)
+        self.images.remove = lambda image_id, force=False: self.images_removed.append(image_id)
+    def ping(self):
+        return True
+
+
+def test_cmd_container_purge_resets_flag_and_drops_session_ref():
+    """cmd_container_purge with no docker state still resets the flag
+    and drops self.container (idempotent contract: safe to run when
+    no init has happened yet)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import docker as _docker  # confirm available before running test
+    import build
+    from build import BuildSession, BuildFlags
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.build_container_ready = True
+    _sess.container = object()
+    class _Cfg:
+        docker_server = ''
+    _sess.config = _Cfg()
+
+    # Stub the docker client so no real daemon is contacted.
+    _client = _StubDockerClient(containers=[], images=[])
+    _orig_from_env = _docker.from_env
+    _docker.from_env = lambda: _client
+    try:
+        _sess.cmd_container_purge('force')
+    finally:
+        _docker.from_env = _orig_from_env
+    assert _sess.flags.build_container_ready is False
+    assert _sess.container is None
+
+
+def test_cmd_container_purge_removes_athena_containers_and_images():
+    """When athenalinux:build-* containers + images exist, they are
+    removed; non-athenalinux entries are ignored."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import docker as _docker
+    import build
+    from build import BuildSession, BuildFlags
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.build_container_ready = True
+    _sess.container = object()
+    class _Cfg:
+        docker_server = ''
+    _sess.config = _Cfg()
+
+    # Two athenalinux images + one foreign; three containers (two ours, one foreign).
+    _img_athena_bw = _StubDockerImage('sha256:aaa', ['athenalinux:build-bookworm'])
+    _img_athena_tr = _StubDockerImage('sha256:bbb', ['athenalinux:build-trixie'])
+    _img_other     = _StubDockerImage('sha256:ccc', ['debian:bookworm-slim'])
+    _c_athena_1 = _StubDockerContainer(_img_athena_bw)
+    _c_athena_2 = _StubDockerContainer(_img_athena_tr)
+    _c_other    = _StubDockerContainer(_img_other)
+    # NOTE: client.images.list(name='athenalinux') filtering is server-side;
+    # our stub returns whatever it has, so feed only the athenalinux ones.
+    _client = _StubDockerClient(
+        containers=[_c_athena_1, _c_athena_2, _c_other],
+        images=[_img_athena_bw, _img_athena_tr],
+    )
+    _orig_from_env = _docker.from_env
+    _docker.from_env = lambda: _client
+    try:
+        _sess.cmd_container_purge('force')
+    finally:
+        _docker.from_env = _orig_from_env
+
+    # Two athenalinux containers removed; foreign one untouched.
+    assert _c_athena_1.removed is True
+    assert _c_athena_2.removed is True
+    assert _c_other.removed is False
+    # Both athenalinux images removed.
+    assert sorted(_client.images_removed) == ['sha256:aaa', 'sha256:bbb']
+    # Flag + session ref reset.
+    assert _sess.flags.build_container_ready is False
+    assert _sess.container is None
+
+
+def test_cmd_container_purge_handles_docker_connect_failure_gracefully():
+    """If docker daemon is unreachable, cmd_container_purge prints an
+    error and returns without raising — does NOT clobber the flag
+    (caller can retry once daemon is up)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import docker as _docker
+    import build
+    from build import BuildSession, BuildFlags
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.build_container_ready = True
+    _sess.container = object()
+    class _Cfg:
+        docker_server = ''
+    _sess.config = _Cfg()
+
+    _orig_from_env = _docker.from_env
+    def _raise(*a, **kw):
+        raise _docker.errors.DockerException("simulated: daemon unreachable")
+    _docker.from_env = _raise
+    try:
+        _sess.cmd_container_purge('force')  # must NOT raise
+    finally:
+        _docker.from_env = _orig_from_env
+    # Connect failure leaves flag alone (operator can fix daemon + retry).
+    assert _sess.flags.build_container_ready is True
+    assert _sess.container is not None
 
 
 def test_cmd_clean_dispatcher_unknown_action_calls_no_handler():
@@ -6549,6 +6694,9 @@ def main() -> int:
         test_cmd_clean_source_resets_download_ready,
         test_cmd_clean_image_resets_iso_flags,
         test_cmd_clean_repo_resets_source_build_ready_and_drops_counts,
+        test_cmd_container_purge_resets_flag_and_drops_session_ref,
+        test_cmd_container_purge_removes_athena_containers_and_images,
+        test_cmd_container_purge_handles_docker_connect_failure_gracefully,
         test_cmd_clean_dispatcher_unknown_action_calls_no_handler,
         test_cmd_build_iso_installer_bails_on_unmet_prereqs,
         # COMP-01c — chroot build live | chroot build installer split
