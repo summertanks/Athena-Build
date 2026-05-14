@@ -540,17 +540,17 @@ class _ChrootMixin:
             Practical Debian dep graphs do not hit this.
         """
         selected = self._dependencytree.selected_pkgs
-        # EXTRAS-01: depth-1 Recommends pulled into selected_pkgs for the
-        # repo (and downloaded by source_download) but NOT meant for chroot
-        # install — filter them out here so the live ISO stays minimal.
-        # Empty set when [Build] IncludeRecommendsInRepo is off, in which
-        # case the filter is a no-op.
+        # Depth-1 Recommends pulled into selected_pkgs for the repo (and
+        # downloaded by source_download) but NOT meant for chroot install
+        # — filter them out here so the live ISO stays minimal.  Empty
+        # set when [Build] IncludeRecommendsInRepo is off, in which case
+        # the filter is a no-op.
         _extras = self._dependencytree.extras_pkg_names
 
         # Restrict the graph to canonical (non-virtual) names that are NOT
-        # part of the libc seed AND NOT EXTRAS-01 extras.  Aliases would
-        # inflate the graph with redundant nodes and Kahn would never be
-        # able to retire them.
+        # part of the libc seed AND NOT recommends-only extras.  Aliases
+        # would inflate the graph with redundant nodes and Kahn would
+        # never be able to retire them.
         all_pkgs = [
             p for p in selected
             if p == selected[p]['Package']

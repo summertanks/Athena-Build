@@ -135,7 +135,7 @@ class _DepDriftMixin:
             except SystemError as e:
                 return False, f'check_dep error: {e}'
 
-        # EXTRAS-01: skip extras when verifying.  Extras are pulled into
+        # Skip extras when verifying.  Extras are pulled into
         # selected_pkgs so source_download fetches them and source_build
         # (in `recommended` mode) can produce their .debs, but they are
         # NOT installed in the chroot — `_compute_install_batches`

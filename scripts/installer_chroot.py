@@ -1,4 +1,4 @@
-"""COMP-01b phase 5: build the installer chroot from the udeb closure.
+"""Build the installer chroot from the udeb closure.
 
 Unlike the live/installed chroot (apt + dpkg with mounting + maintainer
 scripts run at build time), the installer chroot is just a directory tree
@@ -247,8 +247,8 @@ def _resolve_udeb_files(udeb_tree, dir_repo: str) -> List[str]:
             continue
         # Strip +bN binNMU suffix so the recorded filename matches what
         # dpkg-buildpackage actually produced.  utils.strip_build_version
-        # is the single source of truth shared with the deb pipeline
-        # (STA-15) — tolerates udeb extension.
+        # is the single source of truth shared with the deb pipeline —
+        # tolerates udeb extension.
         try:
             _filename = utils.strip_build_version(_filename)
         except ValueError:

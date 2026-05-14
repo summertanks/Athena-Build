@@ -36,7 +36,7 @@ class Cache:
 
     package_hashtable:  Dict[str, Dict[Version, List[Package]]]
     source_hashtable:   Dict[str, List[Source]]
-    # COMP-01b phase 2: parallel hashtable for udeb (Section: debian-installer)
+    # parallel hashtable for udeb (Section: debian-installer)
     # records, indexed from dists/<suite>/main/debian-installer/binary-<arch>/
     # Packages.  Same shape as package_hashtable so the existing
     # DependencyTree class can be instantiated against it for the udeb world.
@@ -98,7 +98,7 @@ class Cache:
 
         # Per-mirror cache file paths: {mirror_id: {'Packages': path, 'Sources': path}}
         self.mirror_cache_files: Dict[str, Dict[str, str]] = {}
-        # COMP-01b phase 2: per-mirror decompressed udeb Packages path.
+        # per-mirror decompressed udeb Packages path.
         # Only set for mirrors that publish a debian-installer index (typically
         # main only — updates/security don't ship udebs).  Absence means
         # "this mirror has no udebs to contribute"; not an error.
@@ -113,7 +113,7 @@ class Cache:
 
         self.required: List[str] = []
         self.important: List[str] = []
-        # COMP-01b phase 2: udeb-world equivalents.  Sparse — bookworm has
+        # udeb-world equivalents.  Sparse — bookworm has
         # only 3 required udebs (base-installer, bootstrap-base, finish-install)
         # and 3 important udebs (kmod-udeb, libkmod2-udeb, libpcre3-udeb).
         self.udeb_required: List[str] = []
@@ -125,7 +125,7 @@ class Cache:
         self.package_hashtable = defaultdict(lambda: defaultdict(list))
         # self.provides_hashtable = defaultdict(lambda: defaultdict(list))
         self.source_hashtable = defaultdict(list) # Dict[str, List[Source]]
-        # COMP-01b phase 2: parallel hashtable for udeb records.
+        # parallel hashtable for udeb records.
         self.udeb_hashtable = defaultdict(lambda: defaultdict(list))
 
         # Download files
@@ -281,7 +281,7 @@ class Cache:
 
             self.mirror_cache_files[_mirror.id] = _mirror_files
 
-            # COMP-01b phase 2: optional udeb index fetch.  The d-i Packages
+            # optional udeb index fetch.  The d-i Packages
             # index is at <component>/debian-installer/binary-<arch>/Packages
             # and is published by main only (updates/security don't ship
             # udebs).  If absent from this mirror's Release, skip silently —
@@ -487,7 +487,7 @@ class Cache:
 
             progress_bar_src.close()
 
-        # COMP-01b phase 2: parallel udeb pass.  Mirrors that don't publish
+        # parallel udeb pass.  Mirrors that don't publish
         # a debian-installer index (typically updates/security) are skipped
         # silently — mirror_udeb_cache_files only carries entries for those
         # mirrors that did.  Same parsing logic as the regular Packages
@@ -540,8 +540,8 @@ class Cache:
         return True
 
     def _ingest_udeb_indices(self, arch: str) -> None:
-        """COMP-01b phase 2: parse the per-mirror udeb Packages files and
-        route their records into self.udeb_hashtable.
+        """Parse the per-mirror udeb Packages files and route their
+        records into self.udeb_hashtable.
 
         Mirrors that didn't publish a d-i index (no entry in
         mirror_udeb_cache_files) are skipped silently.  Per-record parsing
@@ -643,7 +643,7 @@ class Cache:
         return result
 
     def udeb_view(self) -> 'UdebCacheView':
-        """COMP-01b phase 3: return a thin Cache-shaped view that exposes
+        """Return a thin Cache-shaped view that exposes
         udeb_hashtable as package_hashtable.  Lets the existing
         DependencyTree class be instantiated against the udeb world
         unchanged (DependencyTree only reads .get_packages,

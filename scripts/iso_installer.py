@@ -1,11 +1,11 @@
-"""COMP-01b phase 7: master the installer ISO from buildroot/installer/.
+"""Master the installer ISO from buildroot/installer/.
 
 The installer chroot becomes the initrd as a monolithic cpio.gz (no
 separate squashfs layer in v1).  Kernel comes from the linux-image-amd64
 .deb in repo/ — same kernel that ships on the live ISO.  The apt pool
 (repo/) is bundled onto the ISO so the installer reads packages from
-/cdrom/pool at install time (matches the locked COMP-01b decision: no
-Debian repo fallback ever).  grub-mkrescue produces the hybrid BIOS+EFI
+/cdrom/pool at install time (matches the locked decision: no Debian
+repo fallback ever).  grub-mkrescue produces the hybrid BIOS+EFI
 bootable image.
 
 Reference: docs/plans/comp-01-installer.md; project memory
@@ -626,8 +626,7 @@ def _stage_pool(
     """Copy a filtered subset of repo/ → staging/pool/.
 
     The installer reads from /cdrom/pool at runtime (matches the locked
-    COMP-01b decision: file:///cdrom apt source, no network repo
-    fallback).
+    decision: file:///cdrom apt source, no network repo fallback).
 
     When `deb_whitelist` is provided (the normal case from
     cmd_build_iso_installer), only packages the target system will

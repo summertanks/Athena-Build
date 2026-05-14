@@ -215,7 +215,7 @@ def test_source_parses_main_stanza_with_both_files_and_sha256():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ARCH-12 — _compute_install_batches single-pass topo sort
+# _compute_install_batches single-pass topo sort
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # Tests use lightweight stand-in objects so we can exercise the graph logic
@@ -245,7 +245,7 @@ class _StubDepTree:
         self.selected_pkgs = {
             spec[0]: _Pkg(*spec) for spec in pkg_specs
         }
-        # EXTRAS-01: chroot install filter reads dep_tree.extras_pkg_names;
+        # chroot install filter reads dep_tree.extras_pkg_names;
         # default empty so existing tests behave as before.
         self.extras_pkg_names: set = set()
         self.extras_src_names: set = set()
@@ -416,7 +416,7 @@ def test_compute_install_batches_external_deps_filtered():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STA-01 / SEC-01 — InRelease GPG verification
+# InRelease GPG verification
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # These tests generate a throwaway PGP keypair in a temp dir, clear-sign a
@@ -604,7 +604,7 @@ def test_buildconfig_security_enabled_rejects_missing_keyring():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STA-07 — BuildSystem sudo-password lifetime
+# BuildSystem sudo-password lifetime
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _bare_buildsystem(password: str = 'secret'):
@@ -656,7 +656,7 @@ def test_buildsystem_scrub_password_idempotent():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STA-04 — download_source surfaces HTTP / short-download errors clearly
+# download_source surfaces HTTP / short-download errors clearly
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _download_source_with_mocked_get(mock_resp_factory, expected_size: int = 100,
@@ -756,7 +756,7 @@ def test_download_source_surfaces_short_download_clearly():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SEC-02 — DOCKER_SERVER guard refuses unsafe network-reachable daemons
+# DOCKER_SERVER guard refuses unsafe network-reachable daemons
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_docker_server_guard_accepts_safe_targets():
@@ -796,7 +796,7 @@ def test_docker_server_guard_refuses_unsafe_targets():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONF-04 — BuildOptions / BuildProfiles are separate config keys
+# BuildOptions / BuildProfiles are separate config keys
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_buildconfig_build_options_and_profiles_are_separate():
@@ -840,7 +840,7 @@ def test_buildconfig_build_options_falls_back_to_profiles_when_omitted():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONF-05 — DEP-3 header check
+# DEP-3 header check
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_check_dep3_header_clean_patch_returns_empty():
@@ -890,7 +890,7 @@ def test_check_dep3_header_subject_satisfies_description():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ARCH-01 — BuildSession encapsulates pipeline state; cmd_* handlers are
+# BuildSession encapsulates pipeline state; cmd_* handlers are
 #           methods bound to it (no module-level globals).
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -983,7 +983,7 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         # not a verb-only dispatcher; covered by its own tests below.
         ('cmd_key',       'generate', 'cmd_generate_signing_key'),
         ('cmd_key',       'verify',   'cmd_verify_signing_key'),
-        # COMP-05 clean dispatcher.  Note: 'cache' delegates to the
+        # clean dispatcher.  Note: 'cache' delegates to the
         # existing cmd_cache_purge (not a new cmd_clean_cache method),
         # so the matrix exercises the alias.
         ('cmd_clean',     'cache',     'cmd_cache_purge'),
@@ -2800,11 +2800,11 @@ def test_cmd_iso_build_unknown_subaction_calls_neither_handler():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMP-05 — `clean` dispatcher + idempotency on cmd_build_cache / cmd_parse_dependency
+# `clean` dispatcher + idempotency on cmd_build_cache / cmd_parse_dependency
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_cmd_build_cache_skips_when_already_ready_no_force():
-    """COMP-05: cmd_build_cache early-exits when cache_ready is True and
+    """cmd_build_cache early-exits when cache_ready is True and
     an in-memory Cache is loaded.  Cache() must NOT be instantiated —
     that would do real network work.  `force` arg bypasses; covered in
     a follow-on test."""
@@ -2831,7 +2831,7 @@ def test_cmd_build_cache_skips_when_already_ready_no_force():
 
 
 def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
-    """COMP-05: `cache build force` bypasses the early-exit guard and
+    """`cache build force` bypasses the early-exit guard and
     re-runs the full cache build.  Verifies Cache() IS instantiated
     when force is in args."""
     import sys
@@ -2867,7 +2867,7 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
 
 
 def test_cmd_parse_dependency_skips_when_already_ready_no_force():
-    """COMP-05: cmd_parse_dependency early-exits when dep_check_ready is
+    """cmd_parse_dependency early-exits when dep_check_ready is
     True and an in-memory dep_tree exists.  DependencyTree() must NOT
     be instantiated."""
     import sys
@@ -2897,7 +2897,7 @@ def test_cmd_parse_dependency_skips_when_already_ready_no_force():
 
 
 def test_cmd_parse_dependency_runs_when_force_passed_even_if_ready():
-    """COMP-05: `dep parse force` bypasses the early-exit guard.
+    """`dep parse force` bypasses the early-exit guard.
     Cannot drive the full resolve from a stub, but we can verify the
     early-exit guard is bypassed by checking Spinner() construction
     (which happens AFTER the guard but BEFORE any heavy work)."""
@@ -3319,7 +3319,7 @@ def test_cache_purge_empty_dir_is_noop():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ARCH-03 — TUI primitives accept Tui explicitly (no singleton required)
+# TUI primitives accept Tui explicitly (no singleton required)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_console_with_explicit_tui_does_not_touch_singleton():
@@ -3396,7 +3396,7 @@ def test_console_raises_when_no_tui_anywhere():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ARCH-07 — single logging adapter routes by level into the Tui
+# single logging adapter routes by level into the Tui
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _logger_test_with_stub_tui():
@@ -3658,7 +3658,7 @@ def test_setup_file_logging_filename_has_timestamp():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STA-09 — download_file surfaces HTTP status in its return value
+# download_file surfaces HTTP status in its return value
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_download_file_returns_http_status_detail_on_404():
@@ -3814,7 +3814,7 @@ def test_download_file_zero_content_length_does_not_freeze_bar():
 
 
 def test_shipped_build_conf_has_snapshot_enabled():
-    """STA-03: the shipped config/build.conf must default to snapshot pinning
+    """the shipped config/build.conf must default to snapshot pinning
     enabled, so cache and live mirror cannot drift between cache build and
     source build.  Lock-in test — fails if anyone flips Enabled back to false."""
     import configparser
@@ -3824,7 +3824,7 @@ def test_shipped_build_conf_has_snapshot_enabled():
     p.read(cfg_path)
     assert p.has_section('Snapshot'), "shipped build.conf is missing [Snapshot]"
     assert p.getboolean('Snapshot', 'Enabled') is True, (
-        "STA-03 regression: shipped build.conf must default Snapshot.Enabled = true"
+        "regression: shipped build.conf must default Snapshot.Enabled = true"
     )
 
 
@@ -3849,7 +3849,7 @@ def test_buildconfig_creates_dir_gnupg_with_0700():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STA-15 / TEST-04 — strip_build_version edge cases
+# strip_build_version edge cases
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_strip_build_version_strips_trailing_binNMU():
@@ -4064,7 +4064,7 @@ def test_print_no_handler_crashes_on_uninitialized_session():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UX-03 — autorun summary (lives in print_commands.summary)
+# autorun summary (lives in print_commands.summary)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_format_duration_seconds_only():
@@ -4305,7 +4305,7 @@ def test_format_snapshot_timestamp_falls_back_on_malformed():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STA-12 — Cache._GCC_BASE_RE pattern
+# Cache._GCC_BASE_RE pattern
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_gcc_base_re_matches_gcc_N_and_gcc_N_base():
@@ -4336,11 +4336,11 @@ def test_gcc_base_re_rejects_malformed_versions():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXTRAS-01 — pull recommends into selected_pkgs as available-not-installed
+# pull recommends into selected_pkgs as available-not-installed
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _FakePkg:
-    """Minimal Package surface for EXTRAS-01 tests.  Carries the fields
+    """Minimal Package surface for tests.  Carries the fields
     DependencyTree.pull_recommends_extras and derive_extras_src_names
     actually read: ['Package'], .recommends, .source, .get('Filename')."""
     def __init__(self, name, source, filename=None, recommends=None):
@@ -4371,7 +4371,7 @@ def _build_dep_tree_with_recommend(*, recommend_source='libnss3',
                                    skip_src=()):
     """Construct a DependencyTree containing one selected pkg `firefox` from
     source `firefox` that recommends `libnss3-tools` from `recommend_source`.
-    Used by several EXTRAS-01 tests."""
+    Used by several tests."""
     import dependencytree
     seed = _FakePkg('firefox', source='firefox',
                     filename='pool/main/f/firefox/firefox_1.0_amd64.deb',
@@ -4519,7 +4519,7 @@ def test_derive_extras_src_names_marks_extras_only_sources():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMP-01c phase 1 — live.list / installer.list split
+# live.list / installer.list split
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_dep_tree_initialises_subset_exclusive_sets_empty():
@@ -4716,7 +4716,7 @@ def test_derive_subset_exclusive_src_names_handles_installer_exclusive():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMP-01b phase 2 — Cache parses the udeb (debian-installer) Packages index
+# Cache parses the udeb (debian-installer) Packages index
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_mirror_udeb_packages_path_format():
@@ -5003,7 +5003,7 @@ def test_ingest_udeb_indices_dedups_priority_lists_via_caller():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMP-01b phase 3 — Parallel udeb DependencyTree (Cache.udeb_view)
+# Parallel udeb DependencyTree (Cache.udeb_view)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_udeb_view_exposes_udeb_hashtable_as_package_hashtable():
@@ -5368,7 +5368,7 @@ def test_print_udebs_lists_udeb_closure_when_tree_populated():
 
 
 def test_compute_install_batches_excludes_extras_pkg_names():
-    """EXTRAS-01: chroot install path skips packages in
+    """chroot install path skips packages in
     dependencytree.extras_pkg_names so they never enter a batch."""
     bs = _bare_buildsystem_with_deps([
         ('foo', [], []),
@@ -5381,11 +5381,11 @@ def test_compute_install_batches_excludes_extras_pkg_names():
     assert 'foo' in _all_named
     assert 'bar' in _all_named
     assert 'extra-y' not in _all_named, \
-        "EXTRAS-01: extras must be filtered out of install batches"
+        ": extras must be filtered out of install batches"
 
 
 def test_verify_dep_resolution_skips_extras():
-    """EXTRAS-01 REGRESSION: _verify_dep_resolution walked canonical_pkgs
+    """REGRESSION: _verify_dep_resolution walked canonical_pkgs
     including extras and demanded their (often-not-in-our-install-set)
     deps resolve, blocking real builds at the chroot stage with errors
     like 'ca-certificates depends: openssl — unresolved'.  Extras are
@@ -5478,7 +5478,7 @@ def test_verify_dep_resolution_still_catches_real_violations():
 
 
 def test_print_extras_lists_recommended_packages():
-    """`print extras` enumerates the EXTRAS-01 entries with their source
+    """`print extras` enumerates the entries with their source
     classification (extras-only vs mixed)."""
     import print_commands
 
@@ -5540,10 +5540,10 @@ def test_print_extras_handles_empty_extras_set():
     assert 'IncludeRecommendsInRepo' in output
 
 
-# ─── EXTRAS-01: source_build [profiles] override parsing ────────────────────
+# ─── source_build [profiles] override parsing ────────────────────
 
 def test_source_build_args_no_args_defaults_to_pkg_subset():
-    """Phase 4 (COMP-01b): bare `source build` → subset='pkg', not 'live'.
+    """Bare `source build` → subset='pkg', not 'live'.
     Locked decision — pkg is the user-choices layer, live is now an
     explicit additive on top."""
     from build import BuildSession
@@ -5811,7 +5811,7 @@ def test_source_download_iterates_both_deb_and_udeb_trees():
 
 
 def test_autorun_installer_runs_source_build_then_source_build_installer():
-    """Phase 7 of COMP-01b: autorun installer pipeline shape.  Mirrors
+    """Autorun installer pipeline shape.  Mirrors
     autorun live but the second source-build call uses 'installer' and
     the chroot step is cmd_build_chroot_installer."""
     import sys, inspect
@@ -5930,7 +5930,7 @@ def test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each():
 
 
 def test_autorun_live_runs_source_build_then_source_build_live():
-    """Phase 4 of COMP-01b: autorun live must invoke source build twice
+    """Autorun live must invoke source build twice
     — once with no args (pkg subset, the new bare default) and once
     with 'live' — before chroot build.  Catches a regression where
     someone re-orders or drops the live extras step (which would
@@ -6701,7 +6701,7 @@ def main() -> int:
         test_package_and_source_have_mirror_field,
         test_source_parses_security_stanza_without_files_field,
         test_source_parses_main_stanza_with_both_files_and_sha256,
-        # STA-01 / SEC-01
+        # /
         test_verify_inrelease_clean_signature_passes,
         test_verify_inrelease_tampered_signature_fails,
         test_verify_inrelease_missing_keyring_fails,
@@ -6710,7 +6710,6 @@ def main() -> int:
         test_buildconfig_security_disabled_accepts_missing_keyring,
         test_buildconfig_security_enabled_rejects_missing_keyring,
         test_buildconfig_creates_dir_gnupg_with_0700,
-        # ARCH-12
         test_compute_install_batches_linear_chain,
         test_compute_install_batches_independent_packages_share_a_batch,
         test_compute_install_batches_fan_out,
@@ -6721,31 +6720,25 @@ def main() -> int:
         test_compute_install_batches_cycle_with_pre_depends_chain_splits,
         test_compute_install_batches_acyclic_then_cycle,
         test_compute_install_batches_external_deps_filtered,
-        # STA-07
         test_buildsystem_password_readable_before_scrub,
         test_buildsystem_scrub_password_clears_field,
         test_buildsystem_password_property_raises_after_scrub,
         test_buildsystem_scrub_password_idempotent,
-        # STA-04
         test_download_source_surfaces_http_error_clearly,
         test_download_source_surfaces_short_download_clearly,
-        # SEC-02
         test_docker_server_guard_accepts_safe_targets,
         test_docker_server_guard_refuses_unsafe_targets,
-        # CONF-04
         test_buildconfig_build_options_and_profiles_are_separate,
         test_buildconfig_build_options_falls_back_to_profiles_when_omitted,
-        # CONF-05
         test_check_dep3_header_clean_patch_returns_empty,
         test_check_dep3_header_missing_origin_returns_field,
         test_check_dep3_header_subject_satisfies_description,
-        # ARCH-01
         test_buildsession_constructible_with_stub_tui,
         test_group_dispatchers_forward_to_underlying_cmd_methods,
         test_cache_purge_deletes_files_and_resets_flags,
         test_cache_purge_cancelled_keeps_files_and_flags,
         test_cache_purge_empty_dir_is_noop,
-        # COMP-01c — iso build live | iso build installer split
+        # — iso build live | iso build installer split
         test_cmd_iso_build_requires_subaction,
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
         test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
@@ -6765,7 +6758,7 @@ def main() -> int:
         test_cmd_container_purge_handles_docker_connect_failure_gracefully,
         test_cmd_clean_dispatcher_unknown_action_calls_no_handler,
         test_cmd_build_iso_installer_bails_on_unmet_prereqs,
-        # COMP-01c — chroot build live | chroot build installer split
+        # — chroot build live | chroot build installer split
         test_cmd_chroot_build_no_subaction_defaults_to_live,
         test_cmd_chroot_build_live_explicit_forwards_to_live,
         test_cmd_chroot_build_installer_forwards_to_installer,
@@ -6831,11 +6824,9 @@ def main() -> int:
         test_installer_grub_cfg_has_preseed_kernel_cmdline,
         test_buildconfig_chroot_paths_under_shared_buildroot_parent,
         test_build_flags_carries_chroot_installer_ready_default_false,
-        # ARCH-03
         test_console_with_explicit_tui_does_not_touch_singleton,
         test_console_singleton_fallback_when_tui_omitted,
         test_console_raises_when_no_tui_anywhere,
-        # ARCH-07
         test_logger_info_routes_to_log_tab,
         test_logger_warning_routes_to_log_tab,
         test_logger_error_routes_to_log_tab,
@@ -6847,13 +6838,11 @@ def main() -> int:
         test_setup_logging_preserves_filehandler_added_before_it,
         test_logger_warning_does_not_leak_to_console_tab,
         test_setup_file_logging_filename_has_timestamp,
-        # STA-09
         test_download_file_returns_http_status_detail_on_404,
         test_download_file_success_returns_size_and_empty_detail,
         test_download_file_zero_content_length_does_not_freeze_bar,
-        # STA-03
         test_shipped_build_conf_has_snapshot_enabled,
-        # STA-15 / TEST-04
+        # /
         test_strip_build_version_strips_trailing_binNMU,
         test_strip_build_version_preserves_point_release_suffix,
         test_strip_build_version_strips_binNMU_after_point_release,
@@ -6861,7 +6850,6 @@ def main() -> int:
         test_strip_build_version_handles_udeb_extension,
         test_strip_build_version_no_change_when_no_binNMU,
         test_strip_build_version_rejects_malformed_filename,
-        # STA-12
         test_gcc_base_re_matches_gcc_N_and_gcc_N_base,
         test_gcc_base_re_rejects_other_gcc_prefixed_packages,
         test_gcc_base_re_rejects_malformed_versions,
@@ -6878,7 +6866,7 @@ def main() -> int:
         test_fmt_dep_with_constraint,
         test_fmt_dep_group_alternates_with_pipe,
         test_print_no_handler_crashes_on_uninitialized_session,
-        # UX-03 — autorun summary (in print_commands)
+        # — autorun summary (in print_commands)
         test_format_duration_seconds_only,
         test_format_duration_minutes_seconds,
         test_format_duration_hours_minutes_seconds,
@@ -6888,14 +6876,13 @@ def main() -> int:
         test_print_state_renders_unticked_when_flags_unset,
         test_print_summary_without_timing_renders_state_snapshot,
         test_print_summary_dispatch_through_handler,
-        # EXTRAS-01
         test_pull_recommends_extras_pulls_single_name_recommends,
         test_pull_recommends_extras_skips_when_source_in_skip_src,
         test_pull_recommends_extras_drops_alt_groups,
         test_pull_recommends_extras_handles_multi_mirror_version_buckets,
         test_pull_recommends_extras_skips_already_in_selected_pkgs,
         test_derive_extras_src_names_marks_extras_only_sources,
-        # COMP-01c phase 1: live.list / installer.list split
+        # phase 1: live.list / installer.list split
         test_dep_tree_initialises_subset_exclusive_sets_empty,
         test_buildconfig_argparse_exposes_live_and_installer_list_flags,
         test_read_pkg_list_filters_comments_blanks_and_already_selected,
@@ -6903,14 +6890,14 @@ def main() -> int:
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
         test_derive_subset_exclusive_src_names_no_op_when_both_empty,
         test_derive_subset_exclusive_src_names_handles_installer_exclusive,
-        # COMP-01b phase 2: cache parses udeb (debian-installer) Packages index
+        # phase 2: cache parses udeb (debian-installer) Packages index
         test_mirror_udeb_packages_path_format,
         test_cache_class_declares_udeb_fields_on_init,
         test_ingest_udeb_indices_routes_records_to_udeb_hashtable,
         test_ingest_udeb_indices_skips_mirrors_without_udeb_file,
         test_ingest_udeb_indices_handles_partial_mirror_set,
         test_ingest_udeb_indices_dedups_priority_lists_via_caller,
-        # COMP-01b phase 3: parallel udeb DependencyTree
+        # phase 3: parallel udeb DependencyTree
         test_udeb_view_exposes_udeb_hashtable_as_package_hashtable,
         test_udeb_view_get_packages_resolves_against_udeb_hashtable,
         test_udeb_view_does_not_leak_into_real_package_hashtable,
@@ -6926,7 +6913,7 @@ def main() -> int:
         test_verify_dep_resolution_still_catches_real_violations,
         test_print_extras_lists_recommended_packages,
         test_print_extras_handles_empty_extras_set,
-        # source build args parsing (EXTRAS-01 + COMP-01c subset selectors)
+        # source build args parsing (+ subset selectors)
         test_source_build_args_no_args_defaults_to_pkg_subset,
         test_source_build_args_pkg_subset_explicit,
         test_source_build_args_live_subset_explicit,

@@ -77,9 +77,9 @@ class BuildFlags:
         self.signing_key_verified: bool = False    # signing key sign+verify roundtrip
         self.chroot_ready: bool = False            # build_chroot completed (live)
         self.chroot_verified: bool = False         # build_chroot + verify_chroot all checks passed
-        # COMP-01b phase 5: installer chroot built from udeb closure.
-        # Independent of chroot_ready/_verified — the two chroots have
-        # different lifecycles (live = squashfs payload; installer = initrd).
+        # Installer chroot built from udeb closure.  Independent of
+        # chroot_ready/_verified — the two chroots have different
+        # lifecycles (live = squashfs payload; installer = initrd).
         self.chroot_installer_ready: bool = False  # build_chroot installer completed
         # Set on a successful `iso build live` / `iso build installer`.  Lets
         # `autorun live` / `autorun installer` gate the ISO-build step the
@@ -110,8 +110,8 @@ class BuildSession:
         self.tui: 'Tui' = tui_inst
         self.cache: 'Optional[Cache]' = None
         self.dep_tree: 'Optional[dependencytree.DependencyTree]' = None
-        # COMP-01b phase 3: parallel dep tree resolved against the udeb
-        # world (Cache.udeb_hashtable via Cache.udeb_view()).  Populated
+        # Parallel dep tree resolved against the udeb world
+        # (Cache.udeb_hashtable via Cache.udeb_view()).  Populated
         # by cmd_parse_dependency after the deb passes complete.  Stays
         # None until then; consumers MUST gate on dep_check_ready before
         # touching it.
@@ -131,8 +131,7 @@ class BuildSession:
         resolve_packages invocation tight.
 
         Missing or unreadable file → empty list + a warning logged; the
-        caller treats that as "no exclusive packages".  installer.list
-        starts empty by design (COMP-01a populates it).
+        caller treats that as "no exclusive packages".
         """
         try:
             _raw = utils.readfile(path).split('\n')
@@ -157,11 +156,11 @@ class BuildSession:
         distribution and architecture, then indexes them for fast lookup during
         dependency resolution.  Must be run before parse_dependency.
 
-        COMP-05 idempotency: if cache_ready is already set and an
-        in-memory Cache is loaded, the call no-ops with a hint to use
-        `clean cache` (wipe + re-fetch) or `cache build force` (re-run
-        over existing files).  Prevents accidental multi-GB re-fetches
-        when the operator just re-ran the command out of habit.
+        Idempotency: if cache_ready is already set and an in-memory
+        Cache is loaded, the call no-ops with a hint to use `clean
+        cache` (wipe + re-fetch) or `cache build force` (re-run over
+        existing files).  Prevents accidental multi-GB re-fetches when
+        the operator just re-ran the command out of habit.
         """
         if self.flags.cache_ready and self.cache is not None and 'force' not in args:
             console.print(
@@ -274,7 +273,7 @@ class BuildSession:
                 f"({_mb:.1f} MB freed)", tui.COLOR_INFO)
 
 
-    # --------------------------------------COMP-05: clean dispatchers---------------------------------
+    # --------------------------------------clean dispatchers---------------------------------
     # Each `clean <X>` wipes the working dir for stage X and resets the
     # corresponding BuildFlags + drops in-memory state pointing at the
     # deleted files.  Sudo for buildroot/* (root-owned chroot content);
@@ -618,7 +617,7 @@ class BuildSession:
         self.flags = BuildFlags()
         self.last_source_build_counts = None
         # Scrub the password we just collected — same hygiene the rest
-        # of the codebase uses for sudo passwords (STA-07).
+        # of the codebase uses for sudo passwords.
         _password = '*' * len(_password)
         console.print("clean all: complete — pipeline state reset", tui.COLOR_INFO)
 
@@ -674,8 +673,8 @@ class BuildSession:
             console.print("Cache not ready, Run 'cache build' first")
             return
 
-        # COMP-05 idempotency: if dep_check_ready is set and in-memory
-        # trees exist, no-op with a hint.  The full deb+udeb resolve
+        # Idempotency: if dep_check_ready is set and in-memory trees
+        # exist, no-op with a hint.  The full deb+udeb resolve
         # over a real bookworm cache takes minutes; protect against
         # accidental re-runs.
         if (self.flags.dep_check_ready
@@ -788,8 +787,8 @@ class BuildSession:
         )
 
         # --- Pass V: installer.list (mixed deb + udeb per-entry dispatch) ----
-        # Phase 3 (COMP-01b): installer.list contains BOTH udeb names (for
-        # the installer ramdisk) AND deb names like efibootmgr/grub-pc-bin
+        # installer.list contains BOTH udeb names (for the installer
+        # ramdisk) AND deb names like efibootmgr/grub-pc-bin
         # (for the target system to apt-pull at install time).  Each entry
         # is looked up in both hashtables:
         #   - udeb match → goes into the udeb seed set (Pass VI below)
@@ -857,7 +856,7 @@ class BuildSession:
             _udeb_view, select_recommended=False,
             arch=self.config.arch,
             build_profiles=self.config.build_profiles,
-            # COMP-01b phase 3: udeb world commonly has multi-Package-name
+            # Udeb world commonly has multi-Package-name
             # "providers" that are really just kernel-ABI variants of the
             # same module (ext4-modules-6.1.0-{NN}-amd64-di etc.).  Auto-
             # pick the highest version across names instead of prompting.
@@ -963,12 +962,12 @@ class BuildSession:
             if _resp.lower() not in ('y', 'yes'):
                 return
 
-        # COMP-01b phase 3: parse_sources for the udeb tree too.  Sources
-        # are universal (same source produces both .deb and .udeb), so the
-        # shared source_hashtable already has the records we need.
-        # udeb_dep_tree.selected_srcs is populated independently; downstream
-        # consumers (source download / source build) will iterate over the
-        # UNION of both trees' selected_srcs in Phase 4.
+        # parse_sources for the udeb tree too.  Sources are universal
+        # (same source produces both .deb and .udeb), so the shared
+        # source_hashtable already has the records we need.
+        # udeb_dep_tree.selected_srcs is populated independently;
+        # downstream consumers (source download / source build) will
+        # iterate over the UNION of both trees' selected_srcs.
         if self.udeb_dep_tree is not None:
             console.print("Parsing Udeb Source Packages...", tui.COLOR_INFO)
             if not self.udeb_dep_tree.parse_sources():
@@ -988,9 +987,8 @@ class BuildSession:
         if self.dep_tree.extras_pkg_names:
             console.print(f"EXTRAS: {_extras_only} source(s) are extras-only ", tui.COLOR_INFO)
 
-        # COMP-01c phase 1: derive live/installer-exclusive *source* names
-        # so future source-build / chroot-build subset filters can route
-        # them.  Phase 1 just records the sets; behaviour change lands later.
+        # Derive live/installer-exclusive *source* names so source-build
+        # / chroot-build subset filters can route them.
         _live_only, _installer_only = self.dep_tree.derive_subset_exclusive_src_names()
         if _live_only or _installer_only:
             console.print(
@@ -1034,7 +1032,7 @@ class BuildSession:
         # are reflected on re-runs (operator-driven `patch_refresh` after
         # out-of-band changes to the patch tree).
         #
-        # Phase 4 (COMP-01b): walks BOTH the deb tree AND the udeb tree.
+        # Walks BOTH the deb tree AND the udeb tree.
         # Without the udeb pass, sources that live only in the udeb closure
         # (e.g. fuse3 → libfuse3-3-udeb pulled by a d-i udeb) never get
         # their patches discovered — `source build fuse3` then fails because
@@ -1265,7 +1263,7 @@ class BuildSession:
 
         - Does a size verification
 
-        Phase 4 (COMP-01b): downloads from BOTH the deb tree AND the udeb
+        Downloads from BOTH the deb tree AND the udeb
         tree.  Without the udeb pass, sources that exist only in the udeb
         closure (base-installer, debian-installer-utils, debootstrap,
         depthcharge-tools-installer, …) never land in dir_source, and a
@@ -1943,12 +1941,10 @@ class BuildSession:
                 f"named packages.  Use one or the other.",
                 False, '', [], None,
             )
-        # Default: bare `source build` resolves to pkg (Phase 4 of COMP-01b
-        # — used to be 'live' pre-pivot when bare meant "build everything for
-        # the live ISO").  Now bare = pkg-layer only; operator runs explicit
-        # 'source build live' for live extras and 'source build installer'
-        # for the installer udeb closure.  autorun chains pkg + live for the
-        # live ISO workflow.
+        # Default: bare `source build` resolves to pkg (pkg-layer
+        # only); operator runs explicit 'source build live' for live
+        # extras and 'source build installer' for the installer udeb
+        # closure.  autorun chains pkg + live for the live ISO workflow.
         if not _subset and not _names:
             _subset = 'pkg'
         _profile_override = None
@@ -1963,8 +1959,8 @@ class BuildSession:
 
         Usage: source build [force] [pkg | live | installer | recommended | <pkg> ...] [[profile,...]]
 
-        Phase 4 of COMP-01b rewired the subset selectors to layered
-        semantics matching the parallel-universe architecture:
+        Subset selectors use layered semantics matching the
+        parallel-universe architecture:
 
           force         — rebuild packages even if a valid result already exists
           pkg           — build the pkg.list closure ONLY (no live, installer,
@@ -1978,9 +1974,9 @@ class BuildSession:
                           equivalents).  Many sources overlap with pkg/live
                           (cdebconf produces both .deb and .udeb outputs)
                           and are deduped via shared source_hashtable.
-          recommended   — build ONLY the EXTRAS-01 sources (depth-1 Recommends
-                          pulled into the repo by parse_dependency, but
-                          excluded from chroot install).
+          recommended   — build ONLY the Recommends-only extras sources
+                          (depth-1 Recommends pulled into the repo by
+                          parse_dependency, but excluded from chroot install).
           <pkg>...      — limit the build to the named source packages
           [profile,...] — bracket-delimited token (e.g. `[nocheck]`) overrides
                           BOTH DEB_BUILD_PROFILES and DEB_BUILD_OPTIONS for
@@ -2045,7 +2041,7 @@ class BuildSession:
             console.print("Installer mode: building udeb closure + "
                           "installer-exclusive deb sources")
         elif _subset == 'recommended':
-            console.print("Recommended mode: building EXTRAS-01 extras-only sources")
+            console.print("Recommended mode: building extras-only sources")
         if _profile_override is not None:
             console.print(
                 f"Profile override active: DEB_BUILD_PROFILES + "
@@ -2056,9 +2052,8 @@ class BuildSession:
             )
 
         # Pick the package set per the mode resolved above.
-        # COMP-01b phase 4: subset semantics rewired to the parallel-universe
-        # spec.  Each subset is now a tightly-scoped slice of the unified
-        # source corpus; chroot build live needs source build + source build
+        # Each subset is a tightly-scoped slice of the unified source
+        # corpus; chroot build live needs source build + source build
         # live; chroot build installer needs source build + source build
         # installer.  Sources frequently overlap between deb and udeb worlds
         # (e.g. cdebconf produces both .deb and .udeb outputs from one
@@ -2131,7 +2126,7 @@ class BuildSession:
             return
 
         # Tunneled and locally-built successes are tracked separately so the
-        # autorun summary (UX-03) can report them as distinct categories.
+        # autorun summary can report them as distinct categories.
         _built = _tunneled = _failed = _skipped = 0
         _total = len(packages)
         progress_bar = ProgressBar(label='Source Build', itr_label='pkgs', maxvalue=_total)
@@ -2190,7 +2185,7 @@ class BuildSession:
 
         progress_bar.close(persist=True)
 
-        # Persist the counts so the autorun summary (UX-03) can read them
+        # Persist the counts so the autorun summary can read them
         # later.  This is overwritten on every source_build invocation.
         self.last_source_build_counts = {
             'built':    _built,
@@ -2501,7 +2496,7 @@ class BuildSession:
         return self._group_help('key', _table, action)
 
     def cmd_clean(self, action: str = '', *args):
-        """COMP-05: wipe per-stage working state.  Each sub-action is
+        """Wipe per-stage working state.  Each sub-action is
         idempotent (safe to run on already-clean dirs) and resets the
         BuildFlags + drops in-memory pipeline references that pointed
         at the deleted files.  `force` skips the YESNO confirmation.
@@ -2559,8 +2554,8 @@ class BuildSession:
     def cmd_auto_run_live(self):
         """Run the full pipeline through to a bootable live ISO.
 
-        bare `source build` now builds pkg.list closure only (Phase 4 of
-        COMP-01b).  For a complete live ISO, we need pkg + live extras;
+        Bare `source build` builds pkg.list closure only.  For a
+        complete live ISO, we need pkg + live extras;
         chain both before chroot build.  Each step uses the
         source_build_ready flag, which cmd_source_build resets at entry —
         so bailing on either subset's failure works the same way.
@@ -2610,7 +2605,7 @@ class BuildSession:
 
         Walks _steps sequentially, calls each function, gates on its
         success flag.  On the first failure logs + breaks.  Emits the
-        UX-03 summary (via print_commands.summary) on every exit path,
+        autorun summary (via print_commands.summary) on every exit path,
         carrying the stage label that aborted (if any) + total wall time.
         """
         import print_commands
