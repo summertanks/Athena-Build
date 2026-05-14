@@ -60,6 +60,7 @@ def build_installer_iso(
     signing_homedir: Optional[str] = None,
     signing_pubkey_path: Optional[str] = None,
     pkg_groups: Optional['dict[str, set]'] = None,
+    group_meta: Optional['dict[str, dict[str, str]]'] = None,
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -115,6 +116,12 @@ def build_installer_iso(
     # `.desc` files.
     if pkg_groups:
         if not _stage_group_manifests(_staging, pkg_groups):
+            return False
+        # Phase 2: emit tasksel `.desc` so the installer's pkgsel step
+        # surfaces the non-[base] groups as user-selectable tasks.
+        # group_meta provides operator-supplied descriptions; falls
+        # back to a default per-group title when omitted.
+        if not _stage_tasksel_desc(_staging, pkg_groups, group_meta or {}):
             return False
 
     if not _generate_apt_repo(_staging, suite, codename, version, password):
@@ -494,6 +501,84 @@ def _stage_base_include(staging: str, pkgs: Optional[list]) -> bool:
         return False
     tui.console.print(
         f"base_include: {len(pkgs)} package(s) → .disk/base_include"
+    )
+    return True
+
+
+def _stage_tasksel_desc(staging: str,
+                        pkg_groups: 'dict[str, set]',
+                        group_meta: 'dict[str, dict[str, str]]') -> bool:
+    """Write a tasksel `.desc` file at `staging/.disk/athena-tasks.desc`
+    listing every non-`[base]` group as a tasksel task.
+
+    The installer's pre-pkgsel.d hook (shipped via the installer
+    overlay) copies this file to `/target/usr/share/tasksel/descs/`
+    before pkgsel runs `in-target tasksel`, so tasksel finds it when
+    it scans for tasks during the "Software selection" step of d-i.
+
+    `.desc` format (RFC-822 stanzas per task):
+
+        Task: athena-<group>
+        Section: athena
+        Description: <one-line title>
+         <optional extended body paragraph>
+        Key:
+         <seed package name>
+         ...
+
+    `Description:` comes from `group_meta[group].get('description')` if
+    the operator declared `## Description: ...` in pkg.list under the
+    `[group]` header; otherwise falls back to a default.
+
+    `Key:` lists the SEEDS for the task (the canonical-name set we
+    resolved at build time minus deps that have other roots).  We use
+    the full canonical set here — tasksel re-resolves transitive deps
+    via apt at install time, so duplicates with other tasks are
+    harmless.
+
+    `[base]` is intentionally omitted — base packages are installed at
+    debootstrap time via base-installer's `base_include` mechanism,
+    well before pkgsel runs.
+    """
+    if not pkg_groups:
+        return True
+    _non_base = [
+        _g for _g in pkg_groups.keys() if _g != 'base'
+    ]
+    if not _non_base:
+        # Only `[base]` defined — nothing for tasksel to offer.
+        tui.console.print(
+            "tasksel: only [base] group defined — skipping .desc generation"
+        )
+        return True
+    _dir = os.path.join(staging, '.disk')
+    _path = os.path.join(_dir, 'athena-tasks.desc')
+    try:
+        os.makedirs(_dir, exist_ok=True)
+        _stanzas = []
+        for _g in _non_base:
+            _desc = (group_meta.get(_g, {}).get('description')
+                     or f"Athena {_g} group")
+            _keys = sorted(pkg_groups.get(_g, set()))
+            _stanza = [
+                f"Task: athena-{_g}",
+                "Section: athena",
+                f"Description: {_desc}",
+                " Operator-selected install-time group from Athena's pkg.list.",
+                "Key:",
+            ]
+            for _k in _keys:
+                _stanza.append(f" {_k}")
+            _stanzas.append('\n'.join(_stanza))
+        with open(_path, 'w', encoding='utf-8') as fh:
+            fh.write('\n\n'.join(_stanzas) + '\n')
+    except OSError as e:
+        tui.console.print(f"ERROR: write tasksel desc: {e}")
+        logger.error(f"_stage_tasksel_desc: {e}")
+        return False
+    tui.console.print(
+        f"tasksel: {len(_non_base)} task(s) → .disk/athena-tasks.desc "
+        f"({', '.join(sorted(_non_base))})"
     )
     return True
 

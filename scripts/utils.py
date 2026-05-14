@@ -1141,6 +1141,52 @@ def parse_pkg_list_groups(path: str) -> 'dict[str, list[str]]':
     return _groups
 
 
+def parse_pkg_list_group_meta(path: str) -> 'dict[str, dict[str, str]]':
+    """Parse per-group metadata from a pkg.list file.
+
+    Format: a `## Description: ...` comment line directly after a
+    `[group]` header (or anywhere within the group's body, but
+    convention is right under the header) becomes the group's
+    `Description:` field in the generated tasksel `.desc` file.
+
+    Returns dict mapping group name → dict of metadata.  Currently
+    the only key is `'description'`; the shape is extensible (e.g.
+    `'section'`, `'mandatory'`) without breaking call sites.
+
+    A flat (legacy) pkg.list with no `[section]` markers returns
+    `{'base': {}}` — implicit base group with empty metadata.
+
+    Missing description → group is absent from the returned dict's
+    entry value (caller falls back to a default).
+    """
+    _raw = readfile(path)
+    _lines = _raw.splitlines()
+    _section_re = re.compile(r'^\s*\[([^\]]*)\]\s*$')
+    _desc_re = re.compile(r'^\s*##\s*Description:\s*(.+?)\s*$')
+
+    _has_sections = any(_section_re.match(_l) for _l in _lines)
+    if not _has_sections:
+        return {'base': {}}
+
+    _meta: 'dict[str, dict[str, str]]' = {}
+    _current: 'Optional[str]' = None
+    for _l in _lines:
+        _stripped = _l.strip()
+        if not _stripped:
+            continue
+        _m_sec = _section_re.match(_l)
+        if _m_sec:
+            _current = _m_sec.group(1).strip()
+            _meta.setdefault(_current, {})
+            continue
+        if _current is None:
+            continue
+        _m_desc = _desc_re.match(_l)
+        if _m_desc:
+            _meta[_current]['description'] = _m_desc.group(1)
+    return _meta
+
+
 def readfile(filename: str) -> str:
     try:
         with open(filename, 'r') as f:
