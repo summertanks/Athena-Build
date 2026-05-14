@@ -4034,13 +4034,17 @@ class _PrintSessionStub:
         self.dep_tree = None
 
         class _Flags:
-            cache_ready = False
-            dep_check_ready = False
-            download_ready = False
-            build_container_ready = False
-            source_build_ready = False
-            chroot_ready = False
-            chroot_verified = False
+            cache_ready             = False
+            dep_check_ready         = False
+            download_ready          = False
+            build_container_ready   = False
+            source_build_ready      = False
+            signing_key_verified    = False
+            chroot_ready            = False
+            chroot_verified         = False
+            chroot_installer_ready  = False
+            iso_live_ready          = False
+            iso_installer_ready     = False
         self.flags = _Flags()
 
 
@@ -4098,13 +4102,20 @@ def _build_autorun_session_stub(*, all_done: bool, source_build_done: bool):
         dir_image = '/tmp/image'
 
     class _Flags:
-        cache_ready           = True
-        dep_check_ready       = True
-        download_ready        = source_build_done or all_done
-        build_container_ready = source_build_done or all_done
-        source_build_ready    = source_build_done or all_done
-        chroot_ready          = all_done
-        chroot_verified       = all_done
+        cache_ready             = True
+        dep_check_ready         = True
+        download_ready          = source_build_done or all_done
+        build_container_ready   = source_build_done or all_done
+        source_build_ready      = source_build_done or all_done
+        signing_key_verified    = all_done
+        chroot_ready            = all_done
+        chroot_verified         = all_done
+        # 2026-05-14: summary view now renders live + installer chroot
+        # rows + iso target rows independently.  Default to all_done so
+        # an "all green" run renders both targets as built.
+        chroot_installer_ready  = all_done
+        iso_live_ready          = all_done
+        iso_installer_ready     = all_done
 
     class _Pkg:
         def __init__(self, name): self._name = name
@@ -4158,8 +4169,10 @@ def test_autorun_summary_success_includes_counts_and_iso_path():
     assert '2 tunneled'  in output
     assert 'verified'    in output
     assert '/tmp/image/athena-0.1-amd64.iso' in output
-    # All-green next-step hint should be visible
-    assert 'Ready' in output and 'build_iso' in output
+    assert '/tmp/image/athena-installer-0.1-amd64.iso' in output
+    # All-green rendering — both ISOs marked built.
+    assert 'ISO live' in output
+    assert 'ISO installer' in output
 
 
 def test_autorun_summary_aborted_marks_stage_and_partial_state():
@@ -4181,7 +4194,60 @@ def test_autorun_summary_aborted_marks_stage_and_partial_state():
     assert "'source download'" in output
     assert '30m 00s' in output
     assert 'Source build   : not run' in output
-    assert 'Chroot         : not built' in output
+    assert 'Chroot (live)  : not built' in output
+    assert 'Chroot (inst)  : not built' in output
+
+
+def test_print_state_renders_three_sections_with_all_flags():
+    """`print state` groups stages into Shared / Live ISO target /
+    Installer ISO target.  Pin section headers + every flag label so a
+    future BuildFlags addition doesn't silently drop from the view."""
+    import print_commands
+    sess = _build_autorun_session_stub(all_done=True, source_build_done=True)
+    output = _capture_console_print(
+        lambda: print_commands._print_state(sess)
+    )
+    # Section headers.
+    assert 'Shared:' in output
+    assert 'Live ISO target:' in output
+    assert 'Installer ISO target:' in output
+    # Shared rows.
+    assert 'cache_build' in output
+    assert 'dep_parse' in output
+    assert 'source_download' in output
+    assert 'container_init' in output
+    assert 'source_build' in output
+    assert 'signing_key_verified' in output
+    # Live rows.
+    assert 'chroot_build_live' in output
+    assert 'chroot_verify' in output
+    assert 'iso_build_live' in output
+    # Installer rows.
+    assert 'chroot_build_installer' in output
+    assert 'iso_build_installer' in output
+
+
+def test_print_state_renders_unticked_when_flags_unset():
+    """With every BuildFlag False, all rows show the `·` (unticked)
+    glyph; no rows accidentally hard-coded to True."""
+    import print_commands
+    sess = _build_autorun_session_stub(all_done=False, source_build_done=False)
+    # Force the two flags the stub does set to True back to False so we
+    # exercise the pure-unticked path.
+    sess.flags.cache_ready = False
+    sess.flags.dep_check_ready = False
+    output = _capture_console_print(
+        lambda: print_commands._print_state(sess)
+    )
+    # No ticked rows.
+    assert '[✓]' not in output, (
+        f"Expected no ticked rows when every flag is False, got:\n{output}"
+    )
+    # All eleven rows should be present as unticked.
+    assert output.count('[·]') == 11, (
+        "Expected 11 unticked rows (one per BuildFlag), got "
+        f"{output.count('[·]')}:\n{output}"
+    )
 
 
 def test_print_summary_without_timing_renders_state_snapshot():
@@ -6818,6 +6884,8 @@ def main() -> int:
         test_format_duration_hours_minutes_seconds,
         test_autorun_summary_success_includes_counts_and_iso_path,
         test_autorun_summary_aborted_marks_stage_and_partial_state,
+        test_print_state_renders_three_sections_with_all_flags,
+        test_print_state_renders_unticked_when_flags_unset,
         test_print_summary_without_timing_renders_state_snapshot,
         test_print_summary_dispatch_through_handler,
         # EXTRAS-01
