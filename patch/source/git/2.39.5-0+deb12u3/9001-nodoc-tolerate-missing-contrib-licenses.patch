@@ -1,0 +1,61 @@
+Description: tolerate missing contrib LICENSE files under nodoc profile
+ git's `debian/rules` `override_dh_installdocs-arch` target does a
+ sanity-check `diff -q` between two contrib LICENSE files and the
+ system common-licenses they'll later be symlinked to (via
+ `debian/git.links`):
+ .
+   diff -q  …/contrib/persistent-https/LICENSE  /usr/share/common-licenses/Apache-2.0
+   diff -bq …/contrib/subtree/COPYING          /usr/share/common-licenses/GPL-2
+ .
+ The check confirms the bytes match before dh_link replaces the file
+ with a symlink — protects against silent license-text drift when the
+ git source ships a new revision of either LICENSE that no longer
+ matches the common-licenses package.
+ .
+ Under `DEB_BUILD_PROFILES=nodoc` (Athena's default — `[Source]
+ BuildProfiles = nodoc, nocheck` in build.conf), dh_installdocs is a
+ partial no-op: it skips installing the contrib/* doc tree, so neither
+ LICENSE file lands at the path the diff checks.  The diff then fails
+ with "No such file or directory", returning rc=2, and
+ dpkg-buildpackage aborts the binary stage with:
+ .
+   diff: …/usr/share/doc/git/contrib/persistent-https/LICENSE: No such file or directory
+   make[1]: *** [debian/rules:151: override_dh_installdocs-arch] Error 2
+ .
+ Gate each diff on the source file existing.  When `nodoc` skipped the
+ install, the diff is a no-op — dh_link's symlink target won't be
+ there either, which is the expected `nodoc` shape (the
+ contrib/persistent-https and contrib/subtree doc paths simply don't
+ ship in the resulting .deb).  When `nodoc` is NOT in profiles, the
+ files exist and the diff runs unchanged.
+ .
+ Captured during Athena's GROUPS-01 phase-3 gnome build on
+ 2026-05-14, where git is pulled in transitively by the
+ [development-tools] group seed `build-essential` plus the [gnome]
+ closure (gnome-shell → gjs → gobject-introspection → … → git).
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-14
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -148,8 +148,15 @@
+ override_dh_installdocs-arch:
+ 	dh_installdocs --arch -X.gitignore
+ 	# These licenses are replaced with symlinks in git.links.
+-	diff -q '$(GIT)'/usr/share/doc/git/contrib/persistent-https/LICENSE /usr/share/common-licenses/Apache-2.0
+-	diff -bq '$(GIT)'/usr/share/doc/git/contrib/subtree/COPYING /usr/share/common-licenses/GPL-2
++	# Gated on file existence: the `nodoc` build profile skips
++	# dh_installdocs's contrib/* copy, so the LICENSE files aren't
++	# installed in that mode and the diff would fail-stop the build.
++	# When absent, dh_link's symlink target won't exist either —
++	# that's the expected nodoc shape.
++	test ! -f '$(GIT)'/usr/share/doc/git/contrib/persistent-https/LICENSE || \
++	  diff -q '$(GIT)'/usr/share/doc/git/contrib/persistent-https/LICENSE /usr/share/common-licenses/Apache-2.0
++	test ! -f '$(GIT)'/usr/share/doc/git/contrib/subtree/COPYING || \
++	  diff -bq '$(GIT)'/usr/share/doc/git/contrib/subtree/COPYING /usr/share/common-licenses/GPL-2
+ 	rm -rf '$(GIT)'/usr/share/doc/git/contrib/completion
+ 	rm -rf '$(GIT)'/usr/share/doc/git/contrib/emacs
+ 	rm -rf '$(GIT)'/usr/share/doc/git/contrib/hooks
