@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
 
 def test_mirror_url_composition():
     from utils import Mirror
-    m = Mirror(mirror_id='main', baseurl='http://deb.debian.org/',
+    m = Mirror(id='main', baseurl='http://deb.debian.org/',
                baseid='/debian/', release='bookworm', suffix='',
                component='main', arch='amd64')
     assert m.url == 'http://deb.debian.org/debian', m.url
@@ -38,7 +38,7 @@ def test_mirror_url_composition():
 
 def test_mirror_suite_with_suffix():
     from utils import Mirror
-    m = Mirror(mirror_id='security', baseurl='http://deb.debian.org',
+    m = Mirror(id='security', baseurl='http://deb.debian.org',
                baseid='debian-security', release='bookworm', suffix='-security',
                component='main', arch='amd64')
     assert m.suite == 'bookworm-security', m.suite
@@ -50,6 +50,107 @@ def test_mirror_repr_does_not_crash():
     from utils import Mirror
     m = Mirror('updates', 'http://x', 'y', 'z', '-updates', 'main', 'amd64')
     repr(m)  # raises if broken
+
+
+def test_mirror_is_frozen_after_construction():
+    """Mirror is a frozen dataclass — assignment after construction must
+    raise FrozenInstanceError so a downstream caller can't silently
+    mutate a shared instance."""
+    import dataclasses as _dc
+    from utils import Mirror
+    m = Mirror(id='main', baseurl='http://x.test', baseid='debian',
+               release='bookworm', suffix='', component='main', arch='amd64')
+    try:
+        m.baseurl = 'http://attacker.example'  # type: ignore[misc]
+    except _dc.FrozenInstanceError:
+        pass
+    else:
+        raise AssertionError("Mirror must be frozen; assignment should raise")
+
+
+def test_mirror_normalises_baseurl_and_baseid_slashes():
+    """__post_init__ strips trailing slashes from baseurl and leading +
+    trailing slashes from baseid so url-building is consistent regardless
+    of operator slash hygiene in [Mirror.*] sections."""
+    from utils import Mirror
+    m = Mirror(id='main', baseurl='http://x.test/', baseid='/debian/',
+               release='bookworm', suffix='', component='main', arch='amd64')
+    assert m.baseurl == 'http://x.test'
+    assert m.baseid == 'debian'
+    assert m.url == 'http://x.test/debian'
+
+
+def test_mirror_rejects_empty_required_fields():
+    """__post_init__ refuses empty strings on id / baseurl / baseid /
+    release / component / arch with a clear ValueError naming the field."""
+    from utils import Mirror
+    for _field, _bad in [
+        ('id', ''), ('baseurl', ''), ('baseid', ''),
+        ('release', ''), ('component', ''), ('arch', ''),
+    ]:
+        kwargs = dict(id='main', baseurl='http://x.test', baseid='debian',
+                      release='bookworm', suffix='', component='main', arch='amd64')
+        kwargs[_field] = _bad
+        try:
+            Mirror(**kwargs)
+        except ValueError as e:
+            assert _field in str(e), f"ValueError must name the field, got {e}"
+        else:
+            raise AssertionError(f"Mirror({_field}={_bad!r}) should raise ValueError")
+
+
+def test_mirror_rejects_baseurl_without_scheme():
+    """A baseurl without `://` (e.g. `deb.debian.org` bare hostname) is
+    rejected — catches a real operator-typo class.  The error message
+    lists the acceptable schemes so the operator can fix without
+    digging."""
+    from utils import Mirror
+    try:
+        Mirror(id='main', baseurl='deb.debian.org', baseid='debian',
+               release='bookworm', suffix='', component='main', arch='amd64')
+    except ValueError as e:
+        assert 'scheme' in str(e), str(e)
+    else:
+        raise AssertionError("Mirror with scheme-less baseurl should raise")
+
+
+def test_mirror_rejects_suffix_without_leading_dash():
+    """A non-empty suffix must start with `-` so `suite = release + suffix`
+    composes to a real suite name (`bookworm-security`, not
+    `bookwormsecurity`).  Empty suffix is fine — main mirrors use it."""
+    from utils import Mirror
+    # Empty suffix OK
+    m = Mirror(id='main', baseurl='http://x.test', baseid='debian',
+               release='bookworm', suffix='', component='main', arch='amd64')
+    assert m.suite == 'bookworm'
+    # Malformed suffix rejected
+    try:
+        Mirror(id='security', baseurl='http://x.test', baseid='debian-security',
+               release='bookworm', suffix='security',  # missing leading `-`
+               component='main', arch='amd64')
+    except ValueError as e:
+        assert "start with '-'" in str(e), str(e)
+    else:
+        raise AssertionError("Mirror with suffix='security' (no leading -) should raise")
+
+
+def test_mirror_with_snapshot_returns_new_instance_untouched_original():
+    """Mirror.with_snapshot returns a NEW Mirror — the original instance
+    is unchanged.  Confirms the frozen-dataclass contract holds across
+    the `replace` path and downstream callers can pass the same Mirror
+    to multiple `with_snapshot` calls without cross-contamination."""
+    from utils import Mirror
+    orig = Mirror(id='main', baseurl='http://deb.debian.org', baseid='debian',
+                  release='bookworm', suffix='', component='main', arch='amd64')
+    snap = orig.with_snapshot('20260506T120451Z')
+    # Original untouched
+    assert orig.baseurl == 'http://deb.debian.org'
+    assert orig.baseid == 'debian'
+    # Snap has the rewritten URL
+    assert snap.baseurl == 'https://snapshot.debian.org/archive'
+    assert snap.baseid == 'debian/20260506T120451Z'
+    # Distinct instances
+    assert orig is not snap
 
 
 def _write_test_config(tmpdir: str, body: str) -> str:
@@ -3881,7 +3982,7 @@ def test_mirror_with_snapshot_uses_passed_baseurl():
     threading through BuildConfig.snapshot_baseurl can target a fork's
     own snapshot mirror layout without monkey-patching the default."""
     from utils import Mirror
-    m = Mirror(mirror_id='main', baseurl='http://x.test', baseid='debian',
+    m = Mirror(id='main', baseurl='http://x.test', baseid='debian',
                release='bookworm', suffix='', component='main', arch='amd64')
     snap = m.with_snapshot('20260506T120451Z',
                            baseurl='https://snap.athena.local/archive')
@@ -4786,11 +4887,11 @@ def test_mirror_udeb_packages_path_format():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from utils import Mirror
-    m = Mirror(mirror_id='test', baseurl='http://example/', baseid='debian',
+    m = Mirror(id='test', baseurl='http://example/', baseid='debian',
                release='bookworm', suffix='', component='main', arch='amd64')
     assert m.udeb_packages_path == 'main/debian-installer/binary-amd64/Packages'
     # Different component → reflected
-    m2 = Mirror(mirror_id='ctest', baseurl='http://example/', baseid='debian',
+    m2 = Mirror(id='ctest', baseurl='http://example/', baseid='debian',
                 release='bookworm', suffix='', component='contrib', arch='arm64')
     assert m2.udeb_packages_path == 'contrib/debian-installer/binary-arm64/Packages'
 
@@ -4932,7 +5033,7 @@ def test_ingest_udeb_indices_routes_records_to_udeb_hashtable():
 
         c = Cache.__new__(Cache)
         c._arch_table = _StubArchTable()
-        c.mirrors = [Mirror(mirror_id='main', baseurl='http://example/',
+        c.mirrors = [Mirror(id='main', baseurl='http://example/',
                             baseid='debian', release='bookworm', suffix='',
                             component='main', arch='amd64')]
         c.mirror_udeb_cache_files = {'main': _udeb_path}
@@ -4969,9 +5070,9 @@ def test_ingest_udeb_indices_skips_mirrors_without_udeb_file():
     c = Cache.__new__(Cache)
     c._arch_table = _StubArchTable()
     c.mirrors = [
-        Mirror(mirror_id='main',     baseurl='http://example/', baseid='debian',
+        Mirror(id='main',     baseurl='http://example/', baseid='debian',
                release='bookworm', suffix='', component='main', arch='amd64'),
-        Mirror(mirror_id='security', baseurl='http://example/', baseid='debian',
+        Mirror(id='security', baseurl='http://example/', baseid='debian',
                release='bookworm-security', suffix='', component='main', arch='amd64'),
     ]
     # Neither mirror has a udeb file path — both should be skipped
@@ -5005,11 +5106,11 @@ def test_ingest_udeb_indices_handles_partial_mirror_set():
         c = Cache.__new__(Cache)
         c._arch_table = _StubArchTable()
         c.mirrors = [
-            Mirror(mirror_id='main',     baseurl='http://example/', baseid='debian',
+            Mirror(id='main',     baseurl='http://example/', baseid='debian',
                    release='bookworm', suffix='', component='main', arch='amd64'),
-            Mirror(mirror_id='updates',  baseurl='http://example/', baseid='debian',
+            Mirror(id='updates',  baseurl='http://example/', baseid='debian',
                    release='bookworm-updates', suffix='', component='main', arch='amd64'),
-            Mirror(mirror_id='security', baseurl='http://example/', baseid='debian',
+            Mirror(id='security', baseurl='http://example/', baseid='debian',
                    release='bookworm-security', suffix='', component='main', arch='amd64'),
         ]
         # Only main has udebs.  updates + security mirror.id NOT in dict.
@@ -5046,9 +5147,9 @@ def test_ingest_udeb_indices_dedups_priority_lists_via_caller():
         c = Cache.__new__(Cache)
         c._arch_table = _StubArchTable()
         c.mirrors = [
-            Mirror(mirror_id='main1', baseurl='http://example/', baseid='debian',
+            Mirror(id='main1', baseurl='http://example/', baseid='debian',
                    release='bookworm', suffix='', component='main', arch='amd64'),
-            Mirror(mirror_id='main2', baseurl='http://example/', baseid='debian',
+            Mirror(id='main2', baseurl='http://example/', baseid='debian',
                    release='bookworm', suffix='', component='main', arch='amd64'),
         ]
         c.mirror_udeb_cache_files = {'main1': _udeb_path, 'main2': _udeb_path}
@@ -6757,6 +6858,12 @@ def main() -> int:
         test_mirror_url_composition,
         test_mirror_suite_with_suffix,
         test_mirror_repr_does_not_crash,
+        test_mirror_is_frozen_after_construction,
+        test_mirror_normalises_baseurl_and_baseid_slashes,
+        test_mirror_rejects_empty_required_fields,
+        test_mirror_rejects_baseurl_without_scheme,
+        test_mirror_rejects_suffix_without_leading_dash,
+        test_mirror_with_snapshot_returns_new_instance_untouched_original,
         test_buildconfig_parses_three_mirrors,
         test_buildconfig_rejects_no_mirrors,
         test_package_and_source_have_mirror_field,
