@@ -14,25 +14,28 @@ firmware-linux-free
 
 # Bootloader
 #
-# COMP-02 phase C TODO: replace `grub-pc` with `grub-pc-bin` +
-# `grub-efi-amd64-bin` (binaries, no conflict) and let grub-installer
-# pick the meta-package at install time.  That requires fixing
-# apt-cdrom-setup first so `apt-install grub-pc` actually works.
-# See docs/plans/comp-02-robust-build.md.
+# Ship the bin-only packages for both BIOS (`grub-pc-bin`) and EFI
+# (`grub-efi-amd64-bin`) modes.  Unlike the full `grub-pc` /
+# `grub-efi-amd64` meta-packages, the `-bin` packages do NOT Conflict,
+# so both can coexist on the live/installer system and on /target.
 #
-# `grub-pc` is the BIOS-mode bootloader.  Pre-installing it here (so
-# debootstrap pulls it into /target via --include base_include) makes
-# grub-installer's `apt-install grub-pc` step succeed as "already the
-# newest version" instead of failing on broken in-target apt sources.
-# Without this, grub-installer exits 10, corrupts main-menu's debconf
-# DB, and the installer enters a respawn loop (caught 2026-05-12 after
-# extensive apt-cdrom-setup debugging).
+# At install time, `grub-installer` detects the firmware mode (BIOS vs
+# EFI) and runs `apt-install grub-pc` or `apt-install grub-efi-amd64`.
+# The chosen meta-package Depends on its corresponding `-bin`, which
+# is already present in /target (debootstrap pulled it in via
+# .disk/base_include), so apt only has to install the small meta and
+# its EFI/BIOS-specific glue.  No network fetch of grub itself.
 #
-# For EFI targets we'd want `grub-efi-amd64` instead — they Conflict,
-# so only one meta-package can be in the pkg list.  When EFI support
-# is on the roadmap, this becomes a build-config switch or the
-# installer flow needs to decide post-detection.
-grub-pc
+# History: COMP-02 phase A pre-installed the full `grub-pc` here as a
+# workaround for a broken apt-cdrom-setup chain — `grub-installer`'s
+# `apt-install grub-pc` step would fail on the in-target apt sources,
+# exit 10, corrupt main-menu's debconf DB, and trigger a respawn loop.
+# Phase C (commit 42e03ea) fixed apt-cdrom-setup end-to-end by signing
+# the Release file and installing the pubkey at /target before the
+# apt-cdrom step runs, so the workaround is no longer needed.  Switching
+# to bin-only also unblocks EFI installs (Phase D, this change).
+grub-pc-bin
+grub-efi-amd64-bin
 
 # Essential Packages
 base-files
