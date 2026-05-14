@@ -121,7 +121,7 @@ def audit_stanza(
     # Continuation lines with TAB prefix (some parsers stricter on this)
     for _r in raw_lines:
         if _r.startswith('\t'):
-            _issues.append(f"TAB-CONT: stanza has tab-prefix continuation line")
+            _issues.append("TAB-CONT: stanza has tab-prefix continuation line")
             break
     # Unterminated field: a field header (`Name:`) with NO value AND no
     # continuation line following — libdebian-installer trips on this.
