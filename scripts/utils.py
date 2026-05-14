@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import logging
 import os
@@ -57,25 +58,65 @@ def _strip_quotes(s: str) -> str:
     return s
 
 
+@dataclasses.dataclass(frozen=True)
 class Mirror:
     """A single archive source (e.g. bookworm main, bookworm-security main).
 
-    A mirror is composed from defaults + per-mirror overrides at parse time:
+    Immutable (frozen dataclass) so a Mirror passed around the pipeline
+    can't be silently mutated by a downstream consumer.  Construction is
+    the only place input shape is validated; afterwards every URL is
+    composed from the same set of normalised fields via @property
+    accessors.
+
+    Composition:
         url   = <baseurl>/<baseid>          # e.g. http://deb.debian.org/debian
         suite = <release><suffix>           # e.g. bookworm, bookworm-security
-    The split exists so rebasing to a different release only requires changing
-    one [Base].RELEASE field, not every [Mirror.*] section.
+    The release / suffix split exists so rebasing to a different release
+    only requires changing one [Base].RELEASE field, not every
+    [Mirror.*] section.
+
+    Validation is intentionally narrow (non-empty + URL scheme +
+    suffix shape) — anything that could legitimately vary across forks
+    is accepted.  Operators get a clear ValueError at construct time
+    rather than a confusing 404 deep in the download path.
     """
 
-    def __init__(self, mirror_id: str, baseurl: str, baseid: str,
-                 release: str, suffix: str, component: str, arch: str):
-        self.id        = mirror_id
-        self.baseurl   = baseurl.rstrip('/')
-        self.baseid    = baseid.strip('/')
-        self.release   = release
-        self.suffix    = suffix or ''
-        self.component = component
-        self.arch      = arch
+    id:        str
+    baseurl:   str
+    baseid:    str
+    release:   str
+    suffix:    str
+    component: str
+    arch:      str
+
+    def __post_init__(self) -> None:
+        # Normalise: strip trailing slash on baseurl, leading/trailing on
+        # baseid.  Frozen dataclass needs object.__setattr__ for in-place
+        # mutation — the freeze only prevents external writes.
+        object.__setattr__(self, 'baseurl', self.baseurl.rstrip('/'))
+        object.__setattr__(self, 'baseid',  self.baseid.strip('/'))
+        # Normalise None suffix to empty string for back-compat with
+        # callers that pass `suffix=None`.
+        if self.suffix is None:
+            object.__setattr__(self, 'suffix', '')
+
+        # Validation — fail early with a useful message.
+        for _field in ('id', 'baseurl', 'baseid', 'release', 'component', 'arch'):
+            _val = getattr(self, _field)
+            if not _val or not isinstance(_val, str) or not _val.strip():
+                raise ValueError(
+                    f"Mirror.{_field}: non-empty string required, got {_val!r}"
+                )
+        if '://' not in self.baseurl:
+            raise ValueError(
+                f"Mirror.baseurl must include a scheme (http://, https://, "
+                f"or file://), got {self.baseurl!r}"
+            )
+        if self.suffix and not self.suffix.startswith('-'):
+            raise ValueError(
+                f"Mirror.suffix must be empty or start with '-' "
+                f"(e.g. '-updates', '-security'), got {self.suffix!r}"
+            )
 
     @property
     def suite(self) -> str:
@@ -105,7 +146,7 @@ class Mirror:
         # treats this path as OPTIONAL — missing-from-Release is fine.
         return f'{self.component}/debian-installer/binary-{self.arch}/Packages'
 
-    def with_snapshot(self, ts, baseurl: str = 'https://snapshot.debian.org/archive'):
+    def with_snapshot(self, ts, baseurl: str = 'https://snapshot.debian.org/archive') -> 'Mirror':
         """Return a copy of this Mirror rewritten to the snapshot service.
 
         The default targets snapshot.debian.org's layout
@@ -123,14 +164,10 @@ class Mirror:
         """
         if ts is None:
             return self
-        return Mirror(
-            mirror_id = self.id,
-            baseurl   = baseurl,
-            baseid    = f'{self.baseid}/{ts}',
-            release   = self.release,
-            suffix    = self.suffix,
-            component = self.component,
-            arch      = self.arch,
+        return dataclasses.replace(
+            self,
+            baseurl = baseurl,
+            baseid  = f'{self.baseid}/{ts}',
         )
 
     def __repr__(self) -> str:
@@ -561,7 +598,7 @@ class BuildConfig:
                     continue
                 _id = _section.split('.', 1)[1]
                 self.mirrors.append(Mirror(
-                    mirror_id = _id,
+                    id        = _id,
                     baseurl   = config_parser.get(_section, 'BASEURL', fallback=_default_baseurl),
                     baseid    = config_parser.get(_section, 'BASEID',  fallback=_default_baseid),
                     release   = self.release,
