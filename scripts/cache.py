@@ -85,7 +85,10 @@ class Cache:
             self.error_str = f"Snapshot resolution failed: {e}"
             logger.error(self.error_str)
             return
-        self.mirrors = [m.with_snapshot(self.snapshot_ts) for m in buildconfig.mirrors]
+        self.mirrors = [
+            m.with_snapshot(self.snapshot_ts, baseurl=buildconfig.snapshot_baseurl)
+            for m in buildconfig.mirrors
+        ]
 
         # Compression: tried in this order per file; first one listed in the
         # mirror's InRelease wins.  bookworm-updates / bookworm-security ship

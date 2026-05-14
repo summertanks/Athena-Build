@@ -105,21 +105,27 @@ class Mirror:
         # treats this path as OPTIONAL — missing-from-Release is fine.
         return f'{self.component}/debian-installer/binary-{self.arch}/Packages'
 
-    def with_snapshot(self, ts):
-        """Return a copy of this Mirror rewritten to snapshot.debian.org.
+    def with_snapshot(self, ts, baseurl: str = 'https://snapshot.debian.org/archive'):
+        """Return a copy of this Mirror rewritten to the snapshot service.
 
-        snapshot.debian.org preserves the full archive layout under
-            /archive/<baseid>/<TS>/dists/<suite>/...
+        The default targets snapshot.debian.org's layout
+            <baseurl>/<baseid>/<TS>/dists/<suite>/...
         so we only need to rewrite baseurl + baseid; everything else
         (suite, component, packages_path, sources_path) is unchanged.
         Passing ts=None returns self — call sites can use this method
         unconditionally.
+
+        `baseurl` defaults to the Debian snapshot service for back-compat
+        with callers that don't have a BuildConfig.  Live call sites in
+        `resolve_snapshot_timestamp` thread `config.snapshot_baseurl`
+        through so a fork's snapshot mirror can be configured via
+        `[Snapshot] BaseUrl` without touching this method.
         """
         if ts is None:
             return self
         return Mirror(
             mirror_id = self.id,
-            baseurl   = 'https://snapshot.debian.org/archive',
+            baseurl   = baseurl,
             baseid    = f'{self.baseid}/{ts}',
             release   = self.release,
             suffix    = self.suffix,
@@ -266,64 +272,72 @@ def check_dep3_header(patch_path: str) -> list:
     return [_f for _f in REQUIRED if _f not in found]
 
 
-def _query_snapshot_latest() -> str:
-    """Fetch the latest snapshot timestamp covering both `debian` and
-    `debian-security` archives on snapshot.debian.org.
+def _query_snapshot_latest(api_url: str, archive_keys: 'List[str]') -> str:
+    """Fetch the latest snapshot timestamp covering every archive in
+    `archive_keys` (typically `['debian', 'debian-security']`).
 
-    Returns min(latest_debian, latest_debian-security) so the chosen TS is
-    valid for both archive trees (snapshot.d.o resolves a missing exact TS
-    to the nearest snapshot ≤ TS via 302, but we want the symmetric guarantee
-    that both archives have a snapshot at or before the timestamp).
+    Returns min(latest_per_key) so the chosen TS is valid for every
+    archive tree (the service resolves a missing exact TS to the nearest
+    snapshot ≤ TS via 302, but we want the symmetric guarantee that
+    every archive has a snapshot at or before the timestamp).
 
-    Endpoint:  GET https://snapshot.debian.org/mr/timestamp/
-    Response:  {"result": {"debian": [...sorted ts list...], "debian-security": [...]}}
+    Endpoint:  GET <api_url>
+    Response:  {"result": {"<key>": [...sorted ts list...], ...}}
     The list is sorted lexicographically which matches chronological order
     for the YYYYMMDDTHHMMSSZ format, so `[-1]` is the latest.
+
+    Both `api_url` and `archive_keys` are sourced from BuildConfig
+    ([Snapshot] TimestampApi / ArchiveKeys) so a fork running its own
+    snapshot mirror can configure them without code changes.
     """
-    URL = 'https://snapshot.debian.org/mr/timestamp/'
     try:
-        resp = requests.get(URL, timeout=30)
+        resp = requests.get(api_url, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        raise RuntimeError(f"Failed to query {URL}: {e}") from e
+        raise RuntimeError(f"Failed to query {api_url}: {e}") from e
 
     try:
         result = data['result']
-        debian_latest   = result['debian'][-1]
-        security_latest = result['debian-security'][-1]
+        _latest_per_key = {_k: result[_k][-1] for _k in archive_keys}
     except (KeyError, IndexError, TypeError) as e:
         raise RuntimeError(
-            f"Unexpected response shape from {URL}: {e}; top-level keys={list(data.keys())}"
+            f"Unexpected response shape from {api_url}: {e}; "
+            f"top-level keys={list(data.keys())}, "
+            f"requested archive_keys={archive_keys}"
         ) from e
 
-    for _label, _ts in (('debian', debian_latest), ('debian-security', security_latest)):
+    for _label, _ts in _latest_per_key.items():
         if not _SNAPSHOT_TS_RE.match(_ts):
             raise RuntimeError(
-                f"snapshot.d.o returned malformed timestamp for {_label}: {_ts!r}"
+                f"snapshot service returned malformed timestamp for {_label}: {_ts!r}"
             )
 
     # Lexical min == chronological min for YYYYMMDDTHHMMSSZ
-    chosen = min(debian_latest, security_latest)
-    tui.console.print(
-        f"snapshot.d.o latest: debian={debian_latest}, "
-        f"debian-security={security_latest}, picking {chosen}"
-    )
+    chosen = min(_latest_per_key.values())
+    _per_key_str = ', '.join(f"{_k}={_v}" for _k, _v in _latest_per_key.items())
+    tui.console.print(f"snapshot latest: {_per_key_str}, picking {chosen}")
     return chosen
 
 
-def _validate_snapshot_timestamp(ts: str, mirrors: 'List[Mirror]') -> bool:
+def _validate_snapshot_timestamp(
+        ts: str, mirrors: 'List[Mirror]',
+        snapshot_baseurl: str = 'https://snapshot.debian.org/archive',
+) -> bool:
     """HEAD-validate that every mirror has an InRelease available at the
     given snapshot timestamp.  Catches typos and timestamps that predate a
     given suite (e.g. picking 20180101 when bookworm didn't exist yet).
 
-    snapshot.debian.org responds 302 → /file/<sha> for any timestamp it can
-    serve (it nearest-≤ resolves arbitrary timestamps), so we follow the
+    The snapshot service responds 302 → /file/<sha> for any timestamp it
+    can serve (nearest-≤ resolves arbitrary timestamps), so we follow the
     redirect and check the final 200.  A 404 at the redirect target means
     the file doesn't exist for that timestamp and the validation fails.
+
+    `snapshot_baseurl` defaults to the Debian service for back-compat;
+    live call sites pass `config.snapshot_baseurl`.
     """
     for m in mirrors:
-        snap = m.with_snapshot(ts)
+        snap = m.with_snapshot(ts, baseurl=snapshot_baseurl)
         url  = snap.dist_url + 'InRelease'
         try:
             resp = requests.head(url, timeout=15, allow_redirects=True)
@@ -397,8 +411,11 @@ def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
             except OSError as e:
                 logger.warning(f"Cannot read {state_file}: {e}; re-resolving")
 
-        # Cold path: ask snapshot.debian.org
-        ts = _query_snapshot_latest()
+        # Cold path: ask the snapshot service
+        ts = _query_snapshot_latest(
+            config.snapshot_timestamp_api,
+            config.snapshot_archive_keys,
+        )
         try:
             with open(state_file, 'w') as fh:
                 fh.write(ts + '\n')
@@ -417,10 +434,12 @@ def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
             f"Snapshot.Timestamp = {cfg_ts!r} is not a valid Debian snapshot "
             f"timestamp (expected YYYYMMDDTHHMMSSZ, e.g. 20260506T120451Z, or 'latest')"
         )
-    if not _validate_snapshot_timestamp(cfg_ts, config.mirrors):
+    if not _validate_snapshot_timestamp(
+            cfg_ts, config.mirrors,
+            snapshot_baseurl=config.snapshot_baseurl):
         raise ValueError(
             f"Snapshot.Timestamp = {cfg_ts!r} does not cover all configured "
-            f"mirrors on snapshot.debian.org (see prior log lines)"
+            "mirrors on the snapshot service (see prior log lines)"
         )
     tui.console.print(f"Snapshot pin: explicit {cfg_ts} validated")
     _SNAPSHOT_TS_CACHE[cache_key] = cfg_ts
@@ -436,6 +455,13 @@ class BuildConfig:
     baseversion: str
     snapshot_enabled: bool
     snapshot_timestamp_config: str
+    # Externalised snapshot endpoints — defaults target Debian's
+    # snapshot.debian.org service.  Operators running a fork's own
+    # snapshot mirror override via [Snapshot] BaseUrl / TimestampApi /
+    # ArchiveKeys.
+    snapshot_baseurl: str
+    snapshot_timestamp_api: str
+    snapshot_archive_keys: list[str]
     build_codename: str
     build_version: str
     container_release: str
@@ -551,6 +577,21 @@ class BuildConfig:
             # live-mirror behaviour for users who haven't migrated yet.
             self.snapshot_enabled = config_parser.getboolean('Snapshot', 'Enabled', fallback=False)
             self.snapshot_timestamp_config = config_parser.get('Snapshot', 'Timestamp', fallback='latest').strip()
+            # Snapshot endpoints — defaults preserve current Debian
+            # behaviour; overridable for forks / derivative distros
+            # running their own snapshot mirror.
+            self.snapshot_baseurl = config_parser.get(
+                'Snapshot', 'BaseUrl',
+                fallback='https://snapshot.debian.org/archive').rstrip('/')
+            self.snapshot_timestamp_api = config_parser.get(
+                'Snapshot', 'TimestampApi',
+                fallback='https://snapshot.debian.org/mr/timestamp/').strip()
+            _archive_keys_raw = config_parser.get(
+                'Snapshot', 'ArchiveKeys',
+                fallback='debian, debian-security')
+            self.snapshot_archive_keys = [
+                _k.strip() for _k in _archive_keys_raw.split(',') if _k.strip()
+            ]
             self.build_codename = _strip_quotes(config_parser.get('Build', 'CODENAME'))
             self.build_version  = _strip_quotes(config_parser.get('Build', 'VERSION'))
 
