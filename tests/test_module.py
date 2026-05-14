@@ -1879,6 +1879,32 @@ def test_iso_installer_export_pubkey_to_staging_errors_when_disk_dir_missing():
         os.unlink(_pubkey_path)
 
 
+def test_di_utils_dpkg_divert_no_rename_patch_exists_and_is_dep3_clean():
+    """COMP-02 phase E: silence the ~23 `dpkg-divert: warning:
+    diverting file '/sbin/start-stop-daemon' from an Essential package
+    with rename is dangerous` warnings that filled the install log
+    before this patch.  Pin the path so a future re-pack of
+    patch/source/ doesn't drop it, and pin DEP-3 cleanliness so the
+    patch keeps its provenance header."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    _path = os.path.join(
+        _ROOT, 'patch', 'source', 'debian-installer-utils', '1.146',
+        '9001-dpkg-divert-no-rename.patch'
+    )
+    assert os.path.isfile(_path), _path
+    _missing = utils.check_dep3_header(_path)
+    assert not _missing, f"DEP-3 fields missing: {_missing}"
+    with open(_path) as fh:
+        _content = fh.read()
+    # Pin both the file being patched AND the swap (--rename → --no-rename).
+    assert '+++ b/chroot-setup.sh' in _content, _content
+    assert '--no-rename "$1"' in _content, _content
+    assert '-\tchroot /target dpkg-divert --quiet --add' in _content, _content
+    assert '-\tchroot /target dpkg-divert --quiet --remove' in _content, _content
+
+
 def test_base_installer_athena_keyring_patch_exists_and_is_dep3_clean():
     """The quilt patch on base-installer 1.213 is the install-time half
     of phase C — without it the disc's signed Release is unusable
@@ -6098,6 +6124,7 @@ def main() -> int:
         test_iso_installer_export_pubkey_to_staging_errors_when_pubkey_missing,
         test_iso_installer_export_pubkey_to_staging_errors_when_disk_dir_missing,
         test_base_installer_athena_keyring_patch_exists_and_is_dep3_clean,
+        test_di_utils_dpkg_divert_no_rename_patch_exists_and_is_dep3_clean,
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
