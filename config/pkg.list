@@ -184,6 +184,19 @@ strace
 gnome-shell
 gdm3
 
+# X.org server drivers — `xserver-xorg` (pulled by gdm3 transitively)
+# has alt-deps `xserver-xorg-video-all | xorg-driver-video` and
+# `xserver-xorg-input-all | xorg-driver-input`.  Neither alternative
+# resolves automatically because the virtual `xorg-driver-*` names are
+# Provides from individual driver packages — none of which are in
+# our closure unless seeded explicitly.  The `*-all` meta-packages
+# pull every driver Debian ships (amdgpu, ati, intel, nouveau, fbdev,
+# vesa, qxl, vmware, libinput, …).  Heavy-handed but covers any
+# target hardware; prune to a hardware-targeted subset later if ISO
+# size matters.
+xserver-xorg-video-all
+xserver-xorg-input-all
+
 # Core GNOME apps
 gnome-terminal
 nautilus
