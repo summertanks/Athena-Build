@@ -36,10 +36,10 @@ def strip_build_version(file: str) -> str:
         ValueError: filename is not in `name_version_arch.ext` shape.
     """
     _name, _ext = os.path.splitext(file)
-    _name = _name.split('_')
-    if len(_name) != 3:
+    _parts = _name.split('_')
+    if len(_parts) != 3:
         raise ValueError(f"Incorrectly formatted package filename: {file!r}")
-    _pkg_name, _version, _arch = _name
+    _pkg_name, _version, _arch = _parts
     _version = re.sub(r"\+b\d+$", "", _version)
     return f"{_pkg_name}_{_version}_{_arch}{_ext}"
 

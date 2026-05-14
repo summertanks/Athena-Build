@@ -556,7 +556,7 @@ class Source(Sources):
         Each entry is a list of OR-alternatives; each alternative is a tuple (name, ver, op).
         apt_pkg.parse_src_depends filters arch and profile restrictions internally.
         """
-        apt_pkg.config['APT::Build-Profiles'] = ' '.join(active_profiles)
+        apt_pkg.config['APT::Build-Profiles'] = ' '.join(active_profiles)  # type: ignore[index]
         all_deps: List[List[Tuple]] = []
         for field in ('Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch'):
             raw = (self.get(field) or '').strip()
