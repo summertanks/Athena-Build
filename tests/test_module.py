@@ -4782,6 +4782,158 @@ def test_read_pkg_list_missing_file_returns_empty():
     assert out == []
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUPS-01: pkg.list INI-style group parser
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_parse_pkg_list_groups_flat_file_becomes_implicit_base():
+    """Backward compat: a flat pkg.list (no [section] headers) parses
+    as a single `[base]` group containing every non-comment line.  The
+    in-repo pkg.list pre-dates groups and must keep working."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import parse_pkg_list_groups
+    with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as fh:
+        fh.write("# leading comment\nbash\ncoreutils\n# another\nlinux-image-amd64\n")
+        _path = fh.name
+    try:
+        groups = parse_pkg_list_groups(_path)
+        assert list(groups.keys()) == ['base'], groups
+        assert groups['base'] == ['bash', 'coreutils', 'linux-image-amd64']
+    finally:
+        os.unlink(_path)
+
+
+def test_parse_pkg_list_groups_ini_style_multi_section():
+    """An INI-style pkg.list with multiple `[group]` headers parses
+    into a dict respecting declaration order (Python 3.7+ dict
+    preserves insertion order).  Comments and blanks inside sections
+    are skipped."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import parse_pkg_list_groups
+    _body = (
+        "# top-of-file comment\n"
+        "[base]\n"
+        "bash\n"
+        "# inline comment\n"
+        "coreutils\n"
+        "\n"
+        "[development-tools]\n"
+        "gcc\n"
+        "make\n"
+        "\n"
+        "[gnome]\n"
+        "gnome-shell\n"
+        "firefox-esr\n"
+    )
+    with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as fh:
+        fh.write(_body)
+        _path = fh.name
+    try:
+        groups = parse_pkg_list_groups(_path)
+        assert list(groups.keys()) == ['base', 'development-tools', 'gnome'], list(groups.keys())
+        assert groups['base'] == ['bash', 'coreutils']
+        assert groups['development-tools'] == ['gcc', 'make']
+        assert groups['gnome'] == ['gnome-shell', 'firefox-esr']
+    finally:
+        os.unlink(_path)
+
+
+def test_parse_pkg_list_groups_rejects_seed_before_first_section():
+    """In INI-style mode (any `[section]` present), a seed before any
+    header is a configuration error — operator probably forgot `[base]`
+    when migrating a flat file.  ValueError names the line and tells
+    the operator how to fix."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import parse_pkg_list_groups
+    _body = "bash\n[gnome]\ngnome-shell\n"
+    with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as fh:
+        fh.write(_body)
+        _path = fh.name
+    try:
+        try:
+            parse_pkg_list_groups(_path)
+        except ValueError as e:
+            assert 'bash' in str(e), str(e)
+            assert '[base]' in str(e), str(e)
+        else:
+            raise AssertionError("seed before first section should raise ValueError")
+    finally:
+        os.unlink(_path)
+
+
+def test_parse_pkg_list_groups_empty_section_name_raises():
+    """`[]` as a section header is malformed; reject with a clear error
+    rather than producing a confusing empty-key group."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import parse_pkg_list_groups
+    with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as fh:
+        fh.write("[]\nbash\n")
+        _path = fh.name
+    try:
+        try:
+            parse_pkg_list_groups(_path)
+        except ValueError as e:
+            assert 'empty group name' in str(e), str(e)
+        else:
+            raise AssertionError("empty section name should raise ValueError")
+    finally:
+        os.unlink(_path)
+
+
+def test_dep_tree_initialises_pkg_group_fields_empty():
+    """DependencyTree starts with empty pkg_group_pkg_names dict and
+    empty pkg_group_extras_pkg_names set; populated by Pass III in
+    cmd_parse_dependency."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt.pkg_group_pkg_names = {}
+    dt.pkg_group_extras_pkg_names = set()
+    dt.pkg_group_extras_src_names = set()
+    assert dt.pkg_group_pkg_names == {}
+    assert dt.pkg_group_extras_pkg_names == set()
+    assert dt.pkg_group_extras_src_names == set()
+
+
+def test_stage_group_manifests_writes_one_file_per_group():
+    """`_stage_group_manifests` writes `.disk/groups/<group>.list` with
+    one canonical package name per line, alpha-sorted (reproducibility)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_group_manifests
+    with tempfile.TemporaryDirectory() as _stage:
+        _groups = {
+            'base':              {'bash', 'coreutils', 'linux-image-amd64'},
+            'development-tools': {'make', 'gcc', 'git'},
+            'gnome':             {'gnome-shell', 'firefox-esr'},
+        }
+        assert _stage_group_manifests(_stage, _groups) is True
+        _dir = os.path.join(_stage, '.disk', 'groups')
+        assert os.path.isdir(_dir), _dir
+        for _g, _names in _groups.items():
+            _path = os.path.join(_dir, f'{_g}.list')
+            assert os.path.isfile(_path), _path
+            with open(_path) as fh:
+                _lines = [_l.strip() for _l in fh if _l.strip()]
+            assert _lines == sorted(_names), (_g, _lines)
+
+
+def test_stage_group_manifests_empty_groups_is_noop():
+    """No groups → no manifest dir, no error.  Lets callers pass an
+    empty dict unconditionally."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_group_manifests
+    with tempfile.TemporaryDirectory() as _stage:
+        assert _stage_group_manifests(_stage, {}) is True
+        assert not os.path.exists(os.path.join(_stage, '.disk', 'groups'))
+
+
 def test_derive_subset_exclusive_src_names_marks_live_only_sources():
     """A source whose every binary is in live_exclusive_pkg_names is marked
     in live_exclusive_src_names; a mixed source (some pkg-layer, some
@@ -7058,6 +7210,13 @@ def main() -> int:
         test_buildconfig_argparse_exposes_live_and_installer_list_flags,
         test_read_pkg_list_filters_comments_blanks_and_already_selected,
         test_read_pkg_list_missing_file_returns_empty,
+        test_parse_pkg_list_groups_flat_file_becomes_implicit_base,
+        test_parse_pkg_list_groups_ini_style_multi_section,
+        test_parse_pkg_list_groups_rejects_seed_before_first_section,
+        test_parse_pkg_list_groups_empty_section_name_raises,
+        test_dep_tree_initialises_pkg_group_fields_empty,
+        test_stage_group_manifests_writes_one_file_per_group,
+        test_stage_group_manifests_empty_groups_is_noop,
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
         test_derive_subset_exclusive_src_names_no_op_when_both_empty,
         test_derive_subset_exclusive_src_names_handles_installer_exclusive,

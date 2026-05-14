@@ -59,6 +59,7 @@ def build_installer_iso(
     deb_whitelist=None,
     signing_homedir: Optional[str] = None,
     signing_pubkey_path: Optional[str] = None,
+    pkg_groups: Optional['dict[str, set]'] = None,
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -106,6 +107,15 @@ def build_installer_iso(
 
     if not _stage_pool(dir_repo, _staging, password, deb_whitelist):
         return False
+
+    # GROUPS-01: per-group package manifests so the installer (and
+    # post-install operator scripts) can apt-install a chosen group
+    # from /cdrom/pool.  Phase 1 ships plain-text lists at
+    # .disk/groups/<group>.list; Phase 2 will also generate tasksel
+    # `.desc` files.
+    if pkg_groups:
+        if not _stage_group_manifests(_staging, pkg_groups):
+            return False
 
     if not _generate_apt_repo(_staging, suite, codename, version, password):
         return False
@@ -484,6 +494,42 @@ def _stage_base_include(staging: str, pkgs: Optional[list]) -> bool:
         return False
     tui.console.print(
         f"base_include: {len(pkgs)} package(s) → .disk/base_include"
+    )
+    return True
+
+
+def _stage_group_manifests(staging: str, pkg_groups: 'dict[str, set]') -> bool:
+    """Write per-group package manifests under `staging/.disk/groups/`.
+
+    One file per group, named `<group>.list`, containing one canonical
+    package name per line (alpha-sorted for reproducibility).  The
+    installer reads these at install time to drive its `apt-install`
+    of operator-selected groups; the same files are useful for
+    post-install operator scripts that want to enable a group
+    manually (`xargs apt-get install -y < /cdrom/.disk/groups/gnome.list`).
+
+    `[base]` is always emitted (even if it duplicates .disk/base_include)
+    so consumers can treat all groups uniformly.
+
+    Returns True on success / no-op (empty `pkg_groups`).
+    """
+    if not pkg_groups:
+        return True
+    _dir = os.path.join(staging, '.disk', 'groups')
+    try:
+        os.makedirs(_dir, exist_ok=True)
+        for _group, _names in pkg_groups.items():
+            _path = os.path.join(_dir, f'{_group}.list')
+            with open(_path, 'w', encoding='utf-8') as fh:
+                for _name in sorted(_names):
+                    fh.write(_name + '\n')
+    except OSError as e:
+        tui.console.print(f"ERROR: write group manifest: {e}")
+        logger.error(f"_stage_group_manifests: {e}")
+        return False
+    tui.console.print(
+        f"groups: {len(pkg_groups)} manifest(s) → .disk/groups/"
+        f" ({', '.join(sorted(pkg_groups.keys()))})"
     )
     return True
 

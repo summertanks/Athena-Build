@@ -743,28 +743,59 @@ class BuildSession:
             if _priority != 'required' and _priority != 'important':
                 console.print(f"Package {_pkg} with unexpected priority :{_priority}")
 
-        # --- Pass III: manual list ----------------------------------------------
+        # --- Pass III: manual list (per-group) ------------------------------
+        # pkg.list may be flat (legacy — implicit `[base]`) or INI-style
+        # with named `[group]` sections.  Either way we iterate groups
+        # in declaration order, resolving each one's seeds and
+        # crediting the newly-pulled-in canonical names to that group's
+        # entry in `pkg_group_pkg_names`.  Non-`[base]` groups end up
+        # in `pkg_group_extras_pkg_names` — same exclusion semantics
+        # as pool extras (subtracted from `_base_include`, filtered
+        # from live install batches) but conflicts ARE enforced
+        # because group-level packages are not mutually exclusive
+        # within a single install run.
         console.print("Pass III: Checking dependency for manually selected packages", tui.COLOR_INFO)
-        selected_packages = list(self.dep_tree.selected_pkgs.keys())
-        manual_list = []
 
         console.print(f"Parsing {self.config.pkglist_path}...")
         try:
-            manual_packages_list = utils.readfile(self.config.pkglist_path).split('\n')
-        except OSError as e:
-            console.print(f"ERROR: cannot read package list {self.config.pkglist_path}")
-            logger.error(f"readfile({self.config.pkglist_path}): {e}")
-            manual_packages_list = []
+            _pkg_groups = utils.parse_pkg_list_groups(self.config.pkglist_path)
+        except (OSError, ValueError) as e:
+            console.print(f"ERROR: cannot read package list {self.config.pkglist_path}: {e}")
+            logger.error(f"parse_pkg_list_groups({self.config.pkglist_path}): {e}")
+            _pkg_groups = {}
 
-        # Strip comments and blank lines; only add packages not already selected.
-        for pkg in manual_packages_list:
-            if pkg and not pkg.startswith('#') and not pkg.isspace():
-                pkg = pkg.strip()
-                if pkg not in selected_packages:
-                    manual_list.append(pkg)
+        _total_manual_added = 0
+        for _group, _seeds in _pkg_groups.items():
+            _pre_group_keys = set(self.dep_tree.selected_pkgs.keys())
+            # Filter out names already in selected_pkgs (required /
+            # important / earlier groups) — resolve_packages no-ops on
+            # them anyway but the count stays accurate.
+            _new_seeds = [_p for _p in _seeds if _p not in _pre_group_keys]
+            if _new_seeds:
+                self.dep_tree.resolve_packages(_new_seeds)
+            # Per-group canonical names = delta in selected_pkgs.keys().
+            _post_group_keys = set(self.dep_tree.selected_pkgs.keys())
+            self.dep_tree.pkg_group_pkg_names[_group] = (
+                _post_group_keys - _pre_group_keys
+            )
+            _delta = len(self.dep_tree.pkg_group_pkg_names[_group])
+            _total_manual_added += _delta
+            console.print(
+                f"  [{_group}] {len(_seeds)} seed(s) → {_delta} canonical "
+                "package(s) (delta from prior groups + required/important)"
+            )
 
-        console.print(f"Added {len(manual_list)} unique manually selected packages")
-        self.dep_tree.resolve_packages(manual_list)
+        # Non-base groups: their packages get filtered from
+        # _base_include + live install batches but stay in the pool.
+        self.dep_tree.pkg_group_extras_pkg_names = set().union(*[
+            _names for _group, _names in self.dep_tree.pkg_group_pkg_names.items()
+            if _group != 'base'
+        ])
+
+        console.print(
+            f"Manual: {len(_pkg_groups)} group(s), "
+            f"{_total_manual_added} total canonical added"
+        )
 
         __num_total = self.dep_tree.selected_count
         console.print(f"Dependencies for manually added packages : {__num_total - __num_required}")
@@ -1841,14 +1872,22 @@ class BuildSession:
             # target post-install (or by grub-installer at install
             # time, the case that motivated the file).
             _pool_extras = self.dep_tree.pool_extras_pkg_names
+            # GROUPS-01: pkg.list groups other than [base] ship in the
+            # cdrom pool but are NOT installed at target debootstrap
+            # time — tasksel apt-installs the operator-chosen groups
+            # at install time from /cdrom/pool.
+            _group_extras = self.dep_tree.pkg_group_extras_pkg_names
             _canonical = {
                 _name for _name in self.dep_tree.selected_pkgs
                 if _name == self.dep_tree.selected_pkgs[_name]['Package']
             }
-            _base_include = sorted(_canonical - _extras - _live_excl - _pool_extras)
-            # Pool keeps Recommends-only extras AND pool extras so the
-            # operator (or grub-installer) can apt-install them
-            # post-install via the cdrom: source.
+            _base_include = sorted(
+                _canonical - _extras - _live_excl - _pool_extras - _group_extras
+            )
+            # Pool keeps Recommends-only extras, pool extras, AND
+            # group extras so the operator (or grub-installer /
+            # tasksel) can apt-install them post-install via the
+            # cdrom: source.
             _pool_whitelist = _canonical - _live_excl
             _ok = iso_installer.build_installer_iso(
                 dir_chroot_installer=self.config.dir_chroot_installer,
@@ -1864,6 +1903,7 @@ class BuildSession:
                 deb_whitelist=_pool_whitelist,
                 signing_homedir=signing.signing_home(self.config),
                 signing_pubkey_path=signing.signing_pubkey_path(self.config),
+                pkg_groups=self.dep_tree.pkg_group_pkg_names,
             )
             if not _ok:
                 console.print(

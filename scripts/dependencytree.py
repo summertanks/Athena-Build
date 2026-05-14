@@ -120,6 +120,25 @@ class DependencyTree:
         self.pool_extras_pkg_names: set = set()
         self.pool_extras_src_names: set = set()
 
+        # pkg.list groups — operator-defined install-time package
+        # groups.  `pkg_group_pkg_names[<group>]` is the set of
+        # canonical package names whose membership in selected_pkgs is
+        # owed to that group (declaration-order respected — a package
+        # also reachable from an earlier group's closure is credited
+        # there, not here).  The `[base]` group is always installed
+        # (live image + target debootstrap); non-base groups ship in
+        # `/cdrom/pool` only and the installer apt-installs the
+        # operator-selected subset onto /target at install time.
+        # `pkg_group_extras_pkg_names` is the union of non-base
+        # groups' canonical names — same exclusion semantics as
+        # `pool_extras_pkg_names` (subtract from base_include, filter
+        # from live install batches) but conflicts ARE enforced
+        # because group-level packages are not mutually exclusive
+        # within a single install.
+        self.pkg_group_pkg_names: 'Dict[str, set]' = {}
+        self.pkg_group_extras_pkg_names: set = set()
+        self.pkg_group_extras_src_names: set = set()
+
         self.arch = arch
         self.build_profiles = build_profiles
 
