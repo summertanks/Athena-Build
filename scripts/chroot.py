@@ -567,15 +567,32 @@ class _ChrootMixin:
         # the filter is a no-op.
         _extras = self._dependencytree.extras_pkg_names
 
+        # Non-[base] pkg.list groups — packages defined in named
+        # groups other than [base] ship in /cdrom/pool but are NOT
+        # installed in the live chroot (live = [base] only).  The
+        # installer's tasksel step apt-installs operator-chosen groups
+        # at install time.  Empty set when pkg.list is flat (legacy
+        # mode — entire file becomes implicit [base]).
+        _group_extras: set = getattr(
+            self._dependencytree, 'pkg_group_extras_pkg_names', set())
+
+        # Pool extras — `config/pool.list` packages that ship in the
+        # cdrom pool but are never installed in any chroot.  Same
+        # exclusion shape as group extras.
+        _pool_extras: set = getattr(
+            self._dependencytree, 'pool_extras_pkg_names', set())
+
         # Restrict the graph to canonical (non-virtual) names that are NOT
-        # part of the libc seed AND NOT recommends-only extras.  Aliases
-        # would inflate the graph with redundant nodes and Kahn would
-        # never be able to retire them.
+        # part of the libc seed AND NOT in any of the exclusion sets
+        # above.  Aliases would inflate the graph with redundant nodes
+        # and Kahn would never be able to retire them.
         all_pkgs = [
             p for p in selected
             if p == selected[p]['Package']
             and p not in libc_seed_set
             and p not in _extras
+            and p not in _group_extras
+            and p not in _pool_extras
         ]
         in_scope = set(all_pkgs)
 

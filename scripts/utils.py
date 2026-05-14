@@ -1074,6 +1074,73 @@ def get_sha256(filepath: str) -> str:
         return ''
 
 
+def parse_pkg_list_groups(path: str) -> 'dict[str, list[str]]':
+    """Parse a pkg.list file into named groups.
+
+    Two supported layouts:
+
+    1. **Flat** (legacy, no `[section]` markers) — every non-comment,
+       non-blank line is a seed.  Treated as a single `[base]` group so
+       older configs without groups still parse cleanly.
+
+    2. **INI-style** — `[group_name]` headers split the file into named
+       groups, each containing one seed name per line.  Comments (`#`)
+       and blank lines are allowed within sections; group names are
+       free-form identifiers (no validation beyond non-empty).
+
+    Returns a dict mapping group name → list of seed names (declaration
+    order preserved, which `dict[str, ...]` guarantees in Python 3.7+).
+
+    Raises:
+        ValueError: in INI-style mode, a seed appears before any
+        `[section]` header (operator probably forgot `[base]`).
+        OSError: path is unreadable.
+    """
+    _raw = readfile(path)
+    _lines = _raw.splitlines()
+
+    # First pass: does the file contain ANY `[section]` header?  Decides
+    # which mode to parse in.
+    _section_re = re.compile(r'^\s*\[([^\]]*)\]\s*$')
+    _has_sections = any(_section_re.match(_l) for _l in _lines)
+
+    if not _has_sections:
+        # Flat mode — every package becomes a [base] seed.
+        _seeds = []
+        for _l in _lines:
+            _name = _l.strip()
+            if not _name or _name.startswith('#'):
+                continue
+            _seeds.append(_name)
+        return {'base': _seeds}
+
+    # INI mode.  Track current section; reject seeds before any header.
+    _groups: 'dict[str, list[str]]' = {}
+    _current: 'Optional[str]' = None
+    for _lineno, _l in enumerate(_lines, start=1):
+        _stripped = _l.strip()
+        if not _stripped or _stripped.startswith('#'):
+            continue
+        _m = _section_re.match(_l)
+        if _m:
+            _current = _m.group(1).strip()
+            if not _current:
+                raise ValueError(
+                    f"{path}:{_lineno}: empty group name in section header"
+                )
+            _groups.setdefault(_current, [])
+            continue
+        if _current is None:
+            raise ValueError(
+                f"{path}:{_lineno}: package {_stripped!r} appears before any "
+                "`[group]` header; INI-style pkg.list requires every "
+                "package under a named section.  Add `[base]` at the top "
+                "if the file was previously flat."
+            )
+        _groups[_current].append(_stripped)
+    return _groups
+
+
 def readfile(filename: str) -> str:
     try:
         with open(filename, 'r') as f:

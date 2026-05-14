@@ -599,6 +599,33 @@ def _print_installer_exclusive(session, *_extras) -> None:
         )
 
 
+def _print_groups(session, *_extras) -> None:
+    """pkg.list groups — packages resolved per `[group]` header in
+    declaration order.  `[base]` is always installed (live image +
+    target debootstrap); other groups ship in /cdrom/pool only and the
+    installer (tasksel) apt-installs the operator-selected subset
+    onto /target at install time."""
+    if not _require_dep_check(session):
+        return
+    _groups: 'dict[str, set]' = getattr(
+        session.dep_tree, 'pkg_group_pkg_names', {})
+    if not _groups:
+        tui.console.print("No pkg.list groups resolved yet")
+        return
+    _extras_set: set = getattr(
+        session.dep_tree, 'pkg_group_extras_pkg_names', set())
+    tui.console.print(
+        f"pkg.list groups ({len(_groups)} group(s), "
+        f"{len(_extras_set)} non-base canonical(s) in /cdrom/pool):"
+    )
+    for _group, _names in _groups.items():
+        _label = 'base — installed everywhere' if _group == 'base' else \
+                 'pool-only, installer apt-installs on selection'
+        tui.console.print(f"  [{_group}]  {len(_names)} pkg(s)  ({_label})")
+        for _name in sorted(_names):
+            tui.console.print(f"    {_name}")
+
+
 def _print_tunneled(session, *_extras) -> None:
     """Packages set to use prebuilt .debs from the base Debian repo."""
     cfg = session.config
@@ -861,6 +888,7 @@ CATEGORIES: 'dict[str, tuple[Callable[..., None], str, str]]' = {
     'live':      (_print_live_exclusive,      'Packages', 'packages live needs over and above pkg.list'),
     'installer': (_print_installer_exclusive, 'Packages', 'deb-arm of installer.list (efibootmgr/grub-pc-bin etc.)'),
     'udebs':     (_print_udebs,                'Packages', 'udeb closure for installer ramdisk'),
+    'groups':    (_print_groups,               'Packages', 'pkg.list groups + per-group canonical packages'),
     'pkg':       (_print_pkg,       'Packages',      'full package detail — usage: print pkg <name>'),
     'deps':      (_print_deps,      'Packages',      'flat dep list of a package — usage: print deps <name>'),
 

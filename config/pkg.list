@@ -1,3 +1,12 @@
+# pkg.list — INI-style.  Each `[group]` section is an install-time
+# package group.  `[base]` is always installed (live image + target
+# debootstrap); other groups ship in /cdrom/pool and the installer
+# (tasksel) apt-installs the operator-selected subset on /target.
+#
+# Backward-compat: a flat pkg.list (no `[section]` markers) is parsed
+# as a single implicit `[base]` group.
+
+[base]
 # Linux kernel
 linux-image-amd64
 # Kernel headers — needed only by DKMS / out-of-tree module compiles.
