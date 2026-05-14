@@ -163,3 +163,46 @@ vim
 less
 htop
 strace
+
+
+[gnome]
+## Description: GNOME desktop environment — minimal but functional (shell, file manager, terminal, browser).
+# Basic GNOME — login screen, desktop shell, file manager, terminal,
+# settings UI, browser, common GNOME utilities.  Deliberately omits
+# games, office suites, music/photo apps; operator can apt-install
+# those individually post-install if desired.  Closure is large —
+# expect ~1-2 GB added to repo/ and a comparable source-build time
+# (mutter, gjs, webkit2gtk pull in via gnome-shell's Depends).
+#
+# Display server / compositor lives inside gnome-shell's deps
+# (mutter handles Wayland and X11 via xwayland).  gdm3 pulls in the
+# greeter + xserver-xorg fallback automatically.  network-manager-
+# gnome is the only non-GNOME-named explicit seed; needed for the
+# shell's network applet to find NetworkManager.
+
+# Desktop + display manager
+gnome-shell
+gdm3
+
+# Core GNOME apps
+gnome-terminal
+nautilus
+gnome-control-center
+gnome-text-editor
+gnome-system-monitor
+gnome-screenshot
+gnome-disk-utility
+gnome-calculator
+eog
+evince
+
+# Browser
+firefox-esr
+
+# Network manager (frontend for the shell's network applet)
+network-manager-gnome
+
+# Fonts — Noto is GNOME's preferred sans/serif/mono; DejaVu fills
+# Latin-script gaps that Noto-core doesn't cover.
+fonts-noto-core
+fonts-dejavu-core
