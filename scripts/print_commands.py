@@ -191,25 +191,72 @@ def _print_paths(session, *_extras) -> None:
 # ─── Build state views ──────────────────────────────────────────────────────
 
 def _print_state(session, *_extras) -> None:
-    """Pipeline stage progress (BuildFlags) — what's done, what's pending."""
+    """Pipeline stage progress (BuildFlags) split by target.
+
+    Three sections:
+      Shared          — stages whose output feeds both ISO targets
+                        (cache, dep tree, sources, build container,
+                        source build, signing key).
+      Live ISO target — live chroot build, verify, ISO build.
+      Installer ISO target — installer chroot build (from udeb
+                        closure), ISO build.
+
+    The installer chroot has no `verify` step today (its layout is a
+    rootskel-driven udeb closure, not a target system; the 8-check
+    verifier in `chroot.py` doesn't apply).  If/when an installer-
+    side verifier lands, add a row here.
+    """
     flags = session.flags
-    tui.console.print("Pipeline state:")
-    _stages = [
-        ('cache_ready',           'build_cache       ', 'fetch + index APT mirrors'),
-        ('dep_check_ready',       'parse_dependency  ', 'resolve dep graph from pkg.list'),
-        ('download_ready',        'source_download   ', 'fetch upstream source archives'),
-        ('build_container_ready', 'build_container   ', 'init Docker build environment'),
-        ('source_build_ready',    'source_build      ', 'run dpkg-buildpackage per source'),
-        ('signing_key_verified',  'signing key       ', 'verified at top of build_chroot (CONF-02 phase 3)'),
-        ('chroot_ready',          'build_chroot      ', 'install built .debs into buildroot/'),
-        ('chroot_verified',       'verify_chroot     ', '8-check verifier (passes ⇒ ISO ok)'),
-    ]
-    for attr, label, desc in _stages:
+
+    def _row(attr: str, label: str, desc: str) -> None:
         _ok = bool(getattr(flags, attr, False))
         _mark = '✓' if _ok else '·'
         tui.console.print(f"  [{_mark}] {label}  {desc}")
+
+    tui.console.print("Pipeline state:")
     tui.console.print("")
-    tui.console.print("  build_iso runs separately once chroot_verified is set.")
+    tui.console.print("  Shared:", tui.COLOR_INFO)
+    _shared = [
+        ('cache_ready',           'cache_build           ', 'fetch + index APT mirrors'),
+        ('dep_check_ready',       'dep_parse             ',
+            'resolve dep graph (pkg/live/installer/pool.list)'),
+        ('download_ready',        'source_download       ', 'fetch upstream source archives'),
+        ('build_container_ready', 'container_init        ', 'init Docker build sandbox'),
+        ('source_build_ready',    'source_build          ', 'run dpkg-buildpackage per source'),
+        ('signing_key_verified',  'signing_key_verified  ',
+            'sign+verify roundtrip against project key (CONF-02)'),
+    ]
+    for attr, label, desc in _shared:
+        _row(attr, label, desc)
+
+    tui.console.print("")
+    tui.console.print("  Live ISO target:", tui.COLOR_INFO)
+    _live = [
+        ('chroot_ready',     'chroot_build_live     ',
+            'install built .debs into buildroot/live'),
+        ('chroot_verified',  'chroot_verify         ',
+            '8-check verifier (passes ⇒ live ISO ok)'),
+        ('iso_live_ready',   'iso_build_live        ',
+            'hybrid BIOS/EFI live ISO built'),
+    ]
+    for attr, label, desc in _live:
+        _row(attr, label, desc)
+
+    tui.console.print("")
+    tui.console.print("  Installer ISO target:", tui.COLOR_INFO)
+    _installer = [
+        ('chroot_installer_ready', 'chroot_build_installer',
+            'udeb closure unpacked into buildroot/installer'),
+        ('iso_installer_ready',    'iso_build_installer   ',
+            'hybrid BIOS/EFI installer ISO built'),
+    ]
+    for attr, label, desc in _installer:
+        _row(attr, label, desc)
+    tui.console.print("")
+    tui.console.print(
+        "  `iso build` runs separately — `iso build live` after "
+        "chroot_verify, `iso build installer` after chroot_build_installer."
+    )
 
 
 def _print_stats(session, *_extras) -> None:
@@ -326,25 +373,48 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
     else:
         tui.console.print("  Source build   : not run")
 
-    # Chroot
+    # Chroot — live + installer rendered separately.  Each has its own
+    # readiness flag; the installer side has no verify step today (see
+    # _print_state docstring for why).
     if session.flags.chroot_verified:
-        tui.console.print("  Chroot         : built and verified (8/8 checks passed)")
+        tui.console.print("  Chroot (live)  : built and verified (8/8 checks passed)")
     elif session.flags.chroot_ready:
-        tui.console.print("  Chroot         : built but verify failed — re-run verify_chroot")
+        tui.console.print("  Chroot (live)  : built but verify failed — re-run `chroot verify`")
     else:
-        tui.console.print("  Chroot         : not built")
+        tui.console.print("  Chroot (live)  : not built")
+    if session.flags.chroot_installer_ready:
+        tui.console.print("  Chroot (inst)  : udeb closure unpacked into buildroot/installer")
+    else:
+        tui.console.print("  Chroot (inst)  : not built")
 
-    # Predicted ISO path + next-step hint.  Build_iso intentionally not
-    # auto-invoked — see docstring above.
+    # Predicted ISO paths + next-step hints.  Build_iso intentionally
+    # not auto-invoked — see docstring above.
     tui.console.print("")
-    _iso_name = f"athena-{cfg.build_version}-{cfg.arch}.iso"
-    _iso_path = os.path.join(cfg.dir_image, _iso_name)
-    if session.flags.chroot_verified:
-        tui.console.print(f"  ISO target     : {_iso_path}", tui.COLOR_INFO)
-        tui.console.print("                   Ready — run `build_iso` to produce it.",
+    _version = cfg.build_version.strip('"').strip("'")
+    _live_iso_name      = f"athena-{_version}-{cfg.arch}.iso"
+    _installer_iso_name = f"athena-installer-{_version}-{cfg.arch}.iso"
+    _live_iso_path      = os.path.join(cfg.dir_image, _live_iso_name)
+    _installer_iso_path = os.path.join(cfg.dir_image, _installer_iso_name)
+
+    if session.flags.iso_live_ready:
+        tui.console.print(f"  ISO live       : {_live_iso_path}  (built)",
+                          tui.COLOR_HIGHLIGHT)
+    elif session.flags.chroot_verified:
+        tui.console.print(f"  ISO live       : {_live_iso_path}", tui.COLOR_INFO)
+        tui.console.print("                   Ready — run `iso build live` to produce it.",
                           tui.COLOR_HIGHLIGHT)
     else:
-        tui.console.print(f"  ISO target     : {_iso_path}  (chroot must verify first)")
+        tui.console.print(f"  ISO live       : {_live_iso_path}  (chroot must verify first)")
+
+    if session.flags.iso_installer_ready:
+        tui.console.print(f"  ISO installer  : {_installer_iso_path}  (built)",
+                          tui.COLOR_HIGHLIGHT)
+    elif session.flags.chroot_installer_ready:
+        tui.console.print(f"  ISO installer  : {_installer_iso_path}", tui.COLOR_INFO)
+        tui.console.print("                   Ready — run `iso build installer` to produce it.",
+                          tui.COLOR_HIGHLIGHT)
+    else:
+        tui.console.print(f"  ISO installer  : {_installer_iso_path}  (installer chroot must build first)")
 
 
 def _print_summary(session, *_extras) -> None:
