@@ -108,8 +108,8 @@ class Cache:
         self.release_info = ''
 
         # Cache data
-        self.pkg_list = []
-        self.src_list = []
+        self.pkg_list: List[str] = []
+        self.src_list: List[str] = []
 
         self.required: List[str] = []
         self.important: List[str] = []
@@ -137,7 +137,7 @@ class Cache:
             return
 
         # Set when config is validated
-        self._config_valid: bool = True
+        self._config_valid = True
 
     @property
     def is_valid(self) -> bool:

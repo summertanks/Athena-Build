@@ -111,8 +111,14 @@ class BuildContainer:
                 try:
                     with open(os.path.join(self.log_path, 'docker_build.log'), 'w') as fh:
                         for chunk in build_logs:
-                            if 'stream' in chunk:
-                                for line in chunk['stream'].splitlines():
+                            # Docker SDK's images.build() yields a heterogeneous
+                            # stream of dicts; only `stream` entries carry the
+                            # human-readable lines we want in the log file.
+                            if not isinstance(chunk, dict):
+                                continue
+                            _stream = chunk.get('stream')
+                            if isinstance(_stream, str):
+                                for line in _stream.splitlines():
                                     fh.write(line + '\n')
 
                 except (FileNotFoundError, PermissionError) as e:

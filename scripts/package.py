@@ -5,6 +5,7 @@ from debian.debian_support import Version, DpkgArchTable
 import logging
 import apt_pkg
 import tui
+import utils
 
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -223,7 +224,12 @@ class Package(Packages):
             self.arch == other.arch
         )
 
-    def __hash__(self) -> int:
+    def __hash__(self) -> int:  # type: ignore[override]
+        # Deb822Dict is unhashable (sets __hash__ = None) because it's a
+        # mutable mapping; we intentionally make Package hashable so it
+        # can sit in sets / dict keys via (package, version, arch) — a
+        # tuple that's immutable for our purposes (versions/arch don't
+        # change after parsing).
         return hash((self.package, self.version, self.arch))
 
     @property
@@ -420,7 +426,7 @@ class Source(Sources):
         self.pkgs: List[str] = []
 
         self.skip_test = False
-        self.patch_list = []
+        self.patch_list: List[str] = []
         self._err_str: str = ''
 
         # Whether the package is valid or not, set to True if all required fields are present
@@ -478,7 +484,7 @@ class Source(Sources):
                 for e in (self.get('Files') or [])
             ]
 
-            self.files: Dict[str, Dict[str, Any]] = {
+            self.files = {
                 _entry['name']: {
                     'md5':    _md5_map.get(_entry['name'], ''),
                     'sha256': _entry.get('sha256', ''),

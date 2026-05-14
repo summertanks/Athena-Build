@@ -586,8 +586,8 @@ def _select_pool_files(
             if os.path.isfile(os.path.join(dir_repo, n))
         ]
         return _kept, 0
-    _udebs = []
-    _by_name = {}   # canonical_name → (version_str, filename)
+    _udebs: list = []
+    _by_name: dict = {}   # canonical_name → (version_str, filename)
     _skipped = 0
     for _name in _entries:
         _full = os.path.join(dir_repo, _name)

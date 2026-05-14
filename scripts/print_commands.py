@@ -454,9 +454,9 @@ def _print_selected(session, *_extras) -> None:
         return
     pkgs = session.dep_tree.selected_pkgs
     real_pkgs = {k: v for k, v in pkgs.items() if k == v['Package']}
-    _extras_set    = getattr(session.dep_tree, 'extras_pkg_names',           set())
-    _live_set      = getattr(session.dep_tree, 'live_exclusive_pkg_names',   set())
-    _installer_set = getattr(session.dep_tree, 'installer_exclusive_pkg_names', set())
+    _extras_set:    set = getattr(session.dep_tree, 'extras_pkg_names',           set())
+    _live_set:      set = getattr(session.dep_tree, 'live_exclusive_pkg_names',   set())
+    _installer_set: set = getattr(session.dep_tree, 'installer_exclusive_pkg_names', set())
     tui.console.print(f"Selected packages ({len(real_pkgs)}):")
     for name in sorted(real_pkgs.keys()):
         if name in _extras_set:
@@ -476,8 +476,8 @@ def _print_extras(session, *_extras) -> None:
     (use `source build recommended`), and NOT installed in the chroot."""
     if not _require_dep_check(session):
         return
-    extras_pkg_names = getattr(session.dep_tree, 'extras_pkg_names', set())
-    extras_src_names = getattr(session.dep_tree, 'extras_src_names', set())
+    extras_pkg_names: set = getattr(session.dep_tree, 'extras_pkg_names', set())
+    extras_src_names: set = getattr(session.dep_tree, 'extras_src_names', set())
     if not extras_pkg_names:
         tui.console.print(
             "No recommended extras pulled "
@@ -511,8 +511,8 @@ def _print_live_exclusive(session, *_extras) -> None:
     a complete live system."""
     if not _require_dep_check(session):
         return
-    live_pkgs = getattr(session.dep_tree, 'live_exclusive_pkg_names', set())
-    live_srcs = getattr(session.dep_tree, 'live_exclusive_src_names', set())
+    live_pkgs: set = getattr(session.dep_tree, 'live_exclusive_pkg_names', set())
+    live_srcs: set = getattr(session.dep_tree, 'live_exclusive_src_names', set())
     if not live_pkgs:
         tui.console.print(
             "No live-exclusive packages "
@@ -575,8 +575,8 @@ def _print_installer_exclusive(session, *_extras) -> None:
     installer ISO target."""
     if not _require_dep_check(session):
         return
-    inst_pkgs = getattr(session.dep_tree, 'installer_exclusive_pkg_names', set())
-    inst_srcs = getattr(session.dep_tree, 'installer_exclusive_src_names', set())
+    inst_pkgs: set = getattr(session.dep_tree, 'installer_exclusive_pkg_names', set())
+    inst_srcs: set = getattr(session.dep_tree, 'installer_exclusive_src_names', set())
     if not inst_pkgs:
         tui.console.print(
             "No installer-exclusive packages (installer.list empty)"
