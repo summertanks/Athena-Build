@@ -604,7 +604,13 @@ def _print_groups(session, *_extras) -> None:
     declaration order.  `[base]` is always installed (live image +
     target debootstrap); other groups ship in /cdrom/pool only and the
     installer (tasksel) apt-installs the operator-selected subset
-    onto /target at install time."""
+    onto /target at install time.
+
+    Per-group size column is best-effort: sums the on-disk size of
+    every canonical-name `.deb` in `repo/` matching the group's
+    members.  Shown in MB rounded to one decimal.  When `repo/` is
+    empty or no .debs match yet (source build hasn't run), the size
+    column reads `?` so the operator still sees the package count."""
     if not _require_dep_check(session):
         return
     _groups: 'dict[str, set]' = getattr(
@@ -614,6 +620,33 @@ def _print_groups(session, *_extras) -> None:
         return
     _extras_set: set = getattr(
         session.dep_tree, 'pkg_group_extras_pkg_names', set())
+
+    # Best-effort .deb size map for the size column.  Reuses the same
+    # filename parser that _select_pool_files uses so the canonical
+    # name lookup matches what ends up in the ISO pool.
+    _size_by_pkg: 'dict[str, int]' = {}
+    _repo = getattr(session.config, 'dir_repo', None)
+    if _repo and os.path.isdir(_repo):
+        import iso_installer as _iso_inst
+        try:
+            for _fn in os.listdir(_repo):
+                if not _fn.endswith('.deb'):
+                    continue
+                _pkg, _ = _iso_inst._parse_deb_filename(_fn)
+                if not _pkg:
+                    continue
+                try:
+                    _sz = os.path.getsize(os.path.join(_repo, _fn))
+                except OSError:
+                    continue
+                # When repo/ holds multiple versions of the same
+                # package, take the largest as the size estimate.
+                # Approximate, fine for an operator-facing report.
+                if _sz > _size_by_pkg.get(_pkg, 0):
+                    _size_by_pkg[_pkg] = _sz
+        except OSError:
+            pass
+
     tui.console.print(
         f"pkg.list groups ({len(_groups)} group(s), "
         f"{len(_extras_set)} non-base canonical(s) in /cdrom/pool):"
@@ -621,7 +654,14 @@ def _print_groups(session, *_extras) -> None:
     for _group, _names in _groups.items():
         _label = 'base — installed everywhere' if _group == 'base' else \
                  'pool-only, installer apt-installs on selection'
-        tui.console.print(f"  [{_group}]  {len(_names)} pkg(s)  ({_label})")
+        _total = sum(_size_by_pkg.get(_n, 0) for _n in _names)
+        if _total > 0:
+            _size_str = f"{_total / (1024 * 1024):.1f} MB"
+        else:
+            _size_str = '?'
+        tui.console.print(
+            f"  [{_group}]  {len(_names)} pkg(s)  {_size_str}  ({_label})"
+        )
         for _name in sorted(_names):
             tui.console.print(f"    {_name}")
 

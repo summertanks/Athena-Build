@@ -1880,6 +1880,40 @@ class BuildSession:
             # time — tasksel apt-installs the operator-chosen groups
             # at install time from /cdrom/pool.
             _group_extras = self.dep_tree.pkg_group_extras_pkg_names
+
+            # Pre-flight integrity check: catch operator mistakes that
+            # would manifest as a silent install-time UX bug (e.g.
+            # tasksel shows a checkbox for an empty task, or a group
+            # silently has zero packages because every seed was a
+            # typo).
+            _group_pkgs = self.dep_tree.pkg_group_pkg_names
+            for _g, _names in _group_pkgs.items():
+                if not _names:
+                    console.print(
+                        f"WARNING: pkg.list group [{_g}] resolved to ZERO "
+                        "canonical packages — operator likely typo'd every "
+                        "seed in the section.  Check the seed names against "
+                        "your cache.",
+                        tui.COLOR_WARNING,
+                    )
+                    logger.warning(
+                        f"iso build installer: group [{_g}] has empty closure"
+                    )
+            _non_base_groups = [
+                _g for _g in _group_pkgs.keys() if _g != 'base'
+            ]
+            if _non_base_groups and not _group_extras:
+                console.print(
+                    f"WARNING: {len(_non_base_groups)} non-[base] group(s) "
+                    "declared but pkg_group_extras_pkg_names is empty — every "
+                    "package got credited to an earlier group (probably "
+                    "[base]).  The non-base group(s) will be empty in tasksel.",
+                    tui.COLOR_WARNING,
+                )
+                logger.warning(
+                    "iso build installer: non-base groups exist but all "
+                    "packages credited to earlier groups"
+                )
             _canonical = {
                 _name for _name in self.dep_tree.selected_pkgs
                 if _name == self.dep_tree.selected_pkgs[_name]['Package']
