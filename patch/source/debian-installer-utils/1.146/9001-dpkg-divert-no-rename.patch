@@ -1,0 +1,47 @@
+Description: Use dpkg-divert --no-rename for start-stop-daemon diversion
+ chroot-setup.sh's divert() / undivert() helpers run
+ `dpkg-divert --rename` against /sbin/start-stop-daemon, which is
+ shipped by the dpkg package (Essential).  Modern dpkg (>= 1.19) warns
+ on every such invocation:
+ .
+   dpkg-divert: warning: diverting file '/sbin/start-stop-daemon' from
+   an Essential package with rename is dangerous, use --no-rename
+ .
+ The 2026-05-13 reference install log shows ~23 of these warnings
+ spread across base-installer, apt-setup, and finish-install
+ invocations — each step that calls chroot_setup logs one.  None are
+ functional issues but they're noise that drowns out real warnings
+ in operator log review.
+ .
+ Switch both call sites to --no-rename.  This means the Essential
+ file isn't physically renamed (just shadowed by the diversion at
+ lookup time), which matches what dpkg's own maintainer scripts do
+ when they need to divert files from Essential packages.  The
+ functional behaviour during install is identical — chroot_setup
+ still routes start-stop-daemon calls to the .REAL stub that does
+ nothing during install, so daemon start attempts during dpkg
+ unpack/configure are still suppressed; only the rename machinery
+ differs.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-13
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/chroot-setup.sh
++++ b/chroot-setup.sh
+@@ -26,12 +26,12 @@ mountpoints () {
+ }
+
+ divert () {
+-	chroot /target dpkg-divert --quiet --add --divert "$1.REAL" --rename "$1"
++	chroot /target dpkg-divert --quiet --add --divert "$1.REAL" --no-rename "$1"
+ }
+
+ undivert () {
+ 	rm -f "/target$1"
+-	chroot /target dpkg-divert --quiet --remove --rename "$1"
++	chroot /target dpkg-divert --quiet --remove --no-rename "$1"
+ }
+
+ chroot_setup () {
