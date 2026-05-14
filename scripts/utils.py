@@ -188,7 +188,7 @@ def verify_inrelease(signed_path: str, keyring_path: str, work_dir: str) -> tupl
     gpg = _GPG_VERIFIER_CACHE.get(cache_key)
     if gpg is None:
         try:
-            gpg = gnupg.GPG(gnupghome=work_dir)
+            gpg = gnupg.GPG(gnupghome=work_dir)  # type: ignore[attr-defined]
         except (OSError, ValueError) as e:
             return False, f"gnupg init failed: {e}"
 

@@ -7,6 +7,7 @@ from utils import BuildConfig
 from package import Source
 
 import docker
+import docker.errors  # noqa: F401 — explicit import so `docker.errors.X` resolves under mypy
 import tui
 
 logger = logging.getLogger('athena')

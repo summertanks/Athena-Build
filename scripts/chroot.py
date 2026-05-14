@@ -20,14 +20,34 @@ import re
 import shlex
 import subprocess
 import tempfile
+from typing import TYPE_CHECKING, Callable
 
 import tui
 import utils
+
+if TYPE_CHECKING:
+    import dependencytree
+    from utils import BuildConfig
 
 logger = logging.getLogger('athena')
 
 
 class _ChrootMixin:
+    # Instance attributes set by `BuildSystem.__init__` (the composer that
+    # mixes this in).  Declared here as type-only stubs so mypy knows the
+    # mixin can rely on them — no runtime assignment happens here.  The
+    # documented mypy pattern for mixin attributes; see
+    # https://mypy.readthedocs.io/en/stable/more_types.html#mixin-classes
+    _dependencytree: 'dependencytree.DependencyTree'
+    _dir_chroot: str
+    _dir_image: str
+    _dir_repo: str
+    _dir_log: str
+    _dir_preinstall_patch: str
+    _dir_postinstall_patch: str
+    _password: str
+    _config: 'BuildConfig'
+    strip_build_version: Callable[[str], str]
 
     def build_chroot(self, debug: bool = False) -> bool:
         """Install all selected packages into the chroot in dependency order.
