@@ -418,22 +418,24 @@ class DependencyTree:
         _alt_depends = _selected_pkg.alt_depends
         
         for _alt in _alt_depends:
-            # Find alts already selected whose version constraint is also satisfied
+            # Find alts already selected whose version constraint is also satisfied.
+            # `_alt_dep` here is a dep-tuple (name, ver, op) — distinct from
+            # `_pkg` elsewhere in this method which is a Package object.
             _selected_alt_pkg = []
-            for _pkg in _alt:
-                _alt_name = _pkg[0]
+            for _alt_dep in _alt:
+                _alt_name = _alt_dep[0]
                 if _alt_name not in self.selected_pkgs:
                     continue
-                _alt_ver_str = _pkg[1]
+                _alt_ver_str = _alt_dep[1]
                 if not _alt_ver_str:
-                    _selected_alt_pkg.append(_pkg)   # no version constraint — name match sufficient
+                    _selected_alt_pkg.append(_alt_dep)   # no version constraint — name match sufficient
                     continue
-                _alt_op = _pkg[2] if _pkg[2] in self._VALID_CONSTRAINTS else '>='
+                _alt_op = _alt_dep[2] if _alt_dep[2] in self._VALID_CONSTRAINTS else '>='
                 try:
                     if apt_pkg.check_dep(str(self.selected_pkgs[_alt_name].version), _alt_op, _alt_ver_str):
-                        _selected_alt_pkg.append(_pkg)
+                        _selected_alt_pkg.append(_alt_dep)
                 except Exception:
-                    _selected_alt_pkg.append(_pkg)   # can't evaluate — assume satisfied
+                    _selected_alt_pkg.append(_alt_dep)   # can't evaluate — assume satisfied
 
             if _selected_alt_pkg:
                 # one or more already selected and satisfying — pick first, arbitrary decision
@@ -447,20 +449,22 @@ class DependencyTree:
         if self.__recommended:
             _depends += _selected_pkg.recommends
 
-        # recursively
-        for _pkg in _depends:
+        # recursively.  `_dep` is a dep-tuple (name, ver, op) — same
+        # tuple shape as the alt-deps loop above; distinct from `_pkg`
+        # (Package) used in the candidate-selection blocks earlier.
+        for _dep in _depends:
             # Extract version info from dep tuple and build Version object safely
             _dep_ver: Optional[Version] = None
-            if _pkg[1]:
+            if _dep[1]:
                 try:
-                    _dep_ver = Version(_pkg[1])
+                    _dep_ver = Version(_dep[1])
                 except (ValueError, TypeError):
-                    logger.warning(f"Malformed version '{_pkg[1]}' in dep on '{_pkg[0]}', ignoring")
+                    logger.warning(f"Malformed version '{_dep[1]}' in dep on '{_dep[0]}', ignoring")
 
-            _parsed_pkg = self.parse_dependency(_pkg[0], _dep_ver, _pkg[2])
+            _parsed_pkg = self.parse_dependency(_dep[0], _dep_ver, _dep[2])
             if _parsed_pkg is None:
-                tui.console.print(f"WARNING: unresolved dependency '{_pkg[0]}' for {_selected_pkg.package}")
-                logger.warning(f"parse_dependency({_pkg[0]}) from {_selected_pkg.package} returned None")
+                tui.console.print(f"WARNING: unresolved dependency '{_dep[0]}' for {_selected_pkg.package}")
+                logger.warning(f"parse_dependency({_dep[0]}) from {_selected_pkg.package} returned None")
                 continue
 
             # add forward dependency
@@ -473,9 +477,9 @@ class DependencyTree:
             # Record version constraint in the selected package for validate_selection
             if _dep_ver is not None:
                 try:
-                    self.selected_pkgs[_parsed_pkg['Package']].add_constraint(_dep_ver, _pkg[2])
+                    self.selected_pkgs[_parsed_pkg['Package']].add_constraint(_dep_ver, _dep[2])
                 except (ValueError, TypeError) as e:
-                    logger.warning(f"Skipping invalid version constraint '{_pkg[1]}' "
+                    logger.warning(f"Skipping invalid version constraint '{_dep[1]}' "
                                         f"on {_parsed_pkg.package} (from {_selected_pkg.package}): {e}")
 
         return _selected_pkg
@@ -895,9 +899,13 @@ class DependencyTree:
                                         if _bin_mirror is not None and s._mirror is _bin_mirror]
                         _picked = _same_mirror[0] if _same_mirror else _matched[0]
                         self.selected_srcs[_src_name] = _picked
+                        # _picked._mirror is set by Cache.__build_cache at
+                        # parse time; non-None by the time we get here.
+                        _picked_mirror_id = (
+                            _picked._mirror.id if _picked._mirror else '?')
                         logger.info(
                             f"parse_sources: {_src_name} {_src_version} present in "
-                            f"{len(_matched)} mirrors; picked {_picked._mirror.id}"
+                            f"{len(_matched)} mirrors; picked {_picked_mirror_id}"
                         )
 
                 self.selected_srcs[_src_name].pkgs = []

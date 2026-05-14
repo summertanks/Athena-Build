@@ -7,7 +7,7 @@ import apt_pkg
 
 from debian.deb822 import Release
 from debian.debian_support import DpkgArchTable, Version
-from typing import List, Dict, Optional
+from typing import Callable, List, Dict, Optional, Tuple
 from collections import defaultdict
 
 # Internal
@@ -90,7 +90,7 @@ class Cache:
         # Compression: tried in this order per file; first one listed in the
         # mirror's InRelease wins.  bookworm-updates / bookworm-security ship
         # only .xz; main ships all three.
-        self._compression_openers = [
+        self._compression_openers: 'List[Tuple[str, Callable]]' = [
             ('.xz',  lzma.open),
             ('.gz',  gzip.open),
             ('.bz2', bz2.open),
@@ -266,6 +266,10 @@ class Cache:
                 # 1 MB copy buffer reduces Python-side overhead vs the
                 # default 16 KB.
                 _decompress_spinner = Spinner(f"Decompressing {os.path.basename(_compressed_dst)}")
+                # `_chosen_opener is not None` is guaranteed by the loop
+                # above's None-check, but assert it so mypy narrows the
+                # Optional and accepts the call.
+                assert _chosen_opener is not None
                 try:
                     with _chosen_opener(_compressed_dst, 'rb') as f_in:
                         with open(_dst, 'wb') as f_out:
@@ -369,6 +373,8 @@ class Cache:
         tui.console.print(f'Downloaded {_src_url}')
 
         _decompress_spinner = Spinner(f"Decompressing {os.path.basename(_compressed_dst)}")
+        # Guaranteed by the matching loop above's None-check; assert for mypy.
+        assert _chosen_opener is not None
         try:
             with _chosen_opener(_compressed_dst, 'rb') as f_in:
                 with open(_dst, 'wb') as f_out:

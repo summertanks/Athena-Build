@@ -12,9 +12,9 @@ name: ci
 # checked) so the gate stays honest rather than green-washing the
 # codebase's current discipline.  Tightening is a follow-on ticket.
 #
-# mypy is `continue-on-error: true` so it reports findings without
-# failing the workflow — gives us a baseline diagnostic to triage
-# before we make it strict.
+# mypy used to be `continue-on-error: true` while the codebase had a
+# baseline of ~100 findings; cleaned end-to-end 2026-05-14 and mypy
+# is now a hard gate.
 
 on:
   push:
@@ -39,7 +39,6 @@ jobs:
   mypy:
     name: mypy
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

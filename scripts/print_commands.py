@@ -17,7 +17,7 @@ new group by appending to :data:`_HELP_GROUP_ORDER` so the section shows up.
 import datetime
 import os
 from collections import defaultdict
-from typing import NamedTuple, Optional, TYPE_CHECKING
+from typing import Callable, NamedTuple, Optional, TYPE_CHECKING
 
 import tui
 import utils
@@ -840,7 +840,7 @@ def _print_help(_session=None, *_extras) -> None:
 # Adding a category: write _print_<name>(session, *extras), append a row.
 # (handler, group label for help screen, one-line description)
 
-CATEGORIES = {
+CATEGORIES: 'dict[str, tuple[Callable[..., None], str, str]]' = {
     # Configuration
     'config':    (_print_config,    'Configuration', 'overall build configuration values'),
     'mirrors':   (_print_mirrors,   'Configuration', 'configured mirrors with URL, suite, component'),

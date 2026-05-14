@@ -105,9 +105,12 @@ class BuildSession:
     so handlers can be exercised without standing up the curses TUI.
     """
 
-    def __init__(self, config: BuildConfig, tui_inst: 'Tui') -> None:
+    def __init__(self, config: BuildConfig, tui_inst) -> None:
+        # tui_inst is either a Tui or a Cli — both implement the same
+        # duck-typed surface but the static types diverge.  No annotation
+        # so mypy doesn't force callers to pick one or the other.
         self.config: BuildConfig = config
-        self.tui: 'Tui' = tui_inst
+        self.tui = tui_inst
         self.cache: 'Optional[Cache]' = None
         self.dep_tree: 'Optional[dependencytree.DependencyTree]' = None
         # Parallel dep tree resolved against the udeb world
@@ -1040,6 +1043,8 @@ class BuildSession:
         # exists on disk.  Caught in production 2026-05-10.  Both trees
         # share Source instances via source_hashtable, so the union dict
         # naturally dedupes and each Source's patch_list is set exactly once.
+        # Caller gates on dep_check_ready, which implies dep_tree is set.
+        assert self.dep_tree is not None
         _unified_srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
             for _name, _src in self.udeb_dep_tree.selected_srcs.items():
@@ -1363,6 +1368,9 @@ class BuildSession:
         _base = src_pkg._mirror.url
         _success = True
 
+        # Caller gates this on build_container_ready, so self.container
+        # is non-None by the time we get here.
+        assert self.container is not None
         for _filename in src_pkg.pkgs:
             _dest = os.path.join(self.container.repo_path, _filename)
 
@@ -2672,6 +2680,11 @@ def main(banner: str) -> None:
         print(f"ERROR: load configuration - {config.error_str}, Exiting...")
         sys.exit(1)
 
+    # Backend is either a Tui or a Cli depending on `--headless`.  Both
+    # implement the same duck-typed Console-facade surface; typed Any
+    # so mypy isn't forced to inspect every consumer's narrow assumption.
+    from typing import Any as _Any
+    tui_inst: _Any
     if _headless:
         print("Initialising headless CLI backend...")
         try:

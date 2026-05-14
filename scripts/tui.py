@@ -392,6 +392,10 @@ class Tui:
     # =====================================================================
 
     def _refreshfooter(self) -> None:
+        # `_footer` is typed Optional only because it's None during the
+        # pre-init window; by the time the draw loop reaches us it must
+        # be set, or there's no curses screen to draw on.
+        assert self._footer is not None
         max_y, max_x = self._footer.getmaxyx()
         inner_w = max_x - 2 * self.BOX_WIDTH
 
@@ -566,6 +570,7 @@ class Tui:
 
                 # footer is a plain curses.window (not wrapped in a panel),
                 # so it has no panel machinery to queue it — hence the explicit _footer.noutrefresh().
+                assert self._footer is not None
                 self._footer.noutrefresh()
 
                 for tab in self._tabs.values():
@@ -1133,7 +1138,12 @@ PROMPT_OPTIONS  = 1003
 PROMPT_PASSWORD = 1004
 PROMPT_PAUSE    = 1006
 
-tui_instance: Optional[Tui] = None
+from typing import Any as _Any
+# Singleton backend — either a Tui or a Cli (cli.py).  Typed Any
+# because tui.py can't import Cli without a circular import; the
+# duck-typed contract (Console facade methods) is the actual
+# interface, not the class identity.
+tui_instance: Optional[_Any] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1527,7 +1537,7 @@ class _ConsoleTabHandler(logging.Handler):
             self.handleError(record)
 
 
-def setup_logging(tui: 'Optional[Tui]' = None) -> logging.Logger:
+def setup_logging(tui: Optional[_Any] = None) -> logging.Logger:
     """Configure the 'athena' logger to route records into the TUI.
 
     Called automatically by ``Tui.__init__``; an explicit call is only

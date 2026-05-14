@@ -312,6 +312,9 @@ class BuildContainer:
             if not os.path.exists(src_patch_path):
                 src_patch_path = self.patch_empty
 
+            # Client is non-None by the time build() is called — __init__
+            # raises if both the configured and local daemon paths fail.
+            assert self.client is not None
             container = self.client.containers.run(
                 self._image_tag, command=["/bin/bash", "-c", cmd_str],
                 detach=True, auto_remove=False,
