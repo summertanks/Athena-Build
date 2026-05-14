@@ -948,7 +948,7 @@ def test_buildsession_constructible_with_stub_tui():
                           # Group dispatchers (noun-verb command surface).
                           'cmd_cache', 'cmd_dep', 'cmd_patch',
                           'cmd_source', 'cmd_package', 'cmd_container',
-                          'cmd_chroot', 'cmd_iso', 'cmd_key'):
+                          'cmd_chroot', 'cmd_iso', 'cmd_key', 'cmd_clean'):
                 _fn = getattr(session, _name)
                 assert callable(_fn), f"{_name} not callable"
                 assert _fn.__self__ is session, f"{_name} not bound to this session"
@@ -982,6 +982,16 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         # not a verb-only dispatcher; covered by its own tests below.
         ('cmd_key',       'generate', 'cmd_generate_signing_key'),
         ('cmd_key',       'verify',   'cmd_verify_signing_key'),
+        # COMP-05 clean dispatcher.  Note: 'cache' delegates to the
+        # existing cmd_cache_purge (not a new cmd_clean_cache method),
+        # so the matrix exercises the alias.
+        ('cmd_clean',     'cache',     'cmd_cache_purge'),
+        ('cmd_clean',     'source',    'cmd_clean_source'),
+        ('cmd_clean',     'repo',      'cmd_clean_repo'),
+        ('cmd_clean',     'buildroot', 'cmd_clean_buildroot'),
+        ('cmd_clean',     'image',     'cmd_clean_image'),
+        ('cmd_clean',     'download',  'cmd_clean_download'),
+        ('cmd_clean',     'all',       'cmd_clean_all'),
     ]
 
     for _group_name, _verb, _target_name in _matrix:
@@ -2785,6 +2795,261 @@ def test_cmd_iso_build_unknown_subaction_calls_neither_handler():
     _sess.cmd_build_iso_installer = lambda *a, **kw: _called.append('installer')
     _sess.cmd_iso('build', 'wat')
     assert _called == [], _called
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMP-05 — `clean` dispatcher + idempotency on cmd_build_cache / cmd_parse_dependency
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_cmd_build_cache_skips_when_already_ready_no_force():
+    """COMP-05: cmd_build_cache early-exits when cache_ready is True and
+    an in-memory Cache is loaded.  Cache() must NOT be instantiated —
+    that would do real network work.  `force` arg bypasses; covered in
+    a follow-on test."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession, BuildFlags
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.cache_ready = True
+    _sess.cache = object()  # any non-None placeholder
+
+    _ctor_calls = []
+    _orig_Cache = build.Cache
+    build.Cache = lambda *a, **kw: (_ctor_calls.append((a, kw)), object())[1]
+    try:
+        _sess.cmd_build_cache()
+    finally:
+        build.Cache = _orig_Cache
+    assert _ctor_calls == [], (
+        "cmd_build_cache should NOT instantiate Cache when already ready, "
+        f"got {len(_ctor_calls)} call(s)")
+
+
+def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
+    """COMP-05: `cache build force` bypasses the early-exit guard and
+    re-runs the full cache build.  Verifies Cache() IS instantiated
+    when force is in args."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession, BuildFlags
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.cache_ready = True
+    _sess.cache = object()
+    # Stub config — only the bits cmd_build_cache reads on the early
+    # path before Cache() is constructed.
+    class _StubCfg:
+        snapshot_enabled = False
+    _sess.config = _StubCfg()
+
+    _ctor_calls = []
+    class _StubCache:
+        def __init__(self, cfg):
+            _ctor_calls.append(cfg)
+            self.is_valid = False
+            self.error_str = 'stub'
+    _orig_Cache = build.Cache
+    build.Cache = _StubCache
+    try:
+        _sess.cmd_build_cache('force')
+    finally:
+        build.Cache = _orig_Cache
+    assert len(_ctor_calls) == 1, (
+        "cmd_build_cache with force MUST run Cache() even if cache_ready, "
+        f"got {len(_ctor_calls)} call(s)")
+
+
+def test_cmd_parse_dependency_skips_when_already_ready_no_force():
+    """COMP-05: cmd_parse_dependency early-exits when dep_check_ready is
+    True and an in-memory dep_tree exists.  DependencyTree() must NOT
+    be instantiated."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import dependencytree
+    from build import BuildSession, BuildFlags
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.cache_ready = True
+    _sess.flags.dep_check_ready = True
+    _sess.cache = object()
+    _sess.dep_tree = object()
+
+    _ctor_calls = []
+    _orig_DT = dependencytree.DependencyTree
+    dependencytree.DependencyTree = lambda *a, **kw: (
+        _ctor_calls.append((a, kw)), object())[1]
+    try:
+        _sess.cmd_parse_dependency()
+    finally:
+        dependencytree.DependencyTree = _orig_DT
+    assert _ctor_calls == [], (
+        "cmd_parse_dependency should NOT instantiate DependencyTree when "
+        f"already ready, got {len(_ctor_calls)} call(s)")
+
+
+def test_cmd_parse_dependency_runs_when_force_passed_even_if_ready():
+    """COMP-05: `dep parse force` bypasses the early-exit guard.
+    Cannot drive the full resolve from a stub, but we can verify the
+    early-exit guard is bypassed by checking Spinner() construction
+    (which happens AFTER the guard but BEFORE any heavy work)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession, BuildFlags
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.cache_ready = True
+    _sess.flags.dep_check_ready = True
+    _sess.cache = object()
+    _sess.dep_tree = object()
+
+    _spinner_calls = []
+    _orig_Spinner = build.Spinner
+    class _StubSpinner:
+        def __init__(self, *a, **kw):
+            _spinner_calls.append((a, kw))
+            raise RuntimeError("stop here — guard was bypassed, that's all we wanted to check")
+        def done(self): pass
+    build.Spinner = _StubSpinner
+    try:
+        try:
+            _sess.cmd_parse_dependency('force')
+        except RuntimeError as e:
+            assert 'guard was bypassed' in str(e)
+    finally:
+        build.Spinner = _orig_Spinner
+    assert len(_spinner_calls) == 1, (
+        "force should bypass the guard and reach Spinner construction, "
+        f"got {len(_spinner_calls)} Spinner call(s)")
+
+
+def test_wipe_dir_contents_returns_true_on_missing_dir():
+    """_wipe_dir_contents on a path that doesn't exist is a no-op
+    success — operator may run `clean X` before any `X` work has
+    created the dir."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    with tempfile.TemporaryDirectory() as _tmp:
+        _missing = os.path.join(_tmp, 'definitely-not-here')
+        assert _sess._wipe_dir_contents(
+            'test', _missing, sudo=False, skip_prompt=True) is True
+
+
+def test_wipe_dir_contents_returns_true_on_empty_dir():
+    """Empty dir → no work to do, returns True without prompting."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    with tempfile.TemporaryDirectory() as _tmp:
+        # _tmp itself is empty; pass it as the target
+        assert _sess._wipe_dir_contents(
+            'test', _tmp, sudo=False, skip_prompt=True) is True
+
+
+def test_wipe_dir_contents_actually_removes_files_and_subdirs():
+    """skip_prompt=True + populated dir → entries removed, dir itself
+    preserved (BuildConfig invariant)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Plant a file + a non-empty subdir.
+        with open(os.path.join(_tmp, 'top.txt'), 'w') as f:
+            f.write('hi')
+        os.makedirs(os.path.join(_tmp, 'sub'))
+        with open(os.path.join(_tmp, 'sub', 'inner.txt'), 'w') as f:
+            f.write('ho')
+        assert _sess._wipe_dir_contents(
+            'test', _tmp, sudo=False, skip_prompt=True) is True
+        # Dir survives but is empty.
+        assert os.path.isdir(_tmp)
+        assert os.listdir(_tmp) == []
+
+
+def test_cmd_clean_source_resets_download_ready():
+    """cmd_clean_source wipes dir_source and resets download_ready."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession, BuildFlags
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.download_ready = True
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Put a file so the dir is non-empty (exercises the actual wipe).
+        with open(os.path.join(_tmp, 'a.tar.gz'), 'w') as f:
+            f.write('x')
+        class _Cfg:
+            dir_source = _tmp
+        _sess.config = _Cfg()
+        _sess.cmd_clean_source('force')
+    assert _sess.flags.download_ready is False
+
+
+def test_cmd_clean_image_resets_iso_flags():
+    """cmd_clean_image wipes dir_image and resets BOTH iso_live_ready
+    and iso_installer_ready (single dir holds outputs from both
+    pipelines)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession, BuildFlags
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.iso_live_ready = True
+    _sess.flags.iso_installer_ready = True
+    with tempfile.TemporaryDirectory() as _tmp:
+        class _Cfg:
+            dir_image = _tmp
+        _sess.config = _Cfg()
+        _sess.cmd_clean_image('force')
+    assert _sess.flags.iso_live_ready is False
+    assert _sess.flags.iso_installer_ready is False
+
+
+def test_cmd_clean_repo_resets_source_build_ready_and_drops_counts():
+    """cmd_clean_repo wipes dir_repo, resets source_build_ready, and
+    drops last_source_build_counts (shown in the autorun summary)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession, BuildFlags
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.source_build_ready = True
+    _sess.last_source_build_counts = {'built': 12}
+    with tempfile.TemporaryDirectory() as _tmp:
+        class _Cfg:
+            dir_repo = _tmp
+        _sess.config = _Cfg()
+        _sess.cmd_clean_repo('force')
+    assert _sess.flags.source_build_ready is False
+    assert _sess.last_source_build_counts is None
+
+
+def test_cmd_clean_dispatcher_unknown_action_calls_no_handler():
+    """`clean wat` falls through to help, no handler invoked."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _called = []
+    for _name in ('cmd_cache_purge', 'cmd_clean_source', 'cmd_clean_repo',
+                  'cmd_clean_buildroot', 'cmd_clean_image',
+                  'cmd_clean_download', 'cmd_clean_all'):
+        setattr(_sess, _name, lambda *a, _n=_name, **kw: _called.append(_n))
+    _sess.cmd_clean('wat')
+    assert _called == [], (
+        f"unknown clean action must not invoke any handler, got {_called}")
 
 
 def test_cmd_build_iso_installer_bails_on_unmet_prereqs():
@@ -6274,6 +6539,17 @@ def main() -> int:
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
         test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
         test_cmd_iso_build_unknown_subaction_calls_neither_handler,
+        test_cmd_build_cache_skips_when_already_ready_no_force,
+        test_cmd_build_cache_runs_when_force_passed_even_if_ready,
+        test_cmd_parse_dependency_skips_when_already_ready_no_force,
+        test_cmd_parse_dependency_runs_when_force_passed_even_if_ready,
+        test_wipe_dir_contents_returns_true_on_missing_dir,
+        test_wipe_dir_contents_returns_true_on_empty_dir,
+        test_wipe_dir_contents_actually_removes_files_and_subdirs,
+        test_cmd_clean_source_resets_download_ready,
+        test_cmd_clean_image_resets_iso_flags,
+        test_cmd_clean_repo_resets_source_build_ready_and_drops_counts,
+        test_cmd_clean_dispatcher_unknown_action_calls_no_handler,
         test_cmd_build_iso_installer_bails_on_unmet_prereqs,
         # COMP-01c — chroot build live | chroot build installer split
         test_cmd_chroot_build_no_subaction_defaults_to_live,

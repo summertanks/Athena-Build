@@ -150,13 +150,26 @@ class BuildSession:
             _out.append(_name)
         return _out
 
-    def cmd_build_cache(self):
+    def cmd_build_cache(self, *args):
         """Fetch and parse the upstream APT package indices into an in-memory cache.
 
         Downloads the binary and source Packages files for the configured base
         distribution and architecture, then indexes them for fast lookup during
         dependency resolution.  Must be run before parse_dependency.
+
+        COMP-05 idempotency: if cache_ready is already set and an
+        in-memory Cache is loaded, the call no-ops with a hint to use
+        `clean cache` (wipe + re-fetch) or `cache build force` (re-run
+        over existing files).  Prevents accidental multi-GB re-fetches
+        when the operator just re-ran the command out of habit.
         """
+        if self.flags.cache_ready and self.cache is not None and 'force' not in args:
+            console.print(
+                "cache build: already complete — pass `force` to rebuild "
+                "over existing files, or run `clean cache` to wipe first",
+                tui.COLOR_INFO,
+            )
+            return
         console.print("Building Cache...", tui.COLOR_INFO)
         self.flags.cache_ready = False  # reset in case we're re-running
 
@@ -192,7 +205,7 @@ class BuildSession:
 
     # --------------------------------------Command: cache purge-------------------------------------
 
-    def cmd_cache_purge(self):
+    def cmd_cache_purge(self, *args):
         """Delete every regular file in the cache directory.
 
         The cache holds re-downloadable mirror metadata (Packages, Sources,
@@ -206,7 +219,11 @@ class BuildSession:
         Subdirectories (if any) are left intact — only top-level files go.
         Resets cache_ready and dep_check_ready since the in-memory Cache
         and DependencyTree (if any) now point at deleted files.
+
+        `force` arg (or called with skip_prompt by `clean all` orchestrator)
+        bypasses the YESNO confirmation.
         """
+        _force = 'force' in args
         try:
             _entries = [e for e in os.scandir(self.config.dir_cache)
                         if e.is_file(follow_symlinks=False)]
@@ -221,12 +238,13 @@ class BuildSession:
 
         _total_bytes = sum(e.stat().st_size for e in _entries)
         _mb = _total_bytes / (1024 * 1024)
-        _resp = Prompt(PROMPT_YESNO,
-            f"Delete {len(_entries)} file(s) ({_mb:.1f} MB) from "
-            f"{self.config.dir_cache}?").get_response()
-        if _resp.lower() not in ('y', 'yes'):
-            console.print("Cache purge cancelled.")
-            return
+        if not _force:
+            _resp = Prompt(PROMPT_YESNO,
+                f"Delete {len(_entries)} file(s) ({_mb:.1f} MB) from "
+                f"{self.config.dir_cache}?").get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print("Cache purge cancelled.")
+                return
 
         _deleted = 0
         _failed  = 0
@@ -256,9 +274,224 @@ class BuildSession:
                 f"({_mb:.1f} MB freed)", tui.COLOR_INFO)
 
 
+    # --------------------------------------COMP-05: clean dispatchers---------------------------------
+    # Each `clean <X>` wipes the working dir for stage X and resets the
+    # corresponding BuildFlags + drops in-memory state pointing at the
+    # deleted files.  Sudo for buildroot/* (root-owned chroot content);
+    # plain Python for user-owned dirs (cache/, source/, repo/, image/,
+    # download/).  `force` arg skips the YESNO prompt — used by `clean
+    # all` to consolidate confirmation into a single up-front prompt.
+
+    def _wipe_dir_contents(self, label: str, path: str,
+                           sudo: bool, password: str = '',
+                           skip_prompt: bool = False) -> bool:
+        """Remove every entry inside `path` (the dir itself is preserved,
+        so BuildConfig's user-owned-dir invariants stay intact).
+        Returns True on success or no-op (empty/missing dir), False on
+        any partial failure or operator decline."""
+        try:
+            _entries = list(os.scandir(path))
+        except FileNotFoundError:
+            console.print(f"{label}: directory does not exist (already clean): {path}")
+            return True
+        except OSError as e:
+            console.print(f"ERROR: cannot read {label} directory: {e}")
+            logger.error(f"clean {label}: scandir({path}): {e}")
+            return False
+
+        if not _entries:
+            console.print(f"{label}: already empty: {path}")
+            return True
+
+        # Best-effort size: top-level files only (recursing under sudo
+        # for chroot dirs would be slow).  Operator gets a number to
+        # judge "is this what I meant to wipe".
+        _total_bytes = 0
+        for _e in _entries:
+            try:
+                if _e.is_file(follow_symlinks=False):
+                    _total_bytes += _e.stat().st_size
+            except OSError:
+                pass
+        _mb = _total_bytes / (1024 * 1024)
+
+        if not skip_prompt:
+            _resp = Prompt(PROMPT_YESNO,
+                f"Wipe {label}: {len(_entries)} entries "
+                f"(top-level ~{_mb:.1f} MB) at {path}?"
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print(f"{label}: clean cancelled.")
+                return False
+
+        if sudo:
+            # `find -mindepth 1 -maxdepth 1 -exec rm -rf {} +` deletes
+            # every direct child without recursion through find itself
+            # (rm does the recursion).  Avoids globbing in shell.
+            _r = subprocess.run(
+                ['sudo', 'find', path,
+                 '-mindepth', '1', '-maxdepth', '1',
+                 '-exec', 'rm', '-rf', '{}', '+'],
+                capture_output=True, text=True,
+            )
+            if _r.returncode != 0:
+                console.print(
+                    f"ERROR: clean {label} failed: "
+                    f"{_r.stderr.strip()[:200]}"
+                )
+                logger.error(
+                    f"clean {label}: rc={_r.returncode}, "
+                    f"stderr={_r.stderr.strip()}"
+                )
+                return False
+        else:
+            _failed = 0
+            for _e in _entries:
+                try:
+                    if _e.is_dir(follow_symlinks=False):
+                        shutil.rmtree(_e.path)
+                    else:
+                        os.unlink(_e.path)
+                except OSError as ex:
+                    logger.error(f"clean {label}: cannot delete {_e.path}: {ex}")
+                    _failed += 1
+            if _failed:
+                console.print(
+                    f"ERROR: clean {label} partial: {_failed} entries "
+                    "failed (see log)", tui.COLOR_WARNING)
+                return False
+
+        console.print(
+            f"{label}: cleaned ({len(_entries)} entries removed)",
+            tui.COLOR_INFO,
+        )
+        return True
+
+    def _refresh_sudo(self, password: str) -> bool:
+        """Validate the sudo password without consuming any other input.
+        Returns True iff `sudo -v` succeeds.  Used by clean handlers
+        that need root before doing the actual `sudo find ... -exec rm`.
+        """
+        _r = subprocess.run(['sudo', '-S', '-v'],
+            input=password + '\n', capture_output=True, text=True)
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("clean: sudo -v failed")
+            return False
+        return True
+
+    def cmd_clean_source(self, *args):
+        """Wipe downloaded source tarballs.  Resets download_ready so
+        the next `source download` re-fetches.  Source bytes are
+        re-downloadable from upstream; cleaning is safe."""
+        if not self._wipe_dir_contents(
+                'source', self.config.dir_source,
+                sudo=False, skip_prompt='force' in args):
+            return
+        self.flags.download_ready = False
+
+    def cmd_clean_repo(self, *args):
+        """Wipe built .deb / .udeb / .dsc / .source files.  Resets
+        source_build_ready so the next `source build` rebuilds.  Note:
+        does NOT clean buildroot/ — chroot may still reference files
+        that no longer exist; clean buildroot too if you want a fresh
+        chroot off the new repo."""
+        if not self._wipe_dir_contents(
+                'repo', self.config.dir_repo,
+                sudo=False, skip_prompt='force' in args):
+            return
+        self.flags.source_build_ready = False
+        self.last_source_build_counts = None
+
+    def cmd_clean_buildroot(self, *args):
+        """Wipe both live and installer chroots.  Sudo required —
+        chroot contents are root-owned (debootstrap + dpkg --unpack
+        run as root; remove-time also needs root)."""
+        _force = 'force' in args
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        if not self._refresh_sudo(_password):
+            return
+        _ok_live = self._wipe_dir_contents(
+            'buildroot/live', self.config.dir_chroot,
+            sudo=True, password=_password, skip_prompt=_force)
+        _ok_inst = self._wipe_dir_contents(
+            'buildroot/installer', self.config.dir_chroot_installer,
+            sudo=True, password=_password, skip_prompt=_force)
+        if _ok_live:
+            self.flags.chroot_ready = False
+            self.flags.chroot_verified = False
+        if _ok_inst:
+            self.flags.chroot_installer_ready = False
+
+    def cmd_clean_image(self, *args):
+        """Wipe built ISOs (and their staging dirs).  Resets iso_*_ready
+        so the next `iso build` rebuilds."""
+        if not self._wipe_dir_contents(
+                'image', self.config.dir_image,
+                sudo=False, skip_prompt='force' in args):
+            return
+        self.flags.iso_live_ready = False
+        self.flags.iso_installer_ready = False
+
+    def cmd_clean_download(self, *args):
+        """Wipe tunneled .deb downloads.  These are re-fetched on
+        demand by `package tunnel` so cleaning is safe."""
+        self._wipe_dir_contents(
+            'download', self.config.dir_download,
+            sudo=False, skip_prompt='force' in args)
+
+    def cmd_clean_all(self, *args):
+        """Wipe every working dir + reset every BuildFlag + drop every
+        in-memory pipeline reference.  Equivalent to `clean cache` +
+        `clean source` + `clean repo` + `clean download` + `clean
+        image` + `clean buildroot`, but with a single up-front
+        confirmation and a single sudo unlock for the buildroot wipe.
+        Preserved: gnupg/ (signing key), log/ (build history),
+        patch/ (patch series)."""
+        _force = 'force' in args
+        if not _force:
+            _resp = Prompt(PROMPT_YESNO,
+                "clean all: wipes cache/, source/, repo/, download/, "
+                "image/, buildroot/{live,installer}.  "
+                "gnupg/ + log/ + patch/ preserved.  Continue?"
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print("clean all: cancelled.")
+                return
+
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        if not self._refresh_sudo(_password):
+            return
+
+        # User-owned dirs: skip per-step prompts (we already confirmed).
+        self.cmd_cache_purge('force')
+        self._wipe_dir_contents('source',   self.config.dir_source,   sudo=False, skip_prompt=True)
+        self._wipe_dir_contents('repo',     self.config.dir_repo,     sudo=False, skip_prompt=True)
+        self._wipe_dir_contents('download', self.config.dir_download, sudo=False, skip_prompt=True)
+        self._wipe_dir_contents('image',    self.config.dir_image,    sudo=False, skip_prompt=True)
+        # Sudo dirs: re-use the unlocked password.
+        self._wipe_dir_contents('buildroot/live',
+            self.config.dir_chroot, sudo=True, password=_password, skip_prompt=True)
+        self._wipe_dir_contents('buildroot/installer',
+            self.config.dir_chroot_installer, sudo=True, password=_password, skip_prompt=True)
+
+        # Drop in-memory state and reset every flag.  cache_ready and
+        # dep_check_ready already cleared by cmd_cache_purge — explicit
+        # here so the operator-visible end-state is "everything zero".
+        self.cache = None
+        self.dep_tree = None
+        self.udeb_dep_tree = None
+        self.flags = BuildFlags()
+        self.last_source_build_counts = None
+        # Scrub the password we just collected — same hygiene the rest
+        # of the codebase uses for sudo passwords (STA-07).
+        _password = '*' * len(_password)
+        console.print("clean all: complete — pipeline state reset", tui.COLOR_INFO)
+
+
     # --------------------------------------Command: parse_dependency-------------------------------------
 
-    def cmd_parse_dependency(self):
+    def cmd_parse_dependency(self, *args):
         """Resolve the full closure of packages needed to build the target system.
 
         Runs SIX dependency-resolution passes — five against the deb world
@@ -305,6 +538,21 @@ class BuildSession:
         """
         if not self.flags.cache_ready:
             console.print("Cache not ready, Run 'cache build' first")
+            return
+
+        # COMP-05 idempotency: if dep_check_ready is set and in-memory
+        # trees exist, no-op with a hint.  The full deb+udeb resolve
+        # over a real bookworm cache takes minutes; protect against
+        # accidental re-runs.
+        if (self.flags.dep_check_ready
+                and self.dep_tree is not None
+                and 'force' not in args):
+            console.print(
+                "dep parse: already complete — pass `force` to re-resolve, "
+                "or change config/{pkg,live,installer,pool}.list and re-run "
+                "after a cache rebuild",
+                tui.COLOR_INFO,
+            )
             return
 
         _spiner = Spinner("Parsing Dependencies")
@@ -2113,6 +2361,39 @@ class BuildSession:
             return self.cmd_verify_signing_key(*args)
         return self._group_help('key', _table, action)
 
+    def cmd_clean(self, action: str = '', *args):
+        """COMP-05: wipe per-stage working state.  Each sub-action is
+        idempotent (safe to run on already-clean dirs) and resets the
+        BuildFlags + drops in-memory pipeline references that pointed
+        at the deleted files.  `force` skips the YESNO confirmation.
+        Pairs with the early-exit guards on `cache build` and `dep
+        parse`: re-runs of long resolves no-op until the operator
+        explicitly cleans or passes `force`."""
+        _table = {
+            'cache':     'wipe cache/ (re-fetched on next `cache build`)',
+            'source':    'wipe source/ (re-downloaded on next `source download`)',
+            'repo':      'wipe repo/ (rebuilt on next `source build`)',
+            'buildroot': 'wipe buildroot/{live,installer} (sudo)',
+            'image':     'wipe image/ (rebuilt on next `iso build`)',
+            'download':  'wipe download/ (tunnel debs, re-fetched on demand)',
+            'all':       'wipe all of the above + reset every flag (one prompt)',
+        }
+        if action == 'cache':
+            return self.cmd_cache_purge(*args)
+        if action == 'source':
+            return self.cmd_clean_source(*args)
+        if action == 'repo':
+            return self.cmd_clean_repo(*args)
+        if action == 'buildroot':
+            return self.cmd_clean_buildroot(*args)
+        if action == 'image':
+            return self.cmd_clean_image(*args)
+        if action == 'download':
+            return self.cmd_clean_download(*args)
+        if action == 'all':
+            return self.cmd_clean_all(*args)
+        return self._group_help('clean', _table, action)
+
     def cmd_auto_run(self, action: str = '', *args):
         """Group dispatcher: bare `autorun` → autorun live (preserves
         existing UX); explicit `autorun live` or `autorun installer`
@@ -2293,6 +2574,7 @@ def main(banner: str) -> None:
     session = BuildSession(config, tui_inst)
 
     tui.register_command('cache',     session.cmd_cache,     '\tCache:      cache build')
+    tui.register_command('clean',     session.cmd_clean,     '\tClean:      clean cache | source | repo | buildroot | image | download | all')
     tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [live|installer|recommended]')
