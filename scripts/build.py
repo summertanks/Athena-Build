@@ -403,6 +403,136 @@ class BuildSession:
         self.flags.source_build_ready = False
         self.last_source_build_counts = None
 
+    def cmd_container_purge(self, *args):
+        """Stop+remove all containers spawned from `athenalinux:build-*`
+        images, then remove the images themselves.  Useful when:
+          - Docker daemon has orphaned containers from interrupted
+            builds (we use auto_remove=False so logs survive
+            container.wait(), but a SIGKILL between wait() and
+            remove() can leak)
+          - Dockerfile changed and you want to force a fresh image
+            rebuild on the next `container init`
+          - Disk pressure from accumulated image layers across builds
+
+        Resets build_container_ready and drops self.container.
+        `force` arg skips the YESNO prompt — used by `clean all`.
+
+        Honours the same `[Build] DOCKER_SERVER` knob `cmd_init_container`
+        does — purges against the configured remote daemon if set,
+        else local.
+        """
+        _force = 'force' in args
+        try:
+            import docker
+        except ImportError as e:
+            console.print(f"ERROR: docker module not installed: {e}")
+            logger.error(f"container purge: import docker raised: {e}")
+            return
+
+        try:
+            if self.config.docker_server:
+                _client = docker.DockerClient(base_url=self.config.docker_server)
+            else:
+                _client = docker.from_env()
+            _client.ping()
+        except (docker.errors.DockerException, OSError) as e:
+            console.print(f"ERROR: cannot connect to Docker daemon: {e}")
+            logger.error(f"container purge: docker connect raised: {e}")
+            return
+
+        # List athenalinux containers (all states — running + stopped).
+        # Filter on image tag prefix; `image.tags` is a list because one
+        # image can carry multiple tags.
+        _our_containers = []
+        try:
+            for _c in _client.containers.list(all=True):
+                _img_tags = []
+                try:
+                    _img_tags = _c.image.tags or []
+                except docker.errors.APIError:
+                    pass
+                if any(t.startswith('athenalinux:build-') for t in _img_tags):
+                    _our_containers.append(_c)
+        except docker.errors.APIError as e:
+            console.print(f"ERROR: cannot list containers: {e}")
+            logger.error(f"container purge: list containers raised: {e}")
+            return
+
+        # List athenalinux:build-* images.  Repository filter narrows to
+        # the right namespace; per-tag check rules out stray tags.
+        _our_images = []
+        try:
+            for _img in _client.images.list(name='athenalinux'):
+                if any(t.startswith('athenalinux:build-')
+                       for t in (_img.tags or [])):
+                    _our_images.append(_img)
+        except docker.errors.APIError as e:
+            console.print(f"ERROR: cannot list images: {e}")
+            logger.error(f"container purge: list images raised: {e}")
+            return
+
+        if not _our_containers and not _our_images:
+            console.print(
+                "container purge: no athenalinux containers or images present"
+            )
+            self.container = None
+            self.flags.build_container_ready = False
+            return
+
+        if not _force:
+            _resp = Prompt(PROMPT_YESNO,
+                f"Stop+remove {len(_our_containers)} container(s) and "
+                f"{len(_our_images)} image(s) tagged "
+                "`athenalinux:build-*`?"
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print("container purge: cancelled.")
+                return
+
+        # Step 1: kill+remove containers.  force=True kills running
+        # containers first; non-force on a running container raises.
+        _container_failed = 0
+        for _c in _our_containers:
+            try:
+                _c.remove(force=True)
+            except docker.errors.APIError as e:
+                logger.warning(
+                    f"container purge: remove {_c.short_id} failed: {e}"
+                )
+                _container_failed += 1
+
+        # Step 2: remove images.  force=True removes even when stopped
+        # containers reference them (they were just removed but Docker
+        # may still hold image-ref state mid-flight).
+        _image_failed = 0
+        for _img in _our_images:
+            try:
+                _client.images.remove(_img.id, force=True)
+            except docker.errors.APIError as e:
+                logger.warning(
+                    f"container purge: remove image {_img.short_id} failed: {e}"
+                )
+                _image_failed += 1
+
+        self.container = None
+        self.flags.build_container_ready = False
+
+        _ok_c = len(_our_containers) - _container_failed
+        _ok_i = len(_our_images) - _image_failed
+        if _container_failed or _image_failed:
+            console.print(
+                f"container purge: {_ok_c} container(s) + {_ok_i} image(s) "
+                f"removed; {_container_failed} container + {_image_failed} "
+                "image failures (see log)",
+                tui.COLOR_WARNING,
+            )
+        else:
+            console.print(
+                f"container purge: {_ok_c} container(s) + {_ok_i} image(s) "
+                "removed",
+                tui.COLOR_INFO,
+            )
+
     def cmd_clean_buildroot(self, *args):
         """Wipe both live and installer chroots.  Sudo required —
         chroot contents are root-owned (debootstrap + dpkg --unpack
@@ -452,8 +582,9 @@ class BuildSession:
         if not _force:
             _resp = Prompt(PROMPT_YESNO,
                 "clean all: wipes cache/, source/, repo/, download/, "
-                "image/, buildroot/{live,installer}.  "
-                "gnupg/ + log/ + patch/ preserved.  Continue?"
+                "image/, buildroot/{live,installer}, and athenalinux "
+                "Docker containers + images.  gnupg/ + log/ + patch/ "
+                "preserved.  Continue?"
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 console.print("clean all: cancelled.")
@@ -474,6 +605,9 @@ class BuildSession:
             self.config.dir_chroot, sudo=True, password=_password, skip_prompt=True)
         self._wipe_dir_contents('buildroot/installer',
             self.config.dir_chroot_installer, sudo=True, password=_password, skip_prompt=True)
+        # Docker side: kills running athenalinux containers + removes
+        # images so next `container init` rebuilds from Dockerfile.
+        self.cmd_container_purge('force')
 
         # Drop in-memory state and reset every flag.  cache_ready and
         # dep_check_ready already cleared by cmd_cache_purge — explicit
@@ -2306,9 +2440,14 @@ class BuildSession:
         return self._group_help('package', _table, action)
 
     def cmd_container(self, action: str = '', *args):
-        _table = {'init': 'build the Docker build sandbox image'}
+        _table = {
+            'init':  'build the Docker build sandbox image',
+            'purge': 'stop+remove athenalinux containers + images (force rebuild on next init)',
+        }
         if action == 'init':
             return self.cmd_init_container(*args)
+        if action == 'purge':
+            return self.cmd_container_purge(*args)
         return self._group_help('container', _table, action)
 
     def cmd_chroot(self, action: str = '', *args):
@@ -2376,6 +2515,7 @@ class BuildSession:
             'buildroot': 'wipe buildroot/{live,installer} (sudo)',
             'image':     'wipe image/ (rebuilt on next `iso build`)',
             'download':  'wipe download/ (tunnel debs, re-fetched on demand)',
+            'container': 'stop+remove athenalinux Docker containers + images',
             'all':       'wipe all of the above + reset every flag (one prompt)',
         }
         if action == 'cache':
@@ -2390,6 +2530,8 @@ class BuildSession:
             return self.cmd_clean_image(*args)
         if action == 'download':
             return self.cmd_clean_download(*args)
+        if action == 'container':
+            return self.cmd_container_purge(*args)
         if action == 'all':
             return self.cmd_clean_all(*args)
         return self._group_help('clean', _table, action)
@@ -2574,7 +2716,7 @@ def main(banner: str) -> None:
     session = BuildSession(config, tui_inst)
 
     tui.register_command('cache',     session.cmd_cache,     '\tCache:      cache build')
-    tui.register_command('clean',     session.cmd_clean,     '\tClean:      clean cache | source | repo | buildroot | image | download | all')
+    tui.register_command('clean',     session.cmd_clean,     '\tClean:      clean cache | source | repo | buildroot | image | download | container | all')
     tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [live|installer|recommended]')
