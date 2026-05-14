@@ -179,16 +179,115 @@ Each is fragile to upstream churn.
 - Document any extra udeb seeds needed (probably none — `partman-efi` and
   `grub-installer` are already in `installer.list`).
 
-### Phase E — Cosmetic / latent cleanup (1 day)
+### Phase E — Cosmetic / latent cleanup (status as of 2026-05-13)
 
-| Issue | Fix |
-|---|---|
-| `eject: not found` at finish-install | Add `eject` to `pkg.list` (small, target-only; <100K). |
-| `dpkg-divert: --no-rename` warnings | Patch `chroot-setup.sh` in our fork of d-i to use `--no-rename` for `start-stop-daemon`. One-line debian/patches/. |
-| mtab symlink warnings | Either suppress in `in-target` wrapper (patch via debian/patches/) or ensure `/target/etc/mtab` is a regular file via base_include. |
-| `modules.builtin.modinfo` missing | Likely upstream bug in `kernel-image-X-di`. Investigate; file upstream bug if real, else ignore (modules load fine). |
-| `ext4-modules-*-di` description fallback | Cosmetic. Investigate the templates file shape in those udebs. |
-| `/etc/default-release` missing in installer | Ship a `/etc/default-release` file (single line `thor`) in `athena-installer-stubs-udeb`. |
+#### Shipped
+
+| Issue | Fix | Commit |
+|---|---|---|
+| `eject: not found` at finish-install | Added `eject-udeb` to `installer.list` (separate from target-side `eject` in `pkg.list`). | `c2533ff` |
+| `/etc/default-release` missing in installer | `_write_release_files` Python helper in `installer_chroot.py` writes both `/etc/default-release` and `/etc/lsb-release`. | `eed8f2b` |
+| `dpkg-divert: --no-rename` warnings (~23/run) | Quilt patch on `debian-installer-utils 1.146`: `chroot-setup.sh` `divert()` and `undivert()` use `--no-rename`. | `34905d9` |
+
+#### Deferred (track + pick up later)
+
+Each item below has enough context to be picked up cold.  Filed in
+priority order — top items have higher impact / smaller scope.
+
+##### `intel-microcode` not in pool
+
+- **Symptom**: `finish-install`'s `hw-detect` runs `apt-install
+  intel-microcode` on Intel CPUs.  Currently fails with `Unable to
+  locate package` (log line 1940).  Security-relevant — without it,
+  CPU is missing post-2020 microcode patches.
+- **Why deferred**: package lives in `non-free-firmware`, which our
+  cache snapshot (`cache/snapshot.debian.org_archive_debian_*_main_*`)
+  doesn't index.  Enabling `non-free-firmware` is its own decision
+  point (licensing + cache-rebuild).
+- **Pick-up**: enable `non-free-firmware` in the cache mirror config,
+  add `intel-microcode` to `config/pkg.list`, document in
+  `docs/security.md` why we ship non-free CPU microcode.
+
+##### `Falling back to the package description for *-udeb` (~32/run)
+
+- **Symptom**: cdebconf prints these for `brltty-udeb`,
+  `ext4-modules-*-di`, `fat-modules-*-di`, `os-prober-udeb` — the
+  templates files ship a `Description:` field but cdebconf can't load
+  it into its runtime DB.
+- **Why deferred**: needs investigation into cdebconf's template-load
+  path.  Could be a single shared root cause (templates parse-format
+  mismatch) or per-udeb.  No functional impact — install completes.
+- **Pick-up**: read one of the affected udebs' `.templates` file
+  (e.g. `buildroot/installer/var/lib/dpkg/info/brltty-udeb.templates`)
+  and compare against a working udeb.  Likely a missing
+  `Description-en:` or similar.  If a single fix, file as a quilt
+  patch on the relevant source(s); else accept as architecture noise.
+
+##### `/target/etc/mtab won't be updated since it is a symlink` (~23/run)
+
+- **Symptom**: `in-target` wrapper tries to write `/etc/mtab` but
+  modern Debian symlinks it to `/proc/self/mounts` (the kernel-managed
+  mount list).  Each `in-target` invocation logs the warning.
+- **Why deferred**: `in-target` lives in `debian-installer-utils`
+  (same source as our existing dpkg-divert patch).  Either suppress
+  the legacy mtab write in our patch series or unsymlink
+  `/target/etc/mtab` via a base-installer hook.  Both routes need
+  understanding which downstream readers (if any) actually read mtab.
+- **Pick-up**: either (a) extend our existing
+  `9001-dpkg-divert-no-rename.patch` family with a `9002-skip-mtab-symlink.patch`
+  that gates the mtab write on `! -L /etc/mtab`, or (b) drop the
+  symlink in base-installer's configure step.  (a) is cleaner.
+
+##### `dpkg: trying to overwrite '/sbin/depmod' ... busybox-udeb` (chroot-build only)
+
+- **Symptom**: 7 file-overwrite warnings during `chroot build
+  installer` — `kmod-udeb` ships real `/sbin/depmod` etc., busybox-udeb
+  ships multicall stubs at the same paths.  `dpkg --unpack
+  --force-overwrite` accepts but warns.
+- **Why deferred**: noisy but functionally correct (kmod's real tools
+  win, which is what we want).  Two paths: (a) drop `busybox-udeb`
+  from `installer.list` if `kmod-udeb`'s coverage is sufficient;
+  (b) add a `--force-overwrite` exception list to dpkg invocation so
+  these specific overlaps don't warn.  (a) needs verifying every
+  busybox applet we use is also in kmod or a real udeb.
+- **Pick-up**: grep the installer chroot for busybox-only callers
+  (`grep -rl '/bin/busybox\|busybox sh' buildroot/installer/`).  If
+  empty, drop the seed.
+
+##### `depmod: WARNING modules.builtin.modinfo` (1/run)
+
+- **Symptom**: `hw-detect`'s in-target depmod re-run logs this once.
+  Our build-time `_run_depmod` ALSO logs it (rc=0, just noise).
+- **Why deferred**: upstream `linux-signed-amd64` packaging issue —
+  the `kernel-image-*-di` udeb doesn't include `modules.builtin.modinfo`.
+  Modules load fine; depmod just can't compute reverse-deps for
+  builtin modules.
+- **Pick-up**: file an upstream bug against `linux-signed-amd64`.
+  Local fix would mean patching the kernel source build (huge).
+  Probably not worth the effort.
+
+##### `50mirror` / `91security` returns 1 + `apt-setup.components` missing (1+1+1/run)
+
+- **Symptom**: `apt-setup` warnings about missing network mirror
+  generators.  Already documented in `docs/known-issues.md` as
+  architecture-expected (no network mirror by design).
+- **Why deferred**: optional silence-only fix.  Functional behaviour
+  is correct (cdrom-only target wouldn't get network security
+  updates anyway).
+- **Pick-up**: ship a stub `/tmp/apt-setup.components` (single line
+  `main`) via a startup hook in `/lib/debian-installer-startup.d/`.
+  This silences `91security` and `92updates`.  Minimal effort but
+  unclear benefit.
+
+##### `open-vm-tools` not in pool
+
+- **Symptom**: `hw-detect` apt-installs `open-vm-tools` on a VMware
+  guest; fails with `not available` (log line 1928).
+- **Why deferred**: VMware-specific guest tooling; operator who needs
+  it can `apt install` post-install.  Skipping entirely is a defensible
+  decision for a base server install.
+- **Pick-up**: decision rather than work.  Either ship and call it
+  done, or formally close as wontfix.
 
 ### Phase F — CI gate (1-2 days)
 
