@@ -41,7 +41,10 @@ class BuildContainer:
         except (RuntimeError, ValueError) as e:
             logger.error(f"BuildContainer: snapshot resolution failed: {e}")
             raise
-        self.mirrors = [m.with_snapshot(self.snapshot_ts) for m in config.mirrors]
+        self.mirrors = [
+            m.with_snapshot(self.snapshot_ts, baseurl=config.snapshot_baseurl)
+            for m in config.mirrors
+        ]
 
         self.client = None
 

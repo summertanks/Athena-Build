@@ -3828,6 +3828,67 @@ def test_shipped_build_conf_has_snapshot_enabled():
     )
 
 
+def test_buildconfig_snapshot_endpoints_default_to_debian():
+    """When the shipped build.conf [Snapshot] block omits the endpoint
+    fields, BuildConfig falls back to the Debian snapshot service.  Test
+    the fallback path (covers operators using older build.conf files
+    that pre-date ARCH-13)."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_buildconfig_snapshot_endpoints_default_to_debian ({cfg.error_str})")
+            return
+        assert cfg.snapshot_baseurl == 'https://snapshot.debian.org/archive'
+        assert cfg.snapshot_timestamp_api == 'https://snapshot.debian.org/mr/timestamp/'
+        assert cfg.snapshot_archive_keys == ['debian', 'debian-security']
+
+
+def test_buildconfig_snapshot_endpoints_overridable_via_config():
+    """Operators running a fork's own snapshot mirror can point the
+    three endpoints at it via [Snapshot] BaseUrl / TimestampApi /
+    ArchiveKeys.  Confirm the override is read end-to-end."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+
+    [Snapshot]
+    Enabled = true
+    Timestamp = latest
+    BaseUrl = https://snap.athena.local/archive
+    TimestampApi = https://snap.athena.local/api/ts
+    ArchiveKeys = athena, athena-security, athena-backports
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_buildconfig_snapshot_endpoints_overridable_via_config ({cfg.error_str})")
+            return
+        assert cfg.snapshot_baseurl == 'https://snap.athena.local/archive'
+        assert cfg.snapshot_timestamp_api == 'https://snap.athena.local/api/ts'
+        assert cfg.snapshot_archive_keys == ['athena', 'athena-security', 'athena-backports']
+
+
+def test_mirror_with_snapshot_uses_passed_baseurl():
+    """Mirror.with_snapshot accepts a baseurl kwarg so callers
+    threading through BuildConfig.snapshot_baseurl can target a fork's
+    own snapshot mirror layout without monkey-patching the default."""
+    from utils import Mirror
+    m = Mirror(mirror_id='main', baseurl='http://x.test', baseid='debian',
+               release='bookworm', suffix='', component='main', arch='amd64')
+    snap = m.with_snapshot('20260506T120451Z',
+                           baseurl='https://snap.athena.local/archive')
+    assert snap.url.startswith('https://snap.athena.local/archive/debian/20260506T120451Z'), \
+        f"with_snapshot did not use passed baseurl, got url={snap.url}"
+
+
 def test_buildconfig_creates_dir_gnupg_with_0700():
     """dir_gnupg is created and chmod 0700 (gpg homedir requirement)."""
     import stat
@@ -6842,6 +6903,9 @@ def main() -> int:
         test_download_file_success_returns_size_and_empty_detail,
         test_download_file_zero_content_length_does_not_freeze_bar,
         test_shipped_build_conf_has_snapshot_enabled,
+        test_buildconfig_snapshot_endpoints_default_to_debian,
+        test_buildconfig_snapshot_endpoints_overridable_via_config,
+        test_mirror_with_snapshot_uses_passed_baseurl,
         # /
         test_strip_build_version_strips_trailing_binNMU,
         test_strip_build_version_preserves_point_release_suffix,
