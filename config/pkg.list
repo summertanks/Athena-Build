@@ -7,6 +7,7 @@
 # as a single implicit `[base]` group.
 
 [base]
+## Description: Athena base system — kernel, bootloader, init, shell.
 # Linux kernel
 linux-image-amd64
 # Kernel headers — needed only by DKMS / out-of-tree module compiles.
@@ -139,3 +140,12 @@ dosfstools
 # install set) — gives a usable default for `user-setup-apply` to wire
 # up admin sudo without depending on apt-install succeeding mid-install.
 sudo
+
+# tasksel — the "Software selection" engine pkgsel calls during
+# install.  Goes in [base] (debootstrapped onto every /target) so
+# pkgsel's `in-target tasksel --new-install` works offline from
+# /cdrom/pool without an apt-install step.  Reads operator-defined
+# tasks from /target/usr/share/tasksel/descs/athena.desc, which the
+# pre-pkgsel.d-athena-tasks hook (in the initrd) copies from
+# /cdrom/.disk/athena-tasks.desc.  See GROUPS-01 phase 2.
+tasksel

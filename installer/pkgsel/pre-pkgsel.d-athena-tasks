@@ -1,0 +1,36 @@
+#!/bin/sh
+# Athena pre-pkgsel hook — copy the operator-defined tasksel `.desc`
+# from the cdrom into /target so `tasksel` finds it when pkgsel runs
+# `in-target tasksel --new-install` during d-i's "Software selection"
+# step.
+#
+# The `.desc` is generated at iso-build time by
+# `iso_installer._stage_tasksel_desc` and ships at
+# `/cdrom/.disk/athena-tasks.desc`.  See `docs/plans/comp-02-robust-build.md`
+# and GROUPS-01 in TODO.md for the broader context.
+#
+# Installed into the initrd at `/usr/lib/pre-pkgsel.d/05-athena-tasks`
+# via `installer_chroot._OVERLAY_MAP`.  pkgsel runs all scripts under
+# `/usr/lib/pre-pkgsel.d/` (via run-parts) right before invoking
+# tasksel, so this hook is the right insertion point.
+#
+# Exits 0 even when the .desc is absent (e.g. operator did not declare
+# any non-[base] groups), so a hookless build still installs cleanly.
+
+set -e
+
+_SRC=/cdrom/.disk/athena-tasks.desc
+_DST_DIR=/target/usr/share/tasksel/descs
+_DST=$_DST_DIR/athena.desc
+
+if [ ! -f "$_SRC" ]; then
+    logger -t athena-pre-pkgsel "no .desc at $_SRC — skipping (no operator-defined groups)"
+    exit 0
+fi
+
+# /target/usr/share/tasksel/ ships in the `tasksel` package which
+# pkg.list `[base]` debootstraps onto every install.  mkdir -p covers
+# the corner case where a stripped build skipped tasksel.
+mkdir -p "$_DST_DIR"
+cp "$_SRC" "$_DST"
+logger -t athena-pre-pkgsel "installed $_DST (athena-tasks → tasksel)"

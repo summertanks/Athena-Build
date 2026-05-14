@@ -759,10 +759,13 @@ class BuildSession:
         console.print(f"Parsing {self.config.pkglist_path}...")
         try:
             _pkg_groups = utils.parse_pkg_list_groups(self.config.pkglist_path)
+            _pkg_group_meta = utils.parse_pkg_list_group_meta(self.config.pkglist_path)
         except (OSError, ValueError) as e:
             console.print(f"ERROR: cannot read package list {self.config.pkglist_path}: {e}")
             logger.error(f"parse_pkg_list_groups({self.config.pkglist_path}): {e}")
             _pkg_groups = {}
+            _pkg_group_meta = {}
+        self.dep_tree.pkg_group_meta = _pkg_group_meta
 
         _total_manual_added = 0
         for _group, _seeds in _pkg_groups.items():
@@ -1904,6 +1907,7 @@ class BuildSession:
                 signing_homedir=signing.signing_home(self.config),
                 signing_pubkey_path=signing.signing_pubkey_path(self.config),
                 pkg_groups=self.dep_tree.pkg_group_pkg_names,
+                group_meta=self.dep_tree.pkg_group_meta,
             )
             if not _ok:
                 console.print(

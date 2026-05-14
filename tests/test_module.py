@@ -4934,6 +4934,169 @@ def test_stage_group_manifests_empty_groups_is_noop():
         assert not os.path.exists(os.path.join(_stage, '.disk', 'groups'))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUPS-01 phase 2: tasksel `.desc` generation + pre-pkgsel hook
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_parse_pkg_list_group_meta_extracts_descriptions():
+    """`## Description: …` lines after `[group]` headers parse into
+    per-group metadata.  Comments without the `## Description:` prefix
+    (regular `# foo` comments) are ignored."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import parse_pkg_list_group_meta
+    _body = (
+        "[base]\n"
+        "## Description: Athena base — runtime, kernel, bootloader.\n"
+        "# regular comment\n"
+        "bash\n"
+        "\n"
+        "[development-tools]\n"
+        "## Description: Compiler toolchain + version control + build helpers.\n"
+        "gcc\n"
+        "\n"
+        "[gnome]\n"
+        "# no description on this group\n"
+        "gnome-shell\n"
+    )
+    with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as fh:
+        fh.write(_body)
+        _path = fh.name
+    try:
+        meta = parse_pkg_list_group_meta(_path)
+        assert meta['base']['description'] == 'Athena base — runtime, kernel, bootloader.'
+        assert meta['development-tools']['description'] == 'Compiler toolchain + version control + build helpers.'
+        assert 'description' not in meta.get('gnome', {})
+    finally:
+        os.unlink(_path)
+
+
+def test_parse_pkg_list_group_meta_flat_file_returns_base_only():
+    """A flat (no `[section]`) pkg.list returns `{'base': {}}` — same
+    backward-compat shape as parse_pkg_list_groups."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import parse_pkg_list_group_meta
+    with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as fh:
+        fh.write("bash\ncoreutils\n")
+        _path = fh.name
+    try:
+        meta = parse_pkg_list_group_meta(_path)
+        assert meta == {'base': {}}
+    finally:
+        os.unlink(_path)
+
+
+def test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group():
+    """One `Task:` stanza per non-`[base]` group, with `Section: athena`,
+    `Description:`, and `Key:` listing seed names alpha-sorted.  `[base]`
+    is intentionally absent — base packages are debootstrapped before
+    pkgsel runs."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_tasksel_desc
+    _groups = {
+        'base':              {'bash', 'coreutils'},
+        'development-tools': {'gcc', 'make', 'git'},
+        'gnome':             {'gnome-shell', 'firefox-esr'},
+    }
+    _meta = {
+        'development-tools': {'description': 'Build toolchain + git.'},
+        'gnome':             {},  # no description → fallback
+    }
+    with tempfile.TemporaryDirectory() as _stage:
+        assert _stage_tasksel_desc(_stage, _groups, _meta) is True
+        _path = os.path.join(_stage, '.disk', 'athena-tasks.desc')
+        assert os.path.isfile(_path)
+        with open(_path) as fh:
+            _content = fh.read()
+        # [base] never appears as a task
+        assert 'Task: athena-base' not in _content
+        # Both non-base groups present
+        assert 'Task: athena-development-tools' in _content
+        assert 'Task: athena-gnome' in _content
+        # Operator-supplied description wins
+        assert 'Description: Build toolchain + git.' in _content
+        # Fallback description used when meta omits it
+        assert 'Description: Athena gnome group' in _content
+        # Key: lists are alpha-sorted within each stanza
+        assert ' firefox-esr\n gnome-shell' in _content
+        # Section field is consistent
+        assert _content.count('Section: athena') == 2
+
+
+def test_stage_tasksel_desc_only_base_groups_is_noop():
+    """If only `[base]` is defined, no `.desc` file is written —
+    tasksel has nothing to offer."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_tasksel_desc
+    with tempfile.TemporaryDirectory() as _stage:
+        assert _stage_tasksel_desc(_stage, {'base': {'bash'}}, {}) is True
+        assert not os.path.exists(
+            os.path.join(_stage, '.disk', 'athena-tasks.desc')
+        )
+
+
+def test_pre_pkgsel_hook_exists_and_is_executable():
+    """The pre-pkgsel.d script ships under installer/pkgsel/, is
+    executable, and copies `/cdrom/.disk/athena-tasks.desc` to
+    `/target/usr/share/tasksel/descs/`.  Pin the path AND the cp
+    target so a future installer/ reorganisation doesn't silently
+    move the hook to nowhere."""
+    _path = os.path.join(
+        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
+    )
+    assert os.path.isfile(_path), _path
+    assert os.access(_path, os.X_OK), f"hook must be executable: {_path}"
+    with open(_path) as fh:
+        _body = fh.read()
+    assert '/cdrom/.disk/athena-tasks.desc' in _body
+    assert '/target/usr/share/tasksel/descs' in _body
+
+
+def test_overlay_map_contains_pre_pkgsel_hook():
+    """The installer overlay map routes `pkgsel/pre-pkgsel.d-athena-tasks`
+    into `usr/lib/pre-pkgsel.d/05-athena-tasks` in the installer chroot.
+    pkgsel runs run-parts on that directory, so the hook must land
+    there or it's silently inert."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _OVERLAY_MAP
+    _src_to_target = dict(_OVERLAY_MAP)
+    assert 'pkgsel/pre-pkgsel.d-athena-tasks' in _src_to_target, (
+        f"overlay map missing pre-pkgsel hook: {_OVERLAY_MAP}"
+    )
+    _target = _src_to_target['pkgsel/pre-pkgsel.d-athena-tasks']
+    assert _target == 'usr/lib/pre-pkgsel.d/05-athena-tasks', _target
+
+
+def test_installer_list_includes_pkgsel():
+    """pkgsel udeb must be in installer.list — drives the
+    'Software selection' step at install time and runs the
+    pre-pkgsel.d hook that staged the .desc."""
+    _path = os.path.join(_ROOT, 'config', 'installer.list')
+    with open(_path) as fh:
+        _names = {
+            _l.strip() for _l in fh
+            if _l.strip() and not _l.lstrip().startswith('#')
+        }
+    assert 'pkgsel' in _names, "installer.list missing pkgsel"
+
+
+def test_pkg_list_base_includes_tasksel():
+    """tasksel must be in pkg.list [base] so it's debootstrapped onto
+    every /target — pkgsel's `in-target tasksel --new-install` then
+    works without an apt-install round-trip."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import parse_pkg_list_groups
+    _path = os.path.join(_ROOT, 'config', 'pkg.list')
+    groups = parse_pkg_list_groups(_path)
+    assert 'tasksel' in groups.get('base', []), \
+        f"pkg.list [base] missing tasksel; got base={groups.get('base')}"
+
+
 def test_derive_subset_exclusive_src_names_marks_live_only_sources():
     """A source whose every binary is in live_exclusive_pkg_names is marked
     in live_exclusive_src_names; a mixed source (some pkg-layer, some
@@ -7217,6 +7380,14 @@ def main() -> int:
         test_dep_tree_initialises_pkg_group_fields_empty,
         test_stage_group_manifests_writes_one_file_per_group,
         test_stage_group_manifests_empty_groups_is_noop,
+        test_parse_pkg_list_group_meta_extracts_descriptions,
+        test_parse_pkg_list_group_meta_flat_file_returns_base_only,
+        test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group,
+        test_stage_tasksel_desc_only_base_groups_is_noop,
+        test_pre_pkgsel_hook_exists_and_is_executable,
+        test_overlay_map_contains_pre_pkgsel_hook,
+        test_installer_list_includes_pkgsel,
+        test_pkg_list_base_includes_tasksel,
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
         test_derive_subset_exclusive_src_names_no_op_when_both_empty,
         test_derive_subset_exclusive_src_names_handles_installer_exclusive,

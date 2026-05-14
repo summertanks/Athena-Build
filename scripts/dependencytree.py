@@ -136,6 +136,12 @@ class DependencyTree:
         # because group-level packages are not mutually exclusive
         # within a single install.
         self.pkg_group_pkg_names: 'Dict[str, set]' = {}
+        # Per-group metadata (description) parsed from
+        # `## Description: ...` lines after `[group]` headers in
+        # pkg.list.  Empty dict per group if operator declared no
+        # metadata; consumers (tasksel `.desc` generation) fall back
+        # to a default title.
+        self.pkg_group_meta: 'Dict[str, Dict[str, str]]' = {}
         self.pkg_group_extras_pkg_names: set = set()
         self.pkg_group_extras_src_names: set = set()
 
