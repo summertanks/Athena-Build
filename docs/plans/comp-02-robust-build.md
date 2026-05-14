@@ -216,7 +216,7 @@ signed source, not in our cache).  The EFI log shows
 no Secure Boot).  Tracked under the same kind of "needs upstream
 source we don't ship" follow-up as `intel-microcode` below.
 
-### Phase E — Cosmetic / latent cleanup (status as of 2026-05-13)
+### Phase E — Cosmetic / latent cleanup (status as of 2026-05-14)
 
 #### Shipped
 
@@ -224,12 +224,15 @@ source we don't ship" follow-up as `intel-microcode` below.
 |---|---|---|
 | `eject: not found` at finish-install | Added `eject-udeb` to `installer.list` (separate from target-side `eject` in `pkg.list`). | `c2533ff` |
 | `/etc/default-release` missing in installer | `_write_release_files` Python helper in `installer_chroot.py` writes both `/etc/default-release` and `/etc/lsb-release`. | `eed8f2b` |
+| grub-installer fails on both BIOS + EFI: `apt-install grub-pc / grub-efi-amd64 — no installation candidate` | New `config/pool.list` (third tier of package selection alongside `pkg.list` and `installer.list`).  Pass VII resolves entries through the dep tree with `check_conflicts=False`; `validate_selection` skips Breaks/Conflicts where either side is in `pool_extras_pkg_names`.  `cmd_build_iso_installer` subtracts pool extras from `_base_include` so debootstrap doesn't put them on /target — they ship in `/cdrom/pool` only. | `68266a2` |
+| `Failed to install keyboard-configuration / console-setup into /target/: 100` | Added `console-setup`, `keyboard-configuration`, `xkb-data` to `pool.list`.  Pass VII pulls `xkeyboard-config` source through the build pipeline. | `68266a2` |
+| `hw-detect: open-vm-tools — Unable to locate package` (VMware targets) | Added `open-vm-tools` to `pool.list`.  VMware guests get the integration; no live-image bloat for non-VMware targets. | `68266a2` |
 
 #### Reverted
 
 | Issue | Attempted fix | Why reverted |
 |---|---|---|
-| `dpkg-divert: --no-rename` warnings (~23/run) | Quilt patch on `debian-installer-utils 1.146` swapping `chroot-setup.sh` `divert()`/`undivert()` from `--rename` to `--no-rename` (commit `34905d9`). | **Bricked grub-installer.**  Stock `chroot-setup.sh` writes the daemon stub directly OVER the original path: with `--rename`, the real binary is moved to `.REAL` first so the stub overwrites the (now-empty) original safely; with `--no-rename`, divert only creates a metadata record — the real binary is **not moved** — so the `cat > /target/sbin/start-stop-daemon` destroys it.  After the first chroot_setup→cleanup cycle the binary is permanently gone, and `grub-installer` (which runs `chroot /target dpkg ...` directly without going through in-target → no fresh stub gets written) fails with `dpkg: 'start-stop-daemon' not found in PATH`.  Verified on the 2026-05-14 install run.  See `docs/known-issues.md` § cosmetic noise for the standing entry — alternative fix paths require a different mechanism (e.g. silencing the warning at the call site, not changing the divert mode). |
+| `dpkg-divert: --no-rename` warnings (~24/run) | Quilt patch on `debian-installer-utils 1.146` swapping `chroot-setup.sh` `divert()`/`undivert()` from `--rename` to `--no-rename` (commit `34905d9`, reverted in `68266a2`). | **Bricked grub-installer.**  Stock `chroot-setup.sh` writes the daemon stub directly OVER the original path: with `--rename`, the real binary is moved to `.REAL` first so the stub overwrites the (now-empty) original safely; with `--no-rename`, divert only creates a metadata record — the real binary is **not moved** — so the `cat > /target/sbin/start-stop-daemon` destroys it.  After the first chroot_setup→cleanup cycle the binary is permanently gone, and `grub-installer` (which runs `chroot /target dpkg ...` directly without going through in-target → no fresh stub gets written) fails with `dpkg: 'start-stop-daemon' not found in PATH`.  Verified on the 2026-05-14 install run.  Pinned in memory (`feedback_dpkg_divert_keep_rename.md`) and `docs/known-issues.md` § cosmetic noise.  Alternative fix paths require a different mechanism (e.g. silencing the warning at the call site, not changing the divert mode) — see Deferred below. |
 
 #### Deferred (track + pick up later)
 
@@ -239,16 +242,58 @@ priority order — top items have higher impact / smaller scope.
 ##### `intel-microcode` not in pool
 
 - **Symptom**: `finish-install`'s `hw-detect` runs `apt-install
-  intel-microcode` on Intel CPUs.  Currently fails with `Unable to
-  locate package` (log line 1940).  Security-relevant — without it,
-  CPU is missing post-2020 microcode patches.
+  intel-microcode` on Intel CPUs.  Verified failing 2026-05-14 on
+  both BIOS (`log/athena_bios.log:2118`) and EFI
+  (`log/athena_efi.log:2100`) with `Unable to locate package`.
+  Security-relevant — without it, CPU is missing post-2020 microcode
+  patches.
 - **Why deferred**: package lives in `non-free-firmware`, which our
   cache snapshot (`cache/snapshot.debian.org_archive_debian_*_main_*`)
   doesn't index.  Enabling `non-free-firmware` is its own decision
   point (licensing + cache-rebuild).
-- **Pick-up**: enable `non-free-firmware` in the cache mirror config,
-  add `intel-microcode` to `config/pkg.list`, document in
-  `docs/security.md` why we ship non-free CPU microcode.
+- **Pick-up**: enable `non-free-firmware` in the cache mirror config
+  (extend `Cache._release_url` per-component fetch and the snapshot
+  pinning to include the new component), then add `intel-microcode`
+  to `config/pool.list` (target-side only — same shape as
+  `open-vm-tools`).  Document in `docs/security.md` why we ship
+  non-free CPU microcode.
+
+##### `shim-signed` not in pool (EFI Secure Boot)
+
+- **Symptom**: `grub-installer` on EFI mode logs `Additionally
+  installing shim-signed to go with grub-efi-amd64` →
+  `Package 'shim-signed' has no installation candidate` (verified
+  2026-05-14 `log/athena_efi.log:1885`).  EFI installs work without
+  it — only Secure Boot is missing.
+- **Why deferred**: `shim-signed` is a separate Microsoft-signed
+  source not in our cache.  Building it ourselves doesn't help
+  (Secure Boot needs Microsoft's signature on the shim binary; we
+  can't reproduce that locally).  The actual path is to ship the
+  upstream `.deb` as-is in our pool.
+- **Pick-up**: add a path to download specific `.deb`s from the
+  upstream debian repo into `repo/` without going through source-
+  build (since we can't rebuild `shim-signed`).  Then add
+  `shim-signed` to `pool.list`.  Alternative: drop Secure Boot
+  support from the design and document.
+
+##### `dpkg-divert: --no-rename` warnings (~24/run)
+
+- **Symptom**: `chroot-setup.sh` calls `dpkg-divert --rename`
+  against `/sbin/start-stop-daemon` (Essential file from `dpkg`).
+  Modern dpkg warns on every such call — ~24 entries spread across
+  base-installer, apt-setup, and finish-install.
+- **Why deferred**: the obvious fix (switch to `--no-rename`) was
+  attempted in commit `34905d9` and reverted in `68266a2` because
+  it bricks grub-installer (see Reverted table above for the full
+  failure analysis).  Memory entry
+  `feedback_dpkg_divert_keep_rename.md` pins this so future
+  sessions don't re-attempt.
+- **Pick-up**: silence the warning at the call site via a quilt
+  patch on `debian-installer-utils 1.146` `chroot-setup.sh` — wrap
+  the `divert()` and `undivert()` invocations with `2>/dev/null` or
+  use `chroot /target dpkg-divert --quiet ... 2>&1 | grep -v
+  'use --no-rename'`.  Don't change the `--rename` flag itself.
+  Alternative: accept as documented architecture noise.
 
 ##### `Falling back to the package description for *-udeb` (~32/run)
 
