@@ -106,13 +106,36 @@ class DependencyTree:
         self.live_exclusive_src_names: set = set()
         self.installer_exclusive_src_names: set = set()
 
+        # COMP-02 phase D follow-up: pool.list — packages that ship in
+        # the apt pool on the installer ISO but are NEVER installed in
+        # any chroot (live, installer ramdisk, or target).  They go
+        # through the resolver normally so their Depends are pulled in
+        # transitively (everything ends up in selected_pkgs and ships
+        # in /cdrom/pool), but `validate_selection` skips Conflicts
+        # AND Breaks involving pool extras — apt on the target enforces
+        # those at install time.  This lets mutually-conflicting
+        # bootloader metas (`grub-pc` + `grub-efi-amd64`) coexist in
+        # the pool while only one ever gets installed on a given
+        # firmware mode.  Populated by Pass VII in build.py:
+        # pool_extras_pkg_names = (selected_pkgs after VII) − (selected_pkgs before VII).
+        self.pool_extras_pkg_names: set = set()
+        self.pool_extras_src_names: set = set()
+
         self.arch = arch
         self.build_profiles = build_profiles
 
         if lookahead is not None:
             self.add_lookahead(lookahead)
 
-    def add_lookahead(self, lookahead: List[str]):
+    def add_lookahead(self, lookahead: List[str], check_conflicts: bool = True):
+        """When `check_conflicts=False`, step 3 (lookahead-time conflict
+        check) is skipped — the caller is asserting that conflicts among
+        these packages don't matter at selection time (e.g. pool.list
+        entries that ship in the apt pool but never get installed
+        together; apt enforces at install time on the target).  Used
+        by Pass VII to let `grub-pc` and `grub-efi-amd64` coexist in
+        selected_pkgs.
+        """
         for _pkg_name in lookahead:
             if not _pkg_name or _pkg_name.isspace():
                 continue
@@ -165,7 +188,14 @@ class DependencyTree:
                 tui.console.print(f"Multiple providers for '{_pkg_name}': Selected {_selected.package} ({_selected.version})")
 
             # 3. Hard conflict check against entries already in lookahead
+            #    (skipped when check_conflicts=False — pool.list path)
             _conflict_found = False
+            if not check_conflicts:
+                self.__lookahead[_pkg_name][_selected.version] = _selected
+                for _provided_name, _provided_ver in _selected.get_provides():
+                    if _provided_name != _pkg_name:
+                        self.__lookahead[_provided_name][_provided_ver] = _selected
+                continue
             for _conflict_group in _selected.conflicts:
                 _conflict_name    = _conflict_group[0][0]
                 _conflict_ver_str = _conflict_group[0][1]
@@ -229,13 +259,20 @@ class DependencyTree:
         """
         return {k: v for k, v in self.selected_pkgs.items() if k == v['Package']}
 
-    def resolve_packages(self, packages: list[str]) -> list[str]:
-        self.add_lookahead(packages)
+    def resolve_packages(self, packages: list[str],
+                         check_conflicts: bool = True) -> list[str]:
+        """When `check_conflicts=False`, propagated to add_lookahead so
+        the lookahead-time conflict check is skipped.  validate_selection
+        still runs on the full closure but skips conflicts/breaks
+        involving any package in `pool_extras_pkg_names` — see
+        validate_selection() for the membership-based bypass.
+        """
+        self.add_lookahead(packages, check_conflicts=check_conflicts)
         unresolved = [pkg for pkg in packages if self.parse_dependency(pkg) is None]
         for pkg in unresolved:
             tui.console.print(f"WARNING: cannot resolve '{pkg}'")
             logger.error(f"parse_dependency({pkg}) returned None")
-        return unresolved                                    
+        return unresolved
 
 
     def parse_dependency(self, package_name: str,
@@ -468,6 +505,15 @@ class DependencyTree:
                     # "package breaks its own alias" (false positive) from a real break.
                     if self.selected_pkgs[_breaks_name] is self.selected_pkgs[_pkg]:
                         continue
+                    # COMP-02 phase D follow-up: pool.list contract — when
+                    # either side of the relationship is a pool extra,
+                    # apt enforces at install time on the target.  We
+                    # intentionally ship mutually-Breaking pool entries
+                    # so the operator can apt-install one or the other.
+                    _real_breaks_name = self.selected_pkgs[_breaks_name]['Package']
+                    if (_pkg in self.pool_extras_pkg_names or
+                        _real_breaks_name in self.pool_extras_pkg_names):
+                        continue
                     _broken_obj = self.selected_pkgs[_breaks_name]
                     if _broken_obj['Package'] != _breaks_name:
                         # Provider: use the Provides version, not the provider's own version
@@ -502,6 +548,12 @@ class DependencyTree:
                     # Same Debian pattern as Breaks above: Provides: X + Conflicts: X means
                     # "I am X and nothing else can be X". Not a real conflict with another package.
                     if self.selected_pkgs[_conflicts_name] is self.selected_pkgs[_pkg]:
+                        continue
+                    # COMP-02 phase D follow-up: pool.list bypass — see
+                    # the matching block in the Breaks loop above.
+                    _real_conflicts_name = self.selected_pkgs[_conflicts_name]['Package']
+                    if (_pkg in self.pool_extras_pkg_names or
+                        _real_conflicts_name in self.pool_extras_pkg_names):
                         continue
                     _conflict_obj = self.selected_pkgs[_conflicts_name]
                     if _conflict_obj['Package'] != _conflicts_name:
