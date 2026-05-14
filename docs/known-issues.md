@@ -44,16 +44,10 @@ end-to-end in the 15:57 reference install.)*
 
 ## Latent — would surprise an operator
 
-### Installer ISO is BIOS-only
-
-- **Symptom**: An EFI-mode VM boots the ISO but the *installed* system
-  has only `grub-pc` (BIOS bootloader).  An EFI target would have an
-  unbootable installed system.
-- **Evidence**: `config/pkg.list:grub-pc` (the workaround for the
-  apt-cdrom-setup failure pre-installs the BIOS meta-package only).
-- **Fix**: COMP-02 phase D — once phase C ships, replace pre-installed
-  `grub-pc` with both bin-only packages (`grub-pc-bin` +
-  `grub-efi-amd64-bin`) and let `grub-installer` pick at install time.
+*(`Installer ISO is BIOS-only` moved to Fixed 2026-05-13 — Phase D
+shipped bin-only `grub-pc-bin` + `grub-efi-amd64-bin` so
+`grub-installer` picks the right meta-package at install time.
+Verification pending next EFI-mode boot.)*
 
 ---
 
@@ -133,14 +127,11 @@ as "tech debt" without re-reading the decision.
 - **Fix**: COMP-02 phase E — investigate per-udeb; likely a single
   fix across all four.
 
-### `dpkg-divert: warning: ... use --no-rename` (~20+ occurrences)
-
-- **Evidence in log**: spread across the install.
-- **Cause**: Stock `chroot-setup.sh` uses `--rename` when diverting
-  `/sbin/start-stop-daemon`; modern dpkg recommends `--no-rename` for
-  diverts of files from Essential packages.
-- **Fix**: COMP-02 phase E — single-line `debian/patches/` entry on
-  our fork of the d-i source that owns `chroot-setup.sh`.
+*(`dpkg-divert ... use --no-rename` moved to Fixed 2026-05-13 — Phase E
+quilt patch on `debian-installer-utils 1.146` swaps both `divert()`
+and `undivert()` helpers in `chroot-setup.sh` from `--rename` to
+`--no-rename`.  Verification pending next install — should drop the
+~23 warnings from the install log.)*
 
 ### `/target/etc/mtab won't be updated since it is a symlink` (~30+)
 
@@ -209,6 +200,38 @@ as "tech debt" without re-reading the decision.
 ---
 
 ## Fixed
+
+### ~~Installer ISO is BIOS-only~~ — 2026-05-13 *(verification pending)*
+
+- **Was**: `config/pkg.list` pre-installed full `grub-pc` (BIOS meta)
+  as the Phase A workaround for broken apt-cdrom-setup; an EFI-mode
+  target would have an unbootable installed system.
+- **Fix shipped** (commit `875200e`): swapped `grub-pc` for the
+  bin-only pair `grub-pc-bin` + `grub-efi-amd64-bin`.  Unlike the
+  full meta-packages, the `-bin` variants do NOT Conflict, so both
+  coexist on the live + installer + target.  `grub-installer`
+  detects firmware mode at install time and apt-installs whichever
+  meta-package fits; that meta Depends on its `-bin` (already
+  present), so apt only fetches the small meta + glue.
+- **Verification**: pending — boot the rebuilt ISO in EFI-mode VM
+  and confirm `grub-installer` picks `grub-efi-amd64`.
+
+### ~~`dpkg-divert ... use --no-rename` (~23 occurrences)~~ — 2026-05-13 *(verification pending)*
+
+- **Was**: `chroot-setup.sh` (in `debian-installer-utils 1.146`,
+  shipped as the `di-utils` udeb) called `dpkg-divert --rename`
+  against `/sbin/start-stop-daemon` (Essential file from `dpkg`).
+  Modern dpkg warns on every such call.  ~23 warnings in the
+  reference install log spread across base-installer, apt-setup,
+  and finish-install steps.
+- **Fix shipped** (commit `34905d9`):
+  `patch/source/debian-installer-utils/1.146/9001-dpkg-divert-no-rename.patch`
+  swaps both `divert()` and `undivert()` helpers from `--rename` to
+  `--no-rename`.  Functional behaviour during install is identical
+  (the .REAL stub still receives daemon start attempts, which it
+  ignores); only the rename machinery differs.
+- **Verification**: pending — next install log should show zero
+  `use --no-rename` warnings.
 
 ### ~~apt-cdrom-setup chain broken end-to-end~~ — 2026-05-13
 
