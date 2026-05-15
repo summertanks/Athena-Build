@@ -1,0 +1,44 @@
+Description: skip dh_doxygen under nodoc profile
+ libevdev's `debian/rules` `override_dh_installdocs-indep` runs:
+ .
+   dh_installdocs -i
+   dh_doxygen -i -plibevdev-doc
+ .
+ The second line installs the doxygen-generated HTML reference into
+ the `libevdev-doc` binary package.  Under
+ `DEB_BUILD_PROFILES=nodoc` (Athena's default — `[Source]
+ BuildProfiles = nodoc, nocheck` in build.conf), the upstream
+ `dh_auto_build-indep -Bdoc` step doesn't actually run the doxygen
+ generator, so there's no HTML output for `dh_doxygen` to find:
+ .
+   dh_doxygen: error: Doxygen documentation not found
+   make[1]: *** [debian/rules:45: override_dh_installdocs-indep] Error 25
+ .
+ Drop the `dh_doxygen` invocation entirely.  Under nodoc this is the
+ right behaviour — there's nothing to install.  The `libevdev-doc`
+ binary package still gets built (it's an arch-indep .deb that ships
+ README + changelog via `dh_installdocs` above), it just won't carry
+ the doxygen HTML reference under our build profile.
+ .
+ The trade-off: a hypothetical full (non-nodoc) build would also stop
+ shipping the doxygen HTML.  We never run a full build (nodoc is
+ hard-coded for Athena), so this is acceptable.  If a future Athena
+ variant needs doxygen output, gate the line on the inverse of
+ `nodoc` instead of removing it outright.
+ .
+ Surfaced during GROUPS-01 phase 3 gnome build 2026-05-14 — libevdev
+ is pulled in transitively as a Build-Depends of mutter (gnome-shell's
+ compositor) for input-event handling.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-15
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -42,4 +42,3 @@
+
+ override_dh_installdocs-indep:
+ 	dh_installdocs -i
+-	dh_doxygen -i -plibevdev-doc
