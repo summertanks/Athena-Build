@@ -5268,6 +5268,59 @@ def test_parse_pkg_list_groups_empty_section_name_raises():
         os.unlink(_path)
 
 
+def test_pass_iii_dedups_to_canonical_names_for_pkg_group_pkg_names():
+    """Pass III in cmd_parse_dependency must collapse virtual aliases
+    in selected_pkgs.keys() down to canonical Package: names when
+    populating pkg_group_pkg_names.  selected_pkgs is keyed by both
+    real and virtual names (the resolver registers virtuals as
+    aliases pointing to their canonical providers); the per-group
+    set must NOT contain virtuals because:
+      - tasksel's task_avail() runs `apt-cache dumpavail` on each
+        Key entry, and dumpavail only emits real Package: stanzas.
+        A single virtual in the Key list silently hides the entire
+        task from the menu.  Caught 2026-05-15: athena-development-tools
+        had 10 virtuals (cpp, c++-compiler, git-core, …) and never
+        appeared in tasksel.
+      - install batches (chroot._compute_install_batches) operate
+        on canonical names; passing virtuals through the filter
+        is a no-op at best, confusing diagnostic output at worst.
+
+    This test simulates the merge by directly invoking the dedup
+    expression (cleaner than standing up a full Cache+DependencyTree
+    fixture) and pins the canonical-only invariant."""
+    # Simulated Pass III state: selected_pkgs has BOTH real names AND
+    # virtual aliases, all pointing at the canonical Package object.
+    class _StubPkg(dict):
+        pass
+    _gcc12 = _StubPkg({'Package': 'gcc-12'})
+    _git = _StubPkg({'Package': 'git'})
+    _libc6_dev = _StubPkg({'Package': 'libc6-dev'})
+    selected_pkgs = {
+        'gcc-12':       _gcc12,   # real
+        'cpp':          _gcc12,   # virtual alias → gcc-12
+        'c++-compiler': _gcc12,   # virtual alias → gcc-12
+        'git':          _git,     # real
+        'git-core':     _git,     # virtual alias → git
+        'libc6-dev':    _libc6_dev,  # real
+        'libc-dev':     _libc6_dev,  # virtual alias → libc6-dev
+    }
+    _pre_group_keys = set()  # nothing selected before this group
+    _delta_keys = set(selected_pkgs.keys()) - _pre_group_keys
+
+    # The dedup expression from build.py:781
+    _canonical = {
+        selected_pkgs[_n]['Package']
+        for _n in _delta_keys
+        if _n in selected_pkgs
+    }
+    assert _canonical == {'gcc-12', 'git', 'libc6-dev'}, (
+        f"expected canonical-only set; got {_canonical}"
+    )
+    # No virtuals leak through
+    for _v in ('cpp', 'c++-compiler', 'git-core', 'libc-dev'):
+        assert _v not in _canonical, f"virtual {_v!r} leaked into group set"
+
+
 def test_dep_tree_initialises_pkg_group_fields_empty():
     """DependencyTree starts with empty pkg_group_pkg_names dict and
     empty pkg_group_extras_pkg_names set; populated by Pass III in
@@ -7957,6 +8010,7 @@ def main() -> int:
         test_parse_pkg_list_groups_rejects_seed_before_first_section,
         test_parse_pkg_list_groups_empty_section_name_raises,
         test_dep_tree_initialises_pkg_group_fields_empty,
+        test_pass_iii_dedups_to_canonical_names_for_pkg_group_pkg_names,
         test_stage_group_manifests_writes_one_file_per_group,
         test_stage_group_manifests_empty_groups_is_noop,
         test_parse_pkg_list_group_meta_extracts_descriptions,

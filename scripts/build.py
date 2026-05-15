@@ -776,11 +776,31 @@ class BuildSession:
             _new_seeds = [_p for _p in _seeds if _p not in _pre_group_keys]
             if _new_seeds:
                 self.dep_tree.resolve_packages(_new_seeds)
-            # Per-group canonical names = delta in selected_pkgs.keys().
-            _post_group_keys = set(self.dep_tree.selected_pkgs.keys())
-            self.dep_tree.pkg_group_pkg_names[_group] = (
-                _post_group_keys - _pre_group_keys
+            # Per-group package names = delta in selected_pkgs.keys(),
+            # collapsed to canonical names.  selected_pkgs is keyed by
+            # BOTH real Package: names AND every virtual Provides: name
+            # — for downstream code that only reasons about what dpkg
+            # actually installs (tasksel/task_avail, base_include,
+            # install batches), the virtual aliases are noise that
+            # masquerade as separate packages.
+            #
+            # Why this matters specifically for tasksel: the .desc's
+            # `Key:` list ends up downstream of these names; tasksel's
+            # `task_avail()` calls `apt-cache dumpavail` to verify each
+            # Key is installable, and dumpavail only emits real
+            # `Package:` stanzas (Provides aren't separate stanzas).
+            # A single virtual name in Key → task hidden from menu.
+            # Caught 2026-05-15 — athena-development-tools had 10/49
+            # Key entries that were virtuals (cpp, c++-compiler,
+            # git-core, …); tasksel silently filtered the whole task.
+            _delta_keys = (
+                set(self.dep_tree.selected_pkgs.keys()) - _pre_group_keys
             )
+            self.dep_tree.pkg_group_pkg_names[_group] = {
+                self.dep_tree.selected_pkgs[_n]['Package']
+                for _n in _delta_keys
+                if _n in self.dep_tree.selected_pkgs
+            }
             _delta = len(self.dep_tree.pkg_group_pkg_names[_group])
             _total_manual_added += _delta
             console.print(
