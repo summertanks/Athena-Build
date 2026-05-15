@@ -1,0 +1,50 @@
+Description: disable LTO so gkrust rustc stays under OOM-killer threshold
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-15
+Bug-Athena: Surfaced during GROUPS-01 phase 3 gnome build 2026-05-15
+ NOT a packaging bug — this patch addresses a HOST-RESOURCE limit
+ that surfaces as an opaque SIGKILL during the firefox-esr build:
+ .
+   error: could not compile `gkrust` (lib)
+   Caused by:
+     process didn't exit successfully: `... rustc ...` (signal: 9, SIGKILL: kill)
+ .
+ `gkrust` is Mozilla's monolithic Rust library for libxul.  Under
+ `--enable-release` (default in `browser.mozconfig.in`) it compiles
+ with LTO; the LTO link in a single rustc invocation peaks at
+ ~6-8 GB resident.  With our `[Source]` parallelism running
+ multiple rustc workers concurrently, total RAM saturates and the
+ kernel OOM-killer fires.  cargo reports the SIGKILL as opaque
+ `signal: 9` — the actual OOM message lands in host dmesg, not in
+ the build log.
+ .
+ Fix: add `ac_add_options --disable-lto`.  Each gkrust rustc now
+ peaks at ~2-3 GB instead of ~6-8 GB.  Trade-off: ~3-5% firefox
+ runtime perf loss from no link-time optimisation across the Rust
+ codebase.  Acceptable for an installable-via-tasksel browser
+ where build reliability matters more than peak benchmark numbers.
+ .
+ Alternative considered and rejected: cap `CARGO_BUILD_JOBS=1` in
+ `debian/rules` — single-threaded gkrust LTO compilation takes
+ 30-40 minutes vs ~7 min with `--disable-lto`, and a mozconfig
+ knob is more discoverable than a buried env-var in rules.
+ .
+ Revert this patch only when paired with confirmation that the
+ build host has ≥64 GB RAM headroom for parallel LTO rustc.
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/browser.mozconfig.in
++++ b/debian/browser.mozconfig.in
+@@ -2,6 +2,10 @@
+ # packages for Debian or a derivative.
+ ac_add_options --with-app-name=@browser@
+ ac_add_options --enable-release
++# Athena: disable LTO on gkrust to keep per-rustc RAM ~2-3 GB rather
++# than ~6-8 GB.  Without this, the gkrust LTO link is OOM-killed on
++# 16-32 GB build hosts with our [Source] parallelism settings.
++ac_add_options --disable-lto
+ ac_add_options --enable-default-toolkit=cairo-gtk3-wayland
+ ac_add_options --with-google-location-service-api-keyfile=$topsrcdir/debian/google.key
+ ac_add_options --with-google-safebrowsing-api-keyfile=$topsrcdir/debian/google.key
