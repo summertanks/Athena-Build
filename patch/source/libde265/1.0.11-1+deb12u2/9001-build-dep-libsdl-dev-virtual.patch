@@ -1,0 +1,51 @@
+Description: pick a concrete libsdl-dev provider in Build-Depends
+ `debian/control` bare-lists `libsdl-dev` as a Build-Depends.  That
+ name is a virtual package with two concrete providers in bookworm:
+ .
+   libsdl1.2-dev          1.2.15+dfsg2-8   (original SDL 1.2)
+   libsdl1.2-compat-dev   1.2.60-1         (SDL1.2 ABI on top of SDL2)
+ .
+ When neither is already installed, `apt-get build-dep` refuses to
+ disambiguate (see the `llvm-toolchain-15` patch for the longer
+ explanation of why bookworm's apt is strict here):
+ .
+   E: Package 'libsdl-dev' has no installation candidate
+ .
+ Fix follows standard Debian practice for build-depending on a
+ virtual: alternation with a concrete preference first.
+ .
+   libsdl1.2-dev | libsdl-dev
+ .
+ Choice of `libsdl1.2-dev` over `libsdl1.2-compat-dev`:
+   * libde265 only needs SDL for a small display utility in `dec265`
+     — the original SDL 1.2 ABI is sufficient.
+   * libsdl1.2-dev pulls a smaller transitive closure (the compat
+     variant pulls libsdl2-dev).
+   * Matches the intent of the original bare `libsdl-dev`: any
+     SDL 1.2 ABI provider is fine, prefer the original.
+ .
+ Keeping `| libsdl-dev` as the second alternative means a system
+ that already has `libsdl1.2-compat-dev` installed by some other
+ build still satisfies the build-dep without a second concrete
+ install.
+ .
+ Surfaced during GROUPS-01 phase 3 gnome build 2026-05-15 — libde265
+ is pulled in transitively (likely via gnome-shell → tracker →
+ gstreamer-plugins-bad's HEVC decoder, which links libde265).
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-15
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/control
++++ b/debian/control
+@@ -8,7 +8,7 @@
+ Build-Depends:
+  debhelper-compat (= 13),
+  qtbase5-dev | libqt4-dev,
+- libsdl-dev,
++ libsdl1.2-dev | libsdl-dev,
+  libswscale-dev,
+  libx11-dev,
+  libxext-dev,
