@@ -1,0 +1,50 @@
+Description: declare lilv.py as intentionally not installed
+ lilv's waf build system installs a ctypes-based Python wrapper at
+ .
+   debian/tmp/usr/lib/python3/dist-packages/lilv.py
+ .
+ when `python3:native` is present in the build environment (which
+ it always is in our build container).  The wrapper is ~one file —
+ a thin ctypes binding that dlopens `liblilv-0.so.0` at runtime.
+ .
+ None of lilv's three declared binary packages — `liblilv-0-0`,
+ `liblilv-dev`, `lilv-utils` — claims this file in its `.install`
+ list.  Under `debhelper-compat (= 13)`'s default-strict
+ `dh_missing`, an unshipped file in `debian/tmp/` is a build error:
+ .
+   dh_missing: warning: usr/lib/python3/dist-packages/lilv.py exists in debian/tmp but is not installed to anywhere
+   dh_missing: error: missing files, aborting
+ .
+ dh_missing's own recommendation when the omission is intentional:
+ .
+   "If the omission is intentional or no other helper can take care
+    of this consider adding the paths to debian/not-installed."
+ .
+ Add a `debian/not-installed` declaring the Python wrapper as
+ intentionally not shipped.  The ctypes wrapper has no consumer
+ in our build (no `python3-lilv` package is declared upstream;
+ introducing one here would be a much larger packaging change),
+ so dropping it on the floor is the right call.
+ .
+ If a future Athena variant wants the Python binding, the right
+ path is to add a new `python3-lilv` binary package to
+ `debian/control` + a matching `python3-lilv.install` claiming
+ the file — NOT to revert this patch.
+ .
+ Surfaced during GROUPS-01 phase 3 gnome build 2026-05-15 — lilv
+ is pulled in by the LV2 audio plugin host stack (likely transitive
+ via gnome-shell → tracker → libnice or similar audio handling).
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-15
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- /dev/null
++++ b/debian/not-installed
+@@ -0,0 +1,5 @@
++# The waf build installs a ctypes Python wrapper at this path when
++# python3:native is available.  Lilv ships no python3-lilv binary
++# package, so the file is intentionally unshipped.  See the
++# 9001-declare-python-binding-not-installed.patch DEP-3 header.
++usr/lib/python3/dist-packages/lilv.py
