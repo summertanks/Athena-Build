@@ -1087,22 +1087,91 @@ def get_md5(filepath: str) -> str:
         return ''
 
 
-def get_sha256(filepath: str) -> str:
-    """
-    Calculate the SHA256 hash of a file.
-    Args:
-        filepath: The file to hash
-    Returns:
-        str: hex digest, or empty string if file does not exist
-    """
+def _compute_sha256(filepath: str) -> str:
+    """Compute SHA-256 of `filepath` — pure I/O, no caching.  Returns
+    empty string on missing file or read error (logged as warning).
+
+    Separate from `get_sha256` so the cache layer in that function
+    has a clean monkey-patch target for the unit tests (tests assert
+    cache hits by replacing this with a counter)."""
     if not os.path.isfile(filepath):
         return ''
     try:
         with open(filepath, 'rb') as f:
             return hashlib.file_digest(f, 'sha256').hexdigest()
     except OSError as e:
-        logger.warning(f"get_sha256: cannot read {filepath}: {e}")
+        logger.warning(f"_compute_sha256: cannot read {filepath}: {e}")
         return ''
+
+
+def get_sha256(filepath: str, use_cache: bool = True) -> str:
+    """Return the SHA-256 hash of `filepath` (hex digest), empty
+    string on missing file / read error.
+
+    With `use_cache=True` (default), checks `<filepath>.verified` for
+    a cached hash recorded against the file's `(size, mtime_ns)`.
+    When the recorded pair matches the current file stat, returns
+    the cached hash without re-reading the file — a no-op verify
+    run over hundreds of source tarballs drops from ~30 seconds of
+    SHA-256 to milliseconds of `stat()`+sidecar-read.
+
+    Sidecar format — single line, space-separated:
+
+        <size_bytes> <mtime_ns> <sha256_hex>
+
+    Cache miss (sidecar missing OR malformed OR (size, mtime_ns)
+    don't match) → recomputes via `_compute_sha256`, writes a fresh
+    sidecar.  Sidecar write failures are non-fatal: the computed
+    hash is returned and the next call simply recomputes again.
+
+    Cache invariant: `(size, mtime_ns)` unchanged ⇒ file content
+    unchanged.  Holds in our pipeline — downloads write fresh files
+    with new mtime; we never edit in place.  Operators who replace
+    a file out-of-band (e.g. manual `cp --preserve=timestamps`) must
+    also delete `<file>.verified` to force a recompute.
+
+    `use_cache=False` forces a fresh compute AND does not touch the
+    sidecar — for callers that just wrote the file and want to
+    round-trip it from disk to confirm what was written.
+    """
+    if not use_cache:
+        return _compute_sha256(filepath)
+
+    if not os.path.isfile(filepath):
+        return ''
+
+    try:
+        _stat = os.stat(filepath)
+        _size = _stat.st_size
+        _mtime_ns = _stat.st_mtime_ns
+    except OSError as e:
+        logger.warning(f"get_sha256: cannot stat {filepath}: {e}")
+        return ''
+
+    _sidecar = filepath + '.verified'
+    try:
+        with open(_sidecar, 'r', encoding='utf-8') as fh:
+            _parts = fh.readline().strip().split()
+        if (len(_parts) == 3
+                and int(_parts[0]) == _size
+                and int(_parts[1]) == _mtime_ns):
+            return _parts[2]
+    except (OSError, ValueError):
+        # Sidecar missing or malformed — fall through to recompute.
+        pass
+
+    _sha = _compute_sha256(filepath)
+    if _sha:
+        try:
+            with open(_sidecar, 'w', encoding='utf-8') as fh:
+                fh.write(f"{_size} {_mtime_ns} {_sha}\n")
+        except OSError as e:
+            # Non-fatal: caller still gets the correct hash; next
+            # invocation will recompute and try the sidecar write again.
+            logger.debug(
+                f"get_sha256: cannot write sidecar {_sidecar}: {e}"
+            )
+    return _sha
 
 
 def parse_pkg_list_groups(path: str) -> 'dict[str, list[str]]':
