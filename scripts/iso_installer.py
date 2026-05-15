@@ -103,7 +103,25 @@ def build_installer_iso(
     if not _stage_disk_info(_staging, installer_dir, codename, version):
         return False
 
-    if not _stage_base_include(_staging, base_include_pkgs):
+    # GROUPS-01: when non-base groups exist we ship a synthetic
+    # `athena-tasksel-data` package that drops `athena.desc` into
+    # `/usr/share/tasksel/descs/` on /target.  Tasksel's discovery is
+    # just `glob /usr/share/tasksel/descs/*.desc` (see
+    # /usr/bin/tasksel:53-65) — so the .desc lands where tasksel reads
+    # it via standard dpkg machinery; no pre-pkgsel hook gymnastics.
+    # Inject the package name into base_include BEFORE staging so
+    # debootstrap installs it on every /target.  The .deb is built
+    # later (after _stage_pool) and dropped into pool/.
+    _has_non_base_groups = bool(
+        pkg_groups and any(_g != 'base' for _g in pkg_groups)
+    )
+    _effective_base_include = base_include_pkgs
+    if _has_non_base_groups:
+        _effective_base_include = list(base_include_pkgs or []) + [
+            'athena-tasksel-data',
+        ]
+
+    if not _stage_base_include(_staging, _effective_base_include):
         return False
 
     if not _stage_pool(dir_repo, _staging, password, deb_whitelist):
@@ -111,18 +129,21 @@ def build_installer_iso(
 
     # GROUPS-01: per-group package manifests so the installer (and
     # post-install operator scripts) can apt-install a chosen group
-    # from /cdrom/pool.  Phase 1 ships plain-text lists at
-    # .disk/groups/<group>.list; Phase 2 will also generate tasksel
-    # `.desc` files.
+    # from /cdrom/pool.  Ships plain-text lists at .disk/groups/<group>.list.
     if pkg_groups:
         if not _stage_group_manifests(_staging, pkg_groups):
             return False
-        # Phase 2: emit tasksel `.desc` so the installer's pkgsel step
-        # surfaces the non-[base] groups as user-selectable tasks.
-        # group_meta provides operator-supplied descriptions; falls
-        # back to a default per-group title when omitted.
+        # Generate `.disk/athena-tasks.desc` for operator inspection
+        # (xorriso-readable, no boot required).  This is the same
+        # content that goes into the athena-tasksel-data .deb below.
         if not _stage_tasksel_desc(_staging, pkg_groups, group_meta or {}):
             return False
+        # Build the synthetic .deb and drop into pool so debootstrap
+        # picks it up via base_include + apt's cdrom: source.
+        if _has_non_base_groups:
+            if not _build_tasksel_data_deb(
+                    _staging, pkg_groups, group_meta or {}, version):
+                return False
 
     if not _generate_apt_repo(_staging, suite, codename, version, password):
         return False
@@ -579,6 +600,133 @@ def _stage_tasksel_desc(staging: str,
     tui.console.print(
         f"tasksel: {len(_non_base)} task(s) → .disk/athena-tasks.desc "
         f"({', '.join(sorted(_non_base))})"
+    )
+    return True
+
+
+def _build_tasksel_data_deb(
+    staging: str,
+    pkg_groups: 'dict[str, set]',
+    group_meta: 'dict[str, dict[str, str]]',
+    version: str,
+) -> bool:
+    """Build the synthetic `athena-tasksel-data_<ver>_all.deb` and
+    drop it into `staging/pool/`.
+
+    The .deb ships a single file — `usr/share/tasksel/descs/athena.desc`
+    — generated from the operator's pkg.list groups.  tasksel's
+    discovery is just `glob /usr/share/tasksel/descs/*.desc` (verbatim
+    from upstream `/usr/bin/tasksel` lines 53-65); dpkg-installing the
+    file is enough to make the tasks appear in the Software-selection
+    menu.  Avoids the entire pre-pkgsel.d hook contraption — and the
+    apt-cdrom mount-on-demand fight that made the hook unreliable.
+
+    Why a synthetic .deb (rather than baking the .desc into the initrd,
+    or copying it from /cdrom): the file is part of the system's
+    install footprint, so dpkg should track it.  `athena-tasksel-data`
+    appears in `dpkg -l` on /target like any other package; the
+    operator can `dpkg -P athena-tasksel-data` to remove it.  Static
+    initrd-baked / hook-copied files don't have that property.
+
+    The .deb is in the pool only — we don't ship it in `repo/` (the
+    source-build artefact area).  Generation happens at every
+    `iso build installer` run so the .desc content stays in sync with
+    the operator's current pkg.list groups.
+
+    Version semantics: we use the ISO version (e.g. `0.1`) so all
+    iso-build artefacts share the same version string.  No upstream-
+    style versioning — this is purely an iso-build internal package
+    that doesn't track an external source.
+    """
+    _non_base = [_g for _g in pkg_groups.keys() if _g != 'base']
+    if not _non_base:
+        # No-op — base-only installs don't need tasksel customisation.
+        return True
+
+    # Read the .desc we just wrote in _stage_tasksel_desc — single
+    # source of truth for the file content (avoids the two helpers
+    # generating slightly-different output).
+    _desc_src = os.path.join(staging, '.disk', 'athena-tasks.desc')
+    if not os.path.isfile(_desc_src):
+        tui.console.print(
+            f"ERROR: athena-tasks.desc not found at {_desc_src} — "
+            "_stage_tasksel_desc must run first"
+        )
+        logger.error(f"_build_tasksel_data_deb: missing {_desc_src}")
+        return False
+
+    import tempfile
+    _pool_dir = os.path.join(staging, 'pool')
+    os.makedirs(_pool_dir, exist_ok=True)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix='athena-tasksel-data-') as _tmp:
+            _pkg_root = os.path.join(_tmp, 'pkg')
+            _debian_dir = os.path.join(_pkg_root, 'DEBIAN')
+            _descs_dir = os.path.join(
+                _pkg_root, 'usr', 'share', 'tasksel', 'descs',
+            )
+            os.makedirs(_debian_dir)
+            os.makedirs(_descs_dir)
+
+            # Payload — copy the staged .desc into the .deb's tasksel
+            # discovery path.  tasksel will glob it from
+            # /usr/share/tasksel/descs/athena.desc on /target.
+            shutil.copy2(_desc_src, os.path.join(_descs_dir, 'athena.desc'))
+
+            # Compute installed size in KB (Debian convention) — required
+            # by policy 5.6.20.  Just the .desc file plus filesystem overhead.
+            _payload_size_kb = max(
+                1, (os.path.getsize(_desc_src) + 1023) // 1024,
+            )
+
+            _control = (
+                f"Package: athena-tasksel-data\n"
+                f"Version: {version}\n"
+                f"Section: misc\n"
+                f"Priority: optional\n"
+                f"Architecture: all\n"
+                f"Maintainer: Athena Build <athena@local>\n"
+                f"Installed-Size: {_payload_size_kb}\n"
+                # Depend on tasksel so dpkg doesn't install us into a
+                # /target that's missing the consumer.  pkg.list [base]
+                # already pins tasksel for an unrelated reason
+                # (debconf wiring); this Depends is a belt+braces
+                # declaration for any future operator who edits [base].
+                f"Depends: tasksel\n"
+                f"Description: Athena task descriptions for tasksel\n"
+                f" Drops /usr/share/tasksel/descs/athena.desc, the operator-defined\n"
+                f" task list generated at ISO-build time from pkg.list groups.\n"
+                f" tasksel discovers it via its standard glob over the descs\n"
+                f" directory at install/upgrade time.\n"
+            )
+            with open(os.path.join(_debian_dir, 'control'), 'w') as fh:
+                fh.write(_control)
+
+            _deb_name = f"athena-tasksel-data_{version}_all.deb"
+            _deb_path = os.path.join(_pool_dir, _deb_name)
+            _r = subprocess.run(
+                ['dpkg-deb', '--build', '--root-owner-group',
+                 _pkg_root, _deb_path],
+                capture_output=True, text=True,
+            )
+            if _r.returncode != 0:
+                tui.console.print(
+                    f"ERROR: dpkg-deb --build failed: {_r.stderr.strip()}"
+                )
+                logger.error(
+                    f"_build_tasksel_data_deb dpkg-deb rc={_r.returncode}: "
+                    f"{_r.stderr.strip()}"
+                )
+                return False
+    except OSError as e:
+        tui.console.print(f"ERROR: athena-tasksel-data build: {e}")
+        logger.error(f"_build_tasksel_data_deb: {e}")
+        return False
+
+    tui.console.print(
+        f"tasksel: athena-tasksel-data_{version}_all.deb → pool/ "
+        f"({_payload_size_kb} KB payload, {len(_non_base)} task(s))"
     )
     return True
 

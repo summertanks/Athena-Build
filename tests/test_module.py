@@ -5229,43 +5229,11 @@ def test_stage_tasksel_desc_only_base_groups_is_noop():
         )
 
 
-def test_pre_pkgsel_hook_exists_and_is_executable():
-    """The pre-pkgsel.d script ships under installer/pkgsel/, is
-    executable, and copies `/cdrom/.disk/athena-tasks.desc` to
-    `/target/usr/share/tasksel/descs/`.  Pin the path AND the cp
-    target so a future installer/ reorganisation doesn't silently
-    move the hook to nowhere."""
-    _path = os.path.join(
-        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
-    )
-    assert os.path.isfile(_path), _path
-    assert os.access(_path, os.X_OK), f"hook must be executable: {_path}"
-    with open(_path) as fh:
-        _body = fh.read()
-    assert '/cdrom/.disk/athena-tasks.desc' in _body
-    assert '/target/usr/share/tasksel/descs' in _body
-
-
-def test_overlay_map_contains_pre_pkgsel_hook():
-    """The installer overlay map routes `pkgsel/pre-pkgsel.d-athena-tasks`
-    into `usr/lib/pre-pkgsel.d/05-athena-tasks` in the installer chroot.
-    pkgsel runs run-parts on that directory, so the hook must land
-    there or it's silently inert."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _OVERLAY_MAP
-    _src_to_target = dict(_OVERLAY_MAP)
-    assert 'pkgsel/pre-pkgsel.d-athena-tasks' in _src_to_target, (
-        f"overlay map missing pre-pkgsel hook: {_OVERLAY_MAP}"
-    )
-    _target = _src_to_target['pkgsel/pre-pkgsel.d-athena-tasks']
-    assert _target == 'usr/lib/pre-pkgsel.d/05-athena-tasks', _target
-
-
 def test_installer_list_includes_pkgsel():
     """pkgsel udeb must be in installer.list — drives the
-    'Software selection' step at install time and runs the
-    pre-pkgsel.d hook that staged the .desc."""
+    'Software selection' step at install time (which invokes
+    `in-target tasksel --new-install` to read our athena.desc and
+    surface the operator-defined groups)."""
     _path = os.path.join(_ROOT, 'config', 'installer.list')
     with open(_path) as fh:
         _names = {
@@ -5277,8 +5245,8 @@ def test_installer_list_includes_pkgsel():
 
 def test_pkg_list_base_includes_tasksel():
     """tasksel must be in pkg.list [base] so it's debootstrapped onto
-    every /target — pkgsel's `in-target tasksel --new-install` then
-    works without an apt-install round-trip."""
+    every /target.  athena-tasksel-data Depends: tasksel — without this
+    dependency target, the synthetic .deb would fail to install."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from utils import parse_pkg_list_groups
@@ -5288,190 +5256,152 @@ def test_pkg_list_base_includes_tasksel():
         f"pkg.list [base] missing tasksel; got base={groups.get('base')}"
 
 
+# Old pre-pkgsel.d hook block (commits 2cd13b6 / d9818b0 / 346ce20)
+# is gone — replaced by a synthetic athena-tasksel-data .deb generated
+# in iso_installer._build_tasksel_data_deb.  Tasksel reads the .desc
+# via its standard glob over /usr/share/tasksel/descs/ (per
+# /usr/bin/tasksel:53-65), and dpkg-installing the .deb is enough to
+# put the file there.  No more apt-cdrom mount-on-demand gymnastics.
+
+
+def test_overlay_map_does_not_contain_pre_pkgsel_hook():
+    """The pre-pkgsel.d hook is gone — replaced by the synthetic
+    athena-tasksel-data .deb (iso_installer._build_tasksel_data_deb).
+    If a future refactor accidentally re-adds the hook to the overlay
+    map, we want to fail here so the dual-mechanism confusion doesn't
+    silently land."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _OVERLAY_MAP
+    _src_to_target = dict(_OVERLAY_MAP)
+    assert 'pkgsel/pre-pkgsel.d-athena-tasks' not in _src_to_target, (
+        "obsolete pre-pkgsel hook re-added to overlay map — "
+        "athena-tasksel-data .deb supersedes it"
+    )
+
+
+def test_installer_pkgsel_dir_does_not_exist():
+    """Belt+braces: the installer/pkgsel/ directory itself should not
+    exist on disk.  If someone re-creates the hook, we want this test
+    to fail next CI run rather than ship a half-removed mechanism."""
+    _path = os.path.join(_ROOT, 'installer', 'pkgsel')
+    assert not os.path.exists(_path), (
+        f"installer/pkgsel/ should be gone (obsolete pre-pkgsel hook),"
+        f" but exists at {_path}"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# GROUPS-01 phase 3: end-to-end hook smoke test + pre-flight checks
+# GROUPS-01 phase 4: athena-tasksel-data .deb generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_pre_pkgsel_hook_copies_desc_to_target():
-    """Drive the hook script in a tempdir with env-var overrides.
-    Confirms the install-time half of GROUPS-01 actually works without
-    needing to boot a VM: hook reads /cdrom/.disk/athena-tasks.desc,
-    writes /target/usr/share/tasksel/descs/athena.desc with identical
-    bytes."""
-    import subprocess, tempfile
-    _hook = os.path.join(
-        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
-    )
-    assert os.path.isfile(_hook) and os.access(_hook, os.X_OK), _hook
 
-    _payload = (
-        "Task: athena-development-tools\n"
-        "Section: athena\n"
-        "Description: smoke test\n"
-        " body line\n"
-        "Key:\n"
-        " build-essential\n"
-        " git\n"
-    )
-    with tempfile.TemporaryDirectory() as _tmp:
-        _src = os.path.join(_tmp, 'cdrom.desc')
-        _dst_dir = os.path.join(_tmp, 'target', 'usr', 'share', 'tasksel', 'descs')
-        with open(_src, 'w') as fh:
-            fh.write(_payload)
-        _r = subprocess.run(
-            ['sh', _hook],
-            env={
-                **os.environ,
-                'ATHENA_TASKS_SRC': _src,
-                'ATHENA_TASKS_DST_DIR': _dst_dir,
-            },
-            capture_output=True, text=True,
-        )
-        assert _r.returncode == 0, (
-            f"hook exited rc={_r.returncode}; stderr={_r.stderr!r}"
-        )
-        _dst = os.path.join(_dst_dir, 'athena.desc')
-        assert os.path.isfile(_dst), f"hook did not produce {_dst}"
-        with open(_dst) as fh:
-            assert fh.read() == _payload
-
-
-def test_pre_pkgsel_hook_handles_missing_desc_cleanly():
-    """Hook exits 0 when the .desc is absent — caller's run-parts loop
-    treats per-script failures as fatal (sets the install error
-    state), so a missing-but-OK case must not surface as a non-zero
-    exit."""
-    import subprocess, tempfile
-    _hook = os.path.join(
-        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
-    )
-    with tempfile.TemporaryDirectory() as _tmp:
-        _r = subprocess.run(
-            ['sh', _hook],
-            env={
-                **os.environ,
-                'ATHENA_TASKS_SRC': os.path.join(_tmp, 'does-not-exist.desc'),
-                'ATHENA_TASKS_DST_DIR': os.path.join(_tmp, 'target', 'tasksel'),
-            },
-            capture_output=True, text=True,
-        )
-        assert _r.returncode == 0, (
-            f"hook with no .desc must exit 0; got rc={_r.returncode}, "
-            f"stderr={_r.stderr!r}"
-        )
-        # No /target tree should be created when there's nothing to copy.
-        assert not os.path.exists(os.path.join(_tmp, 'target')), \
-            "hook created /target dir despite missing source"
-
-
-def test_pre_pkgsel_hook_searches_multiple_cdrom_paths():
-    """When ATHENA_TASKS_SRC is unset, the hook probes a list of standard
-    cdrom mount points (/cdrom, /media/cdrom, /media/cdrom0, plus the
-    /target/-prefixed variants).  This caught a real install failure
-    2026-05-15 where apt-setup's `remount_cd` skipped /cdrom for an
-    isohybrid disk and the file was reachable only via /media/cdrom*.
-
-    Verify the hook source contains all expected candidate paths so
-    a future refactor that strips them breaks here, not at install
-    time on a fresh ISO build."""
-    _path = os.path.join(
-        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
-    )
-    with open(_path) as fh:
-        _body = fh.read()
-    for _candidate in (
-        '/cdrom/.disk/athena-tasks.desc',
-        '/media/cdrom/.disk/athena-tasks.desc',
-        '/media/cdrom0/.disk/athena-tasks.desc',
-        '/target/media/cdrom/.disk/athena-tasks.desc',
-        '/target/media/cdrom0/.disk/athena-tasks.desc',
-    ):
-        assert _candidate in _body, (
-            f"hook missing candidate path {_candidate!r} — "
-            f"installs with non-standard cdrom mount will silently miss .desc"
-        )
-
-
-def test_pre_pkgsel_hook_mounts_cdrom_device_when_no_path_works():
-    """Three-layer resolution: static paths, /proc/mounts scan, then
-    mount the cdrom device ourselves.  The third layer is the one that
-    actually unblocked our install — apt-cdrom uses mount-on-demand, so
-    layers 1+2 turn up empty even though the device is physically present.
-
-    Pin the device-list and the iso9660 mount command in the script so a
-    future refactor that loses the mount-it-ourselves fallback breaks
-    here, not at install time on a fresh ISO build."""
-    _path = os.path.join(
-        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
-    )
-    with open(_path) as fh:
-        _body = fh.read()
-    # Layer 1 marker (one of the static paths)
-    assert '/cdrom/.disk/athena-tasks.desc' in _body
-    # Layer 2 marker (proc/mounts iso9660 scan)
-    assert '/proc/mounts' in _body
-    assert 'iso9660' in _body and 'udf' in _body
-    # Layer 3 markers (device probe + mount)
-    assert 'cdrom-detect/cdrom_device' in _body, (
-        "missing debconf-based device lookup (preferred over /dev/sr0)"
-    )
-    for _dev in ('/dev/sr0', '/dev/cdrom'):
-        assert _dev in _body, f"missing device fallback {_dev}"
-    assert 'mount -t iso9660' in _body, (
-        "missing layer-3 mount command — apt-cdrom unmounts between fetches,"
-        " hook needs to mount the device itself"
-    )
-    # Cleanup trap so we don't leak the mount on exit
-    assert 'trap cleanup EXIT' in _body, "missing cleanup trap"
-
-
-def test_pre_pkgsel_hook_logs_diagnostic_on_miss():
-    """On total miss the hook dumps /proc/mounts iso/udf entries and
-    /dev/sr0 state via syslog.  Future regressions (e.g. d-i moves
-    to a new mount layout) are then debuggable from the install log
-    alone — no need to instrument the hook and re-cycle a multi-hour
-    installer ISO."""
-    _path = os.path.join(
-        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
-    )
-    with open(_path) as fh:
-        _body = fh.read()
-    assert 'no .desc found' in _body
-    # diagnostic /proc/mounts dump must run after the miss log
-    _miss_idx = _body.index('no .desc found')
-    _proc_idx = _body.rindex('grep -E')
-    assert _proc_idx > _miss_idx, (
-        "diagnostic /proc/mounts dump must come after the miss log line"
-    )
-
-
-def test_pre_pkgsel_hook_unset_src_with_no_real_cdrom_skips_cleanly():
-    """When ATHENA_TASKS_SRC is unset AND none of the standard cdrom
-    paths exist on the host (typical for the test runner's machine,
-    where /cdrom is unmounted and /media/cdrom* don't exist), the
-    candidate-list probe exhausts cleanly and the hook exits 0.
-    Pins the "no spurious failure on the host" property — without it,
-    running the test suite on a machine that happens to have a cdrom
-    mounted could give different results than on one that doesn't."""
-    import subprocess, tempfile
-    _hook = os.path.join(
-        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
-    )
-    # Skip if the test host actually has a real /cdrom mount — the test
-    # would then attempt to read it (and possibly succeed unexpectedly).
-    if os.path.isfile('/cdrom/.disk/athena-tasks.desc'):
+def test_build_tasksel_data_deb_produces_valid_deb():
+    """Drive _build_tasksel_data_deb in a tempdir.  Verifies it:
+      - Produces athena-tasksel-data_<ver>_all.deb in staging/pool/
+      - The .deb has valid dpkg metadata (control + payload)
+      - The .desc lands at /usr/share/tasksel/descs/athena.desc inside
+        the .deb (the path tasksel globs at runtime, per
+        /usr/bin/tasksel:53-65)
+    Skipped silently when `dpkg-deb` isn't on PATH (CI runners that
+    can't build .debs)."""
+    import shutil as _shutil, subprocess, sys, tempfile
+    if _shutil.which('dpkg-deb') is None:
         return
-    with tempfile.TemporaryDirectory() as _tmp:
-        _env = {k: v for k, v in os.environ.items() if k != 'ATHENA_TASKS_SRC'}
-        _env['ATHENA_TASKS_DST_DIR'] = os.path.join(_tmp, 'target', 'tasksel')
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_tasksel_desc, _build_tasksel_data_deb
+
+    _groups = {
+        'base':              {'bash', 'libc6'},
+        'development-tools': {'build-essential', 'git'},
+        'gnome':             {'gnome-shell', 'gdm3'},
+    }
+    _meta = {
+        'development-tools': {'description': 'Dev tools test'},
+        'gnome':             {'description': 'GNOME test'},
+    }
+    with tempfile.TemporaryDirectory() as _stage:
+        # Phase 1: generate .desc into staging/.disk/athena-tasks.desc
+        assert _stage_tasksel_desc(_stage, _groups, _meta) is True
+        # Phase 2: wrap into .deb
+        assert _build_tasksel_data_deb(_stage, _groups, _meta, '0.1') is True
+
+        _deb = os.path.join(_stage, 'pool', 'athena-tasksel-data_0.1_all.deb')
+        assert os.path.isfile(_deb), f".deb not produced at {_deb}"
+
+        # Verify control metadata
         _r = subprocess.run(
-            ['sh', _hook], env=_env, capture_output=True, text=True,
+            ['dpkg-deb', '--field', _deb],
+            capture_output=True, text=True, check=True,
         )
-        assert _r.returncode == 0, (
-            f"hook with no cdrom anywhere must exit 0; got rc={_r.returncode}"
+        assert 'Package: athena-tasksel-data' in _r.stdout
+        assert 'Version: 0.1' in _r.stdout
+        assert 'Architecture: all' in _r.stdout
+        assert 'Depends: tasksel' in _r.stdout
+
+        # Verify payload — the .desc lands at tasksel's discovery path
+        _r = subprocess.run(
+            ['dpkg-deb', '--contents', _deb],
+            capture_output=True, text=True, check=True,
         )
-        assert not os.path.exists(os.path.join(_tmp, 'target')), \
-            "hook created /target despite finding no .desc"
+        assert './usr/share/tasksel/descs/athena.desc' in _r.stdout, (
+            f"payload path wrong — tasksel won't find it. dpkg contents:\n"
+            f"{_r.stdout}"
+        )
+
+        # Verify payload content matches the staged .desc
+        with tempfile.TemporaryDirectory() as _extract:
+            subprocess.run(
+                ['dpkg-deb', '-x', _deb, _extract],
+                check=True, capture_output=True,
+            )
+            _payload = os.path.join(
+                _extract, 'usr', 'share', 'tasksel', 'descs', 'athena.desc',
+            )
+            assert os.path.isfile(_payload)
+            with open(_payload) as fh:
+                _body = fh.read()
+            assert 'Task: athena-development-tools' in _body
+            assert 'Task: athena-gnome' in _body
+            assert 'Task: athena-base' not in _body, (
+                "[base] should be excluded from tasksel — base packages are "
+                "debootstrapped, not tasksel-installed"
+            )
+
+
+def test_build_tasksel_data_deb_noop_when_only_base():
+    """When pkg.list declares only [base] (no operator-selectable
+    groups), _build_tasksel_data_deb is a no-op — no .deb is produced
+    because there's nothing for tasksel to surface."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _build_tasksel_data_deb
+    with tempfile.TemporaryDirectory() as _stage:
+        _groups = {'base': {'bash'}}
+        # Should return True (success — no work to do) without writing anything
+        assert _build_tasksel_data_deb(_stage, _groups, {}, '0.1') is True
+        # No .deb produced
+        _pool = os.path.join(_stage, 'pool')
+        if os.path.exists(_pool):
+            _debs = [f for f in os.listdir(_pool) if f.endswith('.deb')]
+            assert not _debs, f"unexpected .deb(s) in pool: {_debs}"
+
+
+def test_build_tasksel_data_deb_errors_when_desc_missing():
+    """_build_tasksel_data_deb requires _stage_tasksel_desc to have
+    run first (it reads the staged .desc as the single source of
+    truth for the payload).  Missing .desc must surface as a
+    return-False with a clear log line, not a silent broken .deb."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _build_tasksel_data_deb
+    with tempfile.TemporaryDirectory() as _stage:
+        _groups = {
+            'base': {'bash'},
+            'gnome': {'gnome-shell'},  # non-base → would trigger .deb build
+        }
+        # NO _stage_tasksel_desc call — .desc is missing
+        assert _build_tasksel_data_deb(_stage, _groups, {}, '0.1') is False
 
 
 def test_stage_tasksel_desc_warns_on_empty_group():
@@ -7832,16 +7762,13 @@ def main() -> int:
         test_parse_pkg_list_group_meta_flat_file_returns_base_only,
         test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group,
         test_stage_tasksel_desc_only_base_groups_is_noop,
-        test_pre_pkgsel_hook_exists_and_is_executable,
-        test_overlay_map_contains_pre_pkgsel_hook,
         test_installer_list_includes_pkgsel,
         test_pkg_list_base_includes_tasksel,
-        test_pre_pkgsel_hook_copies_desc_to_target,
-        test_pre_pkgsel_hook_handles_missing_desc_cleanly,
-        test_pre_pkgsel_hook_searches_multiple_cdrom_paths,
-        test_pre_pkgsel_hook_mounts_cdrom_device_when_no_path_works,
-        test_pre_pkgsel_hook_logs_diagnostic_on_miss,
-        test_pre_pkgsel_hook_unset_src_with_no_real_cdrom_skips_cleanly,
+        test_overlay_map_does_not_contain_pre_pkgsel_hook,
+        test_installer_pkgsel_dir_does_not_exist,
+        test_build_tasksel_data_deb_produces_valid_deb,
+        test_build_tasksel_data_deb_noop_when_only_base,
+        test_build_tasksel_data_deb_errors_when_desc_missing,
         test_stage_tasksel_desc_warns_on_empty_group,
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
         test_derive_subset_exclusive_src_names_no_op_when_both_empty,
