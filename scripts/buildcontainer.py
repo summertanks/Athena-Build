@@ -15,7 +15,18 @@ logger = logging.getLogger('athena')
 
 class BuildContainer:
 
-    def __init__(self, config: BuildConfig, docker_server=None):
+    def __init__(self, config: BuildConfig, docker_server=None, cache=None):
+
+        # Cache (optional) — when wired, `build()` passes it to
+        # `Source.build_depends(cache=…)` so that multi-provider virtual
+        # build-deps (e.g. `libcurl4-dev`, `libsdl-dev`) get expanded to
+        # alternative chains the container's apt-install loop can fall
+        # back across.  Pre-fix, those failed non-interactively with
+        # "Package X has no installation candidate".  None = legacy
+        # behaviour (no expansion); the only production caller in
+        # build.py wires it through, but tests that construct a
+        # BuildContainer without a cache continue to work unchanged.
+        self.cache = cache
 
         self.build_path = config.dir_repo
         self.src_path = config.dir_source
@@ -214,7 +225,7 @@ class BuildContainer:
                            if options_override is not None
                            else self.build_options)
 
-        for _grp in src_pkg.build_depends(self.arch, _active_profiles):
+        for _grp in src_pkg.build_depends(self.arch, _active_profiles, cache=self.cache):
             if not _grp:
                 continue
             if len(_grp) == 1:

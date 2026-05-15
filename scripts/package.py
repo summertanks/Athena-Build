@@ -550,11 +550,27 @@ class Source(Sources):
 
 
 
-    def build_depends(self, arch: str, active_profiles: frozenset = frozenset()) -> List[List[Tuple]]:
+    def build_depends(self, arch: str, active_profiles: frozenset = frozenset(),
+                      cache: Optional[Any] = None) -> List[List[Tuple]]:
         """Returns combined build dependencies filtered by arch and active build profiles.
 
         Each entry is a list of OR-alternatives; each alternative is a tuple (name, ver, op).
         apt_pkg.parse_src_depends filters arch and profile restrictions internally.
+
+        Virtual-package expansion (when `cache` is passed): a single-element
+        group whose only name is a virtual package with multiple concrete
+        providers (e.g. `libcurl4-dev` → libcurl4-{openssl,gnutls,nss}-dev,
+        `libsdl-dev` → libsdl1.2-{dev,compat-dev}) is rewritten in-place to
+        an alternatives group `[provider1, provider2, …, virtual_name]`,
+        with concrete providers sorted alphabetically by canonical name
+        and the original virtual kept as the final fallback.  This makes
+        the BuildContainer's apt-install chain (which `||`-fallbacks
+        across alternatives) succeed without the operator having to
+        author a `debian/control` patch — apt-get refuses to disambiguate
+        such virtuals from the CLI and would otherwise fail
+        non-interactively with "Package 'X' has no installation
+        candidate".  Without `cache`, no expansion happens (caller-driven
+        opt-in, keeps the dep-tree-time parse a pure transform).
         """
         apt_pkg.config['APT::Build-Profiles'] = ' '.join(active_profiles)  # type: ignore[index]
         all_deps: List[List[Tuple]] = []
@@ -566,4 +582,41 @@ class Source(Sources):
                 except (SystemError, ValueError) as e:
                     # apt_pkg.Error inherits from SystemError.
                     logger.warning(f"parse_src_depends({field}) for '{self.package}': {e}")
-        return all_deps
+        if cache is None:
+            return all_deps
+        return [self._expand_virtual_alternatives(grp, cache) for grp in all_deps]
+
+    @staticmethod
+    def _expand_virtual_alternatives(group: List[Tuple], cache: Any) -> List[Tuple]:
+        """Expand a single-element build-dep group whose name is a multi-
+        provider virtual package into an alternatives chain.
+
+        Multi-element groups (already alternative-typed by the maintainer)
+        are returned unchanged — apt's `|` chain already handles them.
+
+        A name is a "multi-provider virtual" iff `cache.get_packages(name)`
+        returns ≥ 2 distinct canonical Package: names that differ from
+        `name` itself.  Providers are sorted alphabetically for
+        determinism; the original virtual name is appended last so a
+        host that *already* has any provider satisfies the dep without
+        a redundant install attempt against the alphabetic-first
+        provider.
+
+        Tuple shape is preserved (name, ver, op) for each alternative —
+        synthetic providers inherit the version/op constraints of the
+        original virtual entry, matching how apt itself propagates
+        version constraints across a `|` alternation when only one of
+        the alternatives carries the constraint.
+        """
+        if len(group) != 1:
+            return group
+        _name, _ver, _op = group[0]
+        try:
+            _candidates = cache.get_packages(_name)
+        except (KeyError, AttributeError):
+            return group
+        _providers = sorted({_pkg['Package'] for _pkg in _candidates
+                             if _pkg['Package'] != _name})
+        if len(_providers) < 2:
+            return group
+        return [(_p, _ver, _op) for _p in _providers] + [(_name, _ver, _op)]
