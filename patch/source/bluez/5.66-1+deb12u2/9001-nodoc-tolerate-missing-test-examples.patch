@@ -1,0 +1,48 @@
+Description: gate bluez-test-scripts examples chmod on dir existence
+ bluez's `debian/rules` `override_dh_fixperms-indep` runs:
+ .
+   dh_fixperms
+   chmod 0644 debian/bluez-test-scripts/usr/share/doc/bluez-test-scripts/examples/*
+ .
+ The chmod is a permission-fixup over the example scripts that ship
+ in the `bluez-test-scripts` indep package — under a normal build
+ those files exist and get a clean 0644.
+ .
+ Under `DEB_BUILD_PROFILES=nodoc` (Athena's default — `[Source]
+ BuildProfiles = nodoc, nocheck` in build.conf), the examples dir
+ isn't populated.  The shell-glob then expands to literal
+ `examples/*` (no matches), which chmod tries to stat and fails:
+ .
+   chmod: cannot access 'debian/bluez-test-scripts/usr/share/doc/bluez-test-scripts/examples/*': No such file or directory
+   make[1]: *** [debian/rules:69: override_dh_fixperms-indep] Error 1
+ .
+ Gate the chmod on the examples dir existing.  Same shell-conditional
+ pattern as our git nodoc patch (`test ! -f X || diff …`): runs
+ unchanged when the dir has files (full build), no-ops when the
+ dir is absent (nodoc).
+ .
+ Surfaced during GROUPS-01 phase 3 gnome build 2026-05-15 — bluez is
+ pulled in by gnome-bluetooth (or gnome-shell's Bluetooth applet via
+ the obex stack).
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-15
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -66,7 +66,12 @@
+
+ override_dh_fixperms-indep:
+ 	dh_fixperms
+-	chmod 0644 debian/bluez-test-scripts/usr/share/doc/bluez-test-scripts/examples/*
++	# Gated on dir existence: under DEB_BUILD_PROFILES=nodoc the
++	# bluez-test-scripts package isn't populated, so the examples
++	# dir is absent and the glob expands to nothing which chmod
++	# can't stat.  Runs unchanged for full builds.
++	[ ! -d debian/bluez-test-scripts/usr/share/doc/bluez-test-scripts/examples ] || \
++	  chmod 0644 debian/bluez-test-scripts/usr/share/doc/bluez-test-scripts/examples/*
+
+ override_dh_auto_install-indep: build_bluez-source
+ BUILDDIRSOURCE := $(shell pwd)/debian/tmp-source/bluez-source
