@@ -1285,8 +1285,8 @@ class BuildSession:
         console.print("Signing key:", tui.COLOR_INFO)
         console.print(f"  Fingerprint : {_info['fingerprint']}")
         console.print(f"  UID         : {_info['uid']}")
-        console.print(f"  Created     : {_info['created']}  (gpg epoch seconds)")
-        console.print(f"  Expires     : {_info['expires'] or '(never — manual rotation)'}")
+        console.print(f"  Created     : {signing.format_gpg_time(_info['created'])}")
+        console.print(f"  Expires     : {signing.format_gpg_time(_info['expires'], '(never — manual rotation)')}")
 
         _ok, _msg = signing.verify_key(self.config)
         if _ok:
@@ -1514,8 +1514,8 @@ class BuildSession:
             if _info is not None:
                 console.print(f"  Fingerprint : {_info['fingerprint']}")
                 console.print(f"  UID         : {_info['uid']}")
-                console.print(f"  Created     : {_info['created']}  (gpg epoch seconds)")
-                console.print("  Expires     : {_info['expires'] or '(never — manual rotation)'}")
+                console.print(f"  Created     : {signing.format_gpg_time(_info['created'])}")
+                console.print(f"  Expires     : {signing.format_gpg_time(_info['expires'], '(never — manual rotation)')}")
             self.flags.signing_key_verified = True
             return True
 

@@ -6913,6 +6913,29 @@ def test_signing_paths_compose_off_dir_gnupg():
         '/some/path/gnupg/signing/athena-archive-keyring.gpg'
 
 
+def test_format_gpg_time_renders_epoch_as_utc_iso():
+    """gpg's --with-colons emits creation/expiry as Unix epoch seconds.
+    format_gpg_time renders that as a human-readable UTC stamp.
+    1778372793 is 2026-05-10 00:26 UTC (verified independently)."""
+    from signing import format_gpg_time
+    assert format_gpg_time('1778372793') == '2026-05-10 00:26 UTC'
+
+
+def test_format_gpg_time_empty_returns_default():
+    """Empty string (no expiration set on the gpg key — Athena's default
+    for manual-rotation keys) returns the caller-supplied default."""
+    from signing import format_gpg_time
+    assert format_gpg_time('', '(never — manual rotation)') == '(never — manual rotation)'
+    assert format_gpg_time('') == ''
+
+
+def test_format_gpg_time_garbage_returns_raw():
+    """Non-integer input degrades to the raw string rather than raising
+    or returning the default — surfaces a parser bug instead of hiding it."""
+    from signing import format_gpg_time
+    assert format_gpg_time('not-a-number') == 'not-a-number'
+
+
 def test_signing_generate_and_verify_roundtrip_real_gpg():
     """INTEGRATION: generate a real key in a tmp homedir, then sign+verify.
     Uses RSA-2048 for test speed (~3s vs ~30s for production's 4096);
@@ -7767,6 +7790,9 @@ def main() -> int:
         test_signing_get_key_info_returns_none_when_homedir_absent,
         test_signing_verify_key_returns_no_key_when_absent,
         test_signing_paths_compose_off_dir_gnupg,
+        test_format_gpg_time_renders_epoch_as_utc_iso,
+        test_format_gpg_time_empty_returns_default,
+        test_format_gpg_time_garbage_returns_raw,
         test_signing_generate_and_verify_roundtrip_real_gpg,
         # CONF-02 phase 3: signing key gate at top of build_chroot
         test_signing_key_verified_flag_default_false,
