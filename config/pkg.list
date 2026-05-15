@@ -150,6 +150,18 @@ sudo
 # /cdrom/.disk/athena-tasks.desc.  See GROUPS-01 phase 2.
 tasksel
 
+# openssl CLI — runtime dep of `ca-certificates` (which is
+# Priority:standard, so tasksel's "Standard system utilities" task
+# tries to install it on every fresh /target).  `libssl3` alone
+# isn't enough — ca-certificates.postinst calls `openssl` to verify
+# CA bundle hashes.  We already build openssl from source for libssl3;
+# adding it to [base] just whitelists the openssl binary .deb into
+# the pool (and debootstraps the CLI onto /target).  Caught
+# 2026-05-15 — without this, tasksel fails with
+# `ca-certificates : Depends: openssl (>= 1.1.1) but it is not installable`
+# and the whole Software-selection step bombs out.
+openssl
+
 
 [development-tools]
 ## Description: Compiler toolchain, version control, and a handful of editors / diagnostics.
