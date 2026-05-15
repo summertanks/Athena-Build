@@ -6,29 +6,73 @@
 #
 # The `.desc` is generated at iso-build time by
 # `iso_installer._stage_tasksel_desc` and ships at
-# `/cdrom/.disk/athena-tasks.desc`.  See `docs/plans/comp-02-robust-build.md`
-# and GROUPS-01 in TODO.md for the broader context.
+# `<cdrom>/.disk/athena-tasks.desc` on the installer ISO.  See
+# `docs/plans/comp-02-robust-build.md` and GROUPS-01 in TODO.md for
+# the broader context.
 #
 # Installed into the initrd at `/usr/lib/pre-pkgsel.d/05-athena-tasks`
 # via `installer_chroot._OVERLAY_MAP`.  pkgsel runs all scripts under
 # `/usr/lib/pre-pkgsel.d/` (via run-parts) right before invoking
 # tasksel, so this hook is the right insertion point.
 #
-# Exits 0 even when the .desc is absent (e.g. operator did not declare
-# any non-[base] groups), so a hookless build still installs cleanly.
+# Why we search multiple cdrom paths (and don't just trust /cdrom):
+#
+#   First-attempt installs (2026-05-15) failed silently here — the
+#   hook reported "no .desc at /cdrom/.disk/athena-tasks.desc" even
+#   though the .desc was demonstrably on the ISO.  Tasksel then
+#   showed only the default "Standard system utilities" task and no
+#   operator-defined groups got installed.
+#
+#   Diagnosis: apt-setup/40cdrom unmounts and re-mounts /cdrom during
+#   its run.  The `remount_cd` at the end is gated on
+#   `cdrom-detect/hybrid` AND `cdrom-detect/usb-hdd` being false; for
+#   isohybrid (grub-mkrescue-produced) media that is sometimes
+#   detected as a hybrid disk, the gate evaluates false and the
+#   remount is skipped.  /cdrom remains unmounted when our hook
+#   runs.  The cdrom data is still reachable via
+#   `/target/media/cdrom*` (mounted by apt-cdrom inside the chroot),
+#   `/media/cdrom`, or `/media/cdrom0` depending on the d-i version
+#   and the cdrom-detect state.
+#
+#   Probing a candidate list is more robust than picking one path:
+#   whichever mount survived will have the .desc reachable.  Logs
+#   the full candidate list on miss so a future regression is
+#   diagnosable from the install log alone.
+#
+# Exits 0 even when the .desc is absent (e.g. operator did not
+# declare any non-[base] groups), so a hookless build still
+# installs cleanly.
 
 set -e
 
-# Path overrides — defaults match d-i's install-time layout
-# (/cdrom mounted by cdrom-detect, /target by partman+base-installer).
-# The smoke test in tests/test_module.py overrides both to drive the
-# hook against a tempdir without standing up an installer.
-_SRC="${ATHENA_TASKS_SRC:-/cdrom/.disk/athena-tasks.desc}"
+# Destination — d-i installs `tasksel-data` into /target/, and tasksel
+# reads ALL `.desc` files in /usr/share/tasksel/descs/ at runtime.
 _DST_DIR="${ATHENA_TASKS_DST_DIR:-/target/usr/share/tasksel/descs}"
 _DST="$_DST_DIR/athena.desc"
 
-if [ ! -f "$_SRC" ]; then
-    logger -t athena-pre-pkgsel "no .desc at $_SRC — skipping (no operator-defined groups)"
+# Source — explicit override wins (smoke test in tests/test_module.py
+# drives the hook against a tempdir).  Otherwise probe the standard
+# d-i cdrom mount points in order of historical canonicalness.
+_SRC="${ATHENA_TASKS_SRC:-}"
+_SEARCHED=""
+if [ -z "$_SRC" ]; then
+    for _candidate in \
+        /cdrom/.disk/athena-tasks.desc \
+        /media/cdrom/.disk/athena-tasks.desc \
+        /media/cdrom0/.disk/athena-tasks.desc \
+        /target/media/cdrom/.disk/athena-tasks.desc \
+        /target/media/cdrom0/.disk/athena-tasks.desc
+    do
+        _SEARCHED="$_SEARCHED $_candidate"
+        if [ -f "$_candidate" ]; then
+            _SRC="$_candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "$_SRC" ] || [ ! -f "$_SRC" ]; then
+    logger -t athena-pre-pkgsel "no .desc found in any standard cdrom mount — skipping (tried:$_SEARCHED)"
     exit 0
 fi
 
@@ -37,4 +81,4 @@ fi
 # where a stripped build skipped tasksel.
 mkdir -p "$_DST_DIR"
 cp "$_SRC" "$_DST"
-logger -t athena-pre-pkgsel "installed $_DST (athena-tasks → tasksel)"
+logger -t athena-pre-pkgsel "installed $_DST (from $_SRC)"

@@ -5364,6 +5364,63 @@ def test_pre_pkgsel_hook_handles_missing_desc_cleanly():
             "hook created /target dir despite missing source"
 
 
+def test_pre_pkgsel_hook_searches_multiple_cdrom_paths():
+    """When ATHENA_TASKS_SRC is unset, the hook probes a list of standard
+    cdrom mount points (/cdrom, /media/cdrom, /media/cdrom0, plus the
+    /target/-prefixed variants).  This caught a real install failure
+    2026-05-15 where apt-setup's `remount_cd` skipped /cdrom for an
+    isohybrid disk and the file was reachable only via /media/cdrom*.
+
+    Verify the hook source contains all expected candidate paths so
+    a future refactor that strips them breaks here, not at install
+    time on a fresh ISO build."""
+    _path = os.path.join(
+        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
+    )
+    with open(_path) as fh:
+        _body = fh.read()
+    for _candidate in (
+        '/cdrom/.disk/athena-tasks.desc',
+        '/media/cdrom/.disk/athena-tasks.desc',
+        '/media/cdrom0/.disk/athena-tasks.desc',
+        '/target/media/cdrom/.disk/athena-tasks.desc',
+        '/target/media/cdrom0/.disk/athena-tasks.desc',
+    ):
+        assert _candidate in _body, (
+            f"hook missing candidate path {_candidate!r} — "
+            f"installs with non-standard cdrom mount will silently miss .desc"
+        )
+
+
+def test_pre_pkgsel_hook_unset_src_with_no_real_cdrom_skips_cleanly():
+    """When ATHENA_TASKS_SRC is unset AND none of the standard cdrom
+    paths exist on the host (typical for the test runner's machine,
+    where /cdrom is unmounted and /media/cdrom* don't exist), the
+    candidate-list probe exhausts cleanly and the hook exits 0.
+    Pins the "no spurious failure on the host" property — without it,
+    running the test suite on a machine that happens to have a cdrom
+    mounted could give different results than on one that doesn't."""
+    import subprocess, tempfile
+    _hook = os.path.join(
+        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
+    )
+    # Skip if the test host actually has a real /cdrom mount — the test
+    # would then attempt to read it (and possibly succeed unexpectedly).
+    if os.path.isfile('/cdrom/.disk/athena-tasks.desc'):
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _env = {k: v for k, v in os.environ.items() if k != 'ATHENA_TASKS_SRC'}
+        _env['ATHENA_TASKS_DST_DIR'] = os.path.join(_tmp, 'target', 'tasksel')
+        _r = subprocess.run(
+            ['sh', _hook], env=_env, capture_output=True, text=True,
+        )
+        assert _r.returncode == 0, (
+            f"hook with no cdrom anywhere must exit 0; got rc={_r.returncode}"
+        )
+        assert not os.path.exists(os.path.join(_tmp, 'target')), \
+            "hook created /target despite finding no .desc"
+
+
 def test_stage_tasksel_desc_warns_on_empty_group():
     """A group declared in pkg.list but with zero canonical packages
     after resolve_packages indicates an operator typo (seed name didn't
@@ -7728,6 +7785,8 @@ def main() -> int:
         test_pkg_list_base_includes_tasksel,
         test_pre_pkgsel_hook_copies_desc_to_target,
         test_pre_pkgsel_hook_handles_missing_desc_cleanly,
+        test_pre_pkgsel_hook_searches_multiple_cdrom_paths,
+        test_pre_pkgsel_hook_unset_src_with_no_real_cdrom_skips_cleanly,
         test_stage_tasksel_desc_warns_on_empty_group,
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
         test_derive_subset_exclusive_src_names_no_op_when_both_empty,
