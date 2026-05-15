@@ -3,7 +3,7 @@ import hashlib
 import logging
 import os
 from typing import List, Dict
-from utils import BuildConfig
+from utils import BuildConfig, version_no_epoch
 from package import Source
 
 import docker
@@ -265,7 +265,7 @@ class BuildContainer:
         # error as before, looking like the patch silently didn't
         # apply.  Closes the long-standing TODO that lived here.
         _live_patch_dir = os.path.join(
-            self.patch_path, src_pkg.package, str(src_pkg.version),
+            self.patch_path, src_pkg.package, version_no_epoch(src_pkg.version),
         )
         try:
             _live_patch_list = sorted(
@@ -339,7 +339,7 @@ class BuildContainer:
         # never accumulate in `docker ps -a` between runs.
         container = None
         try:
-            src_patch_path = os.path.join(self.patch_path, src_pkg.package, str(src_pkg.version))
+            src_patch_path = os.path.join(self.patch_path, src_pkg.package, version_no_epoch(src_pkg.version))
             if not os.path.exists(src_patch_path):
                 src_patch_path = self.patch_empty
 

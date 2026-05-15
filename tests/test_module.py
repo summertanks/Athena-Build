@@ -4213,6 +4213,55 @@ def test_strip_build_version_rejects_malformed_filename():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# version_no_epoch — patch dir lookup must match Debian filename convention
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Debian filenames strip the epoch (`git_2.39.5-…dsc` for source whose
+# `Version: 1:2.39.5-…`).  Patch directories follow the same convention
+# (`patch/source/git/2.39.5-…/`).  The pre-fix discovery used
+# `str(src.version)` which kept the epoch, so any source with an epoch
+# (git, llvm-toolchain-15, …) silently never had its patches discovered.
+
+
+def test_version_no_epoch_strips_epoch_from_debian_version():
+    """`Version('1:2.39.5-0+deb12u3')` → `'2.39.5-0+deb12u3'`."""
+    from utils import version_no_epoch
+    from debian.debian_support import Version
+    assert version_no_epoch(Version('1:2.39.5-0+deb12u3')) == '2.39.5-0+deb12u3'
+    assert version_no_epoch(Version('1:15.0.6-4')) == '15.0.6-4'
+
+
+def test_version_no_epoch_no_change_when_no_epoch():
+    """Version without an epoch round-trips unchanged."""
+    from utils import version_no_epoch
+    from debian.debian_support import Version
+    assert version_no_epoch(Version('2.39.5-0+deb12u3')) == '2.39.5-0+deb12u3'
+    assert version_no_epoch(Version('1.13.0+dfsg-1')) == '1.13.0+dfsg-1'
+
+
+def test_version_no_epoch_accepts_string_input():
+    """Plain string input (not just Version) works — coerced via str()."""
+    from utils import version_no_epoch
+    assert version_no_epoch('1:2.39.5-0+deb12u3') == '2.39.5-0+deb12u3'
+    assert version_no_epoch('2.39.5-0+deb12u3') == '2.39.5-0+deb12u3'
+
+
+def test_version_no_epoch_handles_multidigit_epoch():
+    """Epoch is `[0-9]+` per Debian policy — multi-digit epochs work."""
+    from utils import version_no_epoch
+    assert version_no_epoch('42:1.0-1') == '1.0-1'
+    assert version_no_epoch('100:9.8.7-3') == '9.8.7-3'
+
+
+def test_version_no_epoch_only_strips_first_colon():
+    """Only the first `:` (epoch separator) is consumed.  Subsequent
+    colons are part of the upstream version (rare but allowed in
+    Debian policy 5.6.12 for `[0-9][A-Za-z0-9.+-:~]*`)."""
+    from utils import version_no_epoch
+    assert version_no_epoch('1:2.0:beta-1') == '2.0:beta-1'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # print_commands — dispatch + help screen
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -7596,6 +7645,12 @@ def main() -> int:
         test_strip_build_version_handles_udeb_extension,
         test_strip_build_version_no_change_when_no_binNMU,
         test_strip_build_version_rejects_malformed_filename,
+        # version_no_epoch — patch dir lookup must match Debian filename convention
+        test_version_no_epoch_strips_epoch_from_debian_version,
+        test_version_no_epoch_no_change_when_no_epoch,
+        test_version_no_epoch_accepts_string_input,
+        test_version_no_epoch_handles_multidigit_epoch,
+        test_version_no_epoch_only_strips_first_colon,
         test_gcc_base_re_matches_gcc_N_and_gcc_N_base,
         test_gcc_base_re_rejects_other_gcc_prefixed_packages,
         test_gcc_base_re_rejects_malformed_versions,

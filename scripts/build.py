@@ -1087,7 +1087,12 @@ class BuildSession:
 
         for _pkg in _unified_srcs:
             _src = _unified_srcs[_pkg]
-            _ver = str(_src.version)
+            # version_no_epoch: patch dirs follow Debian's filename
+            # convention (epoch stripped).  Without this, `git`
+            # (Version `1:2.39.5-…`) and `llvm-toolchain-15`
+            # (Version `1:15.0.6-…`) silently never get their patches
+            # discovered — the lookup uses `1:…` while the dir is `…`.
+            _ver = utils.version_no_epoch(_src.version)
             _patch_path = os.path.join(self.config.dir_patch_source, _pkg, _ver)
             _src.patch_list = []
             try:
@@ -1141,7 +1146,7 @@ class BuildSession:
             except OSError:
                 continue
             _patch_dir = os.path.join(
-                self.config.dir_patch_source, _pkg, str(_src.version),
+                self.config.dir_patch_source, _pkg, utils.version_no_epoch(_src.version),
             )
             _newer = any(
                 os.path.getmtime(os.path.join(_patch_dir, _pf)) > _result_mtime
