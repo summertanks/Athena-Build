@@ -5392,6 +5392,59 @@ def test_pre_pkgsel_hook_searches_multiple_cdrom_paths():
         )
 
 
+def test_pre_pkgsel_hook_mounts_cdrom_device_when_no_path_works():
+    """Three-layer resolution: static paths, /proc/mounts scan, then
+    mount the cdrom device ourselves.  The third layer is the one that
+    actually unblocked our install — apt-cdrom uses mount-on-demand, so
+    layers 1+2 turn up empty even though the device is physically present.
+
+    Pin the device-list and the iso9660 mount command in the script so a
+    future refactor that loses the mount-it-ourselves fallback breaks
+    here, not at install time on a fresh ISO build."""
+    _path = os.path.join(
+        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
+    )
+    with open(_path) as fh:
+        _body = fh.read()
+    # Layer 1 marker (one of the static paths)
+    assert '/cdrom/.disk/athena-tasks.desc' in _body
+    # Layer 2 marker (proc/mounts iso9660 scan)
+    assert '/proc/mounts' in _body
+    assert 'iso9660' in _body and 'udf' in _body
+    # Layer 3 markers (device probe + mount)
+    assert 'cdrom-detect/cdrom_device' in _body, (
+        "missing debconf-based device lookup (preferred over /dev/sr0)"
+    )
+    for _dev in ('/dev/sr0', '/dev/cdrom'):
+        assert _dev in _body, f"missing device fallback {_dev}"
+    assert 'mount -t iso9660' in _body, (
+        "missing layer-3 mount command — apt-cdrom unmounts between fetches,"
+        " hook needs to mount the device itself"
+    )
+    # Cleanup trap so we don't leak the mount on exit
+    assert 'trap cleanup EXIT' in _body, "missing cleanup trap"
+
+
+def test_pre_pkgsel_hook_logs_diagnostic_on_miss():
+    """On total miss the hook dumps /proc/mounts iso/udf entries and
+    /dev/sr0 state via syslog.  Future regressions (e.g. d-i moves
+    to a new mount layout) are then debuggable from the install log
+    alone — no need to instrument the hook and re-cycle a multi-hour
+    installer ISO."""
+    _path = os.path.join(
+        _ROOT, 'installer', 'pkgsel', 'pre-pkgsel.d-athena-tasks'
+    )
+    with open(_path) as fh:
+        _body = fh.read()
+    assert 'no .desc found' in _body
+    # diagnostic /proc/mounts dump must run after the miss log
+    _miss_idx = _body.index('no .desc found')
+    _proc_idx = _body.rindex('grep -E')
+    assert _proc_idx > _miss_idx, (
+        "diagnostic /proc/mounts dump must come after the miss log line"
+    )
+
+
 def test_pre_pkgsel_hook_unset_src_with_no_real_cdrom_skips_cleanly():
     """When ATHENA_TASKS_SRC is unset AND none of the standard cdrom
     paths exist on the host (typical for the test runner's machine,
@@ -7786,6 +7839,8 @@ def main() -> int:
         test_pre_pkgsel_hook_copies_desc_to_target,
         test_pre_pkgsel_hook_handles_missing_desc_cleanly,
         test_pre_pkgsel_hook_searches_multiple_cdrom_paths,
+        test_pre_pkgsel_hook_mounts_cdrom_device_when_no_path_works,
+        test_pre_pkgsel_hook_logs_diagnostic_on_miss,
         test_pre_pkgsel_hook_unset_src_with_no_real_cdrom_skips_cleanly,
         test_stage_tasksel_desc_warns_on_empty_group,
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
