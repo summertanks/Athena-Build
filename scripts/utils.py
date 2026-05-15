@@ -45,6 +45,37 @@ def strip_build_version(file: str) -> str:
     return f"{_pkg_name}_{_version}_{_arch}{_ext}"
 
 
+def version_no_epoch(version) -> str:
+    """Return a Debian Version's string form with the epoch stripped.
+
+    Debian versions have the grammar `[epoch:]upstream[-revision]`.
+    Filenames (`.dsc`, `.deb`, `.udeb`) and convention-based directory
+    layouts strip the epoch entirely — `git_2.39.5-0+deb12u3.dsc`
+    matches the source whose `Version: 1:2.39.5-0+deb12u3`.  This
+    helper produces the no-epoch form for any code that maps a
+    Source/Package Version onto a filename or filesystem path.
+
+    Accepts either a `debian.debian_support.Version` instance or a
+    plain string — both are coerced via `str()` first, then split
+    on the first `:` and the remainder taken.  No `:` → returned
+    unchanged.
+
+    Surfaced 2026-05-15 when patches under
+    `patch/source/git/2.39.5-0+deb12u3/` and
+    `patch/source/llvm-toolchain-15/15.0.6-4/` were silently ignored
+    by `_refresh_patches` and `BuildContainer.build()`'s fresh-disk
+    read because both call sites used `str(src.version)` (epoch
+    intact) to compose the directory path.  Patches at sibling
+    paths for sources without an epoch (libevdev, librsvg, bluez,
+    lilv, libde265, firefox-esr) discovered fine.
+    """
+    _s = str(version)
+    _colon = _s.find(':')
+    if _colon < 0:
+        return _s
+    return _s[_colon + 1:]
+
+
 def _strip_quotes(s: str) -> str:
     """Remove a single matching pair of surrounding quotes from a config value.
 
