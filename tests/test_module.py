@@ -4262,6 +4262,199 @@ def test_version_no_epoch_only_strips_first_colon():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# get_sha256 — sidecar (size, mtime_ns) cache
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Caching wraps `_compute_sha256`.  Tests assert cache hits/misses by
+# monkey-patching `_compute_sha256` to count invocations.
+
+
+def _make_temp_file(contents: bytes = b'hello world'):
+    """Helper — write `contents` to a tempfile, return its path."""
+    import tempfile
+    _fd, _path = tempfile.mkstemp(prefix='athena-sha-test-')
+    os.write(_fd, contents)
+    os.close(_fd)
+    return _path
+
+
+def test_get_sha256_writes_sidecar_on_first_call():
+    """First invocation computes the hash AND writes a sidecar
+    `<file>.verified` recording (size, mtime_ns, sha256)."""
+    import utils
+    _f = _make_temp_file(b'hello athena')
+    try:
+        _h = utils.get_sha256(_f)
+        assert _h != '', "expected non-empty hash for valid file"
+        _sidecar = _f + '.verified'
+        assert os.path.isfile(_sidecar), f"sidecar not written at {_sidecar}"
+        with open(_sidecar) as fh:
+            _parts = fh.readline().strip().split()
+        assert len(_parts) == 3
+        _stat = os.stat(_f)
+        assert int(_parts[0]) == _stat.st_size
+        assert int(_parts[1]) == _stat.st_mtime_ns
+        assert _parts[2] == _h
+    finally:
+        for _p in (_f, _f + '.verified'):
+            if os.path.exists(_p):
+                os.unlink(_p)
+
+
+def test_get_sha256_returns_cached_value_on_size_mtime_match():
+    """Second call with the same (size, mtime_ns) MUST NOT recompute —
+    that's the whole point.  Spy on `_compute_sha256` to assert the
+    cache hit."""
+    import utils
+    _f = _make_temp_file(b'cached content')
+    try:
+        _h1 = utils.get_sha256(_f)
+        # Patch _compute_sha256 to detect a re-hash
+        _orig = utils._compute_sha256
+        _count = {'n': 0}
+
+        def _spy(path):
+            _count['n'] += 1
+            return _orig(path)
+        utils._compute_sha256 = _spy
+        try:
+            _h2 = utils.get_sha256(_f)
+        finally:
+            utils._compute_sha256 = _orig
+        assert _h1 == _h2
+        assert _count['n'] == 0, (
+            f"_compute_sha256 called {_count['n']} time(s) — sidecar"
+            f" cache miss (sidecar should have served the request)"
+        )
+    finally:
+        for _p in (_f, _f + '.verified'):
+            if os.path.exists(_p):
+                os.unlink(_p)
+
+
+def test_get_sha256_recomputes_when_mtime_changes():
+    """Touching the file (mtime advances) invalidates the cache."""
+    import time
+    import utils
+    _f = _make_temp_file(b'mtime-test')
+    try:
+        _h1 = utils.get_sha256(_f)
+        # Advance mtime — use a definitely-different value so we're robust
+        # to filesystems with low mtime resolution.
+        _stat = os.stat(_f)
+        os.utime(_f, ns=(_stat.st_atime_ns, _stat.st_mtime_ns + 10**9))
+
+        _orig = utils._compute_sha256
+        _count = {'n': 0}
+
+        def _spy(path):
+            _count['n'] += 1
+            return _orig(path)
+        utils._compute_sha256 = _spy
+        try:
+            _h2 = utils.get_sha256(_f)
+        finally:
+            utils._compute_sha256 = _orig
+        assert _h1 == _h2, "content unchanged, hash must match"
+        assert _count['n'] == 1, (
+            f"_compute_sha256 called {_count['n']} time(s); expected 1"
+            f" (mtime changed → cache should have missed)"
+        )
+        _ = time  # quiet unused-import flag — kept for future timing tests
+    finally:
+        for _p in (_f, _f + '.verified'):
+            if os.path.exists(_p):
+                os.unlink(_p)
+
+
+def test_get_sha256_recomputes_when_size_changes():
+    """Rewriting the file with different content (size differs)
+    invalidates the cache."""
+    import utils
+    _f = _make_temp_file(b'short')
+    try:
+        _h1 = utils.get_sha256(_f)
+        with open(_f, 'wb') as fh:
+            fh.write(b'much longer content than before')
+        _h2 = utils.get_sha256(_f)
+        assert _h1 != _h2, "content changed, hash must differ"
+        # Sidecar updated to record the new (size, mtime_ns)
+        with open(_f + '.verified') as fh:
+            _parts = fh.readline().strip().split()
+        _stat = os.stat(_f)
+        assert int(_parts[0]) == _stat.st_size
+        assert _parts[2] == _h2
+    finally:
+        for _p in (_f, _f + '.verified'):
+            if os.path.exists(_p):
+                os.unlink(_p)
+
+
+def test_get_sha256_ignores_malformed_sidecar():
+    """A garbage sidecar (corrupt write, partial truncation, manual
+    edit) MUST NOT cause us to return a wrong hash — we fall through
+    to recompute and overwrite the sidecar."""
+    import utils
+    _f = _make_temp_file(b'fresh content')
+    _sidecar = _f + '.verified'
+    try:
+        # Plant a malformed sidecar BEFORE first call
+        with open(_sidecar, 'w') as fh:
+            fh.write("this is not a valid sidecar\n")
+        _h = utils.get_sha256(_f)
+        assert _h != '', "expected valid hash despite malformed sidecar"
+        # Sidecar should now be well-formed
+        with open(_sidecar) as fh:
+            _parts = fh.readline().strip().split()
+        assert len(_parts) == 3
+        assert _parts[2] == _h
+    finally:
+        for _p in (_f, _sidecar):
+            if os.path.exists(_p):
+                os.unlink(_p)
+
+
+def test_get_sha256_use_cache_false_skips_sidecar_entirely():
+    """`use_cache=False` MUST NOT read OR write the sidecar — for
+    callers verifying a just-written file that want a strict
+    round-trip from disk without any cache layer."""
+    import utils
+    _f = _make_temp_file(b'no-cache path')
+    _sidecar = _f + '.verified'
+    try:
+        _h = utils.get_sha256(_f, use_cache=False)
+        assert _h != ''
+        assert not os.path.exists(_sidecar), (
+            "use_cache=False should not write the sidecar"
+        )
+        # If a stale sidecar lies on disk, use_cache=False must NOT trust it.
+        with open(_sidecar, 'w') as fh:
+            _stat = os.stat(_f)
+            fh.write(f"{_stat.st_size} {_stat.st_mtime_ns} deadbeef\n")
+        _h2 = utils.get_sha256(_f, use_cache=False)
+        assert _h2 == _h and _h2 != 'deadbeef', (
+            "use_cache=False must not read the sidecar — got 'deadbeef'"
+            " instead of the real hash"
+        )
+    finally:
+        for _p in (_f, _sidecar):
+            if os.path.exists(_p):
+                os.unlink(_p)
+
+
+def test_get_sha256_missing_file_returns_empty_string():
+    """Pre-existing behaviour — missing file yields '' (callers
+    use this as an "expected != computed" signal to trigger
+    re-download).  Pin so the new cache layer doesn't change
+    semantics."""
+    import utils
+    _path = '/tmp/athena-sha-test-definitely-does-not-exist-xyz'
+    assert not os.path.exists(_path), "test precondition violated"
+    assert utils.get_sha256(_path) == ''
+    assert utils.get_sha256(_path, use_cache=False) == ''
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # print_commands — dispatch + help screen
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -7714,6 +7907,14 @@ def main() -> int:
         test_version_no_epoch_accepts_string_input,
         test_version_no_epoch_handles_multidigit_epoch,
         test_version_no_epoch_only_strips_first_colon,
+        # get_sha256 — sidecar (size, mtime_ns) cache
+        test_get_sha256_writes_sidecar_on_first_call,
+        test_get_sha256_returns_cached_value_on_size_mtime_match,
+        test_get_sha256_recomputes_when_mtime_changes,
+        test_get_sha256_recomputes_when_size_changes,
+        test_get_sha256_ignores_malformed_sidecar,
+        test_get_sha256_use_cache_false_skips_sidecar_entirely,
+        test_get_sha256_missing_file_returns_empty_string,
         test_gcc_base_re_matches_gcc_N_and_gcc_N_base,
         test_gcc_base_re_rejects_other_gcc_prefixed_packages,
         test_gcc_base_re_rejects_malformed_versions,
