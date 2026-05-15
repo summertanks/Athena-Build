@@ -1,0 +1,83 @@
+Description: cap parallel make jobs on amd64 to avoid cc1plus OOM
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-15
+Bug-Athena: Surfaced 2026-05-15 after the DEBIAN_RUST_LTO=-Clto=off
+ patch (9001) successfully unblocked the gkrust OOM but exposed a
+ second, distinct OOM during C++ compile.  Failure-mode in the build
+ log:
+ .
+   g++-11: fatal error: Killed signal terminated program cc1plus
+   compilation terminated.
+   make[5]: *** [config/rules.mk:676: UnifiedBindings26.o] Error 1
+ .
+ Same memory-pressure root cause, different process getting OOM-killed.
+ Mozilla's `Unified_cpp_*.cpp` / `UnifiedBindings*.cpp` are auto-
+ generated concatenations of many source files into a single
+ compilation unit (the "unified build" technique — reduces header-parse
+ overhead, but each .cpp becomes a 10-50k LoC monster).  cc1plus's
+ peak resident set on these is ~3 GB; with `dh_auto_build --parallel`
+ defaulting to `nproc` (8 on this host), 8 concurrent cc1plus reach
+ ~24 GB.  Combined with the parallel gkrust rustc still running (now
+ ~2-3 GB with -Clto=off, was ~6-8 GB with -Clto), total memory
+ demand on a 16 GB host saturates and the kernel OOM-killer fires.
+ .
+ The cc1plus victim isn't necessarily the largest unit — the
+ OOM-killer scores all RSS processes and may kill a mid-size one.
+ The build log shows the kill happens partway through compilation
+ of one Unified file but other Unified files are also in flight.
+ .
+ Fix: cap parallelism on amd64 the same way Debian gates DEBIAN_RUST_LTO
+ — via an arch-specific `export` of the env var that `dh_auto_build`
+ and the explicit `$(MAKE) -j$(DEB_BUILD_OPTION_PARALLEL)` invocations
+ in `debian/rules` already consume.  `DEB_BUILD_OPTION_PARALLEL=1` is
+ the maximally conservative Debian-canonical knob.  By the time
+ `dh_auto_build` runs, the env has our override (Make's top-level
+ `export` directive overrides what dpkg-buildpackage initially set).
+ MAKEFLAGS' job-server protocol propagates the cap to Mozilla's
+ nested make hierarchy automatically.
+ .
+ Memory math on a 16 GB host:
+ .
+   At -j1: 1 × ~3 GB cc1plus + ~3 GB gkrust + ~1-2 GB shell/parents
+           = ~7 GB peak.  Comfortable headroom on 16 GB.
+   At -j2: 2 × ~3 GB cc1plus + ~3 GB gkrust = ~10 GB peak.  Should
+           also fit, but less margin if other host load is present.
+   At -j4: 4 × ~3 GB cc1plus + ~3 GB gkrust = ~15 GB peak.  On the
+           edge — first cc1plus that spikes to ~4 GB triggers OOM.
+   At -j8: 8 × ~3 GB cc1plus + ~3 GB gkrust = ~27 GB peak.  OOMs.
+ .
+ Trade-off: -j1 is ~6-8x slower than -j8 for the C++ portion (the
+ Rust gkrust is already serialised by Mozilla's build into a single
+ rustc invocation, so the rustc portion is unaffected).  Total
+ firefox-esr wall-clock at -j1 is ~3-5 hours vs ~30-45 min at -j8 —
+ but the -j8 build OOMs and produces nothing, while -j1 actually
+ completes.  Slow + working beats fast + broken.
+ .
+ Pairs with 9001 (DEBIAN_RUST_LTO=-Clto=off).  Both apply on amd64.
+ Mirrors the existing armhf and s390x arch-gated memory-budget
+ patterns in upstream Debian's debian/rules.
+ .
+ Revert this patch only when paired with confirmation that the
+ build host has ≥ ~24 GB RAM headroom, OR when [Source] parallelism
+ in build.conf is dropped to 1 (which already serialises rust+c++
+ across the global pipeline).
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -251,6 +251,13 @@ endif
+ ifeq (amd64,$(DEB_BUILD_ARCH))
+ export DEBIAN_RUST_LTO=-Clto=off
+ endif
++# Athena amd64: build hosts may have ~16 GB RAM.  Mozilla's
++# UnifiedBindings*.cpp files compile at ~3 GB peak per cc1plus; default
++# -j8 + parallel gkrust together exceed the OOM threshold.  Cap make
++# jobs to 1 — pairs with the DEBIAN_RUST_LTO=-Clto=off above.
++ifeq (amd64,$(DEB_BUILD_ARCH))
++export DEB_BUILD_OPTION_PARALLEL=1
++endif
+ 
+ stamps/build-$(PRODUCT):: stamps/configure-check-$(PRODUCT)
+ 	+dh_auto_build --parallel --builddirectory=build-$(PRODUCT)
