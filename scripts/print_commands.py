@@ -868,10 +868,10 @@ def _print_signing(session, *_extras) -> None:
         return
     tui.console.print(f"  Fingerprint    : {info['fingerprint']}")
     tui.console.print(f"  UID present    : {info['uid']}")
-    tui.console.print(f"  Created        : {info['created']}  (gpg epoch seconds)")
+    tui.console.print(f"  Created        : {signing.format_gpg_time(info['created'])}")
     tui.console.print(
         f"  Expires        : "
-        f"{info['expires'] or '(never — manual rotation)'}"
+        f"{signing.format_gpg_time(info['expires'], '(never — manual rotation)')}"
     )
     tui.console.print(f"  Public key     : {signing.signing_pubkey_path(cfg)}")
 

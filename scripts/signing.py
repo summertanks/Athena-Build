@@ -36,6 +36,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger('athena')
@@ -137,6 +138,32 @@ def parse_secret_keys_colons(output: str) -> List[Dict[str, str]]:
 
 
 # ─── Public API ────────────────────────────────────────────────────────────
+
+def format_gpg_time(s: str, default: str = '') -> str:
+    """Render a gpg `--with-colons` timestamp field as a human-readable
+    UTC date.
+
+    gpg's colon-format output (per `doc/DETAILS` in upstream gnupg)
+    encodes the `created` and `expires` fields as Unix epoch seconds
+    in column 6 and 7 of the `sec`/`pub` record.  When the field is
+    empty, the key has no expiration (a deliberate operator choice
+    in our gen-key flow — Athena keys are rotated manually).
+
+    Returns `default` when `s` is empty/falsy; this lets the expires
+    field render as "(never — manual rotation)" without an `or`-chain
+    in every f-string call site that touches it.  Returns `s`
+    unmodified when it doesn't parse as an integer (degrades to the
+    raw upstream value rather than swallowing the field).
+    """
+    if not s:
+        return default
+    try:
+        return datetime.fromtimestamp(int(s), tz=timezone.utc).strftime(
+            '%Y-%m-%d %H:%M UTC',
+        )
+    except (ValueError, OSError):
+        return s
+
 
 def get_key_info(config) -> Optional[Dict[str, str]]:
     """Return the parsed key-info dict for the configured signing uid,
