@@ -244,11 +244,28 @@ class BuildContainer:
             f'DEB_BUILD_PROFILES="{_deb_build_profiles}" '
         )
 
-        # TODO: read patch files from disk here instead of relying on src_pkg.patch_list
-        # (patch_list is set during parse_dependency; patches added after that run are missed)
+        # Read the patch list fresh from disk at build time so patches
+        # added AFTER the last `dep parse` run are still picked up.
+        # The cached `src_pkg.patch_list` (set by `_refresh_patches`
+        # during dep parse) goes stale the moment an operator drops a
+        # new patch file in `patch/source/<pkg>/<ver>/` — and there's
+        # no way for them to know they need to re-run `dep parse force`
+        # before `source build`.  Symptom: build re-runs with the same
+        # error as before, looking like the patch silently didn't
+        # apply.  Closes the long-standing TODO that lived here.
+        _live_patch_dir = os.path.join(
+            self.patch_path, src_pkg.package, str(src_pkg.version),
+        )
+        try:
+            _live_patch_list = sorted(
+                _f for _f in os.listdir(_live_patch_dir)
+                if _f.endswith('.patch')
+            )
+        except (FileNotFoundError, OSError):
+            _live_patch_list = []
         patch_cmd = (
-            f'for PATCH in {" ".join(src_pkg.patch_list)}; do patch -p1 < /patch/"$PATCH"; done; '
-            if src_pkg.patch_list else ''
+            f'for PATCH in {" ".join(_live_patch_list)}; do patch -p1 < /patch/"$PATCH"; done; '
+            if _live_patch_list else ''
         )
 
         # A few packages (notably pam) ship a second quilt-managed patch series
