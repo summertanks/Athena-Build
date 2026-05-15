@@ -1361,7 +1361,11 @@ class BuildSession:
         self.flags.build_container_ready = False
         spin = Spinner("Initialising build container")
         try:
-            self.container = buildcontainer.BuildContainer(self.config, docker_server=self.config.docker_server or None)
+            self.container = buildcontainer.BuildContainer(
+                self.config,
+                docker_server=self.config.docker_server or None,
+                cache=self.cache,
+            )
             self.flags.build_container_ready = True
             spin.done()
             console.print("  Build container ready")

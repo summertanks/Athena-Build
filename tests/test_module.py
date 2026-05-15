@@ -316,6 +316,148 @@ def test_source_parses_main_stanza_with_both_files_and_sha256():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Source.build_depends — virtual-package expansion
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Multi-provider virtual build-deps (libcurl4-dev, libsdl-dev, awk, …)
+# can't be resolved by `apt-get install` non-interactively — apt refuses
+# to disambiguate from the CLI.  Source.build_depends(cache=…) rewrites
+# such single-element groups in-place to an alternatives chain so the
+# BuildContainer's `||`-fallback apt-install loop can succeed.
+
+
+class _StubProviderCache:
+    """Minimal cache shape — only `.get_packages(name)` is exercised by
+    `Source._expand_virtual_alternatives`.  Returns dict-like records
+    whose 'Package' key is the canonical name (matching the
+    `_pkg['Package']` access in production code)."""
+
+    def __init__(self, table):
+        # name → list of {'Package': canonical_name} dicts
+        self._table = table
+
+    def get_packages(self, name):
+        return list(self._table.get(name, []))
+
+
+def _src_with_build_depends(raw_build_depends):
+    """Build a minimally-valid Source object with the given Build-Depends."""
+    import package
+    stanza = (
+        "Package: dummy\n"
+        "Version: 1.0\n"
+        "Architecture: any\n"
+        "Directory: pool/main/d/dummy\n"
+        "Files:\n a 0 dummy_1.0.dsc\n"
+        f"Build-Depends: {raw_build_depends}\n"
+    )
+    return package.Source(stanza)
+
+
+def test_build_depends_no_cache_leaves_virtuals_unchanged():
+    """Without cache, multi-provider virtuals stay as single-name entries
+    — caller-driven opt-in keeps the legacy parse a pure transform."""
+    src = _src_with_build_depends("libcurl4-dev")
+    groups = src.build_depends('amd64')
+    assert len(groups) == 1
+    assert groups[0][0][0] == 'libcurl4-dev'
+
+
+def test_build_depends_expands_multi_provider_virtual():
+    """Single-element virtual w/ ≥2 distinct concrete providers gets
+    expanded to alternatives [providers…, virtual_name].  Providers
+    sorted alphabetically; virtual preserved as final fallback."""
+    cache = _StubProviderCache({
+        'libcurl4-dev': [
+            {'Package': 'libcurl4-openssl-dev'},
+            {'Package': 'libcurl4-gnutls-dev'},
+            {'Package': 'libcurl4-nss-dev'},
+        ],
+    })
+    src = _src_with_build_depends("libcurl4-dev")
+    groups = src.build_depends('amd64', cache=cache)
+    assert len(groups) == 1
+    names = [alt[0] for alt in groups[0]]
+    assert names == [
+        'libcurl4-gnutls-dev',
+        'libcurl4-nss-dev',
+        'libcurl4-openssl-dev',
+        'libcurl4-dev',
+    ], names
+
+
+def test_build_depends_single_provider_virtual_not_expanded():
+    """A virtual name with only ONE concrete provider is NOT expanded —
+    apt resolves single-provider virtuals fine; expansion would just
+    add noise.  Threshold: ≥2 distinct providers."""
+    cache = _StubProviderCache({
+        'awk': [{'Package': 'gawk'}],
+    })
+    src = _src_with_build_depends("awk")
+    groups = src.build_depends('amd64', cache=cache)
+    assert len(groups) == 1
+    assert [alt[0] for alt in groups[0]] == ['awk']
+
+
+def test_build_depends_real_package_name_not_expanded():
+    """A name that resolves to itself (the package is real, not virtual)
+    isn't expanded — `_pkg['Package'] != name` filters out the trivial
+    self-match."""
+    cache = _StubProviderCache({
+        'debhelper-compat': [{'Package': 'debhelper-compat'}],
+    })
+    src = _src_with_build_depends("debhelper-compat (= 13)")
+    groups = src.build_depends('amd64', cache=cache)
+    assert len(groups) == 1
+    assert [alt[0] for alt in groups[0]] == ['debhelper-compat']
+
+
+def test_build_depends_already_alternative_group_untouched():
+    """Multi-element groups (maintainer-authored `|` alternations) are
+    already in the right shape — leave them alone, even if one of the
+    alternatives looks virtual-ish."""
+    cache = _StubProviderCache({
+        'libcurl4-dev': [
+            {'Package': 'libcurl4-openssl-dev'},
+            {'Package': 'libcurl4-gnutls-dev'},
+        ],
+    })
+    src = _src_with_build_depends("libcurl4-openssl-dev | libcurl4-dev")
+    groups = src.build_depends('amd64', cache=cache)
+    assert len(groups) == 1
+    assert [alt[0] for alt in groups[0]] == ['libcurl4-openssl-dev', 'libcurl4-dev']
+
+
+def test_build_depends_version_constraint_inherited_by_synthetic_providers():
+    """Synthetic provider entries inherit the version/op of the original
+    virtual entry — matches how apt propagates a version constraint
+    across an `|` chain when only one alternative carries it."""
+    cache = _StubProviderCache({
+        'libsdl-dev': [
+            {'Package': 'libsdl1.2-dev'},
+            {'Package': 'libsdl1.2-compat-dev'},
+        ],
+    })
+    src = _src_with_build_depends("libsdl-dev (>= 1.2)")
+    groups = src.build_depends('amd64', cache=cache)
+    assert len(groups) == 1
+    versions = {alt[0]: (alt[1], alt[2]) for alt in groups[0]}
+    assert versions['libsdl1.2-dev'] == versions['libsdl-dev']
+    assert versions['libsdl1.2-dev'] == ('1.2', '>=')
+
+
+def test_build_depends_unknown_name_left_unchanged():
+    """A name absent from the cache (not a real package, not a virtual
+    name we recognise) is left as-is — the BuildContainer's apt-install
+    will then surface the real error rather than us silently
+    swallowing it."""
+    cache = _StubProviderCache({})  # empty cache
+    src = _src_with_build_depends("nonexistent-pkg")
+    groups = src.build_depends('amd64', cache=cache)
+    assert [alt[0] for alt in groups[0]] == ['nonexistent-pkg']
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _compute_install_batches single-pass topo sort
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -7294,6 +7436,14 @@ def main() -> int:
         test_package_and_source_have_mirror_field,
         test_source_parses_security_stanza_without_files_field,
         test_source_parses_main_stanza_with_both_files_and_sha256,
+        # Source.build_depends — virtual-package expansion
+        test_build_depends_no_cache_leaves_virtuals_unchanged,
+        test_build_depends_expands_multi_provider_virtual,
+        test_build_depends_single_provider_virtual_not_expanded,
+        test_build_depends_real_package_name_not_expanded,
+        test_build_depends_already_alternative_group_untouched,
+        test_build_depends_version_constraint_inherited_by_synthetic_providers,
+        test_build_depends_unknown_name_left_unchanged,
         # /
         test_verify_inrelease_clean_signature_passes,
         test_verify_inrelease_tampered_signature_fails,
