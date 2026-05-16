@@ -65,6 +65,7 @@ grub-efi-amd64
 # (libdrm2, libmspack0, libtirpc3, libxmlsec1, ethtool, zerofree on
 # top of what we already ship).
 open-vm-tools
+open-vm-tools-desktop
 
 # ─── Console keymap configuration ──────────────────────────────────
 # `base-installer`'s `apt-install` queues both `console-setup` and
