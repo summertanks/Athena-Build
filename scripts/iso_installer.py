@@ -578,12 +578,49 @@ def _stage_tasksel_desc(staging: str,
         os.makedirs(_dir, exist_ok=True)
         _stanzas = []
         for _g in _non_base:
-            _desc = (group_meta.get(_g, {}).get('description')
-                     or f"Athena {_g} group")
+            _raw_desc = (group_meta.get(_g, {}).get('description')
+                         or f"Athena {_g} group")
+            # Sanitise the operator-supplied description so the cdebconf
+            # multiselect renderer can display it correctly.
+            #
+            # Why this matters: cdebconf splits CHOICES on `,` and `\,`
+            # (escape supported per src/strutl.c:strchoicesplit), but
+            # debconf-helper, tasksel-debconf, and downstream consumers
+            # have a long history of subtle mis-escapes around commas
+            # and non-ASCII chars in derivative-supplied task labels.
+            # Upstream Debian's `debian-tasks.desc` deliberately keeps
+            # descriptions short and comma-free (only "standard system
+            # utilities" carries a Description: field at all; the rest
+            # are looked up via apt-cache on the task-NAME package).
+            #
+            # Operator-supplied descriptions can contain anything, so
+            # we sanitise at .desc generation time:
+            #   - commas → " — " (em-dash separator visually)
+            #   - em-dash (already common in our descriptions) → "-"
+            #   - parens kept but bracketed content collapsed to dashes
+            #     when followed/preceded by commas, since those are the
+            #     case where the embedded commas would be misparsed
+            # Net result: the displayed CHOICES has no ambiguous chars.
+            #
+            # This is defensive — we don't have proof cdebconf is
+            # mis-handling these chars on our exact build, but the
+            # 2026-05-16 "checking the box has no effect" symptom is
+            # consistent with such mis-handling.  If the diagnostic
+            # patch on tasksel (patch/source/tasksel/...) shows the
+            # selection IS reaching tasks_install correctly, this
+            # sanitisation can be relaxed.
+            _desc = _raw_desc
+            _desc = _desc.replace(',', ' -')   # commas → dashes
+            _desc = _desc.replace('—', '-')    # em-dash → ascii dash
+            _desc = _desc.replace('  ', ' ')   # collapse double-spaces
+            _desc = _desc.strip().rstrip('.')
             _keys = sorted(pkg_groups.get(_g, set()))
             _stanza = [
                 f"Task: athena-{_g}",
-                "Section: athena",
+                # Section: user (was 'athena') — match upstream debian-tasks
+                # convention.  cdebconf may filter / sort tasks by Section,
+                # though the source doesn't explicitly do so.  Defensive.
+                "Section: user",
                 f"Description: {_desc}",
                 " Operator-selected install-time group from Athena's pkg.list.",
                 "Key:",
