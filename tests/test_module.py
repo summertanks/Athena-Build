@@ -5268,36 +5268,6 @@ def test_parse_pkg_list_groups_empty_section_name_raises():
         os.unlink(_path)
 
 
-def test_tasksel_patch_logs_tasks_install_for_diagnostic():
-    """TEMPORARY: tasksel source-patch under patch/source/tasksel/3.73/
-    adds `print STDERR` diagnostic logging of @tasks_install right
-    before apt-get install runs.  This is a diagnostic patch — it's
-    expected to be REMOVED once the dialog-checkbox-has-no-effect bug
-    (2026-05-16) is root-caused and fixed.
-
-    When the patch is intentionally removed, delete this test too —
-    it has no value as a steady-state pin (we shouldn't be shipping
-    noise-adding diagnostic patches to production)."""
-    _patch_dir = os.path.join(
-        _ROOT, 'patch', 'source', 'tasksel', '3.73',
-    )
-    if not os.path.isdir(_patch_dir):
-        return  # patch removed (and so was its dir) — diagnostic done
-    _patches = [
-        f for f in os.listdir(_patch_dir)
-        if f.endswith('.patch') and 'debug-log-tasks-install' in f
-    ]
-    if not _patches:
-        return  # specific debug patch removed — diagnostic done
-    with open(os.path.join(_patch_dir, _patches[0])) as fh:
-        _body = fh.read()
-    assert 'tasksel-debug: tasks_install=' in _body, (
-        f"tasksel debug patch present but missing the expected print "
-        f"STDERR line; this is the diagnostic we rely on. Found: "
-        f"{_patches[0]}"
-    )
-
-
 def test_pkgsel_patch_drops_debian_tasks_only_env_var():
     """patch/source/pkgsel/0.79/ ships a patch that removes
     DEBIAN_TASKS_ONLY=1 from pkgsel's tasksel invocation.  Without
@@ -8127,7 +8097,6 @@ def main() -> int:
         test_dep_tree_initialises_pkg_group_fields_empty,
         test_pass_iii_dedups_to_canonical_names_for_pkg_group_pkg_names,
         test_pkgsel_patch_drops_debian_tasks_only_env_var,
-        test_tasksel_patch_logs_tasks_install_for_diagnostic,
         test_stage_group_manifests_writes_one_file_per_group,
         test_stage_group_manifests_empty_groups_is_noop,
         test_parse_pkg_list_group_meta_extracts_descriptions,
