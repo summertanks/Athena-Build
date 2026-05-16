@@ -203,6 +203,7 @@ _BASE_CONF_BODY = """
     Repo = repo
     Config = config
     Patch = patch
+    Fork = fork
     Image = image
     Chroot = buildroot
     Gnupg = gnupg
@@ -2963,6 +2964,44 @@ def test_buildconfig_chroot_paths_under_shared_buildroot_parent():
         # Neither chroot is INSIDE the other.
         assert not cfg.dir_chroot.startswith(cfg.dir_chroot_installer + os.sep)
         assert not cfg.dir_chroot_installer.startswith(cfg.dir_chroot + os.sep)
+
+
+def test_buildconfig_creates_fork_source_dir():
+    """FORK-01 Step 1: BuildConfig auto-creates fork/ and fork/source/ so
+    operators (and tests) never have to `mkdir` them manually.  Mirrors the
+    dir_patch + dir_patch_source pattern.  Pins the contract per the
+    feedback_dir_ensure_on_config_load.md memory."""
+    import sys, tempfile, shutil
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import BuildConfig
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir, exist_ok=True)
+        shutil.copy(os.path.join(_ROOT, 'config', 'build.conf'),
+                    os.path.join(_cfg_dir, 'build.conf'))
+        for _name in ('pkg.list', 'live.list', 'installer.list'):
+            with open(os.path.join(_cfg_dir, _name), 'w') as f: f.write('')
+        _saved_argv = sys.argv
+        sys.argv = ['build.py',
+                    '--working-dir',    _tmp,
+                    '--config-file',    os.path.join(_cfg_dir, 'build.conf'),
+                    '--pkg-list',       os.path.join(_cfg_dir, 'pkg.list'),
+                    '--live-list',      os.path.join(_cfg_dir, 'live.list'),
+                    '--installer-list', os.path.join(_cfg_dir, 'installer.list')]
+        try:
+            cfg = BuildConfig()
+        finally:
+            sys.argv = _saved_argv
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        # Both the top-level and the source/ subdir must exist after load.
+        assert os.path.isdir(cfg.dir_fork), (
+            f"dir_fork {cfg.dir_fork} not auto-created")
+        assert os.path.isdir(cfg.dir_fork_source), (
+            f"dir_fork_source {cfg.dir_fork_source} not auto-created")
+        assert os.access(cfg.dir_fork, os.W_OK)
+        assert os.access(cfg.dir_fork_source, os.W_OK)
+        # Path composition: dir_fork_source == <dir_fork>/source
+        assert cfg.dir_fork_source == os.path.join(cfg.dir_fork, 'source')
 
 
 def test_build_flags_carries_chroot_installer_ready_default_false():

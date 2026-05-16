@@ -759,6 +759,14 @@ class BuildConfig:
             self.dir_patch_postinstall = os.path.join(self.dir_patch, 'post-install')
             self.dir_patch_empty = os.path.join(self.dir_patch, 'empty')
 
+            # Athena-owned Debian source packages discovered + built
+            # from local trees under <dir_fork_source>/<pkg>/ instead
+            # of via `apt-get source <pkg>`.  Walked at cache-build
+            # time; auto-included in source build.  See
+            # docs/plans/fork-source.md.
+            self.dir_fork = os.path.join(self.working_dir, config_parser.get('Directories', 'Fork'))
+            self.dir_fork_source = os.path.join(self.dir_fork, 'source')
+
             # Isolated gnupg homedir for InRelease verification.  The
             # build-system.sh bootstrap creates this with mode 0700;
             # mirror that here so a Python-only invocation (e.g. tests)
@@ -787,6 +795,9 @@ class BuildConfig:
             pathlib.Path(self.dir_patch_preinstall).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_patch_postinstall).mkdir(parents=True, exist_ok=True)
 
+            pathlib.Path(self.dir_fork).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_fork_source).mkdir(parents=True, exist_ok=True)
+
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_buildroot).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
@@ -803,6 +814,7 @@ class BuildConfig:
                 self.dir_download, self.dir_log, self.dir_cache, self.dir_temp,
                 self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
+                self.dir_fork, self.dir_fork_source,
                 self.dir_image, self.dir_buildroot, self.dir_chroot,
                 self.dir_chroot_installer, self.dir_gnupg,
             ):

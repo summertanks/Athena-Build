@@ -1,0 +1,7 @@
+#!/usr/bin/make -f
+# athena-installer-data — static data package for the d-i ramdisk.
+# Empty package today (Step 1); content lands in Steps 5-7 of
+# docs/plans/fork-source.md.
+
+%:
+	dh $@

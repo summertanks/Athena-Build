@@ -1,0 +1,8 @@
+athena-installer-data (1.0.0) thor; urgency=low
+
+  * Initial scaffolding (FORK-01 Step 1).
+    Empty package — no content shipped yet.  Real content lands in
+    Steps 5-7 (stub templates, release files, runtime dirs,
+    debootstrap codename script, tasksel wrapper).
+
+ -- Athena Linux <athena@local>  Sat, 16 May 2026 12:00:00 +0000
