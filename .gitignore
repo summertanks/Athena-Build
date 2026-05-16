@@ -24,3 +24,27 @@ tmp/
 .idea/
 .vscode/
 *.iml
+
+# fork/source/ — dpkg-buildpackage artifacts land in PARENT of each
+# package's source tree (i.e. directly under fork/source/), and per-
+# pkg debian/ scratch land inside debian/.  Source trees themselves
+# (fork/source/<pkg>/debian/, fork/source/<pkg>/data/) are tracked.
+fork/source/*.udeb
+fork/source/*.deb
+fork/source/*.changes
+fork/source/*.buildinfo
+fork/source/*.dsc
+fork/source/*.tar.gz
+fork/source/*.tar.xz
+fork/source/*.tar.bz2
+fork/source/*/debian/.debhelper/
+fork/source/*/debian/files
+fork/source/*/debian/tmp/
+fork/source/*/debian/*.substvars
+fork/source/*/debian/*.debhelper.log
+fork/source/*/debian/debhelper-build-stamp
+# Per-binary unpack dirs created by dh: e.g. fork/source/foo/debian/foo/
+# Matched by walking known package names — simpler to exclude debian/<name>/
+# only when running locally; gitignore can't easily express "match dir whose
+# name equals the parent's name", so rely on dh_clean to wipe these between
+# builds.
