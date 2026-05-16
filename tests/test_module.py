@@ -5268,6 +5268,36 @@ def test_parse_pkg_list_groups_empty_section_name_raises():
         os.unlink(_path)
 
 
+def test_tasksel_patch_logs_tasks_install_for_diagnostic():
+    """TEMPORARY: tasksel source-patch under patch/source/tasksel/3.73/
+    adds `print STDERR` diagnostic logging of @tasks_install right
+    before apt-get install runs.  This is a diagnostic patch — it's
+    expected to be REMOVED once the dialog-checkbox-has-no-effect bug
+    (2026-05-16) is root-caused and fixed.
+
+    When the patch is intentionally removed, delete this test too —
+    it has no value as a steady-state pin (we shouldn't be shipping
+    noise-adding diagnostic patches to production)."""
+    _patch_dir = os.path.join(
+        _ROOT, 'patch', 'source', 'tasksel', '3.73',
+    )
+    if not os.path.isdir(_patch_dir):
+        return  # patch removed (and so was its dir) — diagnostic done
+    _patches = [
+        f for f in os.listdir(_patch_dir)
+        if f.endswith('.patch') and 'debug-log-tasks-install' in f
+    ]
+    if not _patches:
+        return  # specific debug patch removed — diagnostic done
+    with open(os.path.join(_patch_dir, _patches[0])) as fh:
+        _body = fh.read()
+    assert 'tasksel-debug: tasks_install=' in _body, (
+        f"tasksel debug patch present but missing the expected print "
+        f"STDERR line; this is the diagnostic we rely on. Found: "
+        f"{_patches[0]}"
+    )
+
+
 def test_pkgsel_patch_drops_debian_tasks_only_env_var():
     """patch/source/pkgsel/0.79/ ships a patch that removes
     DEBIAN_TASKS_ONLY=1 from pkgsel's tasksel invocation.  Without
@@ -5467,10 +5497,10 @@ def test_parse_pkg_list_group_meta_flat_file_returns_base_only():
 
 
 def test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group():
-    """One `Task:` stanza per non-`[base]` group, with `Section: athena`,
-    `Description:`, and `Key:` listing seed names alpha-sorted.  `[base]`
-    is intentionally absent — base packages are debootstrapped before
-    pkgsel runs."""
+    """One `Task:` stanza per non-`[base]` group, with `Section: user`
+    (matches debian convention), `Description:` (sanitised), and `Key:`
+    listing seed names alpha-sorted.  `[base]` is intentionally absent
+    — base packages are debootstrapped before pkgsel runs."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from iso_installer import _stage_tasksel_desc
@@ -5480,7 +5510,7 @@ def test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group():
         'gnome':             {'gnome-shell', 'firefox-esr'},
     }
     _meta = {
-        'development-tools': {'description': 'Build toolchain + git.'},
+        'development-tools': {'description': 'Build toolchain plus git'},
         'gnome':             {},  # no description → fallback
     }
     with tempfile.TemporaryDirectory() as _stage:
@@ -5494,14 +5524,57 @@ def test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group():
         # Both non-base groups present
         assert 'Task: athena-development-tools' in _content
         assert 'Task: athena-gnome' in _content
-        # Operator-supplied description wins
-        assert 'Description: Build toolchain + git.' in _content
+        # Operator-supplied description wins (sanitised — trailing period
+        # stripped, but content kept)
+        assert 'Description: Build toolchain plus git' in _content
         # Fallback description used when meta omits it
         assert 'Description: Athena gnome group' in _content
         # Key: lists are alpha-sorted within each stanza
         assert ' firefox-esr\n gnome-shell' in _content
-        # Section field is consistent
-        assert _content.count('Section: athena') == 2
+        # Section is "user" (matches debian convention; defensive fix
+        # for the cdebconf dialog-checkbox issue 2026-05-16)
+        assert _content.count('Section: user') == 2
+        assert 'Section: athena' not in _content
+
+
+def test_stage_tasksel_desc_sanitises_description_chars():
+    """Operator-supplied descriptions may contain commas, em-dashes,
+    parens — chars that historically interact badly with cdebconf
+    multiselect rendering / splitting in derivative-shipped task descs.
+    The generator sanitises them at write time so the rendered menu
+    line is unambiguous."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _stage_tasksel_desc
+    _groups = {
+        'base':  {'bash'},
+        'gnome': {'gnome-shell'},
+    }
+    _meta = {
+        'gnome': {
+            'description': 'GNOME desktop environment — minimal but'
+                           ' functional (shell, file manager, terminal,'
+                           ' browser).',
+        },
+    }
+    with tempfile.TemporaryDirectory() as _stage:
+        assert _stage_tasksel_desc(_stage, _groups, _meta) is True
+        with open(os.path.join(_stage, '.disk', 'athena-tasks.desc')) as fh:
+            _content = fh.read()
+        # Extract the Description line
+        _desc_line = [
+            line for line in _content.splitlines()
+            if line.startswith('Description: ')
+        ][0]
+        assert ',' not in _desc_line, (
+            f"description should be comma-free; got: {_desc_line!r}"
+        )
+        assert '—' not in _desc_line, (
+            f"em-dash should be replaced with '-'; got: {_desc_line!r}"
+        )
+        # Trailing period stripped, no double-spaces
+        assert not _desc_line.endswith('.')
+        assert '  ' not in _desc_line
 
 
 def test_stage_tasksel_desc_only_base_groups_is_noop():
@@ -8054,11 +8127,13 @@ def main() -> int:
         test_dep_tree_initialises_pkg_group_fields_empty,
         test_pass_iii_dedups_to_canonical_names_for_pkg_group_pkg_names,
         test_pkgsel_patch_drops_debian_tasks_only_env_var,
+        test_tasksel_patch_logs_tasks_install_for_diagnostic,
         test_stage_group_manifests_writes_one_file_per_group,
         test_stage_group_manifests_empty_groups_is_noop,
         test_parse_pkg_list_group_meta_extracts_descriptions,
         test_parse_pkg_list_group_meta_flat_file_returns_base_only,
         test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group,
+        test_stage_tasksel_desc_sanitises_description_chars,
         test_stage_tasksel_desc_only_base_groups_is_noop,
         test_installer_list_includes_pkgsel,
         test_pkg_list_base_includes_tasksel,
