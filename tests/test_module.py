@@ -5251,7 +5251,14 @@ def test_athena_tasksel_control_provides_conflicts_replaces_tasksel():
     with open(_ctrl) as fh:
         _body = fh.read()
     assert 'Package: athena-tasksel' in _body, _body
-    assert 'Provides: tasksel' in _body, _body
+    # Versioned Provides is REQUIRED — without it, tasksel-data's strict
+    # Depends: tasksel (= 3.73) fails dpkg config (caught 2026-05-17).
+    # See memory/feedback_fork_provides_must_be_versioned.md.
+    assert 'Provides: tasksel (= 3.73)' in _body, (
+        "athena-tasksel must declare versioned Provides — "
+        "unversioned Provides fails dpkg's strict-version checks "
+        f"from tasksel-data Depends.  Got:\n{_body}"
+    )
     assert 'Conflicts: tasksel' in _body, _body
     assert 'Replaces: tasksel' in _body, _body
 
@@ -5289,7 +5296,10 @@ def test_athena_pkgsel_control_provides_conflicts_replaces_pkgsel():
         _body = fh.read()
     assert 'Package: athena-pkgsel' in _body, _body
     assert 'Package-Type: udeb' in _body, _body
-    assert 'Provides: pkgsel' in _body, _body
+    # Versioned Provides — same defensive pattern as athena-tasksel
+    # even though nothing depends on pkgsel with a version constraint
+    # today.  See memory/feedback_fork_provides_must_be_versioned.md.
+    assert 'Provides: pkgsel (= 0.79)' in _body, _body
     assert 'Conflicts: pkgsel' in _body, _body
     assert 'Replaces: pkgsel' in _body, _body
 
