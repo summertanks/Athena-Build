@@ -2144,12 +2144,19 @@ def test_pool_list_pins_target_only_packages():
     /target but which we don't want pre-installed in the live image.
     Pin the current set so a future config rework doesn't drop them:
       - grub-pc + grub-efi-amd64: bootloader metas (firmware-mode-
-        dependent; grub-installer picks one at install time).
-      - open-vm-tools: hw-detect apt-installs on VMware guests.
-      - console-setup + keyboard-configuration + xkb-data:
-        base-installer apt-installs for /target's console keymap;
-        verified 2026-05-14 these were missing and `Failed to
-        install keyboard-configuration into /target/: 100` fired."""
+        dependent; grub-installer picks one at install time).  Both
+        must be explicit — they conflict with each other, neither
+        pulls the other transitively.
+      - open-vm-tools-desktop: hw-detect apt-installs on VMware
+        guests with desktop env.  Pulls open-vm-tools transitively;
+        open-vm-tools also explicitly listed defensively for the
+        future case where desktop is dropped from the install path.
+      - console-setup + keyboard-configuration + xkb-data: NO LONGER
+        explicit in pool.list (FORK-01 Step 5 follow-up pool-audit
+        2026-05-17 removed them).  Reach the pool transitively via
+        `kbd` (in pkg.list [base], Depends keyboard-configuration →
+        Depends xkb-data).  Re-add if `kbd` is ever dropped from
+        [base]."""
     _path = os.path.join(_ROOT, 'config', 'pool.list')
     assert os.path.isfile(_path), _path
     with open(_path) as fh:
@@ -2157,12 +2164,18 @@ def test_pool_list_pins_target_only_packages():
             _line.strip() for _line in fh
             if _line.strip() and not _line.lstrip().startswith('#')
         }
+    # Bootloader metas — both must be explicit (mutually exclusive)
     assert 'grub-pc' in _names, _names
     assert 'grub-efi-amd64' in _names, _names
+    # VMware guest tooling — desktop pulls non-desktop transitively
+    assert 'open-vm-tools-desktop' in _names, _names
     assert 'open-vm-tools' in _names, _names
-    assert 'console-setup' in _names, _names
-    assert 'keyboard-configuration' in _names, _names
-    assert 'xkb-data' in _names, _names
+    # Negative assertions — these MUST NOT be explicit after Step 5
+    # follow-up audit (reach pool transitively via kbd in [base])
+    assert 'console-setup' not in _names, (
+        "console-setup should be transitive via kbd, not explicit")
+    assert 'keyboard-configuration' not in _names, _names
+    assert 'xkb-data' not in _names, _names
 
 
 def test_buildconfig_exposes_poollist_path():
@@ -2201,9 +2214,11 @@ def test_read_pkg_list_handles_pool_list_format():
     assert 'grub-pc' in _names, _names
     assert 'grub-efi-amd64' in _names, _names
     assert 'open-vm-tools' in _names, _names
-    assert 'console-setup' in _names, _names
-    assert 'keyboard-configuration' in _names, _names
-    assert 'xkb-data' in _names, _names
+    assert 'open-vm-tools-desktop' in _names, _names
+    # console-setup/keyboard-configuration/xkb-data dropped 2026-05-17
+    # (pool-audit cleanup) — reach pool transitively via kbd in
+    # pkg.list [base].  See test_pool_list_pins_target_only_packages.
+    assert 'console-setup' not in _names, _names
     # No accidental comment lines bleeding through.
     for _n in _names:
         assert not _n.startswith('#'), _n
