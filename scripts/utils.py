@@ -1000,8 +1000,9 @@ def download_file(url: str, filename: str) -> tuple:
 
 
 def download_source(dependency_tree, dir_download):
-    from urllib.parse import urljoin
+    from urllib.parse import urljoin, urlsplit, unquote
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
+    import shutil as _shutil
 
     _downloaded_size = 0
     _download_size = dependency_tree.download_size
@@ -1044,40 +1045,63 @@ def download_source(dependency_tree, dir_download):
         _download_path = os.path.join(dir_download, _file)
 
         if get_sha256(_download_path) != _sha256:
-            # Use the size from the InRelease-verified Sources index instead
-            # of a HEAD probe — saves one round-trip per file and removes
-            # the prior bug where a HEAD that returned 0 still produced
-            # `_downloaded_size += 0` while the GET silently 404ed.
-            try:
-                with requests.get(_url, stream=True, timeout=30) as response:
-                    # raise_for_status surfaces 4xx/5xx as HTTPError so the
-                    # existing requests-exception handler logs a clear
-                    # "HTTP <status>" message instead of the prior cryptic
-                    # downstream "Hash mismatch" the user saw on 404s.
-                    response.raise_for_status()
-                    with open(_download_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=1024):
-                            if chunk:
-                                f.write(chunk)
-                                if progress_bar is not None:
-                                    progress_bar.step(len(chunk))
+            # file:// fast-path for fork mirror — local copy via shutil
+            # instead of HTTP.  Fork's Sources index ships real SHA256 +
+            # Size (helper computed them at cache time), so the existing
+            # verification below still gates the copy.  See
+            # scripts/fork_mirror.py.
+            _parts = urlsplit(_url)
+            if _parts.scheme == 'file':
+                _src_path = unquote(_parts.path)
+                try:
+                    _shutil.copyfile(_src_path, _download_path)
+                except OSError as e:
+                    tui.console.print(f"ERROR: file:// copy failed for {_url}")
+                    logger.error(f"download_source({_url}): {e}")
+                    continue
+                if progress_bar is not None:
+                    try:
+                        progress_bar.step(os.path.getsize(_download_path))
+                    except OSError:
+                        pass
+                # Fall through to the size + sha256 verification below
+                # (which gates _file_list[_file] for downstream consumers).
+                pass
+            else:
+                # Use the size from the InRelease-verified Sources index instead
+                # of a HEAD probe — saves one round-trip per file and removes
+                # the prior bug where a HEAD that returned 0 still produced
+                # `_downloaded_size += 0` while the GET silently 404ed.
+                try:
+                    with requests.get(_url, stream=True, timeout=30) as response:
+                        # raise_for_status surfaces 4xx/5xx as HTTPError so the
+                        # existing requests-exception handler logs a clear
+                        # "HTTP <status>" message instead of the prior cryptic
+                        # downstream "Hash mismatch" the user saw on 404s.
+                        response.raise_for_status()
+                        with open(_download_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=1024):
+                                if chunk:
+                                    f.write(chunk)
+                                    if progress_bar is not None:
+                                        progress_bar.step(len(chunk))
 
-            except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-                tui.console.print(f"ERROR: HTTP failure for {_url}")
-                logger.error(f"download_source({_url}): {e}")
-                continue
-            except OSError as e:
-                tui.console.print(f"ERROR: cannot write {_download_path}")
-                logger.error(f"download_source write {_download_path}: {e}")
-                continue
-            except ValueError as e:
-                tui.console.print(f"ERROR: malformed response for {_url}")
-                logger.error(f"download_source parse {_url}: {e}")
-                continue
-            except Exception as e:
-                tui.console.print(f"ERROR: unexpected failure for {_url}")
-                logger.error(f"download_source({_url}): {type(e).__name__}: {e}")
-                continue
+                except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+                    tui.console.print(f"ERROR: HTTP failure for {_url}")
+                    logger.error(f"download_source({_url}): {e}")
+                    continue
+                except OSError as e:
+                    tui.console.print(f"ERROR: cannot write {_download_path}")
+                    logger.error(f"download_source write {_download_path}: {e}")
+                    continue
+                except ValueError as e:
+                    tui.console.print(f"ERROR: malformed response for {_url}")
+                    logger.error(f"download_source parse {_url}: {e}")
+                    continue
+                except Exception as e:
+                    tui.console.print(f"ERROR: unexpected failure for {_url}")
+                    logger.error(f"download_source({_url}): {type(e).__name__}: {e}")
+                    continue
 
             # Validate what landed on disk *before* the sha256 check, so a
             # short/truncated 200 surfaces as a precise byte-count error

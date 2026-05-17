@@ -246,3 +246,11 @@ pkgsel
 # decision.
 efibootmgr
 grub-pc-bin
+
+# ─── Athena fork packages (FORK-01) ────────────────────────────────
+# athena-installer-data ships installer-side stub templates + (future)
+# release identity files + (future) tasksel wrapper.  Built from
+# fork/source/athena-installer-data/; appears as a udeb via the fork
+# mirror Cache ingests at build time.  See fork/source/README.md and
+# docs/plans/fork-source.md.
+athena-installer-data
