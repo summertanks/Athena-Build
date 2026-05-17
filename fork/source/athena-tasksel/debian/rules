@@ -1,0 +1,16 @@
+#! /usr/bin/make -f
+# Athena fork of tasksel: builds only the athena-tasksel binary
+# (the engine), not tasksel-data or any task-* meta-packages
+# (those continue to come from upstream tasksel source).
+
+%:
+	dh $@ --no-parallel
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=`pwd`/debian/athena-tasksel
+
+override_dh_installdocs:
+	dh_installdocs --link-doc=athena-tasksel
+
+override_dh_perl:
+	dh_perl -d

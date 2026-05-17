@@ -1,0 +1,37 @@
+Source: athena-tasksel
+Section: tasks
+Priority: optional
+Maintainer: Athena Linux <athena@local>
+XSBC-Original-Maintainer: Debian Install System Team <debian-boot@lists.debian.org>
+Standards-Version: 4.6.1
+Build-Depends:
+	debhelper-compat (= 13),
+	gettext,
+	po-debconf
+Rules-Requires-Root: no
+
+Package: athena-tasksel
+Section: admin
+Architecture: all
+Pre-Depends: debconf | cdebconf
+Depends: ${misc:Depends}, liblocale-gettext-perl, apt, tasksel-data
+Conflicts: tasksel
+Replaces: tasksel
+Provides: tasksel
+Description: tool for selecting tasks for installation (Athena fork)
+ Athena's fork of upstream Debian tasksel.  Single functional change
+ from upstream 3.73: the list_task_descs() Perl sub ignores the
+ DEBIAN_TASKS_ONLY environment variable and always globs all .desc
+ files in /usr/share/tasksel/descs/.
+ .
+ The upstream behaviour (filter to debian-tasks.desc only when
+ DEBIAN_TASKS_ONLY=1 is set) is incompatible with derivative
+ distributions that ship additional task .desc files alongside
+ Debian's — pkgsel sets DEBIAN_TASKS_ONLY=1 unconditionally during
+ the installer's software-selection step, which would hide our
+ athena.desc.  Our fork eliminates that filter at source rather
+ than patching pkgsel to drop the env var.
+ .
+ Provides + Conflicts + Replaces tasksel so apt resolves any
+ dependency on `tasksel` to this fork, and the upstream tasksel
+ package cannot coexist.

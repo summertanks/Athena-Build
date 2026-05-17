@@ -232,12 +232,17 @@ acpi-modules
 
 # ─── Software selection (Phase 2 of GROUPS-01) ─────────────────────
 # pkgsel drives d-i's "Software selection" step at install time.  It
-# runs scripts under /usr/lib/pre-pkgsel.d/ (we ship one that copies
-# our generated tasksel .desc to /target), then calls `in-target
-# tasksel --new-install` so the operator picks pkg.list groups via
-# tasksel's UI.  Without pkgsel in the installer ramdisk, the
-# tasksel step is silently skipped and groups are unreachable.
-pkgsel
+# calls `in-target tasksel --new-install` so the operator picks
+# pkg.list groups via tasksel's UI.  Without pkgsel in the installer
+# ramdisk, the tasksel step is silently skipped and groups are
+# unreachable.
+#
+# FORK-01 Step 5: athena-pkgsel (Provides + Conflicts + Replaces
+# pkgsel) — Athena fork from fork/source/athena-pkgsel/ that drops
+# the DEBIAN_TASKS_ONLY=1 env prefix on the tasksel call.  Pairs
+# with athena-tasksel (in pkg.list base) which ignores the env var
+# at the engine level too.
+athena-pkgsel
 
 # ─── Target-side debs (NOT udebs — for the apt pool) ───────────────
 # These are deb names that grub-installer apt-pulls onto the TARGET at

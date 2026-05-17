@@ -1,0 +1,154 @@
+# THIS FILE IS GENERATED AUTOMATICALLY FROM THE D-I PO MASTER FILES
+# The master files can be found under packages/po/
+#
+# DO NOT MODIFY THIS FILE DIRECTLY: SUCH CHANGES WILL BE LOST
+#
+# Croatian messages for debian-installer.
+# Copyright (C) 2003 Software in the Public Interest, Inc.
+# This file is distributed under the same license as debian-installer.
+#
+#
+# Translations from iso-codes:
+#   Alastair McKinstry <mckinstry@computer.org>, 2001, 2004.
+#   Free Software Foundation, Inc., 2000,2004
+#   Josip Rodin, 2008
+#   Krunoslav Gernhard, 2004
+#   Vladimir Vuksan <vuksan@veus.hr>, 2000.
+#   Vlatko Kosturjak, 2001
+#   Tomislav Krznar <tomislav.krznar@gmail.com>, 2012, 2013, 2014, 2015.
+#   Valentin Vidic <Valentin.Vidic@CARNet.hr>, 2017
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Debian-installer 1st-stage master file HR\n"
+"Report-Msgid-Bugs-To: pkgsel@packages.debian.org\n"
+"POT-Creation-Date: 2019-12-11 20:02+0000\n"
+"PO-Revision-Date: 2019-07-04 17:02+0000\n"
+"Last-Translator: gogogogi <trebelnik2@gmail.com>\n"
+"Language-Team: Croatian <lokalizacija@linux.hr>\n"
+"Language: hr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=n%10==1 && n%100!=11 ? 0 : n%10>=2 && n"
+"%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2;\n"
+
+#. Type: text
+#. Description
+#. Main menu item
+#. should not be more than 55 columns
+#. pkgsel is the module that installs packages by running tasksel to
+#. select "tasks". Please use "install *software*" and not
+#. "install *packages*" which is less adapted for non technical users
+#. :sl1:
+#: ../pkgsel.templates:1001
+msgid "Select and install software"
+msgstr "Odabir i instalacija softvera"
+
+#. Type: text
+#. Description
+#. This appears in a progress bar when running pkgsel
+#. The text is used when pkgsel is launched, before it installs packages
+#. :sl1:
+#: ../pkgsel.templates:2001
+msgid "Setting up..."
+msgstr "Postavljanje..."
+
+#. Type: text
+#. Description
+#. This appears in a progress bar when running pkgsel
+#. The text is used when upgrading already installed packages.
+#. :sl1:
+#: ../pkgsel.templates:5001
+msgid "Upgrading software..."
+msgstr "Nadogradnja softvera..."
+
+#. Type: text
+#. Description
+#. This appears in a progress bar when running pkgsel
+#. The text is used when running tasksel to allow selecting packages
+#. Tasksel will then display its own screens
+#. :sl1:
+#: ../pkgsel.templates:6001
+msgid "Running tasksel..."
+msgstr "Pokretanje tasksela..."
+
+#. Type: text
+#. Description
+#. This appears in a progress bar when running pkgsel
+#. The text is used at the end of the installation phase while
+#. cleaning up pkgsel's stuff
+#. :sl1:
+#: ../pkgsel.templates:7001
+msgid "Cleaning up..."
+msgstr "Uklanjanje..."
+
+#. Type: text
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:9001
+msgid "Running ${SCRIPT}..."
+msgstr "Pokrećem ${SCRIPT}..."
+
+#. Type: select
+#. Choices
+#. :sl2:
+#: ../pkgsel.templates:10001
+msgid "No automatic updates"
+msgstr "Bez automatskih nadopuna"
+
+#. Type: select
+#. Choices
+#. :sl2:
+#: ../pkgsel.templates:10001
+msgid "Install security updates automatically"
+msgstr "Instaliraj sigurnosne nadopune automatski"
+
+#. Type: select
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:10002
+msgid "Updates management on this system:"
+msgstr "Upravljanje nadopunama na ovom sustavu:"
+
+#. Type: select
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:10002
+msgid ""
+"Applying updates on a frequent basis is an important part of keeping the "
+"system secure."
+msgstr ""
+"Redovno primjenjivanje nadopuna je bitan dio u održavanju sustava sigurnim."
+
+#. Type: select
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:10002
+msgid ""
+"By default, security updates are not automatically installed, as security "
+"advisories should be reviewed before manual installation of the updates "
+"using standard package management tools."
+msgstr ""
+"Po zadanome, sigurnosne nadopune nisu automatski instalirane, po sigurnosnim "
+"napucima trebale bi biti pregledane prije ručne instalacije koristeći "
+"standardne alate upravljanja paketima."
+
+#. Type: select
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:10002
+msgid ""
+"Alternatively the unattended-upgrades package can be installed, which will "
+"install security updates automatically. Note however that automatic "
+"installation of updates may occasionally cause unexpected downtime of "
+"services provided by this machine in the rare cases where the update is not "
+"fully backward-compatible, or where the security advisory requires the "
+"administrator to perform some other manual operation."
+msgstr ""
+"Alternativno se mogu instalirati paketi automatske nadogradnje, koji će "
+"instalirati sigurnosne nadopune automatski. Zapamtite da automatska "
+"instalacija nadopuna ponekada može prouzrokovati neočekivane zastoje usluga "
+"koje omogućuje ovo računalo u rijetkim slučajevima gdje nadopuna nije "
+"potpuno kompatibilna s prijašnjom inačicom ili gdje po sigurnosnim napucima "
+"zahtijeva administratorske ovlasti za izvođenje određenih ručnih radnji."
