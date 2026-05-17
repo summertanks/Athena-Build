@@ -1,7 +1,29 @@
 #!/usr/bin/make -f
 # athena-installer-data — static data package for the d-i ramdisk.
-# Empty package today (Step 1); content lands in Steps 5-7 of
+# Content evolves across FORK-01 plan steps in
 # docs/plans/fork-source.md.
+
+# Codename comes from build env (ATHENA_CODENAME, injected by
+# BuildContainer.deb_build_env at source-build time; sourced from
+# config/build.conf [Build] CODENAME via BuildConfig.build_codename).
+# Falls back to 'thor' for standalone `dpkg-buildpackage` runs
+# outside the engine (verification / sanity checks).
+ATHENA_CODENAME ?= thor
 
 %:
 	dh $@
+
+# Substitute @CODENAME@ in shipped files + create the debootstrap
+# codename symlink (FORK-01 Step 4).  Runs after dh_install has
+# staged data/* files at their target paths.
+override_dh_install:
+	dh_install
+	sed -i 's/@CODENAME@/$(ATHENA_CODENAME)/g' \
+	    debian/athena-installer-data/etc/lsb-release \
+	    debian/athena-installer-data/etc/default-release
+	# debootstrap codename symlink — same pattern upstream uses for
+	# bookworm/sid/kali (see debootstrap-udeb's scripts/ tree).  sid
+	# script comes from debootstrap-udeb (separate package in the
+	# installer closure); the link can dangle until that udeb unpacks.
+	mkdir -p debian/athena-installer-data/usr/share/debootstrap/scripts
+	ln -sf sid debian/athena-installer-data/usr/share/debootstrap/scripts/$(ATHENA_CODENAME)

@@ -557,6 +557,72 @@ the better home.
 
 ---
 
+### Step 8 — Strip Debian-specific install-time hook calls (NEW 2026-05-17)
+
+**Purpose (the principle, per user 2026-05-17):** Athena ships as
+Athena.  The installed system must contain NO Debian-specific
+telemetry, bug-reporting agents, or hardcoded references to upstream
+machinery — even when those calls fail silently today.  This step
+addresses Surface 1 of the broader "no Debian residue" goal
+(Surfaces 2 / 3 / 4 / 5 are handled by Steps 6 / 7 / done / done —
+see `memory/project_filter_debian_specific_installer_hooks.md` for
+the full audit).
+
+D-i ships hardcoded `apt-install <pkg> || true` calls in
+`/usr/lib/pre-pkgsel.d/`, `/usr/lib/post-base-installer.d/`, and
+hw-detect.sh for Debian/Ubuntu/legacy-arch packages.  Each call IS
+Debian-specific machinery shipping inside our installer, regardless
+of whether the package is in our pool.
+
+| Package | Hook | What it is |
+|---|---|---|
+| `popularity-contest` | pkgsel/pre-pkgsel.d/90popcon | Debian's anonymous-pkg-usage telemetry |
+| `installation-report` | installation-report/pre-pkgsel.d/50save-logs | Debian's install-bug-report submission |
+| `landscape-client` | pkgsel/pre-pkgsel.d/20update-policy | Canonical Landscape (Ubuntu-only) |
+| `mouseemu` | hw-detect/post-base-installer.d/60install-mouseemu | Old PPC single-button-mouse emu |
+| `opal-prd` | hw-detect.sh | IBM POWER firmware (we're amd64-only) |
+| `pbbuttonsd` | hw-detect.sh | PowerBook keys daemon (PPC-only) |
+
+Today these fail with "Unable to locate package" — confirming the
+package isn't on Athena, but the machinery to invoke it still ships.
+After this step: the machinery itself is gone.
+
+**Files modified:**
+- `fork/source/athena-installer-data/data/` — add:
+  * `pre-pkgsel.d/90popcon` → no-op (`#!/bin/sh\nexit 0`)
+  * `pre-pkgsel.d/50save-logs` → no-op
+  * `post-base-installer.d/60install-mouseemu` → no-op
+- `fork/source/athena-installer-data/debian/install` — wire each
+  data file to its `/usr/lib/<hook-dir>/<name>` target.
+- `fork/source/athena-installer-data/debian/postinst` — `dpkg-divert
+  --add --rename --divert <path>.upstream <path>` for each hook
+  (parallels Step 5's tasksel wrapper divert mechanism).
+- `fork/source/athena-installer-data/debian/prerm` — reverse the
+  diverts on remove.
+- For `opal-prd` + `pbbuttonsd` (which are calls inside `hw-detect.sh`
+  itself, not in a separate hook dir): patch hw-detect via
+  `patch/source/hw-detect/<ver>/` to comment out those two
+  apt-install lines.  Cheaper than forking hw-detect.
+
+**Acceptance:**
+- athena_efi.log shows no "Unable to locate package popularity-contest"
+  / installation-report / landscape-client / mouseemu errors after
+  install
+- Install behaviour unchanged for everything else (verify by
+  comparing install duration + final package count vs pre-Step 8)
+
+**Risks:**
+- dpkg-divert ordering (same as Step 5 — fork pkg must unpack AFTER
+  upstream OR divert must be defensive against upstream-not-yet-there)
+- Patching hw-detect for the 2 arch-specific lines adds a new patch
+  to maintain across upstream version bumps; small enough to be OK
+
+**Approval needed:** yes — confirm whether to fold this into Step 5's
+udeb (athena-installer-data carries both tasksel wrapper AND hook
+no-ops) vs split into a new fork pkg `athena-installer-hooks`.
+
+---
+
 ## Open questions to resolve in-flight
 
 These come up across multiple steps; capturing here so we don't
@@ -580,9 +646,15 @@ re-derive each time:
    Essential, and apt's behaviour with Conflicts on Essential is
    subtle.
 
-5. **Multi-binary control file shape** (Step 9) — confirm dh's
+5. **Multi-binary control file shape** (Step 7) — confirm dh's
    default behaviour with one source + one udeb binary + one deb
    binary works without explicit overrides in `debian/rules`.
+
+6. **Step 8 fold-in vs split** — extend athena-installer-data with
+   the no-op hooks (one fork pkg grows) or create a new
+   athena-installer-hooks (one fork pkg per concern).  Defer
+   decision until Step 5 lands and we see how big athena-installer-data
+   has grown.
 
 ## Status log
 

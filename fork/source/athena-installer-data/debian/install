@@ -1,1 +1,3 @@
 data/athena-stubs.templates var/lib/dpkg/info
+data/lsb-release            etc
+data/default-release        etc

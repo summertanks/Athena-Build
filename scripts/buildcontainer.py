@@ -33,6 +33,10 @@ class BuildContainer:
         self.log_path = config.dir_log
         self.repo_path = config.dir_repo
         self.arch = config.arch
+        # FORK-01 Step 4: forks under fork/source/ that template codename
+        # into shipped files (lsb-release etc.) read this via the
+        # ATHENA_CODENAME env var injected into the build container.
+        self.codename = config.build_codename
 
         self.buildlog_path = os.path.join(config.dir_log, 'build')
         self.conf_path = config.dir_config
@@ -250,9 +254,16 @@ class BuildContainer:
         # vars below propagate the right values into dpkg-buildpackage.
         _deb_build_opts     = ' '.join(sorted(_active_options))
         _deb_build_profiles = ' '.join(sorted(_active_profiles))
+        # ATHENA_CODENAME (FORK-01 Step 4): forks under fork/source/ that
+        # need to substitute the distribution codename into shipped files
+        # (lsb-release, default-release, debootstrap script symlinks) read
+        # this in their debian/rules via $(ATHENA_CODENAME).  Sourced from
+        # config/build.conf [Build] CODENAME via BuildConfig.build_codename.
+        # Harmless for upstream pkgs that don't reference it.
         deb_build_env = (
             f'DEB_BUILD_OPTIONS="{_deb_build_opts}" '
             f'DEB_BUILD_PROFILES="{_deb_build_profiles}" '
+            f'ATHENA_CODENAME="{self.codename}" '
         )
 
         # Read the patch list fresh from disk at build time so patches
