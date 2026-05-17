@@ -17,7 +17,11 @@ Pre-Depends: debconf | cdebconf
 Depends: ${misc:Depends}, liblocale-gettext-perl, apt, tasksel-data
 Conflicts: tasksel
 Replaces: tasksel
-Provides: tasksel
+# Versioned Provides required so tasksel-data's strict
+# `Depends: tasksel (= 3.73)` resolves to us.  dpkg treats
+# unversioned Provides as version `<none>` which fails strict-version
+# checks.  See memory/feedback_fork_provides_must_be_versioned.md.
+Provides: tasksel (= 3.73)
 Description: tool for selecting tasks for installation (Athena fork)
  Athena's fork of upstream Debian tasksel.  Single functional change
  from upstream 3.73: the list_task_descs() Perl sub ignores the

@@ -12,7 +12,10 @@ XB-Installer-Menu-Item: 7000
 Depends: ${misc:Depends}, apt-setup-udeb, di-utils (>= 1.56)
 Conflicts: pkgsel
 Replaces: pkgsel
-Provides: pkgsel
+# Versioned Provides — defensive against any d-i tool that might
+# require pkgsel (= <ver>).  None today, but matches the pattern
+# used in athena-tasksel.  See memory/feedback_fork_provides_must_be_versioned.md.
+Provides: pkgsel (= 0.79)
 Description: Select and install packages (Athena fork)
  Athena's fork of upstream Debian pkgsel.  Single functional change
  from upstream 0.79: the `DEBIAN_TASKS_ONLY=1` env prefix on the
