@@ -1,0 +1,26 @@
+Source: athena-pkgsel
+Section: debian-installer
+Priority: standard
+Maintainer: Athena Linux <athena@local>
+XSBC-Original-Maintainer: Debian Install System Team <debian-boot@lists.debian.org>
+Build-Depends: po-debconf, debhelper-compat (= 13), dpkg-dev (>= 1.9.0)
+
+Package: athena-pkgsel
+Package-Type: udeb
+Architecture: all
+XB-Installer-Menu-Item: 7000
+Depends: ${misc:Depends}, apt-setup-udeb, di-utils (>= 1.56)
+Conflicts: pkgsel
+Replaces: pkgsel
+Provides: pkgsel
+Description: Select and install packages (Athena fork)
+ Athena's fork of upstream Debian pkgsel.  Single functional change
+ from upstream 0.79: the `DEBIAN_TASKS_ONLY=1` env prefix on the
+ in-target tasksel invocation in debian/postinst is removed —
+ athena-tasksel ignores that env var anyway, but removing the
+ setter makes the install flow's intent explicit.
+ .
+ Provides + Conflicts + Replaces pkgsel so the installer ramdisk
+ resolves to this fork and upstream pkgsel cannot coexist.  This
+ replaces the previously-shipped patch/source/pkgsel/9001-... quilt
+ patch (deleted in the same commit).

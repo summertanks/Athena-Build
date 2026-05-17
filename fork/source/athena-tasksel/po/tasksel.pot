@@ -1,0 +1,39 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-17 16:46+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=CHARSET\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../tasksel.pl:635
+msgid ""
+"tasksel [OPTIONS...] [COMMAND...]\n"
+" Commands:\n"
+"  install TASK...       install tasks\n"
+"  remove TASK...        uninstall tasks\n"
+"  --task-packages=TASK  list packages installed by TASK; can be repeated\n"
+"  --task-desc=TASK      print the description of a task\n"
+"  --list-tasks          list tasks that would be displayed and exit\n"
+" Options:\n"
+"  -t, --test            dry-run: don't really change anything\n"
+"      --new-install     automatically install some tasks\n"
+"  --debconf-apt-progress=\"ARGUMENTS...\"\n"
+"                        provide additional arguments to debconf-apt-"
+"progress(1)\n"
+msgstr ""
+
+#: ../tasksel.pl:933
+msgid "apt-get failed"
+msgstr ""

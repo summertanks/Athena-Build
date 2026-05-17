@@ -1,0 +1,6 @@
+---
+include:
+  - https://salsa.debian.org/installer-team/branch2repo/raw/main/trigger_b2r.yml
+
+variables:
+  BRANCH2REPO_EXTRA_PROJECTS: 'net-retriever:philh:extra-udeb-repo anna:philh:de-dup'

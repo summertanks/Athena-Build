@@ -1,0 +1,150 @@
+# THIS FILE IS GENERATED AUTOMATICALLY FROM THE D-I PO MASTER FILES
+# The master files can be found under packages/po/
+#
+# DO NOT MODIFY THIS FILE DIRECTLY: SUCH CHANGES WILL BE LOST
+#
+# Thai translation of debian-installer.
+# Copyright (C) 2006-2021 Software in the Public Interest, Inc.
+# This file is distributed under the same license as debian-installer.
+# Theppitak Karoonboonyanan <theppitak@gmail.com>, 2006-2021.
+#
+#
+# Translations from iso-codes:
+#   Tobias Quathamer <toddy@debian.org>, 2007.
+#     Translations taken from ICU SVN on 2007-09-09
+#   Free Software Foundation, Inc., 2002,2003,2004
+#   Alastair McKinstry <mckinstry@computer.org>, 2002, 2004
+# Translations from KDE:
+#   Thanomsub Noppaburana <donga@midaassets.com>
+# Theppitak Karoonboonyanan <theppitak@gmail.com>, 2005-2017
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: debian-installer\n"
+"Report-Msgid-Bugs-To: pkgsel@packages.debian.org\n"
+"POT-Creation-Date: 2019-12-11 20:02+0000\n"
+"PO-Revision-Date: 2021-02-03 16:48+0700\n"
+"Last-Translator: Theppitak Karoonboonyanan <theppitak@gmail.com>\n"
+"Language-Team: Thai <thai-l10n@googlegroups.com>\n"
+"Language: th\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#. Type: text
+#. Description
+#. Main menu item
+#. should not be more than 55 columns
+#. pkgsel is the module that installs packages by running tasksel to
+#. select "tasks". Please use "install *software*" and not
+#. "install *packages*" which is less adapted for non technical users
+#. :sl1:
+#: ../pkgsel.templates:1001
+msgid "Select and install software"
+msgstr "เลือกและติดตั้งซอฟต์แวร์"
+
+#. Type: text
+#. Description
+#. This appears in a progress bar when running pkgsel
+#. The text is used when pkgsel is launched, before it installs packages
+#. :sl1:
+#: ../pkgsel.templates:2001
+msgid "Setting up..."
+msgstr "กำลังเตรียมการ..."
+
+#. Type: text
+#. Description
+#. This appears in a progress bar when running pkgsel
+#. The text is used when upgrading already installed packages.
+#. :sl1:
+#: ../pkgsel.templates:5001
+msgid "Upgrading software..."
+msgstr "กำลังปรับรุ่นซอฟต์แวร์..."
+
+#. Type: text
+#. Description
+#. This appears in a progress bar when running pkgsel
+#. The text is used when running tasksel to allow selecting packages
+#. Tasksel will then display its own screens
+#. :sl1:
+#: ../pkgsel.templates:6001
+msgid "Running tasksel..."
+msgstr "กำลังเรียก tasksel..."
+
+#. Type: text
+#. Description
+#. This appears in a progress bar when running pkgsel
+#. The text is used at the end of the installation phase while
+#. cleaning up pkgsel's stuff
+#. :sl1:
+#: ../pkgsel.templates:7001
+msgid "Cleaning up..."
+msgstr "กำลังเก็บกวาด..."
+
+#. Type: text
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:9001
+msgid "Running ${SCRIPT}..."
+msgstr "กำลังดำเนินการ ${SCRIPT}..."
+
+#. Type: select
+#. Choices
+#. :sl2:
+#: ../pkgsel.templates:10001
+msgid "No automatic updates"
+msgstr "ไม่มีการปรับรุ่นอัตโนมัติ"
+
+#. Type: select
+#. Choices
+#. :sl2:
+#: ../pkgsel.templates:10001
+msgid "Install security updates automatically"
+msgstr "ปรับรุ่นแก้ปัญหาระบบความปลอดภัยแบบอัตโนมัติ"
+
+#. Type: select
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:10002
+msgid "Updates management on this system:"
+msgstr "การจัดการการปรับรุ่นในระบบนี้:"
+
+#. Type: select
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:10002
+msgid ""
+"Applying updates on a frequent basis is an important part of keeping the "
+"system secure."
+msgstr "การปรับรุ่นบ่อยๆ เป็นส่วนสำคัญที่จะช่วยให้ระบบมีความปลอดภัยอยู่เสมอ"
+
+#. Type: select
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:10002
+msgid ""
+"By default, security updates are not automatically installed, as security "
+"advisories should be reviewed before manual installation of the updates "
+"using standard package management tools."
+msgstr ""
+"โดยปกติแล้ว จะไม่มีการปรับรุ่นแก้ปัญหาความปลอดภัยแบบอัตโนมัติ "
+"เนื่องจากควรมีการอ่านประกาศแนะนำด้านความปลอดภัยก่อนที่จะสั่งปรับรุ่นด้วยตนเอง "
+"โดยใช้เครื่องมือจัดการแพกเกจมาตรฐาน"
+
+#. Type: select
+#. Description
+#. :sl2:
+#: ../pkgsel.templates:10002
+msgid ""
+"Alternatively the unattended-upgrades package can be installed, which will "
+"install security updates automatically. Note however that automatic "
+"installation of updates may occasionally cause unexpected downtime of "
+"services provided by this machine in the rare cases where the update is not "
+"fully backward-compatible, or where the security advisory requires the "
+"administrator to perform some other manual operation."
+msgstr ""
+"อีกทางหนึ่ง คุณอาจติดตั้งแพกเกจ unattended-upgrades "
+"ซึ่งจะปรับรุ่นแก้ปัญหาความปลอดภัยให้โดยอัตโนมัติ "
+"แต่อย่าลืมว่าการปรับรุ่นอัตโนมัติอาจทำให้บริการบางอย่างที่เครื่องดำเนินการอยู่หยุดทำงานแบบไม่คาดหมายได้ "
+"ซึ่งเป็นกรณีที่เกิดไม่บ่อยนัก โดยรุ่นใหม่อาจไม่เข้ากันกับรุ่นเก่าอย่างเต็มที่ "
+"หรือในประกาศแนะนำด้านความปลอดภัยอาจต้องให้ผู้ดูแลระบบปรับอะไรบางอย่างเองด้วย"

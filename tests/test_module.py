@@ -5218,45 +5218,91 @@ def test_parse_pkg_list_groups_empty_section_name_raises():
         os.unlink(_path)
 
 
-def test_pkgsel_patch_drops_debian_tasks_only_env_var():
-    """patch/source/pkgsel/0.79/ ships a patch that removes
-    DEBIAN_TASKS_ONLY=1 from pkgsel's tasksel invocation.  Without
-    this, tasksel reads ONLY /usr/share/tasksel/descs/debian-tasks.desc
-    (verbatim from /usr/bin/tasksel:53-65) and our athena.desc is
-    silently ignored — the actual root cause of the four-round
-    "tasks don't appear on Software-selection" debugging saga,
-    final fix landed via this patch.
-
-    Pin the patch's existence + payload so a future refactor that
-    drops it (or moves to a new pkgsel version without re-porting)
-    breaks here, NOT during the next install cycle.  Tasksel
-    silently swallowing our tasks is exactly the kind of failure
-    that's invisible until an operator boots the ISO."""
-    _patch_dir = os.path.join(
-        _ROOT, 'patch', 'source', 'pkgsel', '0.79',
+def test_athena_tasksel_fork_ignores_debian_tasks_only_env():
+    """FORK-01 Step 5: athena-tasksel (fork/source/athena-tasksel/)
+    must have list_task_descs() always glob all .desc files —
+    NOT branch on $ENV{DEBIAN_TASKS_ONLY}.  Pin the source-level
+    edit so a future re-import of upstream tasksel doesn't silently
+    re-introduce the env-var filter that hides our athena.desc."""
+    _pl = os.path.join(_ROOT, 'fork', 'source', 'athena-tasksel',
+                       'tasksel.pl')
+    assert os.path.isfile(_pl), f"missing {_pl}"
+    with open(_pl) as fh:
+        _body = fh.read()
+    # The Debian env-var branch must be gone.
+    assert '$ENV{DEBIAN_TASKS_ONLY}' not in _body, (
+        "athena-tasksel still references DEBIAN_TASKS_ONLY — the "
+        "Step 5 source edit was reverted or wasn't applied"
     )
-    assert os.path.isdir(_patch_dir), (
-        f"pkgsel patch dir missing — did pkgsel version change?"
-        f" Expected {_patch_dir!r}"
+    # Verify the canonical-fork glob is there
+    assert '"$descdir/*.desc"' in _body, (
+        "list_task_descs must glob all .desc files"
     )
-    _patches = [f for f in os.listdir(_patch_dir) if f.endswith('.patch')]
-    assert _patches, f"no .patch files in {_patch_dir}"
 
-    # Read all patches, look for the DEBIAN_TASKS_ONLY removal hunk
-    _found_removal = False
-    for _name in _patches:
-        with open(os.path.join(_patch_dir, _name)) as fh:
-            _body = fh.read()
-        if ('-    DEBIAN_TASKS_ONLY=1 in-target' in _body
-                and '+    in-target' in _body):
-            _found_removal = True
-            break
-    assert _found_removal, (
-        "no patch under patch/source/pkgsel/0.79/ removes the "
-        "DEBIAN_TASKS_ONLY=1 prefix from pkgsel's tasksel invocation. "
-        f"Patches found: {_patches}.  Without this removal, tasksel "
-        "ignores our athena.desc and only the upstream Debian tasks "
-        "appear on Software-selection."
+
+def test_athena_tasksel_control_provides_conflicts_replaces_tasksel():
+    """FORK-01 Step 5: athena-tasksel's debian/control declares
+    Provides + Conflicts + Replaces tasksel.  Without all three,
+    apt resolution doesn't reliably pick our fork over upstream
+    tasksel when both are in the pool."""
+    _ctrl = os.path.join(_ROOT, 'fork', 'source', 'athena-tasksel',
+                         'debian', 'control')
+    assert os.path.isfile(_ctrl), f"missing {_ctrl}"
+    with open(_ctrl) as fh:
+        _body = fh.read()
+    assert 'Package: athena-tasksel' in _body, _body
+    assert 'Provides: tasksel' in _body, _body
+    assert 'Conflicts: tasksel' in _body, _body
+    assert 'Replaces: tasksel' in _body, _body
+
+
+def test_athena_pkgsel_fork_postinst_drops_debian_tasks_only_prefix():
+    """FORK-01 Step 5: athena-pkgsel's debian/postinst must NOT
+    prefix its in-target tasksel call with DEBIAN_TASKS_ONLY=1.
+    Belt-and-suspenders with athena-tasksel's source edit — even
+    though our tasksel ignores the env var, removing the setter
+    keeps the install flow's intent explicit."""
+    _post = os.path.join(_ROOT, 'fork', 'source', 'athena-pkgsel',
+                         'debian', 'postinst')
+    assert os.path.isfile(_post), f"missing {_post}"
+    with open(_post) as fh:
+        _body = fh.read()
+    # The literal "DEBIAN_TASKS_ONLY=1 in-target sh -c \"tasksel"
+    # pattern (without leading # comment) must NOT appear as an
+    # active line.  Comments referencing it are OK.
+    for _line in _body.splitlines():
+        _stripped = _line.lstrip()
+        if _stripped.startswith('#'):
+            continue
+        assert 'DEBIAN_TASKS_ONLY=1 in-target' not in _stripped, (
+            f"active line still has DEBIAN_TASKS_ONLY=1 prefix: {_line!r}"
+        )
+
+
+def test_athena_pkgsel_control_provides_conflicts_replaces_pkgsel():
+    """FORK-01 Step 5: athena-pkgsel's debian/control declares
+    Provides + Conflicts + Replaces pkgsel + Package-Type udeb."""
+    _ctrl = os.path.join(_ROOT, 'fork', 'source', 'athena-pkgsel',
+                         'debian', 'control')
+    assert os.path.isfile(_ctrl), f"missing {_ctrl}"
+    with open(_ctrl) as fh:
+        _body = fh.read()
+    assert 'Package: athena-pkgsel' in _body, _body
+    assert 'Package-Type: udeb' in _body, _body
+    assert 'Provides: pkgsel' in _body, _body
+    assert 'Conflicts: pkgsel' in _body, _body
+    assert 'Replaces: pkgsel' in _body, _body
+
+
+def test_pkgsel_patch_dir_deleted():
+    """FORK-01 Step 5: patch/source/pkgsel/ is gone — athena-pkgsel
+    fork replaces the patch entirely.  Pin the deletion so a
+    future operator doesn't accidentally re-add a patch that gets
+    silently shadowed by the fork."""
+    _patch_dir = os.path.join(_ROOT, 'patch', 'source', 'pkgsel')
+    assert not os.path.exists(_patch_dir), (
+        f"{_patch_dir} should not exist after Step 5 — pkgsel patches "
+        "are replaced by the athena-pkgsel fork"
     )
 
 
@@ -5510,31 +5556,43 @@ def test_stage_tasksel_desc_only_base_groups_is_noop():
         )
 
 
-def test_installer_list_includes_pkgsel():
-    """pkgsel udeb must be in installer.list — drives the
-    'Software selection' step at install time (which invokes
-    `in-target tasksel --new-install` to read our athena.desc and
-    surface the operator-defined groups)."""
+def test_installer_list_includes_athena_pkgsel():
+    """FORK-01 Step 5: athena-pkgsel (Provides + Conflicts + Replaces
+    pkgsel) must be in installer.list — drives the 'Software selection'
+    step at install time (which invokes `in-target tasksel --new-install`
+    to read athena.desc and surface the operator-defined groups).
+    Upstream pkgsel is shadowed via the Provides resolution."""
     _path = os.path.join(_ROOT, 'config', 'installer.list')
     with open(_path) as fh:
         _names = {
             _l.strip() for _l in fh
             if _l.strip() and not _l.lstrip().startswith('#')
         }
-    assert 'pkgsel' in _names, "installer.list missing pkgsel"
+    assert 'athena-pkgsel' in _names, "installer.list missing athena-pkgsel"
+    # Upstream pkgsel must NOT be listed (would be redundant + confusing)
+    assert 'pkgsel' not in _names, (
+        "installer.list lists raw 'pkgsel' alongside athena-pkgsel — "
+        "remove the upstream reference; athena-pkgsel Provides pkgsel"
+    )
 
 
-def test_pkg_list_base_includes_tasksel():
-    """tasksel must be in pkg.list [base] so it's debootstrapped onto
-    every /target.  athena-tasksel-data Depends: tasksel — without this
-    dependency target, the synthetic .deb would fail to install."""
+def test_pkg_list_base_includes_athena_tasksel():
+    """FORK-01 Step 5: athena-tasksel (Provides + Conflicts + Replaces
+    tasksel) must be in pkg.list [base] so it's debootstrapped onto
+    every /target.  athena-tasksel-data Depends: tasksel — apt resolves
+    that to athena-tasksel via Provides."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from utils import parse_pkg_list_groups
     _path = os.path.join(_ROOT, 'config', 'pkg.list')
     groups = parse_pkg_list_groups(_path)
-    assert 'tasksel' in groups.get('base', []), \
-        f"pkg.list [base] missing tasksel; got base={groups.get('base')}"
+    assert 'athena-tasksel' in groups.get('base', []), \
+        f"pkg.list [base] missing athena-tasksel; got base={groups.get('base')}"
+    # Upstream tasksel must NOT be in [base] (would be redundant)
+    assert 'tasksel' not in groups.get('base', []), (
+        "pkg.list [base] lists raw 'tasksel' alongside athena-tasksel — "
+        "remove the upstream reference; athena-tasksel Provides tasksel"
+    )
 
 
 # Old pre-pkgsel.d hook block (commits 2cd13b6 / d9818b0 / 346ce20)
@@ -8351,7 +8409,13 @@ def main() -> int:
         test_parse_pkg_list_groups_empty_section_name_raises,
         test_dep_tree_initialises_pkg_group_fields_empty,
         test_pass_iii_dedups_to_canonical_names_for_pkg_group_pkg_names,
-        test_pkgsel_patch_drops_debian_tasks_only_env_var,
+        # FORK-01 Step 5: athena-tasksel + athena-pkgsel forks
+        # replace the old pkgsel patch
+        test_athena_tasksel_fork_ignores_debian_tasks_only_env,
+        test_athena_tasksel_control_provides_conflicts_replaces_tasksel,
+        test_athena_pkgsel_fork_postinst_drops_debian_tasks_only_prefix,
+        test_athena_pkgsel_control_provides_conflicts_replaces_pkgsel,
+        test_pkgsel_patch_dir_deleted,
         test_stage_group_manifests_writes_one_file_per_group,
         test_stage_group_manifests_empty_groups_is_noop,
         test_parse_pkg_list_group_meta_extracts_descriptions,
@@ -8359,8 +8423,8 @@ def main() -> int:
         test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group,
         test_stage_tasksel_desc_sanitises_description_chars,
         test_stage_tasksel_desc_only_base_groups_is_noop,
-        test_installer_list_includes_pkgsel,
-        test_pkg_list_base_includes_tasksel,
+        test_installer_list_includes_athena_pkgsel,
+        test_pkg_list_base_includes_athena_tasksel,
         test_overlay_map_does_not_contain_pre_pkgsel_hook,
         test_installer_pkgsel_dir_does_not_exist,
         test_build_tasksel_data_deb_produces_valid_deb,
