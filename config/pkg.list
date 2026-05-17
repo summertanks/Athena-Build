@@ -236,3 +236,63 @@ network-manager-gnome
 # Latin-script gaps that Noto-core doesn't cover.
 fonts-noto-core
 fonts-dejavu-core
+
+# ─── FORK-01 Step 5 follow-up (2026-05-17): merge with Debian's
+# gnome-desktop task content ─────────────────────────────────────────
+# Per the audit (debian-tasks.desc gnome-desktop = gnome-core +
+# Recommends gnome), we picked the missing-from-our-seeds packages
+# across categories A, B, C (PIM+Software only), and E.
+# Skipped: D (LibreOffice — TODO file separately), F (Debian
+# branding — TODO Athena branding pkg), G (a11y/specialty), H (the
+# gnome/gnome-core metas themselves — picking explicit deps for
+# honest dpkg metadata).
+
+# A: GNOME core infrastructure — session, settings daemon, keyring,
+# audio stack (pipewire), portals, gvfs, gstreamer base+good plugins,
+# theming.
+gnome-session
+gnome-settings-daemon
+gnome-keyring
+libpam-gnome-keyring
+gnome-menus
+gsettings-desktop-schemas
+glib-networking
+gnome-online-accounts
+gvfs-backends
+gvfs-fuse
+libatk-adaptor
+libcanberra-pulse
+libglib2.0-bin
+librsvg2-common
+sound-theme-freedesktop
+xdg-desktop-portal-gnome
+pipewire-audio
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+gnome-shell-extensions
+
+# B: GNOME default apps & utilities that a GNOME desktop user
+# expects out of box (file roller archives, disk usage, help
+# viewer, tweaks UI, theme set, user-dir auto-creation).
+file-roller
+baobab
+yelp
+gnome-tweaks
+gnome-themes-extra
+gnome-user-docs
+gnome-logs
+xdg-user-dirs-gtk
+
+# C: GNOME PIM + Software Center (calendar/contacts/clocks +
+# gnome-software for graphical app installs).  Per user
+# 2026-05-17 — keep this subset of the broader "extras", skip
+# rhythmbox/totem/maps/weather/photo apps for now.
+gnome-calendar
+gnome-contacts
+gnome-clocks
+gnome-software
+
+# E: System administration GUI tools.
+synaptic
+system-config-printer-common
+system-config-printer-udev
