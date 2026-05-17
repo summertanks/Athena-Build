@@ -82,3 +82,147 @@ open-vm-tools-desktop
 console-setup
 keyboard-configuration
 xkb-data
+
+# ─── FORK-01 Step 5 follow-up: tasksel task availability ─────────────
+# Each section below makes a kept tasksel task's hard Depends
+# reachable in /cdrom/pool so apt-install at install time succeeds
+# when the operator selects the task.  Our fork (athena-tasksel-data,
+# coming in next sub-step) ships the .desc that maps task → these
+# package sets.  None of these are installed by default — only when
+# the matching task is ticked in tasksel's UI.
+
+# ─── Debian "standard" task — Priority: standard packages ────────────
+# Replicates Debian's `Packages: standard` semantic so apt-get can
+# satisfy the standard task selection.  87 Priority: standard pkgs
+# total (4 already in our explicit lists); 83 added here.
+#
+# Our own athena-tasksel-data fork's `standard` task will use a
+# CURATED Key: subset (~30 of the most-useful ones) rather than the
+# blanket `Packages: standard` sigil — so default install stays
+# trim, but operator who wants the full Debian-standard experience
+# can `apt install <name>` for any of these post-install.
+#
+# DEBIAN RESIDUE NOTE: `debian-faq`, `doc-debian`, `reportbug`,
+# `python3-reportbug` are Debian-specific (FAQ docs, BTS-submission
+# tooling).  They ship in pool because they're Priority: standard,
+# but they should be EXCLUDED from our curated Athena standard task.
+# Future Debian-strip step may dpkg-divert their files or fork them.
+apt-listchanges
+bash-completion
+bind9-dnsutils
+bind9-host
+bzip2
+ca-certificates
+dbus-system-bus
+debian-faq
+default-dbus-system-bus
+default-logind
+dh-sequence-bash-completion
+dnsutils
+doc-debian
+file
+gettext-base
+groff-base
+host
+inetutils-telnet
+krb5-locales
+libansicolor-perl
+libarchive-tar-perl
+libattribute-handlers-perl
+libautodie-perl
+libc-l10n
+libcompress-zlib-perl
+libcpan-meta-perl
+libdigest-md5-perl
+libdigest-perl
+libextutils-command-perl
+libextutils-install-perl
+libextutils-parsexs-perl
+libfile-spec-perl
+libi18n-langtags-perl
+libio-compress-base-perl
+libio-compress-bzip2-perl
+libio-compress-zlib-perl
+libio-zlib-perl
+liblocale-maketext-perl
+liblocale-maketext-simple-perl
+liblockfile-bin
+libmath-complex-perl
+libmime-base64-perl
+libmodule-load-perl
+libnet-perl
+libnet-ping-perl
+libnss-systemd
+libparams-check-perl
+libparent-perl
+libparse-cpan-meta-perl
+libperl-ostype-perl
+libpod-escapes-perl
+libstorable-perl
+libsys-syslog-perl
+libthread-queue-perl
+libthreads-perl
+libthreads-shared-perl
+libtime-hires-perl
+libtime-local-perl
+libtime-piece-perl
+libversion-requirements-perl
+lsof
+man
+man-db
+manpages
+media-types
+mime-support
+ncurses-term
+netcat
+netcat-traditional
+openssh-client
+perl
+podlators-perl
+python3-reportbug
+reportbug
+ssh-client
+systemd-timesyncd
+telnet
+telnet-client
+ucf
+util-linux-extra
+wamerican
+wget
+xz-utils
+
+# ─── Debian "laptop" task — hard Depends + key Recommends ────────────
+# task-laptop pulls `anacron` (Depends) + bluetooth, powertop, iw,
+# wireless-tools, wpasupplicant, avahi-autoipd (Recommends).  Recs
+# would be silently skipped if missing from pool, but most laptops
+# expect them — ship all in pool.  Operator picks "laptop" task and
+# all install (or laptop-detect auto-flags it).
+anacron
+avahi-autoipd
+bluetooth
+iw
+powertop
+wireless-tools
+wpasupplicant
+
+# ─── Debian "desktop" task — hard Depends + key Recommends ───────────
+# task-desktop pulls xorg + xserver-xorg-* drivers + desktop-base
+# (Debian theme — see TODO) + key system services (cups for
+# printing, alsa-utils for audio, avahi+mdns for network discovery,
+# xdg-utils for desktop integration, fonts-symbola for emoji
+# fallback).  task-gnome-desktop further Recommends-on top of these
+# via task-desktop's chain.
+#
+# TODO (folds into FORK-01 Step 7 athena-branding): replace
+# `desktop-base` with Athena-branded theme/wallpaper package via
+# Provides+Conflicts+Replaces or dpkg-divert.  Today's
+# desktop-base ships Debian-themed wallpaper, GRUB theme, plymouth
+# splash.  Tracked in fork-source.md plan.
+alsa-utils
+avahi-daemon
+cups
+desktop-base
+fonts-symbola
+libnss-mdns
+xdg-utils
+xorg

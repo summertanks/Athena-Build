@@ -656,6 +656,85 @@ re-derive each time:
    decision until Step 5 lands and we see how big athena-installer-data
    has grown.
 
+## Deferred follow-ups
+
+Items captured from in-flight decisions that aren't blocking the
+current step but should land at the right time.
+
+### DEF-1: LibreOffice as a separate optional tasksel task (post Step 7)
+**Captured:** 2026-05-17 during Step 5 task-content discussion.
+**Context:** Debian's `gnome-desktop` task Recommends libreoffice-*
++ spellcheckers + English-US help.  User opted to SKIP libreoffice
+from the merged Athena gnome-desktop content (~600 MB) but wants
+the OPTION available later.
+**Proposal:** add a separate `office` task to our tasksel surface
+(via athena-tasksel-data fork or pkg.list group), pulling
+libreoffice-{writer,calc,impress,gnome}, libreoffice-help-en-us,
+mythes-en-us, hunspell-en-us, hyphen-en-us.  Operator ticks
+"Office suite" in tasksel to add it.
+**Trigger:** anytime after Step 7 (athena-branding) lands.
+
+### DEF-2: Athena branding package — fold scope into Step 7
+**Captured:** 2026-05-17 during Step 5 audit when desktop-base
+was flagged as Debian-themed.
+**Context:** Debian's `desktop-base` ships
+`/usr/share/desktop-base/active-theme/...` (Debian wallpaper, GRUB
+theme, plymouth splash, login background).  Currently included in
+pool.list with a TODO note — kept temporarily so the desktop task
+installs cleanly.
+**Proposal:** extend FORK-01 Step 7 (athena-branding) to cover:
+  - Replace `desktop-base` via Provides+Conflicts+Replaces OR
+    dpkg-divert (Essential-adjacent — investigate which is safer
+    given desktop-base is in Priority: optional but pulled by the
+    desktop task chain)
+  - Provide Athena wallpapers under `/usr/share/desktop-base/active-
+    theme/wallpaper/contents/`
+  - Provide Athena GRUB theme
+  - Provide Athena plymouth splash
+  - Consider also replacing `gnome-backgrounds` if used
+**Trigger:** when Step 7 design discussion begins.
+
+### DEF-3: task-* meta-package cleanup (post Step 5/6/7)
+**Captured:** 2026-05-17 during Step 5 task-content discussion.
+**Context:** Upstream tasksel source still builds 40+ task-*
+meta-packages (task-kde-desktop, task-mate-desktop, task-lxqt-
+desktop, language task-* packages, etc.).  After our fork's
+athena-tasksel-data ships its curated .desc, most of these meta-
+packages are unreferenced — they ship in pool, occupy disk space
+in repo/, but nothing pulls them.
+**Proposal:** either (a) extend our athena-tasksel fork's
+debian/rules to skip building the unused task-* binaries, or
+(b) accept the orphan .debs as cost of staying close to upstream
+build behaviour.  Audit which tasks the kept tasksel menu actually
+references (task-laptop, task-desktop, task-ssh-server, task-web-
+server, task-gnome-desktop minus dropped ones, etc.) and prune
+the rest at the source-build level.
+**Trigger:** post Step 7, when athena-tasksel-data structure is
+stable.
+
+### DEF-4: Curated Athena "standard" task content (Step 5 fork detail)
+**Captured:** 2026-05-17.  Approved as Option β.
+**Context:** Debian's `standard` task uses `Packages: standard`
+sigil which means "install everything Priority: standard" (87
+packages).  Our pool.list now ships all 87 so apt-get can find
+them; but our `athena-tasksel-data` fork's `standard` task
+should use a CURATED Key: list of ~30 packages, not blanket
+`Packages: standard`.
+**Proposal Key: list** (subject to refinement when fork lands):
+  bash-completion, ca-certificates, less, manpages, man-db,
+  openssh-client, rsync, vim, wget, dnsutils, iputils-ping, file,
+  pciutils, usbutils, tcpdump, lsof, psmisc, htop, ncdu, tmux,
+  curl, gettext-base, xz-utils, bzip2, systemd-timesyncd, ucf
+**Explicitly EXCLUDED** (Debian residue): debian-faq, doc-debian,
+reportbug, python3-reportbug.  Operator can apt-install if they
+really want them.
+**Trigger:** during the actual fork (Step 5b — athena-tasksel-data
+implementation, next sub-step).
+
 ## Status log
 
 - 2026-05-16: PROPOSED.  Awaiting approval to begin Step 1.
+- 2026-05-16: Step 1 + Step 2 verified, tagged.
+- 2026-05-16: Step 3 verified, tagged (athena-installer-data ships mirror/protocol stub).
+- 2026-05-17: Step 4 verified, tagged (runtime dirs + release files + debootstrap symlink).
+- 2026-05-17: Step 5 partial — athena-tasksel + athena-pkgsel forks shipped with versioned Provides fix.  athena-tasksel-data fork still pending (Step 5b).
