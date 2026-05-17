@@ -132,12 +132,21 @@ class Mirror:
             object.__setattr__(self, 'suffix', '')
 
         # Validation — fail early with a useful message.
-        for _field in ('id', 'baseurl', 'baseid', 'release', 'component', 'arch'):
+        # `component` is intentionally NOT in this list: the empty string
+        # is a valid value (signalling flat-layout mirror, used by
+        # fork mirror — see scripts/fork_mirror.py).  All other fields
+        # are required non-empty strings.
+        for _field in ('id', 'baseurl', 'baseid', 'release', 'arch'):
             _val = getattr(self, _field)
             if not _val or not isinstance(_val, str) or not _val.strip():
                 raise ValueError(
                     f"Mirror.{_field}: non-empty string required, got {_val!r}"
                 )
+        if not isinstance(self.component, str):
+            raise ValueError(
+                "Mirror.component: string required (may be empty for "
+                f"flat layout), got {self.component!r}"
+            )
         if '://' not in self.baseurl:
             raise ValueError(
                 f"Mirror.baseurl must include a scheme (http://, https://, "
@@ -158,16 +167,35 @@ class Mirror:
         return f'{self.baseurl}/{self.baseid}'
 
     @property
+    def is_flat(self) -> bool:
+        """Flat-layout mirror — Release + index files sit at the URL root,
+        no `dists/<suite>/<component>/...` hierarchy.  Triggered by
+        component='' (the fork mirror sets this; see scripts/fork_mirror.py).
+        apt's equivalent declaration is `deb file://... ./`.
+        """
+        return self.component == ''
+
+    @property
     def dist_url(self) -> str:
-        # 'http://deb.debian.org/debian/dists/bookworm/'
+        # Flat layout: 'file:///working_dir/fork/'
+        # Standard layout: 'http://deb.debian.org/debian/dists/bookworm/'
+        if self.is_flat:
+            return f'{self.url}/'
         return f'{self.url}/dists/{self.suite}/'
 
     @property
     def packages_path(self) -> str:
+        # Flat layout: 'Packages' (sits next to Release at mirror root)
+        # Standard layout: 'main/binary-amd64/Packages'
+        if self.is_flat:
+            return 'Packages'
         return f'{self.component}/binary-{self.arch}/Packages'
 
     @property
     def sources_path(self) -> str:
+        # Flat layout: 'Sources'.  Standard: 'main/source/Sources'.
+        if self.is_flat:
+            return 'Sources'
         return f'{self.component}/source/Sources'
 
     @property
@@ -175,6 +203,11 @@ class Mirror:
         # d-i (udeb) Packages index.  Only main typically
         # publishes this; updates/security mirrors won't have it.  Cache
         # treats this path as OPTIONAL — missing-from-Release is fine.
+        # Flat layout: 'Packages-udeb' (separate file from regular Packages
+        # to keep deb/udeb routing simple; cache reads each into its own
+        # hashtable).
+        if self.is_flat:
+            return 'Packages-udeb'
         return f'{self.component}/debian-installer/binary-{self.arch}/Packages'
 
     def with_snapshot(self, ts, baseurl: str = 'https://snapshot.debian.org/archive') -> 'Mirror':
@@ -194,6 +227,10 @@ class Mirror:
         `[Snapshot] BaseUrl` without touching this method.
         """
         if ts is None:
+            return self
+        # file:// mirrors are local trees (e.g. fork mirror); snapshot
+        # rewriting points at a remote service and would break the URL.
+        if self.baseurl.startswith('file://'):
             return self
         return dataclasses.replace(
             self,
@@ -766,6 +803,10 @@ class BuildConfig:
             # docs/plans/fork-source.md.
             self.dir_fork = os.path.join(self.working_dir, config_parser.get('Directories', 'Fork'))
             self.dir_fork_source = os.path.join(self.dir_fork, 'source')
+            # dpkg-source -b output dir; populated by scripts/fork_mirror.py
+            # at cache-build time.  Not parsed for source trees (the walker
+            # explicitly skips this dir under fork/source/).
+            self.dir_fork_source_repo = os.path.join(self.dir_fork_source, 'repo')
 
             # Isolated gnupg homedir for InRelease verification.  The
             # build-system.sh bootstrap creates this with mode 0700;
@@ -797,6 +838,7 @@ class BuildConfig:
 
             pathlib.Path(self.dir_fork).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_fork_source).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_fork_source_repo).mkdir(parents=True, exist_ok=True)
 
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_buildroot).mkdir(parents=True, exist_ok=True)
@@ -814,7 +856,7 @@ class BuildConfig:
                 self.dir_download, self.dir_log, self.dir_cache, self.dir_temp,
                 self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
-                self.dir_fork, self.dir_fork_source,
+                self.dir_fork, self.dir_fork_source, self.dir_fork_source_repo,
                 self.dir_image, self.dir_buildroot, self.dir_chroot,
                 self.dir_chroot_installer, self.dir_gnupg,
             ):
@@ -848,7 +890,9 @@ def download_file(url: str, filename: str) -> tuple:
     """Downloads file and updates progressbar in incremental manner.
 
     Args:
-        url: URL to download from.
+        url: URL to download from.  Supports http(s)://, https://, and
+             file:// schemes.  file:// is a local copy fast-path used
+             primarily for fork mirror metadata (see scripts/fork_mirror.py).
         filename: Local path to write to; location must be writable.
 
     Returns:
@@ -859,8 +903,26 @@ def download_file(url: str, filename: str) -> tuple:
         their own error_str so the operator sees the actual reason
         rather than a generic "download failed".
     """
-    from urllib.parse import urlsplit
+    from urllib.parse import urlsplit, unquote
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
+
+    # file:// fast-path: local copy via shutil.copy, no HTTP, no progress
+    # bar (transfers are small + instant).  Returns same (size, detail)
+    # contract as the HTTP path.
+    _parts = urlsplit(url)
+    if _parts.scheme == 'file':
+        _src_path = unquote(_parts.path)
+        try:
+            if not os.path.isfile(_src_path):
+                return -1, f"file:// source missing: {_src_path}"
+            _size = os.path.getsize(_src_path)
+            import shutil as _shutil
+            _shutil.copyfile(_src_path, filename)
+            return _size, ''
+        except OSError as e:
+            _detail = f"file:// copy error: {e}"
+            logger.error(f"download_file({url}): {_detail}")
+            return -1, _detail
 
     try:
         name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
