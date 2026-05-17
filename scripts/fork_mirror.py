@@ -338,12 +338,25 @@ def _format_packages_stanza(binary: Deb822, source_name: str,
     if 'Package-Type' in binary:
         _fields.append(f'Package-Type: {binary["Package-Type"]}')
 
-    # Relation fields — preserve only when present and non-empty
+    # Relation fields — preserve only when present and non-empty.
+    # Strip debhelper substvars like ${misc:Depends}, ${shlibs:Depends}
+    # that haven't been substituted yet (cache reads debian/control
+    # BEFORE dh_gencontrol runs).  Leaving them in produces "unresolved
+    # dependency '${misc:Depends}'" warnings at dep-parse time.  The
+    # actual built .deb has these substituted by dh, so this strip
+    # affects only the synthetic Packages record.
+    import re as _re
+    _SUBSTVAR_RE = _re.compile(r'\$\{[^}]+\}')
     for _rel in ('Depends', 'Pre-Depends', 'Recommends', 'Suggests',
                  'Conflicts', 'Replaces', 'Provides', 'Breaks', 'Enhances'):
         _val = (binary.get(_rel, '') or '').strip()
-        if _val:
-            _fields.append(f'{_rel}: {_val}')
+        if not _val:
+            continue
+        # Drop substvar tokens; clean up the resulting comma noise
+        _val = _SUBSTVAR_RE.sub('', _val)
+        _parts = [_p.strip() for _p in _val.split(',') if _p.strip()]
+        if _parts:
+            _fields.append(f'{_rel}: {", ".join(_parts)}')
 
     _fields.append(f'Filename: {_filename}')
     _fields.append('Size: 0')

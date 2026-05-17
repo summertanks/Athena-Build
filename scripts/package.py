@@ -329,13 +329,33 @@ class Package(Packages):
             return False
 
         _satisfied = True
-        
+
+        # Collect Provides versions once (Debian Policy §7.5: a Provides
+        # field with version is considered when satisfying version-
+        # constrained dependencies — `Depends: foo (= X)` is satisfied
+        # by `bar Provides: foo (= X)` even if bar's own version is Y).
+        # apt resolves this way; without it, derivative forks that
+        # Provide upstream pkg names at a different own-version
+        # (athena-tasksel 3.73+athena1 Provides: tasksel (= 3.73)) fail
+        # downstream strict-version Depends.
+        _provides_versions = []
+        try:
+            for _name, _prov_ver in self.get_provides():
+                if _prov_ver:
+                    _provides_versions.append(_prov_ver)
+        except (ValueError, KeyError, AttributeError, SystemError):
+            pass
+
         for _ver in self._constraints.keys():
             _constraint = self._constraints[_ver]
 
-            if not _constraint.is_satisfied_by(self.version):
-                _satisfied = False
-        
+            if _constraint.is_satisfied_by(self.version):
+                continue
+            if any(_constraint.is_satisfied_by(_pv)
+                   for _pv in _provides_versions):
+                continue
+            _satisfied = False
+
         return _satisfied
 
 
