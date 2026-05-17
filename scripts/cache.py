@@ -11,7 +11,7 @@ from typing import Callable, List, Dict, Optional, Tuple
 from collections import defaultdict
 
 # Internal
-import utils, package, tui
+import utils, package, tui, fork_mirror
 from utils import BuildConfig
 from package import Package, Source
 
@@ -90,6 +90,15 @@ class Cache:
             for m in buildconfig.mirrors
         ]
 
+        # Fork mirror — generate fork/{Release, Packages, Sources} from
+        # fork/source/*/, prepend as a file:// Mirror so the cache parses
+        # it FIRST.  Fork is skipped (no Mirror registered) when
+        # fork/source/ has no source trees.  See scripts/fork_mirror.py.
+        # Mirror.with_snapshot() detects file:// scheme and skips snapshot
+        # rewriting, so the fork Mirror added here is not snapshot-pinned.
+        if fork_mirror.generate_fork_mirror(buildconfig):
+            self.mirrors = fork_mirror.register_fork_mirror(self.mirrors, buildconfig)
+
         # Compression: tried in this order per file; first one listed in the
         # mirror's InRelease wins.  bookworm-updates / bookworm-security ship
         # only .xz; main ships all three.
@@ -131,6 +140,18 @@ class Cache:
         # parallel hashtable for udeb records.
         self.udeb_hashtable = defaultdict(lambda: defaultdict(list))
 
+        # Fork supersede tracking — populated during the FORK mirror walk
+        # (which runs first since fork is prepended to self.mirrors), then
+        # consulted during upstream walks to drop same-named records and
+        # warn the operator.  Per the FORK-01 plan Q1: tracks BINARY
+        # Package: names only — NOT Provides:.  Virtual-package bridging
+        # is the operator's responsibility (declare needed Provides: in
+        # fork debian/control); a missing virtual will fail loudly at
+        # dep tree time, by design.
+        self._fork_pkg_names: set  = set()
+        self._fork_udeb_names: set = set()
+        self._fork_src_names: set  = set()
+
         # Download files
         if self.__get_files() < 0:
             return
@@ -168,7 +189,11 @@ class Cache:
 
         for _mirror in self.mirrors:
             _base_url     = _mirror.dist_url
-            _release_url  = _base_url + 'InRelease'
+            # file:// mirrors (fork) ship plain Release — no GPG signature,
+            # no InRelease wrapper.  Local trees are trusted by definition.
+            _is_local     = _base_url.startswith('file://')
+            _release_name = 'Release' if _is_local else 'InRelease'
+            _release_url  = _base_url + _release_name
             _release_file = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(_release_url))
 
             # Per-mirror control files: relative path → expected sha256 (filled below)
@@ -189,8 +214,14 @@ class Cache:
             # Verify the InRelease GPG signature *before* parsing — once
             # the signature is good the SHA256 entries inside can be
             # trusted to gate the index downloads.  Skip when explicitly
-            # disabled (single WARN already emitted above).
-            if not self._security_disabled:
+            # disabled (single WARN already emitted above) OR when the
+            # mirror is local file:// (fork mirror — content we just
+            # generated on this host, trusted without signature).
+            if _is_local:
+                logger.info(
+                    f"[{_mirror.id}] file:// mirror — GPG verification skipped (local)"
+                )
+            if not self._security_disabled and not _is_local:
                 _ok, _detail = utils.verify_inrelease(
                     _release_file,
                     self._security_keyring,
@@ -419,6 +450,11 @@ class Cache:
                 logger.error(self.error_str)
                 return False
 
+            # Fork supersede: fork mirror walks first (it's prepended in
+            # __init__), so by the time any upstream mirror walks here,
+            # _fork_pkg_names is populated.  See FORK-01 plan Step 2 Q1.
+            _is_fork = (_mirror.id == 'fork')
+
             progress_bar_pkg = ProgressBar(
                 label=f"Indexing {_mirror.id}/Packages",
                 itr_label='rec/s', maxvalue=len(_pkg_records))
@@ -440,6 +476,20 @@ class Cache:
 
                 # 'all' = arch-independent package; always compatible.
                 if _pkg.arch != 'all' and self._arch_table.matches_architecture(_pkg.arch, arch) is False:
+                    continue
+
+                # Fork supersede check (FORK-01 Step 2): tracks only the
+                # binary Package: name, NOT Provides:.  Operator must
+                # declare needed virtuals explicitly in fork debian/control.
+                if _is_fork:
+                    self._fork_pkg_names.add(_pkg.package)
+                elif _pkg.package in self._fork_pkg_names:
+                    tui.console.print(
+                        f"Local supersedes upstream {_pkg.package} v{_pkg.version} [{_mirror.id}]"
+                    )
+                    logger.info(
+                        f"[{_mirror.id}] dropped {_pkg.package} v{_pkg.version} — superseded by fork"
+                    )
                     continue
 
                 _pkg._mirror = _mirror
@@ -489,6 +539,17 @@ class Cache:
                         _arch_match = True
                         break
                 if not _arch_match:
+                    continue
+
+                # Fork supersede for source records (parallels the binary
+                # supersede above).  Fork sources are walked first; upstream
+                # sources of the same name get dropped.
+                if _is_fork:
+                    self._fork_src_names.add(_src.package)
+                elif _src.package in self._fork_src_names:
+                    logger.info(
+                        f"[{_mirror.id}] dropped source {_src.package} — superseded by fork"
+                    )
                     continue
 
                 _src._mirror = _mirror
@@ -574,6 +635,8 @@ class Cache:
                 )
                 continue
 
+            _is_fork = (_mirror.id == 'fork')
+
             progress_bar_udeb = ProgressBar(
                 label=f"Indexing {_mirror.id}/d-i Packages",
                 itr_label='rec/s', maxvalue=len(_udeb_records))
@@ -596,6 +659,19 @@ class Cache:
                     continue
 
                 if _udeb.arch != 'all' and self._arch_table.matches_architecture(_udeb.arch, arch) is False:
+                    continue
+
+                # Fork supersede for udebs (separate namespace from debs).
+                # Per FORK-01 Step 2 Q1: track by Package: name only.
+                if _is_fork:
+                    self._fork_udeb_names.add(_udeb.package)
+                elif _udeb.package in self._fork_udeb_names:
+                    tui.console.print(
+                        f"Local supersedes upstream udeb {_udeb.package} v{_udeb.version} [{_mirror.id}]"
+                    )
+                    logger.info(
+                        f"[{_mirror.id}] dropped udeb {_udeb.package} v{_udeb.version} — superseded by fork"
+                    )
                     continue
 
                 _udeb._mirror = _mirror

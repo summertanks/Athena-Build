@@ -172,109 +172,182 @@ proof that the structure works.
 
 ---
 
-### Step 2 — Self-discovery in cache
+### Step 2 — Cache-time helper generates fork as a local Mirror (REVISED 2026-05-16)
 
-**Purpose:** make fork packages visible to the cache as installable
-candidates.  After this step, `print cache athena-installer-data`
-should show our package with the Version and Filename from its
-debian/control + changelog.
+**Status:** APPROVED (architecture lock-in 2026-05-16).  Replaces the
+original "synthetic-records-in-cache.py" Step 2 with a cleaner shape:
+fork is just another Mirror, indistinguishable from upstream after
+metadata generation.
+
+**Purpose:** at cache-build time, transform `fork/source/*/` into a
+fully-formed local Debian repository (Release + Sources + Packages
++ generated `.dsc`/`.tar.*`), register it as a `file://` Mirror
+parsed FIRST, so the cache's existing per-mirror walk does all the
+heavy lifting unchanged.
+
+**Why this shape (not synthetic-records-in-cache):**
+- No cache-side synthesis — fork records flow through the same
+  `Packages.parse` → `package_hashtable` path as upstream.
+- Dep tree treats fork identically to upstream — no special branches.
+- Real hashes for Sources (the .dsc + .tar.* files exist at parse
+  time); placeholder hashes for Packages (binary not yet built — but
+  fork pkgs are never *tunneled*, so the hash/size fields are never
+  consulted to gate a download).
+- Supersede semantics handled at cache layer by parsing fork mirror
+  FIRST then dropping upstream entries that re-declare our names —
+  no version-greater-than maintenance required against upstream.
 
 **Files created:**
-- `scripts/fork_discovery.py` — walks `fork/source/*/debian/`, parses
-  control + changelog, emits synthetic Packages-format records
-  (one per binary stanza in control)
-- `tests/test_module.py` — tests for fork_discovery output shape
+- `scripts/fork_mirror.py` — helper with two public functions:
+  * `generate_fork_mirror(buildconfig) -> bool`: runs `dpkg-source -b`
+    against every `fork/source/<pkg>/`, emits `fork/source/repo/{*.dsc,
+    *.tar.xz}` (real source pkgs), then writes `fork/Packages`
+    (placeholder hashes), `fork/Sources` (real hashes), `fork/Release`
+    (real hashes of the two indices).  Returns True if any fork
+    packages exist; False to skip mirror registration.
+  * `register_fork_mirror(mirrors, buildconfig) -> List[Mirror]`:
+    returns mirrors with a fork Mirror PREPENDED (parsed first).
 
 **Files modified:**
-- `scripts/cache.py` — at cache-build time, merge fork records into
-  the in-memory deb and udeb views (post-Parsing-Package-Files stage)
+- `scripts/utils.py` — `download_file()`: add file:// scheme support
+  at top (just shutil.copy + getsize, no HTTP).  `BuildConfig`:
+  expose `dir_fork_source_repo` (auto-mkdir, writability-checked).
+- `scripts/cache.py` — at start of `__build_cache`: call
+  `generate_fork_mirror`; if True, prepend fork Mirror.  Track
+  `_fork_pkg_names` and `_fork_src_names` (Package: field ONLY — NOT
+  Provides:).  During upstream walk: skip records whose name appears
+  in these sets, print one-line operator warning per skipped record.
+  At fork-mirror fetch time: detect `file://` scheme, skip GPG
+  verification (file:// mirrors are trusted by definition), read
+  plain `Release` (not `InRelease`), accept uncompressed
+  `Packages` + `Sources` (no `.xz`/`.gz` requirement).
 
-**Synthetic record shape:**
+**Fork directory layout (after helper runs):**
+```
+fork/
+├── Release                    ← generated; lists hashes of Packages + Sources
+├── Packages                   ← generated; one stanza per binary in debian/control
+├── Sources                    ← generated; one stanza per source pkg in source/repo
+└── source/
+    ├── athena-installer-data/ ← tracked (Step 1)
+    │   └── debian/...
+    └── repo/                  ← generated; .dsc + .tar.xz output of dpkg-source
+        ├── athena-installer-data_1.0.0.dsc
+        └── athena-installer-data_1.0.0.tar.xz
+```
+
+**Synthetic Packages stanza shape (athena-installer-data example):**
 ```
 Package: athena-installer-data
-Source: athena-installer-data
 Version: 1.0.0
 Architecture: all
-Filename: pool/main/a/athena-installer-data/athena-installer-data_1.0.0_all.udeb
-Size: 0         ← not yet known; cache validates size when chroot install runs
-SHA256:         ← same
-Origin: athena-fork
+Maintainer: Athena Linux <athena@local>
+Section: debian-installer
+Priority: optional
 Package-Type: udeb
+Filename: athena-installer-data_1.0.0_all.udeb    ← bare basename;
+                                                     matches what
+                                                     dpkg-buildpackage
+                                                     deposits in repo/
+Size: 0                                            ← placeholder
+MD5sum: 00000000000000000000000000000000           ← placeholder
+SHA256: 0000…(64 zeros)                            ← placeholder
+Description: Athena installer-side data files
+ (full description from debian/control)
 ```
 
+**Generated Sources stanza shape:**
+```
+Package: athena-installer-data
+Binary: athena-installer-data
+Version: 1.0.0
+Architecture: all
+Format: 3.0 (native)
+Maintainer: Athena Linux <athena@local>
+Directory: source/repo
+Files:
+ <real md5> <real size> athena-installer-data_1.0.0.dsc
+ <real md5> <real size> athena-installer-data_1.0.0.tar.xz
+Checksums-Sha256:
+ <real sha256> <real size> athena-installer-data_1.0.0.dsc
+ <real sha256> <real size> athena-installer-data_1.0.0.tar.xz
+```
+
+**Generated Release file shape:**
+```
+Origin: Athena
+Label: Athena Fork
+Suite: thor
+Codename: thor
+Date: <UTC timestamp>
+Architectures: amd64 all
+Components: main
+SHA256:
+ <real sha> <size> Packages
+ <real sha> <size> Sources
+MD5Sum:
+ <real md5> <size> Packages
+ <real md5> <size> Sources
+```
+
+**Mirror declaration (in-memory, created by `register_fork_mirror`):**
+- `id`: `fork`
+- `url`: `file:///<working_dir>/fork`
+- `dist_url`: `file:///<working_dir>/fork/`   ← suite is `./` (flat)
+- `packages_path`: `Packages`
+- `sources_path`: `Sources`
+- Inserted at index 0 of `self.mirrors` so it's parsed FIRST
+
+**Supersede rule (per user 2026-05-16):**
+- Parse fork FIRST → populates `_fork_pkg_names` (binary `Package:`
+  field only) and `_fork_src_names` (source `Package:` field only).
+- During upstream walk: if `_pkg.package in _fork_pkg_names`, skip
+  insertion AND print one-line operator warning (`"Local supersedes
+  upstream pkg <name> v<ver>"`).
+- NO virtual-package auto-bridging — if fork's `lsb-release` doesn't
+  declare a Provides: that the upstream did, dep tree will fail
+  loudly at the missing virtual.  Operator fixes by adding the
+  Provides: to fork's debian/control.  This is intentional — see
+  user feedback 2026-05-16.
+
 **Acceptance:**
-- `print cache athena-installer-data` returns our record.
-- Dep tree can resolve a Depends on athena-installer-data without error.
-- Existing 319 tests pass; new ~5 tests for fork_discovery pass.
+- Empty `fork/source/` → helper skips silently, no Mirror registered.
+- With `athena-installer-data`: fork/Release, fork/Packages,
+  fork/Sources, fork/source/repo/*.dsc + *.tar.xz all generated.
+- `print cache athena-installer-data` returns the record (with the
+  real Description, with placeholder Size/SHA256).
+- Dep tree can resolve `Depends: athena-installer-data` without error.
+- Same-name supersede: if a test fork pkg names `lsb-release`,
+  upstream `lsb-release` is dropped + warning printed.
+- Virtual NOT auto-bridged: if test fork's `lsb-release` lacks a
+  `Provides: lsb-release-dev`, dep tree resolution of a pkg that
+  needs `lsb-release-dev` fails as expected.
+- Existing tests pass; ~6 new tests for fork_mirror helper +
+  supersede behaviour pass.
 - `ruff check scripts/ tests/` clean.
 
-**Risks:**
-- Cache must not crash when fork pkg has a name colliding with an
-  upstream pkg (Category 2 P/C/R case) — version comparison picks the
-  higher version per existing cache semantics.  Verify with a test.
-- Origin: athena-fork lets us audit "what came from where" via the
-  existing cache fields.
+**Implementation risks:**
+- dpkg-source -b runs on the build host (not container) at cache time.
+  Tooling confirmed present (`dpkg-source --version` → 1.22.22).  If a
+  cleaner environment becomes a constraint later, move dpkg-source
+  invocation into the build container.
+- file:// URL support in download_file: ~10 lines added at top.  No
+  existing call site passes file:// URLs (audited), so this is purely
+  additive.
+- InRelease bypass: file:// mirrors skip GPG verification by scheme;
+  not a per-mirror config knob (avoids changing build.conf shape).
+  Operator-visible: cache build logs `[fork] file:// mirror — GPG
+  verification skipped (local)`.
+- Stale `fork/source/repo/` after operator edits debian/control:
+  helper detects mtime drift (debian/changelog mtime > <pkg>.dsc
+  mtime) and re-runs dpkg-source.  Operator can force-rebuild by
+  `rm -rf fork/source/repo/`.
 
-**Approval needed:** yes — confirm before writing module + cache integration.
-
----
-
-### Step 3 — Source-build integration for fork packages
-
-**Purpose:** when the source builder is asked to build a fork pkg,
-it runs `dpkg-buildpackage` in the fork tree directly, skipping the
-`apt-get source` import.  Output lands in `repo/` exactly like
-upstream-built packages.
-
-**Files modified:**
-- `scripts/build.py` (source build dispatcher): branch on
-  "is this a fork pkg?"; if yes, build in-place under
-  `fork/source/<pkg>/` or in a copy under `build/fork/<pkg>/`.
-- `scripts/buildcontainer.py`: extend to accept a local source dir
-  instead of the apt-source-fetched dir for fork pkgs.
-
-**Open question to resolve here:**
-- Build in-place (touches the repo's source tree at build time —
-  cleaner for iteration, dirties git status) or copy to
-  `build/fork/<pkg>/` first (cleaner repo, slower).  My lean: copy.
-
-**Acceptance:**
-- `source build athena-installer-data` produces
-  `repo/pool/main/a/athena-installer-data/athena-installer-data_1.0.0_all.udeb`
-- cache verify finds the file with correct size + sha256
-- existing source-build tests pass; new tests for fork build path pass
-
-**Risks:** dpkg-buildpackage emits artifacts to the parent dir by
-convention — need to capture and move to `repo/pool/main/`.  Existing
-upstream-source build does the same; reuse that move logic.
-
-**Approval needed:** yes — confirm in-place vs copy-to-build before writing.
+**Approval status:** APPROVED 2026-05-16.  Implementation in progress.
 
 ---
 
-### Step 4 — Auto-include all fork pkgs in build set
-
-**Purpose:** ensure fork packages are built unconditionally on every
-source-build run, regardless of whether anything depends on them yet.
-
-**Files modified:**
-- `scripts/build.py` (build set computation): union the existing
-  set with fork_discovery.list_all_packages()
-
-**Acceptance:**
-- `source build` (no args) builds athena-installer-data even when
-  no upstream pkg in installer.list / pkg.list depends on it
-- `source build clean` removes fork artifacts the same way it
-  removes upstream artifacts
-- existing tests pass; new test for "fork pkg in build set" passes
-
-**Risks:** minimal — fork pkg count is expected to stay small (~3-5).
-
-**Approval needed:** yes.
-
----
-
-### Step 5 — First content: stub templates → athena-installer-data
+### Step 3 — First content: stub templates → athena-installer-data
 
 **Purpose:** the simplest possible content migration.  Move the
 mirror/protocol stub template from `_write_athena_stub_template` in
@@ -288,9 +361,8 @@ step, our udeb actually ships something useful.
   `data/athena-stubs.templates var/lib/dpkg/info/`
 - `scripts/installer_chroot.py` — delete `_write_athena_stub_template`
   + its call site + `_ATHENA_STUB_TEMPLATES` constant
-- `config/installer.list` — add `athena-installer-data` (still
-  manually listed for now; Step 4 makes this auto but we add it
-  here for explicit ramdisk inclusion)
+- `config/installer.list` — add `athena-installer-data` (operator
+  explicitly references the pkg by name, same as any upstream pkg)
 - `tests/test_module.py` — drop the stub-template tests, add a
   test that the udeb's debian/install ships the template
 
@@ -309,7 +381,7 @@ until end-to-end install confirms; remove after one successful run.
 
 ---
 
-### Step 6 — Runtime dirs, release files, dpkg status, debootstrap codename
+### Step 4 — Runtime dirs, release files, dpkg status, debootstrap codename
 
 **Purpose:** migrate the four remaining in-script helpers
 (`_create_runtime_dirs`, `_write_release_files`,
@@ -346,7 +418,7 @@ before implementing.
 
 ---
 
-### Step 7 — Tasksel wrapper (deletes patch/source/pkgsel)
+### Step 5 — Tasksel wrapper (deletes patch/source/pkgsel)
 
 **Purpose:** replace the pkgsel patch with a dpkg-divert + wrapper
 shipped by athena-installer-data.  After this step, we own zero
@@ -394,7 +466,7 @@ before committing to this approach (alternative is keep the patch).
 
 ---
 
-### Step 8 — `athena-base-files` for the target system
+### Step 6 — `athena-base-files` for the target system
 
 **Purpose:** extend the same `fork/source/` mechanism to the target
 (installed) system.  Ship `/etc/os-release`, `/etc/hostname` default,
@@ -445,7 +517,7 @@ before implementing.
 
 ---
 
-### Step 9 — `athena-branding` (installer + target shared)
+### Step 7 — `athena-branding` (installer + target shared)
 
 **Purpose:** demonstrate the multi-binary case: one source package
 producing both a udeb (for installer chrome) AND a deb (for target
@@ -490,19 +562,19 @@ the better home.
 These come up across multiple steps; capturing here so we don't
 re-derive each time:
 
-1. **Where do fork pkgs build — in-place or copy?** (Step 3)
-   Lean: copy to `build/fork/<pkg>/` to keep `fork/source/` clean
-   in git status.
+1. **Where does dpkg-source -b run for Step 2** — on host (chosen,
+   tooling confirmed present) or in build container (heavier,
+   more isolated).  Revisit if host dep proves brittle.
 
-2. **Codename substitution mechanism** (Step 6) — read from
+2. **Codename substitution mechanism** (Step 4) — read from
    `config/release.list` at fork-build time, sed via `debian/rules`?
    Or environment variable consumed by a templated `debian/install`?
 
-3. **dpkg-divert ordering** (Step 7) — is athena-installer-data
+3. **dpkg-divert ordering** (Step 5) — is athena-installer-data
    reliably unpacked AFTER pkgsel?  If not, divert+symlink runs
    against an absent file.
 
-4. **base-files diversion vs P/C/R** (Step 8) — verify on a VM
+4. **base-files diversion vs P/C/R** (Step 6) — verify on a VM
    that the divert approach survives base-files security upgrades
    on the target.  P/C/R might be cleaner but base-files is
    Essential, and apt's behaviour with Conflicts on Essential is

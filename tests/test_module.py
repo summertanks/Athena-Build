@@ -82,11 +82,14 @@ def test_mirror_normalises_baseurl_and_baseid_slashes():
 
 def test_mirror_rejects_empty_required_fields():
     """__post_init__ refuses empty strings on id / baseurl / baseid /
-    release / component / arch with a clear ValueError naming the field."""
+    release / arch with a clear ValueError naming the field.  Note:
+    `component` is intentionally NOT in the required set as of FORK-01
+    Step 2 — empty component is the flat-layout signal used by fork
+    mirror (see Mirror.is_flat)."""
     from utils import Mirror
     for _field, _bad in [
         ('id', ''), ('baseurl', ''), ('baseid', ''),
-        ('release', ''), ('component', ''), ('arch', ''),
+        ('release', ''), ('arch', ''),
     ]:
         kwargs = dict(id='main', baseurl='http://x.test', baseid='debian',
                       release='bookworm', suffix='', component='main', arch='amd64')
@@ -5937,6 +5940,7 @@ def test_cache_class_declares_udeb_fields_on_init():
     from collections import defaultdict
     c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
     c.udeb_required = []
+    c._fork_udeb_names = set()  # FORK-01 Step 2: supersede tracking
     c.udeb_important = []
     c.mirror_udeb_cache_files = {}
     assert isinstance(c.udeb_hashtable, dict)
@@ -6065,6 +6069,7 @@ def test_ingest_udeb_indices_routes_records_to_udeb_hashtable():
         c.mirror_udeb_cache_files = {'main': _udeb_path}
         c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
         c.udeb_required = []
+        c._fork_udeb_names = set()  # FORK-01 Step 2: supersede tracking
         c.udeb_important = []
         # Regular hashtable also needed to assert it's untouched.
         c.package_hashtable = defaultdict(lambda: defaultdict(list))
@@ -6105,6 +6110,7 @@ def test_ingest_udeb_indices_skips_mirrors_without_udeb_file():
     c.mirror_udeb_cache_files = {}
     c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
     c.udeb_required = []
+    c._fork_udeb_names = set()  # FORK-01 Step 2: supersede tracking
     c.udeb_important = []
 
     c._ingest_udeb_indices('amd64')   # must not raise
@@ -6143,6 +6149,7 @@ def test_ingest_udeb_indices_handles_partial_mirror_set():
         c.mirror_udeb_cache_files = {'main': _udeb_path}
         c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
         c.udeb_required = []
+        c._fork_udeb_names = set()  # FORK-01 Step 2: supersede tracking
         c.udeb_important = []
 
         c._ingest_udeb_indices('amd64')
@@ -6181,6 +6188,7 @@ def test_ingest_udeb_indices_dedups_priority_lists_via_caller():
         c.mirror_udeb_cache_files = {'main1': _udeb_path, 'main2': _udeb_path}
         c.udeb_hashtable = defaultdict(lambda: defaultdict(list))
         c.udeb_required = []
+        c._fork_udeb_names = set()  # FORK-01 Step 2: supersede tracking
         c.udeb_important = []
 
         c._ingest_udeb_indices('amd64')
@@ -7898,6 +7906,309 @@ def test_cli_logging_handlers_bound_to_cli_after_init():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FORK-01 Step 2 — fork mirror generation + cache integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
+    """Build a minimal pseudo-BuildConfig pointing at a tmpdir-scoped fork tree.
+    Optionally populates fork/source/athena-installer-data/ with a valid
+    debian/ layout so generate_fork_mirror has real input to chew on."""
+    class _BC: pass
+    bc = _BC()
+    bc.working_dir = tmp
+    bc.dir_fork = os.path.join(tmp, 'fork')
+    bc.dir_fork_source = os.path.join(bc.dir_fork, 'source')
+    bc.dir_fork_source_repo = os.path.join(bc.dir_fork_source, 'repo')
+    bc.build_codename = 'thor'
+    bc.arch = 'amd64'
+    os.makedirs(bc.dir_fork, exist_ok=True)
+    os.makedirs(bc.dir_fork_source, exist_ok=True)
+    os.makedirs(bc.dir_fork_source_repo, exist_ok=True)
+    if with_pkg:
+        _pkg_dir = os.path.join(bc.dir_fork_source, 'athena-installer-data')
+        os.makedirs(os.path.join(_pkg_dir, 'debian'), exist_ok=True)
+        with open(os.path.join(_pkg_dir, 'debian', 'changelog'), 'w') as fh:
+            fh.write('athena-installer-data (1.0.0) thor; urgency=low\n\n'
+                     '  * test fixture\n\n'
+                     ' -- Test <test@local>  Sat, 16 May 2026 12:00:00 +0000\n')
+        with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+            fh.write(textwrap.dedent("""\
+                Source: athena-installer-data
+                Section: debian-installer
+                Priority: optional
+                Maintainer: Test <test@local>
+                Build-Depends: debhelper-compat (= 13)
+                Standards-Version: 4.6.0
+
+                Package: athena-installer-data
+                Package-Type: udeb
+                Section: debian-installer
+                Architecture: all
+                Description: test udeb
+                 Long description body for the test udeb.
+                """))
+        with open(os.path.join(_pkg_dir, 'debian', 'rules'), 'w') as fh:
+            fh.write('#!/usr/bin/make -f\n%:\n\tdh $@\n')
+        os.chmod(os.path.join(_pkg_dir, 'debian', 'rules'), 0o755)
+        with open(os.path.join(_pkg_dir, 'debian', 'copyright'), 'w') as fh:
+            fh.write('Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n')
+    return bc
+
+
+def _stub_tui():
+    """Inject minimal stubs so fork_mirror can call tui.console.print
+    without a real Tui."""
+    import tui as _tui
+    class _Console:
+        def __init__(self): self.out = []
+        def print(self, *a, **kw): self.out.append(' '.join(str(x) for x in a))
+    _tui.console = _Console()
+    return _tui.console
+
+
+def test_mirror_flat_layout_is_signalled_by_empty_component():
+    """Mirror.is_flat returns True iff component is the empty string —
+    the flat-layout signal used by fork mirror."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import Mirror
+    flat = Mirror(id='fork', baseurl='file:///tmp', baseid='fork',
+                  release='./', suffix='', component='', arch='amd64')
+    standard = Mirror(id='main', baseurl='http://deb.debian.org', baseid='debian',
+                      release='bookworm', suffix='', component='main', arch='amd64')
+    assert flat.is_flat is True
+    assert standard.is_flat is False
+
+
+def test_mirror_flat_layout_url_properties():
+    """Flat Mirror returns simplified URL paths (no dists/.../component prefix)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import Mirror
+    m = Mirror(id='fork', baseurl='file:///tmp/wd', baseid='fork',
+               release='./', suffix='', component='', arch='amd64')
+    assert m.url            == 'file:///tmp/wd/fork'
+    assert m.dist_url       == 'file:///tmp/wd/fork/'
+    assert m.packages_path      == 'Packages'
+    assert m.sources_path       == 'Sources'
+    assert m.udeb_packages_path == 'Packages-udeb'
+
+
+def test_mirror_with_snapshot_skips_file_scheme():
+    """file:// mirrors are local trees — with_snapshot must NOT rewrite
+    them to a remote snapshot URL (the local files would vanish)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import Mirror
+    m = Mirror(id='fork', baseurl='file:///tmp/wd', baseid='fork',
+               release='./', suffix='', component='', arch='amd64')
+    rewritten = m.with_snapshot('20260101T000000Z')
+    assert rewritten is m, "file:// Mirror was unexpectedly rewritten by snapshot"
+
+
+def test_mirror_validation_allows_empty_component():
+    """component='' is intentionally valid (signals flat layout).  All
+    other Mirror fields remain mandatory non-empty."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import Mirror
+    # Should construct without raising
+    Mirror(id='fork', baseurl='file:///tmp', baseid='fork',
+           release='./', suffix='', component='', arch='amd64')
+    # But empty release still raises
+    try:
+        Mirror(id='fork', baseurl='file:///tmp', baseid='fork',
+               release='', suffix='', component='', arch='amd64')
+        assert False, "empty release should have raised"
+    except ValueError:
+        pass
+
+
+def test_download_file_handles_file_scheme():
+    """file:// URLs are copied locally via shutil — no HTTP request."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import download_file
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, 'src.txt')
+        dst = os.path.join(tmp, 'dst.txt')
+        with open(src, 'w') as fh:
+            fh.write('hello fork\n')
+        size, detail = download_file('file://' + src, dst)
+        assert size == 11, f"expected size 11, got {size}; detail={detail}"
+        assert detail == ''
+        with open(dst, 'r') as fh:
+            assert fh.read() == 'hello fork\n'
+
+
+def test_download_file_file_scheme_missing_source():
+    """file:// URL to non-existent path returns -1 + detail string."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import download_file
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = os.path.join(tmp, 'dst.txt')
+        size, detail = download_file('file:///nonexistent/path', dst)
+        assert size == -1
+        assert 'missing' in detail or 'No such' in detail
+
+
+def test_fork_mirror_discover_skips_repo_subdir():
+    """The 'repo' subdir under fork/source/ is helper output — discovery
+    must NOT treat it as a source tree."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=False)
+        # Create 'repo' subdir AND a real pkg
+        os.makedirs(os.path.join(bc.dir_fork_source, 'repo'), exist_ok=True)
+        _pkg_dir = os.path.join(bc.dir_fork_source, 'realpkg')
+        os.makedirs(os.path.join(_pkg_dir, 'debian'), exist_ok=True)
+        with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+            fh.write('Source: realpkg\nMaintainer: x\n\nPackage: realpkg\nArchitecture: all\nDescription: x\n')
+        found = fork_mirror._discover_fork_source_trees(bc.dir_fork_source)
+        assert _pkg_dir in found
+        assert not any(os.path.basename(p) == 'repo' for p in found)
+
+
+def test_fork_mirror_discover_skips_dirs_missing_debian_control():
+    """A subdir without debian/control isn't a Debian source tree —
+    discovery skips it with a warning."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=False)
+        # Empty subdir — not a source tree
+        os.makedirs(os.path.join(bc.dir_fork_source, 'not-a-pkg'), exist_ok=True)
+        found = fork_mirror._discover_fork_source_trees(bc.dir_fork_source)
+        assert found == [], f"expected empty, got {found}"
+
+
+def test_fork_mirror_generate_empty_tree_returns_false():
+    """No source trees → False return → no Mirror should be registered
+    (skip-if-empty per FORK-01 plan Q6)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=False)
+        assert fork_mirror.generate_fork_mirror(bc) is False
+        # No Release file should be written when empty
+        assert not os.path.exists(os.path.join(bc.dir_fork, 'Release'))
+
+
+def test_fork_mirror_generate_emits_complete_layout():
+    """Full happy path: athena-installer-data udeb source tree produces
+    Packages, Packages-udeb, Sources, Release, .gz variants, plus
+    .dsc + .tar.* in fork/source/repo/."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        ok = fork_mirror.generate_fork_mirror(bc)
+        assert ok is True, "generate_fork_mirror should succeed with a real pkg"
+        for _name in ('Release', 'Packages', 'Packages-udeb', 'Sources',
+                      'Packages.gz', 'Packages-udeb.gz', 'Sources.gz'):
+            _path = os.path.join(bc.dir_fork, _name)
+            assert os.path.exists(_path), f"missing {_name}"
+        # source/repo/ must have at least the .dsc
+        repo_files = os.listdir(bc.dir_fork_source_repo)
+        assert any(f.endswith('.dsc') for f in repo_files), \
+            f"no .dsc in source/repo/: {repo_files}"
+
+
+def test_fork_mirror_packages_udeb_routing_and_placeholder_hashes():
+    """udeb stanza lands in Packages-udeb (not Packages); Filename uses
+    bare basename matching dpkg-buildpackage output; Size/SHA256 are
+    placeholder zeros."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        fork_mirror.generate_fork_mirror(bc)
+        with open(os.path.join(bc.dir_fork, 'Packages-udeb'), 'r') as fh:
+            udeb_body = fh.read()
+        with open(os.path.join(bc.dir_fork, 'Packages'), 'r') as fh:
+            deb_body = fh.read()
+        assert 'Package: athena-installer-data' in udeb_body
+        assert 'Package: athena-installer-data' not in deb_body, \
+            "udeb leaked into Packages"
+        assert 'Filename: athena-installer-data_1.0.0_all.udeb' in udeb_body
+        assert 'Size: 0' in udeb_body
+        assert 'SHA256: ' + ('0' * 64) in udeb_body
+        assert 'MD5sum: ' + ('0' * 32) in udeb_body
+
+
+def test_fork_mirror_sources_uses_real_hashes_and_directory():
+    """Sources stanza for a generated .dsc must have non-placeholder
+    hashes (the files actually exist on disk) and Directory: source/repo."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        fork_mirror.generate_fork_mirror(bc)
+        with open(os.path.join(bc.dir_fork, 'Sources'), 'r') as fh:
+            body = fh.read()
+        assert 'Package: athena-installer-data' in body
+        assert 'Directory: source/repo' in body
+        # NOT all-zero hashes (those are placeholders for binaries only)
+        assert ('0' * 64) not in body.split('Checksums-Sha256:')[1].split('\n')[1], \
+            "Sources sha256 looks like a placeholder; expected real hash"
+
+
+def test_fork_mirror_register_prepends_at_index_zero():
+    """register_fork_mirror puts fork at index 0 so cache parses it
+    FIRST — required for the supersede tracking to work."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    from utils import Mirror
+    upstream = [
+        Mirror(id='main',     baseurl='http://x', baseid='debian',
+               release='bookworm', suffix='',          component='main', arch='amd64'),
+        Mirror(id='security', baseurl='http://y', baseid='debian',
+               release='bookworm', suffix='-security', component='main', arch='amd64'),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=False)
+        result = fork_mirror.register_fork_mirror(upstream, bc)
+    assert [m.id for m in result] == ['fork', 'main', 'security']
+    assert result[0].is_flat is True
+
+
+def test_fork_mirror_re_run_is_idempotent_via_stale_check():
+    """Running generate_fork_mirror twice in a row should skip dpkg-source
+    on the second run (stale check via mtime comparison)."""
+    import sys, time
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        fork_mirror.generate_fork_mirror(bc)
+        _dsc = os.path.join(bc.dir_fork_source_repo,
+                            'athena-installer-data_1.0.0.dsc')
+        _first_mtime = os.path.getmtime(_dsc)
+        # Sleep enough to make mtime difference detectable on coarse FS
+        time.sleep(1.1)
+        fork_mirror.generate_fork_mirror(bc)
+        _second_mtime = os.path.getmtime(_dsc)
+        assert _first_mtime == _second_mtime, \
+            "second generate_fork_mirror unexpectedly rebuilt the .dsc"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -8243,6 +8554,23 @@ def main() -> int:
         test_cli_prompt_reads_stdin,
         test_cli_keymode_prompt_reads_and_discards,
         test_cli_logging_handlers_bound_to_cli_after_init,
+        # FORK-01 Step 1 (was missing from registry)
+        test_buildconfig_creates_fork_source_dir,
+        # FORK-01 Step 2 — fork mirror generation + cache integration
+        test_mirror_flat_layout_is_signalled_by_empty_component,
+        test_mirror_flat_layout_url_properties,
+        test_mirror_with_snapshot_skips_file_scheme,
+        test_mirror_validation_allows_empty_component,
+        test_download_file_handles_file_scheme,
+        test_download_file_file_scheme_missing_source,
+        test_fork_mirror_discover_skips_repo_subdir,
+        test_fork_mirror_discover_skips_dirs_missing_debian_control,
+        test_fork_mirror_generate_empty_tree_returns_false,
+        test_fork_mirror_generate_emits_complete_layout,
+        test_fork_mirror_packages_udeb_routing_and_placeholder_hashes,
+        test_fork_mirror_sources_uses_real_hashes_and_directory,
+        test_fork_mirror_register_prepends_at_index_zero,
+        test_fork_mirror_re_run_is_idempotent_via_stale_check,
     ]
     failures = 0
     for t in tests:

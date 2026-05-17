@@ -43,6 +43,7 @@ class _StubProgressBar:
     def __init__(self, *_a, **_kw): pass
     def step(self, *_a, **_kw): pass
     def label(self, *_a, **_kw): pass
+    def set_max(self, *_a, **_kw): pass
     def close(self, *_a, **_kw): pass
 
 class _StubPrompt:
