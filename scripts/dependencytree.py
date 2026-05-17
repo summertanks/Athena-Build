@@ -315,15 +315,36 @@ class DependencyTree:
                 return apt_pkg.check_dep(str(pkg_ver), _constraint, str(version))
             except Exception:
                 return True   # can't evaluate — assume satisfied, validate_selection will catch
-            
+
+        def _satisfies_via_provides(pkg: package.Package) -> bool:
+            """True if any of pkg's versioned Provides entries (for the
+            requested package_name) satisfies the constraint.  Per Debian
+            Policy §7.5, Provides versions are load-bearing for version-
+            constrained deps — `Depends: foo (>= X)` is satisfied by
+            `bar Provides: foo (= Y)` when Y >= X, even if bar's own
+            version is different.  Mirror fix landed in package.py's
+            constraints_satisfied (2026-05-17 commit 77a3143).
+            """
+            if version is None:
+                return True
+            try:
+                for _name, _prov_ver in pkg.get_provides():
+                    if _name != package_name:
+                        continue
+                    if _prov_ver and _satisfies(_prov_ver):
+                        return True
+            except (ValueError, KeyError, AttributeError, SystemError):
+                pass
+            return False
+
         if not package_name:
             tui.console.print("Dependency Check: Dependency asked for empty package name")
             return None
-        
+
         # Early return if already selected by name
         if package_name in self.selected_pkgs:
             _existing = self.selected_pkgs[package_name]
-            if _satisfies(_existing.version):
+            if _satisfies(_existing.version) or _satisfies_via_provides(_existing):
                 return _existing
             tui.console.print(f"WARNING: '{package_name}' already selected at {_existing.version}, cannot satisfy {_constraint} {version}")
             logger.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
@@ -337,7 +358,13 @@ class DependencyTree:
         for _pkg in _pkg_candidates:
             if _pkg['Package'] in self.selected_pkgs:
                 _existing = self.selected_pkgs[_pkg['Package']]
-                if not _satisfies(_existing.version):
+                # Same Provides-version honoring fix as the by-name early
+                # return above (Debian Policy §7.5).  Without this, virtuals
+                # like libgcc1 (Provided by libgcc-s1 with version 1:N) get
+                # spurious "cannot satisfy" warnings even though the
+                # Provides version meets the constraint.
+                if (not _satisfies(_existing.version)
+                        and not _satisfies_via_provides(_existing)):
                     logger.warning(f"'{package_name}({_existing.version})' in selected not matching required {_constraint} {version}")
                 return _existing
 
