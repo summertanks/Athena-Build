@@ -68,20 +68,13 @@ open-vm-tools
 open-vm-tools-desktop
 
 # ─── Console keymap configuration ──────────────────────────────────
-# `base-installer`'s `apt-install` queues both `console-setup` and
-# `keyboard-configuration` for /target so the installed system has a
-# working console keymap matching the locale picked at install time.
-# `keyboard-configuration` Depends `xkb-data (>= 2.35.1~) (<< 2.35.1A)`
-# — `xkb-data` lives in source package `xkeyboard-config`, which
-# Pass VII will pull into the source-build pipeline.  Without these
-# in the pool, base-installer logs `Failed to install
-# keyboard-configuration into /target/: 100` and `Failed to install
-# console-setup into /target/: 100` (verified 2026-05-14 install
-# run, both BIOS and EFI).  Not pre-installed in pkg.list because
-# the live image doesn't need them — they're target-side only.
-console-setup
-keyboard-configuration
-xkb-data
+# Removed 2026-05-17 (pool-audit cleanup): console-setup,
+# keyboard-configuration, xkb-data now reach the pool transitively
+# via `kbd` (in pkg.list [base], Depends keyboard-configuration →
+# Depends xkb-data).  Original concern (base-installer's apt-install
+# fails on /target if missing — verified 2026-05-14 install) is
+# satisfied by the transitive chain.  Re-add explicitly if `kbd` is
+# ever dropped from pkg.list [base].
 
 # ─── FORK-01 Step 5 follow-up: tasksel task availability ─────────────
 # Each section below makes a kept tasksel task's hard Depends
@@ -108,29 +101,19 @@ xkb-data
 # but they should be EXCLUDED from our curated Athena standard task.
 # Future Debian-strip step may dpkg-divert their files or fork them.
 apt-listchanges
-bash-completion
 bind9-dnsutils
 bind9-host
-bzip2
-ca-certificates
 dbus-system-bus
 debian-faq
-default-dbus-system-bus
-default-logind
 dh-sequence-bash-completion
 dnsutils
 doc-debian
-file
-gettext-base
-groff-base
 host
 inetutils-telnet
-krb5-locales
 libansicolor-perl
 libarchive-tar-perl
 libattribute-handlers-perl
 libautodie-perl
-libc-l10n
 libcompress-zlib-perl
 libcpan-meta-perl
 libdigest-md5-perl
@@ -150,9 +133,7 @@ liblockfile-bin
 libmath-complex-perl
 libmime-base64-perl
 libmodule-load-perl
-libnet-perl
 libnet-ping-perl
-libnss-systemd
 libparams-check-perl
 libparent-perl
 libparse-cpan-meta-perl
@@ -164,32 +145,18 @@ libthread-queue-perl
 libthreads-perl
 libthreads-shared-perl
 libtime-hires-perl
-libtime-local-perl
 libtime-piece-perl
 libversion-requirements-perl
-lsof
 man
-man-db
-manpages
-media-types
 mime-support
-ncurses-term
 netcat
 netcat-traditional
-openssh-client
-perl
 podlators-perl
 python3-reportbug
 reportbug
-ssh-client
-systemd-timesyncd
 telnet
 telnet-client
-ucf
-util-linux-extra
-wamerican
 wget
-xz-utils
 
 # ─── Debian "laptop" task — hard Depends + key Recommends ────────────
 # task-laptop pulls `anacron` (Depends) + bluetooth, powertop, iw,
@@ -203,7 +170,6 @@ bluetooth
 iw
 powertop
 wireless-tools
-wpasupplicant
 
 # ─── Debian "desktop" task — hard Depends + key Recommends ───────────
 # task-desktop pulls xorg + xserver-xorg-* drivers + desktop-base
@@ -219,10 +185,6 @@ wpasupplicant
 # desktop-base ships Debian-themed wallpaper, GRUB theme, plymouth
 # splash.  Tracked in fork-source.md plan.
 alsa-utils
-avahi-daemon
 cups
-desktop-base
 fonts-symbola
-libnss-mdns
-xdg-utils
 xorg
