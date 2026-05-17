@@ -1,0 +1,12 @@
+Template: mirror/protocol
+Type: string
+Default: file
+Description: Mirror protocol (Athena stub)
+ file:///cdrom is Athena's only repo source.  This template exists
+ solely so bootstrap-base.postinst's UNGUARDED `db_get mirror/protocol`
+ (line 77 of d-i's bootstrap-base postinst, where the `|| true` is on
+ the next line — too late to suppress the error) doesn't return 10 and
+ trip `set -e`, killing the postinst before debootstrap is invoked.
+ .
+ In stock d-i this template is provided by choose-mirror-udeb, which
+ we don't ship — we only support file:///cdrom installs.

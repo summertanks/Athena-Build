@@ -2579,19 +2579,31 @@ def test_installer_chroot_runtime_dirs_includes_tmp_with_sticky_mode():
     assert _by_path.get('root') == '0700', _RUNTIME_DIRS
 
 
-def test_installer_chroot_athena_stub_template_declares_mirror_protocol():
-    """The _ATHENA_STUB_TEMPLATES constant must declare mirror/protocol
-    — that's the question bootstrap-base.postinst queries unguarded
-    (caught 2026-05-11).  After the 2026-05-12 refactor the stub content
-    lives in installer_chroot.py instead of an overlay file, so pin the
-    content here to guard against accidental edit."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _ATHENA_STUB_TEMPLATES
-    assert 'Template: mirror/protocol' in _ATHENA_STUB_TEMPLATES, \
-        _ATHENA_STUB_TEMPLATES
-    assert 'Type: string' in _ATHENA_STUB_TEMPLATES, _ATHENA_STUB_TEMPLATES
-    assert 'Default: file' in _ATHENA_STUB_TEMPLATES, _ATHENA_STUB_TEMPLATES
+def test_athena_installer_data_ships_mirror_protocol_stub():
+    """FORK-01 Step 3: the mirror/protocol stub template (which
+    bootstrap-base.postinst queries unguarded — caught 2026-05-11) now
+    ships from athena-installer-data's data/ tree via debian/install.
+    Pin the content + install path so an accidental edit fails here
+    before it ships a broken installer."""
+    _data = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                         'data', 'athena-stubs.templates')
+    assert os.path.isfile(_data), f"missing {_data}"
+    with open(_data) as fh:
+        _content = fh.read()
+    assert 'Template: mirror/protocol' in _content, _content
+    assert 'Type: string' in _content, _content
+    assert 'Default: file' in _content, _content
+
+    # debian/install must wire data/athena-stubs.templates to
+    # /var/lib/dpkg/info/ (the path rootskel's S20templates run-part
+    # walks at boot via debconf-loadtemplate).
+    _install = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                            'debian', 'install')
+    assert os.path.isfile(_install), f"missing {_install}"
+    with open(_install) as fh:
+        _install_body = fh.read()
+    assert 'data/athena-stubs.templates' in _install_body, _install_body
+    assert 'var/lib/dpkg/info' in _install_body, _install_body
 
 
 def _fake_sudo_write_run(cmd, *_a, **_k):
@@ -2653,32 +2665,6 @@ def test_installer_chroot_sudo_write_does_not_leak_password_to_tee():
         _refresh_calls = [c for c in _calls if c[0][:3] == ('sudo', '-S', '-v')]
         assert len(_refresh_calls) == 1, _refresh_calls
         assert _refresh_calls[0][1] == _SECRET + '\n', _refresh_calls
-
-
-def test_installer_chroot_write_athena_stub_template_writes_to_dpkg_info():
-    """_write_athena_stub_template lands the stub file at
-    /var/lib/dpkg/info/athena-stubs.templates so rootskel's
-    S20templates run-part picks it up via debconf-loadtemplate at boot
-    — same path the real udebs use."""
-    import sys, tempfile
-    from unittest.mock import patch
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import (
-        _write_athena_stub_template,
-        _ATHENA_STUB_TEMPLATES,
-    )
-    with tempfile.TemporaryDirectory() as _chroot:
-        os.makedirs(os.path.join(_chroot, 'var/lib/dpkg/info'))
-        with patch('installer_chroot.subprocess.run',
-                   side_effect=_fake_sudo_write_run):
-            assert _write_athena_stub_template(_chroot, 'pw') is True
-        _written = os.path.join(
-            _chroot, 'var/lib/dpkg/info/athena-stubs.templates'
-        )
-        assert os.path.isfile(_written), _written
-        with open(_written) as fh:
-            _content = fh.read()
-        assert _content == _ATHENA_STUB_TEMPLATES, _content
 
 
 def test_installer_chroot_run_depmod_skips_when_no_modules_dir():
@@ -8350,8 +8336,7 @@ def main() -> int:
         test_installer_chroot_runtime_dirs_includes_tmp_with_sticky_mode,
         # COMP-02 phase B — stock d-i image-build conformance helpers
         test_installer_chroot_sudo_write_does_not_leak_password_to_tee,
-        test_installer_chroot_athena_stub_template_declares_mirror_protocol,
-        test_installer_chroot_write_athena_stub_template_writes_to_dpkg_info,
+        test_athena_installer_data_ships_mirror_protocol_stub,
         test_installer_chroot_run_depmod_skips_when_no_modules_dir,
         test_installer_chroot_run_depmod_indexes_each_kernel_present,
         test_installer_chroot_write_release_files_emits_codename_and_lsb,

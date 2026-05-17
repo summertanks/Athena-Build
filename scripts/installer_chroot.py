@@ -91,9 +91,11 @@ def build_installer_chroot(
     # their maintainer scripts only run at first boot under
     # rootskel + main-menu).  Each action is what stock d-i's
     # installer/build/Makefile does after the dpkg --unpack pass.
-    if not _write_athena_stub_template(dir_chroot_installer, password):
-        return False
-
+    #
+    # FORK-01 Step 3 (2026-05-16): the mirror/protocol stub template
+    # is now shipped by the athena-installer-data udeb (built from
+    # fork/source/athena-installer-data/, dpkg-unpacked above with the
+    # rest of the closure).  Helper deleted in same commit.
     if not _run_depmod(dir_chroot_installer, password):
         return False
 
@@ -531,35 +533,6 @@ def _install_debootstrap_codename_script(
 # ---------------------------------------------------------------------------
 
 
-# Stub template for debconf questions that an upstream udeb would
-# normally define but we don't ship.  Currently just mirror/protocol —
-# bootstrap-base.postinst's UNGUARDED `db_get mirror/protocol` returns
-# 10 → set -e exits → bootstrap-base silent-loops on
-# "succeeded but requested to be left unconfigured".  In stock d-i the
-# template comes from choose-mirror-udeb; we don't ship it because we
-# only support file:///cdrom installs.
-#
-# Lives in /var/lib/dpkg/info/ so rootskel's S20templates run-part
-# picks it up via debconf-loadtemplate at boot — same path the real
-# udebs use.  Caught 2026-05-11 — diagnosed by patching the postinst
-# with `set -x` to /dev/ttyS0 since the failure happened before any
-# base-installer logger call.
-_ATHENA_STUB_TEMPLATES = """\
-Template: mirror/protocol
-Type: string
-Default: file
-Description: Mirror protocol (Athena stub)
- file:///cdrom is Athena's only repo source.  This template exists
- solely so bootstrap-base.postinst's UNGUARDED `db_get mirror/protocol`
- (line 77 of d-i's bootstrap-base postinst, where the `|| true` is on
- the next line — too late to suppress the error) doesn't return 10 and
- trip `set -e`, killing the postinst before debootstrap is invoked.
- .
- In stock d-i this template is provided by choose-mirror-udeb, which
- we don't ship — we only support file:///cdrom installs.
-"""
-
-
 def _sudo_write(path: str, content: str, password: str) -> bool:
     """sudo-write content to path so the destination is root-owned
     (matches what dpkg --unpack would produce).
@@ -610,28 +583,6 @@ def _sudo_write(path: str, content: str, password: str) -> bool:
             f"stderr={_r.stderr.strip()}"
         )
         return False
-    return True
-
-
-def _write_athena_stub_template(
-    dir_chroot_installer: str, password: str
-) -> bool:
-    """Write /var/lib/dpkg/info/athena-stubs.templates.
-
-    Replaces the prior installer/templates/athena-stubs.templates
-    overlay (deleted 2026-05-12) so all stub-template content lives in
-    one place — version-controlled Python rather than a side-car file
-    that operators might assume they can edit for rebrand purposes.
-    """
-    _dst = os.path.join(
-        dir_chroot_installer, 'var/lib/dpkg/info/athena-stubs.templates'
-    )
-    if not _sudo_write(_dst, _ATHENA_STUB_TEMPLATES, password):
-        return False
-    tui.console.print(
-        "Stub templates: athena-stubs.templates → "
-        "/var/lib/dpkg/info/ (mirror/protocol)"
-    )
     return True
 
 
