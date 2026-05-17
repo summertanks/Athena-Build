@@ -83,23 +83,22 @@ def build_installer_chroot(
     if not _dpkg_unpack(dir_chroot_installer, _udeb_files, password):
         return False
 
-    if not _create_runtime_dirs(dir_chroot_installer, password):
-        return False
-
     # Stock d-i image-build actions that aren't done by any udeb's
     # postinst (deferred-postinst model: udebs are unpacked here but
     # their maintainer scripts only run at first boot under
-    # rootskel + main-menu).  Each action is what stock d-i's
-    # installer/build/Makefile does after the dpkg --unpack pass.
+    # rootskel + main-menu).
     #
-    # FORK-01 Step 3 (2026-05-16): the mirror/protocol stub template
-    # is now shipped by the athena-installer-data udeb (built from
-    # fork/source/athena-installer-data/, dpkg-unpacked above with the
-    # rest of the closure).  Helper deleted in same commit.
+    # FORK-01 Steps 3+4 (2026-05-16/17) — moved into the
+    # athena-installer-data udeb (dpkg-unpacked above with the rest
+    # of the closure):
+    #   - Step 3: mirror/protocol stub template
+    #   - Step 4: /etc/lsb-release, /etc/default-release (codename
+    #             substituted at build time), runtime dirs (/tmp,
+    #             /var/tmp, /root), debootstrap codename symlink
+    # _register_self_in_dpkg_status stays here — it writes a fake
+    # `Package: debian-installer` stanza; doing this from a udeb's
+    # postinst would change the lifecycle timing.
     if not _run_depmod(dir_chroot_installer, password):
-        return False
-
-    if not _write_release_files(dir_chroot_installer, codename, password):
         return False
 
     if not _register_self_in_dpkg_status(
@@ -108,10 +107,6 @@ def build_installer_chroot(
 
     if not _apply_installer_overlay(
             dir_chroot_installer, installer_dir, password):
-        return False
-
-    if not _install_debootstrap_codename_script(
-            dir_chroot_installer, codename, password):
         return False
 
     _report_stats(dir_chroot_installer)
@@ -394,127 +389,6 @@ def _apply_installer_overlay(
     return True
 
 
-# COMP-02 phase B TODO: replace this Python helper with an
-# `athena-installer-stubs-udeb` source package that ships the directories
-# in its `debian/dirs` so dpkg --unpack creates them.  See
-# docs/plans/comp-02-robust-build.md.
-#
-# FHS dirs that random d-i scripts assume exist but no udeb in our
-# closure ships.  Caught 2026-05-11 — check-missing-firmware silently
-# warned "can't create /tmp/dmesg.txt: nonexistent directory" and
-# bootstrap-base's run-debootstrap would have done the same later.
-# rootskel.udeb ships /dev /proc /run /sys but NOT /tmp /var/tmp /root,
-# and we don't have a separate postinst layer that creates them
-# (standard d-i builds bake these in at ramdisk-pack time).  Mode
-# 1777 for /tmp + /var/tmp (sticky, world-writable — standard FHS),
-# 0700 for /root.
-_RUNTIME_DIRS = [
-    ('tmp',     '1777'),
-    ('var/tmp', '1777'),
-    ('root',    '0700'),
-]
-
-
-def _create_runtime_dirs(dir_chroot_installer: str, password: str) -> bool:
-    """Create FHS dirs no udeb ships but every d-i script assumes."""
-    for _rel, _mode in _RUNTIME_DIRS:
-        _path = os.path.join(dir_chroot_installer, _rel)
-        _r = _sudo(['mkdir', '-p', _path], password)
-        if _r.returncode != 0:
-            tui.console.print(
-                f"ERROR: mkdir {_path}: {_r.stderr.strip()[:200]}"
-            )
-            logger.error(
-                f"_create_runtime_dirs mkdir {_path}: rc={_r.returncode}, "
-                f"stderr={_r.stderr.strip()}"
-            )
-            return False
-        _r = _sudo(['chmod', _mode, _path], password)
-        if _r.returncode != 0:
-            tui.console.print(
-                f"ERROR: chmod {_mode} {_path}: {_r.stderr.strip()[:200]}"
-            )
-            logger.error(
-                f"_create_runtime_dirs chmod {_path}: rc={_r.returncode}, "
-                f"stderr={_r.stderr.strip()}"
-            )
-            return False
-    tui.console.print(
-        f"Runtime dirs: {len(_RUNTIME_DIRS)} dir(s) created (/tmp, /var/tmp, /root)"
-    )
-    return True
-
-
-# COMP-02 phase B TODO: replace with `athena-debootstrap-codenames-udeb`
-# that ships `scripts/<codename>` directly via `debian/install`.  The
-# codename is read from the udeb's own debian/changelog at build time;
-# no Python helper or chroot post-unpack mutation.  See
-# docs/plans/comp-02-robust-build.md.
-_DEBOOTSTRAP_SCRIPTS_DIR = 'usr/share/debootstrap/scripts'
-
-# Codenames already shipped by debootstrap-udeb — skipping the copy
-# avoids stomping an upstream script with a stale snapshot.  Any name
-# NOT in this set is assumed to be a derivative codename (Athena's
-# default) and gets a copy of `sid` as its script.
-_DEBOOTSTRAP_KNOWN_SUITES = frozenset({
-    'sid', 'unstable', 'testing', 'stable',
-    'trixie', 'bookworm', 'bullseye', 'buster',
-})
-
-
-def _install_debootstrap_codename_script(
-    dir_chroot_installer: str, codename: str, password: str,
-) -> bool:
-    """Make `/usr/share/debootstrap/scripts/<codename>` exist in the chroot.
-
-    Debootstrap is suite-keyed: bootstrap-base passes our codename (e.g.
-    "thor") as the suite argument, debootstrap looks for a script of
-    that exact name under /usr/share/debootstrap/scripts/, and silently
-    bails when it's missing.  bootstrap-base then exits 10 and main-menu
-    falls back to step-selection — exactly the "succeeded but requested
-    to be left unconfigured" loop caught 2026-05-11 on the first VMware
-    install attempt.
-
-    Fix: copy the existing `sid` script to `<codename>`.  `sid` is an
-    11-line wrapper that delegates everything to `debian-common`, so a
-    copy gives our derivative codename the same behaviour upstream uses
-    for unstable — correct for a sid-tracking derivative like Athena.
-    No-op when the codename is already an upstream-shipped suite name
-    (sid / bookworm / trixie / etc.) — those scripts already exist and
-    overwriting them would be wrong.
-    """
-    if codename in _DEBOOTSTRAP_KNOWN_SUITES:
-        tui.console.print(
-            f"Debootstrap script: '{codename}' is upstream — no copy needed"
-        )
-        return True
-    _scripts = os.path.join(dir_chroot_installer, _DEBOOTSTRAP_SCRIPTS_DIR)
-    _src = os.path.join(_scripts, 'sid')
-    _dst = os.path.join(_scripts, codename)
-    if not os.path.isfile(_src):
-        tui.console.print(
-            f"ERROR: {_src} missing — debootstrap-udeb didn't unpack its "
-            "scripts dir.  Was it included in the udeb closure?"
-        )
-        logger.error(f"_install_debootstrap_codename_script: {_src} absent")
-        return False
-    _r = _sudo(['cp', '-p', _src, _dst], password)
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: cp {_src} → {_dst}: {_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_install_debootstrap_codename_script cp: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
-        )
-        return False
-    tui.console.print(
-        f"Debootstrap script: sid → {codename} (so debootstrap recognises "
-        "our suite)"
-    )
-    return True
-
-
 # ---------------------------------------------------------------------------
 # Stock d-i image-build conformance helpers
 #
@@ -653,46 +527,6 @@ def _run_depmod(dir_chroot_installer: str, password: str) -> bool:
             return False
     tui.console.print(
         f"depmod: indexed {len(_kvers)} kernel(s): {', '.join(_kvers)}"
-    )
-    return True
-
-
-def _write_release_files(
-    dir_chroot_installer: str, codename: str, password: str
-) -> bool:
-    """Write /etc/default-release and /etc/lsb-release.
-
-    `/etc/default-release` carries the bare codename (e.g. `thor`) — read
-    by various d-i scripts that need to know which suite the installer
-    targets (apt-setup's release picker, archive-key trust checks).
-    Stock d-i echoes $(DEBIAN_RELEASE) to this file from the Makefile.
-    Caught 2026-05-12 as a cosmetic install-log warning
-    "cat: can't open '/etc/default-release'" — promoted to a real step
-    once the audit identified it as a stock action we'd skipped.
-
-    `/etc/lsb-release` carries minimal distrib info so d-i scripts that
-    grep it for branding render the Athena name rather than falling
-    through to "Debian GNU/Linux".  We use the codename as both
-    RELEASE and CODENAME — Athena tracks sid so there's no separate
-    point-release identifier to record.
-    """
-    _default_release = os.path.join(
-        dir_chroot_installer, 'etc/default-release'
-    )
-    if not _sudo_write(_default_release, codename + '\n', password):
-        return False
-    _lsb = (
-        'DISTRIB_ID=Athena\n'
-        'DISTRIB_DESCRIPTION="Athena Linux installer"\n'
-        f'DISTRIB_RELEASE={codename}\n'
-        f'DISTRIB_CODENAME={codename}\n'
-    )
-    _lsb_path = os.path.join(dir_chroot_installer, 'etc/lsb-release')
-    if not _sudo_write(_lsb_path, _lsb, password):
-        return False
-    tui.console.print(
-        f"Release files: /etc/default-release ({codename}) + "
-        "/etc/lsb-release written"
     )
     return True
 

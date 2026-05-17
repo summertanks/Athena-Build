@@ -1,3 +1,19 @@
+athena-installer-data (1.0.1) thor; urgency=low
+
+  * FORK-01 Step 4: migrate runtime dirs + release files + debootstrap
+    codename symlink from installer_chroot.py Python helpers.
+    - Ship /tmp, /var/tmp, /root via debian/dirs (trust dh_fixperms
+      for /tmp + /var/tmp = 1777; /root gets debhelper default 0755).
+    - Ship /etc/lsb-release + /etc/default-release with codename
+      substituted at build time from ATHENA_CODENAME env var.
+    - Ship /usr/share/debootstrap/scripts/${codename} as symlink to
+      sid (same pattern debootstrap-udeb uses for bookworm/sid/kali).
+  * FORK-01 Step 3 (delivered at 1.0.0, documented here for clarity):
+    /var/lib/dpkg/info/athena-stubs.templates ships the mirror/protocol
+    stub that lets bootstrap-base.postinst's db_get succeed.
+
+ -- Athena Linux <athena@local>  Sun, 17 May 2026 09:00:00 +0000
+
 athena-installer-data (1.0.0) thor; urgency=low
 
   * Initial scaffolding (FORK-01 Step 1).

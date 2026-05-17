@@ -2539,44 +2539,20 @@ def test_installer_chroot_resolve_udeb_files_skips_record_without_filename():
     assert out == []
 
 
-def test_installer_chroot_runtime_dirs_creates_tmp_var_tmp_root():
-    """No udeb ships /tmp, /var/tmp, /root but every d-i script assumes
-    they exist (caught 2026-05-11 — bootstrap-base.postinst dies via
-    set -e on /tmp writes, then on `db_get mirror/protocol` after that).
-    Helper sudo-mkdirs them with the right modes."""
-    import sys, tempfile
-    from unittest.mock import patch
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _create_runtime_dirs, _RUNTIME_DIRS
-    with tempfile.TemporaryDirectory() as _chroot:
-        _calls = []
-        class _Result:
-            returncode = 0
-            stderr = ''
-        def _fake_sudo(cmd, _pw):
-            _calls.append(cmd)
-            if cmd[0] == 'mkdir':
-                os.makedirs(cmd[-1], exist_ok=True)
-            return _Result()
-        with patch('installer_chroot._sudo', side_effect=_fake_sudo):
-            assert _create_runtime_dirs(_chroot, 'pw') is True
-        # Every dir in _RUNTIME_DIRS got mkdir'd + chmod'd.
-        for _rel, _mode in _RUNTIME_DIRS:
-            assert os.path.isdir(os.path.join(_chroot, _rel)), _rel
-        assert sum(1 for c in _calls if c[0] == 'mkdir') == len(_RUNTIME_DIRS)
-        assert sum(1 for c in _calls if c[0] == 'chmod') == len(_RUNTIME_DIRS)
-
-
-def test_installer_chroot_runtime_dirs_includes_tmp_with_sticky_mode():
-    """Pin the specific entries so a future edit doesn't accidentally
-    drop /tmp from the list and re-introduce the bootstrap-base loop."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _RUNTIME_DIRS
-    _by_path = dict(_RUNTIME_DIRS)
-    assert _by_path.get('tmp') == '1777', _RUNTIME_DIRS
-    assert _by_path.get('var/tmp') == '1777', _RUNTIME_DIRS
-    assert _by_path.get('root') == '0700', _RUNTIME_DIRS
+def test_athena_installer_data_ships_runtime_dirs():
+    """FORK-01 Step 4: /tmp, /var/tmp, /root are created by
+    athena-installer-data via debian/dirs (was installer_chroot.py's
+    _create_runtime_dirs helper, deleted in Step 4).  debhelper sets
+    default mode (0755) — installer runs as root, no multi-user
+    requirements at chroot scope."""
+    _dirs = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                         'debian', 'dirs')
+    assert os.path.isfile(_dirs), f"missing {_dirs}"
+    with open(_dirs) as fh:
+        _entries = {line.strip() for line in fh if line.strip()}
+    assert 'tmp' in _entries, _entries
+    assert 'var/tmp' in _entries, _entries
+    assert 'root' in _entries, _entries
 
 
 def test_athena_installer_data_ships_mirror_protocol_stub():
@@ -2712,27 +2688,58 @@ def test_installer_chroot_run_depmod_indexes_each_kernel_present():
             assert _c[1] == '-a' and _c[2] == '-b' and _c[3] == _chroot, _c
 
 
-def test_installer_chroot_write_release_files_emits_codename_and_lsb():
-    """Stock d-i image-build writes /etc/default-release (bare codename)
-    and /etc/lsb-release (distrib info).  Caught 2026-05-12 as cosmetic
-    install-log warnings ("cat: can't open '/etc/default-release'") —
-    promoted to a real step after stock-conformance audit."""
-    import sys, tempfile
-    from unittest.mock import patch
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _write_release_files
-    with tempfile.TemporaryDirectory() as _chroot:
-        os.makedirs(os.path.join(_chroot, 'etc'))
-        with patch('installer_chroot.subprocess.run',
-                   side_effect=_fake_sudo_write_run):
-            assert _write_release_files(_chroot, 'thor', 'pw') is True
-        with open(os.path.join(_chroot, 'etc/default-release')) as fh:
-            assert fh.read().strip() == 'thor'
-        with open(os.path.join(_chroot, 'etc/lsb-release')) as fh:
-            _lsb = fh.read()
-        assert 'DISTRIB_ID=Athena' in _lsb, _lsb
-        assert 'DISTRIB_CODENAME=thor' in _lsb, _lsb
-        assert 'DISTRIB_RELEASE=thor' in _lsb, _lsb
+def test_athena_installer_data_ships_release_files_with_codename_placeholder():
+    """FORK-01 Step 4: /etc/lsb-release + /etc/default-release ship from
+    athena-installer-data with @CODENAME@ placeholders that debian/rules
+    substitutes at build time using the ATHENA_CODENAME env var injected
+    by BuildContainer.  This pins the source templates + the substitution
+    machinery — both must stay aligned for the build to produce valid
+    files."""
+    _lsb = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                        'data', 'lsb-release')
+    _def = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                        'data', 'default-release')
+    assert os.path.isfile(_lsb), f"missing {_lsb}"
+    assert os.path.isfile(_def), f"missing {_def}"
+    with open(_lsb) as fh:
+        _lsb_body = fh.read()
+    with open(_def) as fh:
+        _def_body = fh.read()
+    # Source carries placeholder — codename is supplied at build time
+    assert 'DISTRIB_ID=Athena' in _lsb_body, _lsb_body
+    assert '@CODENAME@' in _lsb_body, _lsb_body
+    assert '@CODENAME@' in _def_body, _def_body
+
+    # debian/install wires both to /etc/
+    _install = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                            'debian', 'install')
+    with open(_install) as fh:
+        _install_body = fh.read()
+    assert 'data/lsb-release' in _install_body and 'etc' in _install_body
+    assert 'data/default-release' in _install_body
+
+    # debian/rules has the sed substitution for @CODENAME@ + symlink creation
+    _rules = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                          'debian', 'rules')
+    with open(_rules) as fh:
+        _rules_body = fh.read()
+    assert 'ATHENA_CODENAME' in _rules_body, _rules_body
+    assert '@CODENAME@' in _rules_body, _rules_body
+    assert 'ln -sf sid' in _rules_body, _rules_body
+
+
+def test_buildcontainer_injects_athena_codename_env():
+    """FORK-01 Step 4: BuildContainer.deb_build_env must set ATHENA_CODENAME
+    from BuildConfig.build_codename so debian/rules in fork pkgs can
+    substitute the distribution codename into shipped files
+    (lsb-release, default-release, debootstrap symlink).  Pin the wiring
+    so a refactor of deb_build_env doesn't silently drop it."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert 'ATHENA_CODENAME' in _body, "ATHENA_CODENAME not present in buildcontainer.py"
+    assert 'self.codename = config.build_codename' in _body, \
+        "self.codename not initialised from config.build_codename"
 
 
 def test_installer_chroot_register_self_appends_debian_installer_stanza():
@@ -2825,91 +2832,6 @@ def test_installer_grub_cfg_has_preseed_kernel_cmdline():
     assert 'auto=true' in _content, _content
     assert 'preseed/file=/preseed.cfg' in _content, _content
 
-
-
-def test_installer_chroot_install_debootstrap_script_copies_sid_to_codename():
-    """For a derivative codename ('thor'), the helper sudo-copies
-    /usr/share/debootstrap/scripts/sid → scripts/<codename> so
-    debootstrap recognises our suite at install time.  Without this,
-    bootstrap-base exits 10 with no log output (caught on first
-    VMware install — d-i loops on the step-selection menu)."""
-    import sys, tempfile
-    from unittest.mock import patch
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import (
-        _install_debootstrap_codename_script,
-        _DEBOOTSTRAP_SCRIPTS_DIR,
-    )
-    with tempfile.TemporaryDirectory() as _chroot:
-        _scripts_dir = os.path.join(_chroot, _DEBOOTSTRAP_SCRIPTS_DIR)
-        os.makedirs(_scripts_dir)
-        with open(os.path.join(_scripts_dir, 'sid'), 'w') as fh:
-            fh.write('# pretend sid script\n')
-        _calls = []
-        class _Result:
-            returncode = 0
-            stderr = ''
-        def _fake_sudo(cmd, _pw):
-            _calls.append(cmd)
-            # Mimic the cp the helper would have run (sudo path skipped).
-            if cmd[0] == 'cp':
-                import shutil
-                shutil.copy(cmd[-2], cmd[-1])
-            return _Result()
-        with patch('installer_chroot._sudo', side_effect=_fake_sudo):
-            assert _install_debootstrap_codename_script(
-                _chroot, 'thor', 'pw') is True
-        assert os.path.isfile(os.path.join(_scripts_dir, 'thor'))
-        with open(os.path.join(_scripts_dir, 'thor')) as fh:
-            assert fh.read() == '# pretend sid script\n'
-        # The sudo call list should record the cp.
-        assert any(c[0] == 'cp' for c in _calls), _calls
-
-
-def test_installer_chroot_install_debootstrap_script_skips_upstream_suite():
-    """When the codename is one upstream debootstrap-udeb already ships
-    a script for (sid, bookworm, trixie, …), the helper is a no-op —
-    stomping an upstream script with sid's content would be wrong."""
-    import sys, tempfile
-    from unittest.mock import patch
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import (
-        _install_debootstrap_codename_script,
-        _DEBOOTSTRAP_SCRIPTS_DIR,
-    )
-    with tempfile.TemporaryDirectory() as _chroot:
-        _scripts_dir = os.path.join(_chroot, _DEBOOTSTRAP_SCRIPTS_DIR)
-        os.makedirs(_scripts_dir)
-        with open(os.path.join(_scripts_dir, 'sid'), 'w') as fh:
-            fh.write('upstream sid content\n')
-        # bookworm already exists with its own content; the helper must
-        # NOT overwrite it.
-        with open(os.path.join(_scripts_dir, 'bookworm'), 'w') as fh:
-            fh.write('upstream bookworm content\n')
-        with patch('installer_chroot._sudo') as _mock_sudo:
-            assert _install_debootstrap_codename_script(
-                _chroot, 'bookworm', 'pw') is True
-            _mock_sudo.assert_not_called()
-        with open(os.path.join(_scripts_dir, 'bookworm')) as fh:
-            assert fh.read() == 'upstream bookworm content\n'
-
-
-def test_installer_chroot_install_debootstrap_script_errors_when_sid_missing():
-    """If the chroot has no /usr/share/debootstrap/scripts/sid at all,
-    something upstream went wrong (debootstrap-udeb absent or unpacked
-    elsewhere) — fail loud rather than silently producing an ISO that
-    will hang at bootstrap-base."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import (
-        _install_debootstrap_codename_script,
-        _DEBOOTSTRAP_SCRIPTS_DIR,
-    )
-    with tempfile.TemporaryDirectory() as _chroot:
-        os.makedirs(os.path.join(_chroot, _DEBOOTSTRAP_SCRIPTS_DIR))
-        # No 'sid' file.
-        assert _install_debootstrap_codename_script(
-            _chroot, 'thor', 'pw') is False
 
 
 def test_buildconfig_chroot_paths_under_shared_buildroot_parent():
@@ -8329,17 +8251,15 @@ def main() -> int:
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
         test_installer_chroot_resolve_udeb_files_logs_missing_silently,
         test_installer_chroot_resolve_udeb_files_skips_record_without_filename,
-        test_installer_chroot_install_debootstrap_script_copies_sid_to_codename,
-        test_installer_chroot_install_debootstrap_script_skips_upstream_suite,
-        test_installer_chroot_install_debootstrap_script_errors_when_sid_missing,
-        test_installer_chroot_runtime_dirs_creates_tmp_var_tmp_root,
-        test_installer_chroot_runtime_dirs_includes_tmp_with_sticky_mode,
+        # FORK-01 Step 4: helpers replaced by athena-installer-data udeb
+        test_athena_installer_data_ships_runtime_dirs,
+        test_athena_installer_data_ships_release_files_with_codename_placeholder,
+        test_buildcontainer_injects_athena_codename_env,
         # COMP-02 phase B — stock d-i image-build conformance helpers
         test_installer_chroot_sudo_write_does_not_leak_password_to_tee,
         test_athena_installer_data_ships_mirror_protocol_stub,
         test_installer_chroot_run_depmod_skips_when_no_modules_dir,
         test_installer_chroot_run_depmod_indexes_each_kernel_present,
-        test_installer_chroot_write_release_files_emits_codename_and_lsb,
         test_installer_chroot_register_self_appends_debian_installer_stanza,
         test_installer_chroot_register_self_idempotent_on_repeat,
         test_installer_grub_cfg_has_preseed_kernel_cmdline,
