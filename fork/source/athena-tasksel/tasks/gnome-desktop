@@ -1,7 +1,67 @@
 Task: gnome-desktop
-Relevance: 1
-Parent: desktop
-Test-default-desktop: 3 gnome
 Section: user
+Relevance: 1
+Description: GNOME Desktop Environment
+ Athena's GNOME desktop — shell, file manager, terminal, system
+ settings, browser, common GNOME apps + utilities, PIM stack
+ (calendar/contacts/clocks), software center, and admin GUI tools.
+ .
+ Derived from Debian's gnome-desktop task content (gnome-core +
+ gnome meta) merged with Athena-specific additions (firefox-esr
+ as default browser, gnome-screenshot, Noto+DejaVu fonts).
+ Mirrors the content of config/pkg.list [gnome-desktop] — keep in
+ sync when adding/removing packages.
 Key:
-  task-gnome-desktop
+ gnome-shell
+ gdm3
+ xserver-xorg-video-all
+ xserver-xorg-input-all
+ gnome-terminal
+ nautilus
+ gnome-control-center
+ gnome-text-editor
+ gnome-system-monitor
+ gnome-screenshot
+ gnome-disk-utility
+ gnome-calculator
+ eog
+ evince
+ firefox-esr
+ network-manager-gnome
+ fonts-noto-core
+ fonts-dejavu-core
+ gnome-session
+ gnome-settings-daemon
+ gnome-keyring
+ libpam-gnome-keyring
+ gnome-menus
+ gsettings-desktop-schemas
+ glib-networking
+ gnome-online-accounts
+ gvfs-backends
+ gvfs-fuse
+ libatk-adaptor
+ libcanberra-pulse
+ libglib2.0-bin
+ librsvg2-common
+ sound-theme-freedesktop
+ xdg-desktop-portal-gnome
+ pipewire-audio
+ gstreamer1.0-plugins-base
+ gstreamer1.0-plugins-good
+ gnome-shell-extensions
+ file-roller
+ baobab
+ yelp
+ gnome-tweaks
+ gnome-themes-extra
+ gnome-user-docs
+ gnome-logs
+ xdg-user-dirs-gtk
+ gnome-calendar
+ gnome-contacts
+ gnome-clocks
+ gnome-software
+ synaptic
+ system-config-printer-common
+ system-config-printer-udev

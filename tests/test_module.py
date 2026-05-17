@@ -5487,99 +5487,6 @@ def test_parse_pkg_list_group_meta_flat_file_returns_base_only():
         os.unlink(_path)
 
 
-def test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group():
-    """One `Task:` stanza per non-`[base]` group, with `Section: user`
-    (matches debian convention), `Description:` (sanitised), and `Key:`
-    listing seed names alpha-sorted.  `[base]` is intentionally absent
-    — base packages are debootstrapped before pkgsel runs."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _stage_tasksel_desc
-    _groups = {
-        'base':              {'bash', 'coreutils'},
-        'development-tools': {'gcc', 'make', 'git'},
-        'gnome':             {'gnome-shell', 'firefox-esr'},
-    }
-    _meta = {
-        'development-tools': {'description': 'Build toolchain plus git'},
-        'gnome':             {},  # no description → fallback
-    }
-    with tempfile.TemporaryDirectory() as _stage:
-        assert _stage_tasksel_desc(_stage, _groups, _meta) is True
-        _path = os.path.join(_stage, '.disk', 'athena-tasks.desc')
-        assert os.path.isfile(_path)
-        with open(_path) as fh:
-            _content = fh.read()
-        # [base] never appears as a task
-        assert 'Task: athena-base' not in _content
-        # Both non-base groups present
-        assert 'Task: athena-development-tools' in _content
-        assert 'Task: athena-gnome' in _content
-        # Operator-supplied description wins (sanitised — trailing period
-        # stripped, but content kept)
-        assert 'Description: Build toolchain plus git' in _content
-        # Fallback description used when meta omits it
-        assert 'Description: Athena gnome group' in _content
-        # Key: lists are alpha-sorted within each stanza
-        assert ' firefox-esr\n gnome-shell' in _content
-        # Section is "user" (matches debian convention; defensive fix
-        # for the cdebconf dialog-checkbox issue 2026-05-16)
-        assert _content.count('Section: user') == 2
-        assert 'Section: athena' not in _content
-
-
-def test_stage_tasksel_desc_sanitises_description_chars():
-    """Operator-supplied descriptions may contain commas, em-dashes,
-    parens — chars that historically interact badly with cdebconf
-    multiselect rendering / splitting in derivative-shipped task descs.
-    The generator sanitises them at write time so the rendered menu
-    line is unambiguous."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _stage_tasksel_desc
-    _groups = {
-        'base':  {'bash'},
-        'gnome': {'gnome-shell'},
-    }
-    _meta = {
-        'gnome': {
-            'description': 'GNOME desktop environment — minimal but'
-                           ' functional (shell, file manager, terminal,'
-                           ' browser).',
-        },
-    }
-    with tempfile.TemporaryDirectory() as _stage:
-        assert _stage_tasksel_desc(_stage, _groups, _meta) is True
-        with open(os.path.join(_stage, '.disk', 'athena-tasks.desc')) as fh:
-            _content = fh.read()
-        # Extract the Description line
-        _desc_line = [
-            line for line in _content.splitlines()
-            if line.startswith('Description: ')
-        ][0]
-        assert ',' not in _desc_line, (
-            f"description should be comma-free; got: {_desc_line!r}"
-        )
-        assert '—' not in _desc_line, (
-            f"em-dash should be replaced with '-'; got: {_desc_line!r}"
-        )
-        # Trailing period stripped, no double-spaces
-        assert not _desc_line.endswith('.')
-        assert '  ' not in _desc_line
-
-
-def test_stage_tasksel_desc_only_base_groups_is_noop():
-    """If only `[base]` is defined, no `.desc` file is written —
-    tasksel has nothing to offer."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _stage_tasksel_desc
-    with tempfile.TemporaryDirectory() as _stage:
-        assert _stage_tasksel_desc(_stage, {'base': {'bash'}}, {}) is True
-        assert not os.path.exists(
-            os.path.join(_stage, '.disk', 'athena-tasks.desc')
-        )
-
 
 def test_installer_list_includes_athena_pkgsel():
     """FORK-01 Step 5: athena-pkgsel (Provides + Conflicts + Replaces
@@ -5656,150 +5563,88 @@ def test_installer_pkgsel_dir_does_not_exist():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GROUPS-01 phase 4: athena-tasksel-data .deb generation
+# FORK-01 Step 5b: athena-tasksel-data shipped from the fork
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_build_tasksel_data_deb_produces_valid_deb():
-    """Drive _build_tasksel_data_deb in a tempdir.  Verifies it:
-      - Produces athena-tasksel-data_<ver>_all.deb in staging/pool/
-      - The .deb has valid dpkg metadata (control + payload)
-      - The .desc lands at /usr/share/tasksel/descs/athena.desc inside
-        the .deb (the path tasksel globs at runtime, per
-        /usr/bin/tasksel:53-65)
-    Skipped silently when `dpkg-deb` isn't on PATH (CI runners that
-    can't build .debs)."""
-    import shutil as _shutil, subprocess, sys, tempfile
-    if _shutil.which('dpkg-deb') is None:
-        return
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _stage_tasksel_desc, _build_tasksel_data_deb
+def test_athena_tasksel_data_binary_stanza_in_fork_control():
+    """FORK-01 Step 5b: fork/source/athena-tasksel/debian/control
+    declares the second binary stanza athena-tasksel-data with
+    versioned Provides + Conflicts + Replaces tasksel-data (= 3.73).
+    The data binary replaces upstream tasksel-data; without versioned
+    Provides, downstream pkgs with strict Depends: tasksel-data
+    (= 3.73) would fail to resolve.  See memory
+    feedback_fork_provides_must_be_versioned.md."""
+    _ctrl = os.path.join(_ROOT, 'fork', 'source', 'athena-tasksel',
+                         'debian', 'control')
+    with open(_ctrl) as fh:
+        body = fh.read()
+    assert 'Package: athena-tasksel-data' in body, body
+    assert 'Provides: tasksel-data (= 3.73)' in body, body
+    assert 'Conflicts: tasksel-data' in body, body
+    assert 'Replaces: tasksel-data' in body, body
 
-    _groups = {
-        'base':              {'bash', 'libc6'},
-        'development-tools': {'build-essential', 'git'},
-        'gnome':             {'gnome-shell', 'gdm3'},
-    }
-    _meta = {
-        'development-tools': {'description': 'Dev tools test'},
-        'gnome':             {'description': 'GNOME test'},
-    }
-    with tempfile.TemporaryDirectory() as _stage:
-        # Phase 1: generate .desc into staging/.disk/athena-tasks.desc
-        assert _stage_tasksel_desc(_stage, _groups, _meta) is True
-        # Phase 2: wrap into .deb
-        assert _build_tasksel_data_deb(_stage, _groups, _meta, '0.1') is True
 
-        _deb = os.path.join(_stage, 'pool', 'athena-tasksel-data_0.1_all.deb')
-        assert os.path.isfile(_deb), f".deb not produced at {_deb}"
+def test_athena_tasksel_fork_ships_exactly_six_curated_tasks():
+    """FORK-01 Step 5b: the fork's tasks/ dir contains exactly the
+    six curated tasks chosen 2026-05-17: standard (curated Key:
+    list, NOT Packages: standard), ssh-server, laptop, desktop
+    (kept from Debian), gnome-desktop, development-tools (Athena
+    content mirroring pkg.list groups)."""
+    _tasks_dir = os.path.join(_ROOT, 'fork', 'source', 'athena-tasksel',
+                              'tasks')
+    files = {f for f in os.listdir(_tasks_dir)
+             if os.path.isfile(os.path.join(_tasks_dir, f))
+             and not f.startswith('.')
+             and f != 'README'}
+    expected = {'standard', 'ssh-server', 'laptop', 'desktop',
+                'gnome-desktop', 'development-tools'}
+    assert files == expected, (
+        f"tasks/ mismatch.  Extra (in tree, not expected): "
+        f"{files - expected}.  Missing (expected, not in tree): "
+        f"{expected - files}"
+    )
 
-        # Verify control metadata
-        _r = subprocess.run(
-            ['dpkg-deb', '--field', _deb],
-            capture_output=True, text=True, check=True,
+
+def test_athena_tasksel_standard_task_uses_curated_key_list():
+    """FORK-01 Step 5b DEF-4: tasks/standard must use an explicit
+    Key: list (Athena curation), NOT upstream's `Packages: standard`
+    sigil (which would install all 87 Priority: standard pkgs).
+    Curated subset is smaller (~25 pkgs); operator gets the rest
+    via apt from /cdrom/pool."""
+    _standard = os.path.join(_ROOT, 'fork', 'source', 'athena-tasksel',
+                             'tasks', 'standard')
+    with open(_standard) as fh:
+        body = fh.read()
+    # Check line-starts only (so quoted text inside Description doesn't false-positive)
+    for _line in body.splitlines():
+        assert not _line.startswith('Packages: standard'), (
+            "tasks/standard reverted to upstream's `Packages: standard` "
+            "sigil — should use explicit curated Key: list per DEF-4"
         )
-        assert 'Package: athena-tasksel-data' in _r.stdout
-        assert 'Version: 0.1' in _r.stdout
-        assert 'Architecture: all' in _r.stdout
-        assert 'Depends: tasksel' in _r.stdout
-
-        # Verify payload — the .desc lands at tasksel's discovery path
-        _r = subprocess.run(
-            ['dpkg-deb', '--contents', _deb],
-            capture_output=True, text=True, check=True,
-        )
-        assert './usr/share/tasksel/descs/athena.desc' in _r.stdout, (
-            f"payload path wrong — tasksel won't find it. dpkg contents:\n"
-            f"{_r.stdout}"
-        )
-
-        # Verify payload content matches the staged .desc
-        with tempfile.TemporaryDirectory() as _extract:
-            subprocess.run(
-                ['dpkg-deb', '-x', _deb, _extract],
-                check=True, capture_output=True,
-            )
-            _payload = os.path.join(
-                _extract, 'usr', 'share', 'tasksel', 'descs', 'athena.desc',
-            )
-            assert os.path.isfile(_payload)
-            with open(_payload) as fh:
-                _body = fh.read()
-            assert 'Task: athena-development-tools' in _body
-            assert 'Task: athena-gnome' in _body
-            assert 'Task: athena-base' not in _body, (
-                "[base] should be excluded from tasksel — base packages are "
-                "debootstrapped, not tasksel-installed"
-            )
+    assert '\nKey:' in body, body
+    # A few essentials we expect; pinning ALL would be brittle
+    for must in ('openssh-client', 'less', 'manpages', 'wget'):
+        assert f' {must}' in body, f"standard task missing {must}"
 
 
-def test_build_tasksel_data_deb_noop_when_only_base():
-    """When pkg.list declares only [base] (no operator-selectable
-    groups), _build_tasksel_data_deb is a no-op — no .deb is produced
-    because there's nothing for tasksel to surface."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _build_tasksel_data_deb
-    with tempfile.TemporaryDirectory() as _stage:
-        _groups = {'base': {'bash'}}
-        # Should return True (success — no work to do) without writing anything
-        assert _build_tasksel_data_deb(_stage, _groups, {}, '0.1') is True
-        # No .deb produced
-        _pool = os.path.join(_stage, 'pool')
-        if os.path.exists(_pool):
-            _debs = [f for f in os.listdir(_pool) if f.endswith('.deb')]
-            assert not _debs, f"unexpected .deb(s) in pool: {_debs}"
-
-
-def test_build_tasksel_data_deb_errors_when_desc_missing():
-    """_build_tasksel_data_deb requires _stage_tasksel_desc to have
-    run first (it reads the staged .desc as the single source of
-    truth for the payload).  Missing .desc must surface as a
-    return-False with a clear log line, not a silent broken .deb."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _build_tasksel_data_deb
-    with tempfile.TemporaryDirectory() as _stage:
-        _groups = {
-            'base': {'bash'},
-            'gnome': {'gnome-shell'},  # non-base → would trigger .deb build
-        }
-        # NO _stage_tasksel_desc call — .desc is missing
-        assert _build_tasksel_data_deb(_stage, _groups, {}, '0.1') is False
-
-
-def test_stage_tasksel_desc_warns_on_empty_group():
-    """A group declared in pkg.list but with zero canonical packages
-    after resolve_packages indicates an operator typo (seed name didn't
-    match the cache).  iso_installer._stage_tasksel_desc emits a stanza
-    with an empty Key: list — verify the stanza is well-formed (RFC-822
-    parser doesn't choke on an empty key list) AND a WARNING is logged."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _stage_tasksel_desc
-    _groups = {
-        'base':              {'bash'},
-        'development-tools': set(),  # operator typo'd every seed
-    }
-    with tempfile.TemporaryDirectory() as _stage:
-        assert _stage_tasksel_desc(_stage, _groups, {}) is True
-        _path = os.path.join(_stage, '.disk', 'athena-tasks.desc')
-        assert os.path.isfile(_path)
-        with open(_path) as fh:
-            _c = fh.read()
-        # Stanza exists but has no Key entries
-        assert 'Task: athena-development-tools' in _c
-        assert 'Key:\n' in _c
-        # The stanza terminates with a blank line or EOF, not with
-        # malformed continuation.  Just ensure Key: isn't followed by
-        # a content line (it's followed by stanza separator).
-        _idx = _c.find('Key:')
-        _after = _c[_idx + len('Key:'):]
-        # First non-empty line after Key: should NOT be a seed name
-        # (it'd be ' build-essential' etc.); should be blank or EOF.
-        _next = _after.lstrip('\n').rstrip('\n')
-        assert not _next or _next.startswith('Task:'), \
-            f"unexpected content after empty Key:\n{_after[:80]!r}"
+def test_iso_installer_synthetic_tasksel_data_retired():
+    """FORK-01 Step 5b path β: the synthetic athena-tasksel-data .deb
+    generation in iso_installer.py is RETIRED — replaced by the
+    fork's multi-binary build (athena-tasksel + athena-tasksel-data
+    from one source).  Pin the removal so a future refactor doesn't
+    silently re-introduce the synthetic mechanism."""
+    _isoi = os.path.join(_ROOT, 'scripts', 'iso_installer.py')
+    with open(_isoi) as fh:
+        body = fh.read()
+    assert 'def _build_tasksel_data_deb' not in body, (
+        "_build_tasksel_data_deb re-introduced — synthetic generation "
+        "should stay retired (fork at fork/source/athena-tasksel/ now "
+        "produces athena-tasksel-data via multi-binary debian/control)"
+    )
+    assert 'def _stage_tasksel_desc' not in body, (
+        "_stage_tasksel_desc re-introduced — same as above"
+    )
 
 
 def test_derive_subset_exclusive_src_names_marks_live_only_sources():
@@ -8445,17 +8290,15 @@ def main() -> int:
         test_stage_group_manifests_empty_groups_is_noop,
         test_parse_pkg_list_group_meta_extracts_descriptions,
         test_parse_pkg_list_group_meta_flat_file_returns_base_only,
-        test_stage_tasksel_desc_writes_rfc822_stanzas_per_non_base_group,
-        test_stage_tasksel_desc_sanitises_description_chars,
-        test_stage_tasksel_desc_only_base_groups_is_noop,
+        # FORK-01 Step 5b: synthetic tasksel-data retired, fork ships it
+        test_athena_tasksel_data_binary_stanza_in_fork_control,
+        test_athena_tasksel_fork_ships_exactly_six_curated_tasks,
+        test_athena_tasksel_standard_task_uses_curated_key_list,
+        test_iso_installer_synthetic_tasksel_data_retired,
         test_installer_list_includes_athena_pkgsel,
         test_pkg_list_base_includes_athena_tasksel,
         test_overlay_map_does_not_contain_pre_pkgsel_hook,
         test_installer_pkgsel_dir_does_not_exist,
-        test_build_tasksel_data_deb_produces_valid_deb,
-        test_build_tasksel_data_deb_noop_when_only_base,
-        test_build_tasksel_data_deb_errors_when_desc_missing,
-        test_stage_tasksel_desc_warns_on_empty_group,
         test_derive_subset_exclusive_src_names_marks_live_only_sources,
         test_derive_subset_exclusive_src_names_no_op_when_both_empty,
         test_derive_subset_exclusive_src_names_handles_installer_exclusive,

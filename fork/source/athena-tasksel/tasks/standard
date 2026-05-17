@@ -1,7 +1,35 @@
 Task: standard
 Section: user
 Description: standard system utilities
- This task sets up a basic user environment, providing a reasonably
- small selection of services and tools usable on the command line.
-Packages: standard
-Test-new-install: mark skip
+ A curated set of command-line utilities that Athena installs by
+ default.  Derivative of Debian's "standard" task but uses an
+ explicit Key: list (Athena-chosen) rather than the broad
+ "Packages: standard" Priority sigil.  Operator who wants any
+ Debian-standard package not listed here can apt-install
+ individually post-install — they're all available in /cdrom/pool.
+Key:
+ bash-completion
+ bzip2
+ ca-certificates
+ dnsutils
+ file
+ gettext-base
+ groff-base
+ iputils-ping
+ less
+ lsof
+ man-db
+ manpages
+ media-types
+ openssh-client
+ pciutils
+ psmisc
+ rsync
+ systemd-timesyncd
+ tcpdump
+ ucf
+ usbutils
+ vim
+ wget
+ xz-utils
+Test-new-install: mark show

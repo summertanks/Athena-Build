@@ -1,6 +1,0 @@
-Task: dzongkha-desktop
-Enhances: desktop
-Section: l10n
-Test-lang: dz
-Key:
-  task-dzongkha-desktop

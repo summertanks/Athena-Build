@@ -17,10 +17,6 @@ Pre-Depends: debconf | cdebconf
 Depends: ${misc:Depends}, liblocale-gettext-perl, apt, tasksel-data
 Conflicts: tasksel
 Replaces: tasksel
-# Versioned Provides required so tasksel-data's strict
-# `Depends: tasksel (= 3.73)` resolves to us.  dpkg treats
-# unversioned Provides as version `<none>` which fails strict-version
-# checks.  See memory/feedback_fork_provides_must_be_versioned.md.
 Provides: tasksel (= 3.73)
 Description: tool for selecting tasks for installation (Athena fork)
  Athena's fork of upstream Debian tasksel.  Single functional change
@@ -28,14 +24,39 @@ Description: tool for selecting tasks for installation (Athena fork)
  DEBIAN_TASKS_ONLY environment variable and always globs all .desc
  files in /usr/share/tasksel/descs/.
  .
- The upstream behaviour (filter to debian-tasks.desc only when
- DEBIAN_TASKS_ONLY=1 is set) is incompatible with derivative
- distributions that ship additional task .desc files alongside
- Debian's — pkgsel sets DEBIAN_TASKS_ONLY=1 unconditionally during
- the installer's software-selection step, which would hide our
- athena.desc.  Our fork eliminates that filter at source rather
- than patching pkgsel to drop the env var.
+ Provides + Conflicts + Replaces tasksel (= 3.73) so apt resolves
+ any dependency on `tasksel` (including tasksel-data's strict
+ `Depends: tasksel (= 3.73)`) to this fork.
+
+Package: athena-tasksel-data
+Section: admin
+Architecture: all
+Depends: ${misc:Depends}
+Recommends: laptop-detect, tasksel
+Conflicts: tasksel-data
+Replaces: tasksel-data
+Provides: tasksel-data (= 3.73)
+Description: Athena task definitions for tasksel
+ Curated task list for Athena's installer software-selection
+ menu, replacing Debian's tasksel-data.  Ships /usr/share/
+ tasksel/descs/athena-tasks.desc with six tasks:
  .
- Provides + Conflicts + Replaces tasksel so apt resolves any
- dependency on `tasksel` to this fork, and the upstream tasksel
- package cannot coexist.
+   - standard         curated CLI utilities (Athena chose ~25 of
+                      Debian's 87 Priority: standard packages)
+   - ssh-server       openssh-server + client (for headless installs)
+   - laptop           laptop-mode-tools + bluetooth + powertop etc.
+                      (detection-based default if laptop-detect fires)
+   - desktop          xorg + drivers + xdg-utils + cups + alsa +
+                      avahi (the umbrella desktop task)
+   - gnome-desktop    Athena's GNOME desktop suite (merged from
+                      Debian's gnome-core/gnome metas + Athena
+                      additions; mirrors pkg.list [gnome-desktop])
+   - development-tools  build-essential + git + dev helpers
+                      (mirrors pkg.list [development-tools])
+ .
+ Provides + Conflicts + Replaces tasksel-data (= 3.73) so apt and
+ dpkg consider this a complete replacement for upstream
+ tasksel-data.  Operator who wants the broader Debian task surface
+ (the dozens of *-desktop alternatives, web-server, mail-server,
+ 79 l10n tasks) can install upstream tasksel-data manually but
+ it will conflict with this package.

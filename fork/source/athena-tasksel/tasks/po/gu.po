@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: tasks-gu\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-17 16:44+0000\n"
+"POT-Creation-Date: 2026-05-17 20:28+0000\n"
 "PO-Revision-Date: 2006-10-06 14:39+0530\n"
 "Last-Translator: Kartik Mistry <kartik.mistry@gmail.com>\n"
 "Language-Team: Gujarati <team@utkarsh.org>\n"
@@ -17,18 +17,63 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 
 #. Description
-#: ../po/debian-tasks.desc:11001
+#: ../po/debian-tasks.desc:2001
+msgid "Development tools"
+msgstr ""
+
+#. Description
+#: ../po/debian-tasks.desc:2001
+msgid ""
+"Compiler toolchain, version control, editors, and runtime diagnostic helpers "
+"for software development on Athena.  Mirrors the content of config/pkg.list "
+"[development-tools] — keep in sync when adding/removing packages."
+msgstr ""
+
+#. Description
+#: ../po/debian-tasks.desc:3001
+#, fuzzy
+#| msgid "GNOME desktop environment"
+msgid "GNOME Desktop Environment"
+msgstr "જીનોમ ડેસ્કટોપ વાતાવરણ"
+
+#. Description
+#: ../po/debian-tasks.desc:3001
+msgid ""
+"Athena's GNOME desktop — shell, file manager, terminal, system settings, "
+"browser, common GNOME apps + utilities, PIM stack (calendar/contacts/"
+"clocks), software center, and admin GUI tools."
+msgstr ""
+
+#. Description
+#: ../po/debian-tasks.desc:3001
+msgid ""
+"Derived from Debian's gnome-desktop task content (gnome-core + gnome meta) "
+"merged with Athena-specific additions (firefox-esr as default browser, gnome-"
+"screenshot, Noto+DejaVu fonts). Mirrors the content of config/pkg.list "
+"[gnome-desktop] — keep in sync when adding/removing packages."
+msgstr ""
+
+#. Description
+#: ../po/debian-tasks.desc:6001
 msgid "standard system utilities"
 msgstr "પ્રમાણભૂત સિસ્ટમ સુવિધાઓ"
 
 #. Description
-#: ../po/debian-tasks.desc:11001
+#: ../po/debian-tasks.desc:6001
 msgid ""
-"This task sets up a basic user environment, providing a reasonably small "
-"selection of services and tools usable on the command line."
+"A curated set of command-line utilities that Athena installs by default.  "
+"Derivative of Debian's \"standard\" task but uses an explicit Key: list "
+"(Athena-chosen) rather than the broad \"Packages: standard\" Priority "
+"sigil.  Operator who wants any Debian-standard package not listed here can "
+"apt-install individually post-install — they're all available in /cdrom/pool."
 msgstr ""
-"આ કાર્ય સામાન્ય વપરાશકર્તા વાતાવરણ ગોઠવે છે, અમુક હદ સુધી નાનાં પ્રમાણમાં પસંદગીની સેવાઓ "
-"અને સાધનો આદેશ તરીકે ઉપયોગી થાય તેમ પૂરા પાડે છે."
+
+#~ msgid ""
+#~ "This task sets up a basic user environment, providing a reasonably small "
+#~ "selection of services and tools usable on the command line."
+#~ msgstr ""
+#~ "આ કાર્ય સામાન્ય વપરાશકર્તા વાતાવરણ ગોઠવે છે, અમુક હદ સુધી નાનાં પ્રમાણમાં પસંદગીની "
+#~ "સેવાઓ અને સાધનો આદેશ તરીકે ઉપયોગી થાય તેમ પૂરા પાડે છે."
 
 #~ msgid "manual package selection"
 #~ msgstr "જાતે પેકેજ પસંદગી"
@@ -79,9 +124,6 @@ msgstr ""
 #~ "and NFS."
 #~ msgstr ""
 #~ "આ કાર્ય તમારી સિસ્ટમને ફાઇલ સર્વર બનાવવા માટે, CIFS અને NFS નો આધાર આપીને ગોઠવે છે."
-
-#~ msgid "GNOME desktop environment"
-#~ msgstr "જીનોમ ડેસ્કટોપ વાતાવરણ"
 
 #~ msgid ""
 #~ "This task provides basic \"desktop\" software using the GNOME desktop "
