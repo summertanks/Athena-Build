@@ -7,34 +7,79 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Debian-installer HR\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-17 16:44+0000\n"
+"POT-Creation-Date: 2026-05-17 20:28+0000\n"
 "PO-Revision-Date: 2010-07-07 14:30+0200\n"
 "Last-Translator: Josip Rodin <joy+ditrans@linux.hr>\n"
 "Language-Team: Croatian <lokalizacija@linux.hr>\n"
 "Language: hr\n"
 "MIME-Version: 1.0\n"
-"Content-Type: text/plain; charset=iso-8859-2\n"
+"Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
 #. Description
-#: ../po/debian-tasks.desc:11001
+#: ../po/debian-tasks.desc:2001
+msgid "Development tools"
+msgstr ""
+
+#. Description
+#: ../po/debian-tasks.desc:2001
+msgid ""
+"Compiler toolchain, version control, editors, and runtime diagnostic helpers "
+"for software development on Athena.  Mirrors the content of config/pkg.list "
+"[development-tools] â€” keep in sync when adding/removing packages."
+msgstr ""
+
+#. Description
+#: ../po/debian-tasks.desc:3001
+#, fuzzy
+#| msgid "GNOME desktop environment"
+msgid "GNOME Desktop Environment"
+msgstr "GNOME radno okruÅ¾enje"
+
+#. Description
+#: ../po/debian-tasks.desc:3001
+msgid ""
+"Athena's GNOME desktop â€” shell, file manager, terminal, system settings, "
+"browser, common GNOME apps + utilities, PIM stack (calendar/contacts/"
+"clocks), software center, and admin GUI tools."
+msgstr ""
+
+#. Description
+#: ../po/debian-tasks.desc:3001
+msgid ""
+"Derived from Debian's gnome-desktop task content (gnome-core + gnome meta) "
+"merged with Athena-specific additions (firefox-esr as default browser, gnome-"
+"screenshot, Noto+DejaVu fonts). Mirrors the content of config/pkg.list "
+"[gnome-desktop] â€” keep in sync when adding/removing packages."
+msgstr ""
+
+#. Description
+#: ../po/debian-tasks.desc:6001
 msgid "standard system utilities"
 msgstr "Standardni sistemski alati"
 
 #. Description
-#: ../po/debian-tasks.desc:11001
+#: ../po/debian-tasks.desc:6001
 msgid ""
-"This task sets up a basic user environment, providing a reasonably small "
-"selection of services and tools usable on the command line."
+"A curated set of command-line utilities that Athena installs by default.  "
+"Derivative of Debian's \"standard\" task but uses an explicit Key: list "
+"(Athena-chosen) rather than the broad \"Packages: standard\" Priority "
+"sigil.  Operator who wants any Debian-standard package not listed here can "
+"apt-install individually post-install â€” they're all available in /cdrom/pool."
 msgstr ""
-"Ova zadaæa pode¹ava osnovno korisnièko okru¾enje, uz razmjerno malen izbor "
-"usluga i alata koji se mogu koristiti putem naredbenog retka."
+
+#~ msgid ""
+#~ "This task sets up a basic user environment, providing a reasonably small "
+#~ "selection of services and tools usable on the command line."
+#~ msgstr ""
+#~ "Ova zadaÄ‡a podeÅ¡ava osnovno korisniÄko okruÅ¾enje, uz razmjerno malen "
+#~ "izbor usluga i alata koji se mogu koristiti putem naredbenog retka."
 
 #~ msgid "manual package selection"
-#~ msgstr "ruèni odabir paketa"
+#~ msgstr "ruÄni odabir paketa"
 
 #~ msgid "Manually select packages to install in aptitude."
-#~ msgstr "Ruèno izabrati pakete za instalaciju u aptitudeu."
+#~ msgstr "RuÄno izabrati pakete za instalaciju u aptitudeu."
 
 #~ msgid "SQL database"
 #~ msgstr "SQL baza podataka"
@@ -42,7 +87,7 @@ msgstr ""
 #~ msgid ""
 #~ "This task selects client and server packages for the PostgreSQL database."
 #~ msgstr ""
-#~ "Ova zadaæa izabire klijentske i poslu¾iteljske pakete za PostgreSQL bazu "
+#~ "Ova zadaÄ‡a izabire klijentske i posluÅ¾iteljske pakete za PostgreSQL bazu "
 #~ "podataka."
 
 #~ msgid ""
@@ -51,1766 +96,1763 @@ msgstr ""
 #~ "user database access, through its facilities for transactions and fine-"
 #~ "grained locking."
 #~ msgstr ""
-#~ "PostgreSQL je SQL baza podataka koja nudi poveæanu SQL92 usklağenost i "
-#~ "neke SQL3 moguænosti. Pogodna je za vi¹ekorisnièki pristup bazi podataka, "
-#~ "kroz svoje moguænosti transakcija i precizno razdijeljeno zakljuèavanje."
+#~ "PostgreSQL je SQL baza podataka koja nudi poveÄ‡anu SQL92 usklaÄ‘enost i "
+#~ "neke SQL3 moguÄ‡nosti. Pogodna je za viÅ¡ekorisniÄki pristup bazi podataka, "
+#~ "kroz svoje moguÄ‡nosti transakcija i precizno razdijeljeno zakljuÄavanje."
 
 #~ msgid "Graphical desktop environment"
-#~ msgstr "Grafièko radno okru¾enje"
+#~ msgstr "GrafiÄko radno okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task provides basic desktop software and serves as a basis for the "
 #~ "GNOME and KDE desktop tasks."
 #~ msgstr ""
-#~ "Ova zadaæa instalira osnovne \"desktop\" programe te slu¾i kao osnova za "
-#~ "zadaæe koje donose GNOME i KDE radna okru¾enja."
+#~ "Ova zadaÄ‡a instalira osnovne \"desktop\" programe te sluÅ¾i kao osnova za "
+#~ "zadaÄ‡e koje donose GNOME i KDE radna okruÅ¾enja."
 
 #~ msgid "DNS server"
-#~ msgstr "DNS poslu¾itelj"
+#~ msgstr "DNS posluÅ¾itelj"
 
 #~ msgid ""
 #~ "Selects the BIND DNS server, and related documentation and utility "
 #~ "packages."
 #~ msgstr ""
-#~ "Izabire BIND DNS poslu¾itelj s odgovarajuæom dokumentacijom i alatima."
+#~ "Izabire BIND DNS posluÅ¾itelj s odgovarajuÄ‡om dokumentacijom i alatima."
 
 #~ msgid "File server"
-#~ msgstr "Datoteèni poslu¾itelj"
+#~ msgstr "DatoteÄni posluÅ¾itelj"
 
 #~ msgid ""
 #~ "This task sets up your system to be a file server, supporting both CIFS "
 #~ "and NFS."
 #~ msgstr ""
-#~ "Ova zadaæa pode¹ava va¹ sustav kao datoteèni poslu¾itelj, podr¾avajuæi i "
+#~ "Ova zadaÄ‡a podeÅ¡ava vaÅ¡ sustav kao datoteÄni posluÅ¾itelj, podrÅ¾avajuÄ‡i i "
 #~ "CIFS i NFS."
-
-#~ msgid "GNOME desktop environment"
-#~ msgstr "GNOME radno okru¾enje"
 
 #~ msgid ""
 #~ "This task provides basic \"desktop\" software using the GNOME desktop "
 #~ "environment."
 #~ msgstr ""
-#~ "Ova zadaæa instalira osnovne \"desktop\" programe koji koriste GNOME "
-#~ "radno okru¾enje."
+#~ "Ova zadaÄ‡a instalira osnovne \"desktop\" programe koji koriste GNOME "
+#~ "radno okruÅ¾enje."
 
 #~ msgid "KDE desktop environment"
-#~ msgstr "KDE radno okru¾enje"
+#~ msgstr "KDE radno okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task provides basic \"desktop\" software using the K Desktop "
 #~ "Environment."
 #~ msgstr ""
-#~ "Ova zadaæa instalira osnovne \"desktop\" programe koji koriste KDE radno "
-#~ "okru¾enje."
+#~ "Ova zadaÄ‡a instalira osnovne \"desktop\" programe koji koriste KDE radno "
+#~ "okruÅ¾enje."
 
 #~ msgid "Laptop"
 #~ msgstr "Prijenosnik"
 
 #~ msgid "This task installs software useful for a laptop."
-#~ msgstr "Ova zadaæa donosi programe korisne za prijenosna raèunala."
+#~ msgstr "Ova zadaÄ‡a donosi programe korisne za prijenosna raÄunala."
 
 #~ msgid "LXDE desktop environment"
-#~ msgstr "LXDE radno okru¾enje"
+#~ msgstr "LXDE radno okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task provides basic \"desktop\" software using the LXDE desktop "
 #~ "environment."
 #~ msgstr ""
-#~ "Ova zadaæa instalira osnovne \"desktop\" programe koji koriste LXDE radno "
-#~ "okru¾enje."
+#~ "Ova zadaÄ‡a instalira osnovne \"desktop\" programe koji koriste LXDE radno "
+#~ "okruÅ¾enje."
 
 #~ msgid "Mail server"
-#~ msgstr "Poslu¾itelj za e-po¹tu"
+#~ msgstr "PosluÅ¾itelj za e-poÅ¡tu"
 
 #~ msgid ""
 #~ "This task selects a variety of package useful for a general purpose mail "
 #~ "server system."
 #~ msgstr ""
-#~ "Ova zadaæa izabire niz paketa korisnih za poslu¾itelj e-po¹te opæe "
+#~ "Ova zadaÄ‡a izabire niz paketa korisnih za posluÅ¾itelj e-poÅ¡te opÄ‡e "
 #~ "namjene."
 
 #~ msgid "Print server"
-#~ msgstr "Poslu¾itelj za ispis"
+#~ msgstr "PosluÅ¾itelj za ispis"
 
 #~ msgid "This task sets up your system to be a print server."
-#~ msgstr "Ova zadaæa pode¹ava va¹ sustav kao poslu¾itelj za ispis."
+#~ msgstr "Ova zadaÄ‡a podeÅ¡ava vaÅ¡ sustav kao posluÅ¾itelj za ispis."
 
 #~ msgid "SSH server"
-#~ msgstr "SSH poslu¾itelj"
+#~ msgstr "SSH posluÅ¾itelj"
 
 #~ msgid ""
 #~ "This task sets up your system to be remotely accessed through SSH "
 #~ "connections."
 #~ msgstr ""
-#~ "Ova zadaæa pode¹ava va¹ sustav tako da mu se mo¾e pristupiti sa udaljene "
+#~ "Ova zadaÄ‡a podeÅ¡ava vaÅ¡ sustav tako da mu se moÅ¾e pristupiti sa udaljene "
 #~ "lokacije kroz SSH veze."
 
 #~ msgid "Web server"
-#~ msgstr "Mre¾ni server"
+#~ msgstr "MreÅ¾ni server"
 
 #~ msgid ""
 #~ "This task selects packages useful for a general purpose web server system."
 #~ msgstr ""
-#~ "Ova zadaæa izabire niz paketa korisnih za mre¾ni poslu¾itelj opæe namjene."
+#~ "Ova zadaÄ‡a izabire niz paketa korisnih za mreÅ¾ni posluÅ¾itelj opÄ‡e namjene."
 
 #~ msgid "Xfce desktop environment"
-#~ msgstr "Xfce radno okru¾enje"
+#~ msgstr "Xfce radno okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task provides basic \"desktop\" software using the Xfce desktop "
 #~ "environment."
 #~ msgstr ""
-#~ "Ova zadaæa instalira osnovne \"desktop\" programe koji koriste Xfce radno "
-#~ "okru¾enje."
+#~ "Ova zadaÄ‡a instalira osnovne \"desktop\" programe koji koriste Xfce radno "
+#~ "okruÅ¾enje."
 
 #~ msgid "Desktop environment"
-#~ msgstr "Radno okru¾enje ('desktop')"
+#~ msgstr "Radno okruÅ¾enje ('desktop')"
 
 #~ msgid "This task installs a reasonably small character-mode system."
 #~ msgstr ""
-#~ "Ova zadaæa instalira razmjerno malen sustav za rad u tekstualnom modu."
+#~ "Ova zadaÄ‡a instalira razmjerno malen sustav za rad u tekstualnom modu."
 
 #~ msgid "Amharic environment"
-#~ msgstr "Arapsko okru¾enje"
+#~ msgstr "Arapsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "makes it easier for Amharic speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore arapski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore arapski."
 
 #~ msgid "Amharic desktop"
-#~ msgstr "Arapska radna povr¹ina"
+#~ msgstr "Arapska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Amharic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na arapski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na arapski."
 
 #~ msgid "Amharic GNOME desktop"
-#~ msgstr "Arapska radna povr¹ina"
+#~ msgstr "Arapska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Amharic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na arapski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na arapski."
 
 #~ msgid "Amharic KDE desktop"
-#~ msgstr "Arapska radna povr¹ina"
+#~ msgstr "Arapska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Amharic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na arapski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na arapski."
 
 #~ msgid "Arabic environment"
-#~ msgstr "Arapsko okru¾enje"
+#~ msgstr "Arapsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "makes it easier for Arabic speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore arapski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore arapski."
 
 #~ msgid "Arabic desktop"
-#~ msgstr "Arapska radna povr¹ina"
+#~ msgstr "Arapska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Arabic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na arapski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na arapski."
 
 #~ msgid "Arabic GNOME desktop"
-#~ msgstr "Arapska radna povr¹ina"
+#~ msgstr "Arapska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Arabic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na arapski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na arapski."
 
 #~ msgid "Arabic KDE desktop"
-#~ msgstr "Arapska radna povr¹ina"
+#~ msgstr "Arapska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Arabic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na arapski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na arapski."
 
 #~ msgid "Basque desktop"
-#~ msgstr "Baskijska radna povr¹ina"
+#~ msgstr "Baskijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Basque."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu baskijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu baskijski."
 
 #~ msgid "Basque GNOME desktop"
-#~ msgstr "Baskijska radna povr¹ina"
+#~ msgstr "Baskijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Basque."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu baskijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu baskijski."
 
 #~ msgid "Basque KDE desktop"
-#~ msgstr "Baskijska radna povr¹ina"
+#~ msgstr "Baskijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Basque."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu baskijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu baskijski."
 
 #~ msgid "Belarusian environment"
-#~ msgstr "Bjelorusko okru¾enje"
+#~ msgstr "Bjelorusko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Belarusian to help "
 #~ "Belarusian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na bjeloruskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore bjeloruski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na bjeloruskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore bjeloruski."
 
 #~ msgid "Belarusian desktop"
-#~ msgstr "Bjeloruska radna povr¹ina"
+#~ msgstr "Bjeloruska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Belarusian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bjeloruski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bjeloruski."
 
 #~ msgid "Belarusian GNOME desktop"
-#~ msgstr "Bjeloruska radna povr¹ina"
+#~ msgstr "Bjeloruska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Belarusian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bjeloruski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bjeloruski."
 
 #~ msgid "Belarusian KDE desktop"
-#~ msgstr "Bjeloruska radna povr¹ina"
+#~ msgstr "Bjeloruska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Belarusian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bjeloruski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bjeloruski."
 
 #~ msgid "Bengali environment"
-#~ msgstr "Bengalsko okru¾enje"
+#~ msgstr "Bengalsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "makes it easier for Bengali speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore bengalski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore bengalski."
 
 #~ msgid "Bengali desktop"
-#~ msgstr "Bengalska radna povr¹ina"
+#~ msgstr "Bengalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Bengali."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bengalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bengalski."
 
 #~ msgid "Bengali GNOME desktop"
-#~ msgstr "Bengalska radna povr¹ina"
+#~ msgstr "Bengalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Bengali."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bengalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bengalski."
 
 #~ msgid "Bengali KDE desktop"
-#~ msgstr "Bengalska radna povr¹ina"
+#~ msgstr "Bengalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Bengali."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bengalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bengalski."
 
 #~ msgid "Bosnian environment"
-#~ msgstr "Bosansko okru¾enje"
+#~ msgstr "Bosansko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Bosnian to help Bosnian "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na bosanskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore bosanski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na bosanskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore bosanski."
 
 #~ msgid "Bosnian desktop"
-#~ msgstr "Bosanska radna povr¹ina"
+#~ msgstr "Bosanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Bosnian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bosanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bosanski."
 
 #~ msgid "Bosnian GNOME desktop"
-#~ msgstr "Bosanska radna povr¹ina"
+#~ msgstr "Bosanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Bosnian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bosanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bosanski."
 
 #~ msgid "Bosnian KDE desktop"
-#~ msgstr "Bosanska radna povr¹ina"
+#~ msgstr "Bosanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Bosnian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bosanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bosanski."
 
 #~ msgid "Brazilian Portuguese environment"
-#~ msgstr "Brazilsko portugalsko okru¾enje"
+#~ msgstr "Brazilsko portugalsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, and documentation that make it "
 #~ "easier for Brazilian Portuguese speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore brazilski portugalski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore brazilski portugalski."
 
 #~ msgid "Brazilian Portuguese desktop"
-#~ msgstr "Brazilski portugalska radna povr¹ina"
+#~ msgstr "Brazilski portugalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Brasilian Portuguese."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na brazilski portugalski."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na brazilski portugalski."
 
 #~ msgid "Brazilian Portuguese GNOME desktop"
-#~ msgstr "Brazilski portugalska radna povr¹ina"
+#~ msgstr "Brazilski portugalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Brazilian Portuguese."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na brazilski portugalski."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na brazilski portugalski."
 
 #~ msgid "Brazilian Portuguese KDE desktop"
-#~ msgstr "Brazilski portugalska radna povr¹ina"
+#~ msgstr "Brazilski portugalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Brazilian Portuguese."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na brazilski portugalski."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na brazilski portugalski."
 
 #~ msgid "British English environment"
-#~ msgstr "Britansko englesko okru¾enje"
+#~ msgstr "Britansko englesko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in British English to help "
 #~ "British English speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na britanskom engleskom "
-#~ "jeziku koji olak¹avaju uporabu Debiana osobama koje govore britanski "
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na britanskom engleskom "
+#~ "jeziku koji olakÅ¡avaju uporabu Debiana osobama koje govore britanski "
 #~ "engleski."
 
 #~ msgid "British English desktop"
-#~ msgstr "Britanska engleska radna povr¹ina"
+#~ msgstr "Britanska engleska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in British English."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na britanski engleski."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na britanski engleski."
 
 #~ msgid "British GNOME desktop"
-#~ msgstr "Britanska engleska radna povr¹ina"
+#~ msgstr "Britanska engleska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in British."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na irski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na irski."
 
 #~ msgid "British KDE desktop"
-#~ msgstr "Britanska engleska radna povr¹ina"
+#~ msgstr "Britanska engleska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in British."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na irski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na irski."
 
 #~ msgid "Bulgarian environment"
-#~ msgstr "Bugarsko okru¾enje"
+#~ msgstr "Bugarsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs and data files that make it easier for "
 #~ "Bulgarian speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe i podatkovne datoteke koji olak¹avaju "
+#~ "Ova zadaÄ‡a instalira programe i podatkovne datoteke koji olakÅ¡avaju "
 #~ "uporabu Debiana osobama koje govore bugarski."
 
 #~ msgid "Bulgarian desktop"
-#~ msgstr "Bugarska radna povr¹ina"
+#~ msgstr "Bugarska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Bulgarian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bugarski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bugarski."
 
 #~ msgid "Bulgarian GNOME desktop"
-#~ msgstr "Bugarska radna povr¹ina"
+#~ msgstr "Bugarska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Bulgarian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bugarski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bugarski."
 
 #~ msgid "Bulgarian KDE desktop"
-#~ msgstr "Bugarska radna povr¹ina"
+#~ msgstr "Bugarska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Bulgarian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na bugarski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na bugarski."
 
 #~ msgid "Catalan environment"
-#~ msgstr "Katalansko okru¾enje"
+#~ msgstr "Katalansko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Catalan to help Catalan "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na katalonskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore katalanski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na katalonskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore katalanski."
 
 #~ msgid "Catalan desktop"
-#~ msgstr "Katalanska radna povr¹ina"
+#~ msgstr "Katalanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Catalan."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na katalanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na katalanski."
 
 #~ msgid "Catalan GNOME desktop"
-#~ msgstr "Katalanska radna povr¹ina"
+#~ msgstr "Katalanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Catalan."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na katalanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na katalanski."
 
 #~ msgid "Catalan KDE desktop"
-#~ msgstr "Katalanska radna povr¹ina"
+#~ msgstr "Katalanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Catalan."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na katalanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na katalanski."
 
 #~ msgid "Simplified Chinese environment"
-#~ msgstr "Pojednostavljeno kinesko okru¾enje"
+#~ msgstr "Pojednostavljeno kinesko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "make it easier for Chinese speakers to use Debian, using the simplified "
 #~ "Chinese encoding."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore kineski, koristeæi "
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore kineski, koristeÄ‡i "
 #~ "pojednostavljenu kinesku kodnu stranicu."
 
 #~ msgid "Simplified Chinese desktop"
-#~ msgstr "Pojednostavljeni kineska radna povr¹ina"
+#~ msgstr "Pojednostavljeni kineska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Simplified Chinese."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na pojednostavljeni kineski."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na pojednostavljeni kineski."
 
 #~ msgid "Chinese-s GNOME desktop"
-#~ msgstr "Vijetnamska radna povr¹ina"
+#~ msgstr "Vijetnamska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Chinese-s."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vijetnamski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na vijetnamski."
 
 #~ msgid "Chinese-s KDE desktop"
-#~ msgstr "Vijetnamska radna povr¹ina"
+#~ msgstr "Vijetnamska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Chinese-s."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vijetnamski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na vijetnamski."
 
 #~ msgid "Traditional Chinese environment"
-#~ msgstr "Tradicionalno kinesko okru¾enje"
+#~ msgstr "Tradicionalno kinesko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "make it easier for Chinese speakers to use Debian, using the traditional "
 #~ "Chinese encoding."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore kineski, koristeæi "
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore kineski, koristeÄ‡i "
 #~ "tradicionalnu kinesku kodnu stranicu."
 
 #~ msgid "Traditional Chinese desktop"
-#~ msgstr "Tradicionalno kinesko okru¾enje"
+#~ msgstr "Tradicionalno kinesko okruÅ¾enje"
 
 #~ msgid "This task localises the desktop in Traditional Chinese."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na tradicionalni kineski."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na tradicionalni kineski."
 
 #~ msgid "Chinese-t GNOME desktop"
-#~ msgstr "Vijetnamska radna povr¹ina"
+#~ msgstr "Vijetnamska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Chinese-t."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vijetnamski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na vijetnamski."
 
 #~ msgid "Chinese-t KDE desktop"
-#~ msgstr "Vijetnamska radna povr¹ina"
+#~ msgstr "Vijetnamska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Chinese-t."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vijetnamski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na vijetnamski."
 
 #~ msgid "Croatian environment"
-#~ msgstr "Hrvatsko okru¾enje"
+#~ msgstr "Hrvatsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Croatian to help "
 #~ "Croatian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na hrvatskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore hrvatski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na hrvatskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore hrvatski."
 
 #~ msgid "Croatian desktop"
-#~ msgstr "Hrvatska radna povr¹ina"
+#~ msgstr "Hrvatska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Croatian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na hrvatski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na hrvatski."
 
 #~ msgid "Croatian GNOME desktop"
-#~ msgstr "Hrvatska radna povr¹ina"
+#~ msgstr "Hrvatska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Croatian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na hrvatski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na hrvatski."
 
 #~ msgid "Croatian KDE desktop"
-#~ msgstr "Hrvatska radna povr¹ina"
+#~ msgstr "Hrvatska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Croatian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na hrvatski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na hrvatski."
 
 #~ msgid "Cyrillic environment"
-#~ msgstr "Æiriliæno okru¾enje"
+#~ msgstr "Ä†iriliÄ‡no okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task provides Cyrillic fonts and other software you will need in "
 #~ "order to use Cyrillic.  It supports Belarusian, Bulgarian, Macedonian, "
 #~ "Russian, Serbian and Ukrainian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pisma i programe za kori¹tenje æiriliènog okru¾enja."
-#~ "Podr¾ava bjeloruski, bugarski, makedonski, ruski, srpski i ukrajinski."
+#~ "Ova zadaÄ‡a instalira pisma i programe za koriÅ¡tenje Ä‡iriliÄnog okruÅ¾enja."
+#~ "PodrÅ¾ava bjeloruski, bugarski, makedonski, ruski, srpski i ukrajinski."
 
 #~ msgid "Cyrillic desktop"
-#~ msgstr "Æiriliæna radna povr¹ina"
+#~ msgstr "Ä†iriliÄ‡na radna povrÅ¡ina"
 
 #~ msgid ""
 #~ "This task localises the desktop in Cyrillic. It supports Belarusian, "
 #~ "Bulgarian, Macedonian, Russian, Serbian and Ukrainian."
 #~ msgstr ""
-#~ "Ova zadaæa lokalizira radnu povr¹inu za kori¹tenje æiriliène abecede. "
-#~ "Podr¾ava bjeloruski, bugarski, makedonski, ruski, srpski i ukrajinski "
+#~ "Ova zadaÄ‡a lokalizira radnu povrÅ¡inu za koriÅ¡tenje Ä‡iriliÄne abecede. "
+#~ "PodrÅ¾ava bjeloruski, bugarski, makedonski, ruski, srpski i ukrajinski "
 #~ "jezik."
 
 #~ msgid "Cyrillic GNOME desktop"
-#~ msgstr "Æiriliæna radna povr¹ina"
+#~ msgstr "Ä†iriliÄ‡na radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Cyrillic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na arapski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na arapski."
 
 #~ msgid "Cyrillic KDE desktop"
-#~ msgstr "Æiriliæna radna povr¹ina"
+#~ msgstr "Ä†iriliÄ‡na radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Cyrillic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na arapski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na arapski."
 
 #~ msgid "Czech environment"
-#~ msgstr "Èe¹ko okru¾enje"
+#~ msgstr "ÄŒeÅ¡ko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Czech to help Czech "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na èe¹kom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore èe¹ki."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na ÄeÅ¡kom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore ÄeÅ¡ki."
 
 #~ msgid "Czech desktop"
-#~ msgstr "Èe¹ka radna povr¹ina"
+#~ msgstr "ÄŒeÅ¡ka radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Czech."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na èe¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ÄeÅ¡ki."
 
 #~ msgid "Czech GNOME desktop"
-#~ msgstr "Èe¹ka radna povr¹ina"
+#~ msgstr "ÄŒeÅ¡ka radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Czech."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na èe¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ÄeÅ¡ki."
 
 #~ msgid "Czech KDE desktop"
-#~ msgstr "Èe¹ka radna povr¹ina"
+#~ msgstr "ÄŒeÅ¡ka radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Czech."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na èe¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ÄeÅ¡ki."
 
 #~ msgid "Danish environment"
-#~ msgstr "Dansko okru¾enje"
+#~ msgstr "Dansko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Danish to help Danish "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore danski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore danski."
 
 #~ msgid "Danish desktop"
-#~ msgstr "Danska radna povr¹ina"
+#~ msgstr "Danska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Danish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na danski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na danski."
 
 #~ msgid "Danish GNOME desktop"
-#~ msgstr "Danska radna povr¹ina"
+#~ msgstr "Danska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Danish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na danski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na danski."
 
 #~ msgid "Danish KDE desktop"
-#~ msgstr "Danska radna povr¹ina"
+#~ msgstr "Danska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Danish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na danski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na danski."
 
 #~ msgid "Dutch environment"
-#~ msgstr "Nizozemsko okru¾enje"
+#~ msgstr "Nizozemsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "makes it easier for Dutch speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore nizozemski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore nizozemski."
 
 #~ msgid "Dutch desktop"
-#~ msgstr "Nizozemska radna povr¹ina."
+#~ msgstr "Nizozemska radna povrÅ¡ina."
 
 #~ msgid "This task localises the desktop in Dutch."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na nizozemski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na nizozemski."
 
 #~ msgid "Dutch GNOME desktop"
-#~ msgstr "Nizozemska radna povr¹ina."
+#~ msgstr "Nizozemska radna povrÅ¡ina."
 
 #~ msgid "This task localises the GNOME desktop in Dutch."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na nizozemski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na nizozemski."
 
 #~ msgid "Dutch KDE desktop"
-#~ msgstr "Nizozemska radna povr¹ina."
+#~ msgstr "Nizozemska radna povrÅ¡ina."
 
 #~ msgid "This task localises the KDE desktop in Dutch."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na nizozemski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na nizozemski."
 
 #~ msgid "Dzongkha desktop"
-#~ msgstr "Dzongkha radna povr¹ina"
+#~ msgstr "Dzongkha radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Dzongkha."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik dzongkha."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik dzongkha."
 
 #~ msgid "Dzongkha GNOME desktop"
-#~ msgstr "Dzongkha radna povr¹ina"
+#~ msgstr "Dzongkha radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Dzongkha."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik dzongkha."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik dzongkha."
 
 #~ msgid "Dzongkha KDE desktop"
-#~ msgstr "Dzongkha radna povr¹ina"
+#~ msgstr "Dzongkha radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Dzongkha."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik dzongkha."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik dzongkha."
 
 #~ msgid "Esperanto desktop"
-#~ msgstr "Esperanto radna povr¹ina"
+#~ msgstr "Esperanto radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Esperanto."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na esperanto."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na esperanto."
 
 #~ msgid "Esperanto GNOME desktop"
-#~ msgstr "Esperanto radna povr¹ina"
+#~ msgstr "Esperanto radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Esperanto."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na esperanto."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na esperanto."
 
 #~ msgid "Esperanto KDE desktop"
-#~ msgstr "Esperanto radna povr¹ina"
+#~ msgstr "Esperanto radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Esperanto."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na esperanto."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na esperanto."
 
 #~ msgid "Estonian desktop"
-#~ msgstr "Estonska radna povr¹ina"
+#~ msgstr "Estonska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Estonian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na estonski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na estonski."
 
 #~ msgid "Estonian GNOME desktop"
-#~ msgstr "Estonska radna povr¹ina"
+#~ msgstr "Estonska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Estonian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na estonski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na estonski."
 
 #~ msgid "Estonian KDE desktop"
-#~ msgstr "Estonska radna povr¹ina"
+#~ msgstr "Estonska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Estonian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na estonski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na estonski."
 
 #~ msgid "Finnish environment"
-#~ msgstr "Finsko okru¾enje"
+#~ msgstr "Finsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Finnish to help Finnish "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na finskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore finski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na finskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore finski."
 
 #~ msgid "Finnish desktop"
-#~ msgstr "Finska radna povr¹ina"
+#~ msgstr "Finska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Finnish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na finski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na finski."
 
 #~ msgid "Finnish GNOME desktop"
-#~ msgstr "Finska radna povr¹ina"
+#~ msgstr "Finska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Finnish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na finski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na finski."
 
 #~ msgid "Finnish KDE desktop"
-#~ msgstr "Finska radna povr¹ina"
+#~ msgstr "Finska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Finnish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na finski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na finski."
 
 #~ msgid "French environment"
-#~ msgstr "Francusko okru¾enje"
+#~ msgstr "Francusko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in French to help French "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore francuski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore francuski."
 
 #~ msgid "French desktop"
-#~ msgstr "Francuska radna povr¹ina."
+#~ msgstr "Francuska radna povrÅ¡ina."
 
 #~ msgid "This task localises the desktop in French."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na francuski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na francuski."
 
 #~ msgid "French GNOME desktop"
-#~ msgstr "Francuska radna povr¹ina."
+#~ msgstr "Francuska radna povrÅ¡ina."
 
 #~ msgid "This task localises the GNOME desktop in French."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na francuski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na francuski."
 
 #~ msgid "French KDE desktop"
-#~ msgstr "Francuska radna povr¹ina."
+#~ msgstr "Francuska radna povrÅ¡ina."
 
 #~ msgid "This task localises the KDE desktop in French."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na francuski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na francuski."
 
 #~ msgid "Galician environment"
-#~ msgstr "Galicijsko okru¾enje"
+#~ msgstr "Galicijsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Galician to help "
 #~ "Galician speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na galicijskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore galicijski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na galicijskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore galicijski."
 
 #~ msgid "Galician desktop"
-#~ msgstr "Galicijska radna povr¹ina"
+#~ msgstr "Galicijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Galician."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na galicijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na galicijski."
 
 #~ msgid "Galician GNOME desktop"
-#~ msgstr "Galicijska radna povr¹ina"
+#~ msgstr "Galicijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Galician."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na galicijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na galicijski."
 
 #~ msgid "Galician KDE desktop"
-#~ msgstr "Galicijska radna povr¹ina"
+#~ msgstr "Galicijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Galician."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na galicijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na galicijski."
 
 #~ msgid "Georgian desktop"
-#~ msgstr "Gruzijska radna povr¹ina"
+#~ msgstr "Gruzijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Georgian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na gruzijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na gruzijski."
 
 #~ msgid "German environment"
-#~ msgstr "Njemaèko okru¾enje"
+#~ msgstr "NjemaÄko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in German to help German "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore njemaèki."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore njemaÄki."
 
 #~ msgid "German desktop"
-#~ msgstr "Njemaèka radna povr¹ina"
+#~ msgstr "NjemaÄka radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in German."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na njemaèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na njemaÄki."
 
 #~ msgid "German GNOME desktop"
-#~ msgstr "Njemaèka radna povr¹ina"
+#~ msgstr "NjemaÄka radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in German."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na njemaèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na njemaÄki."
 
 #~ msgid "German KDE desktop"
-#~ msgstr "Njemaèka radna povr¹ina"
+#~ msgstr "NjemaÄka radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in German."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na njemaèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na njemaÄki."
 
 #~ msgid "Greek environment"
-#~ msgstr "Grèko okru¾enje"
+#~ msgstr "GrÄko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Greek to help Greek "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore grèki."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore grÄki."
 
 #~ msgid "Greek desktop"
-#~ msgstr "Grèka radna povr¹ina."
+#~ msgstr "GrÄka radna povrÅ¡ina."
 
 #~ msgid "This task localises the desktop in Greek."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na grèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na grÄki."
 
 #~ msgid "Greek GNOME desktop"
-#~ msgstr "Grèka radna povr¹ina."
+#~ msgstr "GrÄka radna povrÅ¡ina."
 
 #~ msgid "This task localises the GNOME desktop in Greek."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na grèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na grÄki."
 
 #~ msgid "Greek KDE desktop"
-#~ msgstr "Grèka radna povr¹ina."
+#~ msgstr "GrÄka radna povrÅ¡ina."
 
 #~ msgid "This task localises the KDE desktop in Greek."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na grèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na grÄki."
 
 #~ msgid "Gujarati desktop"
-#~ msgstr "Gujarati radna povr¹ina"
+#~ msgstr "Gujarati radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Gujarati."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik gujarati."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik gujarati."
 
 #~ msgid "Gujarati GNOME desktop"
-#~ msgstr "Gujarati radna povr¹ina"
+#~ msgstr "Gujarati radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Gujarati."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik gujarati."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik gujarati."
 
 #~ msgid "Gujarati KDE desktop"
-#~ msgstr "Gujarati radna povr¹ina"
+#~ msgstr "Gujarati radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Gujarati."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik gujarati."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik gujarati."
 
 #~ msgid "Hebrew environment"
-#~ msgstr "Hebrejsko okru¾enje"
+#~ msgstr "Hebrejsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs and documentation in Hebrew to help Hebrew "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore hebrejski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore hebrejski."
 
 #~ msgid "Hebrew desktop"
-#~ msgstr "Hebrejska radna povr¹ina"
+#~ msgstr "Hebrejska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Hebrew."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na hebrejski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na hebrejski."
 
 #~ msgid "Hebrew GNOME desktop"
-#~ msgstr "Hebrejska radna povr¹ina"
+#~ msgstr "Hebrejska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Hebrew."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na hebrejski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na hebrejski."
 
 #~ msgid "Hebrew KDE desktop"
-#~ msgstr "Hebrejska radna povr¹ina"
+#~ msgstr "Hebrejska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Hebrew."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na hebrejski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na hebrejski."
 
 #~ msgid "Hindi environment"
-#~ msgstr "Hindi okru¾enje"
+#~ msgstr "Hindi okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "makes it easier for Hindi speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore hindi."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore hindi."
 
 #~ msgid "Hindi desktop"
-#~ msgstr "Hindi radna povr¹ina"
+#~ msgstr "Hindi radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Hindi."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik hindi."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik hindi."
 
 #~ msgid "Hindi GNOME desktop"
-#~ msgstr "Hindi radna povr¹ina"
+#~ msgstr "Hindi radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Hindi."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik hindi."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik hindi."
 
 #~ msgid "Hindi KDE desktop"
-#~ msgstr "Hindi radna povr¹ina"
+#~ msgstr "Hindi radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Hindi."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik hindi."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik hindi."
 
 #~ msgid "Hungarian environment"
-#~ msgstr "Mağarsko okru¾enje"
+#~ msgstr "MaÄ‘arsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Hungarian to help "
 #~ "Hungarian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe i dokumentaciju na mağarskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore mağarski."
+#~ "Ova zadaÄ‡a instalira programe i dokumentaciju na maÄ‘arskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore maÄ‘arski."
 
 #~ msgid "Hungarian desktop"
-#~ msgstr "Mağarska radna povr¹ina"
+#~ msgstr "MaÄ‘arska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Hungarian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na mağarski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na maÄ‘arski."
 
 #~ msgid "Hungarian GNOME desktop"
-#~ msgstr "Mağarska radna povr¹ina"
+#~ msgstr "MaÄ‘arska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Hungarian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na mağarski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na maÄ‘arski."
 
 #~ msgid "Hungarian KDE desktop"
-#~ msgstr "Mağarska radna povr¹ina"
+#~ msgstr "MaÄ‘arska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Hungarian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na mağarski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na maÄ‘arski."
 
 #~ msgid "Icelandic environment"
-#~ msgstr "Islandsko okru¾enje"
+#~ msgstr "Islandsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Icelandic to help "
 #~ "Icelandic speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na islandskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore islandski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na islandskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore islandski."
 
 #~ msgid "Icelandic desktop"
-#~ msgstr "Islandska radna povr¹ina"
+#~ msgstr "Islandska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Icelandic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na islandski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na islandski."
 
 #~ msgid "Icelandic GNOME desktop"
-#~ msgstr "Islandska radna povr¹ina"
+#~ msgstr "Islandska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Icelandic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na islandski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na islandski."
 
 #~ msgid "Icelandic KDE desktop"
-#~ msgstr "Islandska radna povr¹ina"
+#~ msgstr "Islandska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Icelandic."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na islandski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na islandski."
 
 #~ msgid "Irish environment"
-#~ msgstr "Irsko okru¾enje"
+#~ msgstr "Irsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Irish to help Irish "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na irskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore irski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na irskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore irski."
 
 #~ msgid "Irish desktop"
-#~ msgstr "Irska radna povr¹ina"
+#~ msgstr "Irska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Irish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na irski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na irski."
 
 #~ msgid "Irish GNOME desktop"
-#~ msgstr "Irska radna povr¹ina"
+#~ msgstr "Irska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Irish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na irski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na irski."
 
 #~ msgid "Irish KDE desktop"
-#~ msgstr "Irska radna povr¹ina"
+#~ msgstr "Irska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Irish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na irski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na irski."
 
 #~ msgid "Italian environment"
-#~ msgstr "Talijansko okru¾enje"
+#~ msgstr "Talijansko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Italian to help Italian "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore talijanski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore talijanski."
 
 #~ msgid "Italian desktop"
-#~ msgstr "Talijanska radna povr¹ina"
+#~ msgstr "Talijanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Italian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na talijanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na talijanski."
 
 #~ msgid "Italian GNOME desktop"
-#~ msgstr "Talijanska radna povr¹ina"
+#~ msgstr "Talijanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Italian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na talijanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na talijanski."
 
 #~ msgid "Italian KDE desktop"
-#~ msgstr "Talijanska radna povr¹ina"
+#~ msgstr "Talijanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Italian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na talijanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na talijanski."
 
 #~ msgid "Japanese environment"
-#~ msgstr "Japansko okru¾enje"
+#~ msgstr "Japansko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages that make it easier for Japanese speakers to "
 #~ "use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore japanski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore japanski."
 
 #~ msgid "Japanese desktop"
-#~ msgstr "Japanska radna povr¹ina"
+#~ msgstr "Japanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Japanese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na japanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na japanski."
 
 #~ msgid "Japanese GNOME desktop"
-#~ msgstr "Japanska radna povr¹ina"
+#~ msgstr "Japanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Japanese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na japanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na japanski."
 
 #~ msgid "Japanese KDE desktop"
-#~ msgstr "Japanska radna povr¹ina"
+#~ msgstr "Japanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Japanese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na japanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na japanski."
 
 #~ msgid "Khmer environment"
-#~ msgstr "Kmersko okru¾enje"
+#~ msgstr "Kmersko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Khmer to help Khmer "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na kmerskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore kmerski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na kmerskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore kmerski."
 
 #~ msgid "Khmer desktop"
-#~ msgstr "Kmerska radna povr¹ina"
+#~ msgstr "Kmerska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Khmer."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na kmerski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na kmerski."
 
 #~ msgid "Khmer GNOME desktop"
-#~ msgstr "Kmerska radna povr¹ina"
+#~ msgstr "Kmerska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Khmer."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na kmerski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na kmerski."
 
 #~ msgid "Khmer KDE desktop"
-#~ msgstr "Kmerska radna povr¹ina"
+#~ msgstr "Kmerska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Khmer."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na kmerski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na kmerski."
 
 #~ msgid "Korean environment"
-#~ msgstr "Korejsko okru¾enje"
+#~ msgstr "Korejsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages that make it easier for Korean speakers to "
 #~ "use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore korejski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore korejski."
 
 #~ msgid "Korean desktop"
-#~ msgstr "Korejska radna povr¹ina"
+#~ msgstr "Korejska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Korean."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na korejski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na korejski."
 
 #~ msgid "Korean GNOME desktop"
-#~ msgstr "Korejska radna povr¹ina"
+#~ msgstr "Korejska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Korean."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na korejski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na korejski."
 
 #~ msgid "Korean KDE desktop"
-#~ msgstr "Korejska radna povr¹ina"
+#~ msgstr "Korejska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Korean."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na korejski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na korejski."
 
 #~ msgid "Kurdish environment"
-#~ msgstr "Tursko okru¾enje"
+#~ msgstr "Tursko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Kurdish to help Kurds "
 #~ "use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na . jeziku koji olak¹avaju "
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na . jeziku koji olakÅ¡avaju "
 #~ "uporabu Debiana osobama koje govore turski."
 
 #~ msgid "Kurdish desktop"
-#~ msgstr "Turska radna povr¹ina"
+#~ msgstr "Turska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Kurdish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na turski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na turski."
 
 #~ msgid "Kurdish GNOME desktop"
-#~ msgstr "Turska radna povr¹ina"
+#~ msgstr "Turska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Kurdish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na turski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na turski."
 
 #~ msgid "Kurdish KDE desktop"
-#~ msgstr "Turska radna povr¹ina"
+#~ msgstr "Turska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Kurdish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na turski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na turski."
 
 #~ msgid "Latvian desktop"
-#~ msgstr "Latvijska radna povr¹ina"
+#~ msgstr "Latvijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Latvian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na latvijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na latvijski."
 
 #~ msgid "Latvian GNOME desktop"
-#~ msgstr "Latvijska radna povr¹ina"
+#~ msgstr "Latvijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Latvian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na latvijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na latvijski."
 
 #~ msgid "Latvian KDE desktop"
-#~ msgstr "Latvijska radna povr¹ina"
+#~ msgstr "Latvijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Latvian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na latvijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na latvijski."
 
 #~ msgid "Lithuanian environment"
-#~ msgstr "Litavsko okru¾enje"
+#~ msgstr "Litavsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Lithuanian to help "
 #~ "Lithuanian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na litavskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore litavski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na litavskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore litavski."
 
 #~ msgid "Lithuanian desktop"
-#~ msgstr "Litavska radna povr¹ina"
+#~ msgstr "Litavska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Lithuanian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na litavski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na litavski."
 
 #~ msgid "Lithuanian GNOME desktop"
-#~ msgstr "Litavska radna povr¹ina"
+#~ msgstr "Litavska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Lithuanian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na litavski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na litavski."
 
 #~ msgid "Lithuanian KDE desktop"
-#~ msgstr "Litavska radna povr¹ina"
+#~ msgstr "Litavska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Lithuanian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na litavski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na litavski."
 
 #~ msgid "Macedonian environment"
-#~ msgstr "Makedonsko okru¾enje"
+#~ msgstr "Makedonsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Macedonian to help "
 #~ "Macedonian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na makedonskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore makedonski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na makedonskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore makedonski."
 
 #~ msgid "Macedonian desktop"
-#~ msgstr "Makedonska radna povr¹ina"
+#~ msgstr "Makedonska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Macedonian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na makedonski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na makedonski."
 
 #~ msgid "Macedonian GNOME desktop"
-#~ msgstr "Makedonska radna povr¹ina"
+#~ msgstr "Makedonska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Macedonian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na makedonski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na makedonski."
 
 #~ msgid "Macedonian KDE desktop"
-#~ msgstr "Makedonska radna povr¹ina"
+#~ msgstr "Makedonska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Macedonian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na makedonski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na makedonski."
 
 #~ msgid "Malayalam desktop"
-#~ msgstr "Katalanska radna povr¹ina"
+#~ msgstr "Katalanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Malayalam."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na katalanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na katalanski."
 
 #~ msgid "Malayalam GNOME desktop"
-#~ msgstr "Katalanska radna povr¹ina"
+#~ msgstr "Katalanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Malayalam."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na katalanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na katalanski."
 
 #~ msgid "Malayalam KDE desktop"
-#~ msgstr "Katalanska radna povr¹ina"
+#~ msgstr "Katalanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Malayalam."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na katalanski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na katalanski."
 
 #~ msgid "Nepali desktop"
-#~ msgstr "Nepalska radna povr¹ina"
+#~ msgstr "Nepalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Nepali."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na nepalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na nepalski."
 
 #~ msgid "Nepali GNOME desktop"
-#~ msgstr "Nepalska radna povr¹ina"
+#~ msgstr "Nepalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Nepali."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na nepalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na nepalski."
 
 #~ msgid "Nepali KDE desktop"
-#~ msgstr "Nepalska radna povr¹ina"
+#~ msgstr "Nepalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Nepali."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na nepalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na nepalski."
 
 #~ msgid "North Sami environment"
-#~ msgstr "Tajlandsko okru¾enje"
+#~ msgstr "Tajlandsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in North Sami to help North "
 #~ "Sami speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore norve¹ki."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore norveÅ¡ki."
 
 #~ msgid "North Sami desktop"
-#~ msgstr "Sjeverni Sami radna povr¹ina"
+#~ msgstr "Sjeverni Sami radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in North Sami."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik Sjeverni Sami."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik Sjeverni Sami."
 
 #~ msgid "North Sami GNOME desktop"
-#~ msgstr "Sjeverni Sami radna povr¹ina"
+#~ msgstr "Sjeverni Sami radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in North Sami."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik Sjeverni Sami."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik Sjeverni Sami."
 
 #~ msgid "North Sami KDE desktop"
-#~ msgstr "Sjeverni Sami radna povr¹ina"
+#~ msgstr "Sjeverni Sami radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in North Sami."
 #~ msgstr ""
-#~ "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik Sjeverni Sami."
+#~ "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik Sjeverni Sami."
 
 #~ msgid "Norwegian (Bokmaal and Nynorsk) environment"
-#~ msgstr "Norve¹ko (Bokmaal i Nynorsk) okru¾enje"
+#~ msgstr "NorveÅ¡ko (Bokmaal i Nynorsk) okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Norwegian to help "
 #~ "Norwegian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore norve¹ki."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore norveÅ¡ki."
 
 #~ msgid "Norwegian (Bokmaal and Nynorsk) desktop"
-#~ msgstr "Norve¹ka (Bokmaal i Nynorsk) radna povr¹ina"
+#~ msgstr "NorveÅ¡ka (Bokmaal i Nynorsk) radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Norwegian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na norve¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na norveÅ¡ki."
 
 #~ msgid "Norwegian GNOME desktop"
-#~ msgstr "Gruzijska radna povr¹ina"
+#~ msgstr "Gruzijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Norwegian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na norve¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na norveÅ¡ki."
 
 #~ msgid "Norwegian KDE desktop"
-#~ msgstr "Gruzijska radna povr¹ina"
+#~ msgstr "Gruzijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Norwegian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na norve¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na norveÅ¡ki."
 
 #~ msgid "Persian environment"
-#~ msgstr "Perzijsko okru¾enje"
+#~ msgstr "Perzijsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "makes it easier for Persian speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore perzijski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore perzijski."
 
 #~ msgid "Persian desktop"
-#~ msgstr "Perzijska radna povr¹ina"
+#~ msgstr "Perzijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Persian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na perzijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na perzijski."
 
 #~ msgid "Persian GNOME desktop"
-#~ msgstr "Perzijska radna povr¹ina"
+#~ msgstr "Perzijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Persian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na perzijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na perzijski."
 
 #~ msgid "Persian KDE desktop"
-#~ msgstr "Perzijska radna povr¹ina"
+#~ msgstr "Perzijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Persian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na perzijski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na perzijski."
 
 #~ msgid "Polish environment"
-#~ msgstr "Poljsko okru¾enje"
+#~ msgstr "Poljsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Polish to help Polish "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore poljski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore poljski."
 
 #~ msgid "Polish desktop"
-#~ msgstr "Poljska radna povr¹ina"
+#~ msgstr "Poljska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Polish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na poljski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na poljski."
 
 #~ msgid "Polish GNOME desktop"
-#~ msgstr "Poljska radna povr¹ina"
+#~ msgstr "Poljska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Polish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na poljski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na poljski."
 
 #~ msgid "Polish KDE desktop"
-#~ msgstr "Poljska radna povr¹ina"
+#~ msgstr "Poljska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Polish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na poljski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na poljski."
 
 #~ msgid "Portuguese environment"
-#~ msgstr "Portugalsko okru¾enje"
+#~ msgstr "Portugalsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Portuguese to help "
 #~ "Portuguese speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na portugalskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore portugalski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na portugalskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore portugalski."
 
 #~ msgid "Portuguese desktop"
-#~ msgstr "Portugalska radna povr¹ina"
+#~ msgstr "Portugalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Portuguese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na portugalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na portugalski."
 
 #~ msgid "Portuguese GNOME desktop"
-#~ msgstr "Portugalska radna povr¹ina"
+#~ msgstr "Portugalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Portuguese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na portugalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na portugalski."
 
 #~ msgid "Portuguese KDE desktop"
-#~ msgstr "Portugalska radna povr¹ina"
+#~ msgstr "Portugalska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Portuguese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na portugalski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na portugalski."
 
 #~ msgid "Punjabi environment"
-#~ msgstr "Pand¾apsko okru¾enje"
+#~ msgstr "PandÅ¾apsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "makes it easier for Punjabi speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore pand¾apski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore pandÅ¾apski."
 
 #~ msgid "Punjabi desktop"
-#~ msgstr "Pand¾apska radna povr¹ina"
+#~ msgstr "PandÅ¾apska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Punjabi."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na pand¾apski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na pandÅ¾apski."
 
 #~ msgid "Punjabi GNOME desktop"
-#~ msgstr "Pand¾apska radna povr¹ina"
+#~ msgstr "PandÅ¾apska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Punjabi."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na pand¾apski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na pandÅ¾apski."
 
 #~ msgid "Punjabi KDE desktop"
-#~ msgstr "Pand¾apska radna povr¹ina"
+#~ msgstr "PandÅ¾apska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Punjabi."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na pand¾apski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na pandÅ¾apski."
 
 #~ msgid "Romanian environment"
-#~ msgstr "Rumunjsko okru¾enje"
+#~ msgstr "Rumunjsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Romanian to help "
 #~ "Romanian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na rumunjskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore rumunjski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na rumunjskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore rumunjski."
 
 #~ msgid "Romanian desktop"
-#~ msgstr "Rumunjska radna povr¹ina"
+#~ msgstr "Rumunjska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Romanian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na rumunjski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na rumunjski."
 
 #~ msgid "Romanian GNOME desktop"
-#~ msgstr "Rumunjska radna povr¹ina"
+#~ msgstr "Rumunjska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Romanian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na rumunjski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na rumunjski."
 
 #~ msgid "Romanian KDE desktop"
-#~ msgstr "Rumunjska radna povr¹ina"
+#~ msgstr "Rumunjska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Romanian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na rumunjski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na rumunjski."
 
 #~ msgid "Russian environment"
-#~ msgstr "Rusko okru¾enje"
+#~ msgstr "Rusko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs and documentation in Russian to help Russian "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore ruski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore ruski."
 
 #~ msgid "Russian desktop"
-#~ msgstr "Ruska radna povr¹ina"
+#~ msgstr "Ruska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Russian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ruski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ruski."
 
 #~ msgid "Russian GNOME desktop"
-#~ msgstr "Ruska radna povr¹ina"
+#~ msgstr "Ruska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Russian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ruski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ruski."
 
 #~ msgid "Russian KDE desktop"
-#~ msgstr "Ruska radna povr¹ina"
+#~ msgstr "Ruska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Russian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ruski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ruski."
 
 #~ msgid "Serbian environment"
-#~ msgstr "Srbijansko okru¾enje"
+#~ msgstr "Srbijansko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Serbian to help Serbian "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹ava uporabu Debiana osobama koje govore srpski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡ava uporabu Debiana osobama koje govore srpski."
 
 #~ msgid "Serbian desktop"
-#~ msgstr "Srbijanska radna povr¹ina"
+#~ msgstr "Srbijanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Serbian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na srpskii."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na srpskii."
 
 #~ msgid "Serbian GNOME desktop"
-#~ msgstr "Srbijanska radna povr¹ina"
+#~ msgstr "Srbijanska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Serbian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na srpskii."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na srpskii."
 
 #~ msgid "Serbian KDE desktop"
-#~ msgstr "Perzijska radna povr¹ina"
+#~ msgstr "Perzijska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Serbian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na srpskii."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na srpskii."
 
 #~ msgid "Slovak environment"
-#~ msgstr "Slovaèko okru¾enje"
+#~ msgstr "SlovaÄko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Slovak to help Slovak "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na slovaèkom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore slovaèki."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na slovaÄkom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore slovaÄki."
 
 #~ msgid "Slovak desktop"
-#~ msgstr "Slovaèka radna povr¹ina"
+#~ msgstr "SlovaÄka radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Slovak."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na slovaèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na slovaÄki."
 
 #~ msgid "Slovak GNOME desktop"
-#~ msgstr "Slovaèka radna povr¹ina"
+#~ msgstr "SlovaÄka radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Slovak."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na slovaèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na slovaÄki."
 
 #~ msgid "Slovak KDE desktop"
-#~ msgstr "Slovaèka radna povr¹ina"
+#~ msgstr "SlovaÄka radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Slovak."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na slovaèki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na slovaÄki."
 
 #~ msgid "Slovenian environment"
-#~ msgstr "Slovensko okru¾enje"
+#~ msgstr "Slovensko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Slovenian to help "
 #~ "Slovenian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na slovenskom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore slovenski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na slovenskom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore slovenski."
 
 #~ msgid "Slovenian desktop"
-#~ msgstr "Slovenska radna povr¹ina"
+#~ msgstr "Slovenska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Slovenian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na slovenski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na slovenski."
 
 #~ msgid "Slovenian GNOME desktop"
-#~ msgstr "Slovenska radna povr¹ina"
+#~ msgstr "Slovenska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Slovenian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na slovenski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na slovenski."
 
 #~ msgid "Slovenian KDE desktop"
-#~ msgstr "Slovenska radna povr¹ina"
+#~ msgstr "Slovenska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Slovenian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na slovenski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na slovenski."
 
 #~ msgid "Spanish environment"
-#~ msgstr "©panjolsko okru¾enje"
+#~ msgstr "Å panjolsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, and documentation that make it "
 #~ "easier for Spanish speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke i dokumentaciju koja "
-#~ "olak¹avaju uporabu Debiana osobama koje govore ¹panjolski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke i dokumentaciju koja "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore Å¡panjolski."
 
 #~ msgid "Spanish desktop"
-#~ msgstr "©panjolska radna povr¹ina"
+#~ msgstr "Å panjolska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Spanish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ¹panjolski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na Å¡panjolski."
 
 #~ msgid "Spanish GNOME desktop"
-#~ msgstr "©panjolska radna povr¹ina"
+#~ msgstr "Å panjolska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Spanish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ¹panjolski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na Å¡panjolski."
 
 #~ msgid "Spanish KDE desktop"
-#~ msgstr "©panjolska radna povr¹ina"
+#~ msgstr "Å panjolska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Spanish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ¹panjolski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na Å¡panjolski."
 
 #~ msgid "Swedish environment"
-#~ msgstr "©vedsko okru¾enje"
+#~ msgstr "Å vedsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Swedish to help Swedish "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na . jeziku koji olak¹avaju "
-#~ "uporabu Debiana osobama koje govore ¹vedski."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na . jeziku koji olakÅ¡avaju "
+#~ "uporabu Debiana osobama koje govore Å¡vedski."
 
 #~ msgid "Swedish desktop"
-#~ msgstr "©vedska radna povr¹ina"
+#~ msgstr "Å vedska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Swedish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ¹vedski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na Å¡vedski."
 
 #~ msgid "Swedish GNOME desktop"
-#~ msgstr "©vedska radna povr¹ina"
+#~ msgstr "Å vedska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Swedish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ¹vedski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na Å¡vedski."
 
 #~ msgid "Swedish KDE desktop"
-#~ msgstr "©vedska radna povr¹ina"
+#~ msgstr "Å vedska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Swedish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ¹vedski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na Å¡vedski."
 
 #~ msgid "Tagalog environment"
-#~ msgstr "Tagalog okru¾enje"
+#~ msgstr "Tagalog okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Tagalog to help Tagalog "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na jeziku tagalog koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore tagalog."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na jeziku tagalog koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore tagalog."
 
 #~ msgid "Tamil environment"
-#~ msgstr "Tamilsko okru¾enje"
+#~ msgstr "Tamilsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs, data files, fonts, and documentation that "
 #~ "makes it easier for Tamil speakers to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira programe, podatkovne datoteke, pisma i dokumentaciju "
-#~ "koja olak¹ava uporabu Debiana osobama koje govore tamilski."
+#~ "Ova zadaÄ‡a instalira programe, podatkovne datoteke, pisma i dokumentaciju "
+#~ "koja olakÅ¡ava uporabu Debiana osobama koje govore tamilski."
 
 #~ msgid "Tamil desktop"
-#~ msgstr "Tamilska radna povr¹ina"
+#~ msgstr "Tamilska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Tamil."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na tamilski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na tamilski."
 
 #~ msgid "Tamil GNOME desktop"
-#~ msgstr "Tamilska radna povr¹ina"
+#~ msgstr "Tamilska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Tamil."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na tamilski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na tamilski."
 
 #~ msgid "Tamil KDE desktop"
-#~ msgstr "Tamilska radna povr¹ina"
+#~ msgstr "Tamilska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Tamil."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na tamilski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na tamilski."
 
 #~ msgid "Thai environment"
-#~ msgstr "Tajlandsko okru¾enje"
+#~ msgstr "Tajlandsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages that make it easier for Thai speaking people "
 #~ "to use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na . jeziku koji olak¹avaju "
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na . jeziku koji olakÅ¡avaju "
 #~ "uporabu Debiana osobama koje govore tajlandski."
 
 #~ msgid "Thai desktop"
-#~ msgstr "Tajlandska radna povr¹ina"
+#~ msgstr "Tajlandska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Thai."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na tajlandski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na tajlandski."
 
 #~ msgid "Thai GNOME desktop"
-#~ msgstr "Tajlandska radna povr¹ina"
+#~ msgstr "Tajlandska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Thai."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na tajlandski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na tajlandski."
 
 #~ msgid "Thai KDE desktop"
-#~ msgstr "Tajlandska radna povr¹ina"
+#~ msgstr "Tajlandska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Thai."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na tajlandski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na tajlandski."
 
 #~ msgid "Turkish environment"
-#~ msgstr "Tursko okru¾enje"
+#~ msgstr "Tursko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Turkish to help Turkish "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na . jeziku koji olak¹avaju "
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na . jeziku koji olakÅ¡avaju "
 #~ "uporabu Debiana osobama koje govore turski."
 
 #~ msgid "Turkish desktop"
-#~ msgstr "Turska radna povr¹ina"
+#~ msgstr "Turska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Turkish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na turski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na turski."
 
 #~ msgid "Turkish GNOME desktop"
-#~ msgstr "Turska radna povr¹ina"
+#~ msgstr "Turska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Turkish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na turski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na turski."
 
 #~ msgid "Turkish KDE desktop"
-#~ msgstr "Turska radna povr¹ina"
+#~ msgstr "Turska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Turkish."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na turski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na turski."
 
 #~ msgid "Ukrainian environment"
-#~ msgstr "Ukrajinsko okru¾enje"
+#~ msgstr "Ukrajinsko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs programs and documentation in Ukrainian to help "
 #~ "Ukrainian speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na . jeziku koji olak¹avaju "
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na . jeziku koji olakÅ¡avaju "
 #~ "uporabu Debiana osobama koje govore ukrajinski."
 
 #~ msgid "Ukrainian desktop"
-#~ msgstr "Ukrajinska radna povr¹ina"
+#~ msgstr "Ukrajinska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Ukrainian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ukrajinski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ukrajinski."
 
 #~ msgid "Ukrainian GNOME desktop"
-#~ msgstr "Ukrajinska radna povr¹ina"
+#~ msgstr "Ukrajinska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Ukrainian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ukrajinski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ukrajinski."
 
 #~ msgid "Ukrainian KDE desktop"
-#~ msgstr "Ukrajinska radna povr¹ina"
+#~ msgstr "Ukrajinska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Ukrainian."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na ukrajinski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na ukrajinski."
 
 #~ msgid "Vietnamese desktop"
-#~ msgstr "Vijetnamska radna povr¹ina"
+#~ msgstr "Vijetnamska radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Vietnamese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vijetnamski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na vijetnamski."
 
 #~ msgid "Vietnamese GNOME desktop"
-#~ msgstr "Vijetnamska radna povr¹ina"
+#~ msgstr "Vijetnamska radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Vietnamese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vijetnamski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na vijetnamski."
 
 #~ msgid "Vietnamese KDE desktop"
-#~ msgstr "Vijetnamska radna povr¹ina"
+#~ msgstr "Vijetnamska radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Vietnamese."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vijetnamski."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na vijetnamski."
 
 #~ msgid "Welsh environment"
-#~ msgstr "Vel¹ko okru¾enje"
+#~ msgstr "VelÅ¡ko okruÅ¾enje"
 
 #~ msgid ""
 #~ "This task installs packages and documentation in Welsh to help Welsh "
 #~ "speaking people use Debian."
 #~ msgstr ""
-#~ "Ova zadaæa instalira pakete i dokumentaciju na vel¹kom jeziku koji "
-#~ "olak¹avaju uporabu Debiana osobama koje govore vel¹ki."
+#~ "Ova zadaÄ‡a instalira pakete i dokumentaciju na velÅ¡kom jeziku koji "
+#~ "olakÅ¡avaju uporabu Debiana osobama koje govore velÅ¡ki."
 
 #~ msgid "Welsh desktop"
-#~ msgstr "Vel¹ka radna povr¹ina"
+#~ msgstr "VelÅ¡ka radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Welsh."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vel¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na velÅ¡ki."
 
 #~ msgid "Welsh GNOME desktop"
-#~ msgstr "Vel¹ka radna povr¹ina"
+#~ msgstr "VelÅ¡ka radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Welsh."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vel¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na velÅ¡ki."
 
 #~ msgid "Welsh KDE desktop"
-#~ msgstr "Vel¹ka radna povr¹ina"
+#~ msgstr "VelÅ¡ka radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Welsh."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na vel¹ki."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na velÅ¡ki."
 
 #~ msgid "Xhosa desktop"
-#~ msgstr "Xhosa radna povr¹ina"
+#~ msgstr "Xhosa radna povrÅ¡ina"
 
 #~ msgid "This task localises the desktop in Xhosa."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik Xhosa."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik Xhosa."
 
 #~ msgid "Xhosa GNOME desktop"
-#~ msgstr "Xhosa radna povr¹ina"
+#~ msgstr "Xhosa radna povrÅ¡ina"
 
 #~ msgid "This task localises the GNOME desktop in Xhosa."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik Xhosa."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik Xhosa."
 
 #~ msgid "Xhosa KDE desktop"
-#~ msgstr "Xhosa radna povr¹ina"
+#~ msgstr "Xhosa radna povrÅ¡ina"
 
 #~ msgid "This task localises the KDE desktop in Xhosa."
-#~ msgstr "Ova zadaæa donosi radnu povr¹inu lokaliziranu na jezik Xhosa."
+#~ msgstr "Ova zadaÄ‡a donosi radnu povrÅ¡inu lokaliziranu na jezik Xhosa."

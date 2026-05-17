@@ -1,0 +1,14 @@
+Task: development-tools
+Section: user
+Description: Development tools
+ Compiler toolchain, version control, editors, and runtime
+ diagnostic helpers for software development on Athena.  Mirrors
+ the content of config/pkg.list [development-tools] — keep in
+ sync when adding/removing packages.
+Key:
+ build-essential
+ git
+ vim
+ less
+ htop
+ strace

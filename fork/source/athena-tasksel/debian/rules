@@ -1,13 +1,23 @@
 #! /usr/bin/make -f
-# Athena fork of tasksel: builds only the athena-tasksel binary
-# (the engine), not tasksel-data or any task-* meta-packages
-# (those continue to come from upstream tasksel source).
+# Athena fork of tasksel — multi-binary source pkg producing:
+#   * athena-tasksel       (the engine — /usr/bin/tasksel)
+#   * athena-tasksel-data  (the data — /usr/share/tasksel/descs/
+#                           athena-tasks.desc + tasks/* + helpers)
+# The 40+ upstream task-* meta-packages continue to come from the
+# upstream tasksel source build (in cache, source-built normally) —
+# kept per user instruction; cleanup deferred to DEF-3.
 
 %:
 	dh $@ --no-parallel
 
 override_dh_auto_install:
-	$(MAKE) install DESTDIR=`pwd`/debian/athena-tasksel
+	$(MAKE) install      DESTDIR=`pwd`/debian/athena-tasksel
+	$(MAKE) install-data DESTDIR=`pwd`/debian/athena-tasksel-data
+	# Rename Makefile's `debian-tasks.desc` output to Athena identity
+	# (file-only rename; tasksel reads any *.desc in the dir).  See
+	# FORK-01 Step 5b 2026-05-17 — Athena ships as Athena.
+	mv debian/athena-tasksel-data/usr/share/tasksel/descs/debian-tasks.desc \
+	   debian/athena-tasksel-data/usr/share/tasksel/descs/athena-tasks.desc
 
 override_dh_installdocs:
 	dh_installdocs --link-doc=athena-tasksel
