@@ -12,6 +12,11 @@ Bug-Athena: libyaml's debian/rules override_dh_installdocs-indep
  Fix: guard the doxygen-driven docs step on the nodoc build option,
  matching the pattern Debian recommends for nodoc-aware rules.
  Behaviour without nodoc is unchanged (dh_doxygen runs as before).
+ .
+ TEMPORARY: nodoc is a workaround for missing doc-build tooling in
+ the build pool, not a permanent policy.  DELETE THIS PATCH when
+ CONF-08 lands and nodoc is dropped from [Source] BuildOptions /
+ BuildProfiles in config/build.conf.
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/debian/rules

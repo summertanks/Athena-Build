@@ -13,6 +13,11 @@ Bug-Athena: protobuf's override_dh_installdocs-arch in debian/rules
  Fix: bracket the chmod with a file-presence test and use `rm -f`
  (silent on missing).  Behaviour without nodoc is identical (the
  file IS present and chmod runs as before).
+ .
+ TEMPORARY: nodoc is a workaround for missing doc-build tooling in
+ the build pool, not a permanent policy.  DELETE THIS PATCH when
+ CONF-08 lands and nodoc is dropped from [Source] BuildOptions /
+ BuildProfiles in config/build.conf.
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/debian/rules
