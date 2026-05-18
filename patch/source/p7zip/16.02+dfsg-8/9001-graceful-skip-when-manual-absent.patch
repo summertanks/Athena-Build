@@ -14,6 +14,11 @@ Bug-Athena: debian/p7zip-full.links is an executable config script that
  (legitimate nodoc build), exit 0 with no symlinks to generate.
  .
  Behaviour with manual present (default upstream build) is unchanged.
+ .
+ TEMPORARY: nodoc is a workaround for missing doc-build tooling in
+ the build pool, not a permanent policy.  DELETE THIS PATCH when
+ CONF-08 lands and nodoc is dropped from [Source] BuildOptions /
+ BuildProfiles in config/build.conf.
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/debian/p7zip-full.links
