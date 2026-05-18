@@ -17,7 +17,7 @@ from tui import Prompt, PROMPT_OPTIONS
 logger = logging.getLogger('athena')
 
 
-def _auto_pick_candidate(candidates):
+def _auto_pick_candidate(candidates, prefer_name=None):
     """Collapse same-name version dupes; auto-pick if one Package name remains.
 
     Returns (picked_or_None, collapsed_list).
@@ -27,10 +27,18 @@ def _auto_pick_candidate(candidates):
     version satisfying constraints" rule.  Result is sorted alphabetically by
     Package name for deterministic prompt ordering.
 
-    Auto-pick: if only one Package name remains after collapse, return it.
-    Otherwise return (None, collapsed_list) so the caller can prompt with the
-    deduplicated set (genuine alternative providers like mawk vs gawk for the
-    virtual `awk`).
+    Auto-pick rules (in order):
+      1. `prefer_name` matches a Package: name in the collapsed set — auto-
+         pick that one.  Mirrors apt's rule that a real package wins over
+         virtual `Provides:` when names match.  Example: seed `anacron` →
+         candidates {anacron, systemd-cron (Provides anacron)} → pick
+         anacron, never systemd-cron.  Without this rule the resolver
+         falls through to highest-version-across-names (or a prompt) and
+         can pick a provider whose Conflicts then blow up the lookahead
+         (caught 2026-05-18 with anacron vs systemd-cron in [laptop]).
+      2. Only one Package name in the collapsed set — auto-pick it.
+      3. Multiple names remain — return (None, collapsed) so caller prompts
+         or applies a per-tree fallback (e.g. udeb-tree's highest-version).
     """
     if not candidates:
         return None, []
@@ -40,6 +48,10 @@ def _auto_pick_candidate(candidates):
     _collapsed = [max(_versions, key=lambda p: p.version)
                   for _versions in _by_name.values()]
     _collapsed.sort(key=lambda p: p['Package'])
+    if prefer_name is not None:
+        for _c in _collapsed:
+            if _c['Package'] == prefer_name:
+                return _c, _collapsed
     if len(_collapsed) == 1:
         return _collapsed[0], _collapsed
     return None, _collapsed
@@ -175,8 +187,11 @@ class DependencyTree:
             # 2. Select version — auto-pick when only versions differ
             # (mechanically correct within a coherent mirror set), prompt
             # only on genuine alternative providers (different Package
-            # names like mawk vs gawk for `awk`).
-            _auto, _collapsed = _auto_pick_candidate(_candidates)
+            # names like mawk vs gawk for `awk`).  Pass prefer_name=
+            # _pkg_name so a real package whose name matches the seed
+            # wins over virtual Provides (e.g. anacron real > systemd-
+            # cron Provides anacron) — apt's same rule.
+            _auto, _collapsed = _auto_pick_candidate(_candidates, prefer_name=_pkg_name)
             if _auto is None and self._auto_pick_highest_when_ambiguous and _collapsed:
                 # Udeb-tree fallback: multiple providers with different
                 # Package names — pick the highest version across names
@@ -409,7 +424,9 @@ class DependencyTree:
         # coherent mirror set this is always correct and matches apt.
         # Prompt only when names differ (genuine alternative providers).
         elif len(_pkg_candidates) > 1:
-            _auto, _collapsed = _auto_pick_candidate(_pkg_candidates)
+            # Same prefer_name= logic as add_lookahead: real package whose
+            # name matches the dep wins over Provides-only candidates.
+            _auto, _collapsed = _auto_pick_candidate(_pkg_candidates, prefer_name=package_name)
             if _auto is None and self._auto_pick_highest_when_ambiguous and _collapsed:
                 # Udeb-tree fallback: highest-version across multi-name
                 # providers (typical for kernel-ABI udeb variants — see
