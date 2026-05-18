@@ -5279,6 +5279,8 @@ class _PrintSessionStub:
             release = 'bookworm'
             baseid = 'debian'
             baseversion = '12'
+            build_distribution = 'Athena'
+            build_base_id = 'athena'
             build_codename = 'athena'
             build_version = '0.1'
             mirrors: list = []

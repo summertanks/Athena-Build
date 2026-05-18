@@ -120,7 +120,7 @@ class _IsoMixin:
         cfg = self._config
         # Strip any stray quotes that may be embedded in the config values
         # (e.g. VERSION = "0.1" parsed with the surrounding quotes intact).
-        _codename = cfg.build_codename.strip('"').strip("'")
+        _name     = cfg.build_distribution.strip('"').strip("'")
         _version  = cfg.build_version.strip('"').strip("'")
         # Pick a random live-user name per build so SSH attackers do not
         # have a fixed `root` (or `user`) target — the username becomes
@@ -132,7 +132,7 @@ class _IsoMixin:
             'set default=0\n'
             'set timeout=5\n'
             '\n'
-            f'menuentry "{_codename} {_version} (live as {_live_user})" {{\n'
+            f'menuentry "{_name} {_version} (live as {_live_user})" {{\n'
             # boot=live   — triggers live-boot to find and mount the squashfs root
             # components  — tells live-boot to activate all its hook scripts
             # console=tty0 — ensures kernel messages go to the screen (visible in QEMU)
