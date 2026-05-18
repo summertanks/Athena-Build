@@ -184,12 +184,14 @@ def drift_report(cfg, dt):
         filename = os.path.basename(pkg_obj.get('Filename', ''))
         if not filename:
             continue
-        # Strip Debian binNMU suffix '+bN' so we look up '...-2_amd64.deb'
-        # instead of '...-2+b2_amd64.deb'.  utils.strip_build_version is the
-        # single source of truth shared with parse_sources and
-        # BuildSystem._get_deb_files.  Tolerate malformed entries.
+        # Map cache Filename → on-disk filename: strip binNMU '+bN',
+        # then apply our distro suffix ('+thor1') to match what
+        # BuildContainer's changelog prepend produced.  Single source of
+        # truth shared with parse_sources, _get_deb_files,
+        # _resolve_udeb_files.  Tolerate malformed entries.
         try:
             filename = utils.strip_build_version(filename)
+            filename = utils.apply_distro_suffix(filename, cfg.distro_suffix)
         except ValueError:
             pass  # fall back to original filename
         deb_path = os.path.join(cfg.dir_repo, filename)

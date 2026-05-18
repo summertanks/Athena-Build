@@ -47,6 +47,7 @@ def build_installer_chroot(
     installer_dir: str,
     password: str,
     codename: str = 'sid',
+    distro_suffix: str = '',
 ) -> bool:
     """Build the installer chroot end to end.
 
@@ -68,7 +69,7 @@ def build_installer_chroot(
     if not _bootstrap_dpkg(dir_chroot_installer, password):
         return False
 
-    _udeb_files = _resolve_udeb_files(udeb_tree, dir_repo)
+    _udeb_files = _resolve_udeb_files(udeb_tree, dir_repo, distro_suffix)
     if not _udeb_files:
         tui.console.print(
             "ERROR: no udeb files resolved from repo — was 'source build "
@@ -213,17 +214,19 @@ def _bootstrap_dpkg(dir_chroot_installer: str, password: str) -> bool:
     return True
 
 
-def _resolve_udeb_files(udeb_tree, dir_repo: str) -> List[str]:
+def _resolve_udeb_files(
+    udeb_tree, dir_repo: str, distro_suffix: str = '',
+) -> List[str]:
     """Map udeb_tree.selected_pkgs canonical names → absolute .udeb paths in
     repo/.
 
-    Uses the Filename field from the udeb's Packages-index record and
-    strips any binNMU suffix (+bN) via utils.strip_build_version — same
-    pattern as chroot.py's _get_deb_files for the deb world.  This
-    matches what dpkg-buildpackage actually emits: a source rebuild of
-    `foo` whose index version is `1.0-2+b7` produces a file named
-    `foo_1.0-2_amd64.udeb` on disk (no `+b7`).  Constructing the
-    filename from the version field would miss the rename.
+    Maps the cache's Packages-index Filename onto what our source-build
+    pipeline produces:
+      1. utils.strip_build_version: drop Debian-buildd's +bN bin-NMU suffix
+      2. utils.apply_distro_suffix: append `+<distro_suffix>` (e.g. `+thor1`)
+         to match BuildContainer's changelog prepend.  Both ends MUST
+         agree on the suffix or no udeb file resolves.
+    Same pattern as chroot.py's _get_deb_files for the deb world.
 
     Returns the list of resolved paths.  Missing-on-disk udebs are
     logged + skipped (warning); they don't fail the whole resolve —
@@ -242,16 +245,16 @@ def _resolve_udeb_files(udeb_tree, dir_repo: str) -> List[str]:
                 f"_resolve_udeb_files: {_name} has no Filename field — skipping"
             )
             continue
-        # Strip +bN binNMU suffix so the recorded filename matches what
-        # dpkg-buildpackage actually produced.  utils.strip_build_version
-        # is the single source of truth shared with the deb pipeline —
-        # tolerates udeb extension.
+        # Strip +bN binNMU suffix then apply our distro_suffix so the
+        # filename matches what dpkg-buildpackage produced via
+        # BuildContainer's changelog prepend.
         try:
             _filename = utils.strip_build_version(_filename)
+            _filename = utils.apply_distro_suffix(_filename, distro_suffix)
         except ValueError:
             logger.warning(
                 f"_resolve_udeb_files: malformed Filename {_filename!r} for "
-                f"{_name} — using original (binNMU strip skipped)"
+                f"{_name} — using original (binNMU/distro-suffix skipped)"
             )
         _filepath = os.path.join(dir_repo, _filename)
         if os.path.exists(_filepath):

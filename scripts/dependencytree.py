@@ -67,10 +67,17 @@ class DependencyTree:
 
     def __init__(self, cache: Cache, select_recommended: bool, arch: str,
                  build_profiles: frozenset = frozenset(), lookahead=None,
-                 auto_pick_highest_when_ambiguous: bool = False):
+                 auto_pick_highest_when_ambiguous: bool = False,
+                 distro_suffix: str = ''):
 
         self.__recommended = select_recommended
         self.__cache = cache
+        # Distribution suffix appended to predicted .deb filenames in
+        # Source.pkgs to match what BuildContainer.build produces
+        # (changelog prepended with `<src-ver>+<suffix>`).  Empty →
+        # legacy upstream filenames (matches a build pipeline that
+        # doesn't bump versions).  See utils.apply_distro_suffix.
+        self._distro_suffix = distro_suffix
         # When True, multi-Package-name candidates that
         # _auto_pick_candidate refuses to auto-pick (different names) get
         # an additional fallback — pick the candidate with the highest
@@ -843,6 +850,9 @@ class DependencyTree:
             if _filename:
                 try:
                     _filename = utils.strip_build_version(_filename)
+                    _filename = utils.apply_distro_suffix(
+                        _filename, self._distro_suffix,
+                    )
                 except ValueError:
                     pass  # malformed — fall back to original (matches parse_sources)
                 _bin_filename_to_name[_filename] = _name
@@ -981,18 +991,31 @@ class DependencyTree:
 
             _bin_filename = (_bin_pkg.get('Filename') or '').rsplit('/', 1)[-1]
             if _bin_filename:
-                # Strip binNMU suffix (+bN) so the recorded filename matches what
-                # dpkg-buildpackage produces from source.  utils.strip_build_version
-                # is the single source of truth, shared with
-                # BuildSystem._get_deb_files and tests/smoke_dep_drift.py.  Tolerate
-                # malformed APT entries that don't fit the name_ver_arch.ext shape
-                # by falling back to the original filename — historical behaviour.
+                # Map the cache's APT Filename onto what our source-build
+                # pipeline will actually produce:
+                #   1. Strip binNMU suffix (+bN) — the cache may have a
+                #      Debian-buildd rebuild like `foo_1.0-2+b3.deb` but
+                #      our `dpkg-source -x` plus `dpkg-buildpackage` from
+                #      the .dsc produces `foo_1.0-2.deb` (source ver).
+                #   2. Append our DistroSuffix (`+thor1`) to match
+                #      BuildContainer's changelog prepend.  Both ends MUST
+                #      agree on the version or check_build looks for a
+                #      file the build didn't produce.
+                # utils.strip_build_version + utils.apply_distro_suffix
+                # are the single source of truth, shared with
+                # BuildSystem._get_deb_files and tests/smoke_dep_drift.py.
+                # Tolerate malformed APT entries that don't fit the
+                # name_ver_arch.ext shape by falling back to the original
+                # filename — historical behaviour.
                 try:
                     _bin_filename = utils.strip_build_version(_bin_filename)
+                    _bin_filename = utils.apply_distro_suffix(
+                        _bin_filename, self._distro_suffix,
+                    )
                 except ValueError:
                     logger.warning(
                         f"parse_sources: malformed Filename {_bin_filename!r} — "
-                        f"binNMU strip skipped")
+                        f"binNMU strip / distro-suffix apply skipped")
                 if _bin_filename not in self.selected_srcs[_src_name].pkgs:
                     self.selected_srcs[_src_name].pkgs.append(_bin_filename)
 
