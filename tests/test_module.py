@@ -6718,12 +6718,18 @@ def test_refresh_patches_iterates_both_deb_and_udeb_trees():
 
 def test_refresh_patches_invalidates_result_when_patch_newer():
     """COMP-02 phase C: _refresh_patches must delete a .result file
-    whose mtime is older than the newest patch in the source's patch
-    dir.  Without this, autorun's source-build step skips packages
-    with `[SKIPPED] already built` even when the operator just added
-    or modified a patch (caught 2026-05-13 with the base-installer
-    keyring patch — autorun ran but the .udeb was the May-10 build,
-    the patch never applied, install failed with 'No public key')."""
+    when the patch CONTENT has changed since the last successful build.
+    Without this, autorun's source-build step skips packages with
+    `[SKIPPED] already built` even when the operator just modified a
+    patch (caught 2026-05-13 with the base-installer keyring patch —
+    autorun ran but the .udeb was the May-10 build, the patch never
+    applied, install failed with 'No public key').
+
+    Two-stage check: mtime gate + content hash.  This test exercises
+    the real-change path: stale .patchhash on disk with a different
+    digest from the on-disk patch content → mtime gate trips → hash
+    confirms divergence → .result is removed and .patchhash rewritten.
+    """
     import sys, tempfile, time
     from unittest.mock import MagicMock, patch as mock_patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -6732,26 +6738,28 @@ def test_refresh_patches_invalidates_result_when_patch_newer():
 
     with tempfile.TemporaryDirectory() as _root:
         # Build a synthetic env: a single source 'foo' v1.0 with a
-        # patch on disk AND an older .result.
+        # patch on disk, an older .result, and a stale .patchhash
+        # reflecting an EARLIER patch revision.
         _log_build = os.path.join(_root, 'log', 'build')
         _patch_dir = os.path.join(_root, 'patch', 'source', 'foo', '1.0')
         os.makedirs(_log_build)
         os.makedirs(_patch_dir)
         _result = os.path.join(_log_build, 'foo.result')
+        _hash_file = os.path.join(_log_build, 'foo.patchhash')
         _patch = os.path.join(_patch_dir, '9001-test.patch')
-        # Result written first (older mtime), then patch (newer).
         with open(_result, 'w') as fh: fh.write('PASS\n')
+        # Pretend the last build saw the patch with old content.
+        with open(_hash_file, 'w') as fh: fh.write('deadbeef' * 8 + '\n')
         time.sleep(0.01)
         with open(_patch, 'w') as fh: fh.write(
             'Description: t\nAuthor: t\nForwarded: no\nLast-Update: 2026-05-13\n'
             '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n'
         )
-        # Touch patch to ensure mtime > result; some FS truncate to seconds.
         _now = time.time()
         os.utime(_result, (_now - 100, _now - 100))
+        os.utime(_hash_file, (_now - 100, _now - 100))
         os.utime(_patch, (_now, _now))
 
-        # Stub BuildSession just enough to drive _refresh_patches.
         _sess = BuildSession.__new__(BuildSession)
         _sess.config = MagicMock()
         _sess.config.dir_patch_source = os.path.join(_root, 'patch', 'source')
@@ -6764,15 +6772,211 @@ def test_refresh_patches_invalidates_result_when_patch_newer():
         _sess.dep_tree.selected_srcs = {'foo': _src}
         _sess.udeb_dep_tree = None
 
-        with mock_patch('build.console') as _c, \
+        with mock_patch('build.console'), \
              mock_patch('build.utils.check_dep3_header', return_value=[]):
             _sess._refresh_patches()
-        # The stale .result must be gone.
         assert not os.path.exists(_result), (
             f"_refresh_patches must invalidate stale .result; still at {_result}"
         )
-        # And patch_list must have picked up the new patch.
         assert _src.patch_list == ['9001-test.patch'], _src.patch_list
+        # New baseline written reflecting the current on-disk patch.
+        with open(_hash_file, 'r') as fh:
+            _new_hash = fh.read().strip()
+        assert _new_hash and _new_hash != 'deadbeef' * 8, (
+            f"baseline .patchhash must be rewritten; still {_new_hash!r}"
+        )
+
+
+def test_refresh_patches_skips_invalidation_for_header_only_edit():
+    """Two-stage invalidation: a patch whose MTIME is newer than the
+    .result but whose CONTENT matches the recorded .patchhash must NOT
+    trigger a rebuild.  Covers the common case of editing only the
+    DEP-3 header / commentary of an existing patch — diff hunks are
+    byte-for-byte identical, no rebuild needed.  Caught when CONF-08
+    annotations were added to three doc patches and the user noticed
+    libyaml/protobuf/p7zip would otherwise rebuild despite no real
+    change."""
+    import sys, tempfile, time
+    from unittest.mock import MagicMock, patch as mock_patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    from package import Source
+    from utils import patch_set_hash
+
+    with tempfile.TemporaryDirectory() as _root:
+        _log_build = os.path.join(_root, 'log', 'build')
+        _patch_dir = os.path.join(_root, 'patch', 'source', 'foo', '1.0')
+        os.makedirs(_log_build); os.makedirs(_patch_dir)
+        _result = os.path.join(_log_build, 'foo.result')
+        _hash_file = os.path.join(_log_build, 'foo.patchhash')
+        _patch = os.path.join(_patch_dir, '9001-test.patch')
+        _content = (
+            'Description: t\nAuthor: t\nForwarded: no\nLast-Update: 2026-05-13\n'
+            '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n'
+        )
+        with open(_patch, 'w') as fh: fh.write(_content)
+        with open(_result, 'w') as fh: fh.write('PASS\n')
+        # Baseline hash matches the current on-disk content.
+        with open(_hash_file, 'w') as fh:
+            fh.write(patch_set_hash(_patch_dir, ['9001-test.patch']) + '\n')
+        # Patch mtime > result mtime (header-only edit scenario).
+        _now = time.time()
+        os.utime(_result, (_now - 100, _now - 100))
+        os.utime(_hash_file, (_now - 100, _now - 100))
+        os.utime(_patch, (_now, _now))
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = MagicMock()
+        _sess.config.dir_patch_source = os.path.join(_root, 'patch', 'source')
+        _sess.config.dir_log = os.path.join(_root, 'log')
+        _src = Source.__new__(Source)
+        _src.package = 'foo'; _src.version = '1.0'; _src.patch_list = []
+        _sess.dep_tree = MagicMock()
+        _sess.dep_tree.selected_srcs = {'foo': _src}
+        _sess.udeb_dep_tree = None
+
+        with mock_patch('build.console'), \
+             mock_patch('build.utils.check_dep3_header', return_value=[]):
+            _sess._refresh_patches()
+        assert os.path.exists(_result), (
+            "header-only patch edit (same hash) must NOT invalidate .result"
+        )
+        # .result mtime should be touched past the patch mtime so future
+        # patch_refresh runs don't keep re-entering the hash branch.
+        assert os.path.getmtime(_result) >= os.path.getmtime(_patch), (
+            "_refresh_patches must touch .result mtime past patch mtime; "
+            f"result={os.path.getmtime(_result)} patch={os.path.getmtime(_patch)}"
+        )
+
+
+def test_refresh_patches_writes_baseline_when_no_patchhash():
+    """Migration path: a source with .result but NO .patchhash (built
+    before the hash schema landed) must NOT be invalidated on first
+    encounter — the existing .result is trusted to reflect the current
+    patches.  Instead the current hash is written as a baseline so
+    future runs compare against it correctly."""
+    import sys, tempfile, time
+    from unittest.mock import MagicMock, patch as mock_patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    from package import Source
+    from utils import patch_set_hash
+
+    with tempfile.TemporaryDirectory() as _root:
+        _log_build = os.path.join(_root, 'log', 'build')
+        _patch_dir = os.path.join(_root, 'patch', 'source', 'foo', '1.0')
+        os.makedirs(_log_build); os.makedirs(_patch_dir)
+        _result = os.path.join(_log_build, 'foo.result')
+        _hash_file = os.path.join(_log_build, 'foo.patchhash')
+        _patch = os.path.join(_patch_dir, '9001-test.patch')
+        with open(_patch, 'w') as fh: fh.write(
+            'Description: t\nAuthor: t\nForwarded: no\nLast-Update: 2026-05-13\n'
+            '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n'
+        )
+        with open(_result, 'w') as fh: fh.write('PASS\n')
+        # Patch newer than .result; NO .patchhash present (pre-upgrade state).
+        _now = time.time()
+        os.utime(_result, (_now - 100, _now - 100))
+        os.utime(_patch, (_now, _now))
+        assert not os.path.exists(_hash_file)
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = MagicMock()
+        _sess.config.dir_patch_source = os.path.join(_root, 'patch', 'source')
+        _sess.config.dir_log = os.path.join(_root, 'log')
+        _src = Source.__new__(Source)
+        _src.package = 'foo'; _src.version = '1.0'; _src.patch_list = []
+        _sess.dep_tree = MagicMock()
+        _sess.dep_tree.selected_srcs = {'foo': _src}
+        _sess.udeb_dep_tree = None
+
+        with mock_patch('build.console'), \
+             mock_patch('build.utils.check_dep3_header', return_value=[]):
+            _sess._refresh_patches()
+        assert os.path.exists(_result), (
+            "first-encounter migration must NOT invalidate trusted .result"
+        )
+        assert os.path.exists(_hash_file), (
+            "first-encounter migration must write baseline .patchhash"
+        )
+        with open(_hash_file, 'r') as fh:
+            _written = fh.read().strip()
+        assert _written == patch_set_hash(_patch_dir, ['9001-test.patch']), (
+            f"baseline hash mismatch: {_written}"
+        )
+
+
+def test_refresh_patches_invalidates_when_patches_removed():
+    """Patch deletion: empty patch_list with a non-empty .patchhash on
+    disk (from a previous build that applied patches) → hash differs
+    from current empty-set hash → invalidate .result + drop the
+    .patchhash.  Comes for free with the content-hash schema; the old
+    mtime-only check could not detect this case (deletion doesn't bump
+    any patch's mtime)."""
+    import sys, tempfile
+    from unittest.mock import MagicMock, patch as mock_patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    from package import Source
+
+    with tempfile.TemporaryDirectory() as _root:
+        _log_build = os.path.join(_root, 'log', 'build')
+        # Patch dir does NOT exist (patches were removed).
+        os.makedirs(_log_build)
+        _result = os.path.join(_log_build, 'foo.result')
+        _hash_file = os.path.join(_log_build, 'foo.patchhash')
+        with open(_result, 'w') as fh: fh.write('PASS\n')
+        # Stale baseline hash reflecting the now-deleted patch set.
+        with open(_hash_file, 'w') as fh: fh.write('cafef00d' * 8 + '\n')
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = MagicMock()
+        _sess.config.dir_patch_source = os.path.join(_root, 'patch', 'source')
+        _sess.config.dir_log = os.path.join(_root, 'log')
+        _src = Source.__new__(Source)
+        _src.package = 'foo'; _src.version = '1.0'; _src.patch_list = []
+        _sess.dep_tree = MagicMock()
+        _sess.dep_tree.selected_srcs = {'foo': _src}
+        _sess.udeb_dep_tree = None
+
+        with mock_patch('build.console'), \
+             mock_patch('build.utils.check_dep3_header', return_value=[]):
+            _sess._refresh_patches()
+        assert not os.path.exists(_result), (
+            "patch removal must invalidate the now-stale .result"
+        )
+        assert not os.path.exists(_hash_file), (
+            "patch removal must drop the now-stale .patchhash"
+        )
+
+
+def test_patch_set_hash_stable_and_order_sensitive():
+    """patch_set_hash invariants: deterministic for identical
+    inputs (so a recorded baseline matches a re-computation), and
+    order-sensitive (so re-ordering patches — which could change their
+    apply order — yields a different digest)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import patch_set_hash
+
+    with tempfile.TemporaryDirectory() as _root:
+        _a = os.path.join(_root, '9001-a.patch')
+        _b = os.path.join(_root, '9002-b.patch')
+        with open(_a, 'w') as fh: fh.write('content-a\n')
+        with open(_b, 'w') as fh: fh.write('content-b\n')
+        _h1 = patch_set_hash(_root, ['9001-a.patch', '9002-b.patch'])
+        _h2 = patch_set_hash(_root, ['9001-a.patch', '9002-b.patch'])
+        _h3 = patch_set_hash(_root, ['9002-b.patch', '9001-a.patch'])
+        _h_empty = patch_set_hash(_root, [])
+        assert _h1 == _h2, "patch_set_hash must be deterministic"
+        assert _h1 != _h3, "patch_set_hash must be order-sensitive"
+        assert _h_empty == _h2[:0] or len(_h_empty) == 64, (
+            f"empty patch list must still produce a hex digest, got {_h_empty!r}"
+        )
+        # Content change → different hash
+        with open(_a, 'w') as fh: fh.write('content-a-changed\n')
+        _h_changed = patch_set_hash(_root, ['9001-a.patch', '9002-b.patch'])
+        assert _h_changed != _h1, "content edit must change the digest"
 
 
 def test_refresh_patches_keeps_result_when_patch_older_than_result():
@@ -8338,6 +8542,10 @@ def main() -> int:
         test_refresh_patches_iterates_both_deb_and_udeb_trees,
         test_refresh_patches_invalidates_result_when_patch_newer,
         test_refresh_patches_keeps_result_when_patch_older_than_result,
+        test_refresh_patches_skips_invalidation_for_header_only_edit,
+        test_refresh_patches_writes_baseline_when_no_patchhash,
+        test_refresh_patches_invalidates_when_patches_removed,
+        test_patch_set_hash_stable_and_order_sensitive,
         test_source_download_iterates_both_deb_and_udeb_trees,
         test_autorun_installer_runs_source_build_then_source_build_installer,
         test_autorun_live_chains_iso_build_after_chroot,

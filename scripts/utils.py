@@ -377,6 +377,38 @@ def check_dep3_header(patch_path: str) -> list:
     return [_f for _f in REQUIRED if _f not in found]
 
 
+def patch_set_hash(patch_dir: str, patch_files: list) -> str:
+    """SHA256 over (filename + NUL + content + NUL) tuples in the given order.
+
+    Used by `_refresh_patches` (build.py) to confirm whether a patch file
+    whose mtime is newer than the corresponding .result actually changed
+    in *content*, or merely had its mtime bumped by a header / comment
+    edit.  Same hash → no rebuild needed (just touch the .result); hash
+    differs → real patch change, invalidate the .result.
+
+    Also written next to .result on every successful build (in
+    BuildContainer.build) so future refreshes have a stable baseline.
+
+    Returns hex digest.  Empty patch_files → digest of "".
+    Missing/unreadable patch files are skipped silently (mirrors
+    _refresh_patches's defensive os.path.exists guard); the resulting
+    hash naturally differs from a baseline taken when the file was
+    readable, which is the conservative behaviour.
+    """
+    _h = hashlib.sha256()
+    for _pf in patch_files:
+        try:
+            with open(os.path.join(patch_dir, _pf), 'rb') as fh:
+                _content = fh.read()
+        except OSError:
+            continue
+        _h.update(_pf.encode('utf-8'))
+        _h.update(b'\0')
+        _h.update(_content)
+        _h.update(b'\0')
+    return _h.hexdigest()
+
+
 def _query_snapshot_latest(api_url: str, archive_keys: 'List[str]') -> str:
     """Fetch the latest snapshot timestamp covering every archive in
     `archive_keys` (typically `['debian', 'debian-security']`).

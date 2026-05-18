@@ -1137,37 +1137,74 @@ class BuildSession:
         _patched = sum(1 for _s in _unified_srcs.values() if _s.patch_list)
         console.print(f"Found patches for {_patched} source package(s)", tui.COLOR_INFO)
 
-        # Invalidate stale .result files when a patch is newer than the
-        # last successful build.  Without this, autorun's source-build
-        # step happily skips packages with `[SKIPPED] already built`
-        # even after the operator drops a new patch in
-        # patch/source/<pkg>/<ver>/ — and the patch never takes effect.
-        # Caught 2026-05-13 with the base-installer Phase C keyring
-        # patch: the patch was on disk, _refresh_patches discovered it,
-        # but check_build saw the May-10 .result + .udeb and skipped
-        # the rebuild.  Install booted the unpatched base-installer →
-        # `gpgv: Can't check signature: No public key`.
+        # Invalidate stale .result files when the patch SET for a source
+        # has changed since the last successful build.  Without this,
+        # autorun's source-build step happily skips packages with
+        # `[SKIPPED] already built` even after the operator drops a new
+        # patch in patch/source/<pkg>/<ver>/ — and the patch never takes
+        # effect.  Caught 2026-05-13 with the base-installer Phase C
+        # keyring patch: the patch was on disk, _refresh_patches
+        # discovered it, but check_build saw the older .result + .udeb
+        # and skipped the rebuild.  Install booted the unpatched
+        # base-installer → `gpgv: Can't check signature: No public key`.
         #
-        # Mtime-based: catches added / modified patches.  Does NOT catch
-        # patch removal — for that the operator uses `source build <pkg>
-        # force` to override check_build.  Removal-detection would
-        # require persisting the previous build's patch list and isn't
-        # worth the schema for an uncommon case.
+        # Two-stage check.  Stage 1 (cheap) is mtime: if no patch is
+        # newer than .result, nothing to do.  Stage 2 (precise) is
+        # content hash: only invalidate when the patch CONTENT actually
+        # changed, not just the mtime.  This avoids spurious rebuilds
+        # from header-only edits (DEP-3 commentary, comment tweaks) that
+        # bump the mtime but produce an identical diff.
+        #
+        # Migration: when no .patchhash exists yet (pre-CONF-08 builds),
+        # we trust that the existing .result reflects the current patch
+        # set (the build that produced it must have applied them), write
+        # a baseline hash, and skip invalidation.  Subsequent runs use
+        # the recorded baseline normally.
+        #
+        # Also catches patch REMOVAL: empty patch_list with an existing
+        # .patchhash for a non-empty old set → hash differs → invalidate.
+        # (Previously documented as not worth the schema; the hash file
+        # makes it free.)
         _buildlog = os.path.join(self.config.dir_log, 'build')
         _invalidated = []
         for _pkg, _src in _unified_srcs.items():
-            if not _src.patch_list:
-                continue
             _result_file = os.path.join(_buildlog, _pkg + '.result')
             if not os.path.exists(_result_file):
-                continue
-            try:
-                _result_mtime = os.path.getmtime(_result_file)
-            except OSError:
                 continue
             _patch_dir = os.path.join(
                 self.config.dir_patch_source, _pkg, utils.version_no_epoch(_src.version),
             )
+            _hash_file = os.path.join(_buildlog, _pkg + '.patchhash')
+            _stored_hash = None
+            try:
+                with open(_hash_file, 'r') as fh:
+                    _stored_hash = fh.read().strip() or None
+            except OSError:
+                pass
+
+            # Patch removal: no patches now, but a baseline hash exists
+            # for a previous non-empty set → invalidate.  (Hash of empty
+            # set differs from any non-empty hash.)
+            if not _src.patch_list:
+                if _stored_hash is None:
+                    continue
+                _current_hash = utils.patch_set_hash(_patch_dir, [])
+                if _stored_hash == _current_hash:
+                    continue
+                try:
+                    os.remove(_result_file)
+                    os.remove(_hash_file)
+                    _invalidated.append(_pkg)
+                except OSError as e:
+                    logger.warning(
+                        f"[patch] {_pkg}: cannot remove stale {_result_file}: {e}"
+                    )
+                continue
+
+            try:
+                _result_mtime = os.path.getmtime(_result_file)
+            except OSError:
+                continue
             _newer = any(
                 os.path.getmtime(os.path.join(_patch_dir, _pf)) > _result_mtime
                 for _pf in _src.patch_list
@@ -1175,8 +1212,53 @@ class BuildSession:
             )
             if not _newer:
                 continue
+
+            _current_hash = utils.patch_set_hash(_patch_dir, _src.patch_list)
+
+            # Compute a target mtime that is guaranteed > every patch
+            # mtime, so the next patch_refresh's mtime gate won't keep
+            # re-entering this branch.  os.utime(path, None) uses the
+            # kernel clock and can land slightly BEFORE a patch mtime
+            # set from time.time() (different clock sources / coarser
+            # resolution); set the value explicitly instead.
+            _newest_patch_mtime = max(
+                (os.path.getmtime(os.path.join(_patch_dir, _pf))
+                 for _pf in _src.patch_list
+                 if os.path.exists(os.path.join(_patch_dir, _pf))),
+                default=0.0,
+            )
+            _touch_mtime = max(time.time(), _newest_patch_mtime + 1.0)
+
+            if _stored_hash is None:
+                # First encounter post-upgrade (or post-clean): the
+                # existing .result was written by a build that already
+                # applied the current patch set.  Record the baseline,
+                # touch .result so we don't re-enter this branch every
+                # patch_refresh, and skip invalidation.
+                try:
+                    with open(_hash_file, 'w') as fh:
+                        fh.write(_current_hash + '\n')
+                    os.utime(_result_file, (_touch_mtime, _touch_mtime))
+                except OSError as e:
+                    logger.warning(
+                        f"[patch] {_pkg}: cannot write {_hash_file}: {e}"
+                    )
+                continue
+
+            if _stored_hash == _current_hash:
+                # Cosmetic edit (header / comment) — content unchanged.
+                # Touch .result to reset the mtime gate; no rebuild.
+                try:
+                    os.utime(_result_file, (_touch_mtime, _touch_mtime))
+                except OSError:
+                    pass
+                continue
+
+            # Real content change — invalidate + record new baseline.
             try:
                 os.remove(_result_file)
+                with open(_hash_file, 'w') as fh:
+                    fh.write(_current_hash + '\n')
                 _invalidated.append(_pkg)
             except OSError as e:
                 logger.warning(
