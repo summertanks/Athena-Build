@@ -1087,6 +1087,37 @@ def test_buildconfig_build_options_falls_back_to_profiles_when_omitted():
         assert cfg.build_options == frozenset({'nodoc', 'nocheck'})
 
 
+def test_production_build_conf_has_noautodbgsym_in_build_options():
+    """Pin `noautodbgsym` in config/build.conf's [Source] BuildOptions.
+    Without it, dh_strip emits a `pkg-dbgsym_*.deb` companion for every
+    binary built from source — ~1500 dbgsym files / ~3-4 GB on a full
+    build, plus the post-strip repack cost on every source build.
+
+    Side-artifact dbgsym packages aren't tracked in
+    dependencytree.selected_pkgs (no consumer ever depends on them) so
+    nothing in the install path notices their absence; the only effect
+    of dropping them is reduced disk + faster builds.
+
+    Pin is on the production config file so a future operator edit
+    (e.g. someone removing it 'to enable debugging') can't silently
+    re-balloon repo/."""
+    _conf = os.path.join(_ROOT, 'config', 'build.conf')
+    assert os.path.isfile(_conf), _conf
+    import configparser
+    _cp = configparser.ConfigParser(interpolation=None)
+    _cp.read(_conf)
+    _opts_raw = _cp.get('Source', 'BuildOptions', fallback='')
+    _opts = {_o.strip() for _o in _opts_raw.split(',') if _o.strip()}
+    assert 'noautodbgsym' in _opts, (
+        f"config/build.conf [Source] BuildOptions must include "
+        f"`noautodbgsym` to suppress dbgsym blobs.  Current value: "
+        f"{_opts_raw!r}"
+    )
+    # Also sanity-check that the two existing opts we depend on stay put.
+    assert 'nodoc' in _opts, _opts_raw
+    assert 'nocheck' in _opts, _opts_raw
+
+
 def test_buildconfig_parses_distro_suffix():
     """`[Source] DistroSuffix` lands on `cfg.distro_suffix` as a stripped
     string.  Used by BuildContainer (changelog prepend) and
@@ -8982,6 +9013,7 @@ def main() -> int:
         test_rebump_deb_file_skips_malformed_filename,
         test_rebump_deb_file_skips_non_deb_files,
         test_cmd_rebump_packages_registered_under_package_dispatcher,
+        test_production_build_conf_has_noautodbgsym_in_build_options,
         test_buildconfig_parses_distro_suffix,
         test_buildconfig_distro_suffix_defaults_to_empty,
         test_buildcontainer_emits_changelog_bump_when_distro_suffix_set,
