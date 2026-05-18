@@ -84,6 +84,9 @@ def build_installer_chroot(
     if not _dpkg_unpack(dir_chroot_installer, _udeb_files, password):
         return False
 
+    if not _strip_debian_residue_hooks(dir_chroot_installer, password):
+        return False
+
     # Stock d-i image-build actions that aren't done by any udeb's
     # postinst (deferred-postinst model: udebs are unpacked here but
     # their maintainer scripts only run at first boot under
@@ -336,6 +339,69 @@ def _dpkg_unpack(
     logger.warning(
         f"_dpkg_unpack returned {_r.returncode} but no hard error in "
         f"stderr — proceeding"
+    )
+    return True
+
+
+def _strip_debian_residue_hooks(
+    dir_chroot_installer: str, password: str,
+) -> bool:
+    """Remove pre-pkgsel.d hooks from upstream udebs that apt-install
+    Debian-specific tools (discover, installation-report) we don't
+    ship in our pool.
+
+    Per the "Athena ships as Athena" principle
+    (memory/project_filter_debian_specific_installer_hooks.md), every
+    apt-install in pkgsel's pre-hooks loop must either succeed against
+    OUR pool or be excluded entirely.  The two upstream hooks below
+    target Debian-only packages:
+
+      hw-detect:/usr/lib/pre-pkgsel.d/20install-hwpackages
+        → apt-install discover (Debian hardware-detection DB used by
+          discover-pkginstall).  We don't ship discover; the hook
+          fails with `E: Unable to locate package discover` and
+          discover-pkginstall is a no-op anyway.
+
+      save-logs:/usr/lib/pre-pkgsel.d/50save-logs
+        → apt-install installation-report (Debian BTS install-report
+          submission tool).  We don't ship it; failure noise only.
+
+    NOT stripped:
+      hw-detect:/usr/lib/pre-pkgsel.d/50install-firmware  — processes
+        /var/cache/firmware/*.deb (firmware blobs the operator drops
+        in via the d-i firmware loader).  Generic, not Debian-specific.
+
+    Each strip is `rm -f` so missing files are non-fatal (e.g., if a
+    future udeb rev drops the hook upstream, our cleanup no-ops).
+
+    Returns True on success, False on any sudo rm failure (which
+    indicates a sudo-cred / FS-permission problem worth surfacing,
+    not a missing target).
+    """
+    _targets = (
+        'usr/lib/pre-pkgsel.d/20install-hwpackages',   # hw-detect → discover
+        'usr/lib/pre-pkgsel.d/50save-logs',            # save-logs → installation-report
+    )
+    _stripped = 0
+    for _rel in _targets:
+        _abs = os.path.join(dir_chroot_installer, _rel)
+        _r = _sudo(['rm', '-f', _abs], password)
+        if _r.returncode != 0:
+            logger.error(
+                f"_strip_debian_residue_hooks: rm -f {_abs} failed: "
+                f"rc={_r.returncode}, stderr={_r.stderr.strip()}"
+            )
+            tui.console.print(
+                f"ERROR: cannot strip {_rel} from installer chroot"
+            )
+            return False
+        # We can't easily tell pre-strip presence (rm -f is silent on
+        # missing) — count what's there now via stat.
+        if not os.path.exists(_abs):
+            _stripped += 1
+    tui.console.print(
+        f"Stripped {_stripped}/{len(_targets)} Debian-residue "
+        f"pre-pkgsel.d hooks"
     )
     return True
 

@@ -2865,6 +2865,109 @@ def test_buildcontainer_emits_changelog_bump_when_distro_suffix_set():
         "BuildContainer.distro_suffix not initialised from config")
 
 
+def test_strip_debian_residue_hooks_removes_known_files():
+    """pre-pkgsel.d hooks from upstream hw-detect and save-logs udebs
+    try to apt-install Debian-specific tools (discover, installation-
+    report) that aren't in our pool.  build_installer_chroot must
+    strip them after udeb unpack so pkgsel's pre-hooks loop doesn't
+    spam `E: Unable to locate package X` during install.
+
+    Verifies: with both hook files present in a synthetic chroot
+    layout, _strip_debian_residue_hooks calls `rm -f` on both and
+    they're gone afterwards.  Missing files are non-fatal (rm -f
+    is silent on missing) — covered by the no-op return path.
+    """
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _strip_debian_residue_hooks
+
+    def _fake_sudo(cmd, _pw):
+        # Mimic `sudo rm -f <path>` semantics: ignore missing.
+        class _R:
+            returncode = 0
+            stderr = ''
+            stdout = ''
+        if cmd[0] == 'rm' and cmd[1] == '-f':
+            try:
+                os.unlink(cmd[2])
+            except FileNotFoundError:
+                pass
+        return _R()
+
+    with tempfile.TemporaryDirectory() as _chroot:
+        # Plant the two hooks plus a third (50install-firmware) we
+        # MUST leave alone.
+        for _rel in (
+            'usr/lib/pre-pkgsel.d/20install-hwpackages',
+            'usr/lib/pre-pkgsel.d/50save-logs',
+            'usr/lib/pre-pkgsel.d/50install-firmware',
+        ):
+            _abs = os.path.join(_chroot, _rel)
+            os.makedirs(os.path.dirname(_abs), exist_ok=True)
+            with open(_abs, 'w') as fh:
+                fh.write('#!/bin/sh\n# stub\n')
+
+        with patch('installer_chroot._sudo', side_effect=_fake_sudo):
+            assert _strip_debian_residue_hooks(_chroot, 'pw') is True
+
+        # The two Debian-residue hooks are gone.
+        for _rel in (
+            'usr/lib/pre-pkgsel.d/20install-hwpackages',
+            'usr/lib/pre-pkgsel.d/50save-logs',
+        ):
+            assert not os.path.exists(os.path.join(_chroot, _rel)), (
+                f"{_rel} should have been stripped"
+            )
+        # The kept hook stays.
+        _kept = os.path.join(_chroot, 'usr/lib/pre-pkgsel.d/50install-firmware')
+        assert os.path.exists(_kept), (
+            "50install-firmware must NOT be stripped (firmware loader, "
+            "not Debian-specific)"
+        )
+
+
+def test_strip_debian_residue_hooks_idempotent_on_missing_targets():
+    """A subsequent install build (or one where upstream dropped the
+    hooks already) shouldn't fail.  `rm -f` is silent on missing →
+    function returns True with zero files actually removed."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _strip_debian_residue_hooks
+
+    def _fake_sudo(cmd, _pw):
+        class _R:
+            returncode = 0
+            stderr = ''
+            stdout = ''
+        if cmd[0] == 'rm' and cmd[1] == '-f':
+            try:
+                os.unlink(cmd[2])
+            except FileNotFoundError:
+                pass
+        return _R()
+
+    with tempfile.TemporaryDirectory() as _chroot:
+        # No pre-pkgsel.d/ at all.
+        with patch('installer_chroot._sudo', side_effect=_fake_sudo):
+            assert _strip_debian_residue_hooks(_chroot, 'pw') is True
+
+
+def test_strip_debian_residue_hooks_called_in_build_flow():
+    """Pin the call-site in build_installer_chroot so a future refactor
+    can't silently drop the strip step.  Static check on the source —
+    cheaper than a full integration test."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    from installer_chroot import build_installer_chroot
+    _src = inspect.getsource(build_installer_chroot)
+    assert '_strip_debian_residue_hooks(' in _src, (
+        "_strip_debian_residue_hooks call missing from "
+        "build_installer_chroot — Debian residue won't get stripped"
+    )
+
+
 def test_installer_chroot_register_self_appends_debian_installer_stanza():
     """Stock d-i image-build adds a dummy `Package: debian-installer`
     stanza to /var/lib/dpkg/status so `dpkg-query -W debian-installer`
@@ -9240,6 +9343,9 @@ def main() -> int:
         test_athena_installer_data_ships_mirror_protocol_stub,
         test_installer_chroot_run_depmod_skips_when_no_modules_dir,
         test_installer_chroot_run_depmod_indexes_each_kernel_present,
+        test_strip_debian_residue_hooks_removes_known_files,
+        test_strip_debian_residue_hooks_idempotent_on_missing_targets,
+        test_strip_debian_residue_hooks_called_in_build_flow,
         test_installer_chroot_register_self_appends_debian_installer_stanza,
         test_installer_chroot_register_self_idempotent_on_repeat,
         test_installer_grub_cfg_has_preseed_kernel_cmdline,
