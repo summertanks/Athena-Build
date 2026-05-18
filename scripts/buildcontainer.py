@@ -347,19 +347,30 @@ class BuildContainer:
         # sed never runs → zero-cost no-op.
         #
         # See memory/project_three_layer_identity.md for the model.
-        # NOTE on the `if ... then ... fi` form (not `[ -d X ] && find X`):
-        # cmd_str runs under `set -e -o pipefail`.  With `&&`, when the
-        # directory is missing, `[ -d X ]` exits 1, `&&` short-circuits,
-        # and the WHOLE brace group inherits that non-zero status —
-        # killing the pipeline (and the build) via pipefail.  `if`-blocks
-        # exit 0 when the condition is false, so missing data/ or tasks/
-        # (true for every upstream pkg) doesn't crash the substitution.
+        # Two non-obvious shell choices, both because cmd_str runs
+        # under `set -e -o pipefail`:
+        #
+        # 1. `if [ -d X ]; then find X; fi` for the optional data/ +
+        #    tasks/ dirs (not `[ -d X ] && find X`).  With `&&`, a
+        #    missing dir leaves the brace group's last command exit
+        #    at 1; pipefail picks that up and set -e kills the build.
+        #    `if`-blocks return 0 when the condition is false.
+        #
+        # 2. `(grep -lE … || true)` wrapper for the grep filter.
+        #    `grep -l` exits 1 when it finds NO matches — true for
+        #    every upstream package (none carry @TOKENS@).  Under
+        #    pipefail, the pipeline inherits that 1 and set -e kills.
+        #    The `|| true` rescues the no-match case while still
+        #    letting actual grep errors (filesystem) propagate as
+        #    non-zero — but since `|| true` flattens any non-zero to
+        #    0, we accept this trade for the much more common no-
+        #    match path.
         _token_subst = (
             '{{ find debian -type f 2>/dev/null; '
             'if [ -d data ]; then find data -type f; fi; '
             'if [ -d tasks ]; then find tasks -type f; fi; }} '
-            "| xargs -d '\\n' -r grep -lE '@(DISTRIBUTION|BASE_ID|CODENAME)@' "
-            '2>/dev/null '
+            "| (xargs -d '\\n' -r grep -lE '@(DISTRIBUTION|BASE_ID|CODENAME)@' "
+            '2>/dev/null || true) '
             "| xargs -d '\\n' -r sed -i "
             f"-e 's|@DISTRIBUTION@|{self.build_distribution}|g' "
             f"-e 's|@BASE_ID@|{self.build_base_id}|g' "

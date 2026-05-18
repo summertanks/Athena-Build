@@ -2933,6 +2933,37 @@ def test_buildcontainer_token_subst_uses_if_not_short_circuit_and():
     assert 'if [ -d tasks ]' in _body, "tasks/ guard missing if-form"
 
 
+def test_buildcontainer_token_subst_grep_rescue_or_true():
+    """The grep filter in _token_subst MUST be wrapped to rescue its
+    no-match exit (1).  `grep -l` exits 1 when nothing matches —
+    true for every upstream package (no @TOKENS@ in their tree).
+    Under set -e -o pipefail, that 1 surfaces through the pipeline
+    and kills the build.  Found 2026-05-18 on the glibc rebuild
+    after the &&-form fix.
+
+    Pattern asserted: `xargs ... grep ... || true` (with or without
+    the subshell parens).  This rescue must NOT be removed without
+    a replacement strategy for the no-match case (e.g. capture +
+    conditional sed)."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # The grep call must end with `|| true` somewhere before the next
+    # pipe stage.  Match across whitespace + the trailing 2>/dev/null
+    # so this stays valid if redirection moves.
+    _grep_line_pattern = re.compile(
+        r"grep -lE '@\(DISTRIBUTION\|BASE_ID\|CODENAME\)@'"
+        r"[^|]*?\|\|\s*true",
+        re.DOTALL,
+    )
+    assert _grep_line_pattern.search(_body), (
+        "regression: grep filter is no longer wrapped with `|| true` — "
+        "upstream pkgs (with no @TOKENS@) will crash the build at the "
+        "token-substitution step because grep -l exits 1 on no matches "
+        "and pipefail surfaces it under set -e")
+
+
 def test_buildcontainer_changelog_uses_codename_field():
     """The _changelog_bump snippet's stanza distribution field
     (after the version, before urgency=) must use self.codename, not
@@ -9644,6 +9675,7 @@ def main() -> int:
         test_buildcontainer_emits_changelog_bump_when_distro_suffix_set,
         test_buildcontainer_emits_token_substitution_snippet,
         test_buildcontainer_token_subst_uses_if_not_short_circuit_and,
+        test_buildcontainer_token_subst_grep_rescue_or_true,
         test_buildcontainer_changelog_uses_codename_field,
         # version_no_epoch — patch dir lookup must match Debian filename convention
         test_version_no_epoch_strips_epoch_from_debian_version,
