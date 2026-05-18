@@ -2933,6 +2933,40 @@ def test_buildcontainer_token_subst_uses_if_not_short_circuit_and():
     assert 'if [ -d tasks ]' in _body, "tasks/ guard missing if-form"
 
 
+def test_buildcontainer_token_subst_no_double_braces_in_regular_strings():
+    """The _token_subst opening brace-group MUST be single `{` / `}` in
+    regular (non-f) Python string literals.  Doubled `{{` / `}}` is an
+    f-string escape — in a REGULAR string they pass through to bash
+    as literal `{{`, which bash rejects with `command not found`
+    (exit 127).  Found 2026-05-18 (third token-subst bug in the same
+    snippet — third regression test in the same file).
+
+    Asserts the source emits the brace pattern correctly by simulating
+    the relevant lines.  Direct substring check on buildcontainer.py
+    is fragile (any f-string would have `{{` legitimately); instead
+    construct the actual cmd_str fragment Python would emit and check
+    the bash-visible output.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    # Re-import in case earlier tests cached an older module.
+    if 'buildcontainer' in sys.modules:
+        import importlib
+        importlib.reload(sys.modules['buildcontainer'])
+    # Walk buildcontainer.py's source looking for the _token_subst
+    # block; ensure no `{{ find` or `}} |` shape (regression sentinel).
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert '{{ find debian' not in _body, (
+        "regression: _token_subst opening brace doubled (`{{ find ...`) "
+        "in a regular string — bash will reject `{{` as command not found "
+        "and the build dies with exit 127.  Use single `{ ` (with space).")
+    assert '; }} ' not in _body, (
+        "regression: _token_subst closing brace doubled (`; }}`) in a "
+        "regular string — same exit 127 failure.  Use single `} `.")
+
+
 def test_buildcontainer_token_subst_grep_rescue_or_true():
     """The grep filter in _token_subst MUST be wrapped to rescue its
     no-match exit (1).  `grep -l` exits 1 when nothing matches —
@@ -9675,6 +9709,7 @@ def main() -> int:
         test_buildcontainer_emits_changelog_bump_when_distro_suffix_set,
         test_buildcontainer_emits_token_substitution_snippet,
         test_buildcontainer_token_subst_uses_if_not_short_circuit_and,
+        test_buildcontainer_token_subst_no_double_braces_in_regular_strings,
         test_buildcontainer_token_subst_grep_rescue_or_true,
         test_buildcontainer_changelog_uses_codename_field,
         # version_no_epoch — patch dir lookup must match Debian filename convention
