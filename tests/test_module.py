@@ -4522,6 +4522,124 @@ def test_rebump_deb_file_skips_malformed_filename():
         assert rebump_deb_file(f'/nonexistent/{bad}', 'thor1') == bad
 
 
+def test_rebump_deb_file_preserves_epoch_from_control():
+    """REGRESSION (2026-05-18): rebump must derive the new Version from
+    DEBIAN/control's existing Version field — NOT from the filename.
+    Debian filenames strip epochs (`pkg_1.0-2_arch.deb` for a binary
+    whose internal Version is `2:1.0-2`), so deriving the new version
+    from the filename silently drops the epoch.  The first install
+    attempt after the buggy rebump failed because gmp's `2:6.2.1+...`
+    became `6.2.1+...+thor1`, failing every `(>= 2:…)` Pre-Depends.
+    """
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rebump_deb_file
+
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_rebump_deb_file_preserves_epoch_from_control (no dpkg-deb)")
+        return
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Synthetic .deb with an EPOCH'd Version in DEBIAN/control but
+        # no epoch in the filename (mirrors how Debian builds them).
+        _original = os.path.join(_tmp, 'libgmp10_6.2.1+dfsg1-1.1_amd64.deb')
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'lib'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: libgmp10\n'
+                'Version: 2:6.2.1+dfsg1-1.1\n'   # ← epoch here
+                'Architecture: amd64\n'
+                'Maintainer: Test <test@local>\n'
+                'Description: epoch-bearing test package\n'
+            )
+        with open(os.path.join(_work, 'usr', 'lib', 'placeholder'), 'w') as fh:
+            fh.write('data\n')
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _original],
+            check=True, capture_output=True,
+        )
+
+        _new = rebump_deb_file(_original, 'thor1')
+        # Filename gets +thor1 appended (no epoch since filenames strip it)
+        assert _new == 'libgmp10_6.2.1+dfsg1-1.1+thor1_amd64.deb', _new
+        # ← THE INVARIANT: control's Version MUST still carry the epoch.
+        _ver = subprocess.run(
+            ['dpkg-deb', '-f', os.path.join(_tmp, _new), 'Version'],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert _ver == '2:6.2.1+dfsg1-1.1+thor1', (
+            f"Epoch lost in rebump.  Got: {_ver!r}, expected: "
+            "2:6.2.1+dfsg1-1.1+thor1"
+        )
+
+
+def test_restore_deb_epoch_prepends_when_missing():
+    """One-time recovery helper: prepends an epoch prefix to a .deb's
+    DEBIAN/control Version field when it's missing.  Returns 'fixed'
+    on success, 'already-correct' if no change needed.  Used to
+    recover from the rebump epoch-strip bug — restores the original
+    epoch by looking it up in the cache."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import restore_deb_epoch
+
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_restore_deb_epoch_prepends_when_missing (no dpkg-deb)")
+        return
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Synthetic .deb whose Version is EPOCH-LESS (mirrors the
+        # post-buggy-rebump corrupted state).
+        _deb = os.path.join(_tmp, 'libgmp10_6.2.1+dfsg1-1.1+thor1_amd64.deb')
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'lib'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: libgmp10\n'
+                'Version: 6.2.1+dfsg1-1.1+thor1\n'   # ← no epoch (corrupted)
+                'Architecture: amd64\n'
+                'Maintainer: Test <test@local>\n'
+                'Description: post-rebump epoch-stripped test\n'
+            )
+        with open(os.path.join(_work, 'usr', 'lib', 'placeholder'), 'w') as fh:
+            fh.write('data\n')
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _deb],
+            check=True, capture_output=True,
+        )
+
+        # First call — should fix.
+        _r1 = restore_deb_epoch(_deb, '2:')
+        assert _r1 == 'fixed', _r1
+        _ver = subprocess.run(
+            ['dpkg-deb', '-f', _deb, 'Version'],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert _ver == '2:6.2.1+dfsg1-1.1+thor1', _ver
+
+        # Second call — idempotent.
+        _r2 = restore_deb_epoch(_deb, '2:')
+        assert _r2 == 'already-correct', _r2
+
+
+def test_restore_deb_epoch_empty_prefix_is_noop():
+    """Empty epoch prefix → nothing to restore; returns
+    'already-correct' immediately without touching the file."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import restore_deb_epoch
+    # No file access happens — early return on empty prefix.
+    assert restore_deb_epoch('/nonexistent/foo.deb', '') == 'already-correct'
+
+
 def test_rebump_deb_file_skips_non_deb_files():
     """Non-.deb/.udeb files in repo/ are left alone (signatures,
     Packages indexes, stray text files, etc.)."""
@@ -9011,6 +9129,9 @@ def main() -> int:
         test_rebump_deb_file_empty_suffix_is_noop,
         test_rebump_deb_file_handles_udeb_extension,
         test_rebump_deb_file_skips_malformed_filename,
+        test_rebump_deb_file_preserves_epoch_from_control,
+        test_restore_deb_epoch_prepends_when_missing,
+        test_restore_deb_epoch_empty_prefix_is_noop,
         test_rebump_deb_file_skips_non_deb_files,
         test_cmd_rebump_packages_registered_under_package_dispatcher,
         test_production_build_conf_has_noautodbgsym_in_build_options,
