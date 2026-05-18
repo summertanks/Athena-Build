@@ -107,20 +107,36 @@ def rebump_deb_file(deb_path: str, suffix: str) -> str:
             ['dpkg-deb', '-R', deb_path, _work],
             check=True, capture_output=True,
         )
-        # Rewrite Version field in DEBIAN/control.  Use a regex anchored
-        # at line start to avoid clobbering any other field that
-        # mentions "Version:" in its description.
+        # Compute new Version from the EXISTING DEBIAN/control Version
+        # field (not from the filename) so an epoch is preserved.
+        # Debian filenames strip epochs (`pkg_1.0-2_arch.deb` for a
+        # binary whose internal Version is `2:1.0-2`); deriving the new
+        # version from the filename would silently drop the epoch and
+        # break every downstream dep constraint that expected it
+        # (caught 2026-05-18: gmp's `2:6.2.1+dfsg1-1.1` got rewritten
+        # to `6.2.1+dfsg1-1.1+thor1`, failing every `(>= 2:…)` Pre-
+        # Depends in the base install).
         _ctrl = os.path.join(_work, 'DEBIAN', 'control')
         with open(_ctrl) as fh:
             _content = fh.read()
+        _m = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
+        if not _m:
+            raise RuntimeError(
+                f"rebump_deb_file: {_base} has no Version field to rewrite"
+            )
+        _control_ver = _m.group(1)
+        if _control_ver.endswith(_tag):
+            return _base       # already bumped on the control side too
+        _control_new_ver = f'{_control_ver}{_tag}'
+        # Rewrite Version field in DEBIAN/control.
         _new_content, _n = re.subn(
             r'^Version: .*$',
-            f'Version: {_new_ver}',
+            f'Version: {_control_new_ver}',
             _content, count=1, flags=re.MULTILINE,
         )
         if _n != 1:
             raise RuntimeError(
-                f"rebump_deb_file: {_base} has no Version field to rewrite"
+                f"rebump_deb_file: {_base} Version regex substitution failed"
             )
         with open(_ctrl, 'w') as fh:
             fh.write(_new_content)
@@ -134,6 +150,58 @@ def rebump_deb_file(deb_path: str, suffix: str) -> str:
 
     os.remove(deb_path)
     return _new_base
+
+
+def restore_deb_epoch(deb_path: str, epoch_prefix: str) -> str:
+    """One-time recovery for .debs whose DEBIAN/control Version field
+    had its epoch stripped by an earlier buggy rebump_deb_file run.
+
+    Reads the current Version field; if it doesn't already start with
+    `epoch_prefix` (e.g. `'2:'`), prepends it.  Returns one of:
+      'fixed'           rewrote the file
+      'already-correct' file already has the epoch (idempotent)
+      'no-version'      DEBIAN/control has no Version field (skip)
+
+    epoch_prefix MUST include the trailing colon (e.g. `'1:'`).  Empty
+    string returns 'already-correct' immediately (nothing to do).
+
+    The filename is NOT touched — Debian filename convention strips the
+    epoch, so the existing on-disk filename is already correct.  Only
+    the DEBIAN/control Version field needs the epoch restored.
+    """
+    import subprocess
+    import tempfile
+    if not epoch_prefix:
+        return 'already-correct'
+    with tempfile.TemporaryDirectory(prefix='athena-epoch-') as _work:
+        subprocess.run(
+            ['dpkg-deb', '-R', deb_path, _work],
+            check=True, capture_output=True,
+        )
+        _ctrl = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl) as fh:
+            _content = fh.read()
+        _m = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
+        if not _m:
+            return 'no-version'
+        _current_ver = _m.group(1)
+        if _current_ver.startswith(epoch_prefix):
+            return 'already-correct'
+        _new_ver = f'{epoch_prefix}{_current_ver}'
+        _new_content, _n = re.subn(
+            r'^Version: .*$',
+            f'Version: {_new_ver}',
+            _content, count=1, flags=re.MULTILINE,
+        )
+        if _n != 1:
+            return 'no-version'
+        with open(_ctrl, 'w') as fh:
+            fh.write(_new_content)
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, deb_path],
+            check=True, capture_output=True,
+        )
+    return 'fixed'
 
 
 def apply_distro_suffix(file: str, suffix: str) -> str:
