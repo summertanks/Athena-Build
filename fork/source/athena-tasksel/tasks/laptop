@@ -1,6 +1,15 @@
 Task: laptop
 Section: user
-Test-laptop: 1
 Relevance: 9
+Description: Laptop tools
+ Power management, Bluetooth, and wireless tooling for laptop
+ hardware.  Mirrors the content of config/pkg.list [laptop] —
+ keep in sync when adding/removing packages.
 Key:
-  task-laptop
+ anacron
+ avahi-autoipd
+ bluetooth
+ iw
+ powertop
+ wireless-tools
+ wpasupplicant
