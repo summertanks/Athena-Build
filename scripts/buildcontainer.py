@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 from typing import List, Dict
+import utils
 from utils import BuildConfig, version_no_epoch
 from package import Source
 
@@ -379,6 +380,27 @@ class BuildContainer:
             _build_result = (_exit_code == 0)
             with open(os.path.join(self.buildlog_path, _filename_prefix + '.result'), 'w') as fh:
                 fh.write('PASS\n' if _build_result else 'FAIL\n')
+
+            # Record the patch-set content hash alongside .result so
+            # `_refresh_patches` (next run) can distinguish header-only
+            # edits (same hash → no rebuild) from real diff changes
+            # (different hash → invalidate).  Written on every build
+            # outcome so deletion-detection works even after a FAIL.
+            _patch_dir_for_hash = os.path.join(
+                self.patch_path, src_pkg.package,
+                version_no_epoch(src_pkg.version),
+            )
+            _hash_value = utils.patch_set_hash(
+                _patch_dir_for_hash, _live_patch_list,
+            )
+            _hash_file = os.path.join(
+                self.buildlog_path, _filename_prefix + '.patchhash',
+            )
+            try:
+                with open(_hash_file, 'w') as fh:
+                    fh.write(_hash_value + '\n')
+            except OSError as e:
+                logger.warning(f"cannot write {_hash_file}: {e}")
 
             if not _build_result:
                 logger.error(
