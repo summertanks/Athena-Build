@@ -2151,12 +2151,18 @@ def test_pool_list_pins_target_only_packages():
         guests with desktop env.  Pulls open-vm-tools transitively;
         open-vm-tools also explicitly listed defensively for the
         future case where desktop is dropped from the install path.
-      - console-setup + keyboard-configuration + xkb-data: NO LONGER
-        explicit in pool.list (FORK-01 Step 5 follow-up pool-audit
-        2026-05-17 removed them).  Reach the pool transitively via
-        `kbd` (in pkg.list [base], Depends keyboard-configuration →
-        Depends xkb-data).  Re-add if `kbd` is ever dropped from
-        [base]."""
+      - console-setup: explicit in pool.list because base-installer
+        apt-installs it on /target as a SEPARATE step, independent of
+        any transitive chain.  Removed 2026-05-17 in a pool-audit
+        cleanup that mis-assumed the kbd chain would cover it; the
+        2026-05-18 install reproduced the original "no installation
+        candidate" failure and it was re-added.
+      - keyboard-configuration + xkb-data: NOT explicit — reach the
+        pool transitively via `kbd` (in pkg.list [base], Depends
+        keyboard-configuration → Depends xkb-data).  Verified by the
+        2026-05-18 install log which shows both being installed from
+        the cdrom pool while console-setup failed.  Re-add if `kbd`
+        is ever dropped from [base]."""
     _path = os.path.join(_ROOT, 'config', 'pool.list')
     assert os.path.isfile(_path), _path
     with open(_path) as fh:
@@ -2170,10 +2176,12 @@ def test_pool_list_pins_target_only_packages():
     # VMware guest tooling — desktop pulls non-desktop transitively
     assert 'open-vm-tools-desktop' in _names, _names
     assert 'open-vm-tools' in _names, _names
-    # Negative assertions — these MUST NOT be explicit after Step 5
-    # follow-up audit (reach pool transitively via kbd in [base])
-    assert 'console-setup' not in _names, (
-        "console-setup should be transitive via kbd, not explicit")
+    # console-setup: base-installer apt-installs directly on /target;
+    # NOT covered by kbd's transitive chain (2026-05-18 regression).
+    assert 'console-setup' in _names, (
+        "console-setup must be explicit — base-installer apt-installs "
+        "it directly, not via the kbd chain")
+    # Negative assertions — these reach pool transitively via kbd
     assert 'keyboard-configuration' not in _names, _names
     assert 'xkb-data' not in _names, _names
 
@@ -2215,10 +2223,14 @@ def test_read_pkg_list_handles_pool_list_format():
     assert 'grub-efi-amd64' in _names, _names
     assert 'open-vm-tools' in _names, _names
     assert 'open-vm-tools-desktop' in _names, _names
-    # console-setup/keyboard-configuration/xkb-data dropped 2026-05-17
-    # (pool-audit cleanup) — reach pool transitively via kbd in
-    # pkg.list [base].  See test_pool_list_pins_target_only_packages.
-    assert 'console-setup' not in _names, _names
+    # console-setup re-added 2026-05-18 after the audit-removal
+    # regression — base-installer apt-installs it directly on /target,
+    # not via the kbd chain.  keyboard-configuration + xkb-data remain
+    # transitive via kbd → keyboard-configuration → xkb-data.
+    # See test_pool_list_pins_target_only_packages.
+    assert 'console-setup' in _names, _names
+    assert 'keyboard-configuration' not in _names, _names
+    assert 'xkb-data' not in _names, _names
     # No accidental comment lines bleeding through.
     for _n in _names:
         assert not _n.startswith('#'), _n
@@ -5317,6 +5329,35 @@ def test_athena_pkgsel_control_provides_conflicts_replaces_pkgsel():
     assert 'Provides: pkgsel (= 0.79)' in _body, _body
     assert 'Conflicts: pkgsel' in _body, _body
     assert 'Replaces: pkgsel' in _body, _body
+
+
+def test_athena_pkgsel_dh_helper_files_use_binary_name():
+    """FORK-01 Step 5 regression guard (caught 2026-05-18 install):
+    dh-style helper files in fork/source/athena-pkgsel/debian/ must be
+    named `athena-pkgsel.<helper>`, not `pkgsel.<helper>`.  debhelper
+    matches helper files against the BINARY package name in
+    debian/control (`Package: athena-pkgsel`); any `pkgsel.<helper>`
+    file is silently ignored, producing an EMPTY udeb that ships
+    nothing except DEBIAN/control + DEBIAN/postinst.
+
+    Symptom of the bug: main-menu fires athena-pkgsel, its postinst
+    runs but `db_progress START debian-installer/pkgsel/title` is a
+    no-op (templates never installed → debconf has no record), all
+    subsequent `db_get pkgsel/<key>` calls return empty, the tasksel
+    branch is skipped, postinst exits 0, main-menu logs
+    `succeeded but requested to be left unconfigured` and the menu
+    loop never advances.  Install hangs on the package-selection step.
+    """
+    _dir = os.path.join(_ROOT, 'fork', 'source', 'athena-pkgsel', 'debian')
+    # The four dh helper files that drive the udeb's payload.
+    for _helper in ('install', 'dirs', 'templates', 'isinstallable'):
+        _correct = os.path.join(_dir, f'athena-pkgsel.{_helper}')
+        _wrong = os.path.join(_dir, f'pkgsel.{_helper}')
+        assert os.path.isfile(_correct), (
+            f"missing {_correct} — debhelper will ship an empty udeb")
+        assert not os.path.isfile(_wrong), (
+            f"{_wrong} exists but binary is athena-pkgsel; dh would "
+            f"silently ignore this file.  Rename to athena-pkgsel.{_helper}")
 
 
 def test_pkgsel_patch_dir_deleted():
@@ -8489,6 +8530,7 @@ def main() -> int:
         test_athena_tasksel_control_provides_conflicts_replaces_tasksel,
         test_athena_pkgsel_fork_postinst_drops_debian_tasks_only_prefix,
         test_athena_pkgsel_control_provides_conflicts_replaces_pkgsel,
+        test_athena_pkgsel_dh_helper_files_use_binary_name,
         test_pkgsel_patch_dir_deleted,
         test_stage_group_manifests_writes_one_file_per_group,
         test_stage_group_manifests_empty_groups_is_noop,

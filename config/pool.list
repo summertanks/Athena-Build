@@ -68,13 +68,22 @@ open-vm-tools
 open-vm-tools-desktop
 
 # ─── Console keymap configuration ──────────────────────────────────
-# Removed 2026-05-17 (pool-audit cleanup): console-setup,
-# keyboard-configuration, xkb-data now reach the pool transitively
-# via `kbd` (in pkg.list [base], Depends keyboard-configuration →
-# Depends xkb-data).  Original concern (base-installer's apt-install
-# fails on /target if missing — verified 2026-05-14 install) is
-# satisfied by the transitive chain.  Re-add explicitly if `kbd` is
-# ever dropped from pkg.list [base].
+# `base-installer`'s `apt-install` queues `console-setup` for /target
+# so the installed system has a working console keymap matching the
+# locale picked at install time.  Without this in the pool,
+# base-installer logs `Failed to install console-setup into
+# /target/: 100` (verified 2026-05-18 install).  Not pre-installed
+# in pkg.list because the live image doesn't need it — target-side
+# only.
+#
+# History: removed 2026-05-17 in a pool-audit cleanup with the
+# justification "reaches transitively via kbd".  That was correct
+# for keyboard-configuration + xkb-data (kbd → keyboard-configuration
+# → xkb-data) — they still reach the pool transitively today.  But
+# it was WRONG for console-setup: base-installer apt-installs
+# console-setup as a SEPARATE step on /target, independent of the
+# kbd dep chain.  Re-added 2026-05-18 after the install failure.
+console-setup
 
 # ─── FORK-01 Step 5 follow-up: tasksel task availability ─────────────
 # Each section below makes a kept tasksel task's hard Depends
