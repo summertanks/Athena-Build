@@ -215,6 +215,7 @@ _BASE_CONF_BODY = """
     SkipTest =
     BuildProfiles = nodoc, nocheck
     Tunneled =
+    DistroSuffix = thor1
     """
 
 
@@ -1084,6 +1085,44 @@ def test_buildconfig_build_options_falls_back_to_profiles_when_omitted():
         # _BASE_CONF_BODY sets BuildProfiles = nodoc, nocheck and no BuildOptions.
         assert cfg.build_options == cfg.build_profiles
         assert cfg.build_options == frozenset({'nodoc', 'nocheck'})
+
+
+def test_buildconfig_parses_distro_suffix():
+    """`[Source] DistroSuffix` lands on `cfg.distro_suffix` as a stripped
+    string.  Used by BuildContainer (changelog prepend) and
+    DependencyTree (filename prediction); both ends MUST agree."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_buildconfig_parses_distro_suffix ({cfg.error_str})")
+            return
+        assert cfg.distro_suffix == 'thor1', cfg.distro_suffix
+
+
+def test_buildconfig_distro_suffix_defaults_to_empty():
+    """Omitted DistroSuffix → empty string (legacy behaviour, no version
+    bump).  Confirms the field is optional."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'DistroSuffix = thor1\n', '',
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_buildconfig_distro_suffix_defaults_to_empty ({cfg.error_str})")
+            return
+        assert cfg.distro_suffix == '', cfg.distro_suffix
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2769,6 +2808,32 @@ def test_buildcontainer_injects_athena_codename_env():
         "self.codename not initialised from config.build_codename"
 
 
+def test_buildcontainer_emits_changelog_bump_when_distro_suffix_set():
+    """When BuildContainer.distro_suffix is non-empty, the assembled
+    cmd_str must include the changelog-prepend snippet that bumps the
+    version to `<src-ver>+<suffix>` before dpkg-buildpackage runs.  The
+    pipeline is failure-prone if half-implemented: prepend without
+    filename-suffix wiring → check_build can't find the built .deb.
+    Pin the wiring so a refactor doesn't silently drop the prepend.
+
+    Also pins the `-b` (binary-only) dpkg-buildpackage flag — required
+    because our changelog prepend produces a version that doesn't match
+    the .dsc, so a source-rebuild step would fail."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert 'dpkg-parsechangelog -SVersion' in _body, (
+        "changelog bump snippet missing — distro_suffix wiring incomplete")
+    assert '${{SRC_VER}}+{_suffix}' in _body or \
+           '"${SRC_VER}+' in _body, (
+        "changelog bump must compose new version as <src-ver>+<suffix>")
+    assert ' -b -us -uc -nc' in _body, (
+        "dpkg-buildpackage must use -b (binary-only) — required when "
+        "changelog bump produces a version that doesn't match the .dsc")
+    assert 'self.distro_suffix = config.distro_suffix' in _body, (
+        "BuildContainer.distro_suffix not initialised from config")
+
+
 def test_installer_chroot_register_self_appends_debian_installer_stanza():
     """Stock d-i image-build adds a dummy `Package: debian-installer`
     stanza to /var/lib/dpkg/status so `dpkg-query -W debian-installer`
@@ -4190,6 +4255,94 @@ def test_strip_build_version_rejects_malformed_filename():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# apply_distro_suffix — append `+<suffix>` to bumped binaries
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_apply_distro_suffix_appends_to_stripped_filename():
+    """The canonical path: strip_build_version produces
+    `foo_1.0-2_amd64.deb`, apply_distro_suffix bumps it to
+    `foo_1.0-2+thor1_amd64.deb` — what BuildContainer's changelog
+    prepend produces from a source build."""
+    from utils import apply_distro_suffix
+    assert (apply_distro_suffix('foo_1.0-2_amd64.deb', 'thor1')
+            == 'foo_1.0-2+thor1_amd64.deb')
+    assert (apply_distro_suffix('foo_1.0-2_amd64.udeb', 'thor1')
+            == 'foo_1.0-2+thor1_amd64.udeb')
+
+
+def test_apply_distro_suffix_empty_is_noop():
+    """Empty suffix → legacy behaviour, filename unchanged.  Lets
+    operators turn the feature off via blank DistroSuffix config."""
+    from utils import apply_distro_suffix
+    assert (apply_distro_suffix('foo_1.0-2_amd64.deb', '')
+            == 'foo_1.0-2_amd64.deb')
+
+
+def test_apply_distro_suffix_idempotent_on_already_suffixed():
+    """Calling apply_distro_suffix on a filename that already ends
+    with `+<suffix>` returns it unchanged.  Guards against double-
+    suffixing if the function is composed with itself or applied
+    to a filename that's already been through the pipeline."""
+    from utils import apply_distro_suffix
+    assert (apply_distro_suffix('foo_1.0-2+thor1_amd64.deb', 'thor1')
+            == 'foo_1.0-2+thor1_amd64.deb')
+
+
+def test_apply_distro_suffix_preserves_deb12u1_security_suffix():
+    """Security/point-release suffixes like `+deb12u1` stay intact —
+    apply_distro_suffix appends, doesn't replace.  Real example:
+    `openssh-client_1:9.2p1-2+deb12u9_amd64.deb` becomes
+    `openssh-client_1:9.2p1-2+deb12u9+thor1_amd64.deb`."""
+    from utils import apply_distro_suffix
+    assert (apply_distro_suffix('foo_1.0-2+deb12u1_amd64.deb', 'thor1')
+            == 'foo_1.0-2+deb12u1+thor1_amd64.deb')
+
+
+def test_apply_distro_suffix_beats_debian_bin_nmu_constraint():
+    """Architectural invariant — our distro_suffix MUST produce a
+    binary version that beats EVERY upstream bin-NMU version, so any
+    downstream consumer whose Depends was stamped against a Debian
+    bin-NMU (`(>= 0.15.5-2b)`, `(>= 0.15.5-2+b1)`, ...) is satisfied
+    by our binary at install time.
+
+    Verified with apt_pkg.check_dep — the same comparison apt does on
+    the target.  This is the WHOLE POINT of the distro_suffix system;
+    if this test fails the suffix is broken.
+    """
+    import apt_pkg
+    apt_pkg.init_system()
+    _our_ver = '0.15.5-2+thor1'
+    for _upstream_constraint in ('0.15.5-2', '0.15.5-2b',
+                                  '0.15.5-2+b1', '0.15.5-2+b99'):
+        assert apt_pkg.check_dep(_our_ver, '>=', _upstream_constraint), (
+            f"DistroSuffix-bumped {_our_ver} must satisfy "
+            f">= {_upstream_constraint} but doesn't"
+        )
+
+
+def test_apply_distro_suffix_rejects_malformed_filename():
+    """Same shape check as strip_build_version — refuse to silently
+    butcher non-conforming filenames."""
+    from utils import apply_distro_suffix
+    for bad in ('not-a-deb.deb', 'one_two.deb', 'a_b_c_d_amd64.deb'):
+        try:
+            apply_distro_suffix(bad, 'thor1')
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+def test_apply_distro_suffix_noop_skips_shape_check_for_empty():
+    """When suffix is empty we don't even validate the shape — caller
+    is asking for a no-op and we honour it bit-for-bit.  Avoids
+    surprising ValueErrors when distro_suffix happens to be blank."""
+    from utils import apply_distro_suffix
+    assert apply_distro_suffix('arbitrary-string-not-deb', '') \
+        == 'arbitrary-string-not-deb'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # version_no_epoch — patch dir lookup must match Debian filename convention
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -5027,6 +5180,7 @@ def test_derive_extras_src_names_marks_extras_only_sources():
     }
     dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
     dt._DependencyTree__cache = _FakeCache({})
+    dt._distro_suffix = ''  # no version bump in this synthetic test
     dt.selected_pkgs = seed_pkgs
     dt.selected_srcs = {
         'firefox': _StubSrc(['firefox_1.0_amd64.deb',
@@ -8635,6 +8789,17 @@ def main() -> int:
         test_strip_build_version_handles_udeb_extension,
         test_strip_build_version_no_change_when_no_binNMU,
         test_strip_build_version_rejects_malformed_filename,
+        # apply_distro_suffix — bump bumped binaries with `+thor1`
+        test_apply_distro_suffix_appends_to_stripped_filename,
+        test_apply_distro_suffix_empty_is_noop,
+        test_apply_distro_suffix_idempotent_on_already_suffixed,
+        test_apply_distro_suffix_preserves_deb12u1_security_suffix,
+        test_apply_distro_suffix_beats_debian_bin_nmu_constraint,
+        test_apply_distro_suffix_rejects_malformed_filename,
+        test_apply_distro_suffix_noop_skips_shape_check_for_empty,
+        test_buildconfig_parses_distro_suffix,
+        test_buildconfig_distro_suffix_defaults_to_empty,
+        test_buildcontainer_emits_changelog_bump_when_distro_suffix_set,
         # version_no_epoch — patch dir lookup must match Debian filename convention
         test_version_no_epoch_strips_epoch_from_debian_version,
         test_version_no_epoch_no_change_when_no_epoch,

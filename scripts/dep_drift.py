@@ -20,6 +20,7 @@ import subprocess
 from typing import TYPE_CHECKING, Callable
 
 import tui
+import utils
 
 if TYPE_CHECKING:
     import dependencytree
@@ -33,6 +34,7 @@ class _DepDriftMixin:
     # assignment here.
     _dependencytree: 'dependencytree.DependencyTree'
     _dir_repo: str
+    _config: 'utils.BuildConfig'
     strip_build_version: Callable[[str], str]
 
     def _check_dep_drift(self):
@@ -81,6 +83,9 @@ class _DepDriftMixin:
             if not _filename:
                 continue
             _filename  = self.strip_build_version(_filename)
+            _filename  = utils.apply_distro_suffix(
+                _filename, self._config.distro_suffix,
+            )
             _deb_path  = os.path.join(self._dir_repo, _filename)
             if not os.path.exists(_deb_path):
                 continue

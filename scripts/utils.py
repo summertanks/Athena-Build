@@ -45,6 +45,40 @@ def strip_build_version(file: str) -> str:
     return f"{_pkg_name}_{_version}_{_arch}{_ext}"
 
 
+def apply_distro_suffix(file: str, suffix: str) -> str:
+    """Append `+<suffix>` to the version field of a `.deb`/`.udeb` filename.
+
+    Input must be `name_version_arch.ext` shape.  No-op when `suffix` is
+    empty.  Idempotent: if the version already ends with `+<suffix>` the
+    filename is returned unchanged.
+
+        apply_distro_suffix("foo_1.0-2_amd64.deb", "thor1")
+            → foo_1.0-2+thor1_amd64.deb
+        apply_distro_suffix("foo_1.0-2+thor1_amd64.deb", "thor1")
+            → foo_1.0-2+thor1_amd64.deb        (idempotent)
+        apply_distro_suffix("foo_1.0-2_amd64.deb", "")
+            → foo_1.0-2_amd64.deb              (no-op)
+
+    Pairs with BuildContainer's changelog prepend: both ends MUST agree
+    on the version, otherwise `check_build` looks for a file the build
+    didn't produce and the source endlessly rebuilds.
+
+    Raises:
+        ValueError: filename is not in `name_version_arch.ext` shape.
+    """
+    if not suffix:
+        return file
+    _name, _ext = os.path.splitext(file)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        raise ValueError(f"Incorrectly formatted package filename: {file!r}")
+    _pkg_name, _version, _arch = _parts
+    _tag = f"+{suffix}"
+    if not _version.endswith(_tag):
+        _version = f"{_version}{_tag}"
+    return f"{_pkg_name}_{_version}_{_arch}{_ext}"
+
+
 def version_no_epoch(version) -> str:
     """Return a Debian Version's string form with the epoch stripped.
 
@@ -608,6 +642,7 @@ class BuildConfig:
     tunnel_packages: list[str]
     build_profiles: frozenset
     build_options: frozenset
+    distro_suffix: str
     max_parallel_builds: int
 
     security_keyring: str
@@ -774,6 +809,13 @@ class BuildConfig:
                 )
             else:
                 self.build_options = self.build_profiles
+            # Distribution suffix appended to every source-built binary's
+            # version (`<upstream-src-ver>+<DistroSuffix>`).  See the
+            # config comment for rationale.  Empty → legacy upstream
+            # versions verbatim (still works, but risks bin-NMU skew).
+            self.distro_suffix: str = config_parser.get(
+                'Source', 'DistroSuffix', fallback='',
+            ).strip()
             self.max_parallel_builds = config_parser.getint('Build', 'MaxParallelBuilds', fallback=4)
 
             # Mirror InRelease GPG verification.  Default: enabled,

@@ -696,7 +696,8 @@ class BuildSession:
 
         console.print("Preparing Parsing Tree...", tui.COLOR_INFO)
         self.dep_tree = dependencytree.DependencyTree(self.cache, select_recommended=False,
-                    arch=self.config.arch, build_profiles=self.config.build_profiles)
+                    arch=self.config.arch, build_profiles=self.config.build_profiles,
+                    distro_suffix=self.config.distro_suffix)
 
         # --- Pass I: required ---------------------------------------------------
         required_packages = self.cache.required
@@ -918,6 +919,7 @@ class BuildSession:
             # same module (ext4-modules-6.1.0-{NN}-amd64-di etc.).  Auto-
             # pick the highest version across names instead of prompting.
             auto_pick_highest_when_ambiguous=True,
+            distro_suffix=self.config.distro_suffix,
         )
         _udeb_seeds_required = list(self.cache.udeb_required)
         _udeb_seeds_important = list(self.cache.udeb_important)
@@ -1794,6 +1796,7 @@ class BuildSession:
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
                 codename=_codename,
+                distro_suffix=self.config.distro_suffix,
             )
             if not _ok:
                 console.print(

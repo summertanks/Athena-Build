@@ -46,6 +46,11 @@ class BuildContainer:
         self.patch_empty = config.dir_patch_empty
         self.build_profiles = config.build_profiles
         self.build_options  = config.build_options
+        # Distribution suffix used to bump the changelog version inside
+        # the build container before dpkg-buildpackage.  Empty → no
+        # bump (binaries ship at upstream source version; legacy
+        # behaviour vulnerable to bin-NMU skew).
+        self.distro_suffix = config.distro_suffix
 
         # Apply snapshot pinning to mirrors so the container's apt fetches
         # build-deps from the same archive snapshot the cache was built from.
@@ -316,6 +321,39 @@ class BuildContainer:
         _dep_install = (f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_apt_retry}install {" ".join(_plain_deps)}; ' if _plain_deps else '') + \
                        ('; '.join(_or_cmds) + '; ' if _or_cmds else '')
 
+        # Distro-suffix bump: prepend a changelog entry that bumps the
+        # version to `<source-ver>+<suffix>` so the produced .debs ship
+        # as `pkg_X-Y+thor1_amd64.deb` instead of `pkg_X-Y_amd64.deb`.
+        # This (a) marks every binary as Thor's build and (b) makes our
+        # binary lexically beat ANY upstream bin-NMU version constraint
+        # at install time (apt's version comparison: `+thor<N>` > `+b<N>`
+        # because letters sort before non-letters and `t` > `b`).
+        # Pairs with utils.apply_distro_suffix in dependencytree's
+        # filename prediction — both ends must agree on the suffix.
+        #
+        # Skipped when distro_suffix is empty (legacy behaviour).
+        # Idempotent: dpkg-parsechangelog always returns the current
+        # top entry's version; on a fresh dpkg-source extraction that's
+        # the upstream source version, so we never double-suffix.
+        if self.distro_suffix:
+            _suffix = self.distro_suffix
+            _changelog_bump = (
+                'SRC_NAME=$(dpkg-parsechangelog -SSource); '
+                'SRC_VER=$(dpkg-parsechangelog -SVersion); '
+                f'NEW_VER="${{SRC_VER}}+{_suffix}"; '
+                'NOW=$(date -R); '
+                '{ '
+                'printf "%s (%s) thor; urgency=medium\\n\\n'
+                '  * Athena rebuild: distro-suffix bump (+%s).\\n\\n'
+                ' -- Athena Build <athena@local>  %s\\n\\n" '
+                f'"$SRC_NAME" "$NEW_VER" "{_suffix}" "$NOW"; '
+                'cat debian/changelog; '
+                '} > debian/changelog.new; '
+                'mv debian/changelog.new debian/changelog; '
+            )
+        else:
+            _changelog_bump = ''
+
         # Pin the container's apt to the exact mirrors our cache was built
         # from.  Without this the base image's stock sources.list (live
         # mirror) is used, and a security update landing between our cache
@@ -331,6 +369,11 @@ class BuildContainer:
             f"{_apt_sources}EOF\n"
         )
 
+        # `-b` (--build=binary) skips the source rebuild step.  This is
+        # required when distro_suffix is set because our changelog
+        # prepend produces a version that doesn't match the .dsc, so
+        # `dpkg-source -b` would fail.  Harmless when distro_suffix is
+        # empty — we never consume the produced source artefacts anyway.
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'{_write_sources}' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
@@ -340,7 +383,8 @@ class BuildContainer:
                   f'cd {_filename_prefix}; ' \
                   f'{patches_applied_cmd}' \
                   f'{patch_cmd}' \
-                  f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -us -uc -nc; cd ..;' \
+                  f'{_changelog_bump}' \
+                  f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -b -us -uc -nc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'
 
         # `container` is initialised to None so the finally block can tell

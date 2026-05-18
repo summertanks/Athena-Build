@@ -874,9 +874,12 @@ class _ChrootMixin:
     def _get_deb_files(self, pkg_list: list) -> list:
         """Resolve package names to absolute .deb paths in the repo directory.
 
-        Uses the Filename field from the binary Packages index and strips any
-        binNMU suffix (+bN) via strip_build_version() so the path matches what
-        dpkg-buildpackage actually produced on disk.
+        Maps the cache's Packages-index Filename onto what our source-build
+        pipeline produced:
+          1. strip_build_version: drop the Debian buildd's +bN bin-NMU suffix
+          2. apply_distro_suffix: append `+<DistroSuffix>` (e.g. `+thor1`)
+             to match BuildContainer's changelog prepend.
+        Both ends MUST agree on the suffix — see utils.apply_distro_suffix.
         """
         file_list = []
         for pkg in pkg_list:
@@ -884,6 +887,9 @@ class _ChrootMixin:
                 self._dependencytree.selected_pkgs[pkg]['Filename']
             )
             _filename = self.strip_build_version(_filename)
+            _filename = utils.apply_distro_suffix(
+                _filename, self._config.distro_suffix,
+            )
             _filepath = os.path.join(self._dir_repo, _filename)
             if not os.path.exists(_filepath):
                 tui.console.print(f"WARNING: .deb not found, skipping: {_filename}")
