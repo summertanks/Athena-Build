@@ -4631,6 +4631,164 @@ def test_restore_deb_epoch_prepends_when_missing():
         assert _r2 == 'already-correct', _r2
 
 
+def test_rewrite_intra_thor1_strict_equals_round_trip():
+    """REGRESSION (2026-05-18 install failure): rebump_deb_file only
+    updates each .deb's own Version field; it leaves stale `(= X)`
+    cross-references to sibling binaries from the same source.
+    Symptom: systemd's `Depends: libsystemd-shared (= 252.39-1~deb12u1)`
+    couldn't be satisfied by our bumped libsystemd-shared at
+    252.39-1~deb12u1+thor1, so debootstrap failed at base configure.
+
+    rewrite_intra_thor1_strict_equals walks Depends/Pre-Depends/
+    Recommends/Suggests/Enhances/Provides; for any `(= X)` constraint
+    targeting a package in `bumped_pkg_set` and whose X doesn't already
+    end with `+suffix`, appends `+suffix`.
+    """
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rewrite_intra_thor1_strict_equals
+
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_rewrite_intra_thor1_strict_equals_round_trip (no dpkg-deb)")
+        return
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _deb = os.path.join(_tmp, 'systemd_252.39-1~deb12u1+thor1_amd64.deb')
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'bin'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: systemd\n'
+                'Version: 252.39-1~deb12u1+thor1\n'
+                'Architecture: amd64\n'
+                'Maintainer: Test <test@local>\n'
+                # Mix of constraints:
+                # - libsystemd-shared (= ...) → bumped sibling, MUST rewrite
+                # - libsystemd0 (= ...) → bumped sibling, MUST rewrite
+                # - libacl1 (>= ...) → cross-source >=, leave alone
+                # - mount (no version) → leave alone
+                # - libudev1:amd64 (= ...) → bumped sibling with arch, MUST rewrite
+                'Depends: libsystemd-shared (= 252.39-1~deb12u1), '
+                'libsystemd0 (= 252.39-1~deb12u1), '
+                'libacl1 (>= 2.2.23), mount, '
+                'libudev1:amd64 (= 252.39-1~deb12u1)\n'
+                'Pre-Depends: libc6 (>= 2.34)\n'
+                'Description: synthetic systemd-like test package\n'
+            )
+        with open(os.path.join(_work, 'usr', 'bin', 'systemd'), 'w') as fh:
+            fh.write('placeholder\n')
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _deb],
+            check=True, capture_output=True,
+        )
+
+        # Bumped set: the three sibling lib pkgs.  libacl1 is NOT in the
+        # set (a cross-source dep still at upstream version).
+        _bumped = {'libsystemd-shared', 'libsystemd0', 'libudev1'}
+        _n = rewrite_intra_thor1_strict_equals(_deb, _bumped, 'thor1')
+        assert _n == 3, f"expected 3 rewrites, got {_n}"
+
+        _depends = subprocess.run(
+            ['dpkg-deb', '-f', _deb, 'Depends'],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        # bumped sibling refs must now carry +thor1
+        assert 'libsystemd-shared (= 252.39-1~deb12u1+thor1)' in _depends, _depends
+        assert 'libsystemd0 (= 252.39-1~deb12u1+thor1)' in _depends, _depends
+        assert 'libudev1:amd64 (= 252.39-1~deb12u1+thor1)' in _depends, _depends
+        # cross-source >= constraint must be UNCHANGED
+        assert 'libacl1 (>= 2.2.23)' in _depends, _depends
+        # parenthesis-free dep stays parenthesis-free
+        assert 'mount' in _depends, _depends
+
+
+def test_rewrite_intra_thor1_strict_equals_idempotent():
+    """Re-running on an already-rewritten .deb does no work.  Pinned so
+    a recovery script that runs twice doesn't double-suffix."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rewrite_intra_thor1_strict_equals
+
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_rewrite_intra_thor1_strict_equals_idempotent (no dpkg-deb)")
+        return
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _deb = os.path.join(_tmp, 'foo_1.0-2+thor1_amd64.deb')
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'bin'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: foo\nVersion: 1.0-2+thor1\nArchitecture: amd64\n'
+                'Maintainer: T <t@l>\n'
+                'Depends: bar (= 1.0-2+thor1)\n'   # already rewritten
+                'Description: test\n'
+            )
+        with open(os.path.join(_work, 'usr', 'bin', 'foo'), 'w') as fh:
+            fh.write('x\n')
+        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _deb],
+                       check=True, capture_output=True)
+
+        _n = rewrite_intra_thor1_strict_equals(_deb, {'bar'}, 'thor1')
+        assert _n == 0, f"idempotent must do nothing, got {_n} rewrites"
+
+
+def test_rewrite_intra_thor1_strict_equals_leaves_conflicts_untouched():
+    """Conflicts / Breaks / Replaces have different semantics ('won't
+    coexist with X', not 'needs X').  rewrite must not touch them —
+    rewriting a Conflicts constraint could let two genuinely-
+    incompatible packages co-install."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rewrite_intra_thor1_strict_equals
+
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_rewrite_intra_thor1_strict_equals_leaves_conflicts_untouched (no dpkg-deb)")
+        return
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _deb = os.path.join(_tmp, 'pkga_1.0-2+thor1_amd64.deb')
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'bin'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: pkga\nVersion: 1.0-2+thor1\nArchitecture: amd64\n'
+                'Maintainer: T <t@l>\n'
+                'Conflicts: pkgb (= 1.0-2)\n'   # must NOT be rewritten
+                'Breaks: pkgc (= 1.0-2)\n'
+                'Replaces: pkgd (= 1.0-2)\n'
+                'Description: test\n'
+            )
+        with open(os.path.join(_work, 'usr', 'bin', 'pkga'), 'w') as fh:
+            fh.write('x\n')
+        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _deb],
+                       check=True, capture_output=True)
+
+        _n = rewrite_intra_thor1_strict_equals(
+            _deb, {'pkgb', 'pkgc', 'pkgd'}, 'thor1',
+        )
+        assert _n == 0, f"Conflicts/Breaks/Replaces must NOT be rewritten, got {_n}"
+        for _field in ('Conflicts', 'Breaks', 'Replaces'):
+            _val = subprocess.run(
+                ['dpkg-deb', '-f', _deb, _field],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            assert '(= 1.0-2)' in _val, f"{_field} mutated: {_val!r}"
+            assert '+thor1' not in _val, f"{_field} got +thor1: {_val!r}"
+
+
 def test_restore_deb_epoch_empty_prefix_is_noop():
     """Empty epoch prefix → nothing to restore; returns
     'already-correct' immediately without touching the file."""
@@ -9131,6 +9289,9 @@ def main() -> int:
         test_rebump_deb_file_skips_malformed_filename,
         test_rebump_deb_file_preserves_epoch_from_control,
         test_restore_deb_epoch_prepends_when_missing,
+        test_rewrite_intra_thor1_strict_equals_round_trip,
+        test_rewrite_intra_thor1_strict_equals_idempotent,
+        test_rewrite_intra_thor1_strict_equals_leaves_conflicts_untouched,
         test_restore_deb_epoch_empty_prefix_is_noop,
         test_rebump_deb_file_skips_non_deb_files,
         test_cmd_rebump_packages_registered_under_package_dispatcher,

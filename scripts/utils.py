@@ -152,6 +152,113 @@ def rebump_deb_file(deb_path: str, suffix: str) -> str:
     return _new_base
 
 
+def rewrite_intra_thor1_strict_equals(deb_path: str, bumped_pkg_set,
+                                       suffix: str) -> int:
+    """Rewrite strict-equal version constraints in dep fields that target
+    a package we bumped to `+<suffix>`.  Used as a recovery pass after
+    rebump_deb_file, which only updates each .deb's own Version field
+    but leaves stale `(= X)` cross-references to siblings.
+
+    Mechanics: walks Depends, Pre-Depends, Recommends, Suggests,
+    Enhances, Provides fields.  For each `<name> (= <X>)` token where
+    `name` is in `bumped_pkg_set` AND `X` doesn't already end with
+    `+<suffix>`, rewrites to `<name> (= <X>+<suffix>)`.
+
+    Returns the count of constraints rewritten in this .deb.
+
+    NOT touched:
+      - operators other than `=` (`>=` already satisfied by +suffix;
+        `<=` / `<<` / `>>` semantics differ and rewrites could break
+        upper-bound intent)
+      - constraints targeting packages NOT in bumped_pkg_set (still
+        upstream → upstream version is correct)
+      - constraints already +suffix'd (idempotent re-run)
+      - Conflicts / Breaks / Replaces fields — those mean "won't
+        coexist with X", not "needs X"; rewriting them could let two
+        conflicting packages co-install or weaken intended barriers
+
+    Caveat: `Provides` is rewritten because `Provides: name (= X)`
+    semantically means "I act as name at version X".  If our package
+    ships at +suffix the Provides claim must match, else downstream
+    `Depends: name (= upstream-X)` resolves to nothing.
+
+    Raises subprocess.CalledProcessError on dpkg-deb failure.
+    """
+    import subprocess
+    import tempfile
+    if not suffix:
+        return 0
+    _tag = f'+{suffix}'
+    _fields_to_walk = (
+        'Depends', 'Pre-Depends', 'Recommends', 'Suggests',
+        'Enhances', 'Provides',
+    )
+    # Pattern: name optional-arch  (= version)
+    # name: [a-z0-9][a-z0-9.+-]*
+    # arch: optional :amd64 / :any
+    # = constraint: ( = X )
+    _dep_re = re.compile(
+        r'([a-z0-9][a-z0-9.+-]*)(:[a-zA-Z0-9-]+)?\s*\(\s*=\s*([^)]+?)\s*\)'
+    )
+
+    with tempfile.TemporaryDirectory(prefix='athena-eqfix-') as _work:
+        subprocess.run(
+            ['dpkg-deb', '-R', deb_path, _work],
+            check=True, capture_output=True,
+        )
+        _ctrl = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl) as fh:
+            _content = fh.read()
+
+        _rewrite_count = 0
+        _new_lines: 'list[str]' = []
+        _in_target_field = False
+        _continuation = False
+        for _line in _content.splitlines(keepends=True):
+            # Detect start of a dep field (matches "FieldName:" at line start)
+            _is_field_start = False
+            _field_name = ''
+            if _line and _line[0] not in (' ', '\t'):
+                _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
+                if _m:
+                    _field_name = _m.group(1)
+                    _is_field_start = True
+            if _is_field_start:
+                _in_target_field = _field_name in _fields_to_walk
+            elif not (_line and _line[0] in (' ', '\t')):
+                _in_target_field = False     # field block ended
+
+            if not _in_target_field:
+                _new_lines.append(_line)
+                continue
+
+            # Rewrite (=X) where target is in bumped set and X has no +suffix
+            def _sub(m):
+                nonlocal _rewrite_count
+                _name = m.group(1)
+                _arch = m.group(2) or ''
+                _ver = m.group(3)
+                if _name not in bumped_pkg_set:
+                    return m.group(0)
+                if _ver.endswith(_tag):
+                    return m.group(0)
+                _rewrite_count += 1
+                return f'{_name}{_arch} (= {_ver}{_tag})'
+
+            _new_lines.append(_dep_re.sub(_sub, _line))
+
+        if _rewrite_count == 0:
+            return 0
+
+        with open(_ctrl, 'w') as fh:
+            fh.writelines(_new_lines)
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, deb_path],
+            check=True, capture_output=True,
+        )
+    return _rewrite_count
+
+
 def restore_deb_epoch(deb_path: str, epoch_prefix: str) -> str:
     """One-time recovery for .debs whose DEBIAN/control Version field
     had its epoch stripped by an earlier buggy rebump_deb_file run.
