@@ -32,4 +32,4 @@ Key:
  vim
  wget
  xz-utils
-Test-new-install: mark show
+Test-new-install: mark skip

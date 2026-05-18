@@ -1,6 +1,19 @@
 Task: desktop
-Relevance: 1
 Section: user
-Test-desktop: 1
+Relevance: 1
+Description: Desktop environment
+ Common desktop infrastructure — Xorg, audio (ALSA), printing
+ (CUPS), network discovery (Avahi/mDNS), font fallback for emoji
+ (Symbola), and xdg-utils for desktop integration.  Mirrors the
+ content of config/pkg.list [desktop] — keep in sync when adding/
+ removing packages.  Today `gnome-desktop` pulls Xorg via its own
+ Key list, so selecting this task alongside `gnome-desktop` is
+ mostly redundant.
 Key:
-  task-desktop
+ alsa-utils
+ avahi-daemon
+ cups
+ fonts-symbola
+ libnss-mdns
+ xdg-utils
+ xorg

@@ -306,3 +306,87 @@ gnome-software
 synaptic
 system-config-printer-common
 system-config-printer-udev
+
+
+[standard]
+## Description: Curated CLI utilities — Athena's subset of Debian Priority: standard.
+##
+## Source-of-truth for the `standard` tasksel task; mirrors the Key:
+## list in fork/source/athena-tasksel/tasks/standard.  Curated from
+## the 87 Priority: standard packages — picked the ~25 most-useful
+## ones, dropping Debian-specific telemetry / docs / BTS tooling
+## (debian-faq, doc-debian, reportbug, python3-reportbug) per the
+## "Athena ships as Athena" principle.  Operator who wants any
+## remaining Debian-standard package can apt-install individually
+## post-install — they're all available in /cdrom/pool.
+bash-completion
+bzip2
+ca-certificates
+dnsutils
+file
+gettext-base
+groff-base
+iputils-ping
+less
+lsof
+man-db
+manpages
+media-types
+openssh-client
+pciutils
+psmisc
+rsync
+systemd-timesyncd
+tcpdump
+ucf
+usbutils
+vim
+wget
+xz-utils
+
+
+[ssh-server]
+## Description: OpenSSH server for remote login.
+##
+## Note: openssh-server is also in [base] (default-on for every install).
+## This group exists so the `ssh-server` tasksel task has a Key: target
+## that exists in our pool.  Selecting / deselecting the task in the
+## installer has no effect today — openssh-server is debootstrapped
+## either way.  Reorganise by moving openssh-server out of [base] if
+## you want ssh to be opt-in.
+openssh-server
+
+
+[laptop]
+## Description: Laptop power management, Bluetooth, and wireless tooling.
+##
+## Source-of-truth for the `laptop` tasksel task; mirrors the Key:
+## list in fork/source/athena-tasksel/tasks/laptop.  Packages curated
+## from upstream task-laptop's Depends + key Recommends.
+anacron
+avahi-autoipd
+bluetooth
+iw
+powertop
+wireless-tools
+wpasupplicant
+
+
+[desktop]
+## Description: Desktop infrastructure — Xorg, audio, printing, network discovery.
+##
+## Source-of-truth for the `desktop` tasksel task; mirrors the Key:
+## list in fork/source/athena-tasksel/tasks/desktop.  Packages curated
+## from upstream task-desktop's Depends + key Recommends, MINUS
+## `desktop-base` (Debian-branded theme/wallpaper — blocked on
+## FORK-01 Step 7 athena-branding).  Today `gnome-desktop` task pulls
+## xorg via its own Key, so selecting `desktop` alongside
+## `gnome-desktop` is mostly redundant — kept as a separate task so
+## a future non-GNOME-DE option (XFCE etc.) can share the umbrella.
+alsa-utils
+avahi-daemon
+cups
+fonts-symbola
+libnss-mdns
+xdg-utils
+xorg

@@ -1,5 +1,8 @@
 Task: ssh-server
 Section: server
-Test-server: 1
+Description: SSH server
+ OpenSSH server for remote login.  Note: openssh-server is also
+ in pkg.list [base], so it's debootstrapped on every install
+ regardless of whether the operator picks this task.
 Key:
-  task-ssh-server
+ openssh-server
