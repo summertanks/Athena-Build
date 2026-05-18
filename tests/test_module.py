@@ -6447,6 +6447,56 @@ def test_dependency_tree_udeb_tree_flag_enables_max_version_fallback():
     assert _picked.version == '6.1.170-3'
 
 
+def test_auto_pick_candidate_prefers_real_package_matching_seed_name():
+    """Regression guard (caught 2026-05-18 install): when a seed name
+    matches a real Package: in the candidate set, _auto_pick_candidate
+    must pick that real package even if other candidates merely
+    `Provides:` it.  Mirrors apt's "real package wins over virtual" rule.
+
+    Bug symptom: seed `anacron` in [laptop] resolved to
+    `systemd-cron (Provides anacron)` instead of `anacron (real)`,
+    triggering `ERROR: Cannot add 'anacron' — conflicts with 'cron'
+    already in lookahead` (systemd-cron Conflicts cron; anacron does
+    not).  Resolver eventually recovered via a different path but the
+    detour cost a confusing error message and a non-deterministic pick.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from dependencytree import _auto_pick_candidate
+
+    class _FakeCandidate:
+        def __init__(self, name, ver):
+            self._fields = {'Package': name}
+            self.package = name
+            self.version = ver
+        def __getitem__(self, k): return self._fields[k]
+
+    cands = [
+        _FakeCandidate('anacron', '2.3-36'),
+        _FakeCandidate('systemd-cron', '1.15.19-5'),
+    ]
+    # Without prefer_name: multi-name → no auto-pick.
+    _auto, _collapsed = _auto_pick_candidate(cands)
+    assert _auto is None
+    assert {c.package for c in _collapsed} == {'anacron', 'systemd-cron'}
+
+    # With prefer_name='anacron': pick the real anacron, ignoring systemd-cron.
+    _auto, _collapsed = _auto_pick_candidate(cands, prefer_name='anacron')
+    assert _auto is not None
+    assert _auto.package == 'anacron'
+    assert _auto.version == '2.3-36'
+
+    # With prefer_name='awk' (no real match): falls through to None (would
+    # prompt or apply per-tree fallback).
+    _auto, _collapsed = _auto_pick_candidate(cands, prefer_name='awk')
+    assert _auto is None
+
+    # Single-name case still auto-picks regardless of prefer_name.
+    single = [_FakeCandidate('foo', '1.0')]
+    _auto, _ = _auto_pick_candidate(single, prefer_name='unrelated')
+    assert _auto is not None and _auto.package == 'foo'
+
+
 def test_dependency_tree_constructor_accepts_auto_pick_flag():
     """DependencyTree.__init__ accepts auto_pick_highest_when_ambiguous as
     a keyword arg; defaults to False (deb tree); True is honoured (udeb tree).
@@ -8683,6 +8733,7 @@ def main() -> int:
         test_parse_dependency_reuses_lookahead_for_multi_version_same_name,
         test_dependency_tree_default_does_not_auto_pick_across_names,
         test_dependency_tree_udeb_tree_flag_enables_max_version_fallback,
+        test_auto_pick_candidate_prefers_real_package_matching_seed_name,
         test_dependency_tree_constructor_accepts_auto_pick_flag,
         test_buildsession_initialises_udeb_dep_tree_as_none,
         test_print_udebs_handles_no_udeb_tree_gracefully,
