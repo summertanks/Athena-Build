@@ -2786,13 +2786,14 @@ def test_installer_chroot_run_depmod_indexes_each_kernel_present():
             assert _c[1] == '-a' and _c[2] == '-b' and _c[3] == _chroot, _c
 
 
-def test_athena_installer_data_ships_release_files_with_codename_placeholder():
-    """FORK-01 Step 4: /etc/lsb-release + /etc/default-release ship from
-    athena-installer-data with @CODENAME@ placeholders that debian/rules
-    substitutes at build time using the ATHENA_CODENAME env var injected
-    by BuildContainer.  This pins the source templates + the substitution
-    machinery — both must stay aligned for the build to produce valid
-    files."""
+def test_athena_installer_data_ships_release_files_with_tokens():
+    """/etc/lsb-release + /etc/default-release ship from
+    athena-installer-data with @DISTRIBUTION@/@CODENAME@ tokens.
+    BuildContainer's _token_subst snippet resolves them at build
+    time (no per-package sed needed in debian/rules anymore).
+    debian/rules now only handles the dynamic symlink filename for
+    /usr/share/debootstrap/scripts/<codename> — the one thing
+    centralised text-substitution can't do."""
     _lsb = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
                         'data', 'lsb-release')
     _def = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
@@ -2803,8 +2804,9 @@ def test_athena_installer_data_ships_release_files_with_codename_placeholder():
         _lsb_body = fh.read()
     with open(_def) as fh:
         _def_body = fh.read()
-    # Source carries placeholder — codename is supplied at build time
-    assert 'DISTRIB_ID=Athena' in _lsb_body, _lsb_body
+    # Source carries tokens — values substituted at build time by
+    # BuildContainer._token_subst.
+    assert 'DISTRIB_ID=@DISTRIBUTION@' in _lsb_body, _lsb_body
     assert '@CODENAME@' in _lsb_body, _lsb_body
     assert '@CODENAME@' in _def_body, _def_body
 
@@ -2816,14 +2818,19 @@ def test_athena_installer_data_ships_release_files_with_codename_placeholder():
     assert 'data/lsb-release' in _install_body and 'etc' in _install_body
     assert 'data/default-release' in _install_body
 
-    # debian/rules has the sed substitution for @CODENAME@ + symlink creation
+    # debian/rules: symlink creation stays (dynamic filename); the
+    # @CODENAME@ sed block in override_dh_install is GONE (centralised
+    # in BuildContainer now).  Negative assertion guards against
+    # accidental reintroduction.
     _rules = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
                           'debian', 'rules')
     with open(_rules) as fh:
         _rules_body = fh.read()
     assert 'ATHENA_CODENAME' in _rules_body, _rules_body
-    assert '@CODENAME@' in _rules_body, _rules_body
     assert 'ln -sf sid' in _rules_body, _rules_body
+    assert "sed -i 's/@CODENAME@" not in _rules_body, (
+        "per-package sed for @CODENAME@ resurrected — centralised in "
+        "BuildContainer._token_subst, must not duplicate here")
 
 
 def test_buildcontainer_injects_athena_codename_env():
@@ -9392,7 +9399,7 @@ def main() -> int:
         test_installer_chroot_resolve_udeb_files_skips_record_without_filename,
         # FORK-01 Step 4: helpers replaced by athena-installer-data udeb
         test_athena_installer_data_ships_runtime_dirs,
-        test_athena_installer_data_ships_release_files_with_codename_placeholder,
+        test_athena_installer_data_ships_release_files_with_tokens,
         test_buildcontainer_injects_athena_codename_env,
         # COMP-02 phase B — stock d-i image-build conformance helpers
         test_installer_chroot_sudo_write_does_not_leak_password_to_tee,

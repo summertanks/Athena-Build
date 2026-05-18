@@ -161,7 +161,7 @@ if db_get pkgsel/run_tasksel && [ "$RET" = true ]; then
     apt-install tasksel  # ensure tasksel is installed
     # Athena fork — DEBIAN_TASKS_ONLY=1 prefix dropped here (was line
     # 162 of upstream pkgsel 0.79).  Setting it would hide derivative
-    # .desc files like our athena.desc from tasksel's task surface.
+    # .desc files like our athena-tasks.desc from tasksel's task surface.
     # athena-tasksel also ignores the var at the engine level so this
     # is belt-and-suspenders.  See debian/changelog 0.79+athena1.
     in-target sh -c "tasksel --new-install --debconf-apt-progress='--from $tasksel_start --to $tasksel_end --logstderr'" || aptfailed

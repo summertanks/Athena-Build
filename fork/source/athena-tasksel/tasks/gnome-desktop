@@ -2,13 +2,14 @@ Task: gnome-desktop
 Section: user
 Relevance: 1
 Description: GNOME Desktop Environment
- Athena's GNOME desktop — shell, file manager, terminal, system
- settings, browser, common GNOME apps + utilities, PIM stack
+ @DISTRIBUTION@'s GNOME desktop — shell, file manager, terminal,
+ system settings, browser, common GNOME apps + utilities, PIM stack
  (calendar/contacts/clocks), software center, and admin GUI tools.
  .
  Derived from Debian's gnome-desktop task content (gnome-core +
- gnome meta) merged with Athena-specific additions (firefox-esr
- as default browser, gnome-screenshot, Noto+DejaVu fonts).
+ gnome meta) merged with @DISTRIBUTION@-specific additions
+ (firefox-esr as default browser, gnome-screenshot, Noto+DejaVu
+ fonts).
  Mirrors the content of config/pkg.list [gnome-desktop] — keep in
  sync when adding/removing packages.
 Key:

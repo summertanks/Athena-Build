@@ -2,28 +2,28 @@
 # athena-installer-data — static data package for the d-i ramdisk.
 # Content evolves across FORK-01 plan steps in
 # docs/plans/fork-source.md.
-
-# Codename comes from build env (ATHENA_CODENAME, injected by
-# BuildContainer.deb_build_env at source-build time; sourced from
-# config/build.conf [Build] CODENAME via BuildConfig.build_codename).
-# Falls back to 'thor' for standalone `dpkg-buildpackage` runs
-# outside the engine (verification / sanity checks).
+#
+# Token substitution for @DISTRIBUTION@ / @BASE_ID@ / @CODENAME@ in
+# debian/, data/, tasks/ content is done centrally by
+# BuildContainer's _token_subst snippet (before dpkg-buildpackage).
+# debian/rules here only handles the one thing centralisation can't
+# do: a release-codename-named symlink whose FILENAME (not just
+# content) must vary per build.
+#
+# ATHENA_CODENAME is read from the build container env (set by
+# BuildContainer.deb_build_env, sourced from [Build] CODENAME).
+# Fallback 'thor' lets standalone `dpkg-buildpackage` runs (out-of-
+# engine verification) still produce a working package.
 ATHENA_CODENAME ?= thor
 
 %:
 	dh $@
 
-# Substitute @CODENAME@ in shipped files + create the debootstrap
-# codename symlink (FORK-01 Step 4).  Runs after dh_install has
-# staged data/* files at their target paths.
+# debootstrap codename symlink — same pattern upstream uses for
+# bookworm/sid/kali (see debootstrap-udeb's scripts/ tree).  sid
+# script comes from debootstrap-udeb (separate package in the
+# installer closure); the link can dangle until that udeb unpacks.
 override_dh_install:
 	dh_install
-	sed -i 's/@CODENAME@/$(ATHENA_CODENAME)/g' \
-	    debian/athena-installer-data/etc/lsb-release \
-	    debian/athena-installer-data/etc/default-release
-	# debootstrap codename symlink — same pattern upstream uses for
-	# bookworm/sid/kali (see debootstrap-udeb's scripts/ tree).  sid
-	# script comes from debootstrap-udeb (separate package in the
-	# installer closure); the link can dangle until that udeb unpacks.
 	mkdir -p debian/athena-installer-data/usr/share/debootstrap/scripts
 	ln -sf sid debian/athena-installer-data/usr/share/debootstrap/scripts/$(ATHENA_CODENAME)

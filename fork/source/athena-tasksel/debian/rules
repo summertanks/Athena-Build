@@ -13,9 +13,10 @@
 override_dh_auto_install:
 	$(MAKE) install      DESTDIR=`pwd`/debian/athena-tasksel
 	$(MAKE) install-data DESTDIR=`pwd`/debian/athena-tasksel-data
-	# Rename Makefile's `debian-tasks.desc` output to Athena identity
-	# (file-only rename; tasksel reads any *.desc in the dir).  See
-	# FORK-01 Step 5b 2026-05-17 — Athena ships as Athena.
+	# Rename Makefile's `debian-tasks.desc` output so we don't ship
+	# a Debian-named identity file (file-only rename; tasksel reads
+	# any *.desc in the dir).  athena- prefix marks toolchain origin
+	# per the three-layer identity model.
 	mv debian/athena-tasksel-data/usr/share/tasksel/descs/debian-tasks.desc \
 	   debian/athena-tasksel-data/usr/share/tasksel/descs/athena-tasks.desc
 

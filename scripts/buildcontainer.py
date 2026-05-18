@@ -333,26 +333,24 @@ class BuildContainer:
         # @CODENAME@ in fork content with values from BuildConfig.
         # This is THE mechanism by which fork packages get branded:
         # their debian/control Description, data/lsb-release strings,
-        # data/*.templates fields, etc. carry tokens; we resolve them
-        # here once per build.
+        # data/*.templates fields, tasks/* descriptions, etc. carry
+        # tokens; we resolve them here once per build.
         #
-        # Scope: debian/ and data/ subdirs only.  Substitution runs
-        # AFTER patches have been applied (so patches can also use
-        # tokens) but BEFORE _changelog_bump (so the bump operates on
-        # post-substitution source).
+        # Scope: debian/, data/, and tasks/ subdirs.  Substitution
+        # runs AFTER patches have been applied (so patches can also
+        # use tokens) but BEFORE _changelog_bump (so the bump
+        # operates on post-substitution source).
         #
         # Selectivity: a grep-first filter finds files that actually
         # contain a token, then xargs sed runs only on those.
         # Upstream packages have no tokens → grep finds nothing →
         # sed never runs → zero-cost no-op.
         #
-        # Source: file paths use NUL terminators between find and
-        # xargs to be robust against whitespace in names; the inner
-        # grep uses fixed-string -F for the token check.  See
-        # memory/project_three_layer_identity.md for the model.
+        # See memory/project_three_layer_identity.md for the model.
         _token_subst = (
             '{{ find debian -type f 2>/dev/null; '
-            '[ -d data ] && find data -type f; }} '
+            '[ -d data ] && find data -type f; '
+            '[ -d tasks ] && find tasks -type f; }} '
             "| xargs -d '\\n' -r grep -lE '@(DISTRIBUTION|BASE_ID|CODENAME)@' "
             '2>/dev/null '
             "| xargs -d '\\n' -r sed -i "
