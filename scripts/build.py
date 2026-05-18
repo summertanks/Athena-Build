@@ -1997,18 +1997,62 @@ class BuildSession:
             # tasksel shows a checkbox for an empty task, or a group
             # silently has zero packages because every seed was a
             # typo).
+            #
+            # `pkg_group_pkg_names[g]` is the DELTA of canonical names
+            # added by group `g` — it's empty in two distinct cases:
+            #   (a) every seed name was already in selected_pkgs from an
+            #       earlier group / required / important.  Not a typo;
+            #       the group is REDUNDANT but the tasksel task still
+            #       works because its Key entries resolve from elsewhere.
+            #       Canonical example: [ssh-server] = openssh-server when
+            #       openssh-server is also in [base].
+            #   (b) one or more seeds failed to resolve (typo, missing
+            #       from cache).  Genuine bug — operator must fix.
+            # Distinguish the two by re-parsing pkg.list and checking
+            # whether each seed is reachable in selected_pkgs.
             _group_pkgs = self.dep_tree.pkg_group_pkg_names
+            try:
+                _raw_pkg_groups = utils.parse_pkg_list_groups(
+                    self.config.pkglist_path,
+                )
+            except Exception:
+                _raw_pkg_groups = {}
             for _g, _names in _group_pkgs.items():
-                if not _names:
+                if _names:
+                    continue
+                _seeds = list(_raw_pkg_groups.get(_g, []))
+                _unresolved = [
+                    _s for _s in _seeds
+                    if _s not in self.dep_tree.selected_pkgs
+                ]
+                if _seeds and not _unresolved:
+                    console.print(
+                        f"INFO: pkg.list group [{_g}] adds 0 unique "
+                        f"packages — all {len(_seeds)} seed(s) already "
+                        "pulled in by an earlier group or required/"
+                        "important.  Tasksel task remains valid (Key "
+                        "entries resolve from elsewhere).",
+                        tui.COLOR_INFO,
+                    )
+                    logger.info(
+                        f"iso build installer: group [{_g}] redundant "
+                        f"with earlier groups (all {len(_seeds)} seed(s) "
+                        "already selected)"
+                    )
+                else:
+                    _detail = (', '.join(_unresolved)
+                               if _unresolved else '(empty seed list)')
                     console.print(
                         f"WARNING: pkg.list group [{_g}] resolved to ZERO "
-                        "canonical packages — operator likely typo'd every "
-                        "seed in the section.  Check the seed names against "
-                        "your cache.",
+                        "canonical packages — "
+                        f"{len(_unresolved)}/{max(1, len(_seeds))} seed(s) "
+                        f"not in cache: {_detail}.  Check seed names "
+                        "against your cache.",
                         tui.COLOR_WARNING,
                     )
                     logger.warning(
-                        f"iso build installer: group [{_g}] has empty closure"
+                        f"iso build installer: group [{_g}] has empty "
+                        f"closure; unresolved seeds: {_detail}"
                     )
             _non_base_groups = [
                 _g for _g in _group_pkgs.keys() if _g != 'base'
