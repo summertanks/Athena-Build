@@ -4343,6 +4343,184 @@ def test_apply_distro_suffix_noop_skips_shape_check_for_empty():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# rebump_deb_file — one-time backfill of an existing repo/ corpus
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_synthetic_deb(path, pkg_name, version, arch='amd64'):
+    """Build a minimal valid .deb at the given path for round-trip tests.
+    Returns the file path.  Requires dpkg-deb on PATH (Debian-derived
+    hosts always have it; CI on Ubuntu does too)."""
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory() as _work:
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'share', 'doc', pkg_name))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                f'Package: {pkg_name}\n'
+                f'Version: {version}\n'
+                f'Architecture: {arch}\n'
+                f'Maintainer: Test <test@local>\n'
+                f'Description: synthetic test package\n'
+                f' Used by tests/test_module.py for rebump round-trips.\n'
+            )
+        with open(os.path.join(_work, 'usr', 'share', 'doc', pkg_name, 'README'), 'w') as fh:
+            fh.write('synthetic data file — verifies data.tar survives repack\n')
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, path],
+            check=True, capture_output=True,
+        )
+    return path
+
+
+def test_rebump_deb_file_round_trip_rewrites_control_and_renames():
+    """Canonical path: a .deb at version X-Y becomes a .deb at
+    X-Y+thor1.  DEBIAN/control's Version is rewritten in lock-step
+    with the filename; the data.tar (README sentinel) survives the
+    repack intact."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rebump_deb_file
+
+    # Skip when dpkg-deb isn't available (non-Debian host).
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_rebump_deb_file_round_trip_rewrites_control_and_renames (no dpkg-deb)")
+        return
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _original = os.path.join(_tmp, 'libfoo26_1.0-2_amd64.deb')
+        _make_synthetic_deb(_original, 'libfoo26', '1.0-2')
+        _new = rebump_deb_file(_original, 'thor1')
+        assert _new == 'libfoo26_1.0-2+thor1_amd64.deb', _new
+        assert not os.path.exists(_original), "original .deb must be removed"
+        _bumped = os.path.join(_tmp, _new)
+        assert os.path.isfile(_bumped), "bumped .deb must exist"
+        # Verify the new control says Version: 1.0-2+thor1
+        _ctrl = subprocess.run(
+            ['dpkg-deb', '-f', _bumped, 'Version'],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert _ctrl == '1.0-2+thor1', f"Version field: {_ctrl!r}"
+        # Verify data.tar survived (the README sentinel is still there)
+        _files = subprocess.run(
+            ['dpkg-deb', '-c', _bumped],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        assert 'usr/share/doc/libfoo26/README' in _files, _files
+
+
+def test_rebump_deb_file_idempotent_on_already_bumped():
+    """A second invocation on an already-bumped file returns the
+    existing basename unchanged.  Lets the operator re-run
+    `package rebump` safely (e.g. after adding a new package that
+    didn't get bumped the first time)."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rebump_deb_file
+
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_rebump_deb_file_idempotent_on_already_bumped (no dpkg-deb)")
+        return
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _original = os.path.join(_tmp, 'libfoo26_1.0-2+thor1_amd64.deb')
+        _make_synthetic_deb(_original, 'libfoo26', '1.0-2+thor1')
+        _new = rebump_deb_file(_original, 'thor1')
+        assert _new == 'libfoo26_1.0-2+thor1_amd64.deb', _new
+        assert os.path.exists(_original), (
+            "idempotent rebump must not touch the file"
+        )
+
+
+def test_rebump_deb_file_empty_suffix_is_noop():
+    """No DistroSuffix configured → no rebump, file untouched.  Lets
+    the rebump command short-circuit when the operator hasn't opted
+    into the suffix scheme."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rebump_deb_file
+    # No actual file needed — empty-suffix path returns before any I/O.
+    assert (rebump_deb_file('/nonexistent/foo_1.0-2_amd64.deb', '')
+            == 'foo_1.0-2_amd64.deb')
+
+
+def test_rebump_deb_file_handles_udeb_extension():
+    """Udebs round-trip identically — same dpkg-deb -R/-b plumbing,
+    just .udeb instead of .deb extension."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rebump_deb_file
+
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_rebump_deb_file_handles_udeb_extension (no dpkg-deb)")
+        return
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _original = os.path.join(_tmp, 'foo-udeb_1.0-2_amd64.udeb')
+        _make_synthetic_deb(_original, 'foo-udeb', '1.0-2')
+        # Rename the .deb dpkg-deb produced to .udeb (test fixture cheat
+        # — dpkg-deb doesn't care about extension when packing).
+        if not _original.endswith('.udeb'):
+            os.rename(_original.replace('.udeb', '.deb'), _original) \
+                if os.path.exists(_original.replace('.udeb', '.deb')) else None
+        # Some dpkg-deb versions write .deb regardless; handle both shapes.
+        _alt = _original.replace('.udeb', '.deb')
+        if os.path.exists(_alt) and not os.path.exists(_original):
+            os.rename(_alt, _original)
+        _new = rebump_deb_file(_original, 'thor1')
+        assert _new == 'foo-udeb_1.0-2+thor1_amd64.udeb', _new
+        assert os.path.exists(os.path.join(_tmp, _new))
+
+
+def test_rebump_deb_file_skips_malformed_filename():
+    """Filenames not in `name_version_arch.ext` shape get a no-op
+    return (caller decides whether to log/warn).  Matches the
+    strip_build_version error-tolerance pattern — backfill walks
+    everything in repo/ and shouldn't die on a stray file."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rebump_deb_file
+    for bad in ('weird.deb', 'a_b_c_d_amd64.deb'):
+        assert rebump_deb_file(f'/nonexistent/{bad}', 'thor1') == bad
+
+
+def test_rebump_deb_file_skips_non_deb_files():
+    """Non-.deb/.udeb files in repo/ are left alone (signatures,
+    Packages indexes, stray text files, etc.)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import rebump_deb_file
+    assert (rebump_deb_file('/nonexistent/Release', 'thor1')
+            == 'Release')
+    assert (rebump_deb_file('/nonexistent/Packages.gz', 'thor1')
+            == 'Packages.gz')
+
+
+def test_cmd_rebump_packages_registered_under_package_dispatcher():
+    """Pin the dispatcher wiring: `package rebump` must route to
+    cmd_rebump_packages.  Without this, operators discover the
+    command exists via `package` help only to have the verb
+    silently no-op."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    assert hasattr(BuildSession, 'cmd_rebump_packages'), (
+        "BuildSession is missing cmd_rebump_packages"
+    )
+    # Static inspection of the dispatcher source — cheaper than a
+    # full BuildSession setup + mock chain just to confirm routing.
+    import inspect
+    _disp_src = inspect.getsource(BuildSession.cmd_package)
+    assert "'rebump'" in _disp_src, _disp_src
+    assert 'self.cmd_rebump_packages' in _disp_src, _disp_src
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # version_no_epoch — patch dir lookup must match Debian filename convention
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -8797,6 +8975,13 @@ def main() -> int:
         test_apply_distro_suffix_beats_debian_bin_nmu_constraint,
         test_apply_distro_suffix_rejects_malformed_filename,
         test_apply_distro_suffix_noop_skips_shape_check_for_empty,
+        test_rebump_deb_file_round_trip_rewrites_control_and_renames,
+        test_rebump_deb_file_idempotent_on_already_bumped,
+        test_rebump_deb_file_empty_suffix_is_noop,
+        test_rebump_deb_file_handles_udeb_extension,
+        test_rebump_deb_file_skips_malformed_filename,
+        test_rebump_deb_file_skips_non_deb_files,
+        test_cmd_rebump_packages_registered_under_package_dispatcher,
         test_buildconfig_parses_distro_suffix,
         test_buildconfig_distro_suffix_defaults_to_empty,
         test_buildcontainer_emits_changelog_bump_when_distro_suffix_set,

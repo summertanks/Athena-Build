@@ -45,6 +45,97 @@ def strip_build_version(file: str) -> str:
     return f"{_pkg_name}_{_version}_{_arch}{_ext}"
 
 
+def rebump_deb_file(deb_path: str, suffix: str) -> str:
+    """Rewrite an existing `.deb`/`.udeb` file in place to bump its
+    Version field with `+<suffix>` AND rename the file accordingly.
+
+    Returns the NEW basename of the file on success.  On failure or
+    no-op (file already bumped, malformed name, bad extension), returns
+    the original basename so the caller can distinguish via the rename
+    flag in the return value's content.
+
+    Purpose: one-time backfill for an existing `repo/` corpus after
+    enabling DistroSuffix, so the operator avoids re-running the full
+    source-build pipeline (which can take 24-36h for the GNOME tree).
+    Pairs with BuildContainer's changelog-prepend for fresh builds —
+    both produce the same `<src-ver>+<suffix>` filename.
+
+    What gets rewritten:
+        DEBIAN/control's Version field    (drives apt resolution)
+        the filename                      (drives check_build lookup)
+
+    What stays the same:
+        all data files (no recompile)
+        DEBIAN/md5sums (data hashes unchanged)
+        DEBIAN/symbols (downstream builds in the bumped corpus aren't
+                       re-stamped against it; fresh builds will use the
+                       NEW symbols header via BuildContainer's path)
+        debian/changelog (not in DEBIAN/, doesn't ship in .deb anyway
+                          beyond docs which we strip with nodoc)
+        maintainer scripts (no version refs)
+
+    Idempotent: a re-run on an already-bumped file no-ops and returns
+    the existing basename.
+
+    Raises subprocess.CalledProcessError when dpkg-deb -R or -b fails.
+    """
+    import subprocess
+    import tempfile
+    _dir = os.path.dirname(deb_path)
+    _base = os.path.basename(deb_path)
+    if not (_base.endswith('.deb') or _base.endswith('.udeb')):
+        return _base
+    if not suffix:
+        return _base
+    _name, _ext = os.path.splitext(_base)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        return _base
+    _pkg, _old_ver, _arch = _parts
+    _tag = f'+{suffix}'
+    if _old_ver.endswith(_tag):
+        return _base       # already bumped — idempotent
+    _new_ver = f'{_old_ver}{_tag}'
+    _new_base = f'{_pkg}_{_new_ver}_{_arch}{_ext}'
+    _new_path = os.path.join(_dir, _new_base)
+
+    with tempfile.TemporaryDirectory(prefix='athena-rebump-') as _work:
+        # Extract the full .deb (control + data).  `dpkg-deb -R` preserves
+        # the original compression format for control and data archives
+        # at repack-time, so we don't have to guess gzip vs xz vs zstd.
+        subprocess.run(
+            ['dpkg-deb', '-R', deb_path, _work],
+            check=True, capture_output=True,
+        )
+        # Rewrite Version field in DEBIAN/control.  Use a regex anchored
+        # at line start to avoid clobbering any other field that
+        # mentions "Version:" in its description.
+        _ctrl = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl) as fh:
+            _content = fh.read()
+        _new_content, _n = re.subn(
+            r'^Version: .*$',
+            f'Version: {_new_ver}',
+            _content, count=1, flags=re.MULTILINE,
+        )
+        if _n != 1:
+            raise RuntimeError(
+                f"rebump_deb_file: {_base} has no Version field to rewrite"
+            )
+        with open(_ctrl, 'w') as fh:
+            fh.write(_new_content)
+        # Repack.  --root-owner-group forces uid/gid 0 in the resulting
+        # archive so the file matches what dpkg-buildpackage would
+        # produce (no operator-uid leakage).
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _new_path],
+            check=True, capture_output=True,
+        )
+
+    os.remove(deb_path)
+    return _new_base
+
+
 def apply_distro_suffix(file: str, suffix: str) -> str:
     """Append `+<suffix>` to the version field of a `.deb`/`.udeb` filename.
 

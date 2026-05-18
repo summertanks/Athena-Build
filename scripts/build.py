@@ -1665,6 +1665,120 @@ class BuildSession:
         self.flags.signing_key_verified = True
         return True
 
+    # --------------------------Command: rebump_packages--------------------------
+
+    def cmd_rebump_packages(self, *args):
+        """One-time backfill: rewrite every `.deb`/`.udeb` in `repo/` to
+        ship at `<existing-ver>+<DistroSuffix>` instead of the upstream
+        source version.  Lets you adopt DistroSuffix on an existing
+        built corpus without re-running `source build` (which can take
+        24-36h for the GNOME tree).
+
+        Usage: package rebump [force]
+
+        Behaviour:
+          * Walks self.config.dir_repo for .deb + .udeb files.
+          * Each: extract control area, rewrite the Version field with
+            `+<suffix>` appended, repack, rename file with new version.
+          * Idempotent: re-runs skip files already bumped.
+          * Confirmation prompt (PROMPT_YESNO) unless `force` is in args
+            — this rewrites every package on disk, so the operator
+            should opt in.
+
+        Operator follow-up after this command:
+          * `dep parse force` to repopulate Source.pkgs with the
+            bumped filenames so `check_build` sees them.
+          * `chroot build`, `iso build` — installs the bumped .debs
+            into the live + installer chroots.
+
+        Tunneled packages are bumped too — every .deb in repo/ gets
+        the same label.  If you'd rather keep tunneled binaries at
+        their upstream versions (honest provenance), exclude them by
+        deleting them from repo/ before running this and re-tunnel
+        after.  The DistroSuffix-bumped versions will still beat
+        any upstream constraint at install time regardless.
+        """
+        _suffix = self.config.distro_suffix
+        if not _suffix:
+            console.print(
+                "DistroSuffix is empty in [Source] of build.conf — "
+                "nothing to bump.  Set DistroSuffix = thor1 (or your "
+                "preferred label) first."
+            )
+            return
+        _repo = self.config.dir_repo
+        try:
+            _files = sorted(
+                _f for _f in os.listdir(_repo)
+                if _f.endswith('.deb') or _f.endswith('.udeb')
+            )
+        except OSError as e:
+            console.print(f"ERROR: cannot list {_repo}: {e}")
+            return
+        if not _files:
+            console.print(f"{_repo} has no .deb/.udeb files — nothing to do")
+            return
+
+        # Pre-scan to count work, skip the ones already bumped.
+        _tag = f'+{_suffix}'
+        _todo = []
+        _already = 0
+        for _f in _files:
+            _name, _ = os.path.splitext(_f)
+            _parts = _name.split('_')
+            if len(_parts) != 3:
+                continue
+            if _parts[1].endswith(_tag):
+                _already += 1
+            else:
+                _todo.append(_f)
+        console.print(
+            f"Found {len(_files)} package(s) in {_repo}: "
+            f"{len(_todo)} to bump (+{_suffix}), {_already} already bumped."
+        )
+        if not _todo:
+            return
+
+        _force = bool(args) and args[0] == 'force'
+        if not _force:
+            _resp = Prompt(
+                PROMPT_YESNO,
+                f"Rewrite {len(_todo)} package(s) in {_repo} with "
+                f"+{_suffix} suffix? This is irreversible without rebuild.",
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print("Aborted")
+                return
+
+        _ok = _failed = 0
+        _bar = ProgressBar(
+            label='Rebump', itr_label='pkgs', maxvalue=len(_todo),
+        )
+        for _f in _todo:
+            _bar.print_progress(_f)
+            _full = os.path.join(_repo, _f)
+            try:
+                _new = utils.rebump_deb_file(_full, _suffix)
+                if _new != _f:
+                    logger.info(f"rebump: {_f} → {_new}")
+                    _ok += 1
+                else:
+                    logger.warning(
+                        f"rebump: {_f} returned unchanged (malformed?)"
+                    )
+                    _failed += 1
+            except Exception as e:
+                logger.error(f"rebump: {_f} failed: {e}")
+                _failed += 1
+                _bar.print(f"FAIL: {_f} — {e}")
+        _bar.done()
+
+        console.print(
+            f"Rebump complete: {_ok} succeeded, {_failed} failed, "
+            f"{_already} already bumped.  Next: `dep parse force` to "
+            f"refresh Source.pkgs with the new filenames."
+        )
+
     def cmd_build_chroot_live(self, *args):
         """Assemble the resolved package set into a bootable live chroot.
 
@@ -2673,9 +2787,15 @@ class BuildSession:
         return self._group_help('source', _table, action)
 
     def cmd_package(self, action: str = '', *args):
-        _table = {'tunnel': 'pull prebuilt .debs from Debian repo (package tunnel [pkg…])'}
+        _table = {
+            'tunnel': 'pull prebuilt .debs from Debian repo (package tunnel [pkg…])',
+            'rebump': 're-stamp every .deb/.udeb in repo/ with +<DistroSuffix> '
+                      '(one-time backfill; avoids 24-36h source rebuild)',
+        }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
+        if action == 'rebump':
+            return self.cmd_rebump_packages(*args)
         return self._group_help('package', _table, action)
 
     def cmd_container(self, action: str = '', *args):
