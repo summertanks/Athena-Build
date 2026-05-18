@@ -152,6 +152,21 @@ class Cache:
         self._fork_udeb_names: set = set()
         self._fork_src_names: set  = set()
 
+        # Collision-gate tracking — records every upstream record that
+        # got dropped by the fork supersede above, so a final pass at
+        # end-of-build can compare upstream version vs fork version
+        # and FAIL if upstream dominates (would-be-hidden bugfix).
+        # See docs/collision-gate.md and
+        # memory/project_fork_collision_no_bump_mitigation.md.
+        #
+        # Per-name list of (mirror_id, dropped_upstream_version) tuples.
+        # Lists rather than scalars because the same name can be dropped
+        # from multiple upstream mirrors (main, updates, security all
+        # ship pkgsel) — the gate's worst-case comparison is against
+        # the HIGHEST recorded upstream version.
+        self._upstream_collisions:      Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+        self._upstream_udeb_collisions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+
         # Download files
         if self.__get_files() < 0:
             return
@@ -484,6 +499,12 @@ class Cache:
                 if _is_fork:
                     self._fork_pkg_names.add(_pkg.package)
                 elif _pkg.package in self._fork_pkg_names:
+                    # Record the upstream version BEFORE dropping so the
+                    # end-of-build collision gate can compare it against
+                    # the fork's version.  See docs/collision-gate.md.
+                    self._upstream_collisions[_pkg.package].append(
+                        (_mirror.id, _pkg.version)
+                    )
                     tui.console.print(
                         f"Local supersedes upstream {_pkg.package} v{_pkg.version} [{_mirror.id}]"
                     )
@@ -607,7 +628,88 @@ class Cache:
             f"{len(self.udeb_required)} / {len(self.udeb_important)}"
         )
 
+        # Collision gate (must be the LAST step in cache build — runs
+        # after both mirror walks complete so it has a holistic picture
+        # of every fork↔upstream version comparison).  Failures set
+        # error_str and return False so the calling Cache.__init__
+        # leaves _config_valid=False; downstream code already exits on
+        # is_valid==False.
+        if not self._verify_no_fork_collisions():
+            return False
+
         return True
+
+    def _verify_no_fork_collisions(self) -> bool:
+        """End-of-build gate: for every upstream record dropped by the
+        fork supersede walk, verify the fork's version actually beats
+        the dropped upstream version.
+
+        Today's supersede behavior unconditionally drops upstream when
+        a fork has the same name — even if the upstream version is
+        higher (which would mean apt's "fork wins" only because we
+        hid the better record).  That's a silent regression vector:
+        the fork no longer tracks upstream's bugfixes/security but
+        ships under a higher-looking version.
+
+        This gate fails the cache build when any dropped upstream
+        version is greater-or-equal to the fork's version.  The fix is
+        NOT a local version bump (would lie about the codebase — see
+        memory/project_fork_collision_no_bump_mitigation.md); it's
+        either rebase the fork onto upstream's new source, or rename
+        the fork.  See docs/collision-gate.md.
+
+        Returns True when no collisions, or False after setting
+        self.error_str (cache becomes is_valid=False).
+        """
+        collisions: List[Tuple[str, str, str, str, str]] = []  # (kind, name, fork_ver, up_mirror, up_ver)
+
+        def _check(kind: str, drops: Dict[str, List[Tuple[str, str]]],
+                   hashtable: Dict[str, Dict[Version, List]]) -> None:
+            for _name, _entries in drops.items():
+                # Fork's version = max version present in the hashtable
+                # for this name (after supersede, only fork records
+                # remain for these names — by construction of the walk).
+                _fork_versions = list(hashtable.get(_name, {}).keys())
+                if not _fork_versions:
+                    # Should not happen: name was added to _fork_pkg_names
+                    # only when a fork record was parsed; either the
+                    # parser dropped it post-name-add (arch filter etc.)
+                    # OR the walk order assumption broke.  Skip silently
+                    # — no fork record means no comparison possible.
+                    continue
+                _fork_ver = max(_fork_versions, key=Version)
+                for _mirror_id, _up_ver in _entries:
+                    if Version(_up_ver) >= Version(_fork_ver):
+                        collisions.append(
+                            (kind, _name, str(_fork_ver), _mirror_id, _up_ver)
+                        )
+
+        _check('deb',  self._upstream_collisions,      self.package_hashtable)
+        _check('udeb', self._upstream_udeb_collisions, self.udeb_hashtable)
+
+        if not collisions:
+            return True
+
+        # Compact diagnostic — one line per collision + pointer to
+        # docs/collision-gate.md.  Multiple collisions emit as a block;
+        # the doc explains the two mitigations (rebase / rename) and
+        # rejects version-bump as a non-fix.
+        _lines = [
+            f"  {_kind}: {_name} (fork {_fork} < upstream {_up} [{_mirror_id}])"
+            for _kind, _name, _fork, _mirror_id, _up in collisions
+        ]
+        self.error_str = (
+            f"cache build aborted — {len(collisions)} fork collision(s) "
+            "where upstream version >= fork version:\n"
+            + "\n".join(_lines)
+            + "\nSee docs/collision-gate.md for the two mitigations "
+              "(rebase fork onto upstream / rename fork).  "
+              "Do NOT bump the fork's local version — it lies about "
+              "the codebase."
+        )
+        logger.error(self.error_str)
+        tui.console.print(self.error_str)
+        return False
 
     def _ingest_udeb_indices(self, arch: str) -> None:
         """Parse the per-mirror udeb Packages files and route their
@@ -666,6 +768,11 @@ class Cache:
                 if _is_fork:
                     self._fork_udeb_names.add(_udeb.package)
                 elif _udeb.package in self._fork_udeb_names:
+                    # Record upstream udeb version for end-of-build
+                    # collision gate (parallels the deb-side check).
+                    self._upstream_udeb_collisions[_udeb.package].append(
+                        (_mirror.id, _udeb.version)
+                    )
                     tui.console.print(
                         f"Local supersedes upstream udeb {_udeb.package} v{_udeb.version} [{_mirror.id}]"
                     )

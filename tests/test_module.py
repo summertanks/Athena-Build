@@ -6750,6 +6750,155 @@ def test_cache_class_declares_udeb_fields_on_init():
     assert len(c.udeb_hashtable) == len(c.udeb_required) == len(c.udeb_important) == 0
 
 
+def _make_collision_cache(deb_drops=None, udeb_drops=None,
+                          pkg_versions=None, udeb_versions=None):
+    """Construct a bare Cache with just the state _verify_no_fork_collisions
+    inspects.  No mirrors, no downloads — strictly a unit-test scaffold
+    for the gate function.
+
+    Args (all optional):
+      deb_drops:     dict pkg_name -> list[(mirror_id, upstream_version)]
+      udeb_drops:    same shape, for udeb namespace
+      pkg_versions:  dict pkg_name -> [fork_version_string, ...]
+      udeb_versions: same shape, for udeb namespace
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    from collections import defaultdict
+    c = Cache.__new__(Cache)
+    c._upstream_collisions      = defaultdict(list, deb_drops or {})
+    c._upstream_udeb_collisions = defaultdict(list, udeb_drops or {})
+    c.package_hashtable = defaultdict(lambda: defaultdict(list))
+    c.udeb_hashtable    = defaultdict(lambda: defaultdict(list))
+    for _n, _vers in (pkg_versions or {}).items():
+        for _v in _vers:
+            c.package_hashtable[_n][_v] = ['<placeholder>']
+    for _n, _vers in (udeb_versions or {}).items():
+        for _v in _vers:
+            c.udeb_hashtable[_n][_v] = ['<placeholder>']
+    c.error_str = ''
+    return c
+
+
+def test_collision_gate_passes_when_no_drops_recorded():
+    """No upstream-side records were dropped during the walk → gate
+    must pass silently.  Today's clean state (all athena-* forks net-
+    new, no upstream collision) lives here."""
+    c = _make_collision_cache()
+    assert c._verify_no_fork_collisions() is True
+    assert c.error_str == ''
+
+
+def test_collision_gate_passes_when_fork_version_dominates():
+    """Upstream `pkgsel 0.79` was dropped; fork ships `0.79+thor1`.
+    dpkg version comparison: `0.79+thor1` > `0.79` because `+thor1`
+    is a positive suffix.  Gate passes."""
+    c = _make_collision_cache(
+        deb_drops={'pkgsel': [('main', '0.79')]},
+        pkg_versions={'pkgsel': ['0.79+thor1']},
+    )
+    assert c._verify_no_fork_collisions() is True, c.error_str
+    assert c.error_str == ''
+
+
+def test_collision_gate_fails_when_upstream_dominates():
+    """Upstream `pkgsel 0.80` shipped; fork stuck at `0.79+thor1`.
+    Upstream > fork → gate fails (would-be-hidden bug fix in 0.80)."""
+    c = _make_collision_cache(
+        deb_drops={'pkgsel': [('main', '0.80')]},
+        pkg_versions={'pkgsel': ['0.79+thor1']},
+    )
+    assert c._verify_no_fork_collisions() is False
+    assert 'pkgsel' in c.error_str
+    assert '0.79+thor1' in c.error_str
+    assert '0.80' in c.error_str
+    assert 'main' in c.error_str
+
+
+def test_collision_gate_fails_on_tied_versions():
+    """Fork and upstream ship identical version (`0.79`).  Gate fails
+    because resolution becomes mirror-priority-dependent — fragile.
+    Operator must bump the suffix or rename."""
+    c = _make_collision_cache(
+        deb_drops={'pkgsel': [('main', '0.79')]},
+        pkg_versions={'pkgsel': ['0.79']},
+    )
+    assert c._verify_no_fork_collisions() is False
+    assert 'pkgsel' in c.error_str
+
+
+def test_collision_gate_reports_all_collisions_in_one_error():
+    """Three colliding forks → one error message lists all three,
+    not just the first.  Operator sees the full landscape in a
+    single build."""
+    c = _make_collision_cache(
+        deb_drops={
+            'pkgsel': [('main', '0.80')],
+            'curl':   [('main', '8.0.1')],
+            'wget':   [('updates', '1.22')],
+        },
+        pkg_versions={
+            'pkgsel': ['0.79+thor1'],
+            'curl':   ['7.88+thor1'],
+            'wget':   ['1.21+thor1'],
+        },
+    )
+    assert c._verify_no_fork_collisions() is False
+    assert 'pkgsel' in c.error_str
+    assert 'curl'   in c.error_str
+    assert 'wget'   in c.error_str
+    assert '3 fork collision' in c.error_str
+
+
+def test_collision_gate_handles_udeb_namespace():
+    """Udeb supersede goes into _upstream_udeb_collisions (separate
+    namespace).  Gate must check both."""
+    c = _make_collision_cache(
+        udeb_drops={'cdebconf-udeb': [('main', '0.265')]},
+        udeb_versions={'cdebconf-udeb': ['0.264+thor1']},
+    )
+    assert c._verify_no_fork_collisions() is False
+    assert 'udeb' in c.error_str
+    assert 'cdebconf-udeb' in c.error_str
+
+
+def test_collision_gate_error_message_points_to_docs():
+    """Diagnostic must reference docs/collision-gate.md so the
+    operator knows where to find the mitigations.  Also asserts
+    the version-bump-rejection wording (per memory rule)."""
+    c = _make_collision_cache(
+        deb_drops={'pkgsel': [('main', '0.80')]},
+        pkg_versions={'pkgsel': ['0.79+thor1']},
+    )
+    assert c._verify_no_fork_collisions() is False
+    assert 'docs/collision-gate.md' in c.error_str
+    # The diagnostic must reject the version-bump-only mitigation
+    # explicitly (per memory/project_fork_collision_no_bump_mitigation).
+    assert 'lies about' in c.error_str or 'NOT bump' in c.error_str.lower() or \
+           'not bump' in c.error_str.lower(), c.error_str
+
+
+def test_collision_gate_multi_mirror_drops_same_name():
+    """Same pkg dropped from BOTH main and security mirrors.  Per-
+    mirror version comparison: main passes (fork dominates) but
+    security has a security-update bump that beats fork → gate
+    fails reporting the security collision specifically, NOT main.
+    Confirms per-(mirror, version) granularity in the diagnostic."""
+    c = _make_collision_cache(
+        deb_drops={'curl': [('main', '7.88'), ('security', '7.89')]},
+        pkg_versions={'curl': ['7.88+thor1']},
+    )
+    # 7.88+thor1 > 7.88 (main): no collision from main.
+    # 7.88+thor1 < 7.89 (security): collision fires from security.
+    _ok = c._verify_no_fork_collisions()
+    assert _ok is False
+    assert 'security' in c.error_str
+    assert '7.89' in c.error_str
+    # main passed — must NOT appear as a collision.
+    assert 'main' not in c.error_str
+
+
 # Helper: build a synthetic udeb Packages stanza string (multi-record).
 def _make_udeb_packages_text():
     """Return a Debian-format Packages-file content with three udeb records:
@@ -9557,6 +9706,14 @@ def main() -> int:
         # phase 2: cache parses udeb (debian-installer) Packages index
         test_mirror_udeb_packages_path_format,
         test_cache_class_declares_udeb_fields_on_init,
+        test_collision_gate_passes_when_no_drops_recorded,
+        test_collision_gate_passes_when_fork_version_dominates,
+        test_collision_gate_fails_when_upstream_dominates,
+        test_collision_gate_fails_on_tied_versions,
+        test_collision_gate_reports_all_collisions_in_one_error,
+        test_collision_gate_handles_udeb_namespace,
+        test_collision_gate_error_message_points_to_docs,
+        test_collision_gate_multi_mirror_drops_same_name,
         test_ingest_udeb_indices_routes_records_to_udeb_hashtable,
         test_ingest_udeb_indices_skips_mirrors_without_udeb_file,
         test_ingest_udeb_indices_handles_partial_mirror_set,
