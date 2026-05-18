@@ -899,6 +899,8 @@ class BuildConfig:
     snapshot_baseurl: str
     snapshot_timestamp_api: str
     snapshot_archive_keys: list[str]
+    build_distribution: str
+    build_base_id: str
     build_codename: str
     build_version: str
     container_release: str
@@ -1030,8 +1032,28 @@ class BuildConfig:
             self.snapshot_archive_keys = [
                 _k.strip() for _k in _archive_keys_raw.split(',') if _k.strip()
             ]
-            self.build_codename = _strip_quotes(config_parser.get('Build', 'CODENAME'))
-            self.build_version  = _strip_quotes(config_parser.get('Build', 'VERSION'))
+            # Three-layer identity (see memory/project_three_layer_identity.md):
+            #   build_distribution — the DISTRIBUTION (user-visible name on
+            #     /etc/os-release NAME, GRUB menu, hostname, lsb-release).
+            #     E.g. "Asgard".
+            #   build_base_id      — lowercased distribution, used for
+            #     /etc/os-release ID and as the dpkg ID namespace.
+            #     Derived from build_distribution; no separate config slot
+            #     today (override path: add BASE_ID to [Build] if a future
+            #     case needs ID independent of lower(NAME), e.g. openSUSE's
+            #     "opensuse-leap").
+            #   build_codename     — the RELEASE codename (Debian's
+            #     "bookworm" equivalent), used for /etc/os-release
+            #     VERSION_CODENAME and the apt suite name.  E.g. "thor".
+            #
+            # Athena-Build itself (the toolchain) is a separate layer not
+            # represented in config — it's the identity of THIS repository
+            # and shows in fork package-name prefixes (athena-*),
+            # ATHENA_CODENAME env var, and Maintainer fields.
+            self.build_distribution = _strip_quotes(config_parser.get('Build', 'DISTRIBUTION'))
+            self.build_base_id      = self.build_distribution.lower()
+            self.build_codename     = _strip_quotes(config_parser.get('Build', 'CODENAME'))
+            self.build_version      = _strip_quotes(config_parser.get('Build', 'VERSION'))
 
             self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback='bookworm')
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
