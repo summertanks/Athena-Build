@@ -1168,37 +1168,42 @@ class _ChrootMixin:
           /etc/apt/sources.list — APT repository for the installed system
         """
         cfg = self._config
+        # Distribution identity is derived from [Build] CODENAME (lower
+        # for ID / hostname / VERSION_CODENAME, capitalised for the
+        # display name).  Athena-Build (the toolchain) builds Thor (the
+        # distribution); user-visible strings here are Thor's.
+        _id = cfg.build_codename.lower()
+        _display = cfg.build_codename.capitalize()
 
         # /etc/os-release — standard file read by systemd, lsb_release, etc.
         self._write_chroot_file('/etc/os-release', (
-            f'# Athena Linux — (c) 2025-26 Harkirat S Virk\n'
-            f'NAME="{cfg.build_codename}"\n'
+            f'# {_display} Linux — (c) 2025-26 Harkirat S Virk\n'
+            f'NAME="{_display}"\n'
             f'VERSION="{cfg.build_version}"\n'
-            f'ID=athena\n'
+            f'ID={_id}\n'
             f'ID_LIKE=debian\n'
-            f'VERSION_CODENAME={cfg.build_codename.lower()}\n'
-            f'PRETTY_NAME="{cfg.build_codename} {cfg.build_version}"\n'
-            f'HOME_URL="https://athenalinux.org"\n'
+            f'VERSION_CODENAME={_id}\n'
+            f'PRETTY_NAME="{_display} Linux {cfg.build_version}"\n'
             f'VENDOR_NAME="Harkirat S Virk"\n'
         ))
 
         # /etc/issue — pre-login banner on TTY consoles. Uses agetty escapes:
         #   \S = PRETTY_NAME from os-release, \r = kernel, \l = tty
         self._write_chroot_file('/etc/issue', (
-            f'{cfg.build_codename} {cfg.build_version} \\n \\l\n'
+            f'{_display} Linux {cfg.build_version} \\n \\l\n'
             f'\n'
             f'(c) 2025-26 Harkirat S Virk\n'
             f'\n'
         ))
 
         # /etc/hostname — a sensible default; can be changed post-install.
-        self._write_chroot_file('/etc/hostname', 'athena\n')
+        self._write_chroot_file('/etc/hostname', f'{_id}\n')
 
         # /etc/hosts — minimal localhost entries required for basic name
         # resolution before a real DNS resolver is configured.
         self._write_chroot_file('/etc/hosts', (
             '127.0.0.1   localhost\n'
-            '127.0.1.1   athena\n'
+            f'127.0.1.1   {_id}\n'
             '::1         localhost ip6-localhost ip6-loopback\n'
             'ff02::1     ip6-allnodes\n'
             'ff02::2     ip6-allrouters\n'
