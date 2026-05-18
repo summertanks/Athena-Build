@@ -33,10 +33,19 @@ class BuildContainer:
         self.log_path = config.dir_log
         self.repo_path = config.dir_repo
         self.arch = config.arch
-        # FORK-01 Step 4: forks under fork/source/ that template codename
-        # into shipped files (lsb-release etc.) read this via the
-        # ATHENA_CODENAME env var injected into the build container.
-        self.codename = config.build_codename
+        # Three-layer identity (see memory/project_three_layer_identity.md):
+        #   build_distribution — display name ("Asgard"), substituted as
+        #     @DISTRIBUTION@ in fork content before dpkg-buildpackage
+        #   build_base_id      — lowercase ("asgard"), substituted as
+        #     @BASE_ID@
+        #   codename           — release codename ("thor"), substituted as
+        #     @CODENAME@ and written into the changelog stanza
+        #     distribution field by _changelog_bump.  Also exposed in
+        #     the build container as ATHENA_CODENAME for any debian/rules
+        #     that wants to read it directly (legacy path).
+        self.build_distribution = config.build_distribution
+        self.build_base_id      = config.build_base_id
+        self.codename           = config.build_codename
 
         self.buildlog_path = os.path.join(config.dir_log, 'build')
         self.conf_path = config.dir_config
@@ -320,13 +329,46 @@ class BuildContainer:
         _dep_install = (f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_apt_retry}install {" ".join(_plain_deps)}; ' if _plain_deps else '') + \
                        ('; '.join(_or_cmds) + '; ' if _or_cmds else '')
 
+        # Token substitution: replace @DISTRIBUTION@, @BASE_ID@,
+        # @CODENAME@ in fork content with values from BuildConfig.
+        # This is THE mechanism by which fork packages get branded:
+        # their debian/control Description, data/lsb-release strings,
+        # data/*.templates fields, etc. carry tokens; we resolve them
+        # here once per build.
+        #
+        # Scope: debian/ and data/ subdirs only.  Substitution runs
+        # AFTER patches have been applied (so patches can also use
+        # tokens) but BEFORE _changelog_bump (so the bump operates on
+        # post-substitution source).
+        #
+        # Selectivity: a grep-first filter finds files that actually
+        # contain a token, then xargs sed runs only on those.
+        # Upstream packages have no tokens → grep finds nothing →
+        # sed never runs → zero-cost no-op.
+        #
+        # Source: file paths use NUL terminators between find and
+        # xargs to be robust against whitespace in names; the inner
+        # grep uses fixed-string -F for the token check.  See
+        # memory/project_three_layer_identity.md for the model.
+        _token_subst = (
+            '{{ find debian -type f 2>/dev/null; '
+            '[ -d data ] && find data -type f; }} '
+            "| xargs -d '\\n' -r grep -lE '@(DISTRIBUTION|BASE_ID|CODENAME)@' "
+            '2>/dev/null '
+            "| xargs -d '\\n' -r sed -i "
+            f"-e 's|@DISTRIBUTION@|{self.build_distribution}|g' "
+            f"-e 's|@BASE_ID@|{self.build_base_id}|g' "
+            f"-e 's|@CODENAME@|{self.codename}|g'; "
+        )
+
         # Distro-suffix bump: prepend a changelog entry that bumps the
         # version to `<source-ver>+<suffix>` so the produced .debs ship
         # as `pkg_X-Y+thor1_amd64.deb` instead of `pkg_X-Y_amd64.deb`.
-        # This (a) marks every binary as Thor's build and (b) makes our
-        # binary lexically beat ANY upstream bin-NMU version constraint
-        # at install time (apt's version comparison: `+thor<N>` > `+b<N>`
-        # because letters sort before non-letters and `t` > `b`).
+        # This (a) marks every binary as Athena-Build's rebuild and
+        # (b) makes our binary lexically beat ANY upstream bin-NMU
+        # version constraint at install time (apt's version comparison:
+        # `+thor<N>` > `+b<N>` because letters sort before non-letters
+        # and `t` > `b`).
         # Pairs with utils.apply_distro_suffix in dependencytree's
         # filename prediction — both ends must agree on the suffix.
         #
@@ -342,7 +384,7 @@ class BuildContainer:
                 f'NEW_VER="${{SRC_VER}}+{_suffix}"; '
                 'NOW=$(date -R); '
                 '{ '
-                'printf "%s (%s) thor; urgency=medium\\n\\n'
+                f'printf "%s (%s) {self.codename}; urgency=medium\\n\\n'
                 '  * Athena rebuild: distro-suffix bump (+%s).\\n\\n'
                 ' -- Athena Build <athena@local>  %s\\n\\n" '
                 f'"$SRC_NAME" "$NEW_VER" "{_suffix}" "$NOW"; '
@@ -382,6 +424,7 @@ class BuildContainer:
                   f'cd {_filename_prefix}; ' \
                   f'{patches_applied_cmd}' \
                   f'{patch_cmd}' \
+                  f'{_token_subst}' \
                   f'{_changelog_bump}' \
                   f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -b -us -uc -nc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'

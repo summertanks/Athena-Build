@@ -2836,7 +2836,9 @@ def test_buildcontainer_injects_athena_codename_env():
     with open(_bc) as fh:
         _body = fh.read()
     assert 'ATHENA_CODENAME' in _body, "ATHENA_CODENAME not present in buildcontainer.py"
-    assert 'self.codename = config.build_codename' in _body, \
+    # Whitespace-tolerant — alignment in __init__ may vary as fields grow.
+    import re
+    assert re.search(r'self\.codename\s*=\s*config\.build_codename', _body), \
         "self.codename not initialised from config.build_codename"
 
 
@@ -2864,6 +2866,57 @@ def test_buildcontainer_emits_changelog_bump_when_distro_suffix_set():
         "changelog bump produces a version that doesn't match the .dsc")
     assert 'self.distro_suffix = config.distro_suffix' in _body, (
         "BuildContainer.distro_suffix not initialised from config")
+
+
+def test_buildcontainer_emits_token_substitution_snippet():
+    """BuildContainer.build assembles a cmd_str that substitutes
+    @DISTRIBUTION@, @BASE_ID@, @CODENAME@ in fork content (debian/
+    and data/ subdirs of the extracted source) before
+    dpkg-buildpackage runs.  This is the central mechanism by which
+    fork pkgs get branded — pinning here so a refactor doesn't drop
+    it silently.
+
+    Three things pinned:
+      1. self.build_distribution / self.build_base_id initialised
+         from BuildConfig in __init__.
+      2. cmd_str contains a grep-lE for the three tokens (selectivity
+         filter: only files actually carrying tokens get sed'd).
+      3. sed -i lines exist for all three tokens.
+    """
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    assert re.search(
+        r'self\.build_distribution\s*=\s*config\.build_distribution', _body), (
+        "BuildContainer.build_distribution not initialised from config")
+    assert re.search(
+        r'self\.build_base_id\s*=\s*config\.build_base_id', _body), (
+        "BuildContainer.build_base_id not initialised from config")
+    assert "@(DISTRIBUTION|BASE_ID|CODENAME)@" in _body, (
+        "token substitution grep filter missing — fork branding will not "
+        "resolve")
+    for _token in ('@DISTRIBUTION@', '@BASE_ID@', '@CODENAME@'):
+        assert f"'s|{_token}|" in _body, (
+            f"sed substitution for {_token} not found in build cmd_str")
+
+
+def test_buildcontainer_changelog_uses_codename_field():
+    """The _changelog_bump snippet's stanza distribution field
+    (after the version, before urgency=) must use self.codename, not
+    a hardcoded literal.  Bug shape: hardcoded 'thor' wouldn't roll
+    over if [Build] CODENAME changes to a new release codename
+    (Debian's bookworm → trixie analog).  Pinned so future renames
+    update the right slot."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    # Either the f-string form interpolating self.codename, or a
+    # plain string composition referring to it.  Hardcoded 'thor'
+    # in the printf is the failure shape we reject.
+    assert 'printf "%s (%s) thor;' not in _body, (
+        "_changelog_bump hardcodes 'thor' in stanza distribution field — "
+        "must read self.codename so [Build] CODENAME rolls correctly")
 
 
 def test_strip_debian_residue_hooks_removes_known_files():
@@ -9408,6 +9461,8 @@ def main() -> int:
         test_buildconfig_parses_distro_suffix,
         test_buildconfig_distro_suffix_defaults_to_empty,
         test_buildcontainer_emits_changelog_bump_when_distro_suffix_set,
+        test_buildcontainer_emits_token_substitution_snippet,
+        test_buildcontainer_changelog_uses_codename_field,
         # version_no_epoch — patch dir lookup must match Debian filename convention
         test_version_no_epoch_strips_epoch_from_debian_version,
         test_version_no_epoch_no_change_when_no_epoch,
