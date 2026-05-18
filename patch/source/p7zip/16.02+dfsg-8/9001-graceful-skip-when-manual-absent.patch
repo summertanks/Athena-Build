@@ -1,0 +1,33 @@
+Description: skip style.css symlink generation when manual is absent (nodoc)
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-17
+Bug-Athena: debian/p7zip-full.links is an executable config script that
+ generates symlinks deduplicating style.css across the HTML manual
+ subdirs under /usr/share/doc/p7zip-full/DOC/MANUAL/.  Under
+ DEB_BUILD_OPTIONS=nodoc the manual isn't installed, so $maindir
+ doesn't exist and the script exits with "does not exist" error 1.
+ .
+ dh_link then fails with "executable config returned exit code 1"
+ and the whole build dies.  Fix: when the manual isn't present
+ (legitimate nodoc build), exit 0 with no symlinks to generate.
+ .
+ Behaviour with manual present (default upstream build) is unchanged.
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/p7zip-full.links
++++ b/debian/p7zip-full.links
+@@ -12,7 +12,11 @@ readonly maindir="usr/share/doc/$pkg/DOC/MANUAL"
+
+ unset CDPATH
+ cd debian/$pkg >/dev/null
+-[ -e "$maindir/$file" ]   || { echo "$maindir/$file does not exist" >&2; exit 1; }
++# Athena fork — under DEB_BUILD_OPTIONS=nodoc the manual isn't installed,
++# so $maindir is absent and there's nothing to symlink.  Exit cleanly
++# instead of failing dh_link.  Behaviour with the manual present is
++# unchanged (the loop below produces the dedupe links as before).
++[ -e "$maindir/$file" ]   || { echo "$maindir/$file absent (nodoc build?), no symlinks needed" >&2; exit 0; }
+
+ for dir in $(find "$maindir" -mindepth 1 -type d -print); do
+   set -- "$maindir/$file" "$dir/$file"

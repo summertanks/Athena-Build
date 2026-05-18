@@ -1,0 +1,34 @@
+Description: guard chmod+rm on docs paths that nodoc build doesn't produce
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-17
+Bug-Athena: protobuf's override_dh_installdocs-arch in debian/rules
+ unconditionally chmods examples/README.md and rm's examples/
+ .gitignore from /usr/share/doc/protobuf-compiler/.  Under
+ DEB_BUILD_OPTIONS=nodoc those files aren't installed by
+ dh_installdocs, so the chmod fails with
+ "cannot access ... No such file or directory" and the build dies.
+ .
+ Fix: bracket the chmod with a file-presence test and use `rm -f`
+ (silent on missing).  Behaviour without nodoc is identical (the
+ file IS present and chmod runs as before).
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -174,8 +174,11 @@ binary-arch: build install
+ override_dh_installdocs-arch:
+ 	dh_installdocs --arch
+ 	# Fix permission
+-	chmod a-x $(CURDIR)/debian/protobuf-compiler/usr/share/doc/protobuf-compiler/examples/README.md
++	# Athena fork — guard against nodoc build where the docs paths
++	# aren't created by dh_installdocs.
++	[ ! -e $(CURDIR)/debian/protobuf-compiler/usr/share/doc/protobuf-compiler/examples/README.md ] || \
++		chmod a-x $(CURDIR)/debian/protobuf-compiler/usr/share/doc/protobuf-compiler/examples/README.md
+ 	# Remove extra .gitignore
+-	rm $(CURDIR)/debian/protobuf-compiler/usr/share/doc/protobuf-compiler/examples/.gitignore
++	rm -f $(CURDIR)/debian/protobuf-compiler/usr/share/doc/protobuf-compiler/examples/.gitignore
+
+ override_dh_installdocs-indep:
+ 	dh_installdocs --indep

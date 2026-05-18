@@ -1,0 +1,40 @@
+Description: drop PHP Build-Depends for nocheck-gated tests
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-17
+Bug-Athena: libsoup2.4 declares php / libapache2-mod-php as build-deps
+ gated <!nocheck> <!noinsttest>.  When our build container runs
+ dpkg-buildpackage with DEB_BUILD_PROFILES=nodoc,nocheck via env,
+ the profile filtering isn't being honored consistently by the
+ internal dep check — fails with
+ "Unmet build dependencies: php (<< 2:9) php (>= 2:7)".
+ .
+ These deps are ONLY for the HTTP testsuite (libsoup2.4 historically
+ ran apache+PHP to test HTTP client behaviour against a live server).
+ Our build profile already disables tests (nocheck), so the deps
+ are dead weight anyway.  Drop them entirely — they're never
+ satisfied in our pool and never needed.
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/control
++++ b/debian/control
+@@ -9,8 +9,6 @@ Build-Depends: apache2 (>= 2.4) <!nocheck> <!noinsttest>,
+                dh-sequence-gnome,
+                glib-networking (>= 2.32.0),
+                gtk-doc-tools,
+-               libapache2-mod-php (<< 2:9) <!nocheck> <!noinsttest>,
+-               libapache2-mod-php (>= 2:7) <!nocheck> <!noinsttest>,
+                libbrotli-dev,
+                libgirepository1.0-dev (>= 0.9.5),
+                libglib2.0-dev (>= 2.58),
+@@ -22,9 +20,6 @@ Build-Depends: apache2 (>= 2.4) <!nocheck> <!noinsttest>,
+                libsqlite3-dev,
+                libxml2-dev,
+                meson (>= 0.48),
+-               php (<< 2:9) <!nocheck> <!noinsttest>,
+-               php (>= 2:7) <!nocheck> <!noinsttest>,
+-               php-xmlrpc <!nocheck> <!noinsttest> | php (>= 2:8.1+85+really8) <!nocheck> <!noinsttest>,
+                python3,
+                valac
+ Build-Depends-Indep: libglib2.0-doc

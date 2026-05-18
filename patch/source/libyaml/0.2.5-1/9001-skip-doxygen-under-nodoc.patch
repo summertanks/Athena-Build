@@ -1,0 +1,31 @@
+Description: skip dh_doxygen invocation when nodoc is in DEB_BUILD_OPTIONS
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-17
+Bug-Athena: libyaml's debian/rules override_dh_installdocs-indep
+ unconditionally calls dh_doxygen — but doxygen isn't installed in
+ our build container (intentionally — DEB_BUILD_OPTIONS=nodoc means
+ we don't want to generate or ship API docs).  dh_doxygen errors
+ with "Doxygen documentation not found" and the build dies.
+ .
+ Fix: guard the doxygen-driven docs step on the nodoc build option,
+ matching the pattern Debian recommends for nodoc-aware rules.
+ Behaviour without nodoc is unchanged (dh_doxygen runs as before).
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -6,8 +6,12 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+ 	dh $@
+
+ override_dh_auto_build-indep:
++ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))
+ 	$(MAKE) html
++endif
+
+ override_dh_installdocs-indep:
+ 	dh_installdocs -i
++ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))
+ 	dh_doxygen -plibyaml-doc
++endif
