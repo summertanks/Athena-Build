@@ -48,21 +48,22 @@ Recommends: laptop-detect, tasksel
 Conflicts: tasksel-data
 Replaces: tasksel-data
 Provides: tasksel-data (= 3.73)
-Description: Athena task definitions for tasksel
- Curated task list for Athena's installer software-selection
+Description: @DISTRIBUTION@ task definitions for tasksel
+ Curated task list for @DISTRIBUTION@'s installer software-selection
  menu, replacing Debian's tasksel-data.  Ships /usr/share/
  tasksel/descs/athena-tasks.desc with six tasks:
  .
-   - standard         curated CLI utilities (Athena chose ~25 of
-                      Debian's 87 Priority: standard packages)
+   - standard         curated CLI utilities (@DISTRIBUTION@ chose ~25
+                      of Debian's 87 Priority: standard packages)
    - ssh-server       openssh-server + client (for headless installs)
    - laptop           laptop-mode-tools + bluetooth + powertop etc.
                       (detection-based default if laptop-detect fires)
    - desktop          xorg + drivers + xdg-utils + cups + alsa +
                       avahi (the umbrella desktop task)
-   - gnome-desktop    Athena's GNOME desktop suite (merged from
-                      Debian's gnome-core/gnome metas + Athena
-                      additions; mirrors pkg.list [gnome-desktop])
+   - gnome-desktop    @DISTRIBUTION@'s GNOME desktop suite (merged
+                      from Debian's gnome-core/gnome metas +
+                      @DISTRIBUTION@ additions; mirrors pkg.list
+                      [gnome-desktop])
    - development-tools  build-essential + git + dev helpers
                       (mirrors pkg.list [development-tools])
  .

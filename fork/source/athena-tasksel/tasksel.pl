@@ -55,7 +55,7 @@ sub list_task_descs {
 	# Athena fork — always glob all .desc files; ignore upstream's
 	# DEBIAN_TASKS_ONLY env var (Debian's pkgsel sets it during the
 	# installer's software-selection step to hide derivative .desc
-	# files like our athena.desc).  See debian/changelog 3.73+athena1.
+	# files like our athena-tasks.desc).  See debian/changelog 3.73+athena1.
 	return glob("$descdir/*.desc"), glob("$localdescdir/*.desc");
 }
 
