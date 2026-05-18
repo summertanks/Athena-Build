@@ -184,6 +184,7 @@ _BASE_CONF_BODY = """
     [Build]
     ARCH = amd64
     NAME = "Test"
+    DISTRIBUTION = "Testdistro"
     CODENAME = "test"
     VERSION = "0.1"
     CHANNEL = "stable"
@@ -5827,7 +5828,7 @@ def test_buildconfig_argparse_exposes_live_and_installer_list_flags():
         # Minimal build.conf — borrows shape from the project's real one.
         with open(os.path.join(_cfg_dir, 'build.conf'), 'w') as f:
             f.write(
-                "[Build]\nARCH=amd64\nCODENAME=athena\nVERSION=0.0\n"
+                "[Build]\nARCH=amd64\nDISTRIBUTION=Testdistro\nCODENAME=athena\nVERSION=0.0\n"
                 "[Base]\nBASEURL=http://example/\nBASEID=debian\n"
                 "RELEASE=athena\nBASEVERSION=1\n"
                 "[Mirror.test]\n"
