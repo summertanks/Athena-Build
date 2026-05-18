@@ -2908,6 +2908,31 @@ def test_buildcontainer_emits_token_substitution_snippet():
             f"sed substitution for {_token} not found in build cmd_str")
 
 
+def test_buildcontainer_token_subst_uses_if_not_short_circuit_and():
+    """The optional-dir guards in _token_subst (for data/, tasks/) MUST
+    use `if [ -d X ]; then ... fi`, NOT `[ -d X ] && find X`.
+
+    Why: cmd_str runs under `set -e -o pipefail`.  With `&&` short-
+    circuit, a missing data/ or tasks/ dir leaves the brace group's
+    last command exit at 1.  The pipeline inherits that via pipefail,
+    set -e kills the build — every upstream package (which has no
+    data/ or tasks/) crashes the substitution step.  Found 2026-05-18.
+
+    The `if`-form returns 0 when the condition is false (no else),
+    so missing dirs don't blow up the pipeline."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert '[ -d data ] && find' not in _body, (
+        "regression: data/ guard uses && (short-circuit fails the build "
+        "for upstream pkgs lacking data/); use `if ...; then ...; fi`")
+    assert '[ -d tasks ] && find' not in _body, (
+        "regression: tasks/ guard uses && (same failure as data/); use "
+        "`if ...; then ...; fi`")
+    assert 'if [ -d data ]' in _body, "data/ guard missing if-form"
+    assert 'if [ -d tasks ]' in _body, "tasks/ guard missing if-form"
+
+
 def test_buildcontainer_changelog_uses_codename_field():
     """The _changelog_bump snippet's stanza distribution field
     (after the version, before urgency=) must use self.codename, not
@@ -9618,6 +9643,7 @@ def main() -> int:
         test_buildconfig_distro_suffix_defaults_to_empty,
         test_buildcontainer_emits_changelog_bump_when_distro_suffix_set,
         test_buildcontainer_emits_token_substitution_snippet,
+        test_buildcontainer_token_subst_uses_if_not_short_circuit_and,
         test_buildcontainer_changelog_uses_codename_field,
         # version_no_epoch — patch dir lookup must match Debian filename convention
         test_version_no_epoch_strips_epoch_from_debian_version,

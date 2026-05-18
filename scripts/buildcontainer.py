@@ -347,10 +347,17 @@ class BuildContainer:
         # sed never runs → zero-cost no-op.
         #
         # See memory/project_three_layer_identity.md for the model.
+        # NOTE on the `if ... then ... fi` form (not `[ -d X ] && find X`):
+        # cmd_str runs under `set -e -o pipefail`.  With `&&`, when the
+        # directory is missing, `[ -d X ]` exits 1, `&&` short-circuits,
+        # and the WHOLE brace group inherits that non-zero status —
+        # killing the pipeline (and the build) via pipefail.  `if`-blocks
+        # exit 0 when the condition is false, so missing data/ or tasks/
+        # (true for every upstream pkg) doesn't crash the substitution.
         _token_subst = (
             '{{ find debian -type f 2>/dev/null; '
-            '[ -d data ] && find data -type f; '
-            '[ -d tasks ] && find tasks -type f; }} '
+            'if [ -d data ]; then find data -type f; fi; '
+            'if [ -d tasks ]; then find tasks -type f; fi; }} '
             "| xargs -d '\\n' -r grep -lE '@(DISTRIBUTION|BASE_ID|CODENAME)@' "
             '2>/dev/null '
             "| xargs -d '\\n' -r sed -i "
