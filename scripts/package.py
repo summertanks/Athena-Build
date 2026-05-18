@@ -239,16 +239,7 @@ class Package(Packages):
         A package is valid if it has all the required fields and they are not empty.
         """
         return self._isvalid
-    
-    @property
-    def err_str(self) -> str:
-        """
-        Returns the error string if the package is not valid.
-        If the package is valid, returns an empty string.
-        """
-        return self._err_str
 
-    
     def get_provides(self) -> List[Tuple[str, Version]]:
         
         if not self.isvalid:
@@ -307,20 +298,6 @@ class Package(Packages):
         # [('acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn-bigint','1.0.0'), ]
     
         return _provides_names
-    
-    def does_provide(self, pkg_name: str) -> bool:
-        """
-        Checks if the current package provides the given package name
-        Args:
-            pkg_name: the package name to check for
-
-        Returns:
-            bool:
-        """
-        if not self.isvalid:
-            return False
-        
-        return any(name == pkg_name for name, _ in self.get_provides())
 
     @property
     def constraints_satisfied(self) -> bool:
@@ -557,10 +534,6 @@ class Source(Sources):
         A package is valid if it has all the required fields and they are not empty.
         """
         return self._isvalid
-
-    @property
-    def err_str(self) -> str:
-        return self._err_str
 
     @property
     def download_size(self) -> int:

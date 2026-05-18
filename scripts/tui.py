@@ -637,11 +637,6 @@ class Tui:
             next_tab = keys[(idx + 1) % len(keys)]
         self._activate(next_tab)
 
-    def enabletab(self, name: str) -> None:
-        """Switch to the named tab (public API)."""
-        if name in self._tabs:
-            self._activate(name)
-
     # =====================================================================
     # Setup / teardown
     # =====================================================================
@@ -1577,11 +1572,6 @@ def setup_logging(tui: Optional[_Any] = None) -> logging.Logger:
     con_h.addFilter(lambda r: r.levelno == DISPLAY)
     logger.addHandler(con_h)
     return logger
-
-
-def get_logger() -> logging.Logger:
-    """Convenience accessor — equivalent to ``logging.getLogger('athena')``."""
-    return logging.getLogger(LOGGER_NAME)
 
 
 def setup_file_logging(log_dir: str, name: str = 'build') -> str:
