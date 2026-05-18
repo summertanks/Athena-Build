@@ -2,7 +2,6 @@
 import hashlib
 import logging
 import os
-from typing import List, Dict
 import utils
 from utils import BuildConfig, version_no_epoch
 from package import Source
