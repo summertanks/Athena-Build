@@ -1,0 +1,38 @@
+Description: gate examples/.c sed on nodoc so the rule no-ops cleanly
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-18
+Bug-Athena: wpa's execute_after_dh_installexamples runs
+ `sed -i debian/*/usr/share/doc/*/examples/*.c` to rewrite
+ `#include "includes.h"` → `#include <stddef.h>` (and same for
+ wpa_ctrl.h) in the shipped example sources.
+ .
+ Under DEB_BUILD_OPTIONS=nodoc, dh_installexamples is a no-op, so
+ the examples/ directory is never created.  The shell glob expands
+ to the literal path, sed errors with
+ "can't read debian/*/usr/share/doc/*/examples/*.c: No such file
+ or directory" and the build dies.
+ .
+ Fix: wrap the sed in `ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))`
+ so the rule no-ops cleanly when nodoc is active.  Behaviour without
+ nodoc is unchanged — the sed still rewrites the example includes.
+ .
+ TEMPORARY: nodoc is a workaround for missing doc-build tooling in
+ the build pool, not a permanent policy.  DELETE THIS PATCH when
+ CONF-08 lands and nodoc is dropped from [Source] BuildOptions /
+ BuildProfiles in config/build.conf.
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -110,7 +110,9 @@ endif
+ ### end dh overrides
+
+ execute_after_dh_installexamples:
++ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))
+ 	sed -e 's="includes.h"=<stddef.h>=' -e 's="common/wpa_ctrl.h"=<wpa_ctrl.h>=' -i debian/*/usr/share/doc/*/examples/*.c
++endif
+
+ %:
+ 	dh $@
