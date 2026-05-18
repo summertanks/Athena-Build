@@ -365,10 +365,17 @@ class BuildContainer:
         #    non-zero — but since `|| true` flattens any non-zero to
         #    0, we accept this trade for the much more common no-
         #    match path.
+        # Bash brace-group syntax: `{ cmd1; cmd2; }` needs SPACE after
+        # the opening `{` and a `;` (or newline) before the closing `}`.
+        # Regular (non-f) Python strings here pass literal `{` and `}`
+        # through.  An earlier draft wrote `{{ ... }}` thinking Python's
+        # f-string escape would collapse to single braces — but these
+        # lines are NOT f-strings, so bash saw literal `{{` and exited
+        # 127 ("command not found").  Fixed 2026-05-18.
         _token_subst = (
-            '{{ find debian -type f 2>/dev/null; '
+            '{ find debian -type f 2>/dev/null; '
             'if [ -d data ]; then find data -type f; fi; '
-            'if [ -d tasks ]; then find tasks -type f; fi; }} '
+            'if [ -d tasks ]; then find tasks -type f; fi; } '
             "| (xargs -d '\\n' -r grep -lE '@(DISTRIBUTION|BASE_ID|CODENAME)@' "
             '2>/dev/null || true) '
             "| xargs -d '\\n' -r sed -i "
