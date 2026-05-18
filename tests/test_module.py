@@ -5290,6 +5290,63 @@ def test_athena_tasksel_control_provides_conflicts_replaces_tasksel():
     assert 'Replaces: tasksel' in _body, _body
 
 
+def test_athena_tasksel_depends_on_athena_tasksel_data_directly():
+    """FORK-01 Step 5 regression guard (caught 2026-05-18 install):
+    athena-tasksel's Depends must name `athena-tasksel-data` directly,
+    NOT the virtual `tasksel-data`.  Apt prefers real packages over
+    virtual Provides — a bare `Depends: tasksel-data` resolves to
+    upstream tasksel-data (still in our cache), shipping upstream's
+    .desc (only "standard system utilities" task) and HIDING our
+    athena-tasks.desc.  Symptom: tasksel menu offers exactly one
+    option, our 6 curated tasks (standard / ssh-server / laptop /
+    desktop / gnome-desktop / development-tools) never appear.
+
+    The Provides+Conflicts+Replaces chain still works for third
+    parties that depend on the virtual `tasksel-data`, but
+    athena-tasksel MUST be explicit because it's the entry point.
+    """
+    _ctrl = os.path.join(_ROOT, 'fork', 'source', 'athena-tasksel',
+                         'debian', 'control')
+    with open(_ctrl) as fh:
+        _body = fh.read()
+    # Extract the athena-tasksel binary stanza's Depends line.
+    import re
+    _m = re.search(
+        r'^Package: athena-tasksel\s*$.*?^Depends:\s*(.+?)\s*$',
+        _body, re.MULTILINE | re.DOTALL,
+    )
+    assert _m, "athena-tasksel binary stanza missing Depends line"
+    _deps = _m.group(1)
+    assert 'athena-tasksel-data' in _deps, (
+        f"athena-tasksel must Depend on athena-tasksel-data directly "
+        f"(virtual tasksel-data loses to upstream real pkg).  Got: {_deps!r}"
+    )
+    # And the bare `tasksel-data` token must NOT appear in the Depends
+    # (would re-trigger the upstream-wins regression).  Match a word
+    # boundary so `athena-tasksel-data` itself doesn't trip the check.
+    assert not re.search(r'(?<![\w-])tasksel-data(?![\w-])', _deps), (
+        f"athena-tasksel Depends still names bare `tasksel-data` — "
+        f"will resolve to upstream.  Got: {_deps!r}"
+    )
+
+
+def test_athena_pkgsel_no_popcon_pre_pkgsel_hook():
+    """Athena ships as Athena (no Debian telemetry residue per
+    project_filter_debian_specific_installer_hooks memory).  Upstream
+    pkgsel ships pre-pkgsel.d/90popcon which apt-installs
+    popularity-contest (Debian's popularity-contest telemetry); the
+    hook fails on install (`E: Unable to locate package
+    popularity-contest`) because popcon isn't in our pool, and even
+    if it were we don't want it on Thor.  Pin the absence so a
+    future rebase from upstream doesn't reintroduce it."""
+    _popcon = os.path.join(_ROOT, 'fork', 'source', 'athena-pkgsel',
+                           'pre-pkgsel.d', '90popcon')
+    assert not os.path.exists(_popcon), (
+        f"{_popcon} reintroduces Debian's popularity-contest telemetry; "
+        f"delete to keep Thor free of Debian residue"
+    )
+
+
 def test_athena_pkgsel_fork_postinst_drops_debian_tasks_only_prefix():
     """FORK-01 Step 5: athena-pkgsel's debian/postinst must NOT
     prefix its in-target tasksel call with DEBIAN_TASKS_ONLY=1.
@@ -8528,6 +8585,8 @@ def main() -> int:
         # replace the old pkgsel patch
         test_athena_tasksel_fork_ignores_debian_tasks_only_env,
         test_athena_tasksel_control_provides_conflicts_replaces_tasksel,
+        test_athena_tasksel_depends_on_athena_tasksel_data_directly,
+        test_athena_pkgsel_no_popcon_pre_pkgsel_hook,
         test_athena_pkgsel_fork_postinst_drops_debian_tasks_only_prefix,
         test_athena_pkgsel_control_provides_conflicts_replaces_pkgsel,
         test_athena_pkgsel_dh_helper_files_use_binary_name,

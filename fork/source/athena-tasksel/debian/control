@@ -14,7 +14,19 @@ Package: athena-tasksel
 Section: admin
 Architecture: all
 Pre-Depends: debconf | cdebconf
-Depends: ${misc:Depends}, liblocale-gettext-perl, apt, tasksel-data
+# Depend on athena-tasksel-data DIRECTLY (not via the `tasksel-data`
+# virtual) — apt prefers REAL packages over virtual Provides, so a
+# bare `Depends: tasksel-data` resolves to upstream tasksel-data
+# (still present in our cache) instead of our athena-tasksel-data
+# fork.  Symptom on the 2026-05-18 install: only upstream's "standard
+# system utilities" task surfaced in the tasksel menu because the
+# .desc shipped by upstream tasksel-data took precedence; our
+# athena-tasks.desc was never installed.  Naming the fork binary
+# explicitly forces the resolution.  athena-tasksel-data still
+# Provides+Conflicts+Replaces tasksel-data so anything ELSE that
+# depends on `tasksel-data` (e.g. third-party packages) still
+# resolves to our fork via the virtual path.
+Depends: ${misc:Depends}, liblocale-gettext-perl, apt, athena-tasksel-data
 Conflicts: tasksel
 Replaces: tasksel
 Provides: tasksel (= 3.73)
