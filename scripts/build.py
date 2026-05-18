@@ -3096,7 +3096,7 @@ def main(banner: str) -> None:
     console.print("Starting Source Build System for Athena Linux...", tui.COLOR_HIGHLIGHT)
     console.print(f"\tArch\t\t\t{config.arch}")
     console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
-    console.print(f"\tBuild Distribution\t{config.build_codename} {config.build_version}")
+    console.print(f"\tBuild Distribution\t{config.build_distribution} {config.build_version} ({config.build_codename})")
 
     tui_inst.wait()
     Exit(0)

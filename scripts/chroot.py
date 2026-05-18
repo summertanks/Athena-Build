@@ -1168,35 +1168,39 @@ class _ChrootMixin:
           /etc/apt/sources.list — APT repository for the installed system
         """
         cfg = self._config
-        # Distribution identity is derived from [Build] CODENAME (lower
-        # for ID / hostname / VERSION_CODENAME, capitalised for the
-        # display name).  Athena-Build (the toolchain) builds Thor (the
-        # distribution); user-visible strings here are Thor's.
-        _id = cfg.build_codename.lower()
-        _display = cfg.build_codename.capitalize()
+        # Three-layer identity (see memory/project_three_layer_identity.md):
+        #   _name     = [Build] DISTRIBUTION    — display name ("Asgard")
+        #   _id       = [Build] DISTRIBUTION.lower() — dpkg ID ("asgard")
+        #   _codename = [Build] CODENAME        — release codename ("thor")
+        _name     = cfg.build_distribution
+        _id       = cfg.build_base_id
+        _codename = cfg.build_codename
 
         # /etc/os-release — standard file read by systemd, lsb_release, etc.
         self._write_chroot_file('/etc/os-release', (
-            f'# {_display} Linux — (c) 2025-26 Harkirat S Virk\n'
-            f'NAME="{_display}"\n'
+            f'# {_name} Linux — (c) 2025-26 Harkirat S Virk\n'
+            f'NAME="{_name}"\n'
             f'VERSION="{cfg.build_version}"\n'
             f'ID={_id}\n'
             f'ID_LIKE=debian\n'
-            f'VERSION_CODENAME={_id}\n'
-            f'PRETTY_NAME="{_display} Linux {cfg.build_version}"\n'
+            f'VERSION_CODENAME={_codename}\n'
+            f'PRETTY_NAME="{_name} Linux {cfg.build_version} ({_codename})"\n'
             f'VENDOR_NAME="Harkirat S Virk"\n'
         ))
 
         # /etc/issue — pre-login banner on TTY consoles. Uses agetty escapes:
         #   \S = PRETTY_NAME from os-release, \r = kernel, \l = tty
         self._write_chroot_file('/etc/issue', (
-            f'{_display} Linux {cfg.build_version} \\n \\l\n'
+            f'{_name} Linux {cfg.build_version} \\n \\l\n'
             f'\n'
             f'(c) 2025-26 Harkirat S Virk\n'
             f'\n'
         ))
 
         # /etc/hostname — a sensible default; can be changed post-install.
+        # Lowercased distribution (not the release codename) — hostnames
+        # are stable across releases; switching codename shouldn't rename
+        # the host out from under the operator.
         self._write_chroot_file('/etc/hostname', f'{_id}\n')
 
         # /etc/hosts — minimal localhost entries required for basic name

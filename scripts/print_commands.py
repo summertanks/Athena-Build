@@ -102,6 +102,7 @@ def _print_config(session, *_extras) -> None:
     tui.console.print(f"    Release             : {cfg.release}")
     tui.console.print(f"    Base ID (default)   : {cfg.baseid}")
     tui.console.print(f"    Parent version      : {cfg.baseversion}")
+    tui.console.print(f"    Distribution        : {cfg.build_distribution}")
     tui.console.print(f"    Build codename      : {cfg.build_codename}")
     tui.console.print(f"    Build version       : {cfg.build_version}")
     tui.console.print(
