@@ -9913,6 +9913,29 @@ def test_wipe_fork_pkg_outputs_removes_both_hash_sidecars():
 # package rebump — source-name filter + cmd_source_rescan
 # ─────────────────────────────────────────────────────────────────────────────
 
+def test_no_stale_progressbar_methods_in_build_py():
+    """ProgressBar exposes step/close/label/pause/resume/set_max/reset
+    in scripts/tui.py — NOT done/print_progress/print.  Those belong to
+    Spinner (only `done`), or never existed.  Calling them on a
+    ProgressBar raises AttributeError at runtime — bit-rot caught
+    2026-05-19 in `package rebump`.  Pin to prevent regression."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    import re
+    # Find every `<name>_bar.<method>(` and `progress_bar.<method>(`
+    # call and assert it's in the valid set.
+    _valid = {'step', 'close', 'label', 'pause', 'resume',
+              'set_max', 'reset'}
+    for _m in re.finditer(
+            r'\b(?:[a-zA-Z_]*_)?(?:bar|progress_bar)\.([a-z_]+)\(', _body):
+        _method = _m.group(1)
+        assert _method in _valid, (
+            f"build.py calls progress-bar method `.{_method}()` which is "
+            f"not in ProgressBar's public API (valid: {sorted(_valid)}). "
+            f"Likely confused with Spinner.done() or a removed method.")
+
+
 def test_cmd_rebump_parses_source_name_filter_args():
     """package rebump with non-`force` args must collect them into a
     Source-name filter set, so a partial rebump can target just the
@@ -10401,6 +10424,7 @@ def main() -> int:
         test_load_pkg_hashes_returns_empty_strings_when_sidecars_missing,
         test_persist_tree_hash_writes_both_sidecars,
         test_wipe_fork_pkg_outputs_removes_both_hash_sidecars,
+        test_no_stale_progressbar_methods_in_build_py,
         test_cmd_rebump_parses_source_name_filter_args,
         test_cmd_source_rescan_registered_in_dispatcher,
         test_cmd_source_rescan_method_uses_check_build,
