@@ -60,6 +60,10 @@ class BuildContainer:
         # bump (binaries ship at upstream source version; legacy
         # behaviour vulnerable to bin-NMU skew).
         self.distro_suffix = config.distro_suffix
+        # CONF-13: sources whose +<DistroSuffix> changelog bump would
+        # break their own version-counting machinery.  Skipped at
+        # build time.
+        self.no_bump_sources = config.no_bump_sources
 
         # Apply snapshot pinning to mirrors so the container's apt fetches
         # build-deps from the same archive snapshot the cache was built from.
@@ -400,7 +404,18 @@ class BuildContainer:
         # Idempotent: dpkg-parsechangelog always returns the current
         # top entry's version; on a fresh dpkg-source extraction that's
         # the upstream source version, so we never double-suffix.
-        if self.distro_suffix:
+        #
+        # Also skipped for sources in NoBumpSources — CONF-13.  Kernel's
+        # gencontrol walks the changelog to set ABI suffix; prepending
+        # `+thor1` would push ABI past Debian's value, producing
+        # binaries whose names the cache's predictor doesn't recognise.
+        # Kernel binaries ship at Debian's pristine version without
+        # +thor1; the trade-off (no DistroSuffix marker on kernel
+        # debs) is acceptable because kernel binaries also won't
+        # collide with upstream (the +thor1-less version IS the
+        # upstream version, and dpkg's same-version-prefer-installed
+        # gives us the right result).
+        if self.distro_suffix and src_pkg.package not in self.no_bump_sources:
             _suffix = self.distro_suffix
             _changelog_bump = (
                 'SRC_NAME=$(dpkg-parsechangelog -SSource); '

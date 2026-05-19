@@ -1157,6 +1157,48 @@ def test_buildconfig_distro_suffix_defaults_to_empty():
         assert cfg.distro_suffix == '', cfg.distro_suffix
 
 
+def test_buildconfig_parses_no_bump_sources():
+    """`[Source] NoBumpSources` lands on `cfg.no_bump_sources` as a
+    frozenset.  CONF-13: kernel sources must be on this list so the
+    +<DistroSuffix> changelog bump skips them (their ABI counter
+    would otherwise produce binaries the cache predictor doesn't
+    know about)."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'DistroSuffix = thor1\n',
+        'DistroSuffix = thor1\n    NoBumpSources = linux, linux-signed-amd64\n',
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_buildconfig_parses_no_bump_sources ({cfg.error_str})")
+            return
+        assert isinstance(cfg.no_bump_sources, frozenset), type(cfg.no_bump_sources)
+        assert cfg.no_bump_sources == frozenset({'linux', 'linux-signed-amd64'}), \
+            cfg.no_bump_sources
+
+
+def test_buildconfig_no_bump_sources_defaults_to_empty():
+    """Omitted NoBumpSources → empty frozenset.  Field is optional."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_buildconfig_no_bump_sources_defaults_to_empty ({cfg.error_str})")
+            return
+        assert cfg.no_bump_sources == frozenset(), cfg.no_bump_sources
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DEP-3 header check
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2996,6 +3038,139 @@ def test_buildcontainer_token_subst_grep_rescue_or_true():
         "upstream pkgs (with no @TOKENS@) will crash the build at the "
         "token-substitution step because grep -l exits 1 on no matches "
         "and pipefail surfaces it under set -e")
+
+
+def test_buildcontainer_skips_changelog_bump_for_no_bump_sources():
+    """CONF-13: when src_pkg.package is in BuildContainer.no_bump_sources,
+    the _changelog_bump snippet must NOT be emitted.  Kernel sources
+    (linux, linux-signed-amd64) would otherwise have their ABI counter
+    walked past Debian's value by our prepend, producing binary names
+    the cache doesn't predict.
+
+    Code-inspection test: pin that the if-condition gates BOTH on
+    `self.distro_suffix` AND on `src_pkg.package not in self.no_bump_sources`."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # Match the if-condition that guards _changelog_bump.  Both terms
+    # must appear in the same condition; tolerant to whitespace.
+    _m = re.search(
+        r'if\s+self\.distro_suffix\s+and\s+src_pkg\.package\s+not\s+in\s+self\.no_bump_sources\s*:',
+        _body,
+    )
+    assert _m, (
+        "BuildContainer.build's _changelog_bump guard must check BOTH "
+        "self.distro_suffix AND `src_pkg.package not in self.no_bump_sources` — "
+        "kernel sources need to skip the bump even when DistroSuffix is set")
+    # Also pin: BuildContainer init reads config.no_bump_sources
+    assert 'self.no_bump_sources = config.no_bump_sources' in _body, (
+        "BuildContainer.no_bump_sources not initialised from config")
+
+
+def test_find_kernel_prefers_expected_kernel_pkg_match():
+    """_find_kernel must prefer .debs whose filename starts with the
+    cache-predicted binary name (e.g. linux-image-6.1.0-47-amd64) over
+    the lexicographically highest match.  Without this, a stale higher-
+    ABI .deb left in repo/ from a pre-rollback snapshot would win the
+    glob — the ABI-47-vs-48 bug shape from 2026-05-19."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import iso_installer
+    with tempfile.TemporaryDirectory() as _tmp:
+        _repo = os.path.join(_tmp, 'repo')
+        _chroot = os.path.join(_tmp, 'chroot')
+        os.makedirs(_repo)
+        os.makedirs(os.path.join(_chroot, 'boot'))
+        # Plant stale higher-ABI .deb AND the cache-matching one.
+        # Both must be valid ar archives or _find_kernel won't reach
+        # the picker — but we only test the picker, so dpkg-deb-extract
+        # would still fail.  Mock by monkey-patching subprocess.run.
+        for _name in ('linux-image-6.1.0-47-amd64_6.1.170-3+thor1_amd64.deb',
+                      'linux-image-6.1.0-48-amd64_6.1.172-1_amd64.deb',
+                      'linux-image-6.1.0-49-amd64_6.1.172-1_amd64.deb'):
+            with open(os.path.join(_repo, _name), 'wb') as fh:
+                fh.write(b'!<arch>\n')
+
+        # Stub subprocess + os.makedirs + glob so _find_kernel's
+        # extraction step "succeeds" with a fake vmlinuz.  We just want
+        # to know which .deb it chose.
+        import subprocess as _sp
+        _chosen = []
+        _orig_run = _sp.run
+        def _fake_run(cmd, **kw):
+            class _R:
+                returncode = 0
+                stderr = ''
+                stdout = ''
+            # Record the .deb passed to dpkg-deb -x
+            if 'dpkg-deb' in cmd and '-x' in cmd:
+                _idx = cmd.index('-x')
+                _chosen.append(cmd[_idx + 1])
+                # Synthesize a vmlinuz under the extraction dir so the
+                # post-extract glob finds something.
+                _extract_dir = cmd[_idx + 2]
+                os.makedirs(os.path.join(_extract_dir, 'boot'), exist_ok=True)
+                with open(os.path.join(_extract_dir, 'boot', 'vmlinuz-x'),
+                          'w') as fh:
+                    fh.write('fake')
+            return _R()
+        _sp.run = _fake_run
+        try:
+            _result = iso_installer._find_kernel(
+                _repo, _chroot, password='',
+                expected_kernel_pkg='linux-image-6.1.0-47-amd64',
+            )
+        finally:
+            _sp.run = _orig_run
+        assert _chosen, "_find_kernel didn't reach the dpkg-deb -x step"
+        assert '6.1.0-47-amd64' in _chosen[-1], (
+            f"expected picker to choose ABI-47 .deb, chose: {_chosen[-1]}")
+
+
+def test_find_kernel_falls_back_to_highest_when_no_match():
+    """When expected_kernel_pkg has no match in repo/, _find_kernel
+    falls back to highest-ABI sort (the original behaviour).  Ensures
+    the new path doesn't break legacy callers that don't pass the hint."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import iso_installer
+    with tempfile.TemporaryDirectory() as _tmp:
+        _repo = os.path.join(_tmp, 'repo')
+        _chroot = os.path.join(_tmp, 'chroot')
+        os.makedirs(_repo)
+        os.makedirs(os.path.join(_chroot, 'boot'))
+        for _name in ('linux-image-6.1.0-47-amd64_6.1.170-3+thor1_amd64.deb',
+                      'linux-image-6.1.0-48-amd64_6.1.172-1_amd64.deb'):
+            with open(os.path.join(_repo, _name), 'wb') as fh:
+                fh.write(b'!<arch>\n')
+        import subprocess as _sp
+        _chosen = []
+        _orig_run = _sp.run
+        def _fake_run(cmd, **kw):
+            class _R:
+                returncode = 0; stderr = ''; stdout = ''
+            if 'dpkg-deb' in cmd and '-x' in cmd:
+                _idx = cmd.index('-x')
+                _chosen.append(cmd[_idx + 1])
+                os.makedirs(os.path.join(cmd[_idx + 2], 'boot'), exist_ok=True)
+                with open(os.path.join(cmd[_idx + 2], 'boot', 'vmlinuz-x'),
+                          'w') as fh:
+                    fh.write('fake')
+            return _R()
+        _sp.run = _fake_run
+        try:
+            _result = iso_installer._find_kernel(
+                _repo, _chroot, password='',
+                expected_kernel_pkg='linux-image-6.1.0-99-amd64',  # not on disk
+            )
+        finally:
+            _sp.run = _orig_run
+        # Fall-back: pick highest-ABI sort → 6.1.0-48 (lex-higher than 47)
+        assert '6.1.0-48-amd64' in _chosen[-1], (
+            f"expected fallback to highest-ABI, chose: {_chosen[-1]}")
 
 
 def test_buildcontainer_changelog_uses_codename_field():
@@ -9267,6 +9442,11 @@ def _stub_tui():
         def add_widget(self, w): return 0
         def del_widget(self, wid): pass
         def print(self, *a, **kw): pass
+        # logger handlers route Tui.ERROR/WARNING/INFO/DEBUG; stub them.
+        def ERROR(self, msg): pass
+        def WARNING(self, msg): pass
+        def INFO(self, msg): pass
+        def DEBUG(self, msg): pass
     _tui.console = _Console()
     _tui.tui_instance = _FakeTui()
     return _tui.console
@@ -10981,6 +11161,11 @@ def main() -> int:
         test_buildcontainer_token_subst_uses_if_not_short_circuit_and,
         test_buildcontainer_token_subst_no_double_braces_in_regular_strings,
         test_buildcontainer_token_subst_grep_rescue_or_true,
+        test_buildconfig_parses_no_bump_sources,
+        test_buildconfig_no_bump_sources_defaults_to_empty,
+        test_buildcontainer_skips_changelog_bump_for_no_bump_sources,
+        test_find_kernel_prefers_expected_kernel_pkg_match,
+        test_find_kernel_falls_back_to_highest_when_no_match,
         test_buildcontainer_changelog_uses_codename_field,
         # version_no_epoch — patch dir lookup must match Debian filename convention
         test_version_no_epoch_strips_epoch_from_debian_version,
