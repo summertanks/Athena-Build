@@ -10535,12 +10535,14 @@ def test_cmd_source_repair_skips_when_binaries_missing():
             "that would mask a legitimate rebuild")
 
 
-def test_cmd_source_repair_deletes_stale_pass_result():
-    """When .result says PASS but the deep verify of binaries
-    fails, repair must DELETE the .result (it's lying).  Without
-    this, repair and rescan disagree: rescan counts the source as
-    'would rebuild' (correct), repair counts it as 'already present'
-    (wrong).  Numbers don't reconcile.  Caught 2026-05-19."""
+def test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails():
+    """Reverted 2026-05-19 (later same day): repair no longer
+    invokes deep verify on .result-PASS sources, so it doesn't
+    delete stale PASS files.  Why: when paired with cross-source
+    strict-equal Depends (very common after rebump), deep verify
+    over-reports — and an over-report deletion costs hours of
+    needless rebuild.  The deep audit is available as the opt-in
+    `source verify` diagnostic; repair stays cheap + permissive."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
@@ -10578,9 +10580,12 @@ def test_cmd_source_repair_deletes_stale_pass_result():
 
         _sess.cmd_source_repair()
 
-        assert not os.path.exists(_result), (
-            "stale PASS .result should have been deleted when deep "
-            "verify failed")
+        assert os.path.exists(_result), (
+            "repair must leave .result PASS alone — deep verify "
+            "moved to opt-in `source verify`")
+        with open(_result) as fh:
+            assert fh.read().strip() == 'PASS', (
+                "repair must not rewrite content of existing .result")
 
 
 def test_cmd_source_repair_leaves_consistent_pass_alone():
@@ -11180,7 +11185,7 @@ def main() -> int:
         test_cmd_source_repair_writes_pass_when_binaries_present,
         test_cmd_source_repair_leaves_fail_result_untouched,
         test_cmd_source_repair_skips_when_binaries_missing,
-        test_cmd_source_repair_deletes_stale_pass_result,
+        test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails,
         test_cmd_source_repair_leaves_consistent_pass_alone,
         test_cmd_source_repair_leaves_tunneled_marker_alone,
     ]

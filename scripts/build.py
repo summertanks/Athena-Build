@@ -2701,23 +2701,10 @@ class BuildSession:
                 if _name not in _srcs:
                     _srcs[_name] = _src
 
-        _repaired       = []  # .result missing + binaries verify → wrote PASS
-        _already_ok     = 0   # .result PASS + binaries verify → no action
-        _stale_removed  = []  # .result PASS but binaries DON'T verify → deleted
-        _need_rebuild   = []  # .result missing + binaries don't verify
-        _tunneled       = 0   # .result TUNNELED → leave alone
-        _prior_fail     = 0   # .result FAIL or non-PASS → leave alone
-        _no_pkgs        = 0   # source declares no binaries
-
-        def _binaries_verify(src):
-            """All predicted binaries pass deep-verify, returns
-            (ok, first_failing_diagnostic_or_None)."""
-            for _f in src.pkgs:
-                _path = os.path.join(self.config.dir_repo, _f)
-                _ok, _reason = self.container.verify_pkg_artifact(_path, _f)
-                if not _ok:
-                    return (False, f"{_f}: {_reason}")
-            return (True, None)
+        _repaired = []
+        _already_ok = 0      # .result already present, skipped
+        _need_rebuild = []   # binaries missing — will rebuild as expected
+        _no_pkgs = 0         # source declares no binaries
 
         _bar = ProgressBar(
             label='Repair', itr_label='srcs', maxvalue=len(_srcs),
@@ -2729,113 +2716,185 @@ class BuildSession:
                 continue
             _result_file = os.path.join(
                 self.container.buildlog_path, _name + '.result')
-
-            # Read existing .result (if any) — drives the four-way
-            # decision below.
-            _existing = None
-            try:
-                with open(_result_file) as fh:
-                    _existing = fh.readline().strip()
-            except OSError:
-                pass
-
-            if _existing == 'TUNNELED':
-                _tunneled += 1
-                continue
-            if _existing not in (None, 'PASS'):
-                # FAIL or other custom marker — leave alone, operator
-                # made an explicit decision we don't override.
-                _prior_fail += 1
-                continue
-
-            # _existing is either None (.result missing) or 'PASS'.
-            # Either way, the right next step is to deep-verify the
-            # binaries.
-            _ok, _diag = _binaries_verify(_src)
-
-            if _existing == 'PASS' and _ok:
-                # State is consistent; nothing to do.
+            if os.path.exists(_result_file):
                 _already_ok += 1
                 continue
-            if _existing == 'PASS' and not _ok:
-                # .result is LYING.  Delete it so source build sees
-                # the source as needing rebuild on next run.  This is
-                # the case rescan vs repair disagreed on — the deep
-                # verify was added later than the .result was written,
-                # so old PASS markers don't reflect the current gate.
-                try:
-                    os.remove(_result_file)
-                    _stale_removed.append(_name)
-                    logger.info(
-                        f"source repair: removed stale {_result_file} "
-                        f"(verify said {_diag})"
-                    )
-                except OSError as e:
-                    console.print(
-                        f"ERROR: cannot remove stale {_result_file}: {e}",
-                        tui.COLOR_ERROR,
-                    )
+            # Shallow check — same as BuildContainer.check_build.
+            # Filename + ar magic.  Doesn't verify internal Version
+            # or Depends; that's `source verify`'s job (opt-in).
+            _all_present = True
+            for _f in _src.pkgs:
+                _path = os.path.join(self.config.dir_repo, _f)
+                if not os.path.isfile(_path):
+                    _all_present = False
+                    break
+                if not self.container.is_ar_file(_path):
+                    _all_present = False
+                    break
+            if not _all_present:
+                _need_rebuild.append(_name)
                 continue
-            if _existing is None and _ok:
-                # .result missing but binaries are consistent — restore.
-                try:
-                    with open(_result_file, 'w') as fh:
-                        fh.write('PASS\n')
-                    _repaired.append(_name)
-                    logger.info(f"source repair: restored {_result_file}")
-                except OSError as e:
-                    console.print(
-                        f"ERROR: cannot write {_result_file}: {e}",
-                        tui.COLOR_ERROR,
-                    )
-                continue
-            # _existing is None and binaries don't verify — genuine
-            # rebuild needed, nothing to do.
-            _need_rebuild.append(_name)
-            if _verbose and _diag:
-                logger.info(f"source repair {_name}: {_diag}")
+            try:
+                with open(_result_file, 'w') as fh:
+                    fh.write('PASS\n')
+                _repaired.append(_name)
+                logger.info(f"source repair: restored {_result_file}")
+            except OSError as e:
+                console.print(
+                    f"ERROR: cannot write {_result_file}: {e}",
+                    tui.COLOR_ERROR,
+                )
         _bar.close()
 
         console.print("Source repair:")
         console.print(
             f"  {len(_repaired):5d}  .result restored to PASS "
-            "(binaries verify; .result was missing)"
+            "(binaries present, will skip rebuild)"
         )
         console.print(
-            f"  {len(_stale_removed):5d}  stale .result deleted "
-            "(was PASS, but binaries no longer verify)"
+            f"  {len(_need_rebuild):5d}  binaries missing "
+            "(legitimate rebuilds — left alone)"
         )
         console.print(
-            f"  {len(_need_rebuild):5d}  legitimate rebuild "
-            "(.result missing, binaries don't verify — left alone)"
+            f"  {_already_ok:5d}  .result already present (untouched)"
         )
-        console.print(
-            f"  {_already_ok:5d}  consistent (.result PASS + binaries verify)"
-        )
-        if _tunneled:
-            console.print(
-                f"  {_tunneled:5d}  tunneled (.result=TUNNELED — left alone)"
-            )
-        if _prior_fail:
-            console.print(
-                f"  {_prior_fail:5d}  prior FAIL marker (left alone)"
-            )
         if _no_pkgs:
             console.print(
                 f"  {_no_pkgs:5d}  source declares no binaries (skipped)"
             )
 
-        if _verbose:
-            if _repaired:
-                console.print("")
-                console.print(f"Restored ({len(_repaired)}):")
-                for _n in _repaired:
-                    console.print(f"  {_n}")
-            if _stale_removed:
-                console.print("")
-                console.print(f"Stale .result removed ({len(_stale_removed)}):")
-                for _n in _stale_removed:
-                    console.print(f"  {_n}")
+        if _verbose and _repaired:
+            console.print("")
+            console.print(f"Restored ({len(_repaired)}):")
+            for _n in _repaired:
+                console.print(f"  {_n}")
+
+    def cmd_source_verify(self, *args):
+        """Opt-in deep audit: report .debs whose internal Version
+        mismatches the predicted filename, or whose Depends no longer
+        resolve in the current cache.
+
+        Usage: source verify [verbose]
+
+        Read-only.  Doesn't touch .result, doesn't rebuild anything.
+        Use as a pre-ship sanity check: BEFORE making a release ISO,
+        run this to surface artifacts that exist in repo/ but would
+        fail to install on a clean Thor system (e.g. Depends pointing
+        at a cache version that has since drifted away).
+
+        Why this is opt-in:  source build / check_build only gate on
+        filename + ar-magic for performance (~5s scan over 1500 srcs).
+        Deep verify is ~30-40s and tends to over-report on the
+        rebump-vs-cross-source-strict-equal scenario: a binary's
+        `Depends: libfoo (= 5.4-1)` won't satisfy against a cached
+        `libfoo 5.4-1+thor1` even though both sides are equivalent
+        modulo our distro suffix.  Run verify, look at the per-
+        binary diagnostic in log/athena.log, decide which findings
+        are real vs noise.
+
+        Reports (verbose):
+          - per-source list of failing binaries + first-failure
+            diagnostic from verify_pkg_artifact (version-mismatch:X!=Y,
+            unsatisfied-Depends:libfoo, etc).
+
+        Prereqs: cache + dep + container (same as source build's gates).
+        """
+        if not (self.flags.cache_ready and self.flags.dep_check_ready
+                and self.flags.build_container_ready):
+            console.print(
+                "source verify needs cache build + dep parse + container "
+                "init to have run first.",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        _verbose = 'verbose' in args
+
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _name, _src in self.udeb_dep_tree.selected_srcs.items():
+                if _name not in _srcs:
+                    _srcs[_name] = _src
+
+        _ok = 0
+        _failed = []         # [(pkg_name, first_failing_binary, diagnostic)]
+        _skipped_tunneled = 0
+        _skipped_missing = 0  # binaries absent — not verify's concern, repair handles
+        _no_pkgs = 0
+
+        _bar = ProgressBar(
+            label='Verify', itr_label='srcs', maxvalue=len(_srcs),
+        )
+        for _name, _src in sorted(_srcs.items()):
+            _bar.step(1)
+            if not _src.pkgs:
+                _no_pkgs += 1
+                continue
+            # Skip TUNNELED — verify doesn't apply to third-party pulls.
+            _result_file = os.path.join(
+                self.container.buildlog_path, _name + '.result')
+            try:
+                with open(_result_file) as fh:
+                    if fh.readline().strip() == 'TUNNELED':
+                        _skipped_tunneled += 1
+                        continue
+            except OSError:
+                pass
+            # Quick precheck: skip if any binary is missing (verify
+            # only judges present binaries; missing ones are repair /
+            # rebuild's concern).
+            _any_missing = False
+            _failing = None
+            for _f in _src.pkgs:
+                _path = os.path.join(self.config.dir_repo, _f)
+                if not os.path.isfile(_path):
+                    _any_missing = True
+                    break
+                _verify_ok, _reason = self.container.verify_pkg_artifact(_path, _f)
+                if not _verify_ok:
+                    _failing = (_f, _reason)
+                    break
+            if _any_missing:
+                _skipped_missing += 1
+                continue
+            if _failing is None:
+                _ok += 1
+            else:
+                _failed.append((_name,) + _failing)
+                logger.info(
+                    f"source verify {_name}: {_failing[0]}: {_failing[1]}"
+                )
+        _bar.close()
+
+        console.print("Source verify (deep audit):")
+        console.print(f"  {_ok:5d}  pass deep verify (binaries internally consistent)")
+        console.print(f"  {len(_failed):5d}  FAIL — present in repo/ but verify rejected")
+        if _skipped_tunneled:
+            console.print(f"  {_skipped_tunneled:5d}  skipped (TUNNELED — third-party pull)")
+        if _skipped_missing:
+            console.print(
+                f"  {_skipped_missing:5d}  skipped (binaries missing — repair/rebuild concern)"
+            )
+        if _no_pkgs:
+            console.print(f"  {_no_pkgs:5d}  no binaries declared")
+
+        if _failed:
+            # Aggregate by failure-type prefix for quick triage.
+            from collections import Counter
+            _types = Counter()
+            for _, _, _diag in _failed:
+                _prefix = _diag.split(':', 1)[0] if ':' in _diag else _diag
+                _types[_prefix] += 1
+            console.print("")
+            console.print("Failure types:")
+            for _k, _v in _types.most_common():
+                console.print(f"  {_v:5d}  {_k}")
+
+        if _verbose and _failed:
+            console.print("")
+            console.print(f"Failing sources ({len(_failed)}):")
+            for _src_name, _f, _diag in _failed:
+                console.print(f"  {_src_name}: {_f}: {_diag}")
 
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
@@ -3307,6 +3366,8 @@ class BuildSession:
             'rescan':   'report what source build would rebuild (source rescan [verbose])',
             'repair':   'restore .result=PASS for sources whose binaries exist in repo/ '
                         '(recovers from accidental .result deletion)',
+            'verify':   'opt-in deep audit: report .debs whose internal Version mismatches the '
+                        'filename or whose Depends no longer resolve in cache (source verify [verbose])',
         }
         if action == 'download':
             return self.cmd_source_download(*args)
@@ -3316,6 +3377,8 @@ class BuildSession:
             return self.cmd_source_rescan(*args)
         if action == 'repair':
             return self.cmd_source_repair(*args)
+        if action == 'verify':
+            return self.cmd_source_verify(*args)
         return self._group_help('source', _table, action)
 
     def cmd_package(self, action: str = '', *args):
