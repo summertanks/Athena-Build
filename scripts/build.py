@@ -1084,6 +1084,23 @@ class BuildSession:
     # --------------------------------------Command: patch_refresh-------------------------------------
 
     def _refresh_patches(self) -> int:
+        # ⚠️  DESTRUCTIVE — DELETES .result FILES when patch-set content
+        # has changed since the last build (see ~line 1261 below).
+        # The name "refresh" is misleading by today's standards;
+        # callers expecting read-only semantics MUST NOT invoke this.
+        # Read-only commands (cmd_source_rescan, cmd_print*, anything
+        # whose name suggests "show / scan / status") are pinned by
+        # test_readonly_named_commands_have_no_destructive_calls() to
+        # never reach here.
+        #
+        # Discovered the hard way 2026-05-19: cmd_source_rescan called
+        # this on entry to "make the count reflect current patch
+        # state" — over-counted by 47 packages because the side
+        # effect wiped their PASS state.
+        #
+        # If you need ONLY the patch_list population (not the .result
+        # invalidation), split this function or extract that pass.
+        #
         # Scan the patch tree for files matching <package>/<version>/*.patch and
         # populate each Source's patch_list.  Sorting by the first five characters
         # preserves the numeric prefix ordering (e.g. 9001-, 9002-) used to control
