@@ -1706,6 +1706,17 @@ class BuildSession:
                 "preferred label) first."
             )
             return
+
+        # Args: `force` flag (any position) + optional source-name
+        # filters.  No filter args → rebump all .debs (legacy behaviour).
+        # Filter args → only .debs whose internal Source: field matches.
+        # Lets the operator say `package rebump linux linux-signed-amd64`
+        # to retrofit just the kernel family without touching anything
+        # else.
+        _args_set = set(args)
+        _force = 'force' in _args_set
+        _source_filter = _args_set - {'force'}
+
         _repo = self.config.dir_repo
         try:
             _files = sorted(
@@ -1732,14 +1743,45 @@ class BuildSession:
                 _already += 1
             else:
                 _todo.append(_f)
+
+        # Filter by Source: field if names were passed.  Reads each
+        # .deb's control area via python-debian (no full data unpack).
+        # On a fresh 5000-file rebump this is ~5s overhead — acceptable
+        # for the targeted-bump use case.
+        if _source_filter and _todo:
+            from debian.debfile import DebFile
+            _filtered = []
+            _bar = ProgressBar(
+                label='Scan Source fields', itr_label='pkgs',
+                maxvalue=len(_todo),
+            )
+            for _f in _todo:
+                _bar.step(1)
+                try:
+                    with DebFile(os.path.join(_repo, _f)) as _deb:
+                        _src_field = _deb.control.debcontrol().get('Source', '')
+                except Exception:
+                    continue
+                # Source: field may include version in parens, e.g.
+                # "linux-signed-amd64 (6.1.172+1+thor1)" — strip to bare name.
+                _src_name = _src_field.split(' ', 1)[0].strip()
+                # If no Source: field, fall back to Package: name (single-
+                # binary sources omit Source when Package == Source).
+                if not _src_name:
+                    _src_name = _f.split('_', 1)[0]
+                if _src_name in _source_filter:
+                    _filtered.append(_f)
+            _bar.done()
+            _todo = _filtered
+
         console.print(
             f"Found {len(_files)} package(s) in {_repo}: "
-            f"{len(_todo)} to bump (+{_suffix}), {_already} already bumped."
+            f"{len(_todo)} to bump (+{_suffix}), {_already} already bumped"
+            + (f" (filter: {sorted(_source_filter)})" if _source_filter else "")
+            + "."
         )
         if not _todo:
             return
-
-        _force = bool(args) and args[0] == 'force'
         if not _force:
             _resp = Prompt(
                 PROMPT_YESNO,
@@ -2478,6 +2520,107 @@ class BuildSession:
             ]
         return (None, _force, _subset, _names, _profile_override)
 
+    def cmd_source_rescan(self, *args):
+        """Report what `source build` would rebuild against the current
+        cache + repo state, without triggering any builds.
+
+        Usage: source rescan [verbose]
+
+        Iterates every source package in the resolved dep tree (deb +
+        udeb sides merged).  For each, runs the same `check_build`
+        gate that `source build` uses to decide skip-vs-rebuild: PASS
+        result file present AND every expected binary filename present
+        in repo/ as a valid `.deb`.  Prints counts and, with `verbose`,
+        the list of source-package names that would rebuild.
+
+        Use cases:
+          * After a snapshot drift, see how many packages have shifted
+            and would queue for rebuild before committing to the time.
+          * After `package rebump` (or a fork edit), confirm the
+            rebuild surface narrowed to what you expected.
+          * Pre-flight a long `autorun` so you know roughly how much
+            work is queued.
+
+        Prereqs: `cache build` + `dep parse` + `container init` must
+        have run earlier in the session — same as source build's own
+        gates (we share `check_build`, which lives on BuildContainer).
+        """
+        if not (self.flags.cache_ready and self.flags.dep_check_ready
+                and self.flags.build_container_ready):
+            console.print(
+                "source rescan needs cache build + dep parse + container "
+                "init to have run first.",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        _verbose = 'verbose' in args
+
+        # Merge deb + udeb dep trees (shared source_hashtable means
+        # duplicates auto-dedupe by source name).
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _name, _src in self.udeb_dep_tree.selected_srcs.items():
+                if _name not in _srcs:
+                    _srcs[_name] = _src
+
+        _ok = []
+        _needs_rebuild = []
+        _no_pkgs = []  # source declares no binaries (unusual)
+        _tunneled = []
+
+        # Refresh patch list + invalidation before the scan so the
+        # decision reflects what `source build` would see right now.
+        # Without this, patches added since the last dep parse don't
+        # influence the rescan even though they'd influence a build.
+        self._refresh_patches()
+
+        for _name, _src in sorted(_srcs.items()):
+            if not _src.pkgs:
+                _no_pkgs.append(_name)
+                continue
+            # Tunneled packages register .result = TUNNELED and have
+            # check_build return True regardless of repo/ presence —
+            # they're pulled at chroot-build time, not produced.
+            _result_file = os.path.join(
+                self.container.buildlog_path, _name + '.result')
+            try:
+                with open(_result_file) as fh:
+                    _first_line = fh.readline().strip()
+                    if _first_line == 'TUNNELED':
+                        _tunneled.append(_name)
+                        continue
+            except OSError:
+                pass
+
+            if self.container.check_build(_src):
+                _ok.append(_name)
+            else:
+                _needs_rebuild.append(_name)
+
+        _total = len(_srcs)
+        console.print("Source rescan against current cache + repo:")
+        console.print(f"  {len(_ok):5d}  built + verified")
+        console.print(f"  {len(_needs_rebuild):5d}  would rebuild")
+        if _tunneled:
+            console.print(f"  {len(_tunneled):5d}  tunneled (pulled, not built)")
+        if _no_pkgs:
+            console.print(f"  {len(_no_pkgs):5d}  no binaries declared (skipped)")
+        console.print(f"  {_total:5d}  total source packages")
+
+        if _verbose and _needs_rebuild:
+            console.print("")
+            console.print(f"Would rebuild ({len(_needs_rebuild)}):")
+            for _n in _needs_rebuild:
+                console.print(f"  {_n}")
+        elif _needs_rebuild and not _verbose:
+            console.print("")
+            console.print(
+                "(pass `source rescan verbose` to list the "
+                f"{len(_needs_rebuild)} rebuild candidates by name)",
+                tui.COLOR_INFO,
+            )
+
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
@@ -2945,11 +3088,14 @@ class BuildSession:
         _table = {
             'download': 'fetch source tarballs for selected sources',
             'build':    'build sources: source build [force] [live | installer | recommended | <pkg>…] [[profile,…]]',
+            'rescan':   'report what source build would rebuild (source rescan [verbose])',
         }
         if action == 'download':
             return self.cmd_source_download(*args)
         if action == 'build':
             return self.cmd_source_build(*args)
+        if action == 'rescan':
+            return self.cmd_source_rescan(*args)
         return self._group_help('source', _table, action)
 
     def cmd_package(self, action: str = '', *args):
