@@ -9257,13 +9257,18 @@ def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
 
 
 def _stub_tui():
-    """Inject minimal stubs so fork_mirror can call tui.console.print
-    without a real Tui."""
+    """Inject minimal stubs so fork_mirror et al can call tui.console.print
+    AND construct ProgressBar/Spinner without a real Tui."""
     import tui as _tui
     class _Console:
         def __init__(self): self.out = []
         def print(self, *a, **kw): self.out.append(' '.join(str(x) for x in a))
+    class _FakeTui:
+        def add_widget(self, w): return 0
+        def del_widget(self, wid): pass
+        def print(self, *a, **kw): pass
     _tui.console = _Console()
+    _tui.tui_instance = _FakeTui()
     return _tui.console
 
 
@@ -10103,6 +10108,183 @@ def test_readonly_named_commands_have_no_destructive_calls():
     )
 
 
+def test_cmd_source_repair_dispatch_and_method_present():
+    """source repair must be wired in cmd_source's dispatch table +
+    have a matching cmd_source_repair method.  Sanity guard so
+    `source repair` isn't a phantom command."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert "'repair'" in _body, "repair not advertised in source help"
+    assert 'def cmd_source_repair(' in _body, (
+        "cmd_source_repair method missing or wrong name")
+    import re
+    assert re.search(
+        r"if action == 'repair':\s*\n\s+return self\.cmd_source_repair",
+        _body), "source repair not dispatched in cmd_source"
+
+
+def test_cmd_source_repair_writes_pass_when_binaries_present():
+    """source repair restores .result=PASS when all expected binaries
+    exist in repo/.  Synthesize the minimum state needed and call
+    the method directly via a stubbed BuildSession."""
+    import sys, types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+
+        # Plant a valid .deb (ar magic header).  is_ar_file via
+        # python-debian's DebFile is stricter — needs full member set;
+        # easier to monkey-patch is_ar_file on the stubbed container.
+        _deb_name = 'foo_1.0_amd64.deb'
+        with open(os.path.join(_repo, _deb_name), 'wb') as fh:
+            fh.write(b'!<arch>\n')  # ar magic; content beyond is fake
+
+        # Stub Source-like
+        class _Src:
+            pkgs = [_deb_name]
+
+        # Stub container with the minimum check_build helpers need
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_path):
+                return True  # we know we wrote the magic
+
+        # Stub config
+        class _Cfg:
+            dir_repo = _repo
+
+        # Stub dep tree
+        class _Tree:
+            selected_srcs = {'foo': _Src()}
+
+        # Stub flags
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+            build_container_ready = True
+
+        # Build session shell
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = _Tree
+        _sess.udeb_dep_tree = None
+        _sess.flags = _Flags
+        _sess.container = _Container
+
+        # Sanity: .result must not exist before
+        _result = os.path.join(_buildlog, 'foo.result')
+        assert not os.path.exists(_result)
+
+        _sess.cmd_source_repair()
+
+        # After repair: .result should exist + contain PASS
+        assert os.path.isfile(_result), "repair didn't write .result"
+        with open(_result) as fh:
+            assert fh.read().strip() == 'PASS', "wrong .result content"
+
+
+def test_cmd_source_repair_skips_when_result_already_present():
+    """source repair must NOT overwrite an existing .result file
+    (could be FAIL, could be a deliberate TUNNELED marker)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+
+        # Plant a FAIL .result for foo
+        _result = os.path.join(_buildlog, 'foo.result')
+        with open(_result, 'w') as fh:
+            fh.write('FAIL\n')
+
+        # Plant the .deb (so the binary check would succeed)
+        _deb_name = 'foo_1.0_amd64.deb'
+        with open(os.path.join(_repo, _deb_name), 'wb') as fh:
+            fh.write(b'!<arch>\n')
+
+        class _Src: pkgs = [_deb_name]
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_path): return True
+        class _Cfg: dir_repo = _repo
+        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+            build_container_ready = True
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = _Tree
+        _sess.udeb_dep_tree = None
+        _sess.flags = _Flags
+        _sess.container = _Container
+
+        _sess.cmd_source_repair()
+
+        # .result content must still be FAIL — repair MUST NOT overwrite
+        with open(_result) as fh:
+            assert fh.read().strip() == 'FAIL', (
+                "repair overwrote an existing .result — must skip when "
+                "the file is already present")
+
+
+def test_cmd_source_repair_skips_when_binaries_missing():
+    """source repair must NOT write .result when expected binaries
+    are missing (those sources legitimately need rebuild)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+        # NO .deb planted — binary missing
+
+        class _Src: pkgs = ['foo_1.0_amd64.deb']
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_path): return True
+        class _Cfg: dir_repo = _repo
+        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+            build_container_ready = True
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = _Tree
+        _sess.udeb_dep_tree = None
+        _sess.flags = _Flags
+        _sess.container = _Container
+
+        _sess.cmd_source_repair()
+
+        # No .result should have been written
+        assert not os.path.exists(os.path.join(_buildlog, 'foo.result')), (
+            "repair wrote .result for a source with missing binary — "
+            "that would mask a legitimate rebuild")
+
+
 def test_destructive_helpers_warn_in_docstring():
     """Helpers whose names DON'T scream 'destructive' but actually
     mutate filesystem state should carry a docstring warning marker
@@ -10594,6 +10776,10 @@ def main() -> int:
         test_cmd_source_rescan_is_readonly_no_refresh_patches_call,
         test_readonly_named_commands_have_no_destructive_calls,
         test_destructive_helpers_warn_in_docstring,
+        test_cmd_source_repair_dispatch_and_method_present,
+        test_cmd_source_repair_writes_pass_when_binaries_present,
+        test_cmd_source_repair_skips_when_result_already_present,
+        test_cmd_source_repair_skips_when_binaries_missing,
     ]
     failures = 0
     for t in tests:

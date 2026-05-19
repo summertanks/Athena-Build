@@ -2651,6 +2651,124 @@ class BuildSession:
                 tui.COLOR_INFO,
             )
 
+    def cmd_source_repair(self, *args):
+        """One-shot: restore `.result=PASS` files for sources whose
+        binaries already exist in repo/ but whose .result is missing.
+
+        Usage: source repair [verbose]
+
+        Designed for recovering from accidental .result deletion —
+        notably the 2026-05-19 incident where `cmd_source_rescan`
+        called the destructive `_refresh_patches` and wiped ~47
+        .result files whose corresponding .debs were still valid in
+        repo/.  Without this, those sources would re-enter the source
+        build queue and waste hours rebuilding artifacts that already
+        exist.
+
+        Algorithm (per source in the merged deb+udeb dep tree):
+
+          1. If .result already exists → skip (don't overwrite).
+          2. If every `src.pkgs` filename exists in repo/ AND each is
+             a syntactically valid .deb (ar archive with the right
+             members per BuildContainer.is_ar_file) → write PASS.
+          3. Otherwise → leave alone (genuinely needs rebuild).
+
+        Repair is the ONLY thing this command mutates.  Doesn't touch
+        repo/, doesn't invoke BuildContainer.build, doesn't refresh
+        patches.  Predicted-filename match comes from `dep parse`'s
+        resolution — for the repair to be correct, the dep tree's
+        view of expected filenames must match what's actually in
+        repo/ (which is true post-rebump for any pkg whose source
+        version hasn't drifted).
+
+        Prereqs: cache build + dep parse + container init (same as
+        source build's gates).
+        """
+        if not (self.flags.cache_ready and self.flags.dep_check_ready
+                and self.flags.build_container_ready):
+            console.print(
+                "source repair needs cache build + dep parse + container "
+                "init to have run first.",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        _verbose = 'verbose' in args
+
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _name, _src in self.udeb_dep_tree.selected_srcs.items():
+                if _name not in _srcs:
+                    _srcs[_name] = _src
+
+        _repaired = []
+        _already_ok = 0      # .result already present, skipped
+        _need_rebuild = []   # binaries missing — will rebuild as expected
+        _no_pkgs = 0         # source declares no binaries
+
+        _bar = ProgressBar(
+            label='Repair', itr_label='srcs', maxvalue=len(_srcs),
+        )
+        for _name, _src in sorted(_srcs.items()):
+            _bar.step(1)
+            if not _src.pkgs:
+                _no_pkgs += 1
+                continue
+            _result_file = os.path.join(
+                self.container.buildlog_path, _name + '.result')
+            if os.path.exists(_result_file):
+                _already_ok += 1
+                continue
+            # Mirror BuildContainer.check_build's binary verification
+            # but without the .result check (we're deciding whether to
+            # CREATE the .result, not whether to use it).
+            _all_present = True
+            for _f in _src.pkgs:
+                _path = os.path.join(self.config.dir_repo, _f)
+                if not os.path.isfile(_path):
+                    _all_present = False
+                    break
+                if not self.container.is_ar_file(_path):
+                    _all_present = False
+                    break
+            if not _all_present:
+                _need_rebuild.append(_name)
+                continue
+            try:
+                with open(_result_file, 'w') as fh:
+                    fh.write('PASS\n')
+                _repaired.append(_name)
+                logger.info(f"source repair: restored {_result_file}")
+            except OSError as e:
+                console.print(
+                    f"ERROR: cannot write {_result_file}: {e}",
+                    tui.COLOR_ERROR,
+                )
+        _bar.close()
+
+        console.print("Source repair:")
+        console.print(
+            f"  {len(_repaired):5d}  .result restored to PASS "
+            "(binaries present, will skip rebuild)"
+        )
+        console.print(
+            f"  {len(_need_rebuild):5d}  binaries missing "
+            "(legitimate rebuilds — left alone)"
+        )
+        console.print(
+            f"  {_already_ok:5d}  .result already present (untouched)"
+        )
+        if _no_pkgs:
+            console.print(
+                f"  {_no_pkgs:5d}  source declares no binaries (skipped)"
+            )
+
+        if _verbose and _repaired:
+            console.print("")
+            console.print(f"Restored ({len(_repaired)}):")
+            for _n in _repaired:
+                console.print(f"  {_n}")
+
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
@@ -3119,6 +3237,8 @@ class BuildSession:
             'download': 'fetch source tarballs for selected sources',
             'build':    'build sources: source build [force] [live | installer | recommended | <pkg>…] [[profile,…]]',
             'rescan':   'report what source build would rebuild (source rescan [verbose])',
+            'repair':   'restore .result=PASS for sources whose binaries exist in repo/ '
+                        '(recovers from accidental .result deletion)',
         }
         if action == 'download':
             return self.cmd_source_download(*args)
@@ -3126,6 +3246,8 @@ class BuildSession:
             return self.cmd_source_build(*args)
         if action == 'rescan':
             return self.cmd_source_rescan(*args)
+        if action == 'repair':
+            return self.cmd_source_repair(*args)
         return self._group_help('source', _table, action)
 
     def cmd_package(self, action: str = '', *args):
