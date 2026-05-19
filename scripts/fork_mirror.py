@@ -191,6 +191,88 @@ def _discover_fork_source_trees(dir_fork_source: str) -> List[str]:
 # Change detection + cache invalidation
 # ---------------------------------------------------------------------------
 
+# debian/control fields that influence apt resolution / dep tree.  When
+# any of these change, the cache + dep tree are stale and need a full
+# rebuild — `package reload` refuses the light path in that case.
+# Everything else (Description, Maintainer, Homepage, Vcs-*, Standards-
+# Version, file content under data/ tasks/, Makefile changes, etc.) is
+# package-local and a light reload is safe.
+_DEP_AFFECTING_FIELDS = frozenset((
+    'Source', 'Package', 'Architecture',
+    'Depends', 'Pre-Depends', 'Recommends', 'Suggests', 'Enhances',
+    'Provides', 'Conflicts', 'Replaces', 'Breaks',
+))
+
+
+def _compute_dep_hash(pkg_dir: str) -> str:
+    """SHA256 over debian/changelog version + debian/control's dep-
+    affecting fields, in stable canonical form.
+
+    Used by `package reload` to distinguish "this edit only affects
+    package content" (light rebuild safe) from "this edit changes apt
+    resolution" (need to re-run cache build + dep parse).
+
+    Field set: see _DEP_AFFECTING_FIELDS.  Normalisation: whitespace
+    collapsed via `' '.join(value.split())` so a line-fold reflow
+    doesn't shift the hash.  Stanza ordering: deterministic by
+    Package/Source name.
+
+    Missing files or parse errors yield a stable "empty" digest so a
+    truly-broken fork doesn't crash callers — the comparison still
+    detects "something changed" downstream.
+    """
+    _h = hashlib.sha256()
+
+    # Changelog version goes first.  A version bump alone always
+    # gates (sibling cross-refs like `(= ${binary:Version})` would
+    # otherwise resolve to wrong values).
+    try:
+        with open(os.path.join(pkg_dir, 'debian', 'changelog')) as fh:
+            _ver = str(Changelog(fh.read()).version)
+    except (OSError, Exception) as e:
+        logger.warning(f"fork_mirror: changelog unreadable for {pkg_dir}: {e}")
+        _ver = ''
+    _h.update(b'version|')
+    _h.update(_ver.encode('utf-8'))
+    _h.update(b'\0')
+
+    # Parse debian/control via Deb822 — handles line-folded values
+    # + multi-stanza forks correctly.
+    try:
+        with open(os.path.join(pkg_dir, 'debian', 'control')) as fh:
+            for _stanza in Deb822.iter_paragraphs(fh):
+                _name = _stanza.get('Package', _stanza.get('Source', '<unknown>'))
+                _h.update(b'stanza|')
+                _h.update(_name.encode('utf-8'))
+                _h.update(b'\0')
+                for _field in sorted(_DEP_AFFECTING_FIELDS):
+                    if _field in _stanza:
+                        _val = ' '.join(_stanza[_field].split())
+                        _h.update(_field.encode('utf-8'))
+                        _h.update(b'=')
+                        _h.update(_val.encode('utf-8'))
+                        _h.update(b'\0')
+    except OSError as e:
+        logger.warning(f"fork_mirror: control unreadable for {pkg_dir}: {e}")
+    return _h.hexdigest()
+
+
+def load_pkg_hashes(pkg_name: str, dir_fork_source_repo: str) -> tuple:
+    """Return (stored_tree_hash, stored_dep_hash) for a pkg.  Empty
+    strings for missing/unreadable sidecars."""
+    _result = []
+    for _ext in ('.tree-hash', '.dep-hash'):
+        _path = os.path.join(dir_fork_source_repo, pkg_name + _ext)
+        _value = ''
+        try:
+            with open(_path) as fh:
+                _value = fh.read().strip()
+        except OSError:
+            pass
+        _result.append(_value)
+    return tuple(_result)
+
+
 def _binary_names_from_control(pkg_dir: str) -> List[str]:
     """Parse debian/control's Package: stanzas, return all binary names.
 
@@ -231,6 +313,9 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
         _targets.extend(glob.glob(os.path.join(_dir, f'{pkg_name}_*')))
     _targets.append(
         os.path.join(buildconfig.dir_fork_source_repo, f'{pkg_name}.tree-hash')
+    )
+    _targets.append(
+        os.path.join(buildconfig.dir_fork_source_repo, f'{pkg_name}.dep-hash')
     )
 
     # Per-binary artifacts in repo/ (covers multi-binary forks)
@@ -296,19 +381,27 @@ def _check_and_invalidate_fork_pkg(pkg_dir: str, buildconfig) -> bool:
 
 
 def _persist_tree_hash(pkg_dir: str, buildconfig) -> None:
-    """Write current tree hash AFTER successful regen.  Idempotent."""
+    """Write current tree-hash AND dep-hash AFTER successful regen.
+    Both sidecars are kept in lockstep so `package reload`'s
+    light-vs-gate decision has consistent baselines.  Idempotent."""
     _pkg_name = os.path.basename(pkg_dir)
-    _hash_file = os.path.join(
+    _tree_file = os.path.join(
         buildconfig.dir_fork_source_repo, f'{_pkg_name}.tree-hash'
     )
-    _current = utils.compute_tree_hash(pkg_dir)
-    try:
-        with open(_hash_file, 'w') as fh:
-            fh.write(_current + '\n')
-    except OSError as e:
-        logger.warning(
-            f"fork_mirror: couldn't persist tree-hash for {_pkg_name}: {e}"
-        )
+    _dep_file = os.path.join(
+        buildconfig.dir_fork_source_repo, f'{_pkg_name}.dep-hash'
+    )
+    _tree = utils.compute_tree_hash(pkg_dir)
+    _dep  = _compute_dep_hash(pkg_dir)
+    for _path, _value in ((_tree_file, _tree), (_dep_file, _dep)):
+        try:
+            with open(_path, 'w') as fh:
+                fh.write(_value + '\n')
+        except OSError as e:
+            logger.warning(
+                f"fork_mirror: couldn't persist {os.path.basename(_path)} "
+                f"for {_pkg_name}: {e}"
+            )
 
 
 # ---------------------------------------------------------------------------

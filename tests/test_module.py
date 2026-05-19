@@ -9747,6 +9747,169 @@ def test_binary_names_from_control_extracts_all_package_stanzas():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# package reload — dep-hash classification + sidecar plumbing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_minimal_pkg(tmp_root: str, source: str, version: str,
+                      binaries: list, depends_main: str = '') -> str:
+    """Create a minimal fork pkg dir at tmp_root/<source>/ with changelog
+    + control.  Returns the pkg dir.  `binaries` is a list of Package:
+    stanza names (first one inherits Depends from `depends_main`)."""
+    _pkg_dir = os.path.join(tmp_root, source)
+    os.makedirs(os.path.join(_pkg_dir, 'debian'), exist_ok=True)
+    with open(os.path.join(_pkg_dir, 'debian', 'changelog'), 'w') as fh:
+        fh.write(f'{source} ({version}) thor; urgency=low\n\n'
+                 '  * fixture\n\n'
+                 ' -- Test <t@local>  Sat, 16 May 2026 12:00:00 +0000\n')
+    _control = f'Source: {source}\nMaintainer: Test <t@local>\n\n'
+    for _i, _bin in enumerate(binaries):
+        _control += f'Package: {_bin}\nArchitecture: all\n'
+        if _i == 0 and depends_main:
+            _control += f'Depends: {depends_main}\n'
+        _control += 'Description: x\n .\n\n'
+    with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+        fh.write(_control)
+    return _pkg_dir
+
+
+def test_compute_dep_hash_changes_on_depends_field_edit():
+    """Adding a new Depends: must shift the dep-hash so package reload
+    can gate the change as 'dep-affecting'."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        _pkg_dir = _make_minimal_pkg(tmp, 'foo', '1.0', ['foo'], depends_main='libc6')
+        _h1 = fork_mirror._compute_dep_hash(_pkg_dir)
+        # Add a dependency
+        _pkg_dir = _make_minimal_pkg(tmp, 'foo', '1.0', ['foo'], depends_main='libc6, libxyz')
+        _h2 = fork_mirror._compute_dep_hash(_pkg_dir)
+        assert _h1 != _h2, "Depends: change must shift dep-hash"
+
+
+def test_compute_dep_hash_changes_on_version_bump():
+    """Version bump alone must shift the dep-hash (sibling
+    cross-refs depend on it via ${binary:Version})."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        _pkg_dir = _make_minimal_pkg(tmp, 'foo', '1.0', ['foo'])
+        _h1 = fork_mirror._compute_dep_hash(_pkg_dir)
+        _pkg_dir = _make_minimal_pkg(tmp, 'foo', '1.1', ['foo'])
+        _h2 = fork_mirror._compute_dep_hash(_pkg_dir)
+        assert _h1 != _h2, "version bump must shift dep-hash"
+
+
+def test_compute_dep_hash_stable_under_description_edit():
+    """Editing Description (non-gating field) must NOT shift dep-hash —
+    that's the whole point of the gate distinguishing content from
+    resolution-affecting changes."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        _pkg_dir = _make_minimal_pkg(tmp, 'foo', '1.0', ['foo'])
+        _h1 = fork_mirror._compute_dep_hash(_pkg_dir)
+        # Edit Description (non-gating)
+        _ctrl_path = os.path.join(_pkg_dir, 'debian', 'control')
+        _ctrl = open(_ctrl_path).read().replace(
+            'Description: x', 'Description: updated description')
+        with open(_ctrl_path, 'w') as fh:
+            fh.write(_ctrl)
+        _h2 = fork_mirror._compute_dep_hash(_pkg_dir)
+        assert _h1 == _h2, (
+            "Description edit shifted dep-hash — non-gating field "
+            "leaked into the hash set")
+
+
+def test_compute_dep_hash_stable_under_whitespace_reflow():
+    """Line-fold reflow of a Depends: value (cosmetic only) must NOT
+    shift the dep-hash."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        _pkg_dir = os.path.join(tmp, 'foo')
+        os.makedirs(os.path.join(_pkg_dir, 'debian'))
+        with open(os.path.join(_pkg_dir, 'debian', 'changelog'), 'w') as fh:
+            fh.write('foo (1.0) thor; urgency=low\n\n  * x\n\n'
+                     ' -- T <t@l>  Sat, 16 May 2026 12:00:00 +0000\n')
+        with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+            fh.write('Source: foo\nMaintainer: T <t@l>\n\n'
+                     'Package: foo\nArchitecture: all\n'
+                     'Depends: libc6, libxyz, libabc\n'
+                     'Description: x\n .\n')
+        _h1 = fork_mirror._compute_dep_hash(_pkg_dir)
+        # Same fields, reflowed across multiple lines (Debian continuation)
+        with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+            fh.write('Source: foo\nMaintainer: T <t@l>\n\n'
+                     'Package: foo\nArchitecture: all\n'
+                     'Depends: libc6,\n         libxyz,\n         libabc\n'
+                     'Description: x\n .\n')
+        _h2 = fork_mirror._compute_dep_hash(_pkg_dir)
+        assert _h1 == _h2, "whitespace reflow shifted dep-hash"
+
+
+def test_load_pkg_hashes_returns_empty_strings_when_sidecars_missing():
+    """Defensive: load_pkg_hashes must not crash when sidecars don't
+    exist — first-build case, returns ('', '')."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        _tree, _dep = fork_mirror.load_pkg_hashes('nonexistent', tmp)
+        assert _tree == '' and _dep == '', (_tree, _dep)
+
+
+def test_persist_tree_hash_writes_both_sidecars():
+    """_persist_tree_hash must produce BOTH .tree-hash AND .dep-hash
+    sidecars so package reload's two-stage decision has both baselines."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        fork_mirror._persist_tree_hash(
+            os.path.join(bc.dir_fork_source, 'athena-installer-data'), bc)
+        _tree_p = os.path.join(
+            bc.dir_fork_source_repo, 'athena-installer-data.tree-hash')
+        _dep_p  = os.path.join(
+            bc.dir_fork_source_repo, 'athena-installer-data.dep-hash')
+        assert os.path.isfile(_tree_p), "tree-hash sidecar missing"
+        assert os.path.isfile(_dep_p),  "dep-hash sidecar missing"
+        # Both should contain valid hex SHA256 (64 chars)
+        for _p in (_tree_p, _dep_p):
+            _value = open(_p).read().strip()
+            assert len(_value) == 64 and all(c in '0123456789abcdef' for c in _value), \
+                f"sidecar {_p} doesn't contain a sha256 hex digest: {_value!r}"
+
+
+def test_wipe_fork_pkg_outputs_removes_both_hash_sidecars():
+    """When invalidating, both .tree-hash and .dep-hash must be wiped
+    so stale baselines don't confuse the next decision."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        # Plant both sidecars
+        for _ext in ('.tree-hash', '.dep-hash'):
+            with open(os.path.join(
+                    bc.dir_fork_source_repo,
+                    f'athena-installer-data{_ext}'), 'w') as fh:
+                fh.write('stale' * 12 + 'abcd')
+        fork_mirror._wipe_fork_pkg_outputs(
+            'athena-installer-data', ['athena-installer-data'], bc)
+        for _ext in ('.tree-hash', '.dep-hash'):
+            assert not os.path.exists(os.path.join(
+                bc.dir_fork_source_repo, f'athena-installer-data{_ext}')), (
+                f"{_ext} sidecar survived wipe")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -10168,6 +10331,13 @@ def main() -> int:
         test_fork_invalidation_no_op_when_hash_matches,
         test_fork_invalidation_covers_multi_binary_via_control_parse,
         test_binary_names_from_control_extracts_all_package_stanzas,
+        test_compute_dep_hash_changes_on_depends_field_edit,
+        test_compute_dep_hash_changes_on_version_bump,
+        test_compute_dep_hash_stable_under_description_edit,
+        test_compute_dep_hash_stable_under_whitespace_reflow,
+        test_load_pkg_hashes_returns_empty_strings_when_sidecars_missing,
+        test_persist_tree_hash_writes_both_sidecars,
+        test_wipe_fork_pkg_outputs_removes_both_hash_sidecars,
     ]
     failures = 0
     for t in tests:
