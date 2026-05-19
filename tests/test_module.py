@@ -9910,6 +9910,69 @@ def test_wipe_fork_pkg_outputs_removes_both_hash_sidecars():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# package rebump — source-name filter + cmd_source_rescan
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_cmd_rebump_parses_source_name_filter_args():
+    """package rebump with non-`force` args must collect them into a
+    Source-name filter set, so a partial rebump can target just the
+    kernel family without touching everything else."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    # Pin: rebump cmd reads a filter set from non-force args
+    assert "_source_filter = _args_set - {'force'}" in _body, (
+        "rebump must compute _source_filter as args minus 'force' so "
+        "a targeted rebump only touches the named sources")
+    # Pin: filter is applied by reading the .deb's Source: control field
+    assert "DebFile" in _body and "_source_filter and _todo" in _body, (
+        "rebump filter must actually narrow _todo via DebFile control "
+        "field read — filename-prefix would miss linux-signed-amd64's "
+        "binaries that ship as linux-image-*")
+
+
+def test_cmd_source_rescan_registered_in_dispatcher():
+    """source rescan must be wired in cmd_source's dispatch table —
+    otherwise the user gets `Unknown sub-command` and the command is
+    a phantom."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert "'rescan'" in _body, "rescan not advertised in source help"
+    assert "cmd_source_rescan" in _body, (
+        "cmd_source_rescan method missing or wrong name")
+    # Pin: rescan dispatches to the method
+    import re
+    assert re.search(
+        r"if action == 'rescan':\s*\n\s+return self\.cmd_source_rescan",
+        _body), "source rescan not dispatched in cmd_source"
+
+
+def test_cmd_source_rescan_method_uses_check_build():
+    """rescan must NOT re-implement check_build — it shares the same
+    decision the source-build path uses, so its count actually reflects
+    what would rebuild.  Pinning the integration to keep them in sync."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    # Locate the cmd_source_rescan body and verify it calls check_build
+    import re
+    _m = re.search(
+        r'def cmd_source_rescan\(self, \*args\):.*?(?=\n    def )',
+        _body, re.DOTALL)
+    assert _m, "cmd_source_rescan not found"
+    _method = _m.group(0)
+    assert 'self.container.check_build' in _method, (
+        "rescan must use BuildContainer.check_build so it stays in sync "
+        "with source build's skip logic")
+    # Pin: rescan flags-gate on cache + dep + container ready
+    assert 'cache_ready' in _method and 'dep_check_ready' in _method \
+        and 'build_container_ready' in _method, (
+        "rescan must gate on the three readiness flags so it doesn't "
+        "scan against stale state")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -10338,6 +10401,9 @@ def main() -> int:
         test_load_pkg_hashes_returns_empty_strings_when_sidecars_missing,
         test_persist_tree_hash_writes_both_sidecars,
         test_wipe_fork_pkg_outputs_removes_both_hash_sidecars,
+        test_cmd_rebump_parses_source_name_filter_args,
+        test_cmd_source_rescan_registered_in_dispatcher,
+        test_cmd_source_rescan_method_uses_check_build,
     ]
     failures = 0
     for t in tests:
