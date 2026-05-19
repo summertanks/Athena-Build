@@ -2,6 +2,7 @@
 import hashlib
 import logging
 import os
+from typing import Optional, Tuple
 import utils
 from utils import BuildConfig, version_no_epoch
 from package import Source
@@ -545,26 +546,178 @@ class BuildContainer:
                     )
 
     def check_build(self, src_pkg: Source) -> bool:
+        """Decide whether a previously-built source can skip rebuild.
 
+        Returns True only when ALL of:
+          1. src_pkg declares at least one binary
+          2. log/build/<src>.result reads PASS or TUNNELED
+          3. Every predicted binary in src_pkg.pkgs passes
+             verify_pkg_artifact (existence, ar validity, Package/
+             Version/Architecture match the filename, every
+             Depends/Pre-Depends resolvable in cache)
+
+        TUNNELED special-cases: a .result line of "TUNNELED" means
+        the binary is a third-party pull, not produced from source —
+        skip the per-binary verify (we didn't build it; only the
+        download step gates it).
+        """
         if not src_pkg.pkgs:
             return False
 
         result_file = os.path.join(self.buildlog_path, src_pkg.package + '.result')
         try:
             with open(result_file, 'r') as fh:
-                if fh.readline().strip() not in ('PASS', 'TUNNELED'):
-                    return False
+                _result = fh.readline().strip()
+            if _result not in ('PASS', 'TUNNELED'):
+                return False
         except OSError:
             return False
 
+        # TUNNELED packages: trust the marker, skip per-binary verify.
+        if _result == 'TUNNELED':
+            return True
+
         for _file in src_pkg.pkgs:
             _filename = os.path.join(self.repo_path, _file)
-            if not os.path.isfile(_filename):
-                return False
-            if not self.is_ar_file(_filename):
+            _ok, _reason = self.verify_pkg_artifact(_filename, _file)
+            if not _ok:
+                logger.info(
+                    f"check_build {src_pkg.package}: {_file}: {_reason}"
+                )
                 return False
 
         return True
+
+    def verify_pkg_artifact(self, deb_path: str,
+                            expected_filename: str) -> 'Tuple[bool, str]':
+        """Deep-verify a single .deb / .udeb against its predicted
+        filename + the current cache state.
+
+        Checks (in order, short-circuits on first failure):
+
+          1. File exists at deb_path
+          2. Valid ar archive (is_ar_file)
+          3. Internal `Package:` field == filename's pkg part
+          4. Internal `Version:` field == filename's version part
+          5. Internal `Architecture:` field matches filename's arch part
+             (also accepts `all` to match any arch suffix — for arch-
+             independent .debs whose filename uses the build arch)
+          6. Every Depends + Pre-Depends OR-group resolvable via
+             self.cache.package_hashtable (at least one alternative in
+             each group has a version satisfying its constraint).
+             Skipped when self.cache is None (no cache to verify
+             against; trust).
+
+        Returns (True, 'ok') on full pass; (False, diagnostic) on
+        first failure.  Diagnostic format: short-token:detail for
+        machine-friendly logging.
+
+        Used by check_build (skip-rebuild decision) and cmd_source_
+        repair (write-PASS decision) so both share the same notion
+        of "this artifact is good enough to skip building."
+        """
+        if not os.path.isfile(deb_path):
+            return (False, 'missing')
+        if not self.is_ar_file(deb_path):
+            return (False, 'not-ar')
+
+        # Parse expected_filename: pkg_VERSION_arch.{deb,udeb}
+        _base = os.path.basename(expected_filename)
+        for _ext in ('.deb', '.udeb'):
+            if _base.endswith(_ext):
+                _base = _base[:-len(_ext)]
+                break
+        _parts = _base.split('_')
+        if len(_parts) != 3:
+            return (False, f'bad-filename-shape:{_base}')
+        _exp_pkg, _exp_ver, _exp_arch = _parts
+
+        # Read .deb's internal control area
+        try:
+            from debian.debfile import DebFile
+            with DebFile(deb_path) as _deb:
+                _ctrl = _deb.control.debcontrol()
+        except Exception as e:
+            return (False, f'unreadable:{type(e).__name__}:{e}')
+
+        _actual_pkg = _ctrl.get('Package', '')
+        if _actual_pkg != _exp_pkg:
+            return (False, f'pkg-mismatch:{_actual_pkg}!={_exp_pkg}')
+
+        _actual_ver = _ctrl.get('Version', '')
+        if _actual_ver != _exp_ver:
+            return (False, f'version-mismatch:{_actual_ver}!={_exp_ver}')
+
+        _actual_arch = _ctrl.get('Architecture', '')
+        # arch-independent (`all`) .debs can sit under any arch's filename
+        if _actual_arch not in (_exp_arch, 'all'):
+            return (False, f'arch-mismatch:{_actual_arch}!={_exp_arch}')
+
+        # Depends resolution against cache.  Skip if no cache (some
+        # call sites construct BuildContainer without one — the
+        # filename + control check still has value).
+        if self.cache is None:
+            return (True, 'ok-nocache')
+
+        from debian.deb822 import PkgRelation
+        for _field in ('Depends', 'Pre-Depends'):
+            _deps_str = _ctrl.get(_field, '')
+            if not _deps_str:
+                continue
+            try:
+                _or_groups = PkgRelation.parse_relations(_deps_str)
+            except Exception:
+                # Malformed Depends — be permissive (don't fail the
+                # whole artifact verify on a parse glitch).
+                continue
+            for _or_group in _or_groups:
+                if not self._or_group_satisfiable(_or_group):
+                    _names = ' | '.join(_d.get('name', '?')
+                                        for _d in _or_group)
+                    return (False, f'unsatisfied-{_field}:{_names}')
+
+        return (True, 'ok')
+
+    def _or_group_satisfiable(self, or_group: list) -> bool:
+        """One OR-group (parsed by PkgRelation) is satisfied iff at
+        least one alternative has a candidate in cache meeting its
+        version constraint."""
+        if not self.cache:
+            return True
+        for _alt in or_group:
+            _name = _alt.get('name', '')
+            if not _name:
+                continue
+            _ver_constraint = _alt.get('version')  # (op, ver) or None
+            _bin_table = self.cache.package_hashtable.get(_name, {})
+            for _candidate_ver in _bin_table.keys():
+                if self._satisfies_version(_candidate_ver, _ver_constraint):
+                    return True
+        return False
+
+    @staticmethod
+    def _satisfies_version(version_str: str,
+                           constraint: 'Optional[Tuple[str, str]]') -> bool:
+        """version_str matches constraint (op, target_ver) using
+        dpkg version semantics.  None constraint means any version
+        is OK."""
+        if constraint is None:
+            return True
+        _op, _target = constraint
+        if not _target:
+            return True
+        try:
+            from debian.debian_support import Version
+            _v = Version(version_str)
+            _t = Version(_target)
+        except Exception:
+            return False
+        if _op == '<<': return _v <  _t
+        if _op == '<=': return _v <= _t
+        if _op in ('=', '=='): return _v == _t
+        if _op == '>=': return _v >= _t
+        if _op == '>>': return _v >  _t
+        return False
 
     @staticmethod
     def is_ar_file(filename: str) -> bool:

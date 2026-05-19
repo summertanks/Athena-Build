@@ -2719,17 +2719,20 @@ class BuildSession:
             if os.path.exists(_result_file):
                 _already_ok += 1
                 continue
-            # Mirror BuildContainer.check_build's binary verification
-            # but without the .result check (we're deciding whether to
-            # CREATE the .result, not whether to use it).
+            # Share BuildContainer.verify_pkg_artifact so repair and
+            # check_build agree on what "OK to skip rebuild" means.
+            # Verifies filename + ar + internal Pkg/Version/Arch +
+            # every Depends/Pre-Depends OR-group resolvable in cache.
             _all_present = True
             for _f in _src.pkgs:
                 _path = os.path.join(self.config.dir_repo, _f)
-                if not os.path.isfile(_path):
+                _ok, _reason = self.container.verify_pkg_artifact(_path, _f)
+                if not _ok:
                     _all_present = False
-                    break
-                if not self.container.is_ar_file(_path):
-                    _all_present = False
+                    if _verbose:
+                        logger.info(
+                            f"source repair {_name}: {_f}: {_reason}"
+                        )
                     break
             if not _all_present:
                 _need_rebuild.append(_name)
