@@ -677,6 +677,53 @@ def check_dep3_header(patch_path: str) -> list:
     return [_f for _f in REQUIRED if _f not in found]
 
 
+def compute_tree_hash(root: str,
+                      skip_dirs: tuple = ('.git', '__pycache__')) -> str:
+    """SHA256 over the content of every regular file under `root`.
+
+    Walks recursively; sorts paths for determinism; hashes
+    (relative_path + NUL + content + NUL) per file in sorted order.
+    Mirrors patch_set_hash's encoding so the two functions are
+    interchangeable in shape — only the scope differs.
+
+    Used by fork_mirror's invalidation pass to detect any change to
+    a fork/source/<pkg>/ tree.  Same hash → tree unchanged → reuse
+    cached artifacts.  Different hash → wipe and rebuild.
+
+    Skips directories named in `skip_dirs` (default: VCS metadata
+    and Python bytecode caches — neither carries semantic content
+    for source builds).  Unreadable files are skipped silently
+    (their absence shifts the hash, which is the conservative
+    behaviour — see patch_set_hash).
+
+    Missing root → digest of empty input ("").
+    """
+    _h = hashlib.sha256()
+    if not os.path.isdir(root):
+        return _h.hexdigest()
+
+    _files: list = []
+    for _dirpath, _dirnames, _filenames in os.walk(root):
+        _dirnames[:] = [_d for _d in _dirnames if _d not in skip_dirs]
+        for _fn in _filenames:
+            _abs = os.path.join(_dirpath, _fn)
+            _rel = os.path.relpath(_abs, root)
+            _files.append(_rel)
+    _files.sort()
+
+    for _rel in _files:
+        try:
+            with open(os.path.join(root, _rel), 'rb') as fh:
+                _content = fh.read()
+        except OSError:
+            continue
+        _h.update(_rel.encode('utf-8'))
+        _h.update(b'\0')
+        _h.update(_content)
+        _h.update(b'\0')
+    return _h.hexdigest()
+
+
 def patch_set_hash(patch_dir: str, patch_files: list) -> str:
     """SHA256 over (filename + NUL + content + NUL) tuples in the given order.
 

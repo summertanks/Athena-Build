@@ -15,6 +15,7 @@ Public API:
     generate_fork_mirror(buildconfig) -> bool
     register_fork_mirror(mirrors, buildconfig) -> List[Mirror]
 """
+import glob
 import gzip
 import hashlib
 import logging
@@ -84,6 +85,15 @@ def generate_fork_mirror(buildconfig) -> bool:
         f"fork_mirror: discovered {len(pkg_dirs)} source tree(s) in fork/source/"
     )
 
+    # Change-detection + cache invalidation: for each fork pkg whose
+    # tree content differs from its persisted tree-hash, wipe every
+    # downstream artifact (fork tarball, source/ copy, repo/ debs,
+    # build logs) so the rebuild starts from clean state.  Eliminates
+    # the "fork edited but stale .deb in repo/ keeps shipping" hazard
+    # that bit us with athena-tasksel + packages/list 2026-05-18.
+    for _pkg_dir in pkg_dirs:
+        _check_and_invalidate_fork_pkg(_pkg_dir, buildconfig)
+
     src_pkg_files = _generate_source_packages(pkg_dirs, dir_fork_source_repo)
     if not src_pkg_files:
         tui.console.print(
@@ -108,6 +118,16 @@ def generate_fork_mirror(buildconfig) -> bool:
         f"fork_mirror: emitted Release + {len(deb_stanzas)} deb(s) + "
         f"{len(udeb_stanzas)} udeb(s) + {len(src_stanzas)} source(s)"
     )
+
+    # Persist tree hashes AFTER successful regen so the next cache build
+    # can detect "no change since last run" and skip the invalidation
+    # wipe.  Done here (not inside _generate_source_packages) so the
+    # hash reflects the FULLY-PROCESSED state: source pkg + index files
+    # all written, mirror is self-consistent.
+    for _pkg_dir in pkg_dirs:
+        if os.path.basename(_pkg_dir) in src_pkg_files:
+            _persist_tree_hash(_pkg_dir, buildconfig)
+
     return True
 
 
@@ -165,6 +185,130 @@ def _discover_fork_source_trees(dir_fork_source: str) -> List[str]:
             continue
         _found.append(_pkg_dir)
     return _found
+
+
+# ---------------------------------------------------------------------------
+# Change detection + cache invalidation
+# ---------------------------------------------------------------------------
+
+def _binary_names_from_control(pkg_dir: str) -> List[str]:
+    """Parse debian/control's Package: stanzas, return all binary names.
+
+    Used by the invalidation wipe to cover multi-binary forks: for
+    athena-tasksel the source is `athena-tasksel` but the produced
+    binaries are `athena-tasksel` + `athena-tasksel-data`.  A glob by
+    source name alone misses the data binary because of the dash-vs-
+    underscore split (`athena-tasksel-data_*` doesn't match
+    `athena-tasksel_*`).
+    """
+    _names: List[str] = []
+    _ctrl = os.path.join(pkg_dir, 'debian', 'control')
+    try:
+        with open(_ctrl) as fh:
+            for _line in fh:
+                if _line.startswith('Package:'):
+                    _names.append(_line.split(':', 1)[1].strip())
+    except OSError as e:
+        logger.warning(f"fork_mirror: cannot parse {_ctrl}: {e}")
+    return _names
+
+
+def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
+                           buildconfig) -> None:
+    """Delete every artifact derived from a fork pkg whose tree changed.
+
+    Targets:
+      - fork/source/repo/<src>_* (dsc + tar.xz from dpkg-source -b)
+      - fork/source/repo/<src>.tree-hash (stale; rewritten post-regen)
+      - source/<src>_* (downloaded copy + .verified sidecar)
+      - repo/<bin>_* for each binary in debian/control (.deb / .udeb)
+      - log/build/<src>{,.result,.patchhash} (build log + sidecars)
+    """
+    _targets: List[str] = []
+
+    # Source-named artifacts (.dsc, .tar.xz, .verified, .tree-hash)
+    for _dir in (buildconfig.dir_fork_source_repo, buildconfig.dir_source):
+        _targets.extend(glob.glob(os.path.join(_dir, f'{pkg_name}_*')))
+    _targets.append(
+        os.path.join(buildconfig.dir_fork_source_repo, f'{pkg_name}.tree-hash')
+    )
+
+    # Per-binary artifacts in repo/ (covers multi-binary forks)
+    for _bin in binary_names:
+        _targets.extend(glob.glob(os.path.join(buildconfig.dir_repo, f'{_bin}_*')))
+
+    # Build-log sidecars (source-named)
+    _build_log_dir = os.path.join(buildconfig.dir_log, 'build')
+    for _suffix in ('', '.result', '.patchhash'):
+        _targets.append(os.path.join(_build_log_dir, pkg_name + _suffix))
+
+    _wiped = 0
+    for _t in _targets:
+        if not (os.path.isfile(_t) or os.path.islink(_t)):
+            continue
+        try:
+            os.remove(_t)
+            _wiped += 1
+            logger.info(f"fork_mirror: wiped stale {_t}")
+        except OSError as e:
+            logger.warning(f"fork_mirror: couldn't wipe {_t}: {e}")
+    if _wiped:
+        tui.console.print(
+            f"fork_mirror: {pkg_name} — wiped {_wiped} stale artifact(s)"
+        )
+
+
+def _check_and_invalidate_fork_pkg(pkg_dir: str, buildconfig) -> bool:
+    """Compare current tree hash against persisted .tree-hash; on
+    mismatch (including first-run-no-hash), wipe downstream artifacts
+    so they regenerate cleanly.
+
+    Returns True if invalidation happened, False if hash matched
+    (no-op, cached artifacts still valid).
+    """
+    _pkg_name = os.path.basename(pkg_dir)
+    _hash_file = os.path.join(
+        buildconfig.dir_fork_source_repo, f'{_pkg_name}.tree-hash'
+    )
+    _current = utils.compute_tree_hash(pkg_dir)
+    _stored = ''
+    try:
+        with open(_hash_file) as fh:
+            _stored = fh.read().strip()
+    except OSError:
+        pass
+
+    # First-run case (no stored hash): if no existing artifacts either,
+    # this is benign — the regen flow will produce them from scratch.
+    # If artifacts DO exist without a stored hash, they're orphans from
+    # a pre-invalidation-mechanism era (or a partial wipe); treat as
+    # mismatch and wipe so subsequent runs are deterministic.
+    if _current == _stored and _stored:
+        return False
+
+    logger.info(
+        f"fork_mirror: tree-hash mismatch for {_pkg_name} "
+        f"(stored={_stored or '<none>'}, current={_current[:12]}…); invalidating"
+    )
+    _binary_names = _binary_names_from_control(pkg_dir)
+    _wipe_fork_pkg_outputs(_pkg_name, _binary_names, buildconfig)
+    return True
+
+
+def _persist_tree_hash(pkg_dir: str, buildconfig) -> None:
+    """Write current tree hash AFTER successful regen.  Idempotent."""
+    _pkg_name = os.path.basename(pkg_dir)
+    _hash_file = os.path.join(
+        buildconfig.dir_fork_source_repo, f'{_pkg_name}.tree-hash'
+    )
+    _current = utils.compute_tree_hash(pkg_dir)
+    try:
+        with open(_hash_file, 'w') as fh:
+            fh.write(_current + '\n')
+    except OSError as e:
+        logger.warning(
+            f"fork_mirror: couldn't persist tree-hash for {_pkg_name}: {e}"
+        )
 
 
 # ---------------------------------------------------------------------------
