@@ -8,17 +8,20 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# Build output directories (generated at runtime)
-buildroot/
-cache/
-download/
-gnupg/
-image/
-log/
-packages/
-repo/
+# Build output directories (generated at runtime) — leading `/` scopes
+# the match to the repo root, so they don't accidentally swallow
+# matching subdirs inside the source tree (e.g. fork/source/<pkg>/packages/
+# is a legitimate part of an upstream-derived fork).
+/buildroot/
+/cache/
+/download/
+/gnupg/
+/image/
+/log/
+/packages/
+/repo/
 /source/
-tmp/
+/tmp/
 
 # IDE
 .idea/
