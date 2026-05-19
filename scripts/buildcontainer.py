@@ -548,18 +548,20 @@ class BuildContainer:
     def check_build(self, src_pkg: Source) -> bool:
         """Decide whether a previously-built source can skip rebuild.
 
-        Returns True only when ALL of:
+        Shallow gate — kept fast because this runs on every source
+        build call across the full dep tree:
+
           1. src_pkg declares at least one binary
           2. log/build/<src>.result reads PASS or TUNNELED
-          3. Every predicted binary in src_pkg.pkgs passes
-             verify_pkg_artifact (existence, ar validity, Package/
-             Version/Architecture match the filename, every
-             Depends/Pre-Depends resolvable in cache)
+          3. Every predicted binary in src_pkg.pkgs exists in repo/
+             AND is a syntactically valid ar archive (is_ar_file)
 
-        TUNNELED special-cases: a .result line of "TUNNELED" means
-        the binary is a third-party pull, not produced from source —
-        skip the per-binary verify (we didn't build it; only the
-        download step gates it).
+        Does NOT verify internal Version / Depends resolution —
+        those checks live in verify_pkg_artifact, exposed as the
+        opt-in `source verify` diagnostic command.  History: the
+        deeper check was added 2026-05-19 then reverted same day
+        because the 12h rebuild cost dominated the false-positive
+        risk; deep audit is now opt-in via `source verify`.
         """
         if not src_pkg.pkgs:
             return False
@@ -567,23 +569,16 @@ class BuildContainer:
         result_file = os.path.join(self.buildlog_path, src_pkg.package + '.result')
         try:
             with open(result_file, 'r') as fh:
-                _result = fh.readline().strip()
-            if _result not in ('PASS', 'TUNNELED'):
-                return False
+                if fh.readline().strip() not in ('PASS', 'TUNNELED'):
+                    return False
         except OSError:
             return False
 
-        # TUNNELED packages: trust the marker, skip per-binary verify.
-        if _result == 'TUNNELED':
-            return True
-
         for _file in src_pkg.pkgs:
             _filename = os.path.join(self.repo_path, _file)
-            _ok, _reason = self.verify_pkg_artifact(_filename, _file)
-            if not _ok:
-                logger.info(
-                    f"check_build {src_pkg.package}: {_file}: {_reason}"
-                )
+            if not os.path.isfile(_filename):
+                return False
+            if not self.is_ar_file(_filename):
                 return False
 
         return True
