@@ -10108,6 +10108,164 @@ def test_readonly_named_commands_have_no_destructive_calls():
     )
 
 
+def _build_minimal_deb(path: str, package: str, version: str,
+                        architecture: str = 'amd64',
+                        depends: str = '') -> None:
+    """Write a minimal .deb at `path` with the given control fields.
+
+    Uses python-debian's debfile is NOT writable; we shell out to
+    dpkg-deb -b on a synth tree.  Skipped (raises) if dpkg-deb isn't
+    available in the test environment.
+    """
+    import subprocess
+    _tmp = path + '.tree'
+    os.makedirs(os.path.join(_tmp, 'DEBIAN'), exist_ok=True)
+    _ctrl = (
+        f'Package: {package}\n'
+        f'Version: {version}\n'
+        f'Architecture: {architecture}\n'
+        'Maintainer: Test <t@local>\n'
+        'Description: synth fixture\n'
+        ' .\n'
+    )
+    if depends:
+        _ctrl += f'Depends: {depends}\n'
+    with open(os.path.join(_tmp, 'DEBIAN', 'control'), 'w') as fh:
+        fh.write(_ctrl)
+    # dpkg-deb refuses to build if mode bits are loose
+    os.chmod(os.path.join(_tmp, 'DEBIAN'), 0o755)
+    _r = subprocess.run(
+        ['dpkg-deb', '--build', '--root-owner-group', _tmp, path],
+        capture_output=True, text=True,
+    )
+    if _r.returncode != 0:
+        raise RuntimeError(f"dpkg-deb failed: {_r.stderr}")
+
+
+def _make_buildcontainer_stub(cache=None, buildlog='/tmp/log', repo='/tmp/repo'):
+    """Construct a BuildContainer without running __init__ (which needs
+    docker etc).  Returns an instance with just the attributes
+    verify_pkg_artifact / check_build read."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc.buildlog_path = buildlog
+    _bc.repo_path = repo
+    _bc.cache = cache
+    return _bc
+
+
+def test_verify_pkg_artifact_ok_when_all_fields_match():
+    """Happy path: synthetic .deb whose internal Pkg/Version/Arch
+    match the filename + no Depends → (True, 'ok-nocache') when no
+    cache supplied, or (True, 'ok') when cache supplied."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return  # skip on hosts without dpkg-deb
+    with tempfile.TemporaryDirectory() as _tmp:
+        _path = os.path.join(_tmp, 'foo_1.0+thor1_amd64.deb')
+        _build_minimal_deb(_path, 'foo', '1.0+thor1', 'amd64')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        _ok, _why = _bc.verify_pkg_artifact(_path, 'foo_1.0+thor1_amd64.deb')
+        assert _ok, f"expected OK, got ({_ok}, {_why})"
+
+
+def test_verify_pkg_artifact_fails_on_internal_version_mismatch():
+    """When the .deb's internal Version doesn't match the expected
+    filename's version, repair/check_build MUST treat the artifact
+    as stale and refuse PASS.  This is the kernel-rebump shape: a
+    .deb whose filename was renamed +thor1 but whose internal
+    Version field wasn't updated would fail this check."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        # .deb's internal version is 1.0 — but filename claims 1.0+thor1
+        _real_path = os.path.join(_tmp, 'foo_1.0+thor1_amd64.deb')
+        _build_minimal_deb(_real_path, 'foo', '1.0', 'amd64')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        _ok, _why = _bc.verify_pkg_artifact(_real_path, 'foo_1.0+thor1_amd64.deb')
+        assert not _ok, "expected version mismatch to fail verify"
+        assert 'version-mismatch' in _why, _why
+
+
+def test_verify_pkg_artifact_fails_on_unsatisfied_depends():
+    """When the .deb declares a Depends that's not present in the
+    cache, verify must fail with unsatisfied-Depends diagnostic.
+
+    Synthesizes a cache that only has libfoo 1.0 in its hashtable;
+    .deb declares Depends: libnonexistent (>= 2.0) → not in cache →
+    fail."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _path = os.path.join(_tmp, 'foo_1.0_amd64.deb')
+        _build_minimal_deb(_path, 'foo', '1.0', 'amd64',
+                            depends='libnonexistent (>= 2.0)')
+
+        # Cache with only libfoo, NOT libnonexistent
+        from collections import defaultdict
+        class _Cache:
+            pass
+        _cache = _Cache()
+        _cache.package_hashtable = defaultdict(lambda: defaultdict(list))
+        _cache.package_hashtable['libfoo']['1.0'] = ['<placeholder>']
+
+        _bc = _make_buildcontainer_stub(cache=_cache, repo=_tmp)
+        _ok, _why = _bc.verify_pkg_artifact(_path, 'foo_1.0_amd64.deb')
+        assert not _ok, "expected unsatisfied Depends to fail verify"
+        assert 'unsatisfied-Depends' in _why, _why
+
+
+def test_verify_pkg_artifact_passes_on_satisfied_depends():
+    """When Depends are present in the cache at a satisfying version,
+    verify must pass."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _path = os.path.join(_tmp, 'foo_1.0_amd64.deb')
+        _build_minimal_deb(_path, 'foo', '1.0', 'amd64',
+                            depends='libbar (>= 2.0)')
+        from collections import defaultdict
+        class _Cache: pass
+        _cache = _Cache()
+        _cache.package_hashtable = defaultdict(lambda: defaultdict(list))
+        # 2.5 satisfies >= 2.0
+        _cache.package_hashtable['libbar']['2.5'] = ['<placeholder>']
+
+        _bc = _make_buildcontainer_stub(cache=_cache, repo=_tmp)
+        _ok, _why = _bc.verify_pkg_artifact(_path, 'foo_1.0_amd64.deb')
+        assert _ok, f"expected OK, got ({_ok}, {_why})"
+
+
+def test_verify_pkg_artifact_or_group_satisfied_by_any_alternative():
+    """An OR-group (`A | B`) is satisfied if ANY alternative resolves
+    in cache, even if the first doesn't.  Mirrors dpkg's resolution
+    semantics."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _path = os.path.join(_tmp, 'foo_1.0_amd64.deb')
+        _build_minimal_deb(_path, 'foo', '1.0', 'amd64',
+                            depends='libmissing | libpresent')
+        from collections import defaultdict
+        class _Cache: pass
+        _cache = _Cache()
+        _cache.package_hashtable = defaultdict(lambda: defaultdict(list))
+        _cache.package_hashtable['libpresent']['1.0'] = ['<placeholder>']
+
+        _bc = _make_buildcontainer_stub(cache=_cache, repo=_tmp)
+        _ok, _why = _bc.verify_pkg_artifact(_path, 'foo_1.0_amd64.deb')
+        assert _ok, f"OR-group with one satisfying alternative should pass; got ({_ok}, {_why})"
+
+
 def test_cmd_source_repair_dispatch_and_method_present():
     """source repair must be wired in cmd_source's dispatch table +
     have a matching cmd_source_repair method.  Sanity guard so
@@ -10150,12 +10308,18 @@ def test_cmd_source_repair_writes_pass_when_binaries_present():
         class _Src:
             pkgs = [_deb_name]
 
-        # Stub container with the minimum check_build helpers need
+        # Stub container with the minimum repair/check_build helpers need.
+        # verify_pkg_artifact is the unified gate (filename + ar +
+        # Pkg/Version/Arch match + Depends resolution); for these
+        # unit tests we just trust the stub returns OK.
         class _Container:
             buildlog_path = _buildlog
             @staticmethod
             def is_ar_file(_path):
-                return True  # we know we wrote the magic
+                return True
+            @staticmethod
+            def verify_pkg_artifact(_path, _filename):
+                return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
 
         # Stub config
         class _Cfg:
@@ -10220,6 +10384,9 @@ def test_cmd_source_repair_skips_when_result_already_present():
             buildlog_path = _buildlog
             @staticmethod
             def is_ar_file(_path): return True
+            @staticmethod
+            def verify_pkg_artifact(_path, _f):
+                return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
         class _Cfg: dir_repo = _repo
         class _Tree: selected_srcs = {'foo': _Src()}
         class _Flags:
@@ -10263,6 +10430,9 @@ def test_cmd_source_repair_skips_when_binaries_missing():
             buildlog_path = _buildlog
             @staticmethod
             def is_ar_file(_path): return True
+            @staticmethod
+            def verify_pkg_artifact(_path, _f):
+                return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
         class _Cfg: dir_repo = _repo
         class _Tree: selected_srcs = {'foo': _Src()}
         class _Flags:
@@ -10776,6 +10946,11 @@ def main() -> int:
         test_cmd_source_rescan_is_readonly_no_refresh_patches_call,
         test_readonly_named_commands_have_no_destructive_calls,
         test_destructive_helpers_warn_in_docstring,
+        test_verify_pkg_artifact_ok_when_all_fields_match,
+        test_verify_pkg_artifact_fails_on_internal_version_mismatch,
+        test_verify_pkg_artifact_fails_on_unsatisfied_depends,
+        test_verify_pkg_artifact_passes_on_satisfied_depends,
+        test_verify_pkg_artifact_or_group_satisfied_by_any_alternative,
         test_cmd_source_repair_dispatch_and_method_present,
         test_cmd_source_repair_writes_pass_when_binaries_present,
         test_cmd_source_repair_skips_when_result_already_present,
