@@ -9995,6 +9995,37 @@ def test_cmd_source_rescan_method_uses_check_build():
         "scan against stale state")
 
 
+def test_cmd_source_rescan_is_readonly_no_refresh_patches_call():
+    """rescan MUST NOT call _refresh_patches — that function deletes
+    .result files when patch hashes diverge, which is destructive and
+    inappropriate for a read-only scan command.  Caught 2026-05-19:
+    rescan was over-counting because the side effect wiped PASS state
+    for sources with newer patches.  Pin to keep rescan read-only."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def cmd_source_rescan\(self, \*args\):.*?(?=\n    def )',
+        _body, re.DOTALL)
+    assert _m, "cmd_source_rescan not found"
+    _method = _m.group(0)
+    # Check for INVOCATION (with paren) — substring would match the
+    # comment that documents WHY we don't call it.
+    assert 'self._refresh_patches(' not in _method, (
+        "rescan must not call self._refresh_patches() (destructive: "
+        "deletes .result files on patch-set changes — turns a read-only "
+        "scan into a state-mutating invalidation pass)")
+    # Forbid filesystem write/delete patterns.  Reads (open() for read,
+    # check_build, etc) are fine.
+    for _bad in ('os.remove(', 'shutil.rmtree(', 'os.unlink(',
+                 "'w'", '"w"', "'wb'", '"wb"',
+                 "'a'", '"a"', "'ab'", '"ab"', 'os.utime('):
+        assert _bad not in _method, (
+            f"rescan body contains write/delete primitive {_bad!r} — "
+            f"should be pure read")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10428,6 +10459,7 @@ def main() -> int:
         test_cmd_rebump_parses_source_name_filter_args,
         test_cmd_source_rescan_registered_in_dispatcher,
         test_cmd_source_rescan_method_uses_check_build,
+        test_cmd_source_rescan_is_readonly_no_refresh_patches_call,
     ]
     failures = 0
     for t in tests:

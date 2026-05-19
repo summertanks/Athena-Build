@@ -2569,11 +2569,16 @@ class BuildSession:
         _no_pkgs = []  # source declares no binaries (unusual)
         _tunneled = []
 
-        # Refresh patch list + invalidation before the scan so the
-        # decision reflects what `source build` would see right now.
-        # Without this, patches added since the last dep parse don't
-        # influence the rescan even though they'd influence a build.
-        self._refresh_patches()
+        # NOTE: do NOT call the patch-refresh helper here despite the
+        # temptation.  That helper DELETES .result files when it
+        # detects patch-set content changes (line ~1261 of build.py)
+        # — a destructive side effect inappropriate for a read-only
+        # scan command.  Trade-off: if the operator added/removed
+        # patches since the last `dep parse`, this count misses those
+        # invalidations.  Run `dep parse` first if patches changed.
+        # Found 2026-05-19: rescan was over-counting because the
+        # patch-refresh side effect was wiping PASS state for any
+        # source whose patch hash diverged.
 
         for _name, _src in sorted(_srcs.items()):
             if not _src.pkgs:
