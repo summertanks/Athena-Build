@@ -644,8 +644,16 @@ class BuildContainer:
         if _actual_pkg != _exp_pkg:
             return (False, f'pkg-mismatch:{_actual_pkg}!={_exp_pkg}')
 
+        # Version comparison: strip epoch from the .deb's internal
+        # Version before comparing to the filename's version part.
+        # Filename convention strips epoch (`libc6_2.36-9..._amd64.deb`
+        # for a package whose internal Version is `2:2.36-9...`), so
+        # raw `==` would false-positive every epoch-bearing pkg as
+        # mismatched.  Use the existing version_no_epoch helper to
+        # canonicalise.
         _actual_ver = _ctrl.get('Version', '')
-        if _actual_ver != _exp_ver:
+        _actual_ver_noepoch = version_no_epoch(_actual_ver)
+        if _actual_ver_noepoch != _exp_ver:
             return (False, f'version-mismatch:{_actual_ver}!={_exp_ver}')
 
         _actual_arch = _ctrl.get('Architecture', '')
@@ -659,10 +667,25 @@ class BuildContainer:
         if self.cache is None:
             return (True, 'ok-nocache')
 
+        # Pick the right hashtable: .udeb's Depends typically resolve
+        # via udeb_hashtable (the d-i parallel namespace).  .deb's
+        # via package_hashtable.  Mixing produces false unsatisfied-
+        # Depends for udeb-only deps that don't appear in the deb
+        # hashtable.
+        _is_udeb = expected_filename.endswith('.udeb')
+        _lookup_table = (self.cache.udeb_hashtable if _is_udeb
+                         else self.cache.package_hashtable)
+
         from debian.deb822 import PkgRelation
         for _field in ('Depends', 'Pre-Depends'):
             _deps_str = _ctrl.get(_field, '')
             if not _deps_str:
+                continue
+            # Skip unresolved substvars (defensive — shouldn't appear
+            # in a properly-built .deb, but if dpkg-gencontrol left
+            # `${shlibs:Depends}` literal, that's a build bug not a
+            # cache-drift bug; don't flag here).
+            if '${' in _deps_str:
                 continue
             try:
                 _or_groups = PkgRelation.parse_relations(_deps_str)
@@ -671,25 +694,34 @@ class BuildContainer:
                 # whole artifact verify on a parse glitch).
                 continue
             for _or_group in _or_groups:
-                if not self._or_group_satisfiable(_or_group):
+                if not self._or_group_satisfiable(_or_group, _lookup_table):
                     _names = ' | '.join(_d.get('name', '?')
                                         for _d in _or_group)
                     return (False, f'unsatisfied-{_field}:{_names}')
 
         return (True, 'ok')
 
-    def _or_group_satisfiable(self, or_group: list) -> bool:
+    def _or_group_satisfiable(self, or_group: list,
+                              lookup_table: Optional[dict] = None) -> bool:
         """One OR-group (parsed by PkgRelation) is satisfied iff at
         least one alternative has a candidate in cache meeting its
-        version constraint."""
+        version constraint.
+
+        lookup_table picks the namespace: pass cache.package_hashtable
+        for .deb deps, cache.udeb_hashtable for .udeb deps.  None →
+        fall back to package_hashtable (backwards-compat for the few
+        callers that don't specify).
+        """
         if not self.cache:
             return True
+        if lookup_table is None:
+            lookup_table = self.cache.package_hashtable
         for _alt in or_group:
             _name = _alt.get('name', '')
             if not _name:
                 continue
             _ver_constraint = _alt.get('version')  # (op, ver) or None
-            _bin_table = self.cache.package_hashtable.get(_name, {})
+            _bin_table = lookup_table.get(_name, {})
             for _candidate_ver in _bin_table.keys():
                 if self._satisfies_version(_candidate_ver, _ver_constraint):
                     return True
