@@ -2423,6 +2423,29 @@ class BuildSession:
             # tasksel) can apt-install them post-install via the
             # cdrom: source.
             _pool_whitelist = _canonical - _live_excl
+
+            # Snapshot-aware kernel pick: tell _find_kernel which
+            # linux-image-<ABI>-amd64 the cache expects.  Without
+            # this, _find_kernel falls back to highest sorted on
+            # disk — which can be a stale higher-ABI .deb left over
+            # from a pre-rollback snapshot, breaking the installer
+            # because the ramdisk's modules won't match (CONF-13
+            # symptom from 2026-05-19).
+            import re as _re
+            _kernel_pat = _re.compile(
+                r'^linux-image-\d+\.\d+\.\d+-\d+-amd64$'
+            )
+            _kernel_candidates = sorted(
+                _n for _n in self.cache.package_hashtable.keys()
+                if _kernel_pat.match(_n)
+            )
+            _expected_kernel = _kernel_candidates[-1] if _kernel_candidates else None
+            if _expected_kernel:
+                console.print(
+                    f"Cache predicts kernel binary: {_expected_kernel}",
+                    tui.COLOR_INFO,
+                )
+
             _ok = iso_installer.build_installer_iso(
                 dir_chroot_installer=self.config.dir_chroot_installer,
                 dir_repo=self.config.dir_repo,
@@ -2439,6 +2462,7 @@ class BuildSession:
                 signing_pubkey_path=signing.signing_pubkey_path(self.config),
                 pkg_groups=self.dep_tree.pkg_group_pkg_names,
                 group_meta=self.dep_tree.pkg_group_meta,
+                expected_kernel_pkg=_expected_kernel,
             )
             if not _ok:
                 console.print(

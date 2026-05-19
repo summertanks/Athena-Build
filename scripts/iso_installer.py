@@ -61,6 +61,7 @@ def build_installer_iso(
     signing_pubkey_path: Optional[str] = None,
     pkg_groups: Optional['dict[str, set]'] = None,
     group_meta: Optional['dict[str, dict[str, str]]'] = None,
+    expected_kernel_pkg: Optional[str] = None,
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -88,7 +89,8 @@ def build_installer_iso(
     if not _prepare_staging(_staging, password):
         return False
 
-    _kernel_src = _find_kernel(dir_repo, dir_chroot_installer, password)
+    _kernel_src = _find_kernel(dir_repo, dir_chroot_installer, password,
+                               expected_kernel_pkg=expected_kernel_pkg)
     if not _kernel_src:
         return False
     if not _stage_kernel(_kernel_src, _staging):
@@ -198,15 +200,25 @@ def _prepare_staging(staging: str, password: str) -> bool:
 
 
 def _find_kernel(dir_repo: str, dir_chroot_installer: str,
-                 password: str) -> Optional[str]:
+                 password: str,
+                 expected_kernel_pkg: Optional[str] = None) -> Optional[str]:
     """Locate a usable vmlinuz.
 
     Strategy:
       1. Look for vmlinuz under dir_chroot_installer/boot/ — if a
          kernel-image-*-di udeb unpacked one, use it.  Self-contained.
       2. Fall back to extracting from repo/linux-image-*-amd64*.deb.
-         dpkg-deb -x extracts the .deb into a temp dir; we pull vmlinuz
-         out of that.  Same kernel that ships on the live ISO.
+
+    Picker (Strategy 2): when expected_kernel_pkg is provided (the
+    binary name the cache predicts, e.g. `linux-image-6.1.0-47-amd64`),
+    PREFER .debs whose filename starts with that binary name.  This
+    avoids picking a stale higher-ABI .deb left in repo/ from a
+    pre-rollback snapshot — the canonical bug shape that bit us
+    2026-05-19 (ISO ramdisk had ABI 47 modules but vmlinuz was
+    ABI 48 because the picker grabbed the highest sorted glob match).
+
+    Falls back to highest-ABI sort when no expected_kernel_pkg or
+    no matching candidate exists.
 
     Returns absolute path to vmlinuz on success, None if neither
     strategy yields one.
@@ -255,11 +267,35 @@ def _find_kernel(dir_repo: str, dir_chroot_installer: str,
         )
         return None
 
+    # Snapshot-aware pick: if the caller told us which binary name the
+    # cache expects (e.g. `linux-image-6.1.0-47-amd64`), filter to that
+    # first.  Without this filter, the fallback (highest sorted) picks
+    # whichever stale ABI happens to be lexicographically newest on
+    # disk — wrong after a snapshot rollback that left higher-ABI
+    # binaries from the pre-rollback state.
+    _preferred = []
+    if expected_kernel_pkg:
+        _prefix = expected_kernel_pkg + '_'
+        _preferred = [_d for _d in _linux_debs
+                      if os.path.basename(_d).startswith(_prefix)]
+        if _preferred:
+            tui.console.print(
+                "Kernel picker: matching cache prediction "
+                f"`{expected_kernel_pkg}` "
+                f"({len(_preferred)} candidate(s) of {len(_linux_debs)})"
+            )
+        else:
+            tui.console.print(
+                f"Kernel picker: cache predicts `{expected_kernel_pkg}` but "
+                f"no matching .deb in repo/ — falling back to highest-ABI",
+                tui.COLOR_INFO,
+            )
+
     # Pick the highest ABI version.  Sort key extracts the ABI tuple from
     # the package name so '6.1.0-47' > '6.1.0-9' lexicographically wrong
     # would otherwise be a hazard — but with consistent numeric padding
     # in Debian's ABI naming, sort-on-name is fine.  Use the last entry.
-    _deb = _linux_debs[-1]
+    _deb = (_preferred or _linux_debs)[-1]
     tui.console.print(f"Extracting kernel from {os.path.basename(_deb)}...")
 
     # Extract under a /tmp work dir.  dpkg-deb -x is non-destructive and

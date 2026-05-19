@@ -955,6 +955,7 @@ class BuildConfig:
 
     skip_build_test: list[str]
     tunnel_packages: list[str]
+    no_bump_sources: frozenset
     build_profiles: frozenset
     build_options: frozenset
     distro_suffix: str
@@ -1121,6 +1122,15 @@ class BuildConfig:
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]
+            # CONF-13: sources whose +<DistroSuffix> changelog bump
+            # would break their own version-counting machinery.
+            # BuildContainer.build skips _changelog_bump for these so
+            # they produce binaries at Debian's pristine versions /
+            # ABI counters.  Kernel sources are the canonical case.
+            _no_bump_raw = config_parser.get('Source', 'NoBumpSources', fallback='')
+            self.no_bump_sources: frozenset = frozenset(
+                _p.strip() for _p in _no_bump_raw.split(',') if _p.strip()
+            )
             # BuildProfiles → DEB_BUILD_PROFILES (which Build-Depends a
             # source package activates at build time).
             # BuildOptions  → DEB_BUILD_OPTIONS  (how the build itself
