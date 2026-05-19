@@ -1,0 +1,49 @@
+From: Athena Build <athena@local>
+Date: Mon, 18 May 2026 22:00:00 +0000
+Subject: gencontrol: default release_prefix to '' for unknown distributions
+Origin: vendor
+Bug-Athena: thor codename not recognised by debian/bin/gencontrol.py
+Forwarded: not-needed
+Last-Update: 2026-05-18
+
+debian/bin/gencontrol.py's _generate_abiname_part() hard-codes the
+list of recognised distribution codenames (UNRELEASED / bookworm /
+bullseye / buster / stretch) and asserts False on anything else.
+
+Athena-Build's _changelog_bump writes `Distribution: thor` (our
+release codename), which fails the assert:
+
+    AssertionError: cannot generate ABI name for thor
+    make[1]: *** [debian/rules:131: debian/control-real] Error 1
+    make: *** [debian/rules:125: debian/control] Error 2
+
+Fix: replace the assert with a fall-through that defaults the
+release_prefix to '' (same as bookworm — no codename prefix in the
+ABI name).  Keeps the kernel ABI name simple — `-NN` — without
+per-codename patch refreshes when Thor's release codename rolls.
+The five named distributions still resolve to their original
+prefixes on match (the for-loop break path is untouched); only the
+else: clause (no match found) is affected.
+
+Python for-else semantics: the else: block runs when the loop
+completes without break.  Setting release_prefix in else: overrides
+whatever last-iteration value was left behind (Python loop
+variables persist after the loop body), giving the intended
+default.
+---
+ debian/bin/gencontrol.py | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+--- a/debian/bin/gencontrol.py
++++ b/debian/bin/gencontrol.py
+@@ -625,7 +625,9 @@
+             if self.changelog[0].distribution.startswith(release_name):
+                 break
+         else:
+-            assert False, f'cannot generate ABI name for {self.changelog[0].distribution}'
++            # Athena-Build: default to bookworm-style prefix (none) for
++            # unknown distributions (e.g. thor).  See patch header.
++            release_prefix = ''
+
+         # Paste that all together
+         result = f'-{release_prefix}{abiname_major}'
