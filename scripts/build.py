@@ -1771,7 +1771,7 @@ class BuildSession:
                     _src_name = _f.split('_', 1)[0]
                 if _src_name in _source_filter:
                     _filtered.append(_f)
-            _bar.done()
+            _bar.close()
             _todo = _filtered
 
         console.print(
@@ -1797,7 +1797,7 @@ class BuildSession:
             label='Rebump', itr_label='pkgs', maxvalue=len(_todo),
         )
         for _f in _todo:
-            _bar.print_progress(_f)
+            _bar.step(1)
             _full = os.path.join(_repo, _f)
             try:
                 _new = utils.rebump_deb_file(_full, _suffix)
@@ -1812,8 +1812,8 @@ class BuildSession:
             except Exception as e:
                 logger.error(f"rebump: {_f} failed: {e}")
                 _failed += 1
-                _bar.print(f"FAIL: {_f} — {e}")
-        _bar.done()
+                console.print(f"FAIL: {_f} — {e}")
+        _bar.close()
 
         console.print(
             f"Rebump complete: {_ok} succeeded, {_failed} failed, "
