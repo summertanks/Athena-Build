@@ -1779,6 +1779,172 @@ class BuildSession:
             f"refresh Source.pkgs with the new filenames."
         )
 
+    def cmd_reload_fork(self, *pkgs):
+        """Light-touch rebuild of a fork pkg after a content edit.
+
+        Usage: package reload <pkg>...
+
+        For each named fork pkg the command:
+
+          1. Compares the current tree-hash + dep-hash against the
+             persisted sidecars from the previous successful build.
+          2. Branches on what changed:
+             - tree-hash matches: NO-OP (no content change since last build)
+             - dep-hash differs: GATE — print the gating fields, refuse the
+               light path.  Operator must do a full cycle:
+                   cache build force → dep parse force →
+                   source download force → source build <pkg>
+             - tree-hash differs but dep-hash matches: LIGHT PATH:
+                 a. Wipe the pkg's derived artifacts (fork tarball,
+                    source/ copy, repo/ debs, build log sidecars).
+                 b. Regenerate the fork tarball via generate_fork_mirror.
+                 c. Copy the fresh tarball into source/ so BuildContainer
+                    can `cp /source/<pkg>_* .` it.
+                 d. Invoke `source build force <pkg>` to rebuild.
+                 e. Persist updated hashes (done by generate_fork_mirror).
+
+        Prereqs: cache build + dep parse + container init must have
+        run earlier in the session.  The reload only avoids RE-RUNNING
+        them; it doesn't bypass them entirely.
+
+        Why this exists: editing a fork file (e.g. fix a typo in
+        debian/rules) used to require `cache build force` →
+        `dep parse force` → `source download force` →
+        `source build <pkg>`, with each force flag manually remembered
+        because the *_ready flags don't auto-invalidate.  This command
+        does the right thing in one step for the common case (content
+        change, no dep impact) and refuses loudly for the uncommon one
+        (dep field changed, must rebuild cache).
+
+        Tunneled packages aren't fork packages; this command skips
+        names not present under fork/source/.
+        """
+        if not pkgs:
+            console.print(
+                "Usage: package reload <pkg>...  "
+                "(name(s) of fork/source/<pkg>/ to reload)",
+                tui.COLOR_INFO,
+            )
+            return
+
+        # Prereqs: we're not the right tool for first-run-of-session.
+        if not (self.flags.cache_ready and self.flags.dep_check_ready
+                and self.flags.build_container_ready):
+            console.print(
+                "package reload requires cache build + dep parse + container "
+                "init to have run earlier in this session.  For first-run, "
+                "use `autorun installer` or the per-step sequence.",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        import fork_mirror
+        import glob
+
+        for _pkg in pkgs:
+            _pkg_dir = os.path.join(self.config.dir_fork_source, _pkg)
+            if not os.path.isdir(_pkg_dir):
+                console.print(
+                    f"package reload: {_pkg} is not a fork "
+                    f"(no {self.config.dir_fork_source}/{_pkg}/) — skipping",
+                    tui.COLOR_INFO,
+                )
+                continue
+            if not os.path.isfile(os.path.join(_pkg_dir, 'debian', 'control')):
+                console.print(
+                    f"package reload: {_pkg} missing debian/control — skipping",
+                    tui.COLOR_INFO,
+                )
+                continue
+
+            # Compute current hashes
+            _current_tree = utils.compute_tree_hash(_pkg_dir)
+            _current_dep  = fork_mirror._compute_dep_hash(_pkg_dir)
+            _stored_tree, _stored_dep = fork_mirror.load_pkg_hashes(
+                _pkg, self.config.dir_fork_source_repo,
+            )
+
+            # Decision: no-op
+            if _current_tree == _stored_tree and _stored_tree:
+                console.print(
+                    f"{_pkg}: unchanged since last build — nothing to do",
+                    tui.COLOR_INFO,
+                )
+                continue
+
+            # Decision: gate (dep-affecting change)
+            if _stored_dep and _current_dep != _stored_dep:
+                console.print(
+                    f"{_pkg}: dep-affecting field(s) changed in debian/control "
+                    "or debian/changelog (Depends / Provides / Version / etc). "
+                    "Light reload would diverge from cache + dep tree.",
+                    tui.COLOR_ERROR,
+                )
+                console.print(
+                    "  Full restart required:\n"
+                    "    cache build force\n"
+                    "    dep parse force\n"
+                    "    source download force\n"
+                    f"    source build {_pkg}",
+                    tui.COLOR_INFO,
+                )
+                continue
+
+            # Decision: light path
+            console.print(
+                f"{_pkg}: package-local change detected — light reload",
+                tui.COLOR_INFO,
+            )
+
+            # Step (a) + (b) + (e): generate_fork_mirror handles wipe,
+            # regen, and hash persist for changed forks.  Runs over ALL
+            # fork pkgs but only changed ones do actual work (mtime gate
+            # in _generate_source_packages skips unchanged ones).
+            if not fork_mirror.generate_fork_mirror(self.config):
+                console.print(
+                    f"{_pkg}: fork mirror regeneration failed; see log",
+                    tui.COLOR_ERROR,
+                )
+                continue
+
+            # Step (c): copy the fresh tarball to source/ so BuildContainer
+            # finds it.  download_source would also do this via file://
+            # but we don't want to re-run the whole download phase.
+            _copied = 0
+            for _src_path in glob.glob(
+                    os.path.join(self.config.dir_fork_source_repo, f'{_pkg}_*')):
+                if _src_path.endswith(('.tree-hash', '.dep-hash')):
+                    continue
+                _basename = os.path.basename(_src_path)
+                _dest = os.path.join(self.config.dir_source, _basename)
+                try:
+                    shutil.copyfile(_src_path, _dest)
+                    # Stale .verified sidecar would be confused by the
+                    # new mtime; remove so first SHA query recomputes.
+                    _verified = _dest + '.verified'
+                    if os.path.exists(_verified):
+                        os.remove(_verified)
+                    _copied += 1
+                except OSError as e:
+                    console.print(
+                        f"package reload: copy {_basename} → source/ failed: {e}",
+                        tui.COLOR_ERROR,
+                    )
+            if _copied == 0:
+                console.print(
+                    f"{_pkg}: regen produced no files to copy — skipping rebuild",
+                    tui.COLOR_ERROR,
+                )
+                continue
+            console.print(
+                f"{_pkg}: copied {_copied} file(s) from fork mirror → source/",
+                tui.COLOR_INFO,
+            )
+
+            # Step (d): rebuild via the standard source build path.  force
+            # so check_build doesn't short-circuit on the wiped .result.
+            self.cmd_source_build('force', _pkg)
+
     def cmd_build_chroot_live(self, *args):
         """Assemble the resolved package set into a bootable live chroot.
 
@@ -2791,11 +2957,15 @@ class BuildSession:
             'tunnel': 'pull prebuilt .debs from Debian repo (package tunnel [pkg…])',
             'rebump': 're-stamp every .deb/.udeb in repo/ with +<DistroSuffix> '
                       '(one-time backfill; avoids 24-36h source rebuild)',
+            'reload': 'rebuild a fork pkg after a local edit, without the '
+                      'full cache + dep cycle (package reload <pkg>...)',
         }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
         if action == 'rebump':
             return self.cmd_rebump_packages(*args)
+        if action == 'reload':
+            return self.cmd_reload_fork(*args)
         return self._group_help('package', _table, action)
 
     def cmd_container(self, action: str = '', *args):
