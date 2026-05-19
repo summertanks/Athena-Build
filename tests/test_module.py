@@ -10706,6 +10706,40 @@ def test_destructive_helpers_warn_in_docstring():
         "the 2026-05-19 over-counting bug.")
 
 
+def test_cmd_source_rescan_classifies_rebuilds_by_subset():
+    """rescan must group rebuild candidates by which `source build
+    <mode>` covers them (pkg / installer / live / recommended).
+    Operator needs to know which command to run to address each
+    bucket — without the breakdown, a 45-candidate queue post-pkg/
+    -installer-build looks like a bug rather than "Recommends-only
+    extras you haven't built yet."  Caught 2026-05-19."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def cmd_source_rescan\(self, \*args\):.*?(?=\n    def )',
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_source_rescan not found"
+    _method = _m.group(0)
+    # Each subset label must appear in the classification logic
+    for _label in ('pkg', 'installer', 'live', 'recommended'):
+        assert f"'{_label}'" in _method, (
+            f"rescan must classify rebuild candidates as '{_label}' so "
+            f"the operator knows which `source build` mode addresses them")
+    # Helper structure: a _subset_for function or equivalent that consults
+    # the four dep-tree set attributes.
+    for _attr in ('live_exclusive_src_names', 'installer_exclusive_src_names',
+                  'extras_src_names'):
+        assert _attr in _method, (
+            f"rescan must consult dep_tree.{_attr} to classify candidates")
+    # The breakdown table must reference each `source build` command so
+    # the output is actionable.
+    assert "'source build'" in _method or 'source build installer' in _method, (
+        "rescan must print the command needed for each subset")
+
+
 def test_cmd_source_rescan_is_readonly_no_refresh_patches_call():
     """rescan MUST NOT call _refresh_patches — that function deletes
     .result files when patch hashes diverge, which is destructive and
@@ -11170,6 +11204,7 @@ def main() -> int:
         test_cmd_rebump_parses_source_name_filter_args,
         test_cmd_source_rescan_registered_in_dispatcher,
         test_cmd_source_rescan_method_uses_check_build,
+        test_cmd_source_rescan_classifies_rebuilds_by_subset,
         test_cmd_source_rescan_is_readonly_no_refresh_patches_call,
         test_readonly_named_commands_have_no_destructive_calls,
         test_destructive_helpers_warn_in_docstring,
