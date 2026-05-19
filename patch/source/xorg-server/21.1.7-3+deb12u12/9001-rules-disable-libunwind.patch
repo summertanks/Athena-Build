@@ -1,0 +1,48 @@
+From: Athena Build <athena@local>
+Date: Tue, 19 May 2026 04:30:00 +0000
+Subject: rules.flags: disable libunwind unconditionally for main build
+Origin: vendor
+Bug-Athena: configure fails — `pkg-config --exists libunwind` returns no
+Forwarded: not-needed
+Last-Update: 2026-05-19
+
+debian/rules.flags enables --enable-libunwind for xserver-main on
+amd64 (lines 131-135).  Our resolver picks libunwind-14-dev (LLVM
+14, epoch-1 version `1:14.0.6-12`) instead of the original
+libunwind-dev (no-epoch `1.6.2-3`) because of dpkg version dominance
+between virtual providers.  libunwind-14-dev ships `libunwind-14.pc`
+not `libunwind.pc`, so xorg-server's configure pkg-config check
+(`PKG_CONFIG --exists --print-errors libunwind`) returns false and
+the build dies:
+
+    configure:30106: result: no
+    Package 'libunwind', required by 'virtual:world', not found
+    configure:30140: error: libunwind requested but not installed.
+    make: *** [debian/rules:8: build] Error 2
+
+Fix: flip --enable-libunwind to --disable-libunwind for the main
+build.  The libunwind feature in xserver is for native stack traces
+on crash — useful for debugging but not load-bearing.  Trade-off:
+when xserver crashes, the syslog gets no native trace.
+
+This is a workaround for the resolver mis-picking the libunwind
+provider — the deeper fix is to teach the resolver to prefer the
+real package matching the Build-Depends name over a virtual
+provider (same shape as memory/feedback_fork_consumer_must_depend_
+by_name.md but on the dep-tree-resolution side).  Tracked
+informally; this patch unblocks xorg-server in the meantime.
+---
+ debian/rules.flags | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/debian/rules.flags
++++ b/debian/rules.flags
+@@ -129,7 +129,7 @@
+
+ # some archs don't have libunwind
+ ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf hppa i386 ia64 mips64 mips64el mipsel powerpc powerpcspe ppc64 ppc64el sh4))
+-	confflags_main += --enable-libunwind
++	confflags_main += --disable-libunwind
+ else
+ 	confflags_main += --disable-libunwind
+ endif
