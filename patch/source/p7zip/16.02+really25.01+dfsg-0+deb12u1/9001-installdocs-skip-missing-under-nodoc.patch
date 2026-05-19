@@ -1,0 +1,51 @@
+From: Athena Build <athena@local>
+Date: Tue, 19 May 2026 03:00:00 +0000
+Subject: rules: tolerate missing doc files in override_dh_installdocs (nodoc)
+Origin: vendor
+Bug-Athena: p7zip override_dh_installdocs fails under DEB_BUILD_OPTIONS=nodoc
+Forwarded: not-needed
+Last-Update: 2026-05-19
+
+debian/rules' override_dh_installdocs target runs:
+
+    cd debian/p7zip-full/usr/share/doc/p7zip && \
+        mv `cat ../../../../../p7zip-full.docs | cut -b5-` DOC/
+
+This relies on `dh_installdocs --link-doc=p7zip` having just staged
+the files listed in debian/p7zip-full.docs (DOC/7zC.txt, DOC/lzma.txt
+etc.) into debian/p7zip-full/usr/share/doc/p7zip/.  Under
+DEB_BUILD_OPTIONS=nodoc, dh_installdocs is a no-op — no files staged
+— and the unconditional mv fails:
+
+    mv: cannot stat '7zC.txt': No such file or directory
+    mv: cannot stat '7zFormat.txt': No such file or directory
+    ...
+    make[1]: *** [debian/rules:72: override_dh_installdocs] Error 1
+
+Fix: loop the .docs entries and only move files that actually exist
+in the staged doc tree.  Behaviour with the manual present (default
+upstream build) is unchanged — every listed file exists, all moved.
+
+TEMPORARY: nodoc is a workaround for missing doc-build tooling in
+the build pool, not a permanent policy.  DELETE THIS PATCH when
+CONF-08 lands and nodoc is dropped from [Source] BuildOptions /
+BuildProfiles in config/build.conf.
+
+This supersedes the 16.02+dfsg-8 era patch (9001-graceful-skip-
+when-manual-absent.patch) which targeted a different failure mode
+(debian/p7zip-full.links absent in this newer source).
+---
+ debian/rules | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+--- a/debian/rules
++++ b/debian/rules
+@@ -70,4 +70,7 @@
+ 	dh_installdocs --link-doc=p7zip
+ #	p7zip compat - move documents to DOC/
+ 	mkdir -p -m 755 debian/p7zip-full/usr/share/doc/p7zip/DOC/
+-	cd debian/p7zip-full/usr/share/doc/p7zip && mv `cat ../../../../../p7zip-full.docs | cut -b5-` DOC/
++	cd debian/p7zip-full/usr/share/doc/p7zip && \
++	  for f in $$(cat ../../../../../p7zip-full.docs | cut -b5-); do \
++	    if [ -e "$$f" ]; then mv "$$f" DOC/; fi; \
++	  done
