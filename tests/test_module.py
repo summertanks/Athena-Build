@@ -9212,11 +9212,19 @@ def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
     bc.dir_fork = os.path.join(tmp, 'fork')
     bc.dir_fork_source = os.path.join(bc.dir_fork, 'source')
     bc.dir_fork_source_repo = os.path.join(bc.dir_fork_source, 'repo')
+    # Added for fork-mirror invalidation: _wipe_fork_pkg_outputs reaches
+    # into dir_source, dir_repo, dir_log/build for derived artifacts.
+    bc.dir_source = os.path.join(tmp, 'source')
+    bc.dir_repo   = os.path.join(tmp, 'repo')
+    bc.dir_log    = os.path.join(tmp, 'log')
     bc.build_codename = 'thor'
     bc.arch = 'amd64'
     os.makedirs(bc.dir_fork, exist_ok=True)
     os.makedirs(bc.dir_fork_source, exist_ok=True)
     os.makedirs(bc.dir_fork_source_repo, exist_ok=True)
+    os.makedirs(bc.dir_source, exist_ok=True)
+    os.makedirs(bc.dir_repo,   exist_ok=True)
+    os.makedirs(os.path.join(bc.dir_log, 'build'), exist_ok=True)
     if with_pkg:
         _pkg_dir = os.path.join(bc.dir_fork_source, 'athena-installer-data')
         os.makedirs(os.path.join(_pkg_dir, 'debian'), exist_ok=True)
@@ -9499,6 +9507,243 @@ def test_fork_mirror_re_run_is_idempotent_via_stale_check():
         _second_mtime = os.path.getmtime(_dsc)
         assert _first_mtime == _second_mtime, \
             "second generate_fork_mirror unexpectedly rebuilt the .dsc"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fork-pkg content invalidation (tree-hash mechanism)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_compute_tree_hash_deterministic_and_content_addressed():
+    """compute_tree_hash must produce identical digests for identical
+    tree content (any traversal-order / mtime variation absorbed) and
+    different digests when content changes."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, 'a'))
+        with open(os.path.join(tmp, 'a', 'x'), 'w') as fh:
+            fh.write('hello')
+        with open(os.path.join(tmp, 'b'), 'w') as fh:
+            fh.write('world')
+        _h1 = utils.compute_tree_hash(tmp)
+        # Bump mtime only (content unchanged) — hash MUST stay the same
+        os.utime(os.path.join(tmp, 'a', 'x'), (1_700_000_000, 1_700_000_000))
+        _h2 = utils.compute_tree_hash(tmp)
+        assert _h1 == _h2, "mtime-only change must not shift tree hash"
+
+        # Modify content — hash MUST change
+        with open(os.path.join(tmp, 'a', 'x'), 'w') as fh:
+            fh.write('HELLO')
+        _h3 = utils.compute_tree_hash(tmp)
+        assert _h1 != _h3, "content change must shift tree hash"
+
+
+def test_compute_tree_hash_changes_on_file_add_and_delete():
+    """Adding or removing a file must shift the tree hash (otherwise
+    fork_mirror's invalidation can't catch packages/list-style omissions)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, 'one'), 'w') as fh:
+            fh.write('one')
+        _baseline = utils.compute_tree_hash(tmp)
+
+        with open(os.path.join(tmp, 'two'), 'w') as fh:
+            fh.write('two')
+        _added = utils.compute_tree_hash(tmp)
+        assert _added != _baseline, "file add must shift tree hash"
+
+        os.remove(os.path.join(tmp, 'two'))
+        _restored = utils.compute_tree_hash(tmp)
+        assert _restored == _baseline, "post-delete hash must match baseline"
+
+
+def test_compute_tree_hash_skips_designated_dirs():
+    """compute_tree_hash should skip .git / __pycache__ by default so
+    bytecode + VCS metadata churn doesn't trigger spurious invalidations."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, 'real'), 'w') as fh:
+            fh.write('real content')
+        _baseline = utils.compute_tree_hash(tmp)
+
+        # Adding files under .git or __pycache__ should NOT change the hash
+        for _d in ('.git', '__pycache__'):
+            os.makedirs(os.path.join(tmp, _d))
+            with open(os.path.join(tmp, _d, 'noise'), 'w') as fh:
+                fh.write('garbage that should be ignored')
+        assert utils.compute_tree_hash(tmp) == _baseline, (
+            "compute_tree_hash must skip .git / __pycache__")
+
+
+def test_compute_tree_hash_missing_root_returns_empty_digest():
+    """Missing root → SHA256 of empty input.  Defensive return path."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    import hashlib
+    _expected = hashlib.sha256().hexdigest()
+    assert utils.compute_tree_hash('/nonexistent/path/xyz') == _expected
+
+
+def test_fork_invalidation_wipes_artifacts_on_content_change():
+    """End-to-end: edit fork/source/<pkg>/, run generate_fork_mirror,
+    confirm the stale derived artifacts (fork repo dsc/tar, source/
+    copy, repo/ debs, build logs) get wiped so the next build run sees
+    a clean slate."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        # First run: establishes baseline hash + generates repo artifacts
+        fork_mirror.generate_fork_mirror(bc)
+        _hash_file = os.path.join(
+            bc.dir_fork_source_repo, 'athena-installer-data.tree-hash')
+        assert os.path.isfile(_hash_file), "tree-hash not persisted on first run"
+
+        # Plant fake stale artifacts that should get wiped on next run
+        _stale_source = os.path.join(
+            bc.dir_source, 'athena-installer-data_1.0.0.tar.gz')
+        with open(_stale_source, 'w') as fh:
+            fh.write('stale tarball')
+        _stale_deb = os.path.join(
+            bc.dir_repo, 'athena-installer-data_1.0.0+thor1_all.udeb')
+        with open(_stale_deb, 'w') as fh:
+            fh.write('stale udeb')
+        _stale_build_log = os.path.join(
+            bc.dir_log, 'build', 'athena-installer-data.result')
+        with open(_stale_build_log, 'w') as fh:
+            fh.write('PASS\n')
+
+        # Mutate fork content
+        with open(os.path.join(bc.dir_fork_source, 'athena-installer-data',
+                               'debian', 'control'), 'a') as fh:
+            fh.write('# mutation: triggers invalidation\n')
+
+        # Second run: invalidation must wipe the three stale artifacts
+        fork_mirror.generate_fork_mirror(bc)
+        for _path in (_stale_source, _stale_deb, _stale_build_log):
+            assert not os.path.exists(_path), (
+                f"stale artifact survived invalidation: {_path}")
+
+
+def test_fork_invalidation_no_op_when_hash_matches():
+    """generate_fork_mirror run twice with no content change must NOT
+    wipe artifacts (perf: invalidation only fires on real changes)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        fork_mirror.generate_fork_mirror(bc)
+        _dsc = os.path.join(
+            bc.dir_fork_source_repo, 'athena-installer-data_1.0.0.dsc')
+        _first_mtime = os.path.getmtime(_dsc)
+
+        # Plant an "existing build artifact" that the no-op path must preserve
+        _existing_deb = os.path.join(
+            bc.dir_repo, 'athena-installer-data_1.0.0+thor1_all.udeb')
+        with open(_existing_deb, 'w') as fh:
+            fh.write('existing deb')
+
+        # Second run, no content change — must NOT wipe the deb
+        fork_mirror.generate_fork_mirror(bc)
+        assert os.path.exists(_existing_deb), (
+            "no-op invalidation wiped a deb it shouldn't have")
+        assert os.path.getmtime(_dsc) == _first_mtime, (
+            "no-op invalidation re-ran dpkg-source-b unnecessarily")
+
+
+def test_fork_invalidation_covers_multi_binary_via_control_parse():
+    """When a fork ships multiple binaries (athena-tasksel produces
+    athena-tasksel + athena-tasksel-data), the wipe must hit each
+    binary in repo/ — not just the source-named one.  A glob by source
+    name alone misses the dash-suffix binary."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=False)
+        # Build a minimal multi-binary fork: athena-foo + athena-foo-data
+        _pkg_dir = os.path.join(bc.dir_fork_source, 'athena-foo')
+        os.makedirs(os.path.join(_pkg_dir, 'debian'))
+        with open(os.path.join(_pkg_dir, 'debian', 'changelog'), 'w') as fh:
+            fh.write('athena-foo (1.0) thor; urgency=low\n\n'
+                     '  * fixture\n\n'
+                     ' -- Test <t@local>  Sat, 16 May 2026 12:00:00 +0000\n')
+        with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+            fh.write('Source: athena-foo\n'
+                     'Maintainer: Test <t@local>\n'
+                     'Build-Depends: debhelper-compat (= 13)\n'
+                     '\n'
+                     'Package: athena-foo\n'
+                     'Architecture: all\n'
+                     'Description: foo binary\n'
+                     ' .\n'
+                     '\n'
+                     'Package: athena-foo-data\n'
+                     'Architecture: all\n'
+                     'Description: foo data\n'
+                     ' .\n')
+        os.makedirs(os.path.join(_pkg_dir, 'debian', 'source'), exist_ok=True)
+        with open(os.path.join(_pkg_dir, 'debian', 'source', 'format'), 'w') as fh:
+            fh.write('3.0 (native)\n')
+
+        # Pre-plant stale .debs for BOTH binaries in repo/
+        _stale_main = os.path.join(bc.dir_repo, 'athena-foo_1.0+thor1_all.deb')
+        _stale_data = os.path.join(bc.dir_repo, 'athena-foo-data_1.0+thor1_all.deb')
+        for _p in (_stale_main, _stale_data):
+            with open(_p, 'w') as fh:
+                fh.write('stale')
+        # And an unrelated package that MUST survive
+        _unrelated = os.path.join(bc.dir_repo, 'libfoo_1.0_all.deb')
+        with open(_unrelated, 'w') as fh:
+            fh.write('unrelated')
+
+        # First run establishes hash; both stale debs survive baseline
+        # because no prior hash exists, invalidation fires (wipes), then
+        # generates the source pkg.  After the wipe, both planted debs
+        # are gone; the unrelated one stays.
+        fork_mirror.generate_fork_mirror(bc)
+        assert not os.path.exists(_stale_main), "athena-foo .deb not wiped"
+        assert not os.path.exists(_stale_data), "athena-foo-data .deb not wiped"
+        assert os.path.exists(_unrelated), \
+            "wipe touched an unrelated package — pattern too broad"
+
+
+def test_binary_names_from_control_extracts_all_package_stanzas():
+    """_binary_names_from_control must return every Package: stanza,
+    including indented or aligned forms.  Used as input to the wipe
+    pattern set so a missed binary leaves stale debs in repo/."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        _pkg_dir = os.path.join(tmp, 'pkg')
+        os.makedirs(os.path.join(_pkg_dir, 'debian'))
+        with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+            fh.write('Source: foo\n'
+                     'Maintainer: x\n'
+                     '\n'
+                     'Package: foo\n'
+                     'Architecture: all\n'
+                     '\n'
+                     'Package: foo-data\n'
+                     'Architecture: all\n'
+                     '\n'
+                     'Package: foo-doc\n'
+                     'Architecture: all\n')
+        _names = fork_mirror._binary_names_from_control(_pkg_dir)
+        assert _names == ['foo', 'foo-data', 'foo-doc'], _names
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9915,6 +10160,14 @@ def main() -> int:
         test_fork_mirror_sources_uses_real_hashes_and_directory,
         test_fork_mirror_register_prepends_at_index_zero,
         test_fork_mirror_re_run_is_idempotent_via_stale_check,
+        test_compute_tree_hash_deterministic_and_content_addressed,
+        test_compute_tree_hash_changes_on_file_add_and_delete,
+        test_compute_tree_hash_skips_designated_dirs,
+        test_compute_tree_hash_missing_root_returns_empty_digest,
+        test_fork_invalidation_wipes_artifacts_on_content_change,
+        test_fork_invalidation_no_op_when_hash_matches,
+        test_fork_invalidation_covers_multi_binary_via_control_parse,
+        test_binary_names_from_control_extracts_all_package_stanzas,
     ]
     failures = 0
     for t in tests:
