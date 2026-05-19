@@ -9995,6 +9995,138 @@ def test_cmd_source_rescan_method_uses_check_build():
         "scan against stale state")
 
 
+def test_readonly_named_commands_have_no_destructive_calls():
+    """Any function whose name signals read-only intent MUST NOT
+    contain filesystem-write primitives OR call known-mutating
+    helpers.  Caught 2026-05-19: cmd_source_rescan invoked
+    self._refresh_patches() (which deletes .result files on patch-set
+    changes) and over-counted the rebuild surface by 47 packages.
+
+    The reverse failure (a destructive helper masquerading as
+    read-only by name) is the more dangerous shape — the name is the
+    operator's primary signal for "is this safe to run?"
+
+    Naming patterns considered read-only:
+      cmd_*_rescan / cmd_*_status / cmd_*_show / cmd_*_list /
+      cmd_*_info / cmd_print* / _print_* / cmd_*_scan /
+      cmd_*_audit / cmd_*_inspect / cmd_*_summary
+
+    Forbidden in those bodies:
+      - FS mutations: os.{remove,unlink,rmdir,rename,replace,utime},
+        shutil.{rmtree,move}
+      - File opens in write/append mode: open(..., 'w'/'a'/'wb'/'ab')
+      - Mutating self-helpers by naming convention:
+        self._refresh_patches, self._invalidate_*, self._wipe_*,
+        self._remove_*, self._purge_*
+
+    Comment lines are stripped before scanning to avoid false positives
+    from docstrings describing forbidden patterns.
+    """
+    import re
+
+    _readonly_pattern = re.compile(
+        r'^(?:    )?def (cmd_\w*?(?:rescan|status|show|list|info|scan|audit|inspect|summary)\w*'
+        r'|cmd_print\w*'
+        r'|_print_\w+)\(',
+        re.MULTILINE,
+    )
+
+    _forbidden = [
+        # FS mutation primitives
+        (r'\bos\.remove\(',     'os.remove'),
+        (r'\bos\.unlink\(',     'os.unlink'),
+        (r'\bos\.rmdir\(',      'os.rmdir'),
+        (r'\bos\.rename\(',     'os.rename'),
+        (r'\bos\.replace\(',    'os.replace'),
+        (r'\bos\.utime\(',      'os.utime'),
+        (r'\bshutil\.rmtree\(', 'shutil.rmtree'),
+        (r'\bshutil\.move\(',   'shutil.move'),
+        # File opens in write/append mode (single OR double quotes)
+        (r'''open\([^)]*,\s*['"](?:w|a)[b+]?['"]''',
+         "open(..., 'w'/'a' mode)"),
+        # Mutating helpers by naming convention
+        (r'self\._refresh_patches\(', 'self._refresh_patches()'),
+        (r'self\._invalidate_\w*\(',  'self._invalidate_*()'),
+        (r'self\._wipe_\w*\(',        'self._wipe_*()'),
+        (r'self\._remove_\w*\(',      'self._remove_*()'),
+        (r'self\._purge_\w*\(',       'self._purge_*()'),
+    ]
+
+    _files_to_scan = [
+        os.path.join(_ROOT, 'scripts', 'build.py'),
+        os.path.join(_ROOT, 'scripts', 'print_commands.py'),
+    ]
+
+    _violations = []
+    for _path in _files_to_scan:
+        with open(_path) as fh:
+            _source = fh.read()
+        for _name_match in _readonly_pattern.finditer(_source):
+            _name = _name_match.group(1)
+            # Extract method/function body up to the next def/class at
+            # the same or lower indent (or EOF).
+            _start = _name_match.end()
+            _rest = _source[_start:]
+            _body_match = re.search(
+                r'(.*?)(?=\n(?:    )?def \w|\nclass \w|\Z)',
+                _rest, re.DOTALL,
+            )
+            _body = _body_match.group(1) if _body_match else _rest
+            # Strip comment-only lines so docstrings/notes mentioning
+            # the forbidden tokens don't trigger.
+            _body_lines = []
+            for _line in _body.splitlines():
+                _stripped = _line.lstrip()
+                if _stripped.startswith('#'):
+                    continue
+                _body_lines.append(_line)
+            _body_clean = '\n'.join(_body_lines)
+            # Also strip triple-quoted docstrings (rough heuristic: drop
+            # lines between consecutive `"""` markers).
+            _body_clean = re.sub(r'""".*?"""', '', _body_clean, flags=re.DOTALL)
+            _body_clean = re.sub(r"'''.*?'''", '', _body_clean, flags=re.DOTALL)
+            for _pat, _label in _forbidden:
+                if re.search(_pat, _body_clean):
+                    _violations.append(
+                        f"{os.path.basename(_path)}:{_name} contains "
+                        f"forbidden write/mutation pattern {_label!r}"
+                    )
+
+    assert not _violations, (
+        "Read-only-named functions must not contain destructive calls.\n"
+        + "\n".join(f"  • {_v}" for _v in _violations)
+        + "\n\nFix options:\n"
+        + "  (a) Rename the function (drop the read-only-implying name).\n"
+        + "  (b) Extract the destructive logic into a separate helper.\n"
+        + "  (c) If the pattern is a false positive (e.g. read-only "
+        + "open via positional arg), refine the test's regex."
+    )
+
+
+def test_destructive_helpers_warn_in_docstring():
+    """Helpers whose names DON'T scream 'destructive' but actually
+    mutate filesystem state should carry a docstring warning marker
+    (⚠️ or 'DESTRUCTIVE' or 'DELETES') so future callers can't miss it.
+
+    Pinning the _refresh_patches case specifically since that's the
+    one that bit us 2026-05-19.  If you add other ambiguously-named
+    destructive helpers, extend this list."""
+    _bp = open(os.path.join(_ROOT, 'scripts', 'build.py')).read()
+    import re
+    _m = re.search(
+        r'def _refresh_patches\(self\)[^:]*:(.*?)(?=\n    def )',
+        _bp, re.DOTALL,
+    )
+    assert _m, "_refresh_patches definition not found"
+    _docstring_or_top = _m.group(1)[:1500]  # first ~30 lines
+    assert any(_marker in _docstring_or_top
+               for _marker in ('⚠', 'DESTRUCTIVE', 'DELETES')), (
+        "_refresh_patches mutates state but its top-of-body comment "
+        "carries no destructive-intent marker (⚠️/DESTRUCTIVE/DELETES). "
+        "Future read-only callers will assume it's safe and recreate "
+        "the 2026-05-19 over-counting bug.")
+
+
 def test_cmd_source_rescan_is_readonly_no_refresh_patches_call():
     """rescan MUST NOT call _refresh_patches — that function deletes
     .result files when patch hashes diverge, which is destructive and
@@ -10460,6 +10592,8 @@ def main() -> int:
         test_cmd_source_rescan_registered_in_dispatcher,
         test_cmd_source_rescan_method_uses_check_build,
         test_cmd_source_rescan_is_readonly_no_refresh_patches_call,
+        test_readonly_named_commands_have_no_destructive_calls,
+        test_destructive_helpers_warn_in_docstring,
     ]
     failures = 0
     for t in tests:
