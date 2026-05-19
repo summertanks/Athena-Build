@@ -10244,6 +10244,85 @@ def test_verify_pkg_artifact_passes_on_satisfied_depends():
         assert _ok, f"expected OK, got ({_ok}, {_why})"
 
 
+def test_verify_pkg_artifact_strips_epoch_from_internal_version():
+    """Debian filename convention strips epoch (`libc6_2.36-9_amd64.deb`
+    for an internal `Version: 2:2.36-9`).  My verify_pkg_artifact
+    must canonicalise the internal version before comparing — raw
+    `==` would false-positive every epoch-bearing package.
+
+    Caught 2026-05-19: source rescan reported 283 'would rebuild' vs
+    repair's 0 restored, because the verify was rejecting every
+    epoch-bearing .deb on a spurious version-mismatch."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Filename strips epoch; internal Version has it.
+        _path = os.path.join(_tmp, 'foo_1.0+thor1_amd64.deb')
+        _build_minimal_deb(_path, 'foo', '2:1.0+thor1', 'amd64')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        _ok, _why = _bc.verify_pkg_artifact(_path, 'foo_1.0+thor1_amd64.deb')
+        assert _ok, (
+            "epoch-bearing internal Version must match filename's "
+            f"no-epoch version part; got ({_ok}, {_why})")
+
+
+def test_verify_pkg_artifact_resolves_udeb_deps_via_udeb_hashtable():
+    """For a .udeb artifact, Depends must be resolved against
+    cache.udeb_hashtable (the parallel d-i namespace), NOT
+    cache.package_hashtable.  Mixing namespaces masks real deps
+    AND can false-positive when a name exists in one table but
+    not the other.
+
+    Test shape: a .udeb declares Depends: foo-udeb.  Cache has
+    foo-udeb ONLY in udeb_hashtable, not in package_hashtable.
+    The check must consult the udeb hashtable and pass."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _path = os.path.join(_tmp, 'foo-udeb_1.0_amd64.udeb')
+        _build_minimal_deb(_path, 'foo-udeb', '1.0', 'amd64',
+                            depends='bar-udeb (>= 1.0)')
+        from collections import defaultdict
+        class _Cache:
+            pass
+        _cache = _Cache()
+        # bar-udeb is in UDEB table only — NOT in deb table.
+        _cache.package_hashtable = defaultdict(lambda: defaultdict(list))
+        _cache.udeb_hashtable    = defaultdict(lambda: defaultdict(list))
+        _cache.udeb_hashtable['bar-udeb']['2.0'] = ['<placeholder>']
+        _bc = _make_buildcontainer_stub(cache=_cache, repo=_tmp)
+        _ok, _why = _bc.verify_pkg_artifact(_path, 'foo-udeb_1.0_amd64.udeb')
+        assert _ok, (
+            ".udeb Depends must resolve via udeb_hashtable; got "
+            f"({_ok}, {_why})")
+
+
+def test_verify_pkg_artifact_substvar_skip_logic_present():
+    """A .deb whose Depends contains `${shlibs:Depends}` is a build-
+    time bug (dpkg-gencontrol didn't expand the substvar), not a
+    cache-drift bug.  verify_pkg_artifact must skip these entries
+    rather than fail with a confusing unsatisfied-Depends naming a
+    pseudo-package.
+
+    Code-inspection test: dpkg-deb refuses to package a control file
+    with literal `${...}` in Depends (validates syntax during build),
+    so a runtime fixture isn't constructible.  Instead, scan the
+    verify_pkg_artifact source for the substvar-skip guard."""
+    _bp = open(os.path.join(_ROOT, 'scripts', 'buildcontainer.py')).read()
+    import re
+    _m = re.search(
+        r'def verify_pkg_artifact\(self.*?\n    def ',
+        _bp, re.DOTALL,
+    )
+    assert _m, "verify_pkg_artifact not found"
+    _body = _m.group(0)
+    assert "'${' in _deps_str" in _body or "${' in _deps_str" in _body, (
+        "verify_pkg_artifact must skip Depends with unresolved "
+        "substvars (defensive guard against half-built .debs).")
+
+
 def test_verify_pkg_artifact_or_group_satisfied_by_any_alternative():
     """An OR-group (`A | B`) is satisfied if ANY alternative resolves
     in cache, even if the first doesn't.  Mirrors dpkg's resolution
@@ -10950,6 +11029,9 @@ def main() -> int:
         test_verify_pkg_artifact_fails_on_internal_version_mismatch,
         test_verify_pkg_artifact_fails_on_unsatisfied_depends,
         test_verify_pkg_artifact_passes_on_satisfied_depends,
+        test_verify_pkg_artifact_strips_epoch_from_internal_version,
+        test_verify_pkg_artifact_resolves_udeb_deps_via_udeb_hashtable,
+        test_verify_pkg_artifact_substvar_skip_logic_present,
         test_verify_pkg_artifact_or_group_satisfied_by_any_alternative,
         test_cmd_source_repair_dispatch_and_method_present,
         test_cmd_source_repair_writes_pass_when_binaries_present,
