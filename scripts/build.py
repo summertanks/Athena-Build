@@ -2628,6 +2628,42 @@ class BuildSession:
                 _needs_rebuild.append(_name)
         _bar.close()
 
+        # Classify each rebuild candidate by which `source build <mode>`
+        # would address it.  Priority order (only ONE label per source):
+        #   1. pkg          : in selected_srcs but NOT in any exclusion set
+        #                     → `source build` (bare, or `source build pkg`)
+        #   2. installer    : in installer_exclusive OR in udeb dep tree
+        #                     → `source build installer`
+        #   3. live         : in live_exclusive_src_names
+        #                     → `source build live`
+        #   4. recommended  : in extras_src_names (Recommends-only depth-1)
+        #                     → `source build recommended`
+        # Overlapping sources (e.g. shared between pkg-list and live) get
+        # the highest-priority tag.
+        _live_set    = self.dep_tree.live_exclusive_src_names
+        _inst_set    = self.dep_tree.installer_exclusive_src_names
+        _extras_set  = self.dep_tree.extras_src_names
+        _udeb_names: set = set()
+        if self.udeb_dep_tree is not None:
+            _udeb_names = set(self.udeb_dep_tree.selected_srcs.keys())
+
+        def _subset_for(name: str) -> str:
+            if (name not in _live_set and name not in _inst_set
+                    and name not in _extras_set and name not in _udeb_names):
+                return 'pkg'
+            if name in _inst_set or name in _udeb_names:
+                return 'installer'
+            if name in _live_set:
+                return 'live'
+            if name in _extras_set:
+                return 'recommended'
+            return 'unclassified'
+
+        from collections import defaultdict as _dd
+        _by_subset = _dd(list)
+        for _n in _needs_rebuild:
+            _by_subset[_subset_for(_n)].append(_n)
+
         _total = len(_srcs)
         console.print("Source rescan against current cache + repo:")
         console.print(f"  {len(_ok):5d}  built + verified")
@@ -2638,16 +2674,43 @@ class BuildSession:
             console.print(f"  {len(_no_pkgs):5d}  no binaries declared (skipped)")
         console.print(f"  {_total:5d}  total source packages")
 
+        # Subset breakdown — tells operator which `source build <mode>`
+        # addresses each chunk of the rebuild queue.
+        if _needs_rebuild:
+            _cmd_map = {
+                'pkg':          'source build',
+                'installer':    'source build installer',
+                'live':         'source build live',
+                'recommended':  'source build recommended',
+                'unclassified': '(none — investigate)',
+            }
+            console.print("")
+            console.print("Rebuild queue by subset:")
+            for _subset in ('pkg', 'installer', 'live', 'recommended',
+                            'unclassified'):
+                _names = _by_subset.get(_subset, [])
+                if not _names:
+                    continue
+                console.print(
+                    f"  {len(_names):5d}  {_subset:<13s}  →  {_cmd_map[_subset]}"
+                )
+
         if _verbose and _needs_rebuild:
             console.print("")
-            console.print(f"Would rebuild ({len(_needs_rebuild)}):")
-            for _n in _needs_rebuild:
-                console.print(f"  {_n}")
+            console.print(f"Would rebuild ({len(_needs_rebuild)}), grouped by subset:")
+            for _subset in ('pkg', 'installer', 'live', 'recommended',
+                            'unclassified'):
+                _names = sorted(_by_subset.get(_subset, []))
+                if not _names:
+                    continue
+                console.print(f"  [{_subset}] ({len(_names)}):")
+                for _n in _names:
+                    console.print(f"    {_n}")
         elif _needs_rebuild and not _verbose:
             console.print("")
             console.print(
                 "(pass `source rescan verbose` to list the "
-                f"{len(_needs_rebuild)} rebuild candidates by name)",
+                f"{len(_needs_rebuild)} rebuild candidates by subset + name)",
                 tui.COLOR_INFO,
             )
 
