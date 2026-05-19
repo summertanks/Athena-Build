@@ -2701,10 +2701,23 @@ class BuildSession:
                 if _name not in _srcs:
                     _srcs[_name] = _src
 
-        _repaired = []
-        _already_ok = 0      # .result already present, skipped
-        _need_rebuild = []   # binaries missing — will rebuild as expected
-        _no_pkgs = 0         # source declares no binaries
+        _repaired       = []  # .result missing + binaries verify → wrote PASS
+        _already_ok     = 0   # .result PASS + binaries verify → no action
+        _stale_removed  = []  # .result PASS but binaries DON'T verify → deleted
+        _need_rebuild   = []  # .result missing + binaries don't verify
+        _tunneled       = 0   # .result TUNNELED → leave alone
+        _prior_fail     = 0   # .result FAIL or non-PASS → leave alone
+        _no_pkgs        = 0   # source declares no binaries
+
+        def _binaries_verify(src):
+            """All predicted binaries pass deep-verify, returns
+            (ok, first_failing_diagnostic_or_None)."""
+            for _f in src.pkgs:
+                _path = os.path.join(self.config.dir_repo, _f)
+                _ok, _reason = self.container.verify_pkg_artifact(_path, _f)
+                if not _ok:
+                    return (False, f"{_f}: {_reason}")
+            return (True, None)
 
         _bar = ProgressBar(
             label='Repair', itr_label='srcs', maxvalue=len(_srcs),
@@ -2716,61 +2729,113 @@ class BuildSession:
                 continue
             _result_file = os.path.join(
                 self.container.buildlog_path, _name + '.result')
-            if os.path.exists(_result_file):
+
+            # Read existing .result (if any) — drives the four-way
+            # decision below.
+            _existing = None
+            try:
+                with open(_result_file) as fh:
+                    _existing = fh.readline().strip()
+            except OSError:
+                pass
+
+            if _existing == 'TUNNELED':
+                _tunneled += 1
+                continue
+            if _existing not in (None, 'PASS'):
+                # FAIL or other custom marker — leave alone, operator
+                # made an explicit decision we don't override.
+                _prior_fail += 1
+                continue
+
+            # _existing is either None (.result missing) or 'PASS'.
+            # Either way, the right next step is to deep-verify the
+            # binaries.
+            _ok, _diag = _binaries_verify(_src)
+
+            if _existing == 'PASS' and _ok:
+                # State is consistent; nothing to do.
                 _already_ok += 1
                 continue
-            # Share BuildContainer.verify_pkg_artifact so repair and
-            # check_build agree on what "OK to skip rebuild" means.
-            # Verifies filename + ar + internal Pkg/Version/Arch +
-            # every Depends/Pre-Depends OR-group resolvable in cache.
-            _all_present = True
-            for _f in _src.pkgs:
-                _path = os.path.join(self.config.dir_repo, _f)
-                _ok, _reason = self.container.verify_pkg_artifact(_path, _f)
-                if not _ok:
-                    _all_present = False
-                    if _verbose:
-                        logger.info(
-                            f"source repair {_name}: {_f}: {_reason}"
-                        )
-                    break
-            if not _all_present:
-                _need_rebuild.append(_name)
+            if _existing == 'PASS' and not _ok:
+                # .result is LYING.  Delete it so source build sees
+                # the source as needing rebuild on next run.  This is
+                # the case rescan vs repair disagreed on — the deep
+                # verify was added later than the .result was written,
+                # so old PASS markers don't reflect the current gate.
+                try:
+                    os.remove(_result_file)
+                    _stale_removed.append(_name)
+                    logger.info(
+                        f"source repair: removed stale {_result_file} "
+                        f"(verify said {_diag})"
+                    )
+                except OSError as e:
+                    console.print(
+                        f"ERROR: cannot remove stale {_result_file}: {e}",
+                        tui.COLOR_ERROR,
+                    )
                 continue
-            try:
-                with open(_result_file, 'w') as fh:
-                    fh.write('PASS\n')
-                _repaired.append(_name)
-                logger.info(f"source repair: restored {_result_file}")
-            except OSError as e:
-                console.print(
-                    f"ERROR: cannot write {_result_file}: {e}",
-                    tui.COLOR_ERROR,
-                )
+            if _existing is None and _ok:
+                # .result missing but binaries are consistent — restore.
+                try:
+                    with open(_result_file, 'w') as fh:
+                        fh.write('PASS\n')
+                    _repaired.append(_name)
+                    logger.info(f"source repair: restored {_result_file}")
+                except OSError as e:
+                    console.print(
+                        f"ERROR: cannot write {_result_file}: {e}",
+                        tui.COLOR_ERROR,
+                    )
+                continue
+            # _existing is None and binaries don't verify — genuine
+            # rebuild needed, nothing to do.
+            _need_rebuild.append(_name)
+            if _verbose and _diag:
+                logger.info(f"source repair {_name}: {_diag}")
         _bar.close()
 
         console.print("Source repair:")
         console.print(
             f"  {len(_repaired):5d}  .result restored to PASS "
-            "(binaries present, will skip rebuild)"
+            "(binaries verify; .result was missing)"
         )
         console.print(
-            f"  {len(_need_rebuild):5d}  binaries missing "
-            "(legitimate rebuilds — left alone)"
+            f"  {len(_stale_removed):5d}  stale .result deleted "
+            "(was PASS, but binaries no longer verify)"
         )
         console.print(
-            f"  {_already_ok:5d}  .result already present (untouched)"
+            f"  {len(_need_rebuild):5d}  legitimate rebuild "
+            "(.result missing, binaries don't verify — left alone)"
         )
+        console.print(
+            f"  {_already_ok:5d}  consistent (.result PASS + binaries verify)"
+        )
+        if _tunneled:
+            console.print(
+                f"  {_tunneled:5d}  tunneled (.result=TUNNELED — left alone)"
+            )
+        if _prior_fail:
+            console.print(
+                f"  {_prior_fail:5d}  prior FAIL marker (left alone)"
+            )
         if _no_pkgs:
             console.print(
                 f"  {_no_pkgs:5d}  source declares no binaries (skipped)"
             )
 
-        if _verbose and _repaired:
-            console.print("")
-            console.print(f"Restored ({len(_repaired)}):")
-            for _n in _repaired:
-                console.print(f"  {_n}")
+        if _verbose:
+            if _repaired:
+                console.print("")
+                console.print(f"Restored ({len(_repaired)}):")
+                for _n in _repaired:
+                    console.print(f"  {_n}")
+            if _stale_removed:
+                console.print("")
+                console.print(f"Stale .result removed ({len(_stale_removed)}):")
+                for _n in _stale_removed:
+                    console.print(f"  {_n}")
 
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.

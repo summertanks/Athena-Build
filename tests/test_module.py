@@ -10434,9 +10434,10 @@ def test_cmd_source_repair_writes_pass_when_binaries_present():
             assert fh.read().strip() == 'PASS', "wrong .result content"
 
 
-def test_cmd_source_repair_skips_when_result_already_present():
-    """source repair must NOT overwrite an existing .result file
-    (could be FAIL, could be a deliberate TUNNELED marker)."""
+def test_cmd_source_repair_leaves_fail_result_untouched():
+    """source repair must NOT overwrite a FAIL .result — that's an
+    explicit operator/build decision that a previous attempt failed,
+    not something repair should second-guess."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
@@ -10532,6 +10533,148 @@ def test_cmd_source_repair_skips_when_binaries_missing():
         assert not os.path.exists(os.path.join(_buildlog, 'foo.result')), (
             "repair wrote .result for a source with missing binary — "
             "that would mask a legitimate rebuild")
+
+
+def test_cmd_source_repair_deletes_stale_pass_result():
+    """When .result says PASS but the deep verify of binaries
+    fails, repair must DELETE the .result (it's lying).  Without
+    this, repair and rescan disagree: rescan counts the source as
+    'would rebuild' (correct), repair counts it as 'already present'
+    (wrong).  Numbers don't reconcile.  Caught 2026-05-19."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+        _result = os.path.join(_buildlog, 'foo.result')
+        with open(_result, 'w') as fh:
+            fh.write('PASS\n')
+        # Don't actually plant a valid .deb — stub verify_pkg_artifact
+        # to return False so the deep-verify "fails" deterministically.
+        class _Src: pkgs = ['foo_1.0_amd64.deb']
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_path): return False
+            @staticmethod
+            def verify_pkg_artifact(_path, _f):
+                return (False, 'version-mismatch:X!=Y')
+        class _Cfg: dir_repo = _repo
+        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+            build_container_ready = True
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = _Tree
+        _sess.udeb_dep_tree = None
+        _sess.flags = _Flags
+        _sess.container = _Container
+
+        _sess.cmd_source_repair()
+
+        assert not os.path.exists(_result), (
+            "stale PASS .result should have been deleted when deep "
+            "verify failed")
+
+
+def test_cmd_source_repair_leaves_consistent_pass_alone():
+    """When .result PASS AND binaries verify, repair must leave the
+    .result untouched (no-op idempotency)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+        _result = os.path.join(_buildlog, 'foo.result')
+        with open(_result, 'w') as fh:
+            fh.write('PASS\n')
+        _orig_mtime = os.path.getmtime(_result)
+        import time as _time
+        _time.sleep(0.05)  # ensure any rewrite would change mtime
+
+        class _Src: pkgs = ['foo_1.0_amd64.deb']
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_path): return True
+            @staticmethod
+            def verify_pkg_artifact(_path, _f): return (True, 'ok')
+        class _Cfg: dir_repo = _repo
+        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+            build_container_ready = True
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = _Tree
+        _sess.udeb_dep_tree = None
+        _sess.flags = _Flags
+        _sess.container = _Container
+
+        _sess.cmd_source_repair()
+
+        assert os.path.exists(_result), ".result was unexpectedly deleted"
+        assert os.path.getmtime(_result) == _orig_mtime, (
+            "consistent PASS .result was rewritten — should be no-op")
+
+
+def test_cmd_source_repair_leaves_tunneled_marker_alone():
+    """A .result containing TUNNELED is an explicit marker for "this
+    binary was pulled, not built."  Repair must NOT re-verify the
+    binaries (they may be in an upstream-from-cache form) and must
+    NOT delete the marker."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+        _result = os.path.join(_buildlog, 'foo.result')
+        with open(_result, 'w') as fh:
+            fh.write('TUNNELED\n')
+
+        class _Src: pkgs = ['foo_1.0_amd64.deb']
+        # verify_pkg_artifact would FAIL if called — but repair must
+        # NOT call it for TUNNELED .result.
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_path): return False
+            @staticmethod
+            def verify_pkg_artifact(_path, _f):
+                return (False, 'should-not-be-called-for-tunneled')
+        class _Cfg: dir_repo = _repo
+        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+            build_container_ready = True
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = _Tree
+        _sess.udeb_dep_tree = None
+        _sess.flags = _Flags
+        _sess.container = _Container
+
+        _sess.cmd_source_repair()
+
+        assert os.path.exists(_result), "TUNNELED marker was deleted!"
+        with open(_result) as fh:
+            assert fh.read().strip() == 'TUNNELED'
 
 
 def test_destructive_helpers_warn_in_docstring():
@@ -11035,8 +11178,11 @@ def main() -> int:
         test_verify_pkg_artifact_or_group_satisfied_by_any_alternative,
         test_cmd_source_repair_dispatch_and_method_present,
         test_cmd_source_repair_writes_pass_when_binaries_present,
-        test_cmd_source_repair_skips_when_result_already_present,
+        test_cmd_source_repair_leaves_fail_result_untouched,
         test_cmd_source_repair_skips_when_binaries_missing,
+        test_cmd_source_repair_deletes_stale_pass_result,
+        test_cmd_source_repair_leaves_consistent_pass_alone,
+        test_cmd_source_repair_leaves_tunneled_marker_alone,
     ]
     failures = 0
     for t in tests:
