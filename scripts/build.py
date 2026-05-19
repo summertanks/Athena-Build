@@ -2597,7 +2597,14 @@ class BuildSession:
         # patch-refresh side effect was wiping PASS state for any
         # source whose patch hash diverged.
 
+        # Progress feedback — even though each check_build is fast
+        # (a few stat() calls + ar magic check), a 1500+ source corpus
+        # is ~2-5s and operator wants to see motion.
+        _bar = ProgressBar(
+            label='Rescan', itr_label='srcs', maxvalue=len(_srcs),
+        )
         for _name, _src in sorted(_srcs.items()):
+            _bar.step(1)
             if not _src.pkgs:
                 _no_pkgs.append(_name)
                 continue
@@ -2619,6 +2626,7 @@ class BuildSession:
                 _ok.append(_name)
             else:
                 _needs_rebuild.append(_name)
+        _bar.close()
 
         _total = len(_srcs)
         console.print("Source rescan against current cache + repo:")
