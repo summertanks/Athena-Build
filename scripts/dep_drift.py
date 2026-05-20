@@ -36,6 +36,7 @@ class _DepDriftMixin:
     _dir_repo: str
     _config: 'utils.BuildConfig'
     strip_build_version: Callable[[str], str]
+    normalize_repo_filename: Callable[[str], str]
 
     def _check_dep_drift(self):
         """Patch Package dep fields from the on-disk .debs and verify resolution.
@@ -82,11 +83,8 @@ class _DepDriftMixin:
             _filename = os.path.basename(_pkg_obj.get('Filename', ''))
             if not _filename:
                 continue
-            _filename  = self.strip_build_version(_filename)
-            _filename  = utils.apply_distro_suffix(
-                _filename, self._config.distro_suffix,
-            )
-            _deb_path  = os.path.join(self._dir_repo, _filename)
+            _filename  = self.normalize_repo_filename(_filename)
+            _deb_path  = os.path.join(self._dir_repo, 'main', _filename)
             if not os.path.exists(_deb_path):
                 continue
             _proc = subprocess.run(

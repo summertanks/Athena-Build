@@ -318,9 +318,12 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
         os.path.join(buildconfig.dir_fork_source_repo, f'{pkg_name}.dep-hash')
     )
 
-    # Per-binary artifacts in repo/ (covers multi-binary forks)
+    # Per-binary artifacts across all repo/ subdirs (covers multi-binary
+    # forks that emit a mix of main/dev/doc/dbgsym/tests).
     for _bin in binary_names:
-        _targets.extend(glob.glob(os.path.join(buildconfig.dir_repo, f'{_bin}_*')))
+        _targets.extend(glob.glob(
+            os.path.join(buildconfig.dir_repo, '*', f'{_bin}_*'),
+        ))
 
     # Build-log sidecars (source-named)
     _build_log_dir = os.path.join(buildconfig.dir_log, 'build')

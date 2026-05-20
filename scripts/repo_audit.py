@@ -1,0 +1,521 @@
+"""Repo state scanner + closure auditor + bump planner.
+
+Shared substrate for `package audit_deps` and `package rebump`.
+
+Replaces the per-file DebFile walk in build.py with a single
+`dpkg-scanpackages` subprocess that produces a canonical Packages
+file from repo/, then parses it via `apt_pkg.TagFile`.  ~10x faster
+than the per-file approach on a 5000-pkg repo; lets the audit run as
+a chroot-build pre-flight gate instead of a manual operator command.
+
+Three primitives:
+  scan_repo_state(config) -> RepoState
+      Generate + parse + cache.  Cache invalidates on repo/ mtime change.
+
+  audit_repo_closure(state) -> AuditResult
+      Resolve every Depends/Pre-Depends/Conflicts/Breaks against the
+      state.  Returns unresolved, conflicts, weak.
+
+  audit_nmu_residue(state) -> list[(pkg, field, value, why), ...]
+      Derive what `package rebump` should do: which pkgs need a Version
+      bump, which need their Depends `(=)` refs rewritten, and the full
+      bumped_pkg_set (already-bumped ∪ to-bump).
+
+All three operate on the same RepoState — single source of truth.
+"""
+import dataclasses
+import logging
+import os
+import re
+import subprocess
+from typing import Optional
+
+import apt_pkg
+
+import utils
+from utils import _NMU_STRIP_FIELDS, strip_nmu_suffix
+
+logger = logging.getLogger('athena')
+
+# Fields we extract from each Packages stanza.  Anything else is
+# discarded so the in-memory state stays compact (a full Packages file
+# on a 5000-pkg repo is ~3 MB; keeping every field would balloon to
+# ~30 MB once split into Python dicts).
+_FIELDS_TO_KEEP = (
+    'Package', 'Version', 'Architecture', 'Filename', 'Source',
+    'Depends', 'Pre-Depends', 'Recommends', 'Suggests',
+    'Enhances', 'Conflicts', 'Breaks', 'Replaces', 'Provides',
+)
+
+# Relation fields walked by the auditor + bump planner.
+_HARD_DEP_FIELDS = ('Depends', 'Pre-Depends')
+_CONFLICT_FIELDS = ('Conflicts', 'Breaks')
+_WEAK_DEP_FIELDS = ('Recommends',)
+_BUMP_REWRITE_FIELDS = (
+    'Depends', 'Pre-Depends', 'Recommends', 'Suggests',
+    'Enhances', 'Provides',
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class RepoState:
+    """Snapshot of repo/ contents at a point in time.
+
+    packages         — {pkg_name: {control field → value}}; highest
+                       version wins on duplicate names (flat repo can
+                       hold both pkg_X and pkg_X+asgard1 simultaneously
+                       during partial-state recoveries).
+    provides_index   — {virtual_name: [(provider_pkg_name, opt_version)]}
+                       built from Provides fields.  Used by the auditor
+                       to resolve virtual-target deps per Debian Policy
+                       §7.5.
+    packages_file    — path to the generated Packages stanza on disk
+                       (kept around for debugging; same file is cached
+                       and reused across audit + rebump within a session).
+    repo_mtime       — max mtime across repo/ contents at scan time.
+                       Cache invalidation key.
+    """
+    packages: dict
+    provides_index: dict
+    packages_file: str
+    repo_mtime: float
+
+
+@dataclasses.dataclass(frozen=True)
+class AuditResult:
+    """Combined audit output.  Three lists, each populated by a separate
+    primitive:
+
+    unresolved          — [(pkg, field, relation_str, why)]
+        from audit_dep_closure(): hard Depends/Pre-Depends that no pkg
+        in repo/ satisfies.  Resolution is whole-repo because apt at
+        install time can pull transitive deps from any tier (pkg, live,
+        installer-debs, pool) — pool deps are NOT a violation.
+
+    live_conflicts      — [(pkg_a, field, other_pkg, relation_str)]
+        from audit_conflict_cohort(live_set): Conflicts/Breaks where
+        BOTH ends are in the live chroot install set (`dep_tree`'s
+        selected_pkgs minus pool_extras minus installer_exclusive).
+
+    installer_conflicts — same shape, cohort = installer ramdisk
+        (udeb_dep_tree.selected_pkgs).  Conflicts only matter when
+        both sides actually unpack into the d-i ramdisk.
+
+    weak                — [(pkg, 'Recommends', relation_str)]
+        unresolved Recommends (informational; soft per Debian Policy).
+    """
+    unresolved: list
+    live_conflicts: list
+    installer_conflicts: list
+    weak: list
+
+
+# Per-process cache.  Key: repo_dir abs path.  Value: (mtime, RepoState).
+# Invalidates when repo/ mtime advances OR when invalidate_cache() is
+# called explicitly (e.g. after rebump finishes editing files).
+_CACHE: 'dict[str, tuple[float, RepoState]]' = {}
+
+
+def _repo_max_mtime(repo_dir: str) -> float:
+    """Max mtime across the repo directory's own stat AND each direct
+    child entry.  Including the directory's own mtime catches change
+    events that don't bump any surviving file's mtime:
+
+      - Pure deletes (`rm foo.deb`) — surviving files' mtimes unchanged,
+        but the dir's mtime bumps when the entry is removed
+      - Pure renames (`mv foo.deb bar.deb`) — inode's mtime unchanged
+        (rename only touches dir + inode's ctime), but the dir's
+        mtime bumps
+
+    File-content modifications, additions, and rebuilds-in-place are
+    caught by the per-entry stat fallback.  Together: any visible
+    change to repo/ → max_mtime advances → cache invalidates.
+
+    Cheap O(n) scandir; no recursion (repo/ has no subdirs in our flat
+    archive).
+    """
+    _max = 0.0
+    try:
+        _max = os.stat(repo_dir).st_mtime
+    except OSError:
+        pass
+    try:
+        for _entry in os.scandir(repo_dir):
+            try:
+                _m = _entry.stat().st_mtime
+                if _m > _max:
+                    _max = _m
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return _max
+
+
+def invalidate_cache(repo_dir: Optional[str] = None) -> None:
+    """Drop cached RepoState.  Call after operations that edit repo/
+    contents (rebump, source build copy-in, etc.) so the next audit
+    sees the post-edit state."""
+    if repo_dir is None:
+        _CACHE.clear()
+    else:
+        _CACHE.pop(os.path.abspath(repo_dir), None)
+
+
+def scan_repo_state(config, subdir: str = 'main',
+                     refresh: bool = False) -> Optional[RepoState]:
+    """Generate + parse a Packages snapshot of one repo/ subdir.
+
+    `subdir` selects which segment of the segregated repo to scan:
+      'main'    installable corpus — default, what `package audit` uses
+      'dev'     -dev side artifacts
+      'doc'     -doc side artifacts
+      'dbgsym'  -dbgsym side artifacts
+      'tests'   -test / -tests side artifacts
+
+    Each subdir caches independently (separate persisted Packages file
+    per subdir in dir_temp, separate in-memory cache key).
+
+    Mechanism:
+      1. Snapshot the subdir's max mtime (includes dir's own mtime so
+         pure-delete / pure-rename also invalidate — see _repo_max_mtime).
+      2. If in-memory cache matches mtime and refresh=False → return.
+      3. Else if persisted `audit-Packages-<subdir>` is newer than the
+         subdir's mtime → re-parse it (skip dpkg-scanpackages).
+      4. Else run `dpkg-scanpackages --multiversion <subdir>/ /dev/null`
+         into dir_temp/audit-Packages-<subdir>.
+      5. Parse via apt_pkg.TagFile.  Highest-version dedup per pkg name.
+      6. Build Provides index for virtual-dep resolution.
+
+    Returns None on dpkg-scanpackages failure.
+
+    Pass refresh=True to force regen unconditionally.
+    """
+    _repo_dir = os.path.abspath(
+        os.path.join(config.dir_repo, subdir)
+    )
+    _mtime = _repo_max_mtime(_repo_dir)
+    if not refresh:
+        _cached = _CACHE.get(_repo_dir)
+        if _cached and _cached[0] == _mtime:
+            return _cached[1]
+
+    _temp_dir = config.dir_temp
+    os.makedirs(_temp_dir, exist_ok=True)
+    _pkg_file = os.path.join(_temp_dir, f'audit-Packages-{subdir}')
+
+    # Cross-session cache: if the persisted Packages file is newer than
+    # any file in repo/, skip the dpkg-scanpackages call entirely and
+    # just re-parse the cached file.  Cuts the per-build gate from ~90s
+    # to ~3s when repo/ hasn't changed since last session.  Honours the
+    # explicit refresh flag.
+    _skip_scan = False
+    if not refresh:
+        try:
+            _pkgfile_mtime = os.path.getmtime(_pkg_file)
+            if _pkgfile_mtime >= _mtime:
+                _skip_scan = True
+        except OSError:
+            pass
+
+    if not _skip_scan:
+        # dpkg-scanpackages reads each .deb's control area (no data
+        # extract).  --multiversion emits every version present; we
+        # dedupe by highest version in the parse step.  /dev/null is the
+        # (empty) override file.
+        try:
+            with open(_pkg_file, 'wb') as _fh:
+                subprocess.run(
+                    ['dpkg-scanpackages', '--multiversion',
+                     _repo_dir, '/dev/null'],
+                    stdout=_fh, stderr=subprocess.PIPE, check=True,
+                )
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"dpkg-scanpackages failed: "
+                f"{e.stderr.decode(errors='replace').strip()}"
+            )
+            return None
+        except FileNotFoundError:
+            logger.error(
+                "dpkg-scanpackages not on PATH — install the `dpkg-dev` package"
+            )
+            return None
+
+    apt_pkg.init_system()
+    _packages: dict = {}
+    with open(_pkg_file) as _fh:
+        _tagfile = apt_pkg.TagFile(_fh)
+        for _section in _tagfile:
+            _pkg = (_section.get('Package') or '').strip()
+            _ver = (_section.get('Version') or '').strip()
+            if not _pkg or not _ver:
+                continue
+            _prev = _packages.get(_pkg)
+            if _prev is not None:
+                try:
+                    if apt_pkg.version_compare(_ver, _prev['Version']) <= 0:
+                        continue
+                except Exception:
+                    continue
+            # Snapshot only the fields we need.  TagSection is backed by
+            # the file handle and the values it returns become invalid
+            # once the loop advances; coerce to str now.
+            _entry = {}
+            for _field in _FIELDS_TO_KEEP:
+                _val = _section.get(_field)
+                if _val is not None:
+                    _entry[_field] = str(_val)
+            _packages[_pkg] = _entry
+
+    _provides_index: dict = _build_provides_index(_packages)
+
+    _state = RepoState(
+        packages=_packages,
+        provides_index=_provides_index,
+        packages_file=_pkg_file,
+        repo_mtime=_mtime,
+    )
+    _CACHE[_repo_dir] = (_mtime, _state)
+    return _state
+
+
+def _build_provides_index(packages: dict) -> dict:
+    """{virtual_name: [(provider_pkg, opt_version)]} from Provides
+    fields.  Uses python-debian's PkgRelation parser — handles the
+    `name (= V)` versioned-Provides syntax that Debian Policy §7.5
+    requires for satisfying versioned virtual deps."""
+    from debian.deb822 import PkgRelation
+    _index: dict = {}
+    for _pkg, _entry in packages.items():
+        _raw = _entry.get('Provides', '')
+        if not _raw:
+            continue
+        try:
+            for _or_group in PkgRelation.parse_relations(_raw):
+                for _rel in _or_group:
+                    _vname = _rel.get('name', '')
+                    _vc = _rel.get('version')
+                    _vver = _vc[1] if _vc else None
+                    if _vname:
+                        _index.setdefault(_vname, []).append((_pkg, _vver))
+        except Exception:
+            continue
+    return _index
+
+
+def audit_nmu_residue(state: RepoState) -> 'list[tuple]':
+    """Walk every pkg in state; report any field whose value still
+    carries an NMU/binNMU/backport suffix.
+
+    Returns a list of (pkg, field, raw_value, why) entries.  Each entry
+    is one violation.  Field is either 'Version' (the pkg's own Version
+    field) or a relation field name ('Depends', 'Conflicts', ...) when
+    a version constraint inside it has NMU residue.
+
+    Used as a verification pass after `package strip` (and as a
+    standing check that the post-build normaliser actually ran).
+    Anything reported here means apt sees a non-normalised version
+    constraint — install-time risk if the target ships at a stripped
+    version.
+    """
+    from debian.deb822 import PkgRelation
+    _findings: 'list[tuple]' = []
+
+    _constraint_re = re.compile(
+        r'\(\s*(?:<=|>=|<<|>>|=)\s*([^)]+?)\s*\)'
+    )
+
+    for _pkg, _entry in state.packages.items():
+        _ver = _entry.get('Version', '')
+        if _ver and strip_nmu_suffix(_ver) != _ver:
+            _findings.append((_pkg, 'Version', _ver, 'pkg own Version'))
+        for _field in _NMU_STRIP_FIELDS:
+            _raw = _entry.get(_field, '')
+            if not _raw:
+                continue
+            for _m in _constraint_re.finditer(_raw):
+                _v = _m.group(1)
+                if strip_nmu_suffix(_v) != _v:
+                    _findings.append(
+                        (_pkg, _field, _m.group(0),
+                         f'version constraint {_m.group(0)} has NMU layer')
+                    )
+    return _findings
+
+
+def _ver_holds(actual: str, op: str, want: str) -> bool:
+    """apt_pkg.check_dep wrapper.  Returns False on parse error."""
+    try:
+        return apt_pkg.check_dep(actual, op, want)
+    except Exception:
+        return False
+
+
+def _rel_satisfied_in_scope(state: RepoState, rel: dict,
+                              scope: Optional[frozenset] = None,
+                              exclude_provider: str = '') -> bool:
+    """True if some pkg in `scope` satisfies `rel`.
+
+    scope=None means "anywhere in state.packages" (whole-repo resolution).
+    exclude_provider: pkg name to exclude from both real-pkg + Provides
+    resolution — used in conflict checks to filter the "I conflict with
+    virtual X which I myself provide" self-conflict idiom.
+    """
+    _target = rel.get('name', '')
+    _vc = rel.get('version')
+    if _vc:
+        _op, _wver = _vc
+    else:
+        _op, _wver = None, None
+
+    def _in_scope(name: str) -> bool:
+        return scope is None or name in scope
+
+    # Real pkg
+    if _target != exclude_provider:
+        _entry = state.packages.get(_target)
+        if _entry is not None and _in_scope(_target):
+            if _op is None or _ver_holds(_entry['Version'], _op, _wver):
+                return True
+    # Virtual via Provides.  Per Debian Policy §7.5: a versioned
+    # Provides counts "exactly as if it were a real package" for
+    # dependency satisfaction.  So `Provides: X (= 11.1.0)` satisfies
+    # `Depends: X (>= 3.0-9)` because apt_pkg.check_dep('11.1.0',
+    # '>=', '3.0-9') is True — any comparison operator works.
+    # Unversioned Provides (`Provides: X` with no version) do NOT
+    # satisfy versioned Depends — policy reserves them for matching
+    # an unversioned Depends only.
+    for _provider, _prov_ver in state.provides_index.get(_target, []):
+        if _provider == exclude_provider:
+            continue
+        if not _in_scope(_provider):
+            continue
+        if _op is None:
+            return True
+        if _prov_ver is not None and _ver_holds(_prov_ver, _op, _wver):
+            return True
+    return False
+
+
+def audit_dep_closure(state: RepoState,
+                       consumer_set: Optional[frozenset] = None
+                       ) -> 'tuple[list, list]':
+    """Hard dependency gate.
+
+    consumer_set — the install corpus.  Only pkgs IN this set are
+        audited as consumers.  None = audit every pkg in state (whole-
+        repo scan).  In practice the caller passes
+        `dep_tree.selected_pkgs ∪ udeb_dep_tree.selected_pkgs` — the
+        union of every tier that gets dpkg-installed somewhere: base,
+        pkg.list, live.list, installer.list, pool.list.  Anything
+        OUTSIDE this set is a side artifact of dpkg-buildpackage
+        (libfoo-dev / libfoo-doc / libfoo-tests / libfoo-dbgsym from
+        a libfoo source we built but never selected for install).
+        Their hard deps are NOT install-correctness concerns.
+
+    Resolution scope is always the WHOLE REPO — apt at install time
+    can pull transitive deps from any pkg in /pool/, even if it's not
+    in the install corpus.  Honours Provides per Debian Policy §7.5
+    (versioned Provides count exactly as if they were real pkgs).
+
+    Returns (unresolved, weak): each is a list of
+    (pkg, field, relation_str, why) tuples.
+    """
+    from debian.deb822 import PkgRelation
+    _unresolved: list = []
+    _weak: list = []
+
+    def _is_consumer(name: str) -> bool:
+        return consumer_set is None or name in consumer_set
+
+    for _pkg, _entry in state.packages.items():
+        if not _is_consumer(_pkg):
+            continue
+        for _field in _HARD_DEP_FIELDS:
+            _raw = _entry.get(_field, '')
+            if not _raw:
+                continue
+            try:
+                _relations = PkgRelation.parse_relations(_raw)
+            except Exception:
+                continue
+            for _or_group in _relations:
+                if not any(_rel_satisfied_in_scope(state, _r)
+                           for _r in _or_group):
+                    _rel_str = PkgRelation.str([_or_group])
+                    _unresolved.append(
+                        (_pkg, _field, _rel_str, 'no satisfying pkg in repo/')
+                    )
+        for _field in _WEAK_DEP_FIELDS:
+            _raw = _entry.get(_field, '')
+            if not _raw:
+                continue
+            try:
+                _relations = PkgRelation.parse_relations(_raw)
+            except Exception:
+                continue
+            for _or_group in _relations:
+                if not any(_rel_satisfied_in_scope(state, _r)
+                           for _r in _or_group):
+                    _rel_str = PkgRelation.str([_or_group])
+                    _weak.append((_pkg, _field, _rel_str))
+
+    return _unresolved, _weak
+
+
+def audit_conflict_cohort(state: RepoState, cohort: frozenset) -> list:
+    """Hard conflict gate: within a cohort (a set of pkgs that get
+    installed SIMULTANEOUSLY), no pkg's Conflicts/Breaks may resolve
+    to another pkg in the same cohort.
+
+    Cohorts are tier-coherent install sets:
+      live chroot           = dep_tree.selected_pkgs - pool_extras
+                              - installer_exclusive
+      installer ramdisk     = udeb_dep_tree.selected_pkgs
+
+    Cross-cohort conflicts (e.g. grub-pc in pool vs grub-efi-amd64 in
+    live) are NOT flagged here — apt arbitrates at install time and
+    the operator can have both available in the repo.
+
+    Returns: list of (pkg, field, other_or_virtual_label, rel_str)
+
+    Self-conflict via Provides (`A Conflicts: X` where `A Provides: X`
+    is the only provider) is filtered as a no-op.
+    """
+    from debian.deb822 import PkgRelation
+    _conflicts: list = []
+
+    for _pkg, _entry in state.packages.items():
+        if _pkg not in cohort:
+            continue
+        _self_name = _pkg
+        for _field in _CONFLICT_FIELDS:
+            _raw = _entry.get(_field, '')
+            if not _raw:
+                continue
+            try:
+                _relations = PkgRelation.parse_relations(_raw)
+            except Exception:
+                continue
+            for _or_group in _relations:
+                for _rel in _or_group:
+                    _target = _rel.get('name', '')
+                    if _target == _self_name:
+                        continue
+                    if _rel_satisfied_in_scope(
+                        state, _rel, scope=cohort,
+                        exclude_provider=_self_name,
+                    ):
+                        _other_entry = state.packages.get(_target)
+                        _other = (
+                            _other_entry['Package'] if _other_entry
+                            else f'<virtual {_target}>'
+                        )
+                        _rel_str = PkgRelation.str([[_rel]])
+                        _conflicts.append(
+                            (_pkg, _field, _other, _rel_str)
+                        )
+    return _conflicts
+
+

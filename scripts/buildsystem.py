@@ -168,8 +168,14 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         self._password = ''
         self._password_scrubbed = True
 
-    # Single source of truth lives in utils.strip_build_version.  Kept as a
-    # method on BuildSystem so the existing `self.strip_build_version` call
-    # in _ChrootMixin._get_deb_files (the mixin contract) continues to work
-    # without each mixin needing to import utils directly.
+    # Filename predictors — both exposed on the BuildSystem so the
+    # _ChrootMixin / dep_drift mixin contracts can call them without
+    # importing utils directly.  Single source of truth lives in utils:
+    #
+    #   strip_build_version    strips ONLY +bN binNMU (legacy primitive)
+    #   normalize_repo_filename strips +bN AND +debNuN/~bpoN+N/+rpiN/-Nb
+    #                          (full match for our post-build strip step;
+    #                           use this for path resolution under
+    #                           repo/main).
     strip_build_version = staticmethod(utils.strip_build_version)
+    normalize_repo_filename = staticmethod(utils.normalize_repo_filename)

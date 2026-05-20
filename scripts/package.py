@@ -427,7 +427,7 @@ class Source(Sources):
         self._err_str: str = ''
 
         # Whether the package is valid or not, set to True if all required fields are present
-        self._isvalid: bool = False 
+        self._isvalid: bool = False
         
         super().__init__(section)
         

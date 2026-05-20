@@ -48,6 +48,7 @@ class _ChrootMixin:
     _password: str
     _config: 'BuildConfig'
     strip_build_version: Callable[[str], str]
+    normalize_repo_filename: Callable[[str], str]
 
     def build_chroot(self, debug: bool = False) -> bool:
         """Install all selected packages into the chroot in dependency order.
@@ -872,25 +873,25 @@ class _ChrootMixin:
         os.environ['DEBCONF_NONINTERACTIVE_SEEN'] = 'true'
 
     def _get_deb_files(self, pkg_list: list) -> list:
-        """Resolve package names to absolute .deb paths in the repo directory.
+        """Resolve package names to absolute .deb paths in repo/main.
 
-        Maps the cache's Packages-index Filename onto what our source-build
-        pipeline produced:
-          1. strip_build_version: drop the Debian buildd's +bN bin-NMU suffix
-          2. apply_distro_suffix: append `+<DistroSuffix>` (e.g. `+thor1`)
-             to match BuildContainer's changelog prepend.
-        Both ends MUST agree on the suffix — see utils.apply_distro_suffix.
+        repo/ is segregated by package role (see utils.classify_repo_subdir).
+        Installable .debs live in repo/main; the live chroot's install
+        set only ever needs main artifacts.
+
+        utils.normalize_repo_filename maps the upstream Packages-index
+        Filename onto its post-strip on-disk form (drops +bN AND
+        +debNuN/~bpoN+N/+rpiN — the layers our BuildContainer strip
+        removes from emitted .debs).
         """
         file_list = []
+        _main = os.path.join(self._dir_repo, 'main')
         for pkg in pkg_list:
             _filename = os.path.basename(
                 self._dependencytree.selected_pkgs[pkg]['Filename']
             )
-            _filename = self.strip_build_version(_filename)
-            _filename = utils.apply_distro_suffix(
-                _filename, self._config.distro_suffix,
-            )
-            _filepath = os.path.join(self._dir_repo, _filename)
+            _filename = self.normalize_repo_filename(_filename)
+            _filepath = os.path.join(_main, _filename)
             if not os.path.exists(_filepath):
                 tui.console.print(f"WARNING: .deb not found, skipping: {_filename}")
                 logger.warning(f"_get_deb_files: missing {_filepath}")

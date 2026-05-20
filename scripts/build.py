@@ -43,6 +43,7 @@ import dependencytree
 import buildsystem
 import installer_chroot
 import iso_installer
+import repo_audit
 import signal
 
 
@@ -97,6 +98,38 @@ class BuildFlags:
                   'chroot_ready', 'chroot_verified', 'chroot_installer_ready',
                   'iso_live_ready', 'iso_installer_ready']
         return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
+
+
+def _dedupe_bidirectional_conflicts(conflicts):
+    """Collapse `A Conflicts B` + `B Conflicts A` into a single entry.
+
+    Many Debian conflicts are declared symmetrically (both sides of a
+    pair-alternative carry `Conflicts:` against each other).  Reporting
+    both halves doubles the apparent count and clutters the operator's
+    triage.  We keep the entry whose consumer name sorts first.
+
+    Operates on the list shape produced by audit_repo_closure:
+      [(consumer_pkg, field, other_pkg, relation_str), ...]
+    """
+    _seen = set()
+    _out = []
+    for _entry in conflicts:
+        _consumer, _field, _other, _rel = _entry
+        # Strip any <virtual …> wrapper for symmetry comparison —
+        # if the other side resolves via virtual, the reverse-direction
+        # entry (real-pkg → real-pkg) is the canonical one to keep.
+        _other_canon = _other
+        if _other_canon.startswith('<virtual ') and _other_canon.endswith('>'):
+            _other_canon = _other_canon[len('<virtual '):-1]
+        _key = frozenset({_consumer, _other_canon})
+        # Tiebreak: prefer the entry where consumer sorts first by name,
+        # so subsequent runs of the same audit produce stable output.
+        if _key in _seen:
+            continue
+        _seen.add(_key)
+        _out.append(_entry)
+    return _out
+
 
 class BuildSession:
     """Owns the full pipeline state and the cmd_* command handlers the TUI
@@ -696,8 +729,7 @@ class BuildSession:
 
         console.print("Preparing Parsing Tree...", tui.COLOR_INFO)
         self.dep_tree = dependencytree.DependencyTree(self.cache, select_recommended=False,
-                    arch=self.config.arch, build_profiles=self.config.build_profiles,
-                    distro_suffix=self.config.distro_suffix)
+                    arch=self.config.arch, build_profiles=self.config.build_profiles)
 
         # --- Pass I: required ---------------------------------------------------
         required_packages = self.cache.required
@@ -919,7 +951,6 @@ class BuildSession:
             # same module (ext4-modules-6.1.0-{NN}-amd64-di etc.).  Auto-
             # pick the highest version across names instead of prompting.
             auto_pick_highest_when_ambiguous=True,
-            distro_suffix=self.config.distro_suffix,
         )
         _udeb_seeds_required = list(self.cache.udeb_required)
         _udeb_seeds_important = list(self.cache.udeb_important)
@@ -1682,160 +1713,660 @@ class BuildSession:
         self.flags.signing_key_verified = True
         return True
 
-    # --------------------------Command: rebump_packages--------------------------
 
-    def cmd_rebump_packages(self, *args):
-        """One-time backfill: rewrite every `.deb`/`.udeb` in `repo/` to
-        ship at `<existing-ver>+<DistroSuffix>` instead of the upstream
-        source version.  Lets you adopt DistroSuffix on an existing
-        built corpus without re-running `source build` (which can take
-        24-36h for the GNOME tree).
+    def _resolve_live_cohort(self) -> Optional[frozenset]:
+        """The set of pkgs that get dpkg-installed in the live chroot
+        simultaneously — the scope within which Conflicts/Breaks are
+        hard violations.
 
-        Usage: package rebump [force]
+        = dep_tree.selected_pkgs
+          − pool_extras_pkg_names   (pool-only; not auto-installed)
+          − installer_exclusive_pkg_names  (installer-support debs not
+            in the live closure)
 
-        Behaviour:
-          * Walks self.config.dir_repo for .deb + .udeb files.
-          * Each: extract control area, rewrite the Version field with
-            `+<suffix>` appended, repack, rename file with new version.
-          * Idempotent: re-runs skip files already bumped.
-          * Confirmation prompt (PROMPT_YESNO) unless `force` is in args
-            — this rewrites every package on disk, so the operator
-            should opt in.
-
-        Operator follow-up after this command:
-          * `dep parse force` to repopulate Source.pkgs with the
-            bumped filenames so `check_build` sees them.
-          * `chroot build`, `iso build` — installs the bumped .debs
-            into the live + installer chroots.
-
-        Tunneled packages are bumped too — every .deb in repo/ gets
-        the same label.  If you'd rather keep tunneled binaries at
-        their upstream versions (honest provenance), exclude them by
-        deleting them from repo/ before running this and re-tunnel
-        after.  The DistroSuffix-bumped versions will still beat
-        any upstream constraint at install time regardless.
+        Returns None when dep_tree isn't populated (operator hasn't
+        run `dep parse`).  Caller should fall back to a coarser check
+        or print a hint.
         """
-        _suffix = self.config.distro_suffix
-        if not _suffix:
+        if not self.dep_tree or not self.dep_tree.selected_pkgs:
+            return None
+        _selected = set(self.dep_tree.selected_pkgs.keys())
+        _selected -= getattr(self.dep_tree, 'pool_extras_pkg_names', set())
+        _selected -= getattr(self.dep_tree, 'installer_exclusive_pkg_names',
+                              set())
+        return frozenset(_selected)
+
+    def _resolve_install_corpus(self) -> Optional[frozenset]:
+        """[pkg + installer + live + pool] — your hard-dep gate scope.
+
+        = dep_tree.selected_pkgs ∪ udeb_dep_tree.selected_pkgs
+
+        Every pkg in this union ends up dpkg-installed somewhere — in
+        the live chroot, the d-i ramdisk, or the target via tasksel +
+        apt at install time.  Their Depends are install-time hard
+        constraints.
+
+        Pkgs OUTSIDE this union are side artifacts of dpkg-buildpackage
+        (libfoo-dev / -doc / -tests / -dbgsym from sources we built
+        but didn't select).  Their Depends never resolve at runtime
+        because they never install.
+
+        Returns None when dep_tree isn't populated (operator hasn't
+        run `dep parse`); caller falls back to whole-repo audit with
+        a hint.
+        """
+        if not self.dep_tree or not self.dep_tree.selected_pkgs:
+            return None
+        _all = set(self.dep_tree.selected_pkgs.keys())
+        if self.udeb_dep_tree and self.udeb_dep_tree.selected_pkgs:
+            _all |= set(self.udeb_dep_tree.selected_pkgs.keys())
+        return frozenset(_all)
+
+    def _resolve_installer_cohort(self) -> Optional[frozenset]:
+        """The set of pkgs that get dpkg-unpacked into the d-i installer
+        ramdisk — the scope for installer conflict checks.
+
+        = udeb_dep_tree.selected_pkgs
+
+        Pool / live / pkg debs are NOT in this scope (the ramdisk is
+        udeb-only; debs are pulled by the installer onto the target
+        system, which is a separate install scenario).
+        """
+        if (not self.udeb_dep_tree
+                or not self.udeb_dep_tree.selected_pkgs):
+            return None
+        return frozenset(self.udeb_dep_tree.selected_pkgs.keys())
+
+    def _preflight_audit_repo(self) -> bool:
+        """Repo audit gate for `chroot build live/installer`.
+
+        Runs the full three-check audit (dep gate over the whole repo +
+        conflict cohorts for live and installer).  Cheap (~3s) when the
+        persisted Packages snapshot is fresher than repo/'s max mtime.
+
+        Returns True to proceed, False to abort.
+
+        Gate triggers on:
+          - any unresolved hard Depends/Pre-Depends in the whole repo
+          - any conflict within the live cohort
+          - any conflict within the installer cohort
+
+        When dep_tree / udeb_dep_tree aren't populated, the relevant
+        cohort check is skipped with a hint to run `dep parse`.  Dep
+        check still runs unconditionally.
+
+        I/O error → don't gate (fall back to install-time discovery).
+        """
+        _state = repo_audit.scan_repo_state(self.config)
+        if _state is None:
             console.print(
-                "DistroSuffix is empty in [Source] of build.conf — "
-                "nothing to bump.  Set DistroSuffix = thor1 (or your "
-                "preferred label) first."
+                "Repo audit: scan failed (see log) — skipping gate, "
+                "proceeding with chroot build"
+            )
+            return True
+        if not _state.packages:
+            return True
+
+        _corpus = self._resolve_install_corpus()
+        _unresolved, _ = repo_audit.audit_dep_closure(
+            _state, consumer_set=_corpus,
+        )
+        _live = self._resolve_live_cohort()
+        _installer = self._resolve_installer_cohort()
+        _live_conflicts = (
+            _dedupe_bidirectional_conflicts(
+                repo_audit.audit_conflict_cohort(_state, _live)
+            ) if _live is not None else []
+        )
+        _inst_conflicts = (
+            _dedupe_bidirectional_conflicts(
+                repo_audit.audit_conflict_cohort(_state, _installer)
+            ) if _installer is not None else []
+        )
+
+        _bad = (
+            len(_unresolved) + len(_live_conflicts) + len(_inst_conflicts)
+        )
+        if _bad == 0:
+            console.print(
+                f"Repo audit OK: {len(_state.packages)} pkgs, "
+                f"hard-dep closure clean, no install-cohort conflicts."
+            )
+            return True
+        console.print(
+            f"Repo audit found install-time risks:\n"
+            f"  UNRESOLVED Depends/Pre-Depends (whole repo): "
+            f"{len(_unresolved)}\n"
+            f"  CONFLICTS in LIVE cohort:                    "
+            f"{len(_live_conflicts)}\n"
+            f"  CONFLICTS in INSTALLER ramdisk cohort:       "
+            f"{len(_inst_conflicts)}"
+        )
+        _show = min(10, len(_unresolved))
+        if _show:
+            console.print(f"\nFirst {_show} UNRESOLVED:")
+            for _pkg, _field, _rel, _why in _unresolved[:_show]:
+                console.print(f"  {_pkg}  {_field}: {_rel}")
+        _show = min(10, len(_live_conflicts))
+        if _show:
+            console.print(f"\nFirst {_show} LIVE conflicts:")
+            for _pkg, _field, _other, _rel in _live_conflicts[:_show]:
+                console.print(f"  {_pkg}  {_field}: {_rel}  → {_other}")
+        _show = min(10, len(_inst_conflicts))
+        if _show:
+            console.print(f"\nFirst {_show} INSTALLER conflicts:")
+            for _pkg, _field, _other, _rel in _inst_conflicts[:_show]:
+                console.print(f"  {_pkg}  {_field}: {_rel}  → {_other}")
+        console.print(
+            "\nRun `package audit verbose` for the full lists."
+        )
+        _resp = Prompt(
+            PROMPT_YESNO,
+            "Proceed with chroot build anyway?  (n recommended; "
+            "fix the issues first)",
+        ).get_response()
+        return _resp.lower() in ('y', 'yes')
+
+    def cmd_audit(self, *args):
+        """Single repo audit covering all three install-correctness gates,
+        scoped to repo/main (the installable subdir).
+
+          DEP GATE (hard) — every pkg in repo/main MUST have its hard
+            Depends/Pre-Depends satisfiable in repo/main.  Resolution
+            honours Provides per Debian Policy §7.5.
+
+          LIVE CONFLICTS (hard) — within the live chroot install set
+            (dep_tree.selected_pkgs − pool_extras − installer_exclusive),
+            no two pkgs may co-install with mutual Conflicts/Breaks.
+            Self-conflict-via-Provides is filtered.
+
+          INSTALLER CONFLICTS (hard) — same shape, cohort is the d-i
+            ramdisk udebs (udeb_dep_tree.selected_pkgs).
+
+        Conflicts outside a cohort (e.g. grub-pc in pool conflicting
+        with grub-efi-amd64 in live) are NOT flagged — apt arbitrates.
+
+        Per-target drill-in mode: pass a target package name as the
+        first non-flag argument.  Shows full state for that target
+        (cache + dep_tree + repo/main + Provides + consumers).
+
+        Gap classification: when the dep gate finds any unresolved
+        target, each is classified as build_failed / missed_by_parse /
+        transitional / other (formerly the `audit_gap` command —
+        merged in here for a single audit interface).
+
+        Usage:
+          package audit                    — full overview
+          package audit <target>           — drill into one target
+          package audit verbose            — full lists, all categories
+          package audit strict             — also list Recommends
+          package audit refresh            — force re-scan
+        """
+        _verbose = 'verbose' in args
+        _strict = 'strict' in args
+        _refresh = 'refresh' in args
+        # Anything other than known flags is treated as a drill-in target.
+        _flags = {'verbose', 'strict', 'refresh'}
+        _drill_target = next(
+            (a for a in args if a not in _flags), None,
+        )
+        _state = repo_audit.scan_repo_state(
+            self.config, subdir='main', refresh=_refresh,
+        )
+        if _state is None:
+            return
+        if not _state.packages:
+            console.print(
+                "repo/main has no .deb/.udeb files — nothing to audit"
             )
             return
 
-        # Args: `force` flag (any position) + optional source-name
-        # filters.  No filter args → rebump all .debs (legacy behaviour).
-        # Filter args → only .debs whose internal Source: field matches.
-        # Lets the operator say `package rebump linux linux-signed-amd64`
-        # to retrofit just the kernel family without touching anything
-        # else.
-        _args_set = set(args)
-        _force = 'force' in _args_set
-        _source_filter = _args_set - {'force'}
-
-        _repo = self.config.dir_repo
-        try:
-            _files = sorted(
-                _f for _f in os.listdir(_repo)
-                if _f.endswith('.deb') or _f.endswith('.udeb')
+        _corpus = self._resolve_install_corpus()
+        if _corpus is None:
+            console.print(
+                "Note: dep_tree not built — falling back to repo/main-"
+                "wide dep gate.  Run `dep parse` first to scope to "
+                "[pkg+installer+live+pool]."
             )
-        except OSError as e:
-            console.print(f"ERROR: cannot list {_repo}: {e}")
-            return
-        if not _files:
-            console.print(f"{_repo} has no .deb/.udeb files — nothing to do")
+        _unresolved, _weak = repo_audit.audit_dep_closure(
+            _state, consumer_set=_corpus,
+        )
+
+        # Drill-in mode short-circuits the overview/cohort sections.
+        if _drill_target:
+            self._audit_gap_drill_in(_state, _unresolved, _drill_target)
             return
 
-        # Pre-scan to count work, skip the ones already bumped.
-        _tag = f'+{_suffix}'
-        _todo = []
-        _already = 0
-        for _f in _files:
-            _name, _ = os.path.splitext(_f)
-            _parts = _name.split('_')
-            if len(_parts) != 3:
-                continue
-            if _parts[1].endswith(_tag):
-                _already += 1
+        _live = self._resolve_live_cohort()
+        _installer = self._resolve_installer_cohort()
+
+        _scope = (
+            f"install corpus [pkg+installer+live+pool] ({len(_corpus)} pkgs)"
+            if _corpus is not None
+            else f"whole repo ({len(_state.packages)} pkgs)"
+        )
+        console.print(
+            f"\n=== DEP GATE (consumers = {_scope}; "
+            f"resolution = whole repo) ==="
+        )
+        console.print(
+            f"  UNRESOLVED Depends/Pre-Depends: {len(_unresolved)}"
+            + (f"\n  WEAK (Recommends unresolved):   {len(_weak)}"
+               if _strict else '')
+        )
+        self._report_unresolved(_unresolved, _weak, _state,
+                                verbose=_verbose, strict=_strict)
+
+        if _live is None:
+            console.print(
+                "\n=== LIVE CONFLICTS ===\n  skipped — dep_tree not built; "
+                "run `dep parse` first"
+            )
+        else:
+            _live_conflicts = _dedupe_bidirectional_conflicts(
+                repo_audit.audit_conflict_cohort(_state, _live)
+            )
+            console.print(
+                f"\n=== LIVE CONFLICTS (cohort = "
+                f"{len(_live)} pkgs in live chroot) ===\n"
+                f"  CONFLICTS: {len(_live_conflicts)}"
+            )
+            self._report_conflicts(_live_conflicts, verbose=_verbose)
+
+        if _installer is None:
+            console.print(
+                "\n=== INSTALLER CONFLICTS ===\n  skipped — udeb_dep_tree "
+                "not built; run `dep parse` first"
+            )
+        else:
+            _inst_conflicts = _dedupe_bidirectional_conflicts(
+                repo_audit.audit_conflict_cohort(_state, _installer)
+            )
+            console.print(
+                f"\n=== INSTALLER CONFLICTS (cohort = "
+                f"{len(_installer)} udebs in d-i ramdisk) ===\n"
+                f"  CONFLICTS: {len(_inst_conflicts)}"
+            )
+            self._report_conflicts(_inst_conflicts, verbose=_verbose)
+
+    def _report_unresolved(self, unresolved, weak, state, *,
+                            verbose: bool, strict: bool):
+        """Detailed report for the dep gate.  Includes gap classification
+        when dep_tree + cache are available (formerly `audit_gap`)."""
+        _show = len(unresolved) if verbose else min(30, len(unresolved))
+        if _show:
+            console.print(f"  First {_show} UNRESOLVED:")
+            for _pkg, _field, _rel, _why in unresolved[:_show]:
+                console.print(f"    {_pkg}  {_field}: {_rel}  — {_why}")
+        if strict:
+            _show = len(weak) if verbose else min(30, len(weak))
+            if _show:
+                console.print(f"  First {_show} WEAK Recommends:")
+                for _pkg, _field, _rel in weak[:_show]:
+                    console.print(f"    {_pkg}  {_field}: {_rel}")
+
+        if not unresolved:
+            return
+
+        # Classify each missing target via gap analysis (formerly the
+        # standalone `audit_gap` command).  Requires dep_tree + cache;
+        # falls back to the simple grouped-by-target tally otherwise.
+        if (self.dep_tree and self.dep_tree.selected_pkgs
+                and self.cache and getattr(self.cache, 'package_hashtable', None)):
+            self._report_gap_classification(unresolved, state, verbose=verbose)
+        elif not verbose:
+            from collections import Counter
+            _missing = Counter()
+            for _pkg, _field, _rel, _why in unresolved:
+                _first = _rel.split(' ', 1)[0].split(':', 1)[0]
+                if _first:
+                    _missing[_first] += 1
+            console.print(
+                f"  Unresolved grouped by missing target "
+                f"({len(_missing)} distinct):"
+            )
+            for _target, _count in _missing.most_common(20):
+                console.print(f"    {_count:5d}  → {_target}")
+
+    def _report_conflicts(self, conflicts, *, verbose: bool):
+        """Detailed report for a conflict-cohort result."""
+        _show = len(conflicts) if verbose else min(30, len(conflicts))
+        if _show:
+            console.print(f"  First {_show}:")
+            for _pkg, _field, _other, _rel in conflicts[:_show]:
+                console.print(
+                    f"    {_pkg}  {_field}: {_rel}  → {_other}"
+                )
+
+    def _report_gap_classification(self, unresolved, state, *,
+                                     verbose: bool) -> None:
+        """Classify each missing target into one of four buckets:
+          build_failed     — in dep_tree, not in repo/main (source
+                             build dropped it or skipped)
+          missed_by_parse  — known to upstream cache (real or virtual)
+                             but NOT in dep_tree (parse didn't reach it)
+          transitional     — not in upstream cache (renamed/removed)
+          other            — in both dep_tree AND repo, but constraint
+                             didn't satisfy (version skew)
+
+        cache.package_hashtable folds real pkgs and Provides under one
+        namespace (see cache.py:520-525), so a single membership check
+        covers both.  Repo virtual coverage uses state.provides_index.
+        """
+        _in_dep_tree = set(self.dep_tree.selected_pkgs.keys())
+        _in_repo = set(state.packages.keys())
+        _in_repo_virtual = set(state.provides_index.keys())
+        _in_repo_either = _in_repo | _in_repo_virtual
+        _in_upstream = set(self.cache.package_hashtable.keys())
+
+        _consumers_by_target: 'dict[str, list]' = {}
+        for _consumer, _field, _rel_str, _why in unresolved:
+            _first = _rel_str.split(' ', 1)[0].split(':', 1)[0]
+            if _first:
+                _consumers_by_target.setdefault(_first, []).append(_consumer)
+
+        _build_failed: 'list[str]' = []
+        _missed_by_parse: 'list[str]' = []
+        _transitional: 'list[str]' = []
+        _other: 'list[str]' = []
+
+        for _target in _consumers_by_target.keys():
+            _in_dt = _target in _in_dep_tree
+            _in_r = _target in _in_repo_either
+            _in_up = _target in _in_upstream
+            if _in_r and _in_dt:
+                _other.append(_target)
+            elif _in_dt and not _in_r:
+                _build_failed.append(_target)
+            elif _in_up and not _in_dt:
+                _missed_by_parse.append(_target)
+            elif not _in_up:
+                _transitional.append(_target)
             else:
-                _todo.append(_f)
+                _other.append(_target)
 
-        # Filter by Source: field if names were passed.  Reads each
-        # .deb's control area via python-debian (no full data unpack).
-        # On a fresh 5000-file rebump this is ~5s overhead — acceptable
-        # for the targeted-bump use case.
-        if _source_filter and _todo:
-            from debian.debfile import DebFile
-            _filtered = []
-            _bar = ProgressBar(
-                label='Scan Source fields', itr_label='pkgs',
-                maxvalue=len(_todo),
-            )
-            for _f in _todo:
-                _bar.step(1)
-                try:
-                    with DebFile(os.path.join(_repo, _f)) as _deb:
-                        _src_field = _deb.control.debcontrol().get('Source', '')
-                except Exception:
-                    continue
-                # Source: field may include version in parens, e.g.
-                # "linux-signed-amd64 (6.1.172+1+thor1)" — strip to bare name.
-                _src_name = _src_field.split(' ', 1)[0].strip()
-                # If no Source: field, fall back to Package: name (single-
-                # binary sources omit Source when Package == Source).
-                if not _src_name:
-                    _src_name = _f.split('_', 1)[0]
-                if _src_name in _source_filter:
-                    _filtered.append(_f)
-            _bar.close()
-            _todo = _filtered
+        def _ref_count(lst):
+            return sum(len(_consumers_by_target[_t]) for _t in lst)
 
         console.print(
-            f"Found {len(_files)} package(s) in {_repo}: "
-            f"{len(_todo)} to bump (+{_suffix}), {_already} already bumped"
-            + (f" (filter: {sorted(_source_filter)})" if _source_filter else "")
-            + "."
+            f"\nGap classification: {len(_consumers_by_target)} distinct "
+            f"missing targets across {len(unresolved)} unresolved refs."
         )
-        if not _todo:
+        console.print(
+            f"  build_failed    : {len(_build_failed):4d} targets "
+            f"({_ref_count(_build_failed)} refs) — in dep_tree, not in repo"
+        )
+        console.print(
+            f"  missed_by_parse : {len(_missed_by_parse):4d} targets "
+            f"({_ref_count(_missed_by_parse)} refs) — in upstream, not in dep_tree"
+        )
+        console.print(
+            f"  transitional    : {len(_transitional):4d} targets "
+            f"({_ref_count(_transitional)} refs) — not in upstream cache"
+        )
+        console.print(
+            f"  other           : {len(_other):4d} targets "
+            f"({_ref_count(_other)} refs) — likely version-skew"
+        )
+
+        def _show_category(name: str, targets: list, n: int = 30):
+            if not targets:
+                return
+            _ranked = sorted(
+                targets,
+                key=lambda t: (-len(_consumers_by_target[t]), t),
+            )
+            _limit = len(_ranked) if verbose else min(n, len(_ranked))
+            console.print(f"\n== {name} (top {_limit} by ref count) ==")
+            for _t in _ranked[:_limit]:
+                _consumers = _consumers_by_target[_t]
+                _sample = ', '.join(sorted(set(_consumers))[:3])
+                if len(set(_consumers)) > 3:
+                    _sample += f', … (+{len(set(_consumers)) - 3})'
+                console.print(
+                    f"  {len(_consumers):4d}× {_t:42s} ← {_sample}"
+                )
+
+        _show_category('build_failed', _build_failed)
+        _show_category('missed_by_parse', _missed_by_parse)
+        _show_category('transitional', _transitional)
+        _show_category('other (likely version skew)', _other)
+
+        console.print(
+            "\nNext steps by category:\n"
+            "  build_failed     → check log/build/<name>.result; rebuild\n"
+            "  missed_by_parse  → add target to pkg.list / live.list / pool.list\n"
+            "  transitional     → update consumer pkg (upstream dropped target)\n"
+            "  other            → `package audit_nmu` first; then drill in"
+            " with `package audit <target>`"
+        )
+
+    def _audit_gap_drill_in(self, state, unresolved, target: str) -> None:
+        """Per-target diagnostic for `package audit_gap <name>`.
+
+        Surfaces enough state to root-cause why `<name>` is unresolved:
+          - in upstream cache?  (with versions if so)
+          - in our dep_tree.selected_pkgs?
+          - in our repo state? (with version)
+          - virtually provided in repo? (with provider + version)
+          - which consumers reference it (with exact constraint)
+        """
+        console.print(f"\n=== Gap drill-in: {target} ===")
+
+        # Upstream cache state
+        _up_versions = sorted(
+            self.cache.package_hashtable.get(target, {}).keys(),
+            key=lambda v: str(v),
+        )
+        if _up_versions:
+            _samples = ', '.join(str(v) for v in _up_versions[:5])
+            _suffix = f' (+{len(_up_versions) - 5} more)' if len(_up_versions) > 5 else ''
+            console.print(
+                f"  upstream cache : YES — versions: {_samples}{_suffix}"
+            )
+        else:
+            console.print("  upstream cache : NO — name not in cache")
+
+        # dep_tree state
+        _dt_pkg = self.dep_tree.selected_pkgs.get(target)
+        if _dt_pkg is not None:
+            _dt_canon = _dt_pkg.get('Package', target)
+            console.print(
+                f"  dep_tree       : YES — canonical name "
+                f"{_dt_canon!r}, Version "
+                f"{_dt_pkg.get('Version', '<none>')!r}"
+            )
+        else:
+            console.print("  dep_tree       : NO")
+
+        # Repo state — real
+        _repo_entry = state.packages.get(target)
+        if _repo_entry is not None:
+            console.print(
+                f"  repo (real)    : YES at version "
+                f"{_repo_entry.get('Version', '<none>')!r}"
+            )
+        else:
+            console.print("  repo (real)    : NO")
+
+        # Repo state — virtual via Provides
+        _providers = state.provides_index.get(target, [])
+        if _providers:
+            console.print("  repo (virtual) : YES — provided by:")
+            for _p, _ver in _providers[:5]:
+                _provider_repo_ver = (
+                    state.packages.get(_p, {}).get('Version', '<missing>')
+                )
+                console.print(
+                    f"    {_p:35s} Provides {target}"
+                    f"{(' (= ' + _ver + ')') if _ver else ' (unversioned)'}"
+                    f"  [provider at {_provider_repo_ver}]"
+                )
+            if len(_providers) > 5:
+                console.print(f"    … +{len(_providers) - 5} more")
+        else:
+            console.print("  repo (virtual) : no providers")
+
+        # Consumer constraints
+        _consumers = [
+            (c, f, r) for (c, f, r, _) in unresolved
+            if r.split(' ', 1)[0].split(':', 1)[0] == target
+        ]
+        if _consumers:
+            console.print(
+                f"  consumers      : {len(_consumers)} unresolved ref(s):"
+            )
+            _show = min(15, len(_consumers))
+            for _c, _f, _r in _consumers[:_show]:
+                console.print(f"    {_c:30s} {_f}: {_r}")
+            if len(_consumers) > _show:
+                console.print(f"    … +{len(_consumers) - _show} more")
+        else:
+            console.print(
+                f"  consumers      : (none) — `{target}` is not in any "
+                f"unresolved dep; either drill-in is for the wrong name "
+                f"or audit hasn't surfaced it"
+            )
+
+    def cmd_audit_nmu(self, *args):
+        """Walk repo/ for residual NMU/binNMU/backport suffixes.
+
+        After enabling post-build strip in BuildContainer, fresh builds
+        enter repo/ already normalised (Version + every dep constraint
+        at pristine source version).  This command verifies that:
+          - Every .deb/.udeb's own Version field is stripped
+          - Every version constraint in Depends/Pre-Depends/Recommends/
+            Suggests/Enhances/Provides/Conflicts/Breaks/Replaces is
+            stripped
+
+        Anything reported here means a .deb in repo/ slipped the
+        normaliser (manually staged, ingested without going through
+        BuildContainer.build, OR a regression in the post-build hook).
+
+        Usage: package audit_nmu [verbose] [refresh]
+        """
+        _verbose = 'verbose' in args
+        _refresh = 'refresh' in args
+        _state = repo_audit.scan_repo_state(self.config, refresh=_refresh)
+        if _state is None:
             return
+        if not _state.packages:
+            console.print("repo/ has no .deb/.udeb files — nothing to audit")
+            return
+        _findings = repo_audit.audit_nmu_residue(_state)
+        if not _findings:
+            console.print(
+                f"NMU audit OK: {len(_state.packages)} pkgs scanned, "
+                f"no residue."
+            )
+            return
+        # Group by field for a quick top-line, then list.
+        from collections import Counter
+        _by_field = Counter(f[1] for f in _findings)
+        console.print(
+            f"NMU audit: {len(_findings)} residue(s) across "
+            f"{len(set(f[0] for f in _findings))} pkg(s).\n"
+            f"  Broken down by field: " +
+            ', '.join(f'{_k}={_v}' for _k, _v in _by_field.most_common())
+        )
+        _show = len(_findings) if _verbose else min(30, len(_findings))
+        for _pkg, _field, _raw, _why in _findings[:_show]:
+            console.print(f"  {_pkg}  {_field}: {_raw}")
+        if not _verbose and len(_findings) > _show:
+            console.print(
+                f"  … and {len(_findings) - _show} more "
+                f"(run `package audit_nmu verbose` for full list)"
+            )
+        console.print(
+            "Fix: `package strip` re-applies the strip to every "
+            "non-conforming .deb in repo/."
+        )
+
+    def cmd_strip_repo(self, *args):
+        """One-time backfill: strip NMU suffix from every .deb/.udeb
+        in repo/.
+
+        Future fresh builds get stripped automatically by BuildContainer
+        post-build; this command exists for the existing corpus and
+        for any .deb that arrived in repo/ via a path that bypasses
+        BuildContainer (manual copy, ingestion, etc.).
+
+        Usage: package strip [force]
+          force — skip the PROMPT_YESNO confirmation
+        """
+        _force = 'force' in args
+        # Post-segregation: .debs live in repo/main / repo/doc / repo/
+        # dbgsym / repo/tests.  Walk all four so strip catches every
+        # tier (especially doc + main where most ~debNuN-leaky files
+        # ended up before the regex got the ~debNuN pattern added).
+        _repo = self.config.dir_repo
+        _files: 'list[str]' = []
+        for _sub in utils._REPO_SUBDIRS:
+            _sub_dir = os.path.join(_repo, _sub)
+            try:
+                for _f in os.listdir(_sub_dir):
+                    if _f.endswith('.deb') or _f.endswith('.udeb'):
+                        _files.append(os.path.join(_sub, _f))
+            except OSError:
+                continue
+        _files.sort()
+        if not _files:
+            console.print(
+                f"{_repo} (subdirs main/doc/dbgsym/tests) has no "
+                f".deb/.udeb files — nothing to do"
+            )
+            return
+        console.print(
+            f"Found {len(_files)} package(s) under {_repo}/<subdir>.  "
+            f"Strip walks each, rewriting only those with NMU residue."
+        )
         if not _force:
             _resp = Prompt(
                 PROMPT_YESNO,
-                f"Rewrite {len(_todo)} package(s) in {_repo} with "
-                f"+{_suffix} suffix? This is irreversible without rebuild.",
+                f"Strip NMU suffix from {len(_files)} .deb(s)?  "
+                f"Repacks each affected file.",
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 console.print("Aborted")
                 return
 
-        _ok = _failed = 0
+        _rewritten = _unchanged = _failed = 0
+        _total_strips = 0
         _bar = ProgressBar(
-            label='Rebump', itr_label='pkgs', maxvalue=len(_todo),
+            label='Strip NMU', itr_label='pkgs', maxvalue=len(_files),
         )
-        for _f in _todo:
+        for _f in _files:
             _bar.step(1)
-            _full = os.path.join(_repo, _f)
+            _path = os.path.join(_repo, _f)
             try:
-                _new = utils.rebump_deb_file(_full, _suffix)
-                if _new != _f:
-                    logger.info(f"rebump: {_f} → {_new}")
-                    _ok += 1
+                _r = utils.strip_nmu_from_deb(_path)
+                if _r['status'] == 'rewritten':
+                    _rewritten += 1
+                    _total_strips += _r['strips_count']
+                    if _r['new_path'] != _path:
+                        logger.info(
+                            f"strip_nmu: {_f} → "
+                            f"{os.path.basename(_r['new_path'])}"
+                        )
+                elif _r['status'] == 'unchanged':
+                    _unchanged += 1
                 else:
-                    logger.warning(
-                        f"rebump: {_f} returned unchanged (malformed?)"
-                    )
                     _failed += 1
             except Exception as e:
-                logger.error(f"rebump: {_f} failed: {e}")
+                logger.error(f"strip_nmu: {_f} failed: {e}")
                 _failed += 1
                 console.print(f"FAIL: {_f} — {e}")
         _bar.close()
 
+        # Filenames + Versions just shifted; the cached Packages
+        # snapshot in dir_temp is now stale.
+        repo_audit.invalidate_cache(self.config.dir_repo)
+
         console.print(
-            f"Rebump complete: {_ok} succeeded, {_failed} failed, "
-            f"{_already} already bumped.  Next: `dep parse force` to "
-            f"refresh Source.pkgs with the new filenames."
+            f"Strip complete: {_rewritten} rewritten, "
+            f"{_unchanged} unchanged, {_failed} failed.  "
+            f"{_total_strips} suffix(es) stripped in total.  "
+            f"Run `package audit_nmu` to confirm zero residue."
         )
 
     def cmd_reload_fork(self, *pkgs):
@@ -2031,6 +2562,14 @@ class BuildSession:
         if not self._ensure_signing_key_verified():
             return
 
+        # Pre-flight closure audit — scoped to the live selection so
+        # alternatives in the flat repo (busybox vs busybox-static,
+        # grub-pc vs grub-efi) don't surface as false-positive conflicts.
+        # Fast path (cached Packages snapshot) when repo/ unchanged.
+        if not self._preflight_audit_repo():
+            console.print("Aborted by repo audit pre-flight")
+            return
+
         _debug = 'with_debug' in args
         if _debug:
             console.print("Debug mode: journald will forward to ttyS0 in built chroot")
@@ -2109,6 +2648,14 @@ class BuildSession:
             )
             return
 
+        # Pre-flight closure audit — scoped to the installer (udeb)
+        # selection.  Installer chroot uses dpkg --unpack (no apt),
+        # so unmet deps don't fail until the installer runs on the
+        # target — catch them here.
+        if not self._preflight_audit_repo():
+            console.print("Aborted by repo audit pre-flight")
+            return
+
         self.flags.chroot_installer_ready = False  # reset before work
 
         # Sudo password — same pattern as cmd_build_chroot_live's BuildSystem.
@@ -2135,7 +2682,6 @@ class BuildSession:
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
                 codename=_codename,
-                distro_suffix=self.config.distro_suffix,
             )
             if not _ok:
                 console.print(
@@ -2448,7 +2994,7 @@ class BuildSession:
 
             _ok = iso_installer.build_installer_iso(
                 dir_chroot_installer=self.config.dir_chroot_installer,
-                dir_repo=self.config.dir_repo,
+                dir_repo=self.config.dir_repo_main,
                 dir_image=self.config.dir_image,
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
@@ -2855,6 +3401,103 @@ class BuildSession:
             console.print(f"Restored ({len(_repaired)}):")
             for _n in _repaired:
                 console.print(f"  {_n}")
+
+    def cmd_source_audit(self, *args):
+        """Walk dep_tree.selected_srcs; for each source, check whether
+        its main-tier binaries are present in repo/main at the right
+        filename.  Reports sources that still need building.
+
+        Categories per source:
+          missing    — at least one main binary not in repo/main
+          mismatched — file exists but is not a valid ar archive
+                       (broken from a partial build / disk issue)
+          ok         — all main binaries present + readable
+
+        -dev / -doc / -dbgsym / -tests binaries are NOT checked here —
+        they're side artifacts and shouldn't gate the rebuild decision
+        (matches BuildContainer.check_build semantics).
+
+        Usage: source audit [verbose]
+
+        Prerequisite: cache + dep parse must have run.
+
+        Companion to `source rescan`: rescan uses BuildContainer's
+        check_build per-source (gated by ar-validity); this command
+        gives the operator a top-level view of "how much rebuilding
+        remains" without driving any state.
+        """
+        _verbose = 'verbose' in args
+        if not (self.dep_tree and self.dep_tree.selected_srcs):
+            console.print(
+                "source audit requires dep_tree.selected_srcs — run "
+                "`dep parse` first."
+            )
+            return
+
+        _main = os.path.join(self.config.dir_repo, 'main')
+        _missing_srcs: 'list[tuple]' = []  # (src, missing_files)
+        _mismatch_srcs: 'list[tuple]' = []  # (src, bad_files)
+        _ok = 0
+
+        from buildcontainer import BuildContainer
+        for _src_name, _src in self.dep_tree.selected_srcs.items():
+            _expected_main = [
+                _f for _f in (_src.pkgs or [])
+                if utils.classify_repo_subdir(_f) == 'main'
+            ]
+            if not _expected_main:
+                # Source produces only -dev/-doc/-dbgsym/-tests — no
+                # main artifact to gate on.  Trust as OK.
+                _ok += 1
+                continue
+            _missing: 'list[str]' = []
+            _mismatch: 'list[str]' = []
+            for _f in _expected_main:
+                _p = os.path.join(_main, _f)
+                if not os.path.isfile(_p):
+                    _missing.append(_f)
+                    continue
+                if not BuildContainer.is_ar_file(_p):
+                    _mismatch.append(_f)
+            if _missing:
+                _missing_srcs.append((_src_name, _missing))
+            elif _mismatch:
+                _mismatch_srcs.append((_src_name, _mismatch))
+            else:
+                _ok += 1
+
+        console.print(
+            f"\n=== Source audit (repo/main scope) ===\n"
+            f"  ok         : {_ok} sources\n"
+            f"  missing    : {len(_missing_srcs)} sources "
+            f"(main binary not in repo/main)\n"
+            f"  mismatched : {len(_mismatch_srcs)} sources "
+            f"(file exists but not a valid ar archive)"
+        )
+        _show = len(_missing_srcs) if _verbose else min(30, len(_missing_srcs))
+        if _show:
+            console.print(f"\nFirst {_show} missing sources:")
+            for _src_name, _files in _missing_srcs[:_show]:
+                _sample = ', '.join(_files[:3])
+                if len(_files) > 3:
+                    _sample += f', … (+{len(_files) - 3})'
+                console.print(f"  {_src_name:30s} → {_sample}")
+        _show = (
+            len(_mismatch_srcs) if _verbose
+            else min(30, len(_mismatch_srcs))
+        )
+        if _show:
+            console.print(f"\nFirst {_show} mismatched sources:")
+            for _src_name, _files in _mismatch_srcs[:_show]:
+                _sample = ', '.join(_files[:3])
+                if len(_files) > 3:
+                    _sample += f', … (+{len(_files) - 3})'
+                console.print(f"  {_src_name:30s} → {_sample}")
+
+        if _missing_srcs or _mismatch_srcs:
+            console.print(
+                "\nNext: `source build` to rebuild missing/mismatched."
+            )
 
     def cmd_source_verify(self, *args):
         """Opt-in deep audit: report .debs whose internal Version
@@ -3455,6 +4098,9 @@ class BuildSession:
                         '(recovers from accidental .result deletion)',
             'verify':   'opt-in deep audit: report .debs whose internal Version mismatches the '
                         'filename or whose Depends no longer resolve in cache (source verify [verbose])',
+            'audit':    'walk dep_tree.selected_srcs; report sources whose main '
+                        'binaries are missing from repo/main or whose versions '
+                        'mismatch.  Tells you which sources still need building.',
         }
         if action == 'download':
             return self.cmd_source_download(*args)
@@ -3466,22 +4112,38 @@ class BuildSession:
             return self.cmd_source_repair(*args)
         if action == 'verify':
             return self.cmd_source_verify(*args)
+        if action == 'audit':
+            return self.cmd_source_audit(*args)
         return self._group_help('source', _table, action)
 
     def cmd_package(self, action: str = '', *args):
         _table = {
             'tunnel': 'pull prebuilt .debs from Debian repo (package tunnel [pkg…])',
-            'rebump': 're-stamp every .deb/.udeb in repo/ with +<DistroSuffix> '
+            'rebump': 're-stamp every NMU-layered .deb/.udeb in repo/ with '
+                      '+<DistroSuffix>, then close strict-equal refs '
                       '(one-time backfill; avoids 24-36h source rebuild)',
             'reload': 'rebuild a fork pkg after a local edit, without the '
                       'full cache + dep cycle (package reload <pkg>...)',
+            'audit':      'dep + conflict audit (repo/main) + gap '
+                          'classification.  Pass a target name to drill '
+                          'in: `package audit lsb-base`.',
+            'audit_nmu':  'walk repo/ for any .deb whose Version or dep '
+                          'constraints still carry an NMU/binNMU/backport '
+                          'suffix (+bN, +debNuN, ~bpoN+N, etc.)',
+            'strip':      'one-time backfill: strip NMU suffixes from every '
+                          '.deb/.udeb in repo/.  Future fresh builds get '
+                          'stripped automatically post-dpkg-buildpackage.',
         }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
-        if action == 'rebump':
-            return self.cmd_rebump_packages(*args)
         if action == 'reload':
             return self.cmd_reload_fork(*args)
+        if action == 'audit':
+            return self.cmd_audit(*args)
+        if action == 'audit_nmu':
+            return self.cmd_audit_nmu(*args)
+        if action == 'strip':
+            return self.cmd_strip_repo(*args)
         return self._group_help('package', _table, action)
 
     def cmd_container(self, action: str = '', *args):

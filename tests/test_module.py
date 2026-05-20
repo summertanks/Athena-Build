@@ -1119,86 +1119,6 @@ def test_production_build_conf_has_noautodbgsym_in_build_options():
     assert 'nocheck' in _opts, _opts_raw
 
 
-def test_buildconfig_parses_distro_suffix():
-    """`[Source] DistroSuffix` lands on `cfg.distro_suffix` as a stripped
-    string.  Used by BuildContainer (changelog prepend) and
-    DependencyTree (filename prediction); both ends MUST agree."""
-    mirror_block = """
-    [Mirror.main]
-    Suffix =
-    Component = main
-    """
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
-        cfg = _build_config_from(tmp, cfg_path)
-        if not cfg.is_valid:
-            print(f"SKIP test_buildconfig_parses_distro_suffix ({cfg.error_str})")
-            return
-        assert cfg.distro_suffix == 'thor1', cfg.distro_suffix
-
-
-def test_buildconfig_distro_suffix_defaults_to_empty():
-    """Omitted DistroSuffix → empty string (legacy behaviour, no version
-    bump).  Confirms the field is optional."""
-    mirror_block = """
-    [Mirror.main]
-    Suffix =
-    Component = main
-    """
-    body = _BASE_CONF_BODY.replace(
-        'DistroSuffix = thor1\n', '',
-    )
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
-        cfg = _build_config_from(tmp, cfg_path)
-        if not cfg.is_valid:
-            print(f"SKIP test_buildconfig_distro_suffix_defaults_to_empty ({cfg.error_str})")
-            return
-        assert cfg.distro_suffix == '', cfg.distro_suffix
-
-
-def test_buildconfig_parses_no_bump_sources():
-    """`[Source] NoBumpSources` lands on `cfg.no_bump_sources` as a
-    frozenset.  CONF-13: kernel sources must be on this list so the
-    +<DistroSuffix> changelog bump skips them (their ABI counter
-    would otherwise produce binaries the cache predictor doesn't
-    know about)."""
-    mirror_block = """
-    [Mirror.main]
-    Suffix =
-    Component = main
-    """
-    body = _BASE_CONF_BODY.replace(
-        'DistroSuffix = thor1\n',
-        'DistroSuffix = thor1\n    NoBumpSources = linux, linux-signed-amd64\n',
-    )
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
-        cfg = _build_config_from(tmp, cfg_path)
-        if not cfg.is_valid:
-            print(f"SKIP test_buildconfig_parses_no_bump_sources ({cfg.error_str})")
-            return
-        assert isinstance(cfg.no_bump_sources, frozenset), type(cfg.no_bump_sources)
-        assert cfg.no_bump_sources == frozenset({'linux', 'linux-signed-amd64'}), \
-            cfg.no_bump_sources
-
-
-def test_buildconfig_no_bump_sources_defaults_to_empty():
-    """Omitted NoBumpSources → empty frozenset.  Field is optional."""
-    mirror_block = """
-    [Mirror.main]
-    Suffix =
-    Component = main
-    """
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
-        cfg = _build_config_from(tmp, cfg_path)
-        if not cfg.is_valid:
-            print(f"SKIP test_buildconfig_no_bump_sources_defaults_to_empty ({cfg.error_str})")
-            return
-        assert cfg.no_bump_sources == frozenset(), cfg.no_bump_sources
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # DEP-3 header check
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2630,8 +2550,11 @@ def test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix():
     from installer_chroot import _resolve_udeb_files
 
     with tempfile.TemporaryDirectory() as _repo:
+        # Post-segregation layout: installable .udebs live in repo/main/
+        _main = os.path.join(_repo, 'main')
+        os.makedirs(_main, exist_ok=True)
         # File on disk: binNMU stripped (this is what dpkg-buildpackage emits)
-        _fake_path = os.path.join(_repo, 'busybox-udeb_1.35.0-4_amd64.udeb')
+        _fake_path = os.path.join(_main, 'busybox-udeb_1.35.0-4_amd64.udeb')
         with open(_fake_path, 'wb') as fh:
             fh.write(b'')
         # Package record: binNMU preserved (this is what Packages index has)
@@ -2891,32 +2814,6 @@ def test_buildcontainer_injects_athena_codename_env():
         "self.codename not initialised from config.build_codename"
 
 
-def test_buildcontainer_emits_changelog_bump_when_distro_suffix_set():
-    """When BuildContainer.distro_suffix is non-empty, the assembled
-    cmd_str must include the changelog-prepend snippet that bumps the
-    version to `<src-ver>+<suffix>` before dpkg-buildpackage runs.  The
-    pipeline is failure-prone if half-implemented: prepend without
-    filename-suffix wiring → check_build can't find the built .deb.
-    Pin the wiring so a refactor doesn't silently drop the prepend.
-
-    Also pins the `-b` (binary-only) dpkg-buildpackage flag — required
-    because our changelog prepend produces a version that doesn't match
-    the .dsc, so a source-rebuild step would fail."""
-    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    assert 'dpkg-parsechangelog -SVersion' in _body, (
-        "changelog bump snippet missing — distro_suffix wiring incomplete")
-    assert '${{SRC_VER}}+{_suffix}' in _body or \
-           '"${SRC_VER}+' in _body, (
-        "changelog bump must compose new version as <src-ver>+<suffix>")
-    assert ' -b -us -uc -nc' in _body, (
-        "dpkg-buildpackage must use -b (binary-only) — required when "
-        "changelog bump produces a version that doesn't match the .dsc")
-    assert 'self.distro_suffix = config.distro_suffix' in _body, (
-        "BuildContainer.distro_suffix not initialised from config")
-
-
 def test_buildcontainer_emits_token_substitution_snippet():
     """BuildContainer.build assembles a cmd_str that substitutes
     @DISTRIBUTION@, @BASE_ID@, @CODENAME@ in fork content (debian/
@@ -3038,34 +2935,6 @@ def test_buildcontainer_token_subst_grep_rescue_or_true():
         "upstream pkgs (with no @TOKENS@) will crash the build at the "
         "token-substitution step because grep -l exits 1 on no matches "
         "and pipefail surfaces it under set -e")
-
-
-def test_buildcontainer_skips_changelog_bump_for_no_bump_sources():
-    """CONF-13: when src_pkg.package is in BuildContainer.no_bump_sources,
-    the _changelog_bump snippet must NOT be emitted.  Kernel sources
-    (linux, linux-signed-amd64) would otherwise have their ABI counter
-    walked past Debian's value by our prepend, producing binary names
-    the cache doesn't predict.
-
-    Code-inspection test: pin that the if-condition gates BOTH on
-    `self.distro_suffix` AND on `src_pkg.package not in self.no_bump_sources`."""
-    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    import re
-    # Match the if-condition that guards _changelog_bump.  Both terms
-    # must appear in the same condition; tolerant to whitespace.
-    _m = re.search(
-        r'if\s+self\.distro_suffix\s+and\s+src_pkg\.package\s+not\s+in\s+self\.no_bump_sources\s*:',
-        _body,
-    )
-    assert _m, (
-        "BuildContainer.build's _changelog_bump guard must check BOTH "
-        "self.distro_suffix AND `src_pkg.package not in self.no_bump_sources` — "
-        "kernel sources need to skip the bump even when DistroSuffix is set")
-    # Also pin: BuildContainer init reads config.no_bump_sources
-    assert 'self.no_bump_sources = config.no_bump_sources' in _body, (
-        "BuildContainer.no_bump_sources not initialised from config")
 
 
 def test_find_kernel_prefers_expected_kernel_pkg_match():
@@ -4715,96 +4584,287 @@ def test_strip_build_version_rejects_malformed_filename():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# apply_distro_suffix — append `+<suffix>` to bumped binaries
+# strip_nmu_suffix + strip_nmu_from_control_text + strip_nmu_from_deb
+# — normalise NMU/binNMU/backport suffixes off Debian version strings
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_apply_distro_suffix_appends_to_stripped_filename():
-    """The canonical path: strip_build_version produces
-    `foo_1.0-2_amd64.deb`, apply_distro_suffix bumps it to
-    `foo_1.0-2+thor1_amd64.deb` — what BuildContainer's changelog
-    prepend produces from a source build."""
-    from utils import apply_distro_suffix
-    assert (apply_distro_suffix('foo_1.0-2_amd64.deb', 'thor1')
-            == 'foo_1.0-2+thor1_amd64.deb')
-    assert (apply_distro_suffix('foo_1.0-2_amd64.udeb', 'thor1')
-            == 'foo_1.0-2+thor1_amd64.udeb')
+def test_classify_repo_subdir_routes_dev_to_main():
+    """`-dev` packages live in repo/main alongside main binaries (not in
+    a separate repo/dev subdir).  Reason: install-corpus packages
+    hard-depend on them at runtime — build-essential Depends libc6-dev,
+    gcc-12 Depends libgcc-12-dev, g++-12 Depends libstdc++-12-dev.
+    Without -dev in main, those hard deps go unresolved at install.
 
-
-def test_apply_distro_suffix_empty_is_noop():
-    """Empty suffix → legacy behaviour, filename unchanged.  Lets
-    operators turn the feature off via blank DistroSuffix config."""
-    from utils import apply_distro_suffix
-    assert (apply_distro_suffix('foo_1.0-2_amd64.deb', '')
-            == 'foo_1.0-2_amd64.deb')
-
-
-def test_apply_distro_suffix_idempotent_on_already_suffixed():
-    """Calling apply_distro_suffix on a filename that already ends
-    with `+<suffix>` returns it unchanged.  Guards against double-
-    suffixing if the function is composed with itself or applied
-    to a filename that's already been through the pipeline."""
-    from utils import apply_distro_suffix
-    assert (apply_distro_suffix('foo_1.0-2+thor1_amd64.deb', 'thor1')
-            == 'foo_1.0-2+thor1_amd64.deb')
-
-
-def test_apply_distro_suffix_preserves_deb12u1_security_suffix():
-    """Security/point-release suffixes like `+deb12u1` stay intact —
-    apply_distro_suffix appends, doesn't replace.  Real example:
-    `openssh-client_1:9.2p1-2+deb12u9_amd64.deb` becomes
-    `openssh-client_1:9.2p1-2+deb12u9+thor1_amd64.deb`."""
-    from utils import apply_distro_suffix
-    assert (apply_distro_suffix('foo_1.0-2+deb12u1_amd64.deb', 'thor1')
-            == 'foo_1.0-2+deb12u1+thor1_amd64.deb')
-
-
-def test_apply_distro_suffix_beats_debian_bin_nmu_constraint():
-    """Architectural invariant — our distro_suffix MUST produce a
-    binary version that beats EVERY upstream bin-NMU version, so any
-    downstream consumer whose Depends was stamped against a Debian
-    bin-NMU (`(>= 0.15.5-2b)`, `(>= 0.15.5-2+b1)`, ...) is satisfied
-    by our binary at install time.
-
-    Verified with apt_pkg.check_dep — the same comparison apt does on
-    the target.  This is the WHOLE POINT of the distro_suffix system;
-    if this test fails the suffix is broken.
-    """
-    import apt_pkg
-    apt_pkg.init_system()
-    _our_ver = '0.15.5-2+thor1'
-    for _upstream_constraint in ('0.15.5-2', '0.15.5-2b',
-                                  '0.15.5-2+b1', '0.15.5-2+b99'):
-        assert apt_pkg.check_dep(_our_ver, '>=', _upstream_constraint), (
-            f"DistroSuffix-bumped {_our_ver} must satisfy "
-            f">= {_upstream_constraint} but doesn't"
+    `-doc`, `-dbgsym`, `-test`/`-tests` stay in their own subdirs (true
+    side artifacts that never install in any chroot)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import classify_repo_subdir
+    cases = [
+        # Main install corpus
+        ('libc6_2.36-9_amd64.deb',              'main'),
+        ('libc6-udeb_2.36-9_amd64.udeb',        'main'),
+        # -dev → main (per the runtime-hard-dep observation above)
+        ('libc6-dev_2.36-9_amd64.deb',          'main'),
+        ('libgcc-12-dev_12.2.0-14_amd64.deb',   'main'),
+        ('libstdc++-12-dev_12.2.0-14_amd64.deb', 'main'),
+        ('python3-dev_3.11-1_amd64.deb',        'main'),
+        # Other suffixes still segregate
+        ('libfoo-doc_1.0-2_all.deb',            'doc'),
+        ('libfoo-dbgsym_1.0-2_amd64.deb',       'dbgsym'),
+        ('libfoo-tests_1.0-2_amd64.deb',        'tests'),
+        ('libfoo-test_1.0-2_amd64.deb',         'tests'),
+        # Mid-name -dev doesn't trigger (suffix-only check)
+        ('libfoo-dev-bin_1.0-2_amd64.deb',      'main'),
+        # Malformed → safe default
+        ('not_a_real_deb.deb',                  'main'),
+    ]
+    for inp, expected in cases:
+        got = classify_repo_subdir(inp)
+        assert got == expected, (
+            f"classify_repo_subdir({inp!r}) = {got!r}, expected {expected!r}"
         )
 
 
-def test_apply_distro_suffix_rejects_malformed_filename():
-    """Same shape check as strip_build_version — refuse to silently
-    butcher non-conforming filenames."""
-    from utils import apply_distro_suffix
-    for bad in ('not-a-deb.deb', 'one_two.deb', 'a_b_c_d_amd64.deb'):
-        try:
-            apply_distro_suffix(bad, 'thor1')
-        except ValueError:
-            continue
-        raise AssertionError(f"expected ValueError for {bad!r}")
+def test_strip_nmu_suffix_strips_known_patterns():
+    """Each canonical NMU/binNMU/backport layer pattern strips cleanly."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_suffix
+    cases = [
+        ('1.0-2',                  '1.0-2'),           # pristine — no-op
+        ('1.0-2+b1',               '1.0-2'),           # modern binNMU
+        ('1.0-2+b99',              '1.0-2'),           # high N
+        ('1.0-2+deb12u3',          '1.0-2'),           # security/point update
+        ('1.0-2+deb12u3+b1',       '1.0-2'),           # stacked: NMU + binNMU
+        ('2.90-4~deb12u2',         '2.90-4'),          # sort-BEFORE-base NMU
+        ('1.0-2~bpo12+1',          '1.0-2'),           # backport
+        ('1.0-2+rpi1',             '1.0-2'),           # raspbian rebuild
+        ('1.0-2+rpt2',             '1.0-2'),           # raspberry-pi-tools
+        ('0.15.5-2b',              '0.15.5-2'),        # legacy binNMU (bare b)
+        ('0.15.5-2b1',             '0.15.5-2'),        # legacy binNMU (bN)
+        ('2:1.0-2+b1',             '2:1.0-2'),         # epoch preserved
+        ('1.0-2alpha',             '1.0-2alpha'),      # not an NMU layer
+        ('libb1.0-2',              'libb1.0-2'),       # 'b1' embedded in name
+    ]
+    for input_ver, expected in cases:
+        got = strip_nmu_suffix(input_ver)
+        assert got == expected, (
+            f"strip_nmu_suffix({input_ver!r}) = {got!r}, expected {expected!r}"
+        )
 
 
-def test_apply_distro_suffix_noop_skips_shape_check_for_empty():
-    """When suffix is empty we don't even validate the shape — caller
-    is asking for a no-op and we honour it bit-for-bit.  Avoids
-    surprising ValueErrors when distro_suffix happens to be blank."""
-    from utils import apply_distro_suffix
-    assert apply_distro_suffix('arbitrary-string-not-deb', '') \
-        == 'arbitrary-string-not-deb'
+def test_strip_nmu_suffix_idempotent():
+    """Re-running on an already-stripped version is a no-op."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_suffix
+    for v in ('1.0-2', '2:1.0-2', '6.1.172-1'):
+        assert strip_nmu_suffix(strip_nmu_suffix(v)) == strip_nmu_suffix(v)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# rebump_deb_file — one-time backfill of an existing repo/ corpus
-# ─────────────────────────────────────────────────────────────────────────────
+def test_strip_nmu_from_control_text_walks_relation_fields():
+    """The in-memory text transform must strip from Version, Depends,
+    Pre-Depends, Recommends, Suggests, Enhances, Provides, Conflicts,
+    Breaks, Replaces.  Other fields (Architecture, Description) untouched."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_control_text
+    _ctrl = (
+        'Package: libfoo\n'
+        'Version: 1.0-2+deb12u3+b1\n'
+        'Architecture: amd64\n'
+        'Depends: libbar (>= 1.0-2+b1), libbaz (= 0.15.5-2b)\n'
+        'Provides: libfoo (= 1.0-2+b1)\n'
+        'Conflicts: liboldfoo (<< 1.0-2+deb12u3)\n'
+        'Description: just a test (no version, 2+b1 not in a constraint)\n'
+    )
+    _out, _n = strip_nmu_from_control_text(_ctrl)
+    assert _n >= 5, f"expected at least 5 strips, got {_n}"
+    assert 'Version: 1.0-2\n' in _out
+    assert 'Depends: libbar (>= 1.0-2), libbaz (= 0.15.5-2)\n' in _out
+    assert 'Provides: libfoo (= 1.0-2)\n' in _out
+    assert 'Conflicts: liboldfoo (<< 1.0-2)\n' in _out
+    # Description must be untouched — `2+b1` inside Description text is
+    # not a version constraint.
+    assert '2+b1' in _out, "Description text should not be stripped"
+
+
+def test_strip_nmu_from_deb_round_trip():
+    """End-to-end: synthesise a .deb with NMU suffixes everywhere, run
+    strip_nmu_from_deb, verify filename + internal Version + all dep
+    constraints are normalised, epoch preserved."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_deb
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_strip_nmu_from_deb_round_trip (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'lib'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: libfoo\n'
+                'Version: 2:1.0-2+deb12u3+b1\n'      # epoch + NMU stack
+                'Architecture: amd64\n'
+                'Maintainer: T <t@l>\n'
+                'Depends: libbar (>= 1.0-2+b1), libbaz (= 0.15.5-2b)\n'
+                'Conflicts: liboldfoo (<< 1.0-2+deb12u3)\n'
+                'Description: round-trip test\n'
+            )
+        with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as fh:
+            fh.write('x\n')
+        _orig = os.path.join(_tmp, 'libfoo_1.0-2+deb12u3+b1_amd64.deb')
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _orig],
+            check=True, capture_output=True,
+        )
+
+        _r = strip_nmu_from_deb(_orig)
+        assert _r['status'] == 'rewritten', _r
+        assert _r['strips_count'] >= 5, _r
+        assert os.path.basename(_r['new_path']) == 'libfoo_1.0-2_amd64.deb'
+        # Verify internal metadata
+        _ver = subprocess.run(
+            ['dpkg-deb', '-f', _r['new_path'], 'Version'],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert _ver == '2:1.0-2', f"epoch lost? {_ver!r}"
+        _deps = subprocess.run(
+            ['dpkg-deb', '-f', _r['new_path'], 'Depends'],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert '+b1' not in _deps and '+deb12u3' not in _deps and '2b' not in _deps, (
+            f"NMU residue in Depends: {_deps!r}"
+        )
+
+
+def test_strip_nmu_from_deb_idempotent():
+    """Re-running on an already-stripped .deb returns 'unchanged' with
+    no I/O — important for the post-build hook to avoid wasted repacks
+    when an idempotent rebuild happens."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_deb
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_strip_nmu_from_deb_idempotent (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'lib'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: libfoo\n'
+                'Version: 1.0-2\n'
+                'Architecture: amd64\n'
+                'Maintainer: T <t@l>\n'
+                'Depends: libbar (>= 1.0-2)\n'
+                'Description: already stripped\n'
+            )
+        with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as fh:
+            fh.write('x\n')
+        _p = os.path.join(_tmp, 'libfoo_1.0-2_amd64.deb')
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _p],
+            check=True, capture_output=True,
+        )
+        _r = strip_nmu_from_deb(_p)
+        assert _r['status'] == 'unchanged', _r
+        assert _r['strips_count'] == 0, _r
+
+
+def test_buildcontainer_calls_strip_post_build():
+    """BuildContainer.build must invoke strip_nmu post-dpkg-buildpackage
+    on every successfully-built source.  Pin via code inspection."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # Pin: helper method exists
+    assert re.search(
+        r'def _strip_nmu_from_built_artifacts\(self', _body), (
+        "BuildContainer needs a _strip_nmu_from_built_artifacts method "
+        "that walks repo/ for .debs of the just-built source")
+    # Pin: build() calls it on the success path
+    _m = re.search(
+        r'def build\(self, src_pkg.*?(?=\n    def )',
+        _body, re.DOTALL)
+    assert _m, "BuildContainer.build not found"
+    assert 'self._strip_nmu_from_built_artifacts(src_pkg)' in _m.group(0), (
+        "BuildContainer.build must call self._strip_nmu_from_built_artifacts "
+        "on the success path so every fresh .deb enters repo/ normalised")
+
+
+def test_cmd_audit_nmu_registered_in_package_dispatcher():
+    """`package audit_nmu` must be wired into cmd_package's dispatch."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    assert "'audit_nmu'" in _body, (
+        "audit_nmu must be advertised in cmd_package's help table")
+    assert re.search(
+        r"if action == 'audit_nmu':\s*\n\s+return self\.cmd_audit_nmu",
+        _body), "audit_nmu not dispatched in cmd_package"
+
+
+def test_cmd_strip_repo_registered_in_package_dispatcher():
+    """`package strip` must be wired into cmd_package's dispatch."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    assert "'strip'" in _body, (
+        "strip must be advertised in cmd_package's help table")
+    assert re.search(
+        r"if action == 'strip':\s*\n\s+return self\.cmd_strip_repo",
+        _body), "strip not dispatched in cmd_package"
+
+
+def test_audit_nmu_residue_detects_layered_versions():
+    """audit_nmu_residue must flag any version with NMU layer remaining,
+    in Version field OR in any dep-field version constraint."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    # Hand-construct a RepoState to exercise the auditor without I/O.
+    _state = repo_audit.RepoState(
+        packages={
+            'libfoo': {
+                'Package': 'libfoo',
+                'Version': '1.0-2',                    # clean
+                'Depends': 'libbar (>= 1.0-2)',        # clean
+            },
+            'libdirty': {
+                'Package': 'libdirty',
+                'Version': '1.0-2+deb12u3',            # NMU residue
+                'Depends': 'libbar (>= 1.0-2+b1)',     # NMU residue in constraint
+            },
+        },
+        provides_index={},
+        packages_file='/dev/null',
+        repo_mtime=0.0,
+    )
+    _findings = repo_audit.audit_nmu_residue(_state)
+    _pkgs = {f[0] for f in _findings}
+    _fields = {(f[0], f[1]) for f in _findings}
+    assert 'libdirty' in _pkgs, (
+        f"libdirty has NMU residue, expected in findings: {_findings}"
+    )
+    assert 'libfoo' not in _pkgs, (
+        f"libfoo is clean, should NOT be in findings: {_findings}"
+    )
+    assert ('libdirty', 'Version') in _fields, (
+        f"Version field should be flagged: {_findings}"
+    )
+    assert ('libdirty', 'Depends') in _fields, (
+        f"Depends constraint should be flagged: {_findings}"
+    )
 
 
 def _make_synthetic_deb(path, pkg_name, version, arch='amd64'):
@@ -4831,440 +4891,6 @@ def _make_synthetic_deb(path, pkg_name, version, arch='amd64'):
             check=True, capture_output=True,
         )
     return path
-
-
-def test_rebump_deb_file_round_trip_rewrites_control_and_renames():
-    """Canonical path: a .deb at version X-Y becomes a .deb at
-    X-Y+thor1.  DEBIAN/control's Version is rewritten in lock-step
-    with the filename; the data.tar (README sentinel) survives the
-    repack intact."""
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rebump_deb_file
-
-    # Skip when dpkg-deb isn't available (non-Debian host).
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_rebump_deb_file_round_trip_rewrites_control_and_renames (no dpkg-deb)")
-        return
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _original = os.path.join(_tmp, 'libfoo26_1.0-2_amd64.deb')
-        _make_synthetic_deb(_original, 'libfoo26', '1.0-2')
-        _new = rebump_deb_file(_original, 'thor1')
-        assert _new == 'libfoo26_1.0-2+thor1_amd64.deb', _new
-        assert not os.path.exists(_original), "original .deb must be removed"
-        _bumped = os.path.join(_tmp, _new)
-        assert os.path.isfile(_bumped), "bumped .deb must exist"
-        # Verify the new control says Version: 1.0-2+thor1
-        _ctrl = subprocess.run(
-            ['dpkg-deb', '-f', _bumped, 'Version'],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        assert _ctrl == '1.0-2+thor1', f"Version field: {_ctrl!r}"
-        # Verify data.tar survived (the README sentinel is still there)
-        _files = subprocess.run(
-            ['dpkg-deb', '-c', _bumped],
-            check=True, capture_output=True, text=True,
-        ).stdout
-        assert 'usr/share/doc/libfoo26/README' in _files, _files
-
-
-def test_rebump_deb_file_idempotent_on_already_bumped():
-    """A second invocation on an already-bumped file returns the
-    existing basename unchanged.  Lets the operator re-run
-    `package rebump` safely (e.g. after adding a new package that
-    didn't get bumped the first time)."""
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rebump_deb_file
-
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_rebump_deb_file_idempotent_on_already_bumped (no dpkg-deb)")
-        return
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _original = os.path.join(_tmp, 'libfoo26_1.0-2+thor1_amd64.deb')
-        _make_synthetic_deb(_original, 'libfoo26', '1.0-2+thor1')
-        _new = rebump_deb_file(_original, 'thor1')
-        assert _new == 'libfoo26_1.0-2+thor1_amd64.deb', _new
-        assert os.path.exists(_original), (
-            "idempotent rebump must not touch the file"
-        )
-
-
-def test_rebump_deb_file_empty_suffix_is_noop():
-    """No DistroSuffix configured → no rebump, file untouched.  Lets
-    the rebump command short-circuit when the operator hasn't opted
-    into the suffix scheme."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rebump_deb_file
-    # No actual file needed — empty-suffix path returns before any I/O.
-    assert (rebump_deb_file('/nonexistent/foo_1.0-2_amd64.deb', '')
-            == 'foo_1.0-2_amd64.deb')
-
-
-def test_rebump_deb_file_handles_udeb_extension():
-    """Udebs round-trip identically — same dpkg-deb -R/-b plumbing,
-    just .udeb instead of .deb extension."""
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rebump_deb_file
-
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_rebump_deb_file_handles_udeb_extension (no dpkg-deb)")
-        return
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _original = os.path.join(_tmp, 'foo-udeb_1.0-2_amd64.udeb')
-        _make_synthetic_deb(_original, 'foo-udeb', '1.0-2')
-        # Rename the .deb dpkg-deb produced to .udeb (test fixture cheat
-        # — dpkg-deb doesn't care about extension when packing).
-        if not _original.endswith('.udeb'):
-            os.rename(_original.replace('.udeb', '.deb'), _original) \
-                if os.path.exists(_original.replace('.udeb', '.deb')) else None
-        # Some dpkg-deb versions write .deb regardless; handle both shapes.
-        _alt = _original.replace('.udeb', '.deb')
-        if os.path.exists(_alt) and not os.path.exists(_original):
-            os.rename(_alt, _original)
-        _new = rebump_deb_file(_original, 'thor1')
-        assert _new == 'foo-udeb_1.0-2+thor1_amd64.udeb', _new
-        assert os.path.exists(os.path.join(_tmp, _new))
-
-
-def test_rebump_deb_file_skips_malformed_filename():
-    """Filenames not in `name_version_arch.ext` shape get a no-op
-    return (caller decides whether to log/warn).  Matches the
-    strip_build_version error-tolerance pattern — backfill walks
-    everything in repo/ and shouldn't die on a stray file."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rebump_deb_file
-    for bad in ('weird.deb', 'a_b_c_d_amd64.deb'):
-        assert rebump_deb_file(f'/nonexistent/{bad}', 'thor1') == bad
-
-
-def test_rebump_deb_file_preserves_epoch_from_control():
-    """REGRESSION (2026-05-18): rebump must derive the new Version from
-    DEBIAN/control's existing Version field — NOT from the filename.
-    Debian filenames strip epochs (`pkg_1.0-2_arch.deb` for a binary
-    whose internal Version is `2:1.0-2`), so deriving the new version
-    from the filename silently drops the epoch.  The first install
-    attempt after the buggy rebump failed because gmp's `2:6.2.1+...`
-    became `6.2.1+...+thor1`, failing every `(>= 2:…)` Pre-Depends.
-    """
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rebump_deb_file
-
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_rebump_deb_file_preserves_epoch_from_control (no dpkg-deb)")
-        return
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        # Synthetic .deb with an EPOCH'd Version in DEBIAN/control but
-        # no epoch in the filename (mirrors how Debian builds them).
-        _original = os.path.join(_tmp, 'libgmp10_6.2.1+dfsg1-1.1_amd64.deb')
-        _work = os.path.join(_tmp, 'src')
-        os.makedirs(os.path.join(_work, 'DEBIAN'))
-        os.makedirs(os.path.join(_work, 'usr', 'lib'))
-        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
-            fh.write(
-                'Package: libgmp10\n'
-                'Version: 2:6.2.1+dfsg1-1.1\n'   # ← epoch here
-                'Architecture: amd64\n'
-                'Maintainer: Test <test@local>\n'
-                'Description: epoch-bearing test package\n'
-            )
-        with open(os.path.join(_work, 'usr', 'lib', 'placeholder'), 'w') as fh:
-            fh.write('data\n')
-        subprocess.run(
-            ['dpkg-deb', '--root-owner-group', '-b', _work, _original],
-            check=True, capture_output=True,
-        )
-
-        _new = rebump_deb_file(_original, 'thor1')
-        # Filename gets +thor1 appended (no epoch since filenames strip it)
-        assert _new == 'libgmp10_6.2.1+dfsg1-1.1+thor1_amd64.deb', _new
-        # ← THE INVARIANT: control's Version MUST still carry the epoch.
-        _ver = subprocess.run(
-            ['dpkg-deb', '-f', os.path.join(_tmp, _new), 'Version'],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        assert _ver == '2:6.2.1+dfsg1-1.1+thor1', (
-            f"Epoch lost in rebump.  Got: {_ver!r}, expected: "
-            "2:6.2.1+dfsg1-1.1+thor1"
-        )
-
-
-def test_restore_deb_epoch_prepends_when_missing():
-    """One-time recovery helper: prepends an epoch prefix to a .deb's
-    DEBIAN/control Version field when it's missing.  Returns 'fixed'
-    on success, 'already-correct' if no change needed.  Used to
-    recover from the rebump epoch-strip bug — restores the original
-    epoch by looking it up in the cache."""
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import restore_deb_epoch
-
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_restore_deb_epoch_prepends_when_missing (no dpkg-deb)")
-        return
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        # Synthetic .deb whose Version is EPOCH-LESS (mirrors the
-        # post-buggy-rebump corrupted state).
-        _deb = os.path.join(_tmp, 'libgmp10_6.2.1+dfsg1-1.1+thor1_amd64.deb')
-        _work = os.path.join(_tmp, 'src')
-        os.makedirs(os.path.join(_work, 'DEBIAN'))
-        os.makedirs(os.path.join(_work, 'usr', 'lib'))
-        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
-            fh.write(
-                'Package: libgmp10\n'
-                'Version: 6.2.1+dfsg1-1.1+thor1\n'   # ← no epoch (corrupted)
-                'Architecture: amd64\n'
-                'Maintainer: Test <test@local>\n'
-                'Description: post-rebump epoch-stripped test\n'
-            )
-        with open(os.path.join(_work, 'usr', 'lib', 'placeholder'), 'w') as fh:
-            fh.write('data\n')
-        subprocess.run(
-            ['dpkg-deb', '--root-owner-group', '-b', _work, _deb],
-            check=True, capture_output=True,
-        )
-
-        # First call — should fix.
-        _r1 = restore_deb_epoch(_deb, '2:')
-        assert _r1 == 'fixed', _r1
-        _ver = subprocess.run(
-            ['dpkg-deb', '-f', _deb, 'Version'],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        assert _ver == '2:6.2.1+dfsg1-1.1+thor1', _ver
-
-        # Second call — idempotent.
-        _r2 = restore_deb_epoch(_deb, '2:')
-        assert _r2 == 'already-correct', _r2
-
-
-def test_rewrite_intra_thor1_strict_equals_round_trip():
-    """REGRESSION (2026-05-18 install failure): rebump_deb_file only
-    updates each .deb's own Version field; it leaves stale `(= X)`
-    cross-references to sibling binaries from the same source.
-    Symptom: systemd's `Depends: libsystemd-shared (= 252.39-1~deb12u1)`
-    couldn't be satisfied by our bumped libsystemd-shared at
-    252.39-1~deb12u1+thor1, so debootstrap failed at base configure.
-
-    rewrite_intra_thor1_strict_equals walks Depends/Pre-Depends/
-    Recommends/Suggests/Enhances/Provides; for any `(= X)` constraint
-    targeting a package in `bumped_pkg_set` and whose X doesn't already
-    end with `+suffix`, appends `+suffix`.
-    """
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rewrite_intra_thor1_strict_equals
-
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_rewrite_intra_thor1_strict_equals_round_trip (no dpkg-deb)")
-        return
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _deb = os.path.join(_tmp, 'systemd_252.39-1~deb12u1+thor1_amd64.deb')
-        _work = os.path.join(_tmp, 'src')
-        os.makedirs(os.path.join(_work, 'DEBIAN'))
-        os.makedirs(os.path.join(_work, 'usr', 'bin'))
-        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
-            fh.write(
-                'Package: systemd\n'
-                'Version: 252.39-1~deb12u1+thor1\n'
-                'Architecture: amd64\n'
-                'Maintainer: Test <test@local>\n'
-                # Mix of constraints:
-                # - libsystemd-shared (= ...) → bumped sibling, MUST rewrite
-                # - libsystemd0 (= ...) → bumped sibling, MUST rewrite
-                # - libacl1 (>= ...) → cross-source >=, leave alone
-                # - mount (no version) → leave alone
-                # - libudev1:amd64 (= ...) → bumped sibling with arch, MUST rewrite
-                'Depends: libsystemd-shared (= 252.39-1~deb12u1), '
-                'libsystemd0 (= 252.39-1~deb12u1), '
-                'libacl1 (>= 2.2.23), mount, '
-                'libudev1:amd64 (= 252.39-1~deb12u1)\n'
-                'Pre-Depends: libc6 (>= 2.34)\n'
-                'Description: synthetic systemd-like test package\n'
-            )
-        with open(os.path.join(_work, 'usr', 'bin', 'systemd'), 'w') as fh:
-            fh.write('placeholder\n')
-        subprocess.run(
-            ['dpkg-deb', '--root-owner-group', '-b', _work, _deb],
-            check=True, capture_output=True,
-        )
-
-        # Bumped set: the three sibling lib pkgs.  libacl1 is NOT in the
-        # set (a cross-source dep still at upstream version).
-        _bumped = {'libsystemd-shared', 'libsystemd0', 'libudev1'}
-        _n = rewrite_intra_thor1_strict_equals(_deb, _bumped, 'thor1')
-        assert _n == 3, f"expected 3 rewrites, got {_n}"
-
-        _depends = subprocess.run(
-            ['dpkg-deb', '-f', _deb, 'Depends'],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        # bumped sibling refs must now carry +thor1
-        assert 'libsystemd-shared (= 252.39-1~deb12u1+thor1)' in _depends, _depends
-        assert 'libsystemd0 (= 252.39-1~deb12u1+thor1)' in _depends, _depends
-        assert 'libudev1:amd64 (= 252.39-1~deb12u1+thor1)' in _depends, _depends
-        # cross-source >= constraint must be UNCHANGED
-        assert 'libacl1 (>= 2.2.23)' in _depends, _depends
-        # parenthesis-free dep stays parenthesis-free
-        assert 'mount' in _depends, _depends
-
-
-def test_rewrite_intra_thor1_strict_equals_idempotent():
-    """Re-running on an already-rewritten .deb does no work.  Pinned so
-    a recovery script that runs twice doesn't double-suffix."""
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rewrite_intra_thor1_strict_equals
-
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_rewrite_intra_thor1_strict_equals_idempotent (no dpkg-deb)")
-        return
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _deb = os.path.join(_tmp, 'foo_1.0-2+thor1_amd64.deb')
-        _work = os.path.join(_tmp, 'src')
-        os.makedirs(os.path.join(_work, 'DEBIAN'))
-        os.makedirs(os.path.join(_work, 'usr', 'bin'))
-        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
-            fh.write(
-                'Package: foo\nVersion: 1.0-2+thor1\nArchitecture: amd64\n'
-                'Maintainer: T <t@l>\n'
-                'Depends: bar (= 1.0-2+thor1)\n'   # already rewritten
-                'Description: test\n'
-            )
-        with open(os.path.join(_work, 'usr', 'bin', 'foo'), 'w') as fh:
-            fh.write('x\n')
-        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _deb],
-                       check=True, capture_output=True)
-
-        _n = rewrite_intra_thor1_strict_equals(_deb, {'bar'}, 'thor1')
-        assert _n == 0, f"idempotent must do nothing, got {_n} rewrites"
-
-
-def test_rewrite_intra_thor1_strict_equals_leaves_conflicts_untouched():
-    """Conflicts / Breaks / Replaces have different semantics ('won't
-    coexist with X', not 'needs X').  rewrite must not touch them —
-    rewriting a Conflicts constraint could let two genuinely-
-    incompatible packages co-install."""
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rewrite_intra_thor1_strict_equals
-
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_rewrite_intra_thor1_strict_equals_leaves_conflicts_untouched (no dpkg-deb)")
-        return
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _deb = os.path.join(_tmp, 'pkga_1.0-2+thor1_amd64.deb')
-        _work = os.path.join(_tmp, 'src')
-        os.makedirs(os.path.join(_work, 'DEBIAN'))
-        os.makedirs(os.path.join(_work, 'usr', 'bin'))
-        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
-            fh.write(
-                'Package: pkga\nVersion: 1.0-2+thor1\nArchitecture: amd64\n'
-                'Maintainer: T <t@l>\n'
-                'Conflicts: pkgb (= 1.0-2)\n'   # must NOT be rewritten
-                'Breaks: pkgc (= 1.0-2)\n'
-                'Replaces: pkgd (= 1.0-2)\n'
-                'Description: test\n'
-            )
-        with open(os.path.join(_work, 'usr', 'bin', 'pkga'), 'w') as fh:
-            fh.write('x\n')
-        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _deb],
-                       check=True, capture_output=True)
-
-        _n = rewrite_intra_thor1_strict_equals(
-            _deb, {'pkgb', 'pkgc', 'pkgd'}, 'thor1',
-        )
-        assert _n == 0, f"Conflicts/Breaks/Replaces must NOT be rewritten, got {_n}"
-        for _field in ('Conflicts', 'Breaks', 'Replaces'):
-            _val = subprocess.run(
-                ['dpkg-deb', '-f', _deb, _field],
-                check=True, capture_output=True, text=True,
-            ).stdout.strip()
-            assert '(= 1.0-2)' in _val, f"{_field} mutated: {_val!r}"
-            assert '+thor1' not in _val, f"{_field} got +thor1: {_val!r}"
-
-
-def test_restore_deb_epoch_empty_prefix_is_noop():
-    """Empty epoch prefix → nothing to restore; returns
-    'already-correct' immediately without touching the file."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import restore_deb_epoch
-    # No file access happens — early return on empty prefix.
-    assert restore_deb_epoch('/nonexistent/foo.deb', '') == 'already-correct'
-
-
-def test_rebump_deb_file_skips_non_deb_files():
-    """Non-.deb/.udeb files in repo/ are left alone (signatures,
-    Packages indexes, stray text files, etc.)."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import rebump_deb_file
-    assert (rebump_deb_file('/nonexistent/Release', 'thor1')
-            == 'Release')
-    assert (rebump_deb_file('/nonexistent/Packages.gz', 'thor1')
-            == 'Packages.gz')
-
-
-def test_cmd_rebump_packages_registered_under_package_dispatcher():
-    """Pin the dispatcher wiring: `package rebump` must route to
-    cmd_rebump_packages.  Without this, operators discover the
-    command exists via `package` help only to have the verb
-    silently no-op."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-    assert hasattr(BuildSession, 'cmd_rebump_packages'), (
-        "BuildSession is missing cmd_rebump_packages"
-    )
-    # Static inspection of the dispatcher source — cheaper than a
-    # full BuildSession setup + mock chain just to confirm routing.
-    import inspect
-    _disp_src = inspect.getsource(BuildSession.cmd_package)
-    assert "'rebump'" in _disp_src, _disp_src
-    assert 'self.cmd_rebump_packages' in _disp_src, _disp_src
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# version_no_epoch — patch dir lookup must match Debian filename convention
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# Debian filenames strip the epoch (`git_2.39.5-…dsc` for source whose
-# `Version: 1:2.39.5-…`).  Patch directories follow the same convention
-# (`patch/source/git/2.39.5-…/`).  The pre-fix discovery used
-# `str(src.version)` which kept the epoch, so any source with an epoch
-# (git, llvm-toolchain-15, …) silently never had its patches discovered.
 
 
 def test_version_no_epoch_strips_epoch_from_debian_version():
@@ -9391,6 +9017,14 @@ def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
     # into dir_source, dir_repo, dir_log/build for derived artifacts.
     bc.dir_source = os.path.join(tmp, 'source')
     bc.dir_repo   = os.path.join(tmp, 'repo')
+    # Post-segregation: repo/ has subdirs.  The fork tests that plant
+    # artifacts in repo go through dir_repo_main; the rest (dev/doc/
+    # dbgsym/tests) are created for completeness so fork_mirror's
+    # cross-subdir glob has all expected paths.
+    bc.dir_repo_main   = os.path.join(bc.dir_repo, 'main')
+    bc.dir_repo_doc    = os.path.join(bc.dir_repo, 'doc')
+    bc.dir_repo_dbgsym = os.path.join(bc.dir_repo, 'dbgsym')
+    bc.dir_repo_tests  = os.path.join(bc.dir_repo, 'tests')
     bc.dir_log    = os.path.join(tmp, 'log')
     bc.build_codename = 'thor'
     bc.arch = 'amd64'
@@ -9399,6 +9033,9 @@ def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
     os.makedirs(bc.dir_fork_source_repo, exist_ok=True)
     os.makedirs(bc.dir_source, exist_ok=True)
     os.makedirs(bc.dir_repo,   exist_ok=True)
+    for _sub in (bc.dir_repo_main, bc.dir_repo_doc,
+                 bc.dir_repo_dbgsym, bc.dir_repo_tests):
+        os.makedirs(_sub, exist_ok=True)
     os.makedirs(os.path.join(bc.dir_log, 'build'), exist_ok=True)
     if with_pkg:
         _pkg_dir = os.path.join(bc.dir_fork_source, 'athena-installer-data')
@@ -9792,13 +9429,15 @@ def test_fork_invalidation_wipes_artifacts_on_content_change():
             bc.dir_fork_source_repo, 'athena-installer-data.tree-hash')
         assert os.path.isfile(_hash_file), "tree-hash not persisted on first run"
 
-        # Plant fake stale artifacts that should get wiped on next run
+        # Plant fake stale artifacts that should get wiped on next run.
+        # Post-segregation: installable artifacts live under repo/main/.
         _stale_source = os.path.join(
             bc.dir_source, 'athena-installer-data_1.0.0.tar.gz')
         with open(_stale_source, 'w') as fh:
             fh.write('stale tarball')
         _stale_deb = os.path.join(
-            bc.dir_repo, 'athena-installer-data_1.0.0+thor1_all.udeb')
+            bc.dir_repo_main, 'athena-installer-data_1.0.0+thor1_all.udeb')
+        os.makedirs(os.path.dirname(_stale_deb), exist_ok=True)
         with open(_stale_deb, 'w') as fh:
             fh.write('stale udeb')
         _stale_build_log = os.path.join(
@@ -9834,7 +9473,8 @@ def test_fork_invalidation_no_op_when_hash_matches():
 
         # Plant an "existing build artifact" that the no-op path must preserve
         _existing_deb = os.path.join(
-            bc.dir_repo, 'athena-installer-data_1.0.0+thor1_all.udeb')
+            bc.dir_repo_main, 'athena-installer-data_1.0.0+thor1_all.udeb')
+        os.makedirs(os.path.dirname(_existing_deb), exist_ok=True)
         with open(_existing_deb, 'w') as fh:
             fh.write('existing deb')
 
@@ -9882,14 +9522,17 @@ def test_fork_invalidation_covers_multi_binary_via_control_parse():
         with open(os.path.join(_pkg_dir, 'debian', 'source', 'format'), 'w') as fh:
             fh.write('3.0 (native)\n')
 
-        # Pre-plant stale .debs for BOTH binaries in repo/
-        _stale_main = os.path.join(bc.dir_repo, 'athena-foo_1.0+thor1_all.deb')
-        _stale_data = os.path.join(bc.dir_repo, 'athena-foo-data_1.0+thor1_all.deb')
+        # Pre-plant stale .debs for BOTH binaries in repo/main (post-
+        # segregation layout).  fork_mirror globs across all repo
+        # subdirs (`repo/*/<bin>_*`) so the wipe still finds them.
+        os.makedirs(bc.dir_repo_main, exist_ok=True)
+        _stale_main = os.path.join(bc.dir_repo_main, 'athena-foo_1.0+thor1_all.deb')
+        _stale_data = os.path.join(bc.dir_repo_main, 'athena-foo-data_1.0+thor1_all.deb')
         for _p in (_stale_main, _stale_data):
             with open(_p, 'w') as fh:
                 fh.write('stale')
         # And an unrelated package that MUST survive
-        _unrelated = os.path.join(bc.dir_repo, 'libfoo_1.0_all.deb')
+        _unrelated = os.path.join(bc.dir_repo_main, 'libfoo_1.0_all.deb')
         with open(_unrelated, 'w') as fh:
             fh.write('unrelated')
 
@@ -10121,22 +9764,347 @@ def test_no_stale_progressbar_methods_in_build_py():
             f"Likely confused with Spinner.done() or a removed method.")
 
 
-def test_cmd_rebump_parses_source_name_filter_args():
-    """package rebump with non-`force` args must collect them into a
-    Source-name filter set, so a partial rebump can target just the
-    kernel family without touching everything else."""
+def test_cmd_audit_registered_under_package_dispatcher():
+    """`package audit` must be wired into cmd_package's dispatch."""
+    from build import BuildSession
+    assert hasattr(BuildSession, 'cmd_audit'), (
+        "BuildSession is missing cmd_audit")
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
-    # Pin: rebump cmd reads a filter set from non-force args
-    assert "_source_filter = _args_set - {'force'}" in _body, (
-        "rebump must compute _source_filter as args minus 'force' so "
-        "a targeted rebump only touches the named sources")
-    # Pin: filter is applied by reading the .deb's Source: control field
-    assert "DebFile" in _body and "_source_filter and _todo" in _body, (
-        "rebump filter must actually narrow _todo via DebFile control "
-        "field read — filename-prefix would miss linux-signed-amd64's "
-        "binaries that ship as linux-image-*")
+    import re
+    assert re.search(
+        r"if action == 'audit':\s*\n\s+return self\.cmd_audit",
+        _body), "audit not dispatched in cmd_package"
+    assert "'audit'" in _body, (
+        "audit must be advertised in cmd_package's help table")
+
+
+def test_cmd_audit_runs_three_checks():
+    """`package audit` must invoke ALL THREE primitives:
+      - audit_dep_closure (hard dep gate over whole repo)
+      - audit_conflict_cohort × 2 (live cohort + installer cohort)
+    Hard-coded into the cmd body so a single command surfaces all three
+    install-correctness checks."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def cmd_audit\(self, \*args\):.*?(?=\n    def )',
+        _body, re.DOTALL)
+    assert _m, "cmd_audit not found"
+    _method = _m.group(0)
+    assert 'repo_audit.audit_dep_closure' in _method, (
+        "cmd_audit must call repo_audit.audit_dep_closure for the dep gate")
+    assert 'repo_audit.audit_conflict_cohort' in _method, (
+        "cmd_audit must call repo_audit.audit_conflict_cohort "
+        "(twice — once per cohort)")
+    assert '_resolve_live_cohort' in _method, (
+        "cmd_audit must resolve the live install cohort")
+    assert '_resolve_installer_cohort' in _method, (
+        "cmd_audit must resolve the installer ramdisk cohort")
+
+
+def test_resolve_live_cohort_subtracts_pool_and_installer():
+    """live cohort = dep_tree.selected_pkgs − pool_extras −
+    installer_exclusive.  Pin via code inspection."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def _resolve_live_cohort\(self.*?(?=\n    def )',
+        _body, re.DOTALL)
+    assert _m, "_resolve_live_cohort not found"
+    _method = _m.group(0)
+    assert 'pool_extras_pkg_names' in _method, (
+        "live cohort must subtract pool_extras_pkg_names — pool pkgs "
+        "don't get auto-installed in the live chroot, apt arbitrates")
+    assert 'installer_exclusive_pkg_names' in _method, (
+        "live cohort must subtract installer_exclusive_pkg_names — "
+        "installer-support debs not in the live chroot's install set")
+
+
+def test_resolve_installer_cohort_uses_udeb_tree():
+    """installer cohort = udeb_dep_tree.selected_pkgs (the d-i ramdisk).
+    Pin via code inspection."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def _resolve_installer_cohort\(self.*?(?=\n    def )',
+        _body, re.DOTALL)
+    assert _m, "_resolve_installer_cohort not found"
+    _method = _m.group(0)
+    assert 'udeb_dep_tree.selected_pkgs' in _method, (
+        "installer cohort is just udeb_dep_tree.selected_pkgs — udebs "
+        "in the ramdisk only; debs install on target separately")
+
+
+def test_audit_dep_closure_resolves_against_whole_repo():
+    """audit_dep_closure resolves Depends against ALL of repo, not a
+    selected subset — apt at install time can pull transitive deps
+    from any tier (pkg, live, installer-debs, pool).  A live-pkg's
+    dep on a pool-pkg is NOT a violation."""
+    _ra = os.path.join(_ROOT, 'scripts', 'repo_audit.py')
+    with open(_ra) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def audit_dep_closure\(state.*?(?=\ndef |\Z)',
+        _body, re.DOTALL)
+    assert _m, "audit_dep_closure not found"
+    _method = _m.group(0)
+    # Pin: no 'cohort' / 'scope' arg restricting resolution
+    assert 'scope=' not in _method.split(':', 1)[0], (
+        "audit_dep_closure signature should not take a scope — it always "
+        "resolves against the whole repo")
+    # Pin: hard fields walked (via _HARD_DEP_FIELDS constant)
+    assert '_HARD_DEP_FIELDS' in _method, (
+        "audit_dep_closure must iterate _HARD_DEP_FIELDS — single source "
+        "of truth for which dep fields are hard")
+
+
+def test_audit_conflict_cohort_only_flags_within_cohort():
+    """audit_conflict_cohort flags a Conflicts/Breaks only when the
+    target also resolves to a pkg in the same cohort.  Cross-cohort
+    conflicts (e.g. grub-pc in pool, grub-efi-amd64 in live) are NOT
+    flagged — apt arbitrates at install time."""
+    _ra = os.path.join(_ROOT, 'scripts', 'repo_audit.py')
+    with open(_ra) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def audit_conflict_cohort\(state.*?(?=\ndef |\Z)',
+        _body, re.DOTALL)
+    assert _m, "audit_conflict_cohort not found"
+    _method = _m.group(0)
+    assert 'cohort' in _method, (
+        "audit_conflict_cohort signature must take a cohort frozenset")
+    # Pin: consumer iteration filters by cohort membership
+    assert 'if _pkg not in cohort' in _method, (
+        "audit_conflict_cohort must skip consumers not in the cohort — "
+        "we only care about Conflicts between pkgs that actually co-install")
+    # Pin: resolution is scoped to cohort (passed via scope=cohort)
+    assert 'scope=cohort' in _method, (
+        "conflict resolution must be scope-limited to the cohort — "
+        "cross-cohort hits don't matter")
+
+
+def test_dedupe_bidirectional_conflicts_collapses_pairs():
+    """`_dedupe_bidirectional_conflicts` collapses (A→B) + (B→A)
+    declarations of the same conflict into one entry.  Halves the
+    apparent conflict count for the common symmetric pattern."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import _dedupe_bidirectional_conflicts
+    _input = [
+        ('grub-pc', 'Conflicts', 'grub-efi-amd64', 'grub-efi-amd64'),
+        ('grub-efi-amd64', 'Conflicts', 'grub-pc', 'grub-pc'),
+        ('fuse3', 'Breaks', 'fuse', 'fuse'),
+    ]
+    _out = _dedupe_bidirectional_conflicts(_input)
+    assert len(_out) == 2, (
+        f"two distinct conflicts after dedup; got {len(_out)}: {_out}"
+    )
+    _consumers = {e[0] for e in _out}
+    # Only one of grub-pc/grub-efi-amd64 should survive; the other was
+    # collapsed.  fuse3 always survives (no reverse pair).
+    assert 'fuse3' in _consumers
+    assert ('grub-pc' in _consumers) ^ ('grub-efi-amd64' in _consumers), (
+        f"expected exactly one of grub-pc / grub-efi-amd64: {_consumers}"
+    )
+
+
+def test_audit_versioned_provides_satisfies_any_operator():
+    """Per Debian Policy §7.5: a versioned Provides (`Provides: X (= V)`)
+    satisfies a Depends on X with ANY comparison operator, not just `=`.
+    Tested via a synthetic RepoState — `sysvinit-utils Provides lsb-base
+    (= 11.1.0)` must satisfy `Depends: lsb-base (>= 3.0-9)`."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    _state = repo_audit.RepoState(
+        packages={
+            'sysvinit-utils': {
+                'Package': 'sysvinit-utils',
+                'Version': '3.06-4',
+                'Provides': 'lsb-base (= 11.1.0)',
+            },
+            'consumer-ge': {
+                'Package': 'consumer-ge',
+                'Version': '1.0',
+                'Depends': 'lsb-base (>= 3.0-9)',
+            },
+            'consumer-gt': {
+                'Package': 'consumer-gt',
+                'Version': '1.0',
+                'Depends': 'lsb-base (>> 3.0)',
+            },
+            'consumer-le': {
+                'Package': 'consumer-le',
+                'Version': '1.0',
+                'Depends': 'lsb-base (<= 99.0)',
+            },
+            'consumer-eq': {
+                'Package': 'consumer-eq',
+                'Version': '1.0',
+                'Depends': 'lsb-base (= 11.1.0)',
+            },
+            'consumer-unmet': {
+                'Package': 'consumer-unmet',
+                'Version': '1.0',
+                'Depends': 'lsb-base (>= 99.0)',   # genuinely unmet
+            },
+        },
+        provides_index={'lsb-base': [('sysvinit-utils', '11.1.0')]},
+        packages_file='/dev/null',
+        repo_mtime=0.0,
+    )
+    _unresolved, _ = repo_audit.audit_dep_closure(_state)
+    _unresolved_consumers = {u[0] for u in _unresolved}
+    # All four operators must resolve via the versioned Provides
+    for _consumer in ('consumer-ge', 'consumer-gt', 'consumer-le', 'consumer-eq'):
+        assert _consumer not in _unresolved_consumers, (
+            f"{_consumer}'s Depends should resolve via versioned Provides; "
+            f"unresolved={_unresolved}"
+        )
+    # The genuinely-unmet one must still be flagged
+    assert 'consumer-unmet' in _unresolved_consumers, (
+        f"consumer-unmet wants >= 99.0 but provider is at 11.1.0 — "
+        f"this MUST be flagged: {_unresolved}"
+    )
+
+
+def test_audit_unversioned_provides_does_not_satisfy_versioned_depends():
+    """Per Debian Policy §7.5: an UNVERSIONED Provides does NOT satisfy
+    a versioned Depends — the policy reserves unversioned virtuals for
+    matching unversioned Depends only."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    _state = repo_audit.RepoState(
+        packages={
+            'provider': {
+                'Package': 'provider',
+                'Version': '1.0',
+                'Provides': 'virtfoo',        # unversioned
+            },
+            'consumer-unversioned': {
+                'Package': 'consumer-unversioned',
+                'Version': '1.0',
+                'Depends': 'virtfoo',          # unversioned → satisfied
+            },
+            'consumer-versioned': {
+                'Package': 'consumer-versioned',
+                'Version': '1.0',
+                'Depends': 'virtfoo (>= 2.0)', # versioned → NOT satisfied
+            },
+        },
+        provides_index={'virtfoo': [('provider', None)]},
+        packages_file='/dev/null',
+        repo_mtime=0.0,
+    )
+    _unresolved, _ = repo_audit.audit_dep_closure(_state)
+    _unresolved_consumers = {u[0] for u in _unresolved}
+    assert 'consumer-unversioned' not in _unresolved_consumers, (
+        "unversioned Provides satisfies unversioned Depends"
+    )
+    assert 'consumer-versioned' in _unresolved_consumers, (
+        "unversioned Provides must NOT satisfy versioned Depends per "
+        "Debian Policy §7.5"
+    )
+
+
+def test_repo_max_mtime_detects_delete_and_rename():
+    """`_repo_max_mtime` must include the directory's OWN mtime (not
+    just per-entry mtimes), otherwise pure-delete and pure-rename
+    operations leave it unchanged → cache stays stale → audit returns
+    pre-edit state.  Pin the actual behavior by exercising both."""
+    import sys, tempfile, time
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _n in ('a.deb', 'b.deb'):
+            with open(os.path.join(_tmp, _n), 'w') as fh:
+                fh.write('x')
+        _initial = repo_audit._repo_max_mtime(_tmp)
+        time.sleep(0.05)
+        # Pure delete: surviving files' mtimes unchanged
+        os.remove(os.path.join(_tmp, 'a.deb'))
+        _after_delete = repo_audit._repo_max_mtime(_tmp)
+        assert _after_delete > _initial, (
+            f"delete must advance max_mtime; "
+            f"{_initial} → {_after_delete}"
+        )
+        time.sleep(0.05)
+        # Pure rename: same inode, same content mtime
+        os.rename(os.path.join(_tmp, 'b.deb'), os.path.join(_tmp, 'c.deb'))
+        _after_rename = repo_audit._repo_max_mtime(_tmp)
+        assert _after_rename > _after_delete, (
+            f"rename must advance max_mtime; "
+            f"{_after_delete} → {_after_rename}"
+        )
+
+
+def test_repo_audit_module_exports():
+    """The repo_audit module must export the primitives consumed by
+    build.py: RepoState + AuditResult dataclasses, plus the callables
+    scan_repo_state / audit_dep_closure / audit_conflict_cohort /
+    audit_nmu_residue / invalidate_cache."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    for _name in (
+        'RepoState', 'AuditResult',
+        'scan_repo_state', 'audit_dep_closure',
+        'audit_conflict_cohort', 'audit_nmu_residue',
+        'invalidate_cache',
+    ):
+        assert hasattr(repo_audit, _name), (
+            f"repo_audit module must export {_name}")
+
+
+def test_repo_audit_scan_uses_dpkg_scanpackages_and_apt_pkg():
+    """The scanner must use `dpkg-scanpackages` (fast C subprocess) +
+    `apt_pkg.TagFile` (streaming parser) rather than per-file
+    python-debian DebFile reads.  ~3x speedup on 5000-pkg repos and
+    enables a session-persistent cache (the Packages file on disk)."""
+    _bc = os.path.join(_ROOT, 'scripts', 'repo_audit.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert 'dpkg-scanpackages' in _body, (
+        "repo_audit.scan_repo_state must shell out to dpkg-scanpackages")
+    assert 'apt_pkg.TagFile' in _body, (
+        "repo_audit must stream-parse via apt_pkg.TagFile, not a "
+        "per-section dict comprehension (TagFile is much faster on "
+        "5000-stanza files)")
+    assert 'apt_pkg.version_compare' in _body, (
+        "repo_audit must dedupe multi-version stanzas via "
+        "apt_pkg.version_compare so highest version wins")
+
+
+def test_repo_audit_closure_handles_conflicts_and_provides():
+    """The audit primitives must walk hard deps, conflicts, AND honour
+    versioned Provides for virtual-target resolution per Debian Policy
+    §7.5.  Pin via code inspection — the resolution logic shouldn't
+    silently drop classes when refactored."""
+    _bc = os.path.join(_ROOT, 'scripts', 'repo_audit.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    assert "'Depends'" in _body and "'Pre-Depends'" in _body, (
+        "audit must walk both hard-dep fields")
+    assert "'Conflicts'" in _body and "'Breaks'" in _body, (
+        "audit must walk both conflict fields")
+    assert 'provides_index' in _body, (
+        "audit must consult the Provides index for virtual-target "
+        "resolution — Depends on virtual `awk` is satisfied by any "
+        "pkg whose Provides includes `awk`")
+    assert "'Recommends'" in _body, (
+        "audit must walk Recommends as the weak-class report")
 
 
 def test_cmd_source_rescan_registered_in_dispatcher():
@@ -11132,38 +11100,22 @@ def main() -> int:
         test_strip_build_version_handles_udeb_extension,
         test_strip_build_version_no_change_when_no_binNMU,
         test_strip_build_version_rejects_malformed_filename,
+        test_classify_repo_subdir_routes_dev_to_main,
+        test_strip_nmu_suffix_strips_known_patterns,
+        test_strip_nmu_suffix_idempotent,
+        test_strip_nmu_from_control_text_walks_relation_fields,
+        test_strip_nmu_from_deb_round_trip,
+        test_strip_nmu_from_deb_idempotent,
+        test_buildcontainer_calls_strip_post_build,
+        test_cmd_audit_nmu_registered_in_package_dispatcher,
+        test_cmd_strip_repo_registered_in_package_dispatcher,
+        test_audit_nmu_residue_detects_layered_versions,
         # apply_distro_suffix — bump bumped binaries with `+thor1`
-        test_apply_distro_suffix_appends_to_stripped_filename,
-        test_apply_distro_suffix_empty_is_noop,
-        test_apply_distro_suffix_idempotent_on_already_suffixed,
-        test_apply_distro_suffix_preserves_deb12u1_security_suffix,
-        test_apply_distro_suffix_beats_debian_bin_nmu_constraint,
-        test_apply_distro_suffix_rejects_malformed_filename,
-        test_apply_distro_suffix_noop_skips_shape_check_for_empty,
-        test_rebump_deb_file_round_trip_rewrites_control_and_renames,
-        test_rebump_deb_file_idempotent_on_already_bumped,
-        test_rebump_deb_file_empty_suffix_is_noop,
-        test_rebump_deb_file_handles_udeb_extension,
-        test_rebump_deb_file_skips_malformed_filename,
-        test_rebump_deb_file_preserves_epoch_from_control,
-        test_restore_deb_epoch_prepends_when_missing,
-        test_rewrite_intra_thor1_strict_equals_round_trip,
-        test_rewrite_intra_thor1_strict_equals_idempotent,
-        test_rewrite_intra_thor1_strict_equals_leaves_conflicts_untouched,
-        test_restore_deb_epoch_empty_prefix_is_noop,
-        test_rebump_deb_file_skips_non_deb_files,
-        test_cmd_rebump_packages_registered_under_package_dispatcher,
         test_production_build_conf_has_noautodbgsym_in_build_options,
-        test_buildconfig_parses_distro_suffix,
-        test_buildconfig_distro_suffix_defaults_to_empty,
-        test_buildcontainer_emits_changelog_bump_when_distro_suffix_set,
         test_buildcontainer_emits_token_substitution_snippet,
         test_buildcontainer_token_subst_uses_if_not_short_circuit_and,
         test_buildcontainer_token_subst_no_double_braces_in_regular_strings,
         test_buildcontainer_token_subst_grep_rescue_or_true,
-        test_buildconfig_parses_no_bump_sources,
-        test_buildconfig_no_bump_sources_defaults_to_empty,
-        test_buildcontainer_skips_changelog_bump_for_no_bump_sources,
         test_find_kernel_prefers_expected_kernel_pkg_match,
         test_find_kernel_falls_back_to_highest_when_no_match,
         test_buildcontainer_changelog_uses_codename_field,
@@ -11386,7 +11338,19 @@ def main() -> int:
         test_persist_tree_hash_writes_both_sidecars,
         test_wipe_fork_pkg_outputs_removes_both_hash_sidecars,
         test_no_stale_progressbar_methods_in_build_py,
-        test_cmd_rebump_parses_source_name_filter_args,
+        test_cmd_audit_registered_under_package_dispatcher,
+        test_cmd_audit_runs_three_checks,
+        test_resolve_live_cohort_subtracts_pool_and_installer,
+        test_resolve_installer_cohort_uses_udeb_tree,
+        test_audit_dep_closure_resolves_against_whole_repo,
+        test_audit_conflict_cohort_only_flags_within_cohort,
+        test_dedupe_bidirectional_conflicts_collapses_pairs,
+        test_audit_versioned_provides_satisfies_any_operator,
+        test_audit_unversioned_provides_does_not_satisfy_versioned_depends,
+        test_repo_max_mtime_detects_delete_and_rename,
+        test_repo_audit_module_exports,
+        test_repo_audit_scan_uses_dpkg_scanpackages_and_apt_pkg,
+        test_repo_audit_closure_handles_conflicts_and_provides,
         test_cmd_source_rescan_registered_in_dispatcher,
         test_cmd_source_rescan_method_uses_check_build,
         test_cmd_source_rescan_classifies_rebuilds_by_subset,
