@@ -384,11 +384,23 @@ class BuildContainer:
         # from.  Without this the base image's stock sources.list (live
         # mirror) is used, and a security update landing between our cache
         # snapshot and the build run will produce dep version skew between
-        # the .deb we build and what the cache thinks (caught by
-        # _verify_dep_resolution).  Step 2 will swap these URLs for snapshot
-        # URLs to make the alignment durable.
+        # the .deb we build and what the cache thinks.
+        #
+        # `[check-valid-until=no]` — snapshot.debian.org's InRelease files
+        # carry a Valid-Until ~7 days after Date (replay-attack defense in
+        # the normal apt flow).  We intentionally pin to a fixed snapshot
+        # for reproducibility, so the file naturally goes "expired" as the
+        # snapshot ages.  Override is safe here because:
+        #   1. The build container only ever talks to our snapshot URLs
+        #      (no other apt sources to be tricked into replaying).
+        #   2. We pin a content-hashed snapshot by timestamp — the file
+        #      is already the trusted artifact, not a stream from a live
+        #      mirror.
+        # When the snapshot rolls forward, this option silently becomes
+        # a no-op (current InRelease is within Valid-Until again).
         _apt_sources = ''.join(
-            f'deb {_m.url} {_m.suite} {_m.component}\n' for _m in self.mirrors
+            f'deb [check-valid-until=no] {_m.url} {_m.suite} {_m.component}\n'
+            for _m in self.mirrors
         )
         _write_sources = (
             f"sudo tee /etc/apt/sources.list >/dev/null <<'EOF'\n"
