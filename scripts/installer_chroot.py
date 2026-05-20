@@ -47,7 +47,6 @@ def build_installer_chroot(
     installer_dir: str,
     password: str,
     codename: str = 'sid',
-    distro_suffix: str = '',
 ) -> bool:
     """Build the installer chroot end to end.
 
@@ -69,7 +68,7 @@ def build_installer_chroot(
     if not _bootstrap_dpkg(dir_chroot_installer, password):
         return False
 
-    _udeb_files = _resolve_udeb_files(udeb_tree, dir_repo, distro_suffix)
+    _udeb_files = _resolve_udeb_files(udeb_tree, dir_repo)
     if not _udeb_files:
         tui.console.print(
             "ERROR: no udeb files resolved from repo — was 'source build "
@@ -217,29 +216,25 @@ def _bootstrap_dpkg(dir_chroot_installer: str, password: str) -> bool:
     return True
 
 
-def _resolve_udeb_files(
-    udeb_tree, dir_repo: str, distro_suffix: str = '',
-) -> List[str]:
-    """Map udeb_tree.selected_pkgs canonical names → absolute .udeb paths in
-    repo/.
+def _resolve_udeb_files(udeb_tree, dir_repo: str) -> List[str]:
+    """Map udeb_tree.selected_pkgs canonical names → absolute .udeb
+    paths in repo/main.
 
-    Maps the cache's Packages-index Filename onto what our source-build
-    pipeline produces:
-      1. utils.strip_build_version: drop Debian-buildd's +bN bin-NMU suffix
-      2. utils.apply_distro_suffix: append `+<distro_suffix>` (e.g. `+thor1`)
-         to match BuildContainer's changelog prepend.  Both ends MUST
-         agree on the suffix or no udeb file resolves.
-    Same pattern as chroot.py's _get_deb_files for the deb world.
+    repo/ is segregated by package role; udebs are installable so they
+    land in repo/main alongside .debs (see utils.classify_repo_subdir).
 
-    Returns the list of resolved paths.  Missing-on-disk udebs are
-    logged + skipped (warning); they don't fail the whole resolve —
-    caller will notice if the list is too short.
+    Maps the cache's Packages-index Filename via strip_build_version
+    (drops Debian buildd's +bN bin-NMU suffix).  Post-build NMU strip
+    further normalises the on-disk .udeb to its pristine source
+    version.
+
+    Missing-on-disk udebs are logged + skipped (warning); caller
+    notices if the list is too short.
     """
     _files: List[str] = []
+    _main = os.path.join(dir_repo, 'main')
     for _name in udeb_tree.selected_pkgs:
         _pkg = udeb_tree.selected_pkgs[_name]
-        # Skip virtual-package alias entries — same canonical pkg under
-        # multiple keys would be unpacked multiple times.
         if _name != _pkg['Package']:
             continue
         _filename = os.path.basename(_pkg.get('Filename') or '')
@@ -248,18 +243,8 @@ def _resolve_udeb_files(
                 f"_resolve_udeb_files: {_name} has no Filename field — skipping"
             )
             continue
-        # Strip +bN binNMU suffix then apply our distro_suffix so the
-        # filename matches what dpkg-buildpackage produced via
-        # BuildContainer's changelog prepend.
-        try:
-            _filename = utils.strip_build_version(_filename)
-            _filename = utils.apply_distro_suffix(_filename, distro_suffix)
-        except ValueError:
-            logger.warning(
-                f"_resolve_udeb_files: malformed Filename {_filename!r} for "
-                f"{_name} — using original (binNMU/distro-suffix skipped)"
-            )
-        _filepath = os.path.join(dir_repo, _filename)
+        _filename = utils.normalize_repo_filename(_filename)
+        _filepath = os.path.join(_main, _filename)
         if os.path.exists(_filepath):
             _files.append(_filepath)
             continue

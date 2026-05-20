@@ -15,6 +15,56 @@ from typing import List, Optional
 logger = logging.getLogger('athena')
 
 
+# repo/ is segregated by package role.  Layout:
+#   repo/main/     installable binaries (base + pkg.list + live + installer +
+#                  pool, plus udebs).  ALSO includes -dev side artifacts —
+#                  see classify_repo_subdir for the rationale.
+#   repo/doc/      `-doc` side artifacts (mostly absent under build profile
+#                  `nodoc`; kept for the rare source that produces docs
+#                  regardless)
+#   repo/dbgsym/   `-dbgsym` side artifacts (mostly absent under build
+#                  option `noautodbgsym`)
+#   repo/tests/    `-test` / `-tests` side artifacts
+#
+# Each subdir has its own Packages index.  `package audit` scopes repo/main.
+_REPO_SUBDIRS = ('main', 'doc', 'dbgsym', 'tests')
+
+
+def classify_repo_subdir(filename: str) -> str:
+    """Return the subdir under repo/ where `filename` belongs.
+
+    Classification is by binary PACKAGE NAME suffix (everything before
+    the first underscore in the filename):
+
+        libfoo_1.0-2_amd64.deb         → 'main'
+        libfoo-dev_1.0-2_amd64.deb     → 'main'   (see note)
+        libfoo-doc_1.0-2_all.deb       → 'doc'
+        libfoo-dbgsym_1.0-2_amd64.deb  → 'dbgsym'
+        libfoo-tests_1.0-2_amd64.deb   → 'tests'  (plural)
+        libfoo-test_1.0-2_amd64.deb    → 'tests'  (singular)
+        foo-udeb_1.0-2_amd64.udeb      → 'main'   (udebs are installable)
+
+    `-dev` packages live in `main` even though they're "side artifacts"
+    by traditional Debian taxonomy.  Reason: install-corpus packages
+    hard-depend on them at runtime — `build-essential` Depends
+    `libc6-dev`, `gcc-12` Depends `libgcc-12-dev`, `g++-12` Depends
+    `libstdc++-12-dev`.  Without -dev in main, those hard deps go
+    unresolved at install time.  Moving -dev to its own subdir
+    (tried 2026-05-20 then reverted) just shifted the problem.
+
+    Unknown extensions / malformed filenames default to 'main'.
+    """
+    _base = filename.rsplit('.', 1)[0]
+    _pkg = _base.split('_', 1)[0]
+    if _pkg.endswith('-doc'):
+        return 'doc'
+    if _pkg.endswith('-dbgsym'):
+        return 'dbgsym'
+    if _pkg.endswith('-tests') or _pkg.endswith('-test'):
+        return 'tests'
+    return 'main'
+
+
 def strip_build_version(file: str) -> str:
     """Remove a Debian binNMU rebuild suffix `+bN` from a `.deb` filename.
 
@@ -45,304 +95,234 @@ def strip_build_version(file: str) -> str:
     return f"{_pkg_name}_{_version}_{_arch}{_ext}"
 
 
-def rebump_deb_file(deb_path: str, suffix: str) -> str:
-    """Rewrite an existing `.deb`/`.udeb` file in place to bump its
-    Version field with `+<suffix>` AND rename the file accordingly.
+# NMU/binNMU/backport suffix matcher — strips at END of a version string.
+# Matches in order (greedy from end), can stack:
+#   +debNuN       — Debian security/point-release update (sorts AFTER base)
+#   ~debNuN       — security update that sorts BEFORE base (rarer form;
+#                   used when upstream wants the security backport to
+#                   take a lower version slot — e.g. dnsmasq's
+#                   `2.90-4~deb12u2`)
+#   ~bpoN+N       — backport
+#   +rpiN, +rptN  — Raspberry Pi rebuilds
+#   +bN           — modern binNMU
+#   (?<=\d)b\d*   — legacy binNMU form (`-2b1`, `-2b`); requires a digit
+#                   immediately before `b` so we don't accidentally munch
+#                   into upstream-version letters like `2alpha`
+# Trailing `+` after the group means: strip MULTIPLE stacked layers
+# (`1.0-2+deb12u3+b1` → strip both → `1.0-2`).
+_NMU_SUFFIX_RE = re.compile(
+    r'(?:\+deb\d+u\d+|~deb\d+u\d+|~bpo\d+\+\d+|\+rpi\d+|\+rpt\d+|'
+    r'\+b\d+|(?<=\d)b\d*)+$'
+)
 
-    Returns the NEW basename of the file on success.  On failure or
-    no-op (file already bumped, malformed name, bad extension), returns
-    the original basename so the caller can distinguish via the rename
-    flag in the return value's content.
+# Relation fields whose version constraints should also have NMU stripped.
+# Includes Conflicts/Breaks/Replaces — operator's intent per the rework
+# (we don't relax the relation SHAPE, just normalise the version
+# representation; if libfoo Conflicts: libbar (<< 1.0-2+deb12u3) the
+# strip yields Conflicts: libbar (<< 1.0-2) — broader-but-still-honest).
+_NMU_STRIP_FIELDS = (
+    'Depends', 'Pre-Depends', 'Recommends', 'Suggests',
+    'Enhances', 'Provides', 'Conflicts', 'Breaks', 'Replaces',
+)
 
-    Purpose: one-time backfill for an existing `repo/` corpus after
-    enabling DistroSuffix, so the operator avoids re-running the full
-    source-build pipeline (which can take 24-36h for the GNOME tree).
-    Pairs with BuildContainer's changelog-prepend for fresh builds —
-    both produce the same `<src-ver>+<suffix>` filename.
 
-    What gets rewritten:
-        DEBIAN/control's Version field    (drives apt resolution)
-        the filename                      (drives check_build lookup)
+def normalize_repo_filename(filename: str) -> str:
+    """Map an upstream Packages-index Filename to its repo/main on-disk
+    form.  Strips both layers our build pipeline removes:
 
-    What stays the same:
-        all data files (no recompile)
-        DEBIAN/md5sums (data hashes unchanged)
-        DEBIAN/symbols (downstream builds in the bumped corpus aren't
-                       re-stamped against it; fresh builds will use the
-                       NEW symbols header via BuildContainer's path)
-        debian/changelog (not in DEBIAN/, doesn't ship in .deb anyway
-                          beyond docs which we strip with nodoc)
-        maintainer scripts (no version refs)
+      1. +bN — binNMU rebuild suffix (Debian buildd-only metadata)
+      2. +debNuN / ~bpoN+N / +rpiN / +rptN / legacy -Nb — upstream NMU
+         layers, removed by BuildContainer's post-`dpkg-buildpackage`
+         strip pass (utils.strip_nmu_from_deb).
 
-    Idempotent: a re-run on an already-bumped file no-ops and returns
-    the existing basename.
+    Examples:
+        normalize_repo_filename('libc6_2.36-9+deb12u13_amd64.deb')
+            → 'libc6_2.36-9_amd64.deb'
+        normalize_repo_filename('libfoo_1.0-2+b1_amd64.deb')
+            → 'libfoo_1.0-2_amd64.deb'
+        normalize_repo_filename('libfoo_1.0-2+deb12u3+b1_amd64.deb')
+            → 'libfoo_1.0-2_amd64.deb'
+        normalize_repo_filename('libfoo_1.0-2_amd64.deb')
+            → 'libfoo_1.0-2_amd64.deb'  (no-op)
 
-    Raises subprocess.CalledProcessError when dpkg-deb -R or -b fails.
+    Use anywhere code resolves an upstream Filename onto a disk path
+    under repo/main: dep-tree filename prediction, chroot install
+    resolution, installer udeb lookup, dep-drift scan.
+
+    Malformed filenames (not in `name_version_arch.ext` shape) are
+    returned unchanged — best-effort, doesn't raise.
+    """
+    if not (filename.endswith('.deb') or filename.endswith('.udeb')):
+        return filename
+    _name, _ext = os.path.splitext(filename)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        return filename
+    _pkg, _ver, _arch = _parts
+    _new_ver = strip_nmu_suffix(_ver)   # regex includes +bN, +debNuN, etc.
+    return f'{_pkg}_{_new_ver}_{_arch}{_ext}'
+
+
+def strip_nmu_suffix(version: str) -> str:
+    """Strip trailing NMU/binNMU/backport suffix layers from a Debian
+    version string.  Returns the pristine source version.
+
+        strip_nmu_suffix('1.0-2')                  → '1.0-2'
+        strip_nmu_suffix('1.0-2+b1')               → '1.0-2'
+        strip_nmu_suffix('1.0-2+deb12u3')          → '1.0-2'
+        strip_nmu_suffix('1.0-2+deb12u3+b1')       → '1.0-2'
+        strip_nmu_suffix('1.0-2~bpo12+1')          → '1.0-2'
+        strip_nmu_suffix('0.15.5-2b')              → '0.15.5-2'   (legacy form)
+        strip_nmu_suffix('0.15.5-2b1')             → '0.15.5-2'   (legacy form)
+        strip_nmu_suffix('2:1.0-2+b1')             → '2:1.0-2'    (epoch kept)
+        strip_nmu_suffix('1.0-2alpha')             → '1.0-2alpha' (no strip;
+                                                                  not an NMU)
+    """
+    return _NMU_SUFFIX_RE.sub('', version)
+
+
+def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
+    """Return (new_text, strip_count) — strips NMU suffix from the
+    Version field AND every version constraint in dep-related fields
+    of a DEBIAN/control text.
+
+    Walks fields line-by-line (handles multi-line continuation).
+    Idempotent: re-running on already-stripped text counts zero strips.
+    """
+    _total = 0
+    _content = content
+
+    # Strip from the Version: field.
+    def _sub_version(_m):
+        nonlocal _total
+        _old = _m.group(1)
+        _new = strip_nmu_suffix(_old)
+        if _new != _old:
+            _total += 1
+        return f'Version: {_new}'
+
+    _content = re.sub(
+        r'^Version: (\S+)\s*$',
+        _sub_version, _content, count=1, flags=re.MULTILINE,
+    )
+
+    # Per-relation version-constraint stripper: matches `(OP VERSION)`
+    # within a dep-field's value.  Operator is preserved verbatim.
+    _constraint_re = re.compile(
+        r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)'
+    )
+
+    def _sub_constraint(_m):
+        nonlocal _total
+        _op, _ver = _m.group(1), _m.group(2)
+        _new_ver = strip_nmu_suffix(_ver)
+        if _new_ver != _ver:
+            _total += 1
+        return f'({_op} {_new_ver})'
+
+    # Walk lines; only rewrite inside a relation field block.  Uses
+    # the deb822 wrap-on-continuation convention: a field starts at
+    # column 0 with `Name:`; continuation lines start with whitespace.
+    _new_lines: 'list[str]' = []
+    _in_target = False
+    for _line in _content.splitlines(keepends=True):
+        if _line and _line[0] not in (' ', '\t'):
+            _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
+            if _m:
+                _in_target = _m.group(1) in _NMU_STRIP_FIELDS
+            else:
+                _in_target = False
+        # (continuation lines inherit the surrounding _in_target state)
+        if _in_target:
+            _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
+        else:
+            _new_lines.append(_line)
+
+    return ''.join(_new_lines), _total
+
+
+def strip_nmu_from_deb(deb_path: str) -> dict:
+    """Strip NMU suffix layers from a .deb/.udeb in place.
+
+    Single dpkg-deb -R / -b cycle.  Updates:
+      - The filename (if its version segment had an NMU suffix)
+      - DEBIAN/control Version field
+      - Every version constraint in dep fields (incl. Conflicts/Breaks)
+
+    Returns dict:
+      {'status': 'rewritten' | 'unchanged' | 'malformed' | 'skipped',
+       'new_path': str,
+       'strips_count': int}
+
+    Idempotent: re-running on already-stripped .deb returns 'unchanged'
+    without I/O.  Cheap pre-check via DebFile (no data archive extract)
+    rules out the no-op case.
     """
     import subprocess
     import tempfile
-    _dir = os.path.dirname(deb_path)
+    from debian.debfile import DebFile
+
+    _result = {
+        'status': 'unchanged', 'new_path': deb_path, 'strips_count': 0,
+    }
     _base = os.path.basename(deb_path)
     if not (_base.endswith('.deb') or _base.endswith('.udeb')):
-        return _base
-    if not suffix:
-        return _base
+        _result['status'] = 'skipped'
+        return _result
     _name, _ext = os.path.splitext(_base)
     _parts = _name.split('_')
     if len(_parts) != 3:
-        return _base
-    _pkg, _old_ver, _arch = _parts
-    _tag = f'+{suffix}'
-    if _old_ver.endswith(_tag):
-        return _base       # already bumped — idempotent
-    _new_ver = f'{_old_ver}{_tag}'
-    _new_base = f'{_pkg}_{_new_ver}_{_arch}{_ext}'
-    _new_path = os.path.join(_dir, _new_base)
+        _result['status'] = 'malformed'
+        return _result
+    _pkg, _old_filename_ver, _arch = _parts
 
-    with tempfile.TemporaryDirectory(prefix='athena-rebump-') as _work:
-        # Extract the full .deb (control + data).  `dpkg-deb -R` preserves
-        # the original compression format for control and data archives
-        # at repack-time, so we don't have to guess gzip vs xz vs zstd.
+    try:
+        with DebFile(deb_path) as _deb:
+            _ctrl_bytes = _deb.control.get_content('control')
+    except Exception:
+        _result['status'] = 'malformed'
+        return _result
+    if _ctrl_bytes is None:
+        _result['status'] = 'malformed'
+        return _result
+    _ctrl_text = _ctrl_bytes.decode('utf-8', errors='replace')
+
+    _new_ctrl_text, _strips = strip_nmu_from_control_text(_ctrl_text)
+    _new_filename_ver = strip_nmu_suffix(_old_filename_ver)
+    _filename_changed = _new_filename_ver != _old_filename_ver
+
+    if not _filename_changed and _strips == 0:
+        return _result      # 'unchanged'
+
+    if _filename_changed:
+        _new_base = f'{_pkg}_{_new_filename_ver}_{_arch}{_ext}'
+    else:
+        _new_base = _base
+    _new_path = os.path.join(os.path.dirname(deb_path), _new_base)
+
+    with tempfile.TemporaryDirectory(prefix='strip-nmu-') as _work:
         subprocess.run(
             ['dpkg-deb', '-R', deb_path, _work],
             check=True, capture_output=True,
         )
-        # Compute new Version from the EXISTING DEBIAN/control Version
-        # field (not from the filename) so an epoch is preserved.
-        # Debian filenames strip epochs (`pkg_1.0-2_arch.deb` for a
-        # binary whose internal Version is `2:1.0-2`); deriving the new
-        # version from the filename would silently drop the epoch and
-        # break every downstream dep constraint that expected it
-        # (caught 2026-05-18: gmp's `2:6.2.1+dfsg1-1.1` got rewritten
-        # to `6.2.1+dfsg1-1.1+thor1`, failing every `(>= 2:…)` Pre-
-        # Depends in the base install).
-        _ctrl = os.path.join(_work, 'DEBIAN', 'control')
-        with open(_ctrl) as fh:
-            _content = fh.read()
-        _m = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
-        if not _m:
-            raise RuntimeError(
-                f"rebump_deb_file: {_base} has no Version field to rewrite"
-            )
-        _control_ver = _m.group(1)
-        if _control_ver.endswith(_tag):
-            return _base       # already bumped on the control side too
-        _control_new_ver = f'{_control_ver}{_tag}'
-        # Rewrite Version field in DEBIAN/control.
-        _new_content, _n = re.subn(
-            r'^Version: .*$',
-            f'Version: {_control_new_ver}',
-            _content, count=1, flags=re.MULTILINE,
-        )
-        if _n != 1:
-            raise RuntimeError(
-                f"rebump_deb_file: {_base} Version regex substitution failed"
-            )
-        with open(_ctrl, 'w') as fh:
-            fh.write(_new_content)
-        # Repack.  --root-owner-group forces uid/gid 0 in the resulting
-        # archive so the file matches what dpkg-buildpackage would
-        # produce (no operator-uid leakage).
+        _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl_disk, 'w') as _fh:
+            _fh.write(_new_ctrl_text)
         subprocess.run(
             ['dpkg-deb', '--root-owner-group', '-b', _work, _new_path],
             check=True, capture_output=True,
         )
 
-    os.remove(deb_path)
-    return _new_base
+    if _new_path != deb_path:
+        os.remove(deb_path)
+    _result.update({
+        'status': 'rewritten',
+        'new_path': _new_path,
+        'strips_count': _strips + (1 if _filename_changed else 0),
+    })
+    return _result
 
 
-def rewrite_intra_thor1_strict_equals(deb_path: str, bumped_pkg_set,
-                                       suffix: str) -> int:
-    """Rewrite strict-equal version constraints in dep fields that target
-    a package we bumped to `+<suffix>`.  Used as a recovery pass after
-    rebump_deb_file, which only updates each .deb's own Version field
-    but leaves stale `(= X)` cross-references to siblings.
-
-    Mechanics: walks Depends, Pre-Depends, Recommends, Suggests,
-    Enhances, Provides fields.  For each `<name> (= <X>)` token where
-    `name` is in `bumped_pkg_set` AND `X` doesn't already end with
-    `+<suffix>`, rewrites to `<name> (= <X>+<suffix>)`.
-
-    Returns the count of constraints rewritten in this .deb.
-
-    NOT touched:
-      - operators other than `=` (`>=` already satisfied by +suffix;
-        `<=` / `<<` / `>>` semantics differ and rewrites could break
-        upper-bound intent)
-      - constraints targeting packages NOT in bumped_pkg_set (still
-        upstream → upstream version is correct)
-      - constraints already +suffix'd (idempotent re-run)
-      - Conflicts / Breaks / Replaces fields — those mean "won't
-        coexist with X", not "needs X"; rewriting them could let two
-        conflicting packages co-install or weaken intended barriers
-
-    Caveat: `Provides` is rewritten because `Provides: name (= X)`
-    semantically means "I act as name at version X".  If our package
-    ships at +suffix the Provides claim must match, else downstream
-    `Depends: name (= upstream-X)` resolves to nothing.
-
-    Raises subprocess.CalledProcessError on dpkg-deb failure.
-    """
-    import subprocess
-    import tempfile
-    if not suffix:
-        return 0
-    _tag = f'+{suffix}'
-    _fields_to_walk = (
-        'Depends', 'Pre-Depends', 'Recommends', 'Suggests',
-        'Enhances', 'Provides',
-    )
-    # Pattern: name optional-arch  (= version)
-    # name: [a-z0-9][a-z0-9.+-]*
-    # arch: optional :amd64 / :any
-    # = constraint: ( = X )
-    _dep_re = re.compile(
-        r'([a-z0-9][a-z0-9.+-]*)(:[a-zA-Z0-9-]+)?\s*\(\s*=\s*([^)]+?)\s*\)'
-    )
-
-    with tempfile.TemporaryDirectory(prefix='athena-eqfix-') as _work:
-        subprocess.run(
-            ['dpkg-deb', '-R', deb_path, _work],
-            check=True, capture_output=True,
-        )
-        _ctrl = os.path.join(_work, 'DEBIAN', 'control')
-        with open(_ctrl) as fh:
-            _content = fh.read()
-
-        _rewrite_count = 0
-        _new_lines: 'list[str]' = []
-        _in_target_field = False
-        _continuation = False
-        for _line in _content.splitlines(keepends=True):
-            # Detect start of a dep field (matches "FieldName:" at line start)
-            _is_field_start = False
-            _field_name = ''
-            if _line and _line[0] not in (' ', '\t'):
-                _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
-                if _m:
-                    _field_name = _m.group(1)
-                    _is_field_start = True
-            if _is_field_start:
-                _in_target_field = _field_name in _fields_to_walk
-            elif not (_line and _line[0] in (' ', '\t')):
-                _in_target_field = False     # field block ended
-
-            if not _in_target_field:
-                _new_lines.append(_line)
-                continue
-
-            # Rewrite (=X) where target is in bumped set and X has no +suffix
-            def _sub(m):
-                nonlocal _rewrite_count
-                _name = m.group(1)
-                _arch = m.group(2) or ''
-                _ver = m.group(3)
-                if _name not in bumped_pkg_set:
-                    return m.group(0)
-                if _ver.endswith(_tag):
-                    return m.group(0)
-                _rewrite_count += 1
-                return f'{_name}{_arch} (= {_ver}{_tag})'
-
-            _new_lines.append(_dep_re.sub(_sub, _line))
-
-        if _rewrite_count == 0:
-            return 0
-
-        with open(_ctrl, 'w') as fh:
-            fh.writelines(_new_lines)
-        subprocess.run(
-            ['dpkg-deb', '--root-owner-group', '-b', _work, deb_path],
-            check=True, capture_output=True,
-        )
-    return _rewrite_count
-
-
-def restore_deb_epoch(deb_path: str, epoch_prefix: str) -> str:
-    """One-time recovery for .debs whose DEBIAN/control Version field
-    had its epoch stripped by an earlier buggy rebump_deb_file run.
-
-    Reads the current Version field; if it doesn't already start with
-    `epoch_prefix` (e.g. `'2:'`), prepends it.  Returns one of:
-      'fixed'           rewrote the file
-      'already-correct' file already has the epoch (idempotent)
-      'no-version'      DEBIAN/control has no Version field (skip)
-
-    epoch_prefix MUST include the trailing colon (e.g. `'1:'`).  Empty
-    string returns 'already-correct' immediately (nothing to do).
-
-    The filename is NOT touched — Debian filename convention strips the
-    epoch, so the existing on-disk filename is already correct.  Only
-    the DEBIAN/control Version field needs the epoch restored.
-    """
-    import subprocess
-    import tempfile
-    if not epoch_prefix:
-        return 'already-correct'
-    with tempfile.TemporaryDirectory(prefix='athena-epoch-') as _work:
-        subprocess.run(
-            ['dpkg-deb', '-R', deb_path, _work],
-            check=True, capture_output=True,
-        )
-        _ctrl = os.path.join(_work, 'DEBIAN', 'control')
-        with open(_ctrl) as fh:
-            _content = fh.read()
-        _m = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
-        if not _m:
-            return 'no-version'
-        _current_ver = _m.group(1)
-        if _current_ver.startswith(epoch_prefix):
-            return 'already-correct'
-        _new_ver = f'{epoch_prefix}{_current_ver}'
-        _new_content, _n = re.subn(
-            r'^Version: .*$',
-            f'Version: {_new_ver}',
-            _content, count=1, flags=re.MULTILINE,
-        )
-        if _n != 1:
-            return 'no-version'
-        with open(_ctrl, 'w') as fh:
-            fh.write(_new_content)
-        subprocess.run(
-            ['dpkg-deb', '--root-owner-group', '-b', _work, deb_path],
-            check=True, capture_output=True,
-        )
-    return 'fixed'
-
-
-def apply_distro_suffix(file: str, suffix: str) -> str:
-    """Append `+<suffix>` to the version field of a `.deb`/`.udeb` filename.
-
-    Input must be `name_version_arch.ext` shape.  No-op when `suffix` is
-    empty.  Idempotent: if the version already ends with `+<suffix>` the
-    filename is returned unchanged.
-
-        apply_distro_suffix("foo_1.0-2_amd64.deb", "thor1")
-            → foo_1.0-2+thor1_amd64.deb
-        apply_distro_suffix("foo_1.0-2+thor1_amd64.deb", "thor1")
-            → foo_1.0-2+thor1_amd64.deb        (idempotent)
-        apply_distro_suffix("foo_1.0-2_amd64.deb", "")
-            → foo_1.0-2_amd64.deb              (no-op)
-
-    Pairs with BuildContainer's changelog prepend: both ends MUST agree
-    on the version, otherwise `check_build` looks for a file the build
-    didn't produce and the source endlessly rebuilds.
-
-    Raises:
-        ValueError: filename is not in `name_version_arch.ext` shape.
-    """
-    if not suffix:
-        return file
-    _name, _ext = os.path.splitext(file)
-    _parts = _name.split('_')
-    if len(_parts) != 3:
-        raise ValueError(f"Incorrectly formatted package filename: {file!r}")
-    _pkg_name, _version, _arch = _parts
-    _tag = f"+{suffix}"
-    if not _version.endswith(_tag):
-        _version = f"{_version}{_tag}"
-    return f"{_pkg_name}_{_version}_{_arch}{_ext}"
 
 
 def version_no_epoch(version) -> str:
@@ -955,10 +935,8 @@ class BuildConfig:
 
     skip_build_test: list[str]
     tunnel_packages: list[str]
-    no_bump_sources: frozenset
     build_profiles: frozenset
     build_options: frozenset
-    distro_suffix: str
     max_parallel_builds: int
 
     security_keyring: str
@@ -975,12 +953,16 @@ class BuildConfig:
     dir_temp: str
     dir_source: str
     dir_repo: str
+    dir_repo_main: str
+    dir_repo_doc: str
+    dir_repo_dbgsym: str
+    dir_repo_tests: str
     dir_config: str
     dir_patch: str
     dir_gnupg: str
     dir_image: str
     dir_chroot: str
-    
+
     dir_patch_source: str
     dir_patch_preinstall: str
     dir_patch_postinstall: str
@@ -1122,24 +1104,12 @@ class BuildConfig:
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]
-            # CONF-13: sources whose +<DistroSuffix> changelog bump
-            # would break their own version-counting machinery.
-            # BuildContainer.build skips _changelog_bump for these so
-            # they produce binaries at Debian's pristine versions /
-            # ABI counters.  Kernel sources are the canonical case.
-            _no_bump_raw = config_parser.get('Source', 'NoBumpSources', fallback='')
-            self.no_bump_sources: frozenset = frozenset(
-                _p.strip() for _p in _no_bump_raw.split(',') if _p.strip()
-            )
             # BuildProfiles → DEB_BUILD_PROFILES (which Build-Depends a
             # source package activates at build time).
             # BuildOptions  → DEB_BUILD_OPTIONS  (how the build itself
             # behaves: nodoc, nocheck, parallel=N, …).
             # The two share names like nodoc / nocheck but are distinct
-            # namespaces with distinct semantics.  An earlier
-            # implementation set a single `BuildProfiles` into BOTH env
-            # vars, which made values like `parallel=4` (only valid as
-            # an option) attempt to be a profile and triggered apt warnings.
+            # namespaces with distinct semantics.
             #
             # Backward compat: when BuildOptions is missing, mirror
             # BuildProfiles so existing build.conf files keep working.
@@ -1154,13 +1124,6 @@ class BuildConfig:
                 )
             else:
                 self.build_options = self.build_profiles
-            # Distribution suffix appended to every source-built binary's
-            # version (`<upstream-src-ver>+<DistroSuffix>`).  See the
-            # config comment for rationale.  Empty → legacy upstream
-            # versions verbatim (still works, but risks bin-NMU skew).
-            self.distro_suffix: str = config_parser.get(
-                'Source', 'DistroSuffix', fallback='',
-            ).strip()
             self.max_parallel_builds = config_parser.getint('Build', 'MaxParallelBuilds', fallback=4)
 
             # Mirror InRelease GPG verification.  Default: enabled,
@@ -1195,6 +1158,14 @@ class BuildConfig:
             self.dir_temp = os.path.join(self.working_dir, config_parser.get('Directories', 'Temp'))
             self.dir_source = os.path.join(self.working_dir, config_parser.get('Directories', 'Source'))
             self.dir_repo = os.path.join(self.working_dir, config_parser.get('Directories', 'Repo'))
+            # repo/ is segregated by package role; see classify_repo_subdir.
+            # `-dev` packages live in main (build-essential, gcc-12, g++-12
+            # hard-depend on them at runtime).  All subdirs are mkdir+
+            # writability checked below.
+            self.dir_repo_main   = os.path.join(self.dir_repo, 'main')
+            self.dir_repo_doc    = os.path.join(self.dir_repo, 'doc')
+            self.dir_repo_dbgsym = os.path.join(self.dir_repo, 'dbgsym')
+            self.dir_repo_tests  = os.path.join(self.dir_repo, 'tests')
             self.dir_config = os.path.join(self.working_dir, config_parser.get('Directories', 'Config'))
             self.dir_image = os.path.join(self.working_dir, config_parser.get('Directories', 'Image'))
             # The [Directories] Chroot value is the PARENT directory holding
@@ -1248,6 +1219,11 @@ class BuildConfig:
             pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_repo).mkdir(parents=True, exist_ok=True)
+            for _sub in (
+                self.dir_repo_main, self.dir_repo_doc,
+                self.dir_repo_dbgsym, self.dir_repo_tests,
+            ):
+                pathlib.Path(_sub).mkdir(parents=True, exist_ok=True)
 
             pathlib.Path(self.dir_patch).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_patch_empty).mkdir(parents=True, exist_ok=True)

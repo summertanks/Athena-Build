@@ -55,15 +55,6 @@ class BuildContainer:
         self.patch_empty = config.dir_patch_empty
         self.build_profiles = config.build_profiles
         self.build_options  = config.build_options
-        # Distribution suffix used to bump the changelog version inside
-        # the build container before dpkg-buildpackage.  Empty → no
-        # bump (binaries ship at upstream source version; legacy
-        # behaviour vulnerable to bin-NMU skew).
-        self.distro_suffix = config.distro_suffix
-        # CONF-13: sources whose +<DistroSuffix> changelog bump would
-        # break their own version-counting machinery.  Skipped at
-        # build time.
-        self.no_bump_sources = config.no_bump_sources
 
         # Apply snapshot pinning to mirrors so the container's apt fetches
         # build-deps from the same archive snapshot the cache was built from.
@@ -389,51 +380,6 @@ class BuildContainer:
             f"-e 's|@CODENAME@|{self.codename}|g'; "
         )
 
-        # Distro-suffix bump: prepend a changelog entry that bumps the
-        # version to `<source-ver>+<suffix>` so the produced .debs ship
-        # as `pkg_X-Y+thor1_amd64.deb` instead of `pkg_X-Y_amd64.deb`.
-        # This (a) marks every binary as Athena-Build's rebuild and
-        # (b) makes our binary lexically beat ANY upstream bin-NMU
-        # version constraint at install time (apt's version comparison:
-        # `+thor<N>` > `+b<N>` because letters sort before non-letters
-        # and `t` > `b`).
-        # Pairs with utils.apply_distro_suffix in dependencytree's
-        # filename prediction — both ends must agree on the suffix.
-        #
-        # Skipped when distro_suffix is empty (legacy behaviour).
-        # Idempotent: dpkg-parsechangelog always returns the current
-        # top entry's version; on a fresh dpkg-source extraction that's
-        # the upstream source version, so we never double-suffix.
-        #
-        # Also skipped for sources in NoBumpSources — CONF-13.  Kernel's
-        # gencontrol walks the changelog to set ABI suffix; prepending
-        # `+thor1` would push ABI past Debian's value, producing
-        # binaries whose names the cache's predictor doesn't recognise.
-        # Kernel binaries ship at Debian's pristine version without
-        # +thor1; the trade-off (no DistroSuffix marker on kernel
-        # debs) is acceptable because kernel binaries also won't
-        # collide with upstream (the +thor1-less version IS the
-        # upstream version, and dpkg's same-version-prefer-installed
-        # gives us the right result).
-        if self.distro_suffix and src_pkg.package not in self.no_bump_sources:
-            _suffix = self.distro_suffix
-            _changelog_bump = (
-                'SRC_NAME=$(dpkg-parsechangelog -SSource); '
-                'SRC_VER=$(dpkg-parsechangelog -SVersion); '
-                f'NEW_VER="${{SRC_VER}}+{_suffix}"; '
-                'NOW=$(date -R); '
-                '{ '
-                f'printf "%s (%s) {self.codename}; urgency=medium\\n\\n'
-                '  * Athena rebuild: distro-suffix bump (+%s).\\n\\n'
-                ' -- Athena Build <athena@local>  %s\\n\\n" '
-                f'"$SRC_NAME" "$NEW_VER" "{_suffix}" "$NOW"; '
-                'cat debian/changelog; '
-                '} > debian/changelog.new; '
-                'mv debian/changelog.new debian/changelog; '
-            )
-        else:
-            _changelog_bump = ''
-
         # Pin the container's apt to the exact mirrors our cache was built
         # from.  Without this the base image's stock sources.list (live
         # mirror) is used, and a security update landing between our cache
@@ -449,11 +395,13 @@ class BuildContainer:
             f"{_apt_sources}EOF\n"
         )
 
-        # `-b` (--build=binary) skips the source rebuild step.  This is
-        # required when distro_suffix is set because our changelog
-        # prepend produces a version that doesn't match the .dsc, so
-        # `dpkg-source -b` would fail.  Harmless when distro_suffix is
-        # empty — we never consume the produced source artefacts anyway.
+        # `-b` (--build=binary) skips the source rebuild step.  No
+        # version-bump is performed; the produced .debs ship at the
+        # pristine upstream source version.  Post-build, the BuildContainer
+        # runs utils.strip_nmu_from_deb on every produced artifact to
+        # normalise the Version field + all dep-constraint version
+        # references — stripping +bN, +debNuN, ~bpoN+N, +rpiN, etc.
+        # so internal cross-refs resolve cleanly inside our repo.
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'{_write_sources}' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
@@ -464,7 +412,6 @@ class BuildContainer:
                   f'{patches_applied_cmd}' \
                   f'{patch_cmd}' \
                   f'{_token_subst}' \
-                  f'{_changelog_bump}' \
                   f'{deb_build_env} dpkg-checkbuilddeps; {deb_build_env} dpkg-buildpackage -a {self.arch} -b -us -uc -nc; cd ..;' \
                   f'cp *.deb /repo/ 2>/dev/null || true; cp *.udeb /repo/ 2>/dev/null || true ;'
 
@@ -533,6 +480,27 @@ class BuildContainer:
                     f"{container.short_id} (exit {_exit_code})"
                 )
 
+            # On successful build: strip NMU/binNMU/backport suffixes
+            # from every .deb/.udeb this build produced, in place.  This
+            # normalises both the binary's own Version field and every
+            # version constraint in its Depends/Pre-Depends/Recommends/
+            # Suggests/Enhances/Provides/Conflicts/Breaks/Replaces fields
+            # to the pristine source version.  Result: a corpus where
+            # internal cross-refs are by source-version only — no carry-
+            # over of Debian's release-cycle metadata into our archive.
+            # See utils.strip_nmu_from_deb for the suffix patterns.
+            if _build_result:
+                # 1. Classify each just-emitted .deb/.udeb at repo/ root
+                #    and move it into the right subdir (main/dev/doc/
+                #    dbgsym/tests).  See utils.classify_repo_subdir for
+                #    the suffix rule.  Done BEFORE strip so the strip's
+                #    in-place rewrites land at the final location.
+                self._segregate_built_artifacts(src_pkg)
+                # 2. Strip NMU/binNMU/backport suffix from the emitted
+                #    .debs (now in their subdirs).  Per-file decision;
+                #    only re-packs when residue exists.
+                self._strip_nmu_from_built_artifacts(src_pkg)
+
             return _build_result
 
         except docker.errors.APIError as e:
@@ -560,6 +528,117 @@ class BuildContainer:
                         f"for {src_pkg.package}: {e}"
                     )
 
+    def _strip_nmu_from_built_artifacts(self, src_pkg) -> None:
+        """Walk repo/ for .deb/.udeb files whose Package: field belongs
+        to this source build and run utils.strip_nmu_from_deb on each.
+
+        Identification: read each file's Source: field via DebFile; match
+        against src_pkg.package.  Falls back to filename-prefix match
+        when Source: is absent (single-binary sources omit Source when
+        Source == Package).
+
+        Failures are logged but don't propagate — strip is best-effort
+        normalisation; a stripped failure leaves the .deb at upstream-
+        layered version, surfaced later by `package audit_nmu`.
+        """
+        from debian.debfile import DebFile
+        _src_name = src_pkg.package
+        # Post-segregate, artifacts live in subdirs.  Walk all of them.
+        _files: 'list[str]' = []
+        for _sub in ('main', 'doc', 'dbgsym', 'tests'):
+            _sub_path = os.path.join(self.repo_path, _sub)
+            try:
+                for _f in os.listdir(_sub_path):
+                    if _f.endswith('.deb') or _f.endswith('.udeb'):
+                        _files.append(os.path.join(_sub, _f))
+            except OSError:
+                continue
+        _n_rewritten = 0
+        for _f in _files:
+            _path = os.path.join(self.repo_path, _f)
+            # Quick filter by control's Source: field.  Some binaries
+            # in repo/ come from other source pkgs and shouldn't be
+            # touched here — they'll be stripped when their own source
+            # builds (or by the one-time `package strip` backfill).
+            try:
+                with DebFile(_path) as _deb:
+                    _src_field = (_deb.control.debcontrol().get('Source') or '').strip()
+                    _pkg_field = (_deb.control.debcontrol().get('Package') or '').strip()
+            except Exception:
+                continue
+            _origin = _src_field.split(' ', 1)[0].strip() if _src_field else _pkg_field
+            if _origin != _src_name:
+                continue
+            try:
+                _r = utils.strip_nmu_from_deb(_path)
+                if _r['status'] == 'rewritten':
+                    _n_rewritten += 1
+                    if _r['new_path'] != _path:
+                        logger.info(
+                            f"strip_nmu: {_f} → "
+                            f"{os.path.basename(_r['new_path'])}"
+                        )
+            except Exception as e:
+                logger.warning(f"strip_nmu: {_f} failed: {e}")
+        if _n_rewritten:
+            logger.info(
+                f"strip_nmu: normalised {_n_rewritten} artifact(s) "
+                f"from source {_src_name}"
+            )
+
+    def _segregate_built_artifacts(self, src_pkg) -> None:
+        """After dpkg-buildpackage's `cp *.deb /repo/`, the binaries
+        land at repo/ ROOT (not in any subdir).  This pass classifies
+        each by name and moves it to the right subdir per
+        utils.classify_repo_subdir:
+
+          main    installable binaries + udebs
+          dev     -dev side artifacts
+          doc     -doc side artifacts
+          dbgsym  -dbgsym side artifacts
+          tests   -test / -tests side artifacts
+
+        Operates ONLY on the just-emitted files (those at repo/ root) —
+        existing subdir contents are left alone.  Skips when no files
+        at root (steady state).
+        """
+        try:
+            _files_at_root = [
+                _f for _f in os.listdir(self.repo_path)
+                if (_f.endswith('.deb') or _f.endswith('.udeb'))
+                and os.path.isfile(os.path.join(self.repo_path, _f))
+            ]
+        except OSError as e:
+            logger.warning(
+                f"segregate: cannot list {self.repo_path}: {e}"
+            )
+            return
+        if not _files_at_root:
+            return
+        _moved = 0
+        for _f in _files_at_root:
+            _sub = utils.classify_repo_subdir(_f)
+            _src = os.path.join(self.repo_path, _f)
+            _dst_dir = os.path.join(self.repo_path, _sub)
+            os.makedirs(_dst_dir, exist_ok=True)
+            _dst = os.path.join(_dst_dir, _f)
+            try:
+                if os.path.exists(_dst):
+                    # Collision: a prior build produced the same
+                    # filename.  Newer rebuild wins.
+                    os.remove(_dst)
+                os.rename(_src, _dst)
+                _moved += 1
+            except OSError as e:
+                logger.warning(
+                    f"segregate: failed to move {_f} → {_sub}/: {e}"
+                )
+        if _moved:
+            logger.info(
+                f"segregate: {_moved} artifact(s) from {src_pkg.package} "
+                f"placed in repo/ subdirs"
+            )
+
     def check_build(self, src_pkg: Source) -> bool:
         """Decide whether a previously-built source can skip rebuild.
 
@@ -568,8 +647,15 @@ class BuildContainer:
 
           1. src_pkg declares at least one binary
           2. log/build/<src>.result reads PASS or TUNNELED
-          3. Every predicted binary in src_pkg.pkgs exists in repo/
-             AND is a syntactically valid ar archive (is_ar_file)
+          3. Every predicted INSTALLABLE binary (classified to main)
+             in src_pkg.pkgs exists at repo/main/<file> AND is a
+             syntactically valid ar archive (is_ar_file).
+
+        Missing -dev/-doc/-dbgsym/-tests artifacts do NOT trigger
+        rebuild — they're side artifacts that don't install anywhere,
+        and re-running a 30-min source build to repopulate a missing
+        -doc file is wasteful.  Only missing installable (main)
+        artifacts gate rebuild.
 
         Does NOT verify internal Version / Depends resolution —
         those checks live in verify_pkg_artifact, exposed as the
@@ -590,7 +676,12 @@ class BuildContainer:
             return False
 
         for _file in src_pkg.pkgs:
-            _filename = os.path.join(self.repo_path, _file)
+            # Only main-classified binaries gate rebuild; missing
+            # -dev/-doc/-dbgsym/-tests are tolerated.
+            _sub = utils.classify_repo_subdir(_file)
+            if _sub != 'main':
+                continue
+            _filename = os.path.join(self.repo_path, 'main', _file)
             if not os.path.isfile(_filename):
                 return False
             if not self.is_ar_file(_filename):
