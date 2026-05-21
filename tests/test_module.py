@@ -5559,23 +5559,40 @@ def test_gcc_base_re_rejects_malformed_versions():
 
 class _FakePkg:
     """Minimal Package surface for tests.  Carries the fields
-    DependencyTree.pull_recommends_extras and derive_extras_src_names
-    actually read: ['Package'], .recommends, .source, .get('Filename')."""
-    def __init__(self, name, source, filename=None, recommends=None):
+    DependencyTree.pull_recommends_extras, parse_dependency, and
+    derive_extras_src_names actually read: ['Package'], .recommends,
+    .source, .get('Filename'), .depends, .pre_depends, .alt_depends,
+    .get_provides(), .version, .add_constraint, .depends_on, .depended_by."""
+    def __init__(self, name, source, filename=None, recommends=None,
+                 depends=None, version='1.0'):
         self._fields = {'Package': name, 'Filename': filename or ''}
         self.source = source
+        self.package = name
+        from debian.debian_support import Version
+        try:
+            self.version = Version(version)
+        except Exception:
+            self.version = version
         # parse_depends shape: each entry is a tuple (name, ver, op).
         self.recommends = [(r, '', '') for r in (recommends or [])]
+        self.depends = [(d, '', '') for d in (depends or [])]
+        self.pre_depends = []
+        self.alt_depends = []
+        self.depends_on = []
+        self.depended_by = []
 
     def __getitem__(self, k): return self._fields[k]
+    def __contains__(self, k): return k in self._fields
     def get(self, k, default=''): return self._fields.get(k, default)
+    def get_provides(self): return []
+    def add_constraint(self, *args, **kwargs): pass
 
 
 class _FakeCache:
-    """Minimal Cache surface — package_hashtable + skip_src.  Mirrors the
-    real shape:  Dict[name, Dict[version, List[Package]]]  — the inner
-    list carries the per-mirror records.  Versions are simple strings so
-    max() works lexically (sufficient for these tests)."""
+    """Minimal Cache surface — package_hashtable + skip_src + get_packages.
+    Mirrors the real shape: Dict[name, Dict[version, List[Package]]] — the
+    inner list carries the per-mirror records.  Versions are simple strings
+    so max() works lexically (sufficient for these tests)."""
     def __init__(self, pkgs_by_name, skip_src=()):
         # pkgs_by_name: {name: [_FakePkg, ...]}
         self.package_hashtable = {
@@ -5583,6 +5600,17 @@ class _FakeCache:
             for name, pkgs in pkgs_by_name.items()
         }
         self.skip_src = list(skip_src)
+
+    def get_packages(self, name, version=None, constraint=''):
+        """Mirror Cache.get_packages: return the Package candidates matching
+        `name` (optionally version-filtered).  For test simplicity we ignore
+        the version filter — recommends in our fixtures are unversioned, so
+        callers don't trip on this."""
+        _bucket = self.package_hashtable.get(name) or {}
+        _out = []
+        for _ver_pkgs in _bucket.values():
+            _out.extend(_ver_pkgs)
+        return _out
 
 
 def _build_dep_tree_with_recommend(*, recommend_source='libnss3',
@@ -5604,13 +5632,33 @@ def _build_dep_tree_with_recommend(*, recommend_source='libnss3',
     )
     dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
     # Bypass __init__ (avoids needing the full Cache constructor) — set the
-    # attributes pull_recommends_extras + derive_extras_src_names actually use.
+    # attributes pull_recommends_extras + parse_dependency +
+    # derive_extras_src_names actually use.
+    _seed_test_dep_tree(dt, cache, {'firefox': seed})
+    return dt, seed, rec
+
+
+def _seed_test_dep_tree(dt, cache, selected_pkgs):
+    """Populate a __new__-constructed DependencyTree with the minimum
+    attribute set parse_dependency / pull_recommends_extras need.
+
+    Centralised here because Bug 1's fix wired pull_recommends_extras
+    through parse_dependency, which touches more state (lookahead,
+    constraints set, etc.) than the old direct-insert path."""
+    from collections import defaultdict
     dt._DependencyTree__cache = cache
-    dt.selected_pkgs = {'firefox': seed}
+    dt._DependencyTree__lookahead = defaultdict(dict)
+    dt._DependencyTree__recommended = False
+    dt._auto_pick_highest_when_ambiguous = False
+    dt.selected_pkgs = dict(selected_pkgs)
     dt.selected_srcs = {}
+    dt.src_pkg_files = {}
     dt.extras_pkg_names = set()
     dt.extras_src_names = set()
-    return dt, seed, rec
+    dt.live_exclusive_pkg_names = set()
+    dt.installer_exclusive_pkg_names = set()
+    dt.pool_extras_pkg_names = set()
+    dt.pkg_group_extras_pkg_names = set()
 
 
 def test_pull_recommends_extras_pulls_single_name_recommends():
@@ -5648,11 +5696,7 @@ def test_pull_recommends_extras_drops_alt_groups():
                     recommends=[])  # parsed list ignores OR-groups
     cache = _FakeCache({'firefox': [seed]})
     dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
-    dt._DependencyTree__cache = cache
-    dt.selected_pkgs = {'firefox': seed}
-    dt.selected_srcs = {}
-    dt.extras_pkg_names = set()
-    dt.extras_src_names = set()
+    _seed_test_dep_tree(dt, cache, {'firefox': seed})
     added = dt.pull_recommends_extras()
     assert added == 0  # nothing pulled from an alt-recommend
 
@@ -5679,11 +5723,7 @@ def test_pull_recommends_extras_handles_multi_mirror_version_buckets():
     assert isinstance(_bucket, list), \
         "test fixture must mirror the real Dict[name,Dict[ver,List[Pkg]]] shape"
     dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
-    dt._DependencyTree__cache = cache
-    dt.selected_pkgs = {'firefox': seed}
-    dt.selected_srcs = {}
-    dt.extras_pkg_names = set()
-    dt.extras_src_names = set()
+    _seed_test_dep_tree(dt, cache, {'firefox': seed})
     added = dt.pull_recommends_extras()
     assert added == 1
     assert 'libnss3-tools' in dt.extras_pkg_names
@@ -5701,13 +5741,119 @@ def test_pull_recommends_extras_skips_already_in_selected_pkgs():
     assert 'libnss3-tools' not in dt.extras_pkg_names
 
 
+def test_pull_recommends_extras_walks_transitive_depends():
+    """REGRESSION (2026-05-20, pre-audit-split tag): the old code
+    inserted recommends directly into selected_pkgs WITHOUT going through
+    parse_dependency.  The recommend's own Depends graph was never walked,
+    leaving leaf libraries (libksba8, libnpth0, libmbim-glib4 et al)
+    absent from the install corpus and source-build queue.  Result: 80+
+    unresolved package_audit findings hidden until install time.
+
+    After the fix, pull_recommends_extras calls self.parse_dependency,
+    which recurses into hard Depends.  Verify it pulls dirmngr's
+    libksba8 along for the ride."""
+    import dependencytree
+    seed = _FakePkg('libgpgme11', source='gpgme1.0',
+                    filename='libgpgme11_1.0_amd64.deb',
+                    recommends=['dirmngr'])
+    # dirmngr Depends libksba8.  libksba8 is in the cache but no consumer
+    # selected it directly — only dirmngr (via recommend) needs it.
+    dirmngr = _FakePkg('dirmngr', source='gnupg2',
+                       filename='dirmngr_2.0_amd64.deb',
+                       depends=['libksba8'])
+    libksba8 = _FakePkg('libksba8', source='libksba',
+                        filename='libksba8_1.6_amd64.deb')
+    cache = _FakeCache({
+        'libgpgme11': [seed], 'dirmngr': [dirmngr], 'libksba8': [libksba8],
+    })
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    _seed_test_dep_tree(dt, cache, {'libgpgme11': seed})
+    added = dt.pull_recommends_extras()
+    assert added == 1   # only dirmngr is a direct recommend
+    # The fix's payload: libksba8 follows dirmngr in via the Depends walk.
+    assert 'dirmngr' in dt.selected_pkgs, \
+        "direct recommend missing from selected_pkgs"
+    assert 'libksba8' in dt.selected_pkgs, \
+        "BUG 1 REGRESSED: recommend's transitive Depends not walked"
+    # Both the direct recommend AND its transitive Depends are marked
+    # extras (their only justification is the recommend chain).
+    assert 'dirmngr' in dt.extras_pkg_names
+    assert 'libksba8' in dt.extras_pkg_names
+    # Seed itself stays out of extras (it's a "real" selection).
+    assert 'libgpgme11' not in dt.extras_pkg_names
+
+
+def test_parse_sources_uses_per_tree_src_pkg_files_not_shared_source_attr():
+    """REGRESSION (2026-05-20, pre-audit-split tag): Source.pkgs used to
+    live on the Source object, which is SHARED across the deb and udeb
+    DependencyTree instances via cache.source_hashtable.  The udeb tree's
+    parse_sources reset .pkgs = [] before appending only the udeb binary,
+    overwriting the deb tree's prediction.  source_audit then saw only
+    libc6-udeb (present in repo) and missed missing deb binaries like
+    libc6-dev.
+
+    The fix: per-tree src_pkg_files dict on DependencyTree.  Two trees,
+    two independent maps.  Verify by populating both and confirming
+    neither overwrites the other.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    import package as _pkg_mod
+
+    # Source.pkgs attribute must NOT exist on a fresh Source instance —
+    # if it reappears, the storage class drifted back to the shared-
+    # mutable-state design and this regression will recur.
+    _src = _pkg_mod.Source.__new__(_pkg_mod.Source)
+    assert not hasattr(_src, 'pkgs'), (
+        "Source.pkgs has reappeared — per-tree src_pkg_files split "
+        "is broken; the udeb tree will silently overwrite the deb "
+        "tree's predictions again")
+
+    # Two independent DependencyTrees with their own src_pkg_files.
+    # Simulate parse_sources having populated each from its own
+    # selected_pkgs without any shared state to clobber.
+    dt_deb = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt_deb.src_pkg_files = {'glibc': ['libc6_2.36-9_amd64.deb',
+                                       'libc6-dev_2.36-9_amd64.deb',
+                                       'libc-bin_2.36-9_amd64.deb']}
+    dt_udeb = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt_udeb.src_pkg_files = {'glibc': ['libc6-udeb_2.36-9_amd64.udeb']}
+
+    # Cross-tree isolation: each tree's view is intact, the other's
+    # write didn't leak.
+    assert 'libc6-dev_2.36-9_amd64.deb' in dt_deb.src_pkg_files['glibc']
+    assert 'libc6-udeb_2.36-9_amd64.udeb' in dt_udeb.src_pkg_files['glibc']
+    assert 'libc6-udeb_2.36-9_amd64.udeb' not in dt_deb.src_pkg_files['glibc']
+    assert 'libc6-dev_2.36-9_amd64.deb' not in dt_udeb.src_pkg_files['glibc']
+
+
+def test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately():
+    """source audit's output must label deb and udeb cohorts distinctly,
+    so the operator can tell which cohort drives each missing source.
+    Anti-regression for the pre-split single-cohort output that
+    silently merged the two trees' findings."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    # Both cohort labels appear in the audit header path.
+    assert 'deb cohort' in _body, "source audit missing deb-cohort label"
+    assert 'udeb cohort' in _body, "source audit missing udeb-cohort label"
+    # And the audit iterates a list of cohorts (not a single tree).
+    assert "_cohorts = [('deb'" in _body, (
+        "cmd_source_audit no longer iterates a per-cohort list — "
+        "the split into deb/udeb scopes may have regressed")
+
+
 def test_derive_extras_src_names_marks_extras_only_sources():
     """A source whose every binary is in extras_pkg_names is in
     extras_src_names.  A mixed source (some selected + some extras) is NOT."""
     import dependencytree
 
     class _StubSrc:
-        def __init__(self, pkgs): self.pkgs = pkgs
+        pass
 
     # firefox source: produces firefox.deb (selected) AND firefox-l10n-en.deb
     # (extras).  Mixed → NOT in extras_src_names.
@@ -5724,10 +5870,13 @@ def test_derive_extras_src_names_marks_extras_only_sources():
     dt._DependencyTree__cache = _FakeCache({})
     dt._distro_suffix = ''  # no version bump in this synthetic test
     dt.selected_pkgs = seed_pkgs
-    dt.selected_srcs = {
-        'firefox': _StubSrc(['firefox_1.0_amd64.deb',
-                             'firefox-l10n-en_1.0_amd64.deb']),
-        'libnss3': _StubSrc(['libnss3-tools_3.0_amd64.deb']),
+    dt.selected_srcs = {'firefox': _StubSrc(), 'libnss3': _StubSrc()}
+    # Per-tree predicted filenames (replaces Source.pkgs, see
+    # dependencytree.py:src_pkg_files docstring for why).
+    dt.src_pkg_files = {
+        'firefox': ['firefox_1.0_amd64.deb',
+                    'firefox-l10n-en_1.0_amd64.deb'],
+        'libnss3': ['libnss3-tools_3.0_amd64.deb'],
     }
     dt.extras_pkg_names = {'firefox-l10n-en', 'libnss3-tools'}
     dt.extras_src_names = set()
@@ -6511,7 +6660,7 @@ def test_derive_subset_exclusive_src_names_marks_live_only_sources():
     import dependencytree
 
     class _StubSrc:
-        def __init__(self, pkgs): self.pkgs = pkgs
+        pass
 
     # firefox source: produces firefox.deb (pkg-layer) AND firefox-l10n-en.deb
     # (extras).  Mixed → NOT in any exclusive src set.
@@ -6527,10 +6676,11 @@ def test_derive_subset_exclusive_src_names_marks_live_only_sources():
     dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
     dt._DependencyTree__cache = _FakeCache({})
     dt.selected_pkgs = seed_pkgs
-    dt.selected_srcs = {
-        'firefox':     _StubSrc(['firefox_1.0_amd64.deb',
-                                 'firefox-l10n-en_1.0_amd64.deb']),
-        'live-config': _StubSrc(['live-config_1.0_all.deb']),
+    dt.selected_srcs = {'firefox': _StubSrc(), 'live-config': _StubSrc()}
+    dt.src_pkg_files = {
+        'firefox':     ['firefox_1.0_amd64.deb',
+                        'firefox-l10n-en_1.0_amd64.deb'],
+        'live-config': ['live-config_1.0_all.deb'],
     }
     dt.extras_pkg_names = set()
     dt.extras_src_names = set()
@@ -6574,7 +6724,7 @@ def test_derive_subset_exclusive_src_names_handles_installer_exclusive():
     import dependencytree
 
     class _StubSrc:
-        def __init__(self, pkgs): self.pkgs = pkgs
+        pass
 
     seed_pkgs = {
         'partman-base': _FakePkg('partman-base', source='partman-base',
@@ -6583,9 +6733,8 @@ def test_derive_subset_exclusive_src_names_handles_installer_exclusive():
     dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
     dt._DependencyTree__cache = _FakeCache({})
     dt.selected_pkgs = seed_pkgs
-    dt.selected_srcs = {
-        'partman-base': _StubSrc(['partman-base_1.0_all.udeb']),
-    }
+    dt.selected_srcs = {'partman-base': _StubSrc()}
+    dt.src_pkg_files = {'partman-base': ['partman-base_1.0_all.udeb']}
     dt.extras_pkg_names = set()
     dt.extras_src_names = set()
     dt.live_exclusive_pkg_names = set()
@@ -10555,6 +10704,7 @@ def test_cmd_source_repair_writes_pass_when_binaries_present():
         # Stub dep tree
         class _Tree:
             selected_srcs = {'foo': _Src()}
+            src_pkg_files = {'foo': list(_Src.pkgs)}
 
         # Stub flags
         class _Flags:
@@ -10616,7 +10766,9 @@ def test_cmd_source_repair_leaves_fail_result_untouched():
             def verify_pkg_artifact(_path, _f):
                 return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
         class _Cfg: dir_repo = _repo
-        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Tree:
+            selected_srcs = {'foo': _Src()}
+            src_pkg_files = {'foo': list(_Src.pkgs)}
         class _Flags:
             cache_ready = True
             dep_check_ready = True
@@ -10662,7 +10814,9 @@ def test_cmd_source_repair_skips_when_binaries_missing():
             def verify_pkg_artifact(_path, _f):
                 return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
         class _Cfg: dir_repo = _repo
-        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Tree:
+            selected_srcs = {'foo': _Src()}
+            src_pkg_files = {'foo': list(_Src.pkgs)}
         class _Flags:
             cache_ready = True
             dep_check_ready = True
@@ -10714,7 +10868,9 @@ def test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails():
             def verify_pkg_artifact(_path, _f):
                 return (False, 'version-mismatch:X!=Y')
         class _Cfg: dir_repo = _repo
-        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Tree:
+            selected_srcs = {'foo': _Src()}
+            src_pkg_files = {'foo': list(_Src.pkgs)}
         class _Flags:
             cache_ready = True
             dep_check_ready = True
@@ -10763,7 +10919,9 @@ def test_cmd_source_repair_leaves_consistent_pass_alone():
             @staticmethod
             def verify_pkg_artifact(_path, _f): return (True, 'ok')
         class _Cfg: dir_repo = _repo
-        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Tree:
+            selected_srcs = {'foo': _Src()}
+            src_pkg_files = {'foo': list(_Src.pkgs)}
         class _Flags:
             cache_ready = True
             dep_check_ready = True
@@ -10811,7 +10969,9 @@ def test_cmd_source_repair_leaves_tunneled_marker_alone():
             def verify_pkg_artifact(_path, _f):
                 return (False, 'should-not-be-called-for-tunneled')
         class _Cfg: dir_repo = _repo
-        class _Tree: selected_srcs = {'foo': _Src()}
+        class _Tree:
+            selected_srcs = {'foo': _Src()}
+            src_pkg_files = {'foo': list(_Src.pkgs)}
         class _Flags:
             cache_ready = True
             dep_check_ready = True
@@ -11164,6 +11324,9 @@ def main() -> int:
         test_pull_recommends_extras_drops_alt_groups,
         test_pull_recommends_extras_handles_multi_mirror_version_buckets,
         test_pull_recommends_extras_skips_already_in_selected_pkgs,
+        test_pull_recommends_extras_walks_transitive_depends,
+        test_parse_sources_uses_per_tree_src_pkg_files_not_shared_source_attr,
+        test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately,
         test_derive_extras_src_names_marks_extras_only_sources,
         # phase 1: live.list / installer.list split
         test_dep_tree_initialises_subset_exclusive_sets_empty,

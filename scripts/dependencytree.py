@@ -157,6 +157,26 @@ class DependencyTree:
         self.pkg_group_extras_pkg_names: set = set()
         self.pkg_group_extras_src_names: set = set()
 
+        # Per-tree predicted-binary-filename map.  Source-name → list of
+        # binary filenames (post utils.normalize_repo_filename) this tree
+        # expects to land in repo/ from a successful dpkg-buildpackage of
+        # the source.
+        #
+        # Stored per-tree (not on Source) because Source objects are shared
+        # across DependencyTree instances via cache.source_hashtable.  The
+        # old design mutated Source.pkgs in-place; the udeb tree's
+        # parse_sources reset the shared list, overwriting the deb tree's
+        # entries.  Source audit then saw only udeb binaries (libc6-udeb
+        # present → "ok") and missed missing deb binaries like libc6-dev.
+        # Bug found 2026-05-20; pre-audit-split-2026-05-20 tag preserves
+        # the pre-fix state.
+        #
+        # Readers that need the union across both trees (e.g.
+        # BuildContainer.check_build deciding skip-rebuild) take both
+        # trees' maps explicitly and union them in the caller — no
+        # implicit cross-tree state.
+        self.src_pkg_files: 'Dict[str, List[str]]' = {}
+
         self.arch = arch
         self.build_profiles = build_profiles
 
@@ -722,7 +742,8 @@ class DependencyTree:
 
     def pull_recommends_extras(self) -> int:
         """Walk the current selected_pkgs and pull depth-1 Recommends
-        into selected_pkgs as 'extras'.
+        into selected_pkgs (and their transitive Depends closure) as
+        'extras'.
 
         Extras land in selected_pkgs (so source_download fetches their
         upstream tarballs via the existing parse_sources path) and their
@@ -731,7 +752,18 @@ class DependencyTree:
         modes.
 
         Behaviour:
-          - Depth-1 only: recommends of recommends are NOT followed.
+          - Depth-1 for RECOMMENDS: a recommend's own Recommends are
+            NOT followed (constructor's select_recommended=False ensures
+            parse_dependency skips them too).
+          - FULL DEPTH for DEPENDS of the recommend: parse_dependency
+            recursively walks the recommend's hard Depends.  Without
+            this the recommend lands as an orphan — its libs (libksba8,
+            libnpth0, libmbim*, libqmi*, libtss2-*, etc.) never enter
+            selected_pkgs, never get a source build, and chroot-install
+            fails at audit time.  Both extras AND their transitive
+            Depends end up in extras_pkg_names so the WHOLE recommends-
+            only subtree ships in /cdrom/pool but skips the live/target
+            install batches.
           - OR-grouped recommends ('foo | bar') are silently skipped —
             today's package.recommends only carries single-name groups
             (package.py:201 `if len(g) == 1`).  Documented gap; widening
@@ -740,19 +772,21 @@ class DependencyTree:
             a WARN — promising it in the repo would lie since neither
             source_build nor tunnel will produce a .deb for it.
           - A recommend already in selected_pkgs (covered by required/
-            important/manual closure) is NOT marked as extras — the chroot
-            install set is the source of truth for "must install".
+            important/manual closure) is NOT re-walked.
 
         Caller is responsible for calling derive_extras_src_names()
         AFTER parse_sources runs to populate self.extras_src_names.
 
-        Returns the number of new extras added to selected_pkgs.
+        Returns the number of direct recommends pulled in (does NOT
+        count transitive Depends added on their behalf — the logger
+        WARNING line reports both numbers separately).
         """
         # Snapshot — we'll mutate selected_pkgs while iterating.
         _seed_names = [
             name for name in self.selected_pkgs.keys()
             if name == self.selected_pkgs[name]['Package']  # canonical only
         ]
+        _pre_keys = set(self.selected_pkgs.keys())
         _added = 0
         _skipped_skip_src = 0
         for _seed_name in _seed_names:
@@ -768,14 +802,14 @@ class DependencyTree:
                         f"'{_seed_name}') not in package cache — skipped"
                     )
                     continue
-                # Pick latest version.  package_hashtable is structured as
-                #   Dict[name, Dict[Version, List[Package]]]
-                # — the inner List is per-mirror (same name+version can ship
-                # from main AND security).  max() over Version keys gives the
-                # highest version; pick the first Package from that bucket
-                # (any mirror's record is fine for the .recommends → source
-                # lookup; parse_sources will pick the right mirror later when
-                # mapping binary → source).
+                # skip_src gate: inspect the latest-version candidate's
+                # source name before calling parse_dependency so we don't
+                # waste a walk on something we'll refuse to build.
+                # package_hashtable is Dict[name, Dict[Version, List[Package]]]
+                # — inner list is per-mirror (same name+version from main
+                # AND security).  Any mirror's record works for the
+                # source-name lookup; parse_sources picks the right mirror
+                # later when mapping binary → source.
                 _ver = max(_candidates.keys())
                 _ver_bucket = _candidates[_ver]
                 if not _ver_bucket:
@@ -784,11 +818,8 @@ class DependencyTree:
                         f"version bucket for {_ver} — skipped"
                     )
                     continue
-                _rec_pkg = _ver_bucket[0]
-                # Source-name lookup — if the recommend's source is on the
-                # skip list, refuse: we'd advertise something we never build.
                 try:
-                    _src_name = _rec_pkg.source
+                    _src_name = _ver_bucket[0].source
                 except Exception as e:
                     logger.warning(
                         f"pull_recommends_extras: cannot read source for "
@@ -802,15 +833,32 @@ class DependencyTree:
                     )
                     _skipped_skip_src += 1
                     continue
-                # Add to selected_pkgs under the canonical name and mark as
-                # extras.  parse_sources() (called next by cmd_parse_dependency)
-                # will pick it up and pull the source into selected_srcs.
-                self.selected_pkgs[_rec_pkg['Package']] = _rec_pkg
-                self.extras_pkg_names.add(_rec_pkg['Package'])
+                # Walk via parse_dependency so the recommend's own hard
+                # Depends graph (libksba8, libnpth0, etc) gets pulled in
+                # transitively.  Constructor's select_recommended=False
+                # means recommends-of-recommends are NOT followed.
+                _resolved = self.parse_dependency(_rec_name)
+                if _resolved is None:
+                    logger.warning(
+                        f"pull_recommends_extras: '{_rec_name}' (recommended "
+                        f"by '{_seed_name}') failed to resolve — skipped"
+                    )
+                    continue
                 _added += 1
+        # Mark every NEWLY added canonical pkg as extras — the direct
+        # recommends AND every transitive Depends pulled in for them.
+        # Virtual-alias entries (same Package object under a Provides
+        # name) are filtered by the canonical-only check.
+        _delta_canonical = {
+            n for n in (set(self.selected_pkgs.keys()) - _pre_keys)
+            if n == self.selected_pkgs[n]['Package']
+        }
+        self.extras_pkg_names |= _delta_canonical
+        _transitive = len(_delta_canonical) - _added
         logger.warning(
-            f"pull_recommends_extras: added {_added} recommends to "
-            f"selected_pkgs (skip_src skipped {_skipped_skip_src})"
+            f"pull_recommends_extras: added {_added} direct recommend(s), "
+            f"+{_transitive} transitive dep(s) to selected_pkgs "
+            f"(skip_src skipped {_skipped_skip_src})"
         )
         return _added
 
@@ -830,10 +878,10 @@ class DependencyTree:
         self.extras_src_names.clear()
         if not self.extras_pkg_names:
             return 0
-        # Map binary filename → canonical package name.  selected_srcs[src].pkgs
-        # holds filenames (e.g. 'foo_1.0_amd64.deb'); we need package names to
-        # check membership in extras_pkg_names.  Build a reverse index from
-        # selected_pkgs once.
+        # Map binary filename → canonical package name.  src_pkg_files[src]
+        # holds filenames (e.g. 'foo_1.0_amd64.deb'); we need package names
+        # to check membership in extras_pkg_names.  Build a reverse index
+        # from selected_pkgs once.
         _bin_filename_to_name = {}
         for _name in self.selected_pkgs:
             if _name != self.selected_pkgs[_name]['Package']:
@@ -843,8 +891,8 @@ class DependencyTree:
             if _filename:
                 _filename = utils.normalize_repo_filename(_filename)
                 _bin_filename_to_name[_filename] = _name
-        for _src_name, _src in self.selected_srcs.items():
-            _src_bins = getattr(_src, 'pkgs', []) or []
+        for _src_name in self.selected_srcs:
+            _src_bins = self.src_pkg_files.get(_src_name) or []
             if not _src_bins:
                 continue  # source has no binaries known yet — not extras-only
             _pkg_names = [
@@ -890,8 +938,8 @@ class DependencyTree:
             if _filename:
                 _filename = utils.normalize_repo_filename(_filename)
                 _bin_filename_to_name[_filename] = _name
-        for _src_name, _src in self.selected_srcs.items():
-            _src_bins = getattr(_src, 'pkgs', []) or []
+        for _src_name in self.selected_srcs:
+            _src_bins = self.src_pkg_files.get(_src_name) or []
             if not _src_bins:
                 continue
             _pkg_names = [_bin_filename_to_name.get(_fn) for _fn in _src_bins]
@@ -910,7 +958,22 @@ class DependencyTree:
                 len(self.installer_exclusive_src_names))
 
     def parse_sources(self) -> bool:
+        """Populate self.selected_srcs (source-name → Source) and
+        self.src_pkg_files (source-name → list of predicted binary
+        filenames in THIS tree) for every canonical pkg in
+        self.selected_pkgs.
+
+        src_pkg_files is per-tree storage — see __init__ for why
+        (Source.pkgs was shared across trees, causing the udeb tree's
+        parse_sources to overwrite the deb tree's entries).  Readers
+        that need the union across both trees take both maps and union
+        explicitly at the call site.
+        """
         _found = True
+        # Reset src_pkg_files — caller may invoke parse_sources multiple
+        # times (e.g. `dep parse force` after pkg.list edits).  Stale
+        # filename entries would survive selected_pkgs changes.
+        self.src_pkg_files.clear()
         # Build (source_name, source_version, Package) tuples. Skip packages whose
         # python-debian .source / .source_version properties raise on malformed data.
         _src_list = []
@@ -971,8 +1034,6 @@ class DependencyTree:
                             f"{len(_matched)} mirrors; picked {_picked_mirror_id}"
                         )
 
-                self.selected_srcs[_src_name].pkgs = []
-
             _bin_filename = (_bin_pkg.get('Filename') or '').rsplit('/', 1)[-1]
             if _bin_filename:
                 # Map the cache's upstream APT Filename onto what our
@@ -980,10 +1041,11 @@ class DependencyTree:
                 # strips both +bN (Debian-buildd binNMU) and +debNuN /
                 # ~bpoN+N / +rpiN / -Nb (upstream NMU layers, removed
                 # by our post-`dpkg-buildpackage` strip).  Result: the
-                # filename in src.pkgs matches what lands in repo/main.
+                # filename in src_pkg_files matches what lands in repo/main.
                 _bin_filename = utils.normalize_repo_filename(_bin_filename)
-                if _bin_filename not in self.selected_srcs[_src_name].pkgs:
-                    self.selected_srcs[_src_name].pkgs.append(_bin_filename)
+                _bucket = self.src_pkg_files.setdefault(_src_name, [])
+                if _bin_filename not in _bucket:
+                    _bucket.append(_bin_filename)
 
         logger.warning(f"parse_sources: selected {len(self.selected_srcs)} source packages")
         return _found

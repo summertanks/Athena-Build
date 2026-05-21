@@ -814,9 +814,22 @@ def _print_src(session, *extras) -> None:
         for fname, meta in sorted(s.files.items()):
             _size = meta.get('size', '?')
             tui.console.print(f"      {fname}  ({_size} B)")
-    if getattr(s, 'pkgs', None):
-        tui.console.print(f"  Produced .debs: {len(s.pkgs)}")
-        for d in sorted(s.pkgs):
+    # Predicted binary filenames — split per-tree so the operator can
+    # see which cohort drives each binary.  Source objects no longer
+    # carry a .pkgs attribute; the per-tree maps live on
+    # DependencyTree.src_pkg_files.
+    _deb_files = sorted(session.dep_tree.src_pkg_files.get(name) or [])
+    _udeb_files = []
+    if getattr(session, 'udeb_dep_tree', None) is not None:
+        _udeb_files = sorted(
+            session.udeb_dep_tree.src_pkg_files.get(name) or [])
+    if _deb_files:
+        tui.console.print(f"  Produced .debs ({len(_deb_files)}):")
+        for d in _deb_files:
+            tui.console.print(f"      {d}")
+    if _udeb_files:
+        tui.console.print(f"  Produced .udebs ({len(_udeb_files)}):")
+        for d in _udeb_files:
             tui.console.print(f"      {d}")
 
 

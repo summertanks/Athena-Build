@@ -419,8 +419,13 @@ class Source(Sources):
 
         self.package_list: List[str] = []
 
-        # Runtime: binary .deb filenames produced from this source (populated by DependencyTree.parse_sources)
-        self.pkgs: List[str] = []
+        # NOTE: predicted binary filenames live in DependencyTree.src_pkg_files
+        # (per-tree map keyed by source name), NOT on the Source object.
+        # Source objects are shared across deb and udeb dep-trees via
+        # cache.source_hashtable; storing pkgs here let the udeb pass
+        # overwrite the deb pass's list, hiding deb-cohort gaps in source
+        # audit.  Removed 2026-05-20; pre-audit-split-2026-05-20 tag
+        # preserves the prior layout.
 
         self.skip_test = False
         self.patch_list: List[str] = []

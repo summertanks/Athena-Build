@@ -651,17 +651,25 @@ class BuildContainer:
                 f"placed in repo/ subdirs"
             )
 
-    def check_build(self, src_pkg: Source) -> bool:
+    def check_build(self, src_pkg: Source,
+                    expected_files: 'list[str]') -> bool:
         """Decide whether a previously-built source can skip rebuild.
 
         Shallow gate — kept fast because this runs on every source
         build call across the full dep tree:
 
-          1. src_pkg declares at least one binary
+          1. expected_files is non-empty
           2. log/build/<src>.result reads PASS or TUNNELED
           3. Every predicted INSTALLABLE binary (classified to main)
-             in src_pkg.pkgs exists at repo/main/<file> AND is a
+             in expected_files exists at repo/main/<file> AND is a
              syntactically valid ar archive (is_ar_file).
+
+        expected_files is the union across both dep_trees of binaries
+        this source is predicted to produce — caller passes
+        dep_tree.src_pkg_files.get(src) + udeb_dep_tree.src_pkg_files.get(src).
+        We can't read them off src_pkg because Source objects are
+        shared across trees via cache.source_hashtable; the per-tree
+        prediction lives in each DependencyTree.src_pkg_files map.
 
         Missing -dev/-doc/-dbgsym/-tests artifacts do NOT trigger
         rebuild — they're side artifacts that don't install anywhere,
@@ -676,7 +684,7 @@ class BuildContainer:
         because the 12h rebuild cost dominated the false-positive
         risk; deep audit is now opt-in via `source verify`.
         """
-        if not src_pkg.pkgs:
+        if not expected_files:
             return False
 
         result_file = os.path.join(self.buildlog_path, src_pkg.package + '.result')
@@ -687,7 +695,7 @@ class BuildContainer:
         except OSError:
             return False
 
-        for _file in src_pkg.pkgs:
+        for _file in expected_files:
             # Only main-classified binaries gate rebuild; missing
             # -dev/-doc/-dbgsym/-tests are tolerated.
             _sub = utils.classify_repo_subdir(_file)
