@@ -4700,6 +4700,141 @@ def test_strip_nmu_from_control_text_walks_relation_fields():
     assert '2+b1' in _out, "Description text should not be stripped"
 
 
+def test_strip_nmu_pair_rewrite_collapses_sibling_idiom():
+    """The upstream `X (>> V), X (<< V-.)` "any debrev of upstream V"
+    idiom is collapsed to `X (= our_version)` at strip time.  After
+    strip-NMU, our siblings ship at `V-0` which apt treats as equal to
+    bare V (Policy §5.6.12), so the >> half of the original fails.
+    The rewrite locks the constraint to our own atomic-source-build
+    version, matching the invariant our pipeline actually preserves.
+
+    See docs/strip-nmu-sibling-constraint-idiom.md for the full
+    rationale + impact analysis."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_control_text
+    # Real git-shape: Depends pair with same name, >> V on one half,
+    # << V-. on the other.  Mixed with unrelated constraints that must
+    # be preserved as-is.
+    _ctrl = (
+        'Package: git\n'
+        'Version: 1:2.39.5-0\n'
+        'Architecture: amd64\n'
+        'Depends: libc6 (>= 2.34), git-man (>> 1:2.39.5),'
+        ' git-man (<< 1:2.39.5-.), perl\n'
+        'Description: a test stanza\n'
+    )
+    _out, _n = strip_nmu_from_control_text(_ctrl)
+    # Pair collapses to single (=) entry; >> and << gone.
+    assert 'git-man (= 1:2.39.5-0)' in _out, (
+        f"sibling idiom not collapsed; got:\n{_out}"
+    )
+    assert '>>' not in _out and '<< 1:2.39.5-.' not in _out, (
+        f"original pair still present after rewrite:\n{_out}"
+    )
+    # Unrelated constraints survive untouched.
+    assert 'libc6 (>= 2.34)' in _out
+    assert ', perl' in _out
+
+
+def test_strip_nmu_pair_rewrite_only_when_pair_matches():
+    """The rewriter is strictly bound to the FULL pair pattern.
+    Single `>>` or pair without the `-.` upper bound must NOT trigger
+    the collapse — that would be relaxing a constraint the maintainer
+    might have written for an entirely different reason."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_control_text
+
+    # Case A: lone `>>` (no matching `<< V-.`) — must NOT rewrite.
+    _ctrl_a = (
+        'Package: foo\n'
+        'Version: 1.0-3\n'
+        'Architecture: amd64\n'
+        'Depends: libbar (>> 1.0)\n'
+    )
+    _out_a, _ = strip_nmu_from_control_text(_ctrl_a)
+    assert 'libbar (>> 1.0)' in _out_a, (
+        "lone >> incorrectly rewritten"
+    )
+
+    # Case B: pair with DIFFERENT names — must NOT rewrite.
+    _ctrl_b = (
+        'Package: foo\n'
+        'Version: 1.0-3\n'
+        'Architecture: amd64\n'
+        'Depends: libbar (>> 1.0), libquux (<< 1.0-.)\n'
+    )
+    _out_b, _ = strip_nmu_from_control_text(_ctrl_b)
+    assert 'libbar (>> 1.0)' in _out_b
+    assert 'libquux (<< 1.0-.)' in _out_b
+
+    # Case C: pair without `-.` upper bound (e.g. `<< 2.0` instead).
+    # NOT the canonical idiom — different intent, must NOT rewrite.
+    _ctrl_c = (
+        'Package: foo\n'
+        'Version: 1.0-3\n'
+        'Architecture: amd64\n'
+        'Depends: libbar (>> 1.0), libbar (<< 2.0)\n'
+    )
+    _out_c, _ = strip_nmu_from_control_text(_ctrl_c)
+    assert 'libbar (>> 1.0)' in _out_c
+    assert 'libbar (<< 2.0)' in _out_c
+
+    # Case D: OR-alternative containing the pair — must NOT rewrite
+    # (the idiom is AND-level only; OR-alternatives change the semantics).
+    _ctrl_d = (
+        'Package: foo\n'
+        'Version: 1.0-3\n'
+        'Architecture: amd64\n'
+        'Depends: libbar (>> 1.0) | libbar (<< 1.0-.)\n'
+    )
+    _out_d, _ = strip_nmu_from_control_text(_ctrl_d)
+    assert '(>> 1.0)' in _out_d and '(<< 1.0-.)' in _out_d, (
+        "OR-grouped pair incorrectly collapsed; the idiom only applies "
+        "at AND-level"
+    )
+
+
+def test_strip_nmu_pair_rewrite_idempotent():
+    """Re-running on already-rewritten content is a no-op (pair was
+    already collapsed to `(= our_version)`, no `>>` half remains to
+    detect)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_control_text
+    _ctrl = (
+        'Package: git\n'
+        'Version: 1:2.39.5-0\n'
+        'Architecture: amd64\n'
+        'Depends: git-man (= 1:2.39.5-0)\n'
+    )
+    _out, _n = strip_nmu_from_control_text(_ctrl)
+    # Should be a no-op — content already has (=) form.
+    assert _out == _ctrl
+    assert _n == 0
+
+
+def test_strip_nmu_pair_rewrite_scoped_to_depends_pre_depends():
+    """The idiom is a hard-link convention (Depends / Pre-Depends).
+    Recommends / Suggests / Enhances must NOT be rewritten — they're
+    soft links and could legitimately use the `>>, <<-.` pair to
+    express "if you happen to have this debrev, fine".  Conflicts /
+    Breaks similarly carry different semantics."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_control_text
+    _ctrl = (
+        'Package: foo\n'
+        'Version: 1.0-3\n'
+        'Architecture: amd64\n'
+        'Recommends: libbar (>> 1.0), libbar (<< 1.0-.)\n'
+        'Suggests:   libquux (>> 2.0), libquux (<< 2.0-.)\n'
+    )
+    _out, _ = strip_nmu_from_control_text(_ctrl)
+    assert 'libbar (>> 1.0)' in _out and 'libbar (<< 1.0-.)' in _out, (
+        "Recommends pair was rewritten; idiom must be scoped to "
+        "Depends/Pre-Depends only"
+    )
+    assert 'libquux (>> 2.0)' in _out and 'libquux (<< 2.0-.)' in _out
+
+
 def test_strip_nmu_from_deb_round_trip():
     """End-to-end: synthesise a .deb with NMU suffixes everywhere, run
     strip_nmu_from_deb, verify filename + internal Version + all dep
@@ -11546,6 +11681,10 @@ def main() -> int:
         test_strip_nmu_suffix_strips_known_patterns,
         test_strip_nmu_suffix_idempotent,
         test_strip_nmu_from_control_text_walks_relation_fields,
+        test_strip_nmu_pair_rewrite_collapses_sibling_idiom,
+        test_strip_nmu_pair_rewrite_only_when_pair_matches,
+        test_strip_nmu_pair_rewrite_idempotent,
+        test_strip_nmu_pair_rewrite_scoped_to_depends_pre_depends,
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
         test_buildcontainer_calls_strip_post_build,
