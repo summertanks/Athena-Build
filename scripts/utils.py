@@ -248,7 +248,157 @@ def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
         else:
             _new_lines.append(_line)
 
-    return ''.join(_new_lines), _total
+    _content = ''.join(_new_lines)
+
+    # Pair-rewrite pass: detect the upstream "same-upstream-sibling"
+    # idiom (`X (>> V), X (<< V-.)`) and collapse it to `X (= our_version)`.
+    # See docs/strip-nmu-sibling-constraint-idiom.md for the full
+    # rationale + impact analysis.  Briefly: the >> half fails after
+    # strip-NMU because Policy §5.6.12 makes our `V-0` equal to bare `V`;
+    # the maintainer's intent was "any debrev of same upstream", which
+    # in our atomic-source-build pipeline reduces to "the exact sibling
+    # binary version we produce".
+    _our_version = _extract_version(_content)
+    if _our_version:
+        _content, _pairs = _rewrite_sibling_idiom_in_text(_content, _our_version)
+        _total += _pairs
+
+    return _content, _total
+
+
+def _extract_version(content: str) -> 'Optional[str]':
+    """Read the Version: field value from a control-file text."""
+    _m = re.search(r'^Version: (\S+)\s*$', content, re.MULTILINE)
+    return _m.group(1) if _m else None
+
+
+def _rewrite_sibling_idiom_in_text(content: str,
+                                    our_version: str) -> 'tuple[str, int]':
+    """Rewrite the upstream `X (>> V), X (<< V-.)` AND-pair idiom in
+    Depends / Pre-Depends to a single `X (= our_version)` entry.
+
+    Strictly bound to the four pair conditions — anything that doesn't
+    match the full signature is left untouched:
+
+      1. Field is Depends or Pre-Depends (Recommends/Suggests/etc skipped:
+         the idiom is a hard-link convention).
+      2. Both entries are at AND-level (each is its own single-entry
+         OR-group — Debian Policy forbids alternatives in the idiom).
+      3. Same target name X on both halves.
+      4. `>>` half's version is V; `<<` half's version is exactly `V-.`
+         (the canonical "any debrev of V" upper bound).
+
+    Returns (new_content, pairs_rewritten_count).  Idempotent: re-running
+    on already-rewritten content returns count=0.
+    """
+    from debian.deb822 import PkgRelation
+    _pairs_total = 0
+    _new_lines: 'list[str]' = []
+    _lines = content.splitlines(keepends=True)
+    _i = 0
+    while _i < len(_lines):
+        _line = _lines[_i]
+        # Field header detection: column 0 + Name: at the start.
+        _m = re.match(r'^(Depends|Pre-Depends):\s*(.*)$', _line)
+        if not _m or (_line and _line[0] in (' ', '\t')):
+            _new_lines.append(_line)
+            _i += 1
+            continue
+        _field = _m.group(1)
+        _value_parts = [_m.group(2).rstrip('\n')]
+        # Collect continuation lines (lead-with-whitespace).
+        _j = _i + 1
+        while _j < len(_lines) and _lines[_j] and _lines[_j][0] in (' ', '\t'):
+            _value_parts.append(_lines[_j].strip())
+            _j += 1
+        _full_value = ' '.join(p for p in _value_parts if p)
+        _new_value, _pairs = _collapse_sibling_pair(_full_value, our_version)
+        if _pairs > 0:
+            # Determine trailing newline shape from the original first line.
+            _eol = '\n' if _line.endswith('\n') else ''
+            _new_lines.append(f'{_field}: {_new_value}{_eol}')
+            _pairs_total += _pairs
+        else:
+            # No rewrite needed — preserve original line shape (including
+            # operator-authored continuation wrapping).
+            _new_lines.append(_line)
+            for _k in range(_i + 1, _j):
+                _new_lines.append(_lines[_k])
+        _i = _j
+    if _pairs_total == 0:
+        return content, 0
+    return ''.join(_new_lines), _pairs_total
+
+
+def _collapse_sibling_pair(value: str,
+                            our_version: str) -> 'tuple[str, int]':
+    """Parse a Depends-field value, collapse every `X (>> V), X (<< V-.)`
+    pair into `X (= our_version)`.  See _rewrite_sibling_idiom_in_text
+    docstring for the exact match criteria."""
+    from debian.deb822 import PkgRelation
+    try:
+        _relations = PkgRelation.parse_relations(value)
+    except Exception:
+        return value, 0
+    _skip: 'set[int]' = set()
+    _count = 0
+    _new_relations: 'list[list]' = []
+    for _i, _or_group in enumerate(_relations):
+        if _i in _skip:
+            continue
+        # Match guard 1: AND-level entries are single-element OR-groups.
+        # Alternatives like `(X >> V) | (Y >> V)` are not the idiom.
+        if len(_or_group) != 1:
+            _new_relations.append(_or_group)
+            continue
+        _entry_i = _or_group[0]
+        _ver_i = _entry_i.get('version')
+        if not _ver_i or _ver_i[0] != '>>':
+            _new_relations.append(_or_group)
+            continue
+        _name = _entry_i['name']
+        _v = _ver_i[1]
+        # Look forward for the matching `<<` half.  Architecture
+        # restrictions, arch-qualifiers, and build-profile restrictions
+        # must also match to confirm it's the same logical constraint.
+        _matched_j: 'Optional[int]' = None
+        for _j in range(_i + 1, len(_relations)):
+            if _j in _skip:
+                continue
+            if len(_relations[_j]) != 1:
+                continue
+            _entry_j = _relations[_j][0]
+            _ver_j = _entry_j.get('version')
+            if not _ver_j or _ver_j[0] != '<<':
+                continue
+            if _entry_j['name'] != _name:
+                continue
+            if _ver_j[1] != f'{_v}-.':
+                continue
+            if (_entry_j.get('arch') != _entry_i.get('arch')
+                    or _entry_j.get('archqual') != _entry_i.get('archqual')
+                    or _entry_j.get('restrictions') != _entry_i.get('restrictions')):
+                continue
+            _matched_j = _j
+            break
+        if _matched_j is None:
+            _new_relations.append(_or_group)
+            continue
+        # Pair confirmed.  Collapse to a single `(X = our_version)` entry
+        # in place of the `>>` half; drop the `<<` half.
+        _collapsed = {
+            'name':         _name,
+            'version':      ('=', our_version),
+            'arch':         _entry_i.get('arch'),
+            'archqual':     _entry_i.get('archqual'),
+            'restrictions': _entry_i.get('restrictions'),
+        }
+        _new_relations.append([_collapsed])
+        _skip.add(_matched_j)
+        _count += 1
+    if _count == 0:
+        return value, 0
+    return PkgRelation.str(_new_relations), _count
 
 
 def strip_nmu_from_deb(deb_path: str) -> dict:
