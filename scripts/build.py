@@ -3113,13 +3113,15 @@ class BuildSession:
     # ---------------------------------------------------------------------------
 
     # Subset selectors recognised by `source build` — pkg / live /
-    # installer / recommended are mutually exclusive; named pkgs are a
-    # fifth (also exclusive) mode.  'pkg' is the default when no subset
-    # and no names are given (Phase 4 — used to be 'live' pre-pivot).
+    # installer / recommended / all are mutually exclusive; named pkgs
+    # are a sixth (also exclusive) mode.  'pkg' is the default when no
+    # subset and no names are given (Phase 4 — used to be 'live' pre-pivot).
     # 'pkg' = pkg.list closure only; 'live' = live extras only; 'installer'
     # = udeb closure + installer.list deb-arm extras; 'recommended' = extras
-    # pulled by depth-1 Recommends.
-    _SOURCE_SUBSETS = ('pkg', 'live', 'installer', 'recommended')
+    # pulled by depth-1 Recommends; 'all' = union of every selected source
+    # in dep_tree + udeb_dep_tree (no exclusions — equivalent to running
+    # pkg + live + installer + recommended back-to-back, deduped).
+    _SOURCE_SUBSETS = ('pkg', 'live', 'installer', 'recommended', 'all')
 
     @staticmethod
     def _parse_source_build_args(args):
@@ -3127,22 +3129,23 @@ class BuildSession:
 
         Recognises:
           - 'force' as a case-insensitive flag-word at any position
-          - 'live' / 'installer' / 'recommended' as case-insensitive
-            subset selectors at any position; mutually exclusive with
-            each other AND with named packages
+          - 'pkg' / 'live' / 'installer' / 'recommended' / 'all' as
+            case-insensitive subset selectors at any position; mutually
+            exclusive with each other AND with named packages
           - one optional `[profile,...]` bracket-token (override for both
             DEB_BUILD_PROFILES and DEB_BUILD_OPTIONS); multiple bracket
             tokens is a parse error
           - everything else as a package name
 
         Default: bare `source build` (no subset, no names) resolves to
-        subset='live'.
+        subset='pkg'.
 
         Returns ``(err, force, subset, names, profile_override)``.
         On success ``err`` is None; on parse error ``err`` is a printable
         string the caller should surface.  ``subset`` is one of
-        'live' / 'installer' / 'recommended' when a subset selector was
-        given (or no args at all); '' when named packages were given.
+        'pkg' / 'live' / 'installer' / 'recommended' / 'all' when a
+        subset selector was given (or no args at all); '' when named
+        packages were given.
         ``profile_override`` is None when no bracket-token was given; an
         empty list when the operator wrote `[]` (most-permissive build);
         a populated list otherwise.
@@ -3734,7 +3737,7 @@ class BuildSession:
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
-        Usage: source build [force] [pkg | live | installer | recommended | <pkg> ...] [[profile,...]]
+        Usage: source build [force] [pkg | live | installer | recommended | all | <pkg> ...] [[profile,...]]
 
         Subset selectors use layered semantics matching the
         parallel-universe architecture:
@@ -3754,6 +3757,13 @@ class BuildSession:
           recommended   — build ONLY the Recommends-only extras sources
                           (depth-1 Recommends pulled into the repo by
                           parse_dependency, but excluded from chroot install).
+          all           — build EVERY selected source — the union of pkg +
+                          live + installer + recommended in one pass,
+                          deduped.  Equivalent to running the four subset
+                          modes back-to-back; convenient when you don't
+                          care about the staging and just want a complete
+                          repo (apt-pool included).  Same per-source skip-
+                          if-built gate applies, so re-running is cheap.
           <pkg>...      — limit the build to the named source packages
           [profile,...] — bracket-delimited token (e.g. `[nocheck]`) overrides
                           BOTH DEB_BUILD_PROFILES and DEB_BUILD_OPTIONS for
@@ -3763,11 +3773,12 @@ class BuildSession:
                           .result cache wouldn't reflect the override.
           (no arg)      — equivalent to `source build pkg`.
 
-        pkg / live / installer / recommended are mutually exclusive with each
-        other and with named packages.
+        pkg / live / installer / recommended / all are mutually exclusive
+        with each other and with named packages.
 
         For a complete live ISO: source build → source build live.
         For a complete installer ISO: source build → source build installer.
+        For a complete repo in one command: source build all.
         autorun chains pkg + live for the live workflow.
 
         Each package is built in a fresh container instance with its declared
@@ -3819,6 +3830,9 @@ class BuildSession:
                           "installer-exclusive deb sources")
         elif _subset == 'recommended':
             console.print("Recommended mode: building extras-only sources")
+        elif _subset == 'all':
+            console.print("All mode: building every selected source "
+                          "(pkg + live + installer + recommended union)")
         if _profile_override is not None:
             console.print(
                 f"Profile override active: DEB_BUILD_PROFILES + "
@@ -3874,6 +3888,24 @@ class BuildSession:
             # grub-pc-bin — needed in repo/ for grub-installer to apt-pull
             # onto the target at install time).
             _src_names_set = set(self.dep_tree.installer_exclusive_src_names)
+            if self.udeb_dep_tree is not None:
+                _src_names_set |= set(self.udeb_dep_tree.selected_srcs.keys())
+            packages = []
+            for _name in sorted(_src_names_set):
+                _s = (self.dep_tree.selected_srcs.get(_name)
+                      or (self.udeb_dep_tree.selected_srcs.get(_name)
+                          if self.udeb_dep_tree is not None else None))
+                if _s:
+                    packages.append(_s)
+        elif _subset == 'all':
+            # 'all' mode: every selected source across both trees, no
+            # exclusions — pkg + live + installer + recommended in one
+            # pass.  Per-source check_build still gates skip-if-built so
+            # re-running is cheap; the saving over running the four
+            # subset modes back-to-back is operator convenience, not
+            # work avoidance.  Shared source_hashtable means looking up
+            # an overlapping name in dep_tree first dedupes naturally.
+            _src_names_set = set(self.dep_tree.selected_srcs.keys())
             if self.udeb_dep_tree is not None:
                 _src_names_set |= set(self.udeb_dep_tree.selected_srcs.keys())
             packages = []
@@ -4203,7 +4235,7 @@ class BuildSession:
     def cmd_source(self, action: str = '', *args):
         _table = {
             'download': 'fetch source tarballs for selected sources',
-            'build':    'build sources: source build [force] [live | installer | recommended | <pkg>…] [[profile,…]]',
+            'build':    'build sources: source build [force] [pkg | live | installer | recommended | all | <pkg>…] [[profile,…]]',
             'rescan':   'report what source build would rebuild (source rescan [verbose])',
             'repair':   'restore .result=PASS for sources whose binaries exist in repo/ '
                         '(recovers from accidental .result deletion)',
@@ -4542,7 +4574,7 @@ def main(banner: str) -> None:
     tui.register_command('clean',     session.cmd_clean,     '\tClean:      clean cache | source | repo | buildroot | image | download | container | all')
     tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
-    tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [live|installer|recommended]')
+    tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [pkg|live|installer|recommended|all]')
     tui.register_command('package',   session.cmd_package,   '\tPackages:   package tunnel')
     tui.register_command('container', session.cmd_container, '\tContainer:  container init')
     tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
