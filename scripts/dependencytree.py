@@ -620,20 +620,23 @@ class DependencyTree:
                         # (1.8.12-2) IS << 12-7 by Debian comparison,
                         # but that comparison is irrelevant because
                         # fwupd's Provides makes no version claim about
-                        # the fwupdate name.  Falling back to fwupd's
-                        # own version produced a spurious break that
-                        # blocked dep parse 2026-05-20 (surfaced once
-                        # parse_dependency started registering virtual
-                        # aliases properly post-Bug-2 fix).
-                        _provided_ver = next(
-                            (str(v) for n, v in _broken_obj.get_provides()
-                             if n == _breaks_name and v is not None), None)
+                        # the fwupdate name.
+                        # explicit_provides_version returns None for
+                        # unversioned Provides (no substitution to
+                        # self.version like get_provides does — that
+                        # fallback is wrong for this scope).  Use it
+                        # instead of get_provides to avoid the spurious
+                        # break that blocked dep parse 2026-05-20 once
+                        # Bug-2's parse_dependency started registering
+                        # virtual aliases in selected_pkgs.
+                        _provided_ver = _broken_obj.explicit_provides_version(
+                            _breaks_name)
                         if _provided_ver is None:
                             if _break_comparator:
                                 continue  # versioned break vs unversioned provides — no match
                             _pkg_ver = None   # unversioned break — existence triggers below
                         else:
-                            _pkg_ver = _provided_ver
+                            _pkg_ver = str(_provided_ver)
                     else:
                         _pkg_ver = str(_broken_obj.version)
 
@@ -673,17 +676,19 @@ class DependencyTree:
                         # Same unversioned-Provides rule as the Breaks
                         # arm above — Debian Policy §7.5: an unversioned
                         # Provides cannot satisfy a versioned Conflicts
-                        # constraint.  Falling back to the provider's
-                        # own version produces a spurious conflict.
-                        _provided_ver = next(
-                            (str(v) for n, v in _conflict_obj.get_provides()
-                             if n == _conflicts_name and v is not None), None)
+                        # constraint.  Use explicit_provides_version (no
+                        # fallback to self.version) — get_provides
+                        # substitutes the provider's own version which
+                        # produces spurious conflict triggers for the
+                        # unversioned-Provides case.
+                        _provided_ver = _conflict_obj.explicit_provides_version(
+                            _conflicts_name)
                         if _provided_ver is None:
                             if _conflict_comparator:
                                 continue  # versioned conflict vs unversioned provides — no match
                             _pkg_ver = None   # unversioned conflict — existence triggers below
                         else:
-                            _pkg_ver = _provided_ver
+                            _pkg_ver = str(_provided_ver)
                     else:
                         _pkg_ver = str(_conflict_obj.version)
 
