@@ -1,0 +1,6 @@
+data/aegis-light.svg                                          usr/share/backgrounds/athena
+data/aegis-dark.svg                                           usr/share/backgrounds/athena
+_build/png/aegis-light.png                                    usr/share/backgrounds/athena
+_build/png/aegis-dark.png                                     usr/share/backgrounds/athena
+data/athena-backgrounds.xml                                   usr/share/gnome-background-properties
+data/90_athena-branding.gschema.override                      usr/share/glib-2.0/schemas

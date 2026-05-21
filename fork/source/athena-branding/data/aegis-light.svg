@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Aegis (light) — default wallpaper for @DISTRIBUTION@.
+
+  Same compositional anchor as the dark variant (Α glyph, optical
+  centre, horizon line), reset for daylight: warm ivory/cream
+  radial gradient and a deep-indigo glyph.  No stars.  Aurora
+  is recast as muted high-altitude mist.
+
+  3840×2160 canvas, scales to any resolution via preserveAspectRatio.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3840 2160" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <radialGradient id="sky" cx="50%" cy="20%" r="84%" fx="50%" fy="20%">
+      <stop offset="0%"  stop-color="#fbf6e3"/>
+      <stop offset="55%" stop-color="#f0e5c6"/>
+      <stop offset="100%" stop-color="#d9c7a0"/>
+    </radialGradient>
+    <radialGradient id="bloom" cx="50%" cy="22%" r="50%" fx="50%" fy="22%">
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="indigoStroke" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#28396b"/>
+      <stop offset="100%" stop-color="#101936"/>
+    </linearGradient>
+    <linearGradient id="mistA" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#8a6c3f" stop-opacity="0"/>
+      <stop offset="50%"  stop-color="#8a6c3f" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#8a6c3f" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="mistB" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#3a4d7a" stop-opacity="0"/>
+      <stop offset="50%"  stop-color="#3a4d7a" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#3a4d7a" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- sky -->
+  <rect width="3840" height="2160" fill="url(#sky)"/>
+  <rect width="3840" height="2160" fill="url(#bloom)"/>
+
+  <!-- high-altitude mist (daylight equivalent of aurora) -->
+  <g fill="none" stroke-linecap="round">
+    <path d="M -200 700  Q  960  650 1920 700  T 4040 720" stroke="url(#mistA)" stroke-width="3"/>
+    <path d="M -200 820  Q 1280  740 2200 840  T 4040 810" stroke="url(#mistB)" stroke-width="2"/>
+    <path d="M -200 1820 Q 1600 1860 2400 1820 T 4040 1840" stroke="url(#mistA)" stroke-width="2.5"/>
+  </g>
+
+  <!-- Α (alpha) glyph: identical geometry to dark variant -->
+  <g stroke="url(#indigoStroke)" fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M 1660 1400 L 1920 800 L 2180 1400" stroke-width="14"/>
+    <path d="M 1750 1200 L 2090 1200"            stroke-width="11"/>
+  </g>
+
+  <!-- horizon line below the glyph -->
+  <line x1="1600" y1="1500" x2="2240" y2="1500"
+        stroke="#28396b" stroke-width="1.5" opacity="0.45"/>
+</svg>

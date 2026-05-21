@@ -1,0 +1,18 @@
+# Athena/@DISTRIBUTION@ default wallpaper and visual identity overrides.
+#
+# Filename "90_…" places this near the end of the alphabetic schema-
+# override merge order; later entries win for any conflicting key.
+# Compiled by the dpkg trigger on /usr/share/glib-2.0/schemas
+# (provided by libglib2.0-0) at install time.
+
+[org.gnome.desktop.background]
+picture-uri='file:///usr/share/backgrounds/athena/aegis-light.png'
+picture-uri-dark='file:///usr/share/backgrounds/athena/aegis-dark.png'
+picture-options='zoom'
+primary-color='#0d152e'
+secondary-color='#0d152e'
+
+[org.gnome.desktop.screensaver]
+picture-uri='file:///usr/share/backgrounds/athena/aegis-dark.png'
+picture-options='zoom'
+primary-color='#0d152e'

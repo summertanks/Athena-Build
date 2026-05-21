@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Aegis (dark) — default wallpaper for @DISTRIBUTION@.
+
+  Composition: a stylised Greek capital alpha (Α) — Athena's mark —
+  set against the night sky of Asgard.  Deep midnight indigo radial
+  gradient, sparse high-altitude stars, three faint aurora streaks
+  in muted teal, gold-stroke glyph at the optical centre.
+
+  3840×2160 canvas, scales to any resolution via preserveAspectRatio.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3840 2160" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <radialGradient id="sky" cx="50%" cy="22%" r="82%" fx="50%" fy="22%">
+      <stop offset="0%"  stop-color="#1f2c52"/>
+      <stop offset="55%" stop-color="#0d152e"/>
+      <stop offset="100%" stop-color="#04070f"/>
+    </radialGradient>
+    <radialGradient id="haze" cx="50%" cy="58%" r="58%" fx="50%" fy="58%">
+      <stop offset="0%"   stop-color="#3d5681" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#3d5681" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="goldStroke" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#f0d27b"/>
+      <stop offset="100%" stop-color="#a47a2b"/>
+    </linearGradient>
+    <linearGradient id="auroraA" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#3d8c7e" stop-opacity="0"/>
+      <stop offset="50%"  stop-color="#5fb29c" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#3d8c7e" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="auroraB" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#5fa28e" stop-opacity="0"/>
+      <stop offset="50%"  stop-color="#86c4af" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#5fa28e" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- sky -->
+  <rect width="3840" height="2160" fill="url(#sky)"/>
+  <rect width="3840" height="2160" fill="url(#haze)"/>
+
+  <!-- aurora streaks -->
+  <g fill="none" stroke-linecap="round">
+    <path d="M -200 720  Q  960  660 1920 720  T 4040 740" stroke="url(#auroraA)" stroke-width="3"/>
+    <path d="M -200 800  Q 1280  720 2200 820  T 4040 790" stroke="url(#auroraB)" stroke-width="2"/>
+    <path d="M -200 1840 Q 1600 1880 2400 1840 T 4040 1860" stroke="url(#auroraA)" stroke-width="2.5"/>
+  </g>
+
+  <!-- sparse stars (upper half only) -->
+  <g fill="#ffffff">
+    <circle cx="280"  cy="180" r="1.6" opacity="0.62"/>
+    <circle cx="540"  cy="320" r="1.1" opacity="0.42"/>
+    <circle cx="820"  cy="240" r="2.0" opacity="0.78"/>
+    <circle cx="1140" cy="160" r="1.0" opacity="0.50"/>
+    <circle cx="1380" cy="380" r="1.5" opacity="0.60"/>
+    <circle cx="1640" cy="200" r="1.0" opacity="0.40"/>
+    <circle cx="2080" cy="120" r="1.5" opacity="0.66"/>
+    <circle cx="2280" cy="280" r="1.5" opacity="0.70"/>
+    <circle cx="2580" cy="160" r="1.0" opacity="0.50"/>
+    <circle cx="2840" cy="340" r="2.0" opacity="0.78"/>
+    <circle cx="3120" cy="220" r="1.0" opacity="0.45"/>
+    <circle cx="3400" cy="380" r="1.5" opacity="0.62"/>
+    <circle cx="3640" cy="200" r="1.0" opacity="0.50"/>
+    <circle cx="180"  cy="480" r="1.0" opacity="0.32"/>
+    <circle cx="3700" cy="500" r="1.0" opacity="0.32"/>
+    <circle cx="980"  cy="540" r="0.8" opacity="0.30"/>
+    <circle cx="2940" cy="560" r="0.8" opacity="0.28"/>
+  </g>
+
+  <!-- Α (alpha) glyph: apex (1920, 800); feet at (1660, 1400) & (2180, 1400);
+       crossbar between (1750, 1200) and (2090, 1200) -->
+  <g stroke="url(#goldStroke)" fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M 1660 1400 L 1920 800 L 2180 1400" stroke-width="14"/>
+    <path d="M 1750 1200 L 2090 1200"            stroke-width="11"/>
+  </g>
+
+  <!-- horizon line below the glyph -->
+  <line x1="1600" y1="1500" x2="2240" y2="1500"
+        stroke="#c9a24a" stroke-width="1.5" opacity="0.45"/>
+</svg>
