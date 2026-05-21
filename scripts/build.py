@@ -2131,6 +2131,93 @@ class BuildSession:
             )
             self._report_conflicts(_inst_conflicts, verbose=_verbose)
 
+        # Soft-warn section.  Doesn't gate the audit — these aren't broken
+        # constraints, they're "shouldn't be in the pool" residue.  Mirrors
+        # the categorisation `package cleanup` uses, without the deletion
+        # half.  Surfaces the silent-drift scenarios that DID bite us —
+        # apt picks the highest version per name and the lower one becomes
+        # a phantom, so dep-resolution looks fine right up until install
+        # time (when dpkg refuses two .debs of the same name in the pool)
+        # or chroot build (where the older one might be picked, depending
+        # on order).
+        if self.flags.dep_check_ready:
+            self._report_stale_files_warning(verbose=_verbose)
+        else:
+            console.print(
+                "\n=== STALE FILES ===\n  skipped — dep_tree not built; "
+                "run `dep parse` first"
+            )
+
+    def _report_stale_files_warning(self, *, verbose: bool) -> None:
+        """Soft-warning STALE FILES section for package audit.
+
+        Lists counts (and a short preview) of orphan-source and
+        version-drift residue under repo/.  Doesn't delete — the
+        operator runs `package cleanup` when they want to act.
+        """
+        _orphan, _drift, _malformed, _total = self._scan_stale_files()
+        _n_stale = len(_orphan) + len(_drift)
+        console.print(
+            f"\n=== STALE FILES (repo/ scan, {_total} file(s)) ==="
+        )
+        if _n_stale == 0 and not _malformed:
+            console.print("  repo/ is clean — no orphan-source or drift residue")
+            return
+        _bytes = (sum(s for *_, s in _orphan)
+                  + sum(s for *_, s in _drift))
+        console.print(
+            f"  orphan-source : {len(_orphan)} file(s) "
+            f"(source not in selected_srcs)"
+        )
+        console.print(
+            f"  version-drift : {len(_drift)} file(s) "
+            f"(source selected but version mismatch)"
+        )
+        if _malformed:
+            console.print(
+                f"  malformed     : {len(_malformed)} file(s) "
+                f"(can't read control)"
+            )
+        if _n_stale:
+            console.print(
+                f"  TOTAL STALE   : {_n_stale} file(s), "
+                f"{_bytes / 1024 / 1024:.1f} MB"
+            )
+            # Short preview — one line per source for orphans (collapses
+            # the task-* family case), individual lines for drift.  Full
+            # detail lives in `package cleanup` (dry-run).
+            _show = 5 if not verbose else max(len(_orphan), len(_drift))
+            if _orphan:
+                from collections import defaultdict
+                _by_src: 'dict[str, int]' = defaultdict(int)
+                for _, _, _src, _ in _orphan:
+                    _by_src[_src] += 1
+                _src_top = sorted(_by_src.items(), key=lambda kv: -kv[1])
+                _slice = _src_top if verbose else _src_top[:_show]
+                console.print(f"  First {len(_slice)} orphan source(s):")
+                for _src, _cnt in _slice:
+                    console.print(f"    {_src:30s} → {_cnt} file(s)")
+                if len(_src_top) > _show and not verbose:
+                    console.print(
+                        f"    … (+{len(_src_top) - _show} more; "
+                        f"pass `verbose` for full list)"
+                    )
+            if _drift:
+                _slice = _drift if verbose else _drift[:_show]
+                console.print(f"  First {len(_slice)} drift file(s):")
+                for _sub, _f, _src, _ in _slice:
+                    console.print(f"    {_sub}/{_f} (source: {_src})")
+                if len(_drift) > _show and not verbose:
+                    console.print(
+                        f"    … (+{len(_drift) - _show} more; "
+                        f"pass `verbose` for full list)"
+                    )
+            console.print(
+                "  Run `package cleanup` to review/remove (dry-run by "
+                "default).",
+                tui.COLOR_INFO,
+            )
+
     def _report_unresolved(self, unresolved, weak, state, *,
                             verbose: bool, strict: bool):
         """Detailed report for the dep gate.  Includes gap classification
@@ -2519,6 +2606,108 @@ class BuildSession:
             f"Run `package audit_nmu` to confirm zero residue."
         )
 
+    def _scan_stale_files(self) -> 'tuple[list, list, list, int]':
+        """Walk repo/{main,doc,dbgsym,tests} for .deb/.udeb files that
+        shouldn't be there given the current selected_srcs + src_pkg_files.
+
+        Returns (orphan, drift, malformed, total):
+          orphan    — list of (sub, filename, source_name, size) where
+                      the file's Source field doesn't name any selected
+                      source.  Most common cause: source dropped from
+                      the dep tree (e.g. upstream `tasksel` replaced by
+                      `athena-tasksel` fork → leaves 222 task-*
+                      binaries orphaned).
+          drift     — list of (sub, filename, source_name, size) where
+                      the source IS selected but this specific filename
+                      isn't in any predicted-files list.  Most common
+                      cause: source rebuilt at a new version, old .deb
+                      lingers (e.g. base-files_12.4_amd64.deb left over
+                      after the same-name fork bumped to
+                      base-files_12.4+deb12u14+athena1_amd64.deb).
+          malformed — list of 'sub/filename' where dpkg control couldn't
+                      be parsed (truncated/corrupt .deb).
+          total     — total .deb/.udeb files scanned across all subdirs.
+
+        Shared by cmd_package_cleanup (DELETE on `force`) and cmd_audit
+        (warn-only).  Requires dep_check_ready — caller verifies.
+        """
+        from debian.debfile import DebFile
+
+        # Build the three reference sets:
+        #   _expected_files     — exact predicted filenames across both
+        #                         trees.  A file matching one is KEEP.
+        #   _selected_pkg_names — binary pkg names appearing in any
+        #                         src_pkg_files entry.  File whose name
+        #                         is here but filename ISN'T in
+        #                         _expected_files = version drift.
+        #   _selected_srcs      — source names selected across both
+        #                         trees.  File whose Source isn't in
+        #                         this set = orphan-source.
+        #
+        # Filename-keyed (not Version-field-keyed) to avoid the dpkg
+        # epoch convention trap (bsdutils source 2.38.1-5 → binary
+        # Version 1:2.38.1-5 but Filename bsdutils_2.38.1-5_amd64.deb,
+        # epoch stripped — comparing Version fields raw false-positives
+        # every epoch-bumped binary).
+        _expected_files: 'set[str]' = set()
+        _selected_pkg_names: 'set[str]' = set()
+        _selected_srcs: 'set[str]' = set()
+        for _tree in (self.dep_tree, self.udeb_dep_tree):
+            if _tree is None:
+                continue
+            _selected_srcs.update(_tree.selected_srcs.keys())
+            for _files in _tree.src_pkg_files.values():
+                _expected_files.update(_files)
+                for _fn in _files:
+                    _selected_pkg_names.add(_fn.split('_', 1)[0])
+
+        _orphan: 'list[tuple[str, str, str, int]]' = []
+        _drift:  'list[tuple[str, str, str, int]]' = []
+        _malformed: 'list[str]' = []
+        _total = 0
+
+        for _sub in utils._REPO_SUBDIRS:
+            _sub_dir = os.path.join(self.config.dir_repo, _sub)
+            try:
+                _entries = sorted(os.listdir(_sub_dir))
+            except OSError:
+                continue
+            for _f in _entries:
+                if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+                    continue
+                _total += 1
+                # Fast path: predicted target — KEEP.
+                if _f in _expected_files:
+                    continue
+                _path = os.path.join(_sub_dir, _f)
+                try:
+                    with DebFile(_path) as _deb:
+                        _ctrl = _deb.control.debcontrol()
+                    _pkg = (_ctrl.get('Package') or '').strip()
+                    _src_field = (_ctrl.get('Source') or '').strip()
+                except Exception:
+                    _malformed.append(os.path.join(_sub, _f))
+                    continue
+                # Source field is "name" or "name (version)" — drop the
+                # version qualifier; fall back to Package name when the
+                # control omits Source (single-binary sources).
+                _src_name = (_src_field.split(' ', 1)[0].strip()
+                             if _src_field else _pkg)
+                _file_pkg = _f.split('_', 1)[0]
+                if _src_name not in _selected_srcs:
+                    _orphan.append(
+                        (_sub, _f, _src_name, os.path.getsize(_path))
+                    )
+                elif _file_pkg in _selected_pkg_names:
+                    _drift.append(
+                        (_sub, _f, _src_name, os.path.getsize(_path))
+                    )
+                # else: pkg name not predicted but source IS selected —
+                # production sibling (lib*-i386, lib*-l10n, etc.) that
+                # ships in /cdrom/pool but isn't an install target.  KEEP.
+
+        return _orphan, _drift, _malformed, _total
+
     def cmd_package_cleanup(self, *args):
         """Identify and delete obsolete .debs/.udebs in repo/.
 
@@ -2565,97 +2754,7 @@ class BuildSession:
         _force = 'force' in args
         _verbose = 'verbose' in args
 
-        # Filename-based decisions.  Build three sets up-front:
-        #   _expected_files     — exact predicted filenames across both
-        #                         trees' src_pkg_files.  Any file matching
-        #                         one is a selected install-time target —
-        #                         KEEP unconditionally.
-        #   _selected_pkg_names — every binary PACKAGE NAME that appears
-        #                         in any src_pkg_files entry.  A file whose
-        #                         name is in this set but whose specific
-        #                         filename is NOT in _expected_files is
-        #                         version drift (same binary name, wrong
-        #                         version) — DELETE.
-        #   _selected_srcs      — every source name selected across both
-        #                         trees.  A file whose Source is not in
-        #                         this set is orphan-source — DELETE.
-        #
-        # Filename-keyed avoids the Debian "epoch in binary Version field
-        # but not in source Version" trap (bsdutils Version 1:2.38.1-5
-        # built from util-linux source 2.38.1-5; binary filename
-        # bsdutils_2.38.1-5_amd64.deb omits the epoch per dpkg convention,
-        # which is what src_pkg_files records).  Comparing Version fields
-        # raw would false-positive every epoch-bumped binary.
-        _expected_files: 'set[str]' = set()
-        _selected_pkg_names: 'set[str]' = set()
-        _selected_srcs: 'set[str]' = set()
-        for _tree in (self.dep_tree, self.udeb_dep_tree):
-            if _tree is None:
-                continue
-            _selected_srcs.update(_tree.selected_srcs.keys())
-            for _files in _tree.src_pkg_files.values():
-                _expected_files.update(_files)
-                for _fn in _files:
-                    # Filename shape: name_version_arch.ext.  Pkg name
-                    # is everything before the first underscore.
-                    _selected_pkg_names.add(_fn.split('_', 1)[0])
-
-        # Walk the repo and categorise.
-        from debian.debfile import DebFile
-        _orphan: 'list[tuple[str, str, str, int]]' = []   # (sub, file, src, size)
-        _drift:  'list[tuple[str, str, str, int]]' = []   # (sub, file, src, size)
-        _malformed: 'list[str]' = []
-        _total_files = 0
-
-        for _sub in utils._REPO_SUBDIRS:
-            _sub_dir = os.path.join(self.config.dir_repo, _sub)
-            try:
-                _entries = sorted(os.listdir(_sub_dir))
-            except OSError:
-                continue
-            for _f in _entries:
-                if not (_f.endswith('.deb') or _f.endswith('.udeb')):
-                    continue
-                _total_files += 1
-
-                # Predicted-filename fast path: file IS a selected
-                # install-time target.  No need to open the .deb.
-                if _f in _expected_files:
-                    continue
-
-                _path = os.path.join(_sub_dir, _f)
-                try:
-                    with DebFile(_path) as _deb:
-                        _ctrl = _deb.control.debcontrol()
-                    _pkg = (_ctrl.get('Package') or '').strip()
-                    _src_field = (_ctrl.get('Source') or '').strip()
-                except Exception:
-                    _malformed.append(os.path.join(_sub, _f))
-                    continue
-                # Source field is "name" or "name (version)" — drop the
-                # version qualifier; default to Package name for single-
-                # binary sources that omit Source.
-                _src_name = (_src_field.split(' ', 1)[0].strip()
-                             if _src_field else _pkg)
-
-                # File pkg name comes from filename (canonical, no epoch).
-                _file_pkg = _f.split('_', 1)[0]
-
-                if _src_name not in _selected_srcs:
-                    # Source removed from selection entirely.
-                    _orphan.append(
-                        (_sub, _f, _src_name, os.path.getsize(_path))
-                    )
-                elif _file_pkg in _selected_pkg_names:
-                    # Source selected AND its pkg name appears in our
-                    # predicted set, but THIS specific filename doesn't.
-                    # Same name + different version = drift.
-                    _drift.append(
-                        (_sub, _f, _src_name, os.path.getsize(_path))
-                    )
-                # else: source selected but pkg name is not in any
-                # predicted-files list → production sibling that ships in
-                # /cdrom/pool but isn't selected for install.  KEEP.
+        _orphan, _drift, _malformed, _total_files = self._scan_stale_files()
 
         # ------ Report ------
         _n_obsolete = len(_orphan) + len(_drift)
