@@ -1,0 +1,46 @@
+Description: relax git → git-man bound from >> to >= for stripped-NMU repo
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-21
+Bug-Athena: git's debian/control declares
+   git-man (>> ${source:Upstream-Version}),
+   git-man (<< ${source:Upstream-Version}-.)
+ which at build time becomes
+   Depends: git-man (>> 1:2.39.5), git-man (<< 1:2.39.5-.)
+ .
+ The idiom relies on Debian's NMU/security suffix to provide the
+ strict-greater-than ordering: upstream ships at `1:2.39.5-0+deb12uN`,
+ which IS >> 1:2.39.5 because the `+deb12uN` suffix sorts higher than
+ the bare upstream string.
+ .
+ Athena strips NMU suffixes from every package (utils.strip_nmu_from_deb)
+ so our git-man ships at the pristine `1:2.39.5-0`.  Per Debian Policy
+ §5.6.12 "missing parts shall be treated as if they were '0'", so apt
+ considers `1:2.39.5-0` EQUAL to `1:2.39.5` (debrev 0 == missing debrev).
+ The `>>` constraint then fails — `apt_pkg.check_dep('1:2.39.5-0', '>>',
+ '1:2.39.5')` returns False.  Result: every package_audit run flags
+   git Depends: git-man (>> 1:2.39.5) — no satisfying pkg in repo/
+ even though the matching git-man IS in repo at the matching version.
+ .
+ Fix: relax the lower bound to `>=`.  The matching upper bound
+ `<< 1:2.39.5-.` still prevents accepting any wrong-major-version
+ git-man (`.` sorts higher than any digit, so this rejects 1:2.39.5-99
+ etc); the `>=` lower bound now accepts our bare-debrev `1:2.39.5-0`
+ while still rejecting older 2.38.x.
+ .
+ TEMPORARY: revisit when CONF-08 lands or we add a security-update
+ bump layer that brings the strict-greater-than ordering back.
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/control
++++ b/debian/control
+@@ -28,7 +28,7 @@
+ Architecture: any
+ Multi-Arch: foreign
+ Depends: ${misc:Depends}, ${shlibs:Depends}, perl, liberror-perl,
+- git-man (>> ${source:Upstream-Version}), git-man (<< ${source:Upstream-Version}-.)
++ git-man (>= ${source:Upstream-Version}), git-man (<< ${source:Upstream-Version}-.)
+ Pre-Depends: ${misc:Pre-Depends}
+ Recommends: ca-certificates, patch, less, ssh-client
+ Suggests: gettext-base, git-daemon-run | git-daemon-sysvinit,

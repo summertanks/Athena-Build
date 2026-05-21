@@ -4645,6 +4645,19 @@ def test_strip_nmu_suffix_strips_known_patterns():
         ('2:1.0-2+b1',             '2:1.0-2'),         # epoch preserved
         ('1.0-2alpha',             '1.0-2alpha'),      # not an NMU layer
         ('libb1.0-2',              'libb1.0-2'),       # 'b1' embedded in name
+        # REGRESSION 2026-05-21: constraint-style trailing-tilde marker
+        # AFTER an NMU suffix.  libflatpak0's `Depends: bubblewrap
+        # (>= 0.8.0-2+deb12u1~)` was leaking through strip because the
+        # regex's `$` anchor was blocked by the `~`.  Each of these
+        # is the constraint-version literal that the on-disk Depends
+        # carries — strip must scrub the entire NMU+tilde block.
+        ('0.8.0-2+deb12u1~',       '0.8.0-2'),         # the bubblewrap case
+        ('1.0-2+b1~',              '1.0-2'),           # binNMU + tilde
+        ('1.0~bpo12+1~',           '1.0'),             # backport + tilde
+        ('2.36-9+deb12u14~',       '2.36-9'),          # glibc-shape + tilde
+        # NOT an NMU — bare-version pre-release tilde must SURVIVE.
+        ('1.0~rc1',                '1.0~rc1'),         # rc marker
+        ('72.1~rc-1',              '72.1~rc-1'),       # real-world: icu
     ]
     for input_ver, expected in cases:
         got = strip_nmu_suffix(input_ver)
