@@ -10078,6 +10078,39 @@ def test_fork_mirror_re_run_is_idempotent_via_stale_check():
             "second generate_fork_mirror unexpectedly rebuilt the .dsc"
 
 
+def test_fork_mirror_arch_any_filename_uses_build_arch():
+    """For an Architecture: any (or arch-specific) binary, _format_packages_
+    stanza must emit Filename + Architecture using the build target arch
+    (e.g. amd64), NOT the literal string from debian/control.  Without
+    this remap, an arch=any fork pkg's predicted filename
+    `<pkg>_<ver>_any.deb` never matches what dpkg-buildpackage actually
+    deposits (`<pkg>_<ver>_amd64.deb`), and the source audit loops the
+    rebuild.  Caught 2026-05-21 on the base-files Path X migration."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from debian.deb822 import Deb822
+    import fork_mirror as _fm
+    # Architecture: any → arch-specific .deb
+    _bin_any = Deb822(['Package: example\n', 'Architecture: any\n',
+                       'Description: x\n'])
+    _stanza = _fm._format_packages_stanza(_bin_any, 'example',
+                                          '1.0', 'M <m@x>', 'amd64')
+    assert 'Filename: example_1.0_amd64.deb' in _stanza, \
+        f"arch=any did not remap to build_arch in filename: {_stanza}"
+    assert 'Architecture: amd64' in _stanza, \
+        f"arch=any did not remap to build_arch in field: {_stanza}"
+    assert 'Architecture: any' not in _stanza, \
+        f"literal 'any' leaked through: {_stanza}"
+    # Architecture: all → stays 'all' (arch-independent .deb)
+    _bin_all = Deb822(['Package: example\n', 'Architecture: all\n',
+                       'Description: x\n'])
+    _stanza_all = _fm._format_packages_stanza(_bin_all, 'example',
+                                              '1.0', 'M <m@x>', 'amd64')
+    assert 'Filename: example_1.0_all.deb' in _stanza_all, \
+        f"arch=all was incorrectly remapped: {_stanza_all}"
+    assert 'Architecture: all' in _stanza_all
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Fork-pkg content invalidation (tree-hash mechanism)
 # ─────────────────────────────────────────────────────────────────────────────
