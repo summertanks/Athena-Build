@@ -1,0 +1,24 @@
+Source: athena-branding
+Section: x11
+Priority: optional
+Maintainer: Athena Linux <athena@local>
+Build-Depends: debhelper-compat (= 13), librsvg2-bin
+Standards-Version: 4.6.0
+
+Package: athena-branding
+Architecture: all
+Multi-Arch: foreign
+Depends: ${misc:Depends}
+Description: @DISTRIBUTION@ desktop branding (wallpaper, gsettings defaults)
+ Default desktop wallpaper and GNOME gsettings overrides establishing
+ @DISTRIBUTION@'s visual identity (codename @CODENAME@).
+ .
+ Ships:
+   * /usr/share/backgrounds/athena/aegis-{light,dark}.{svg,png}
+       — 3840×2160 PNG renders + scalable SVG sources
+   * /usr/share/gnome-background-properties/athena.xml
+       — registers the wallpaper in GNOME's picker
+   * /usr/share/glib-2.0/schemas/90_athena-branding.gschema.override
+       — sets aegis-light/dark as default wallpaper for new users
+ .
+ No content carrying upstream Debian trademarks or identity.

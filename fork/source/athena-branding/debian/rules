@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+# athena-branding — default wallpaper + gsettings defaults.
+#
+# SVG sources under data/ are rendered to PNG at build time via
+# rsvg-convert.  3840×2160 covers 4K natively; GNOME's wallpaper
+# pipeline downscales for lower-DPI displays.  We ship both SVG
+# and PNG so:
+#  - the wallpaper picker shows the PNG thumbnail (faster, cached)
+#  - any future re-render at custom resolution can use the SVG
+#  - users with HiDPI setups beyond 4K can rsvg-convert at will
+#
+# Token substitution for @DISTRIBUTION@ / @BASE_ID@ / @CODENAME@ in
+# debian/, data/ content is performed centrally by BuildContainer's
+# _token_subst snippet before dpkg-buildpackage runs.
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	mkdir -p _build/png
+	rsvg-convert -w 3840 -h 2160 -o _build/png/aegis-light.png data/aegis-light.svg
+	rsvg-convert -w 3840 -h 2160 -o _build/png/aegis-dark.png  data/aegis-dark.svg
+
+override_dh_auto_clean:
+	rm -rf _build

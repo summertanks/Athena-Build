@@ -20,12 +20,17 @@ d-i partman-auto/method string regular
 
 Lines starting with `#` are comments.  Lines may continue with `\`.
 
-## v1 status
+## Current entries
 
-`preseed.cfg` ships **empty** (comment-only).  The operator answers every
-prompt interactively — no Athena-locked defaults yet.  Once we know which
-questions to lock and which to keep interactive (likely: locale/keyboard
-locked, hostname/user/disk interactive), populate this file.
+- `netcfg/get_hostname` → `asgard`.  Stock d-i ships `Default: debian`
+  in netcfg's templates; this override sets the hostname default
+  shown on the "Hostname:" prompt to our distribution identity.
+  DHCP-supplied hostname still wins when present.
+
+Everything else is still answered interactively — locale, keyboard,
+user, disk, etc.  Add lines here only when we have evidence the
+preseed key actually takes effect in our build (some d-i keys like
+`apt-setup/disable-cdrom-entries` were no-ops for us).
 
 ## Authoritative reference
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE wallpapers SYSTEM "gnome-wp-list.dtd">
+<wallpapers>
+  <wallpaper deleted="false">
+    <name>Aegis (@DISTRIBUTION@ default)</name>
+    <filename>/usr/share/backgrounds/athena/aegis-light.png</filename>
+    <filename-dark>/usr/share/backgrounds/athena/aegis-dark.png</filename-dark>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#0d152e</pcolor>
+    <scolor>#0d152e</scolor>
+    <artist>Athena Linux</artist>
+  </wallpaper>
+</wallpapers>

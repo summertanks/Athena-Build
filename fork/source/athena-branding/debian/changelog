@@ -1,0 +1,16 @@
+athena-branding (1.0.0) thor; urgency=low
+
+  * Initial release (FORK-01 Step 7, deb-half).
+    - Ships default GNOME wallpaper "Aegis" (light + dark) under
+      /usr/share/backgrounds/athena/, both SVG and 3840×2160 PNG.
+    - gsettings schema override sets aegis-light/dark as the default
+      desktop & lock-screen wallpaper for new users.
+    - gnome-background-properties XML registers the wallpaper pair
+      in the GNOME Settings → Background picker.
+  * The udeb half (athena-branding-installer, debconf-overrides for
+    installer chrome) is intentionally deferred to a follow-up
+    release pending user approval — see docs/plans/fork-source.md
+    § "Step 7" and the DEF-2 note for the broader desktop-base
+    replacement scope.
+
+ -- Athena Linux <athena@local>  Wed, 21 May 2026 13:00:00 +0000

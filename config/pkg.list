@@ -252,10 +252,11 @@ fonts-dejavu-core
 # Per the audit (debian-tasks.desc gnome-desktop = gnome-core +
 # Recommends gnome), we picked the missing-from-our-seeds packages
 # across categories A, B, C (PIM+Software only), and E.
-# Skipped: D (LibreOffice — TODO file separately), F (Debian
-# branding — TODO Athena branding pkg), G (a11y/specialty), H (the
-# gnome/gnome-core metas themselves — picking explicit deps for
-# honest dpkg metadata).
+# Skipped: D (LibreOffice — TODO file separately), G (a11y/specialty),
+# H (the gnome/gnome-core metas themselves — picking explicit deps
+# for honest dpkg metadata).  F (branding) covered by athena-branding
+# fork pkg below — wallpaper + gsettings defaults replace what
+# desktop-base would have shipped on Debian.
 
 # A: GNOME core infrastructure — session, settings daemon, keyring,
 # audio stack (pipewire), portals, gvfs, gstreamer base+good plugins,
@@ -306,6 +307,12 @@ gnome-software
 synaptic
 system-config-printer-common
 system-config-printer-udev
+
+# F: Athena/Asgard visual identity — default wallpaper + gsettings
+# defaults so a fresh user lands on Aegis instead of GNOME's stock
+# blue gradient.  Replaces the role Debian's desktop-base would
+# have played; see fork/source/athena-branding/.
+athena-branding
 
 
 [standard]
