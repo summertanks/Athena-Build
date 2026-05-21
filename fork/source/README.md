@@ -37,8 +37,8 @@ same name, pick the right mechanism per package:
 
 ### 1. Net-new (no upstream collision)
 The package name doesn't exist upstream (e.g. `athena-installer-data`,
-`athena-base-files`).  No collision to resolve — just declare and
-ship.  **Default for everything Athena-specific.**
+`athena-branding`).  No collision to resolve — just declare and ship.
+**Default for everything Athena-specific.**
 
 ### 2. Provides / Conflicts / Replaces (P/C/R override)
 Our package has a different name (`athena-lsb-release`) but declares
@@ -59,22 +59,37 @@ in the Essential set.  Self-documenting (`dpkg -l | grep athena-`
 audits everything we override).
 
 ### 3. File diversion via dpkg-divert
-For packages in the Essential set (notably `base-files`, which
-`debootstrap` installs first and which other Essential packages
-silently depend on), Conflicts: would break the bootstrap.
+Our package keeps a different name but `Depends:` on the upstream
+one and uses `dpkg-divert --add --rename` in postinst to move the
+upstream file aside and `cp` ours into its place.  prerm undoes
+the divert on remove.  Files must ship under `/usr/share/<our-pkg>/`
+rather than the canonical `/etc/` path — debhelper auto-flags
+`/etc/*` as conffiles, and two packages claiming the same conffile
+path collides with the diversion machinery (the .dpkg-dist trap;
+verified 2026-05-21 on athena-base-files 1.0.0).
 
-Instead, our package `Depends:` on the upstream one and uses
-`dpkg-divert --add --rename --divert /path.real /path` in its
-postinst to move the upstream file aside and install ours in its
-place.  prerm undoes the divert on remove.
+Best for: identity-file overrides where the upstream is Essential
+AND we want to overlay only a narrow set of files (Pop!_OS uses
+this pattern with `pop-default-settings`).
 
-Example: `athena-base-files` depends on `base-files`; in postinst:
-```sh
-dpkg-divert --add --rename --divert /etc/os-release.real /etc/os-release
-cp /usr/share/athena/os-release /etc/os-release
-```
+### 4. Same-name fork
+Our package literally takes the upstream name (e.g. `base-files`).
+Fork-supersede in `cache.py` drops upstream's record entirely from
+the apt index when a fork ships the same name — so debootstrap and
+apt only ever see our binary.  Version is `<upstream>+athena<N>`
+matching the chained-suffix convention used by Devuan/Parrot/Kali/
+elementary/Mint for the same case.
 
-Best for: identity-file overrides where the upstream is Essential.
+Example: `fork/source/base-files/` is upstream's `base-files`
+12.4+deb12u14 source with a 5-file Asgard delta (etc/issue, etc/
+issue.net, etc/os-release, share/motd, origins/debian) and version
+bumped to `12.4+deb12u14+athena1`.
+
+Best for: when we want to control ALL of the upstream package's
+file paths, including ones we don't actively diff (so future leaks
+in those files we already own).  Cost: re-merge on every upstream
+point release.  Industry consensus for base-files specifically:
+6 of 8 surveyed Debian derivatives use this pattern.
 
 ## Per-package layout
 
