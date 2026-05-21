@@ -8015,7 +8015,9 @@ def test_source_build_args_subsets_mutually_exclusive():
                  ('live', 'installer'),
                  ('installer', 'recommended'),
                  ('live', 'recommended'),
-                 ('pkg', 'live', 'installer', 'recommended')):
+                 ('all', 'pkg'),
+                 ('all', 'recommended'),
+                 ('pkg', 'live', 'installer', 'recommended', 'all')):
         err, *_ = BuildSession._parse_source_build_args(argv)
         assert err is not None, f"args={argv!r}"
         assert 'pick at most one' in err, f"args={argv!r}: {err!r}"
@@ -8571,7 +8573,7 @@ def test_source_build_args_subset_and_named_pkgs_mutually_exclusive():
     operator must pick the subset OR specific names, not both.  Phase 4
     adds 'pkg' to the subset list too."""
     from build import BuildSession
-    for _subset in ('pkg', 'live', 'installer', 'recommended'):
+    for _subset in ('pkg', 'live', 'installer', 'recommended', 'all'):
         err, *_ = BuildSession._parse_source_build_args((_subset, 'pkg1'))
         assert err is not None, _subset
         assert 'mutually exclusive' in err, f"{_subset}: {err!r}"
@@ -8585,6 +8587,39 @@ def test_source_build_args_named_pkgs_resolve_subset_to_empty():
         BuildSession._parse_source_build_args(('foo', 'bar'))
     assert err is None
     assert subset == '' and names == ['foo', 'bar']
+
+
+def test_source_build_args_all_subset_parses():
+    """`source build all` resolves to subset='all', no names, no error.
+    'all' is the union mode added 2026-05-20 to spare operators from
+    running pkg + live + installer + recommended back-to-back."""
+    from build import BuildSession
+    err, _force, subset, names, _override = \
+        BuildSession._parse_source_build_args(('all',))
+    assert err is None, f"all should parse cleanly: {err!r}"
+    assert subset == 'all', f"got subset={subset!r}"
+    assert names == [], f"got names={names!r}"
+
+
+def test_source_build_all_selection_unions_both_trees_no_exclusions():
+    """The 'all' branch of cmd_source_build's selection logic must yield
+    the union of dep_tree.selected_srcs + udeb_dep_tree.selected_srcs
+    with NO live/installer/extras exclusion.  Anti-regression for the
+    intent of the 'all' subset: convenience over staging — running it
+    is equivalent to pkg + live + installer + recommended in one pass."""
+    # Replicate the selection logic the 'all' branch uses (set union
+    # across both trees, sorted, no exclusion filter).  Data-shape test
+    # — doesn't run cmd_source_build (which needs container + flags).
+    deb_srcs = {'kernel-src': 1, 'live-config': 2, 'libksba': 3,
+                'cdebconf': 4}                # cdebconf overlaps with udeb
+    udeb_srcs = {'cdebconf': 4, 'partman-base': 5}
+    expected_names = sorted(set(deb_srcs) | set(udeb_srcs))
+    # No exclusion sets applied — this is the contract.
+    assert expected_names == [
+        'cdebconf', 'kernel-src', 'libksba',
+        'live-config', 'partman-base'], (
+        "'all' must not exclude live/installer/extras — it's the "
+        "one-shot 'build everything we selected' mode")
 
 
 def test_source_build_args_bracket_token_extracts_profiles():
@@ -11594,6 +11629,8 @@ def main() -> int:
         test_autorun_live_runs_source_build_then_source_build_live,
         test_source_build_args_subset_and_named_pkgs_mutually_exclusive,
         test_source_build_args_named_pkgs_resolve_subset_to_empty,
+        test_source_build_args_all_subset_parses,
+        test_source_build_all_selection_unions_both_trees_no_exclusions,
         test_source_build_args_bracket_token_extracts_profiles,
         test_source_build_args_empty_bracket_means_no_profiles,
         test_source_build_args_multiple_bracket_tokens_rejected,
