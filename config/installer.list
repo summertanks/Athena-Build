@@ -86,6 +86,22 @@ cdrom-detect
 mountmedia
 cdrom-retriever
 
+# netcfg — d-i's network configuration UI.  Provides the
+# `configured-network` virtual.  Without it, ppp-udeb (also a
+# configured-network provider — built as a side artifact of the ppp
+# source we need for runtime ppp tools) becomes the only candidate
+# main-menu can auto-install, and its postinst fails with
+#   FAIL:ppp-udeb: required package netcfg is not installed
+# (undocumented runtime check the maintainer added that's not in
+# ppp-udeb's Depends).  Add netcfg so main-menu picks it at its lower
+# Installer-Menu-Item priority (~80); netcfg presents the "Configure
+# network" dialog with a "Do not configure the network at this time"
+# option for offline installs (all files from CD).  Transitive deps
+# (ethdetect, libiw30-udeb, wpasupplicant-udeb, ndisc6-udeb,
+# rdnssd-udeb, wide-dhcpv6-client-udeb) are pulled in automatically
+# by the udeb dep tree.
+netcfg
+
 # ─── Preseed runtime ───────────────────────────────────────────────
 # preseed-common loads /preseed.cfg (baked into the initrd by Phase 5's
 # overlay) and pre-answers debconf questions per its contents.  v1
