@@ -1737,12 +1737,42 @@ class BuildSession:
         return True
 
 
+    @staticmethod
+    def _canonical_names(tree) -> 'set[str]':
+        """Return only canonical-name keys from selected_pkgs.
+
+        DependencyTree.selected_pkgs registers BOTH canonical pkg names
+        AND every virtual name a selected pkg provides (parse_dependency
+        L494's Provides walk).  Raw .keys() therefore includes virtual
+        aliases.
+
+        For cohort/corpus scopes used by the audit, virtual aliases are
+        misleading: a name like 'fuse' that's in selected_pkgs only as
+        an alias of fuse3 (via `Provides: fuse`) doesn't represent a
+        pkg dpkg would install under that name.  Including it as a
+        cohort member causes audit_conflict_cohort to false-positive on
+        the canonical Debian fork-replaces-upstream idiom:
+          fuse3 Provides: fuse + fuse3 Breaks: fuse
+                  → 'fuse' is in cohort (as virtual)
+                  → audit flags fuse3 → fuse conflict
+                  → but at install only fuse3 is installed; no real
+                    'fuse' package present → no actual conflict
+
+        Filter to canonical names (where the key == the underlying
+        Package's own 'Package' field).  Matches what dpkg actually
+        sees at install time.
+        """
+        return {
+            n for n, p in tree.selected_pkgs.items()
+            if n == p['Package']
+        }
+
     def _resolve_live_cohort(self) -> Optional[frozenset]:
         """The set of pkgs that get dpkg-installed in the live chroot
         simultaneously — the scope within which Conflicts/Breaks are
         hard violations.
 
-        = dep_tree.selected_pkgs
+        = dep_tree.selected_pkgs (canonical names only)
           − pool_extras_pkg_names   (pool-only; not auto-installed)
           − installer_exclusive_pkg_names  (installer-support debs not
             in the live closure)
@@ -1753,7 +1783,7 @@ class BuildSession:
         """
         if not self.dep_tree or not self.dep_tree.selected_pkgs:
             return None
-        _selected = set(self.dep_tree.selected_pkgs.keys())
+        _selected = self._canonical_names(self.dep_tree)
         _selected -= getattr(self.dep_tree, 'pool_extras_pkg_names', set())
         _selected -= getattr(self.dep_tree, 'installer_exclusive_pkg_names',
                               set())
@@ -1782,22 +1812,26 @@ class BuildSession:
 
     def _resolve_deb_cohort(self) -> Optional[frozenset]:
         """Consumers audited as the .deb-cohort by package_audit's
-        DEP-GATE.  = dep_tree.selected_pkgs (everything we install via
-        debootstrap, tasksel/apt at install time, or live-chroot batch).
+        DEP-GATE.  = dep_tree.selected_pkgs canonical names (everything
+        we install via debootstrap, tasksel/apt at install time, or
+        live-chroot batch).
 
         Excludes the udeb tree.  Audited separately so each cohort's
         unresolved surface is visible — the old combined audit hid
         per-cohort breakdowns and made it hard to tell which gap came
         from which install path.
+
+        Canonical-name filter: see _canonical_names docstring for why
+        virtual-alias keys must be excluded from scope sets.
         """
         if not self.dep_tree or not self.dep_tree.selected_pkgs:
             return None
-        return frozenset(self.dep_tree.selected_pkgs.keys())
+        return frozenset(self._canonical_names(self.dep_tree))
 
     def _resolve_udeb_cohort(self) -> Optional[frozenset]:
         """Consumers audited as the .udeb-cohort by package_audit's
-        DEP-GATE.  = udeb_dep_tree.selected_pkgs (everything dpkg-
-        unpacked into the d-i installer ramdisk).
+        DEP-GATE.  = udeb_dep_tree.selected_pkgs canonical names
+        (everything dpkg-unpacked into the d-i installer ramdisk).
 
         Resolution still spans the whole repo per Option B — udebs
         with deb deps (~9 known upstream metadata cases like
@@ -1808,12 +1842,13 @@ class BuildSession:
         if (not self.udeb_dep_tree
                 or not self.udeb_dep_tree.selected_pkgs):
             return None
-        return frozenset(self.udeb_dep_tree.selected_pkgs.keys())
+        return frozenset(self._canonical_names(self.udeb_dep_tree))
 
     def _resolve_install_corpus(self) -> Optional[frozenset]:
         """[pkg + installer + live + pool] — your hard-dep gate scope.
 
         = dep_tree.selected_pkgs ∪ udeb_dep_tree.selected_pkgs
+          (canonical names from each tree)
 
         Every pkg in this union ends up dpkg-installed somewhere — in
         the live chroot, the d-i ramdisk, or the target via tasksel +
@@ -1831,16 +1866,16 @@ class BuildSession:
         """
         if not self.dep_tree or not self.dep_tree.selected_pkgs:
             return None
-        _all = set(self.dep_tree.selected_pkgs.keys())
+        _all = self._canonical_names(self.dep_tree)
         if self.udeb_dep_tree and self.udeb_dep_tree.selected_pkgs:
-            _all |= set(self.udeb_dep_tree.selected_pkgs.keys())
+            _all |= self._canonical_names(self.udeb_dep_tree)
         return frozenset(_all)
 
     def _resolve_installer_cohort(self) -> Optional[frozenset]:
         """The set of pkgs that get dpkg-unpacked into the d-i installer
         ramdisk — the scope for installer conflict checks.
 
-        = udeb_dep_tree.selected_pkgs
+        = udeb_dep_tree.selected_pkgs (canonical names)
 
         Pool / live / pkg debs are NOT in this scope (the ramdisk is
         udeb-only; debs are pulled by the installer onto the target
@@ -1849,7 +1884,7 @@ class BuildSession:
         if (not self.udeb_dep_tree
                 or not self.udeb_dep_tree.selected_pkgs):
             return None
-        return frozenset(self.udeb_dep_tree.selected_pkgs.keys())
+        return frozenset(self._canonical_names(self.udeb_dep_tree))
 
     def _preflight_audit_repo(self) -> bool:
         """Repo audit gate for `chroot build live/installer`.
