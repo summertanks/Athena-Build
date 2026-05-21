@@ -5048,36 +5048,101 @@ def test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source():
 
     Anti-regression for the original epoch-trap implementation that
     compared Version fields raw — bsdutils Version 1:2.38.1-5 from
-    util-linux source 2.38.1-5 would false-positive as drift."""
+    util-linux source 2.38.1-5 would false-positive as drift.
+
+    Categorisation now lives in the shared `_scan_stale_files` helper
+    (refactored 2026-05-21 to also serve `package audit`'s STALE
+    section as a warn-only surface).  cmd_package_cleanup delegates
+    to it and adds the dry-run/force/delete machinery."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # Helper holds the scan logic.
+    _m_scan = re.search(
+        r"\n    def _scan_stale_files\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m_scan is not None, "_scan_stale_files helper not found"
+    _scan = _m_scan.group(0)
+    # Predicted-filename fast path lives in the helper.
+    assert 'if _f in _expected_files' in _scan, (
+        "fast-path filename match missing from _scan_stale_files — "
+        "would needlessly open every .deb's control file"
+    )
+    # Production-sibling preservation lives in the helper.
+    assert 'production sibling' in _scan.lower(), (
+        "_scan_stale_files must document/preserve production-sibling "
+        "fall-through (source selected + pkg name not predicted = KEEP)"
+    )
+    # Cleanup delegates to the helper rather than re-implementing.
+    _m_cleanup = re.search(
+        r"\n    def cmd_package_cleanup\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m_cleanup is not None
+    _cleanup = _m_cleanup.group(0)
+    assert 'self._scan_stale_files()' in _cleanup, (
+        "cmd_package_cleanup must call _scan_stale_files (not "
+        "re-implement the scan inline — two copies will drift)"
+    )
+    # Audit cache invalidation after delete — repo state shifted.
+    assert 'repo_audit.invalidate_cache' in _cleanup, (
+        "audit cache must be invalidated after deletion"
+    )
+
+
+def test_package_audit_includes_stale_files_warning_section():
+    """`package audit` must call _scan_stale_files (via the
+    _report_stale_files_warning helper) so the operator sees orphan-
+    source and version-drift residue surfaced as a soft warning at
+    the end of every audit run.  Audit is the natural place to flag
+    these — they don't break dep resolution (apt picks highest-version
+    per name and the older sibling becomes a phantom), but they DO
+    silently break chroot builds and install-time dpkg unpack.
+
+    Anti-regression for the 2026-05-21 base-files Path X migration
+    where stale base-files_12.4_amd64.deb sat next to the new
+    base-files_12.4+deb12u14+athena1_amd64.deb and neither audit nor
+    dep-parse complained until source-build looped."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
     import re
     _m = re.search(
-        r"\n    def cmd_package_cleanup\b.*?(?=\n    def \w)",
+        r"\n    def cmd_audit\b.*?(?=\n    def \w)",
         _body, re.DOTALL,
     )
     assert _m is not None
-    _method = _m.group(0)
-    # Predicted-filename fast path: keep without opening the .deb.
-    assert 'if _f in _expected_files' in _method, (
-        "fast-path filename match missing — would needlessly open every "
-        ".deb's control file"
+    _audit = _m.group(0)
+    # The warning helper is invoked.
+    assert '_report_stale_files_warning' in _audit, (
+        "cmd_audit must call _report_stale_files_warning so STALE FILES "
+        "section appears in the audit output"
     )
-    # Three categorisation buckets present.
-    assert '_orphan' in _method and '_drift' in _method, (
-        "cleanup must categorise into _orphan and _drift lists"
+    # Helper exists and does the right thing.
+    _m_helper = re.search(
+        r"\n    def _report_stale_files_warning\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
     )
-    # Production-sibling preservation: source selected + pkg name not in
-    # any src_pkg_files entry → fall-through, not appended to _drift.
-    assert 'production sibling' in _method.lower(), (
-        "no comment / mention of production-sibling preservation — "
-        "easy to regress by adding an `else: _orphan.append(...)` "
-        "clause"
+    assert _m_helper is not None, "_report_stale_files_warning helper missing"
+    _helper = _m_helper.group(0)
+    assert 'self._scan_stale_files()' in _helper, (
+        "warning helper must call _scan_stale_files (single source of "
+        "categorisation truth)"
     )
-    # Audit cache invalidation after delete — repo state shifted.
-    assert 'repo_audit.invalidate_cache' in _method, (
-        "audit cache must be invalidated after deletion"
+    assert 'STALE FILES' in _helper, (
+        "helper must surface a STALE FILES section header"
+    )
+    # NOT a hard gate — must point operator to cleanup, not abort.
+    assert 'package cleanup' in _helper, (
+        "warn-only path must point operator at `package cleanup` for "
+        "the actual action"
+    )
+    # Helper must NOT call os.remove — warn-only.
+    assert 'os.remove' not in _helper, (
+        "warn-only audit path must NOT delete files; cleanup owns "
+        "deletion"
     )
 
 
