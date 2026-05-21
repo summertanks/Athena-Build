@@ -1,3 +1,16 @@
+base-files (12.4+deb12u14+athena2) thor; urgency=low
+
+  * Description field rebranded — was "Debian base system
+    miscellaneous files", now "Asgard base system miscellaneous
+    files".  Plus a paragraph noting the fork origin so `apt show
+    base-files` and dpkg's package query reads honestly.  Body
+    keeps the literal mention of /etc/debian_version because the
+    file itself is preserved at that path for tool compatibility
+    (any rename would break consumers like grub-installer that
+    grep it).
+
+ -- Athena Linux <athena@local>  Wed, 21 May 2026 21:30:00 +0000
+
 base-files (12.4+deb12u14+athena1) thor; urgency=low
 
   * Athena fork (Path X — same-name fork of upstream Debian base-files).
