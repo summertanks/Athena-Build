@@ -237,6 +237,17 @@ class BuildSession:
 
         self.flags.cache_ready = True
 
+        # Late-inject the freshly-built cache into the auto-init'd build
+        # container.  cmd_init_container runs at session startup BEFORE
+        # cache_build (auto-init in main() — saves the operator a trivial
+        # manual step), so BuildContainer was constructed with cache=None.
+        # build_depends + verify_pkg_artifact need the cache to resolve
+        # virtual-provider build-deps and audit binary Depends.  Without
+        # this assignment, source builds resolve build-deps against None
+        # and silently pick wrong providers.
+        if self.container is not None:
+            self.container.cache = self.cache
+
 
     # --------------------------------------Command: cache purge-------------------------------------
 
@@ -4415,11 +4426,16 @@ class BuildSession:
         source_build_ready flag, which cmd_source_build resets at entry —
         so bailing on either subset's failure works the same way.
         """
+        # NOTE: `container init` is auto-run at session startup (see
+        # main()), so it's intentionally omitted from this step list.
+        # If startup auto-init failed (e.g. Docker daemon not running),
+        # cmd_source_build will surface "Run 'container init' first" and
+        # autorun bails — operator fixes Docker, re-runs `container init`
+        # manually, then re-issues `autorun`.
         _steps = [
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',       'dep parse'),
             (self.cmd_source_download,   'download_ready',        'source download'),
-            (self.cmd_init_container,    'build_container_ready', 'container init'),
             (self.cmd_source_build,                                  # bare = pkg
                                           'source_build_ready',    'source build'),
             (lambda: self.cmd_source_build('live'),                  # live extras
@@ -4439,11 +4455,13 @@ class BuildSession:
         deb sources) and chroot build (unpack udebs into buildroot/installer/
         via dpkg --unpack), then converges on iso build installer.
         """
+        # `container init` runs at session startup (main()); see the
+        # matching note in cmd_auto_run_live.  Command itself stays
+        # available for manual invocation after `container purge`.
         _steps = [
             (self.cmd_build_cache,       'cache_ready',                'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',            'dep parse'),
             (self.cmd_source_download,   'download_ready',             'source download'),
-            (self.cmd_init_container,    'build_container_ready',      'container init'),
             (self.cmd_source_build,                                       # bare = pkg
                                           'source_build_ready',         'source build'),
             (lambda: self.cmd_source_build('installer'),                  # udeb closure
@@ -4588,6 +4606,17 @@ def main(banner: str) -> None:
     console.print(f"\tArch\t\t\t{config.arch}")
     console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
     console.print(f"\tBuild Distribution\t{config.build_distribution} {config.build_version} ({config.build_codename})")
+
+    # Auto-init the Docker build container at session start.  The image
+    # build is independent of cache state (just needs the Dockerfile +
+    # snapshot.timestamp file, which is persisted across runs), so this
+    # is safe before `cache build`.  The BuildContainer's `cache`
+    # attribute starts as None and is late-injected by cmd_build_cache
+    # so subsequent source-build dep-resolution sees the live cache.
+    # Failures here are non-fatal — cmd_init_container catches Docker
+    # errors and surfaces them to the operator, who can debug Docker
+    # state and run `container init` manually.
+    session.cmd_init_container()
 
     tui_inst.wait()
     Exit(0)
