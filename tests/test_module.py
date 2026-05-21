@@ -5828,6 +5828,54 @@ def test_parse_sources_uses_per_tree_src_pkg_files_not_shared_source_attr():
     assert 'libc6-dev_2.36-9_amd64.deb' not in dt_udeb.src_pkg_files['glibc']
 
 
+def test_explicit_provides_version_returns_none_for_unversioned_provides():
+    """Anti-regression for the real-Package code path: when a stanza
+    declares `Provides: fwupdate` with no version, the new
+    explicit_provides_version helper must return None — NOT fall back
+    to the provider's own version like get_provides does.
+
+    The stub-based validate_selection tests use a hand-rolled
+    explicit_provides_version; this test pins the real Package class's
+    behavior so the stub can't drift out of sync with production."""
+    import sys, io
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import apt_pkg
+    apt_pkg.init()
+    from debian.deb822 import Packages
+    from package import Package
+
+    _stanza = (
+        "Package: fwupd\n"
+        "Version: 1.8.12-2\n"
+        "Architecture: amd64\n"
+        "Maintainer: Test <test@example>\n"
+        "Description: test\n"
+        "Provides: fwupdate\n"
+        "Filename: pool/main/f/fwupd/fwupd_1.8.12-2_amd64.deb\n"
+        "SHA256: deadbeef\n"
+        "Size: 100\n"
+    )
+    section = next(Packages.iter_paragraphs(io.StringIO(_stanza)))
+    pkg = Package(section)
+    assert pkg.isvalid, "test fixture failed to parse"
+    # get_provides STILL substitutes (kept that way for Depends
+    # resolution semantics — apt treats the provider's version as
+    # satisfying for `Depends: virtual`).
+    assert pkg.get_provides() == [('fwupdate', pkg.version)], (
+        "get_provides regression — must keep substituting self.version "
+        "for unversioned Provides so Depends-satisfaction lookups stay "
+        "consistent with apt's behaviour")
+    # The new helper does NOT substitute — returns None for unversioned.
+    assert pkg.explicit_provides_version('fwupdate') is None, (
+        "REGRESSION: explicit_provides_version is substituting "
+        "self.version for unversioned Provides — the whole point of "
+        "this helper is to distinguish that case so validate_selection "
+        "can apply Policy §7.5 correctly")
+    # And None for a name we don't provide at all.
+    assert pkg.explicit_provides_version('nonexistent') is None
+
+
 def test_validate_selection_unversioned_provides_no_spurious_break():
     """REGRESSION (2026-05-20): fwupd declares `Provides: fwupdate`
     (UNVERSIONED).  linux-image declares `Breaks: fwupdate (<< 12-7)`.
@@ -5852,8 +5900,8 @@ def test_validate_selection_unversioned_provides_no_spurious_break():
     class _BrkPkg:
         """Minimal Package surface for validate_selection — needs
         .breaks (list of OR-groups), .conflicts, .alt_depends,
-        .recommends, .constraints_satisfied, .version, .get_provides,
-        and ['Package'] / __getitem__."""
+        .recommends, .constraints_satisfied, .version,
+        .explicit_provides_version, and ['Package'] / __getitem__."""
         def __init__(self, name, version, *, breaks=(), provides=()):
             self._fields = {'Package': name}
             from debian.debian_support import Version
@@ -5865,12 +5913,21 @@ def test_validate_selection_unversioned_provides_no_spurious_break():
             self.conflicts = []
             self.alt_depends = []
             self.recommends = []
-            self._provides = list(provides)  # list of (name, version_or_None)
+            # _provides: list of (name, version_str_or_None).  None
+            # means "unversioned Provides" — explicit_provides_version
+            # returns None for it (Policy §7.5).
+            self._provides = list(provides)
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
         def __contains__(self, k): return k in self._fields
         def get(self, k, d=''): return self._fields.get(k, d)
-        def get_provides(self): return self._provides
+        def explicit_provides_version(self, name):
+            from debian.debian_support import Version
+            for _n, _v in self._provides:
+                if _n != name:
+                    continue
+                return Version(_v) if _v is not None else None
+            return None
 
     fwupd = _BrkPkg('fwupd', '1.8.12-2',
                     provides=[('fwupdate', None)])
@@ -5908,14 +5965,17 @@ def test_validate_selection_versioned_provides_still_flagged():
             self.conflicts = []
             self.alt_depends = []
             self.recommends = []
-            self._provides = [
-                (n, Version(v) if v else None) for n, v in provides
-            ]
+            self._provides = list(provides)  # [(name, version_str_or_None)]
             self.constraints_satisfied = True
         def __getitem__(self, k): return self._fields[k]
         def __contains__(self, k): return k in self._fields
         def get(self, k, d=''): return self._fields.get(k, d)
-        def get_provides(self): return self._provides
+        def explicit_provides_version(self, name):
+            for _n, _v in self._provides:
+                if _n != name:
+                    continue
+                return Version(_v) if _v is not None else None
+            return None
 
     # Provides version = 5.0; Breaks constraint = (<< 10).  5.0 << 10 → break.
     provider = _BrkPkg('provider', '99-99',  # provider's own version irrelevant
@@ -11433,6 +11493,7 @@ def main() -> int:
         test_pull_recommends_extras_skips_already_in_selected_pkgs,
         test_pull_recommends_extras_walks_transitive_depends,
         test_parse_sources_uses_per_tree_src_pkg_files_not_shared_source_attr,
+        test_explicit_provides_version_returns_none_for_unversioned_provides,
         test_validate_selection_unversioned_provides_no_spurious_break,
         test_validate_selection_versioned_provides_still_flagged,
         test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately,

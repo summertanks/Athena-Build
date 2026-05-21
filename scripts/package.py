@@ -240,6 +240,45 @@ class Package(Packages):
         """
         return self._isvalid
 
+    def explicit_provides_version(self, name: str) -> 'Optional[Version]':
+        """Return the EXPLICITLY-declared Provides version for `name`,
+        or None if this package provides `name` unversioned (or doesn't
+        provide it at all).
+
+        Distinct from get_provides() which substitutes self.version when
+        the Provides entry is unversioned — that substitution is correct
+        for Depends-satisfaction lookups (apt treats the provider's
+        version as the satisfying version) but WRONG for versioned
+        Breaks/Conflicts constraints, where Debian Policy §7.5 says an
+        unversioned Provides cannot satisfy the constraint at all.
+
+        Used by validate_selection's Breaks/Conflicts arms to suppress
+        spurious breaks like `fwupd (Provides: fwupdate)` triggering
+        `linux-image (Breaks: fwupdate (<< 12-7))` despite fwupd's
+        Provides making no version claim about the fwupdate name.
+        """
+        if not self.isvalid or not self.provides:
+            return None
+        for _grp in self.provides:
+            for _dep in _grp:
+                try:
+                    if _dep[0].strip() != name:
+                        continue
+                    _ver_str = _dep[1]
+                    _op = _dep[2]
+                    # Both ver_str and op must be present for an
+                    # explicit Provides version — `Provides: foo (= X)`.
+                    if _ver_str and _op == '=':
+                        return Version(_ver_str)
+                    # Found the Provides entry but it's unversioned
+                    # (or has an invalid operator that get_provides
+                    # would warn about).  Either way, no explicit
+                    # version to claim.
+                    return None
+                except (IndexError, ValueError, AttributeError, TypeError):
+                    continue
+        return None
+
     def get_provides(self) -> List[Tuple[str, Version]]:
         
         if not self.isvalid:
