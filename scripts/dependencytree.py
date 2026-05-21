@@ -607,16 +607,35 @@ class DependencyTree:
                         _real_breaks_name in self.pool_extras_pkg_names):
                         continue
                     _broken_obj = self.selected_pkgs[_breaks_name]
+                    _break_version = _break_group[0][1]
+                    _break_comparator = _break_group[0][2]
                     if _broken_obj['Package'] != _breaks_name:
-                        # Provider: use the Provides version, not the provider's own version
+                        # Virtual via Provides.  Per Debian Policy §7.5,
+                        # an UNVERSIONED Provides cannot satisfy a
+                        # versioned Breaks/Conflicts constraint — apt
+                        # will install both pkgs and not flag a break.
+                        # Real-world case: `fwupd Provides: fwupdate`
+                        # (unversioned) + `linux-image Breaks:
+                        # fwupdate (<< 12-7)` — fwupd's own version
+                        # (1.8.12-2) IS << 12-7 by Debian comparison,
+                        # but that comparison is irrelevant because
+                        # fwupd's Provides makes no version claim about
+                        # the fwupdate name.  Falling back to fwupd's
+                        # own version produced a spurious break that
+                        # blocked dep parse 2026-05-20 (surfaced once
+                        # parse_dependency started registering virtual
+                        # aliases properly post-Bug-2 fix).
                         _provided_ver = next(
                             (str(v) for n, v in _broken_obj.get_provides()
                              if n == _breaks_name and v is not None), None)
-                        _pkg_ver = _provided_ver if _provided_ver else str(_broken_obj.version)
+                        if _provided_ver is None:
+                            if _break_comparator:
+                                continue  # versioned break vs unversioned provides — no match
+                            _pkg_ver = None   # unversioned break — existence triggers below
+                        else:
+                            _pkg_ver = _provided_ver
                     else:
                         _pkg_ver = str(_broken_obj.version)
-                    _break_version = _break_group[0][1]
-                    _break_comparator = _break_group[0][2]
 
                     # Check if it breaks
                     try:
@@ -648,15 +667,25 @@ class DependencyTree:
                         _real_conflicts_name in self.pool_extras_pkg_names):
                         continue
                     _conflict_obj = self.selected_pkgs[_conflicts_name]
+                    _conflict_version = _conflict_group[0][1]
+                    _conflict_comparator = _conflict_group[0][2]
                     if _conflict_obj['Package'] != _conflicts_name:
+                        # Same unversioned-Provides rule as the Breaks
+                        # arm above — Debian Policy §7.5: an unversioned
+                        # Provides cannot satisfy a versioned Conflicts
+                        # constraint.  Falling back to the provider's
+                        # own version produces a spurious conflict.
                         _provided_ver = next(
                             (str(v) for n, v in _conflict_obj.get_provides()
                              if n == _conflicts_name and v is not None), None)
-                        _pkg_ver = _provided_ver if _provided_ver else str(_conflict_obj.version)
+                        if _provided_ver is None:
+                            if _conflict_comparator:
+                                continue  # versioned conflict vs unversioned provides — no match
+                            _pkg_ver = None   # unversioned conflict — existence triggers below
+                        else:
+                            _pkg_ver = _provided_ver
                     else:
                         _pkg_ver = str(_conflict_obj.version)
-                    _conflict_version = _conflict_group[0][1]
-                    _conflict_comparator = _conflict_group[0][2]
 
                     # Check if conflicts
                     try:

@@ -5828,6 +5828,113 @@ def test_parse_sources_uses_per_tree_src_pkg_files_not_shared_source_attr():
     assert 'libc6-dev_2.36-9_amd64.deb' not in dt_udeb.src_pkg_files['glibc']
 
 
+def test_validate_selection_unversioned_provides_no_spurious_break():
+    """REGRESSION (2026-05-20): fwupd declares `Provides: fwupdate`
+    (UNVERSIONED).  linux-image declares `Breaks: fwupdate (<< 12-7)`.
+    Per Debian Policy §7.5, an unversioned Provides cannot satisfy a
+    versioned Breaks/Conflicts — apt does not flag this combo.
+
+    Pre-fix, validate_selection fell back to the provider's own version
+    (fwupd 1.8.12-2) when Provides was unversioned, then `check_dep`
+    saw 1.8.12-2 << 12-7 → True (correct Debian version comparison,
+    wrong scope) and triggered a spurious break.  The bug was masked
+    until parse_dependency started properly registering virtual aliases
+    (Bug 2 fix) — once selected_pkgs['fwupdate'] pointed to the fwupd
+    Package, validate_selection's existing-but-broken logic fired.
+
+    Test wires the exact upstream shape (fwupd + linux-image-amd64)
+    and asserts validate_selection returns True (no breaks).
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+
+    class _BrkPkg:
+        """Minimal Package surface for validate_selection — needs
+        .breaks (list of OR-groups), .conflicts, .alt_depends,
+        .recommends, .constraints_satisfied, .version, .get_provides,
+        and ['Package'] / __getitem__."""
+        def __init__(self, name, version, *, breaks=(), provides=()):
+            self._fields = {'Package': name}
+            from debian.debian_support import Version
+            self.version = Version(version)
+            # breaks shape mirrors parse_depends: list-of-list-of-tuples.
+            # Each inner list is one OR-group (Debian forbids alts in
+            # breaks so always length 1).  Tuple is (name, ver, op).
+            self.breaks = [[(n, v, op)] for n, v, op in breaks]
+            self.conflicts = []
+            self.alt_depends = []
+            self.recommends = []
+            self._provides = list(provides)  # list of (name, version_or_None)
+            self.constraints_satisfied = True
+        def __getitem__(self, k): return self._fields[k]
+        def __contains__(self, k): return k in self._fields
+        def get(self, k, d=''): return self._fields.get(k, d)
+        def get_provides(self): return self._provides
+
+    fwupd = _BrkPkg('fwupd', '1.8.12-2',
+                    provides=[('fwupdate', None)])
+    linux_image = _BrkPkg('linux-image-amd64', '6.1.170-3',
+                          breaks=[('fwupdate', '12-7', '<<')])
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt.selected_pkgs = {
+        'fwupd':             fwupd,
+        'fwupdate':          fwupd,         # virtual alias → real fwupd Package
+        'linux-image-amd64': linux_image,
+    }
+    dt.pool_extras_pkg_names = set()
+    assert dt.validate_selection() is True, (
+        "spurious break: linux-image-amd64 Breaks: fwupdate (<< 12-7) "
+        "should NOT trigger against fwupd's unversioned `Provides: "
+        "fwupdate` (Debian Policy §7.5)"
+    )
+
+
+def test_validate_selection_versioned_provides_still_flagged():
+    """Symmetry: when Provides IS versioned and that version actually
+    matches the Breaks constraint, the break MUST still trigger.
+    Pins behaviour for the legitimate case so the Policy §7.5 fix
+    doesn't accidentally over-loosen."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    from debian.debian_support import Version
+
+    class _BrkPkg:
+        def __init__(self, name, version, *, breaks=(), provides=()):
+            self._fields = {'Package': name}
+            self.version = Version(version)
+            self.breaks = [[(n, v, op)] for n, v, op in breaks]
+            self.conflicts = []
+            self.alt_depends = []
+            self.recommends = []
+            self._provides = [
+                (n, Version(v) if v else None) for n, v in provides
+            ]
+            self.constraints_satisfied = True
+        def __getitem__(self, k): return self._fields[k]
+        def __contains__(self, k): return k in self._fields
+        def get(self, k, d=''): return self._fields.get(k, d)
+        def get_provides(self): return self._provides
+
+    # Provides version = 5.0; Breaks constraint = (<< 10).  5.0 << 10 → break.
+    provider = _BrkPkg('provider', '99-99',  # provider's own version irrelevant
+                       provides=[('virtual', '5.0')])
+    breaker = _BrkPkg('breaker', '1.0',
+                      breaks=[('virtual', '10', '<<')])
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt.selected_pkgs = {
+        'provider': provider,
+        'virtual':  provider,
+        'breaker':  breaker,
+    }
+    dt.pool_extras_pkg_names = set()
+    assert dt.validate_selection() is False, (
+        "versioned Provides (= 5.0) MUST satisfy Breaks (<< 10) — "
+        "the Policy §7.5 fix dropped a legitimate break"
+    )
+
+
 def test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately():
     """source audit's output must label deb and udeb cohorts distinctly,
     so the operator can tell which cohort drives each missing source.
@@ -11326,6 +11433,8 @@ def main() -> int:
         test_pull_recommends_extras_skips_already_in_selected_pkgs,
         test_pull_recommends_extras_walks_transitive_depends,
         test_parse_sources_uses_per_tree_src_pkg_files_not_shared_source_attr,
+        test_validate_selection_unversioned_provides_no_spurious_break,
+        test_validate_selection_versioned_provides_still_flagged,
         test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately,
         test_derive_extras_src_names_marks_extras_only_sources,
         # phase 1: live.list / installer.list split
