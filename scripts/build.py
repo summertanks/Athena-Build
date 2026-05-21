@@ -2458,7 +2458,15 @@ class BuildSession:
                 elif _r['status'] == 'unchanged':
                     _unchanged += 1
                 else:
+                    # status is 'malformed' or 'skipped'; surface the
+                    # filename + reason so the operator can decide
+                    # whether to rebuild or accept (otherwise "1 failed"
+                    # is opaque and the operator has to grep the repo
+                    # to find the culprit).
                     _failed += 1
+                    logger.warning(
+                        f"strip_nmu: {_f} skipped (status={_r['status']})"
+                    )
             except Exception as e:
                 logger.error(f"strip_nmu: {_f} failed: {e}")
                 _failed += 1
