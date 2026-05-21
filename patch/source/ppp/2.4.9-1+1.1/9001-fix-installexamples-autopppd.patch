@@ -1,0 +1,37 @@
+Description: Install autopppd straight into examples/scripts/
+ override_dh_installexamples-arch ran `dh_installexamples` and then
+ moved `examples/autopppd` to `examples/scripts/`, assuming the helper
+ had placed both `debian/extra/autopppd` and the upstream `scripts/`
+ dir under `usr/share/doc/ppp/examples/`.  Under our snapshot's
+ debhelper neither happens — `dh_installexamples` silently skips every
+ entry in `debian/ppp.examples`, so `examples/` is never populated and
+ the subsequent `mv` aborts with "cannot stat examples/autopppd".
+ .
+ Replace the `mv` with `install -D` that creates the parent directory
+ and copies `debian/extra/autopppd` to its final destination directly,
+ with no dependence on whatever `dh_installexamples` did or didn't do
+ with the same source path.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-20
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -113,9 +113,12 @@
+ override_dh_installexamples-arch:
+ 	dh_installexamples
+
+-	# use our own version, not the upstream one
+-	mv $(DIR_PPP)/usr/share/doc/ppp/examples/autopppd \
+-		$(DIR_PPP)/usr/share/doc/ppp/examples/scripts/
++	# use our own version, not the upstream one.  `-D` creates
++	# examples/scripts/ since dh_installexamples doesn't populate it
++	# under our debhelper (file/dir entries in ppp.examples appear to be
++	# silently skipped), and overwrites the upstream copy if present.
++	install -D -p -m 555 debian/extra/autopppd \
++		$(DIR_PPP)/usr/share/doc/ppp/examples/scripts/autopppd
+
+ override_dh_lintian:
+ 	dh_lintian
