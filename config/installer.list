@@ -155,6 +155,34 @@ usb-modules
 usb-storage-modules
 isofs-modules
 
+# Network-interface drivers — same shape as the storage modules
+# above.  Without these in the INITIAL ramdisk, ethdetect's first
+# run sees only `lo` because the actual ethernet driver (e1000,
+# r8169, igb, virtio_net, vmxnet3, e1000e, etc) hasn't been loaded
+# yet.  Anna does eventually fetch nic-modules-*-di from
+# /cdrom/pool during the install — but by then ethdetect has
+# already failed empty-handed and netcfg fell back to "leave
+# unconfigured", which is the symptom that surfaced 2026-05-21
+# (kernel uptime 28s before e1000 finally loaded — 17s too late
+# for ethdetect's first run).
+#
+#   nic-modules           — generic NIC drivers (e1000, e1000e,
+#                            r8169, igb, virtio_net, vmxnet3, etc.)
+#   nic-shared-modules    — shared infrastructure (mii.ko, etc.)
+#   nic-usb-modules       — USB ethernet (rtl8150, asix, etc.)
+#   nic-wireless-modules  — wireless drivers (operator can skip
+#                            past wifi config in netcfg if not
+#                            using; harmless to include)
+#   nic-pcmcia-modules    — legacy PCMCIA ethernet (small udeb;
+#                            include for portability)
+#
+# Stock d-i installer ramdisks include all five.
+nic-modules
+nic-shared-modules
+nic-usb-modules
+nic-wireless-modules
+nic-pcmcia-modules
+
 # ─── Stock d-i seed: pkg-lists/base ────────────────────────────────
 # Verbatim from debian-installer 20230607+deb12u13 pkg-lists/base.  These
 # are the udebs stock d-i puts in EVERY image flavour (cdrom, netboot,
