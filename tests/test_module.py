@@ -6014,50 +6014,47 @@ def test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately():
         "the split into deb/udeb scopes may have regressed")
 
 
-def test_main_auto_inits_container_before_tui_wait():
-    """`container init` runs automatically at session startup so the
-    operator doesn't have to type a trivial setup command every time.
-    Anti-regression for the auto-init introduced 2026-05-21: main()
-    must call session.cmd_init_container() between BuildSession
-    construction (+ command registration) and tui_inst.wait().
+def test_cmd_init_container_gated_on_cache_ready():
+    """REGRESSION pin (2026-05-21): cmd_init_container must refuse to
+    run before cmd_build_cache.  BuildContainer is constructed with
+    cache=self.cache; if cache is None, source-build's
+    Source.build_depends(cache=None) returns raw groups without virtual-
+    provider expansion.  In-container `apt-get install libcurl4-dev`
+    (or any other virtual with multiple providers) then fails non-
+    interactively with `Package 'X' has no installation candidate`,
+    blowing up the source build cryptically.
 
-    Source-text inspection because main()'s effects (TUI event loop,
-    Docker init) are heavy to fixture for a contract check."""
+    Catching the ordering at the command boundary keeps the failure
+    actionable instead of silently breaking later builds."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
     import re
-    # Find main(), then assert the cmd_init_container call appears
-    # BEFORE tui_inst.wait() in the body.  Use spans rather than
-    # substring index to keep the assertion robust to whitespace edits.
-    _main_match = re.search(r"\ndef main\b.*?(?=\nif __name__\b)",
-                            _body, re.DOTALL)
-    assert _main_match is not None, "main() definition not found in build.py"
-    _main_body = _main_match.group(0)
-    _init_idx = _main_body.find('session.cmd_init_container(')
-    _wait_idx = _main_body.find('tui_inst.wait(')
-    assert _init_idx != -1, (
-        "main() no longer calls session.cmd_init_container() — startup "
-        "auto-init regressed; operator has to run `container init` manually"
+    _m = re.search(r"\n    def cmd_init_container\b.*?\n    def \w",
+                   _body, re.DOTALL)
+    assert _m is not None, "cmd_init_container body not found"
+    _body_text = _m.group(0)
+    # Gate must read the flag and return early when False.
+    assert 'self.flags.cache_ready' in _body_text, (
+        "cmd_init_container no longer reads self.flags.cache_ready — "
+        "the cache-build ordering gate regressed; in-container apt-installs "
+        "for virtual Build-Depends will fail without diagnosis"
     )
-    assert _wait_idx != -1, "main() lost its tui_inst.wait() call"
-    assert _init_idx < _wait_idx, (
-        "session.cmd_init_container() must run BEFORE tui_inst.wait() — "
-        "running it after the event loop blocks would never fire"
+    # The body must guard *before* mutating build_container_ready /
+    # constructing the BuildContainer (otherwise we'd reset state then
+    # bail, leaving inconsistent flags).
+    _gate_idx = _body_text.find('self.flags.cache_ready')
+    _construct_idx = _body_text.find('buildcontainer.BuildContainer(')
+    assert _gate_idx < _construct_idx, (
+        "cache_ready gate must precede BuildContainer construction "
+        "(don't reset build_container_ready when bailing on the gate)"
     )
 
 
-def test_autorun_step_lists_omit_container_init():
-    """`container init` is auto-run at session startup (see main()).
-    Both autorun pipelines must NOT include it in their step lists —
-    re-running the Docker image build mid-pipeline is wasteful and the
-    startup auto-init already covers the cold-start case.
-
-    Operator can still invoke `container init` manually after `container
-    purge` — only the autorun script-mode is the scope here.
-
-    Scope the assertion to the `_steps = [...]` literal so test isn't
-    confused by NOTE comments that mention the phrase."""
+def test_autorun_step_lists_include_container_init():
+    """`container init` is part of both autorun pipelines, ordered
+    AFTER cache build (gate requires it) and BEFORE source build.
+    Scope assertion to the `_steps = [...]` literal."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
@@ -6066,43 +6063,22 @@ def test_autorun_step_lists_omit_container_init():
         _m = re.search(rf"\n    def {_fn}\b.*?_steps = \[(?P<list>.*?)\]\s*\n",
                        _body, re.DOTALL)
         assert _m is not None, f"{_fn}'s _steps list not found"
-        _steps_literal = _m.group('list')
-        assert 'cmd_init_container' not in _steps_literal, (
-            f"{_fn} still references cmd_init_container in its step list — "
-            f"startup auto-init makes this redundant; removed 2026-05-21"
+        _steps = _m.group('list')
+        assert 'cmd_init_container' in _steps, (
+            f"{_fn} missing cmd_init_container step — source builds will "
+            f"hit 'Run `container init` first' mid-pipeline"
         )
-        assert "'container init'" not in _steps_literal, (
-            f"{_fn} still has a 'container init' step label — operator "
-            f"will see a no-op step name in the autorun summary"
+        # Ordering: cache build comes BEFORE container init (gate
+        # requirement), container init comes BEFORE source build
+        # (source build needs the container ready).
+        _cache_idx = _steps.find('cmd_build_cache')
+        _container_idx = _steps.find('cmd_init_container')
+        _source_idx = _steps.find('cmd_source_build')
+        assert _cache_idx < _container_idx < _source_idx, (
+            f"{_fn} step order broken: expected cache_build → "
+            f"init_container → source_build, got idx "
+            f"{_cache_idx}/{_container_idx}/{_source_idx}"
         )
-
-
-def test_cmd_build_cache_late_injects_cache_into_existing_container():
-    """Because cmd_init_container auto-runs at startup (BEFORE
-    cmd_build_cache), BuildContainer is constructed with cache=None.
-    cmd_build_cache must late-inject the freshly-built cache so
-    source-build's build_depends() + verify_pkg_artifact() see it.
-    Without the injection, build-dep resolution silently picks wrong
-    virtual providers."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    import re
-    _m = re.search(r"\n    def cmd_build_cache\b.*?\n    def cmd_cache_purge\b",
-                   _body, re.DOTALL)
-    assert _m is not None, "cmd_build_cache body not found"
-    _body_text = _m.group(0)
-    assert 'self.container.cache = self.cache' in _body_text, (
-        "cmd_build_cache no longer late-injects cache into the auto-init'd "
-        "container.  build_depends() will silently resolve against None."
-    )
-    # And the injection must be guarded — container may not exist (auto-
-    # init at startup can fail e.g. if Docker isn't running, leaving
-    # self.container is None).
-    assert 'if self.container is not None' in _body_text, (
-        "Cache late-injection missing the `if self.container is not None` "
-        "guard; will AttributeError when Docker startup failed"
-    )
 
 
 def test_derive_extras_src_names_marks_extras_only_sources():
@@ -11623,9 +11599,8 @@ def main() -> int:
         test_validate_selection_unversioned_provides_no_spurious_break,
         test_validate_selection_versioned_provides_still_flagged,
         test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately,
-        test_main_auto_inits_container_before_tui_wait,
-        test_autorun_step_lists_omit_container_init,
-        test_cmd_build_cache_late_injects_cache_into_existing_container,
+        test_cmd_init_container_gated_on_cache_ready,
+        test_autorun_step_lists_include_container_init,
         test_derive_extras_src_names_marks_extras_only_sources,
         # phase 1: live.list / installer.list split
         test_dep_tree_initialises_subset_exclusive_sets_empty,
