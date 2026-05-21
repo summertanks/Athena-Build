@@ -102,7 +102,7 @@ def generate_fork_mirror(buildconfig) -> bool:
         logger.warning("fork_mirror: src_pkg_files empty after generation pass")
         return False
 
-    deb_stanzas, udeb_stanzas = _build_packages_stanzas(pkg_dirs)
+    deb_stanzas, udeb_stanzas = _build_packages_stanzas(pkg_dirs, buildconfig.arch)
     src_stanzas = _build_sources_stanzas(src_pkg_files)
 
     _write_index(os.path.join(dir_fork, 'Packages'),      deb_stanzas)
@@ -507,9 +507,15 @@ def _list_files_for_pkg(dst_dir: str, pkg_name: str, ver: str) -> List[str]:
 # Packages / Packages-udeb generation (placeholder hashes)
 # ---------------------------------------------------------------------------
 
-def _build_packages_stanzas(pkg_dirs: List[str]) -> Tuple[List[str], List[str]]:
+def _build_packages_stanzas(pkg_dirs: List[str], build_arch: str
+                            ) -> Tuple[List[str], List[str]]:
     """Parse each pkg's debian/control; emit Packages-format stanzas
     routed by Package-Type field.
+
+    `build_arch` is the target arch the build container produces
+    binaries for; it's substituted into the synthesized Filename and
+    Architecture fields for any binary whose `Architecture:` is not
+    literally `all`.  See _format_packages_stanza for the rationale.
 
     Returns: (deb_stanzas, udeb_stanzas).
     """
@@ -540,7 +546,8 @@ def _build_packages_stanzas(pkg_dirs: List[str]) -> Tuple[List[str], List[str]]:
         _maintainer = _src_stanza.get('Maintainer', 'Athena Linux <athena@local>')
 
         for _bin in _stanzas[1:]:
-            _text = _format_packages_stanza(_bin, _src_name, _ver, _maintainer)
+            _text = _format_packages_stanza(_bin, _src_name, _ver,
+                                            _maintainer, build_arch)
             if _bin.get('Package-Type', '') == 'udeb':
                 _udeb_stanzas.append(_text)
             else:
@@ -550,7 +557,8 @@ def _build_packages_stanzas(pkg_dirs: List[str]) -> Tuple[List[str], List[str]]:
 
 
 def _format_packages_stanza(binary: Deb822, source_name: str,
-                            ver: str, maintainer: str) -> str:
+                            ver: str, maintainer: str,
+                            build_arch: str) -> str:
     """Format ONE binary stanza into Packages-format text.
 
     Filename uses the bare basename matching what dpkg-buildpackage will
@@ -558,9 +566,23 @@ def _format_packages_stanza(binary: Deb822, source_name: str,
     Size/MD5sum/SHA256 are placeholders (cache never tunnels fork pkgs
     so these are inert, but the fields MUST be present per the user
     feedback 2026-05-16).
+
+    Architecture mapping: control's `Architecture:` field can be `all`
+    (arch-independent → .deb is named `_all.deb`), `any` (built per
+    arch → .deb is named `_<target-arch>.deb`), `linux-any`, or a
+    specific arch / arch list.  Only `all` keeps the literal string
+    in the filename; any other value resolves to `build_arch` (the
+    target the build container produces for — `amd64` in our
+    pipeline).  Without this remap, arch=any fork packages (e.g. our
+    base-files same-name fork) emit `_any.deb` filenames that no
+    actual build step produces, breaking the audit's prediction (it
+    looks for the literal filename and never finds it, looping the
+    rebuild).  Caught 2026-05-21 when migrating base-files to Path X.
     """
     _pkg_name = binary['Package']
     _arch     = binary.get('Architecture', 'all')
+    if _arch != 'all':
+        _arch = build_arch
     _ext      = 'udeb' if binary.get('Package-Type', '') == 'udeb' else 'deb'
     _filename = f'{_pkg_name}_{ver}_{_arch}.{_ext}'
 
