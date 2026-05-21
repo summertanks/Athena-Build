@@ -60,14 +60,14 @@ class _StubPrompt:
     def get_response(self):
         return self._options[0] if self._options else 'y'
 
-tui.console      = _StubConsole()
-tui.Spinner      = _StubSpinner
-tui.ProgressBar  = _StubProgressBar
-tui.Prompt       = _StubPrompt
+tui.console      = _StubConsole()       # type: ignore[assignment]
+tui.Spinner      = _StubSpinner         # type: ignore[assignment,misc]
+tui.ProgressBar  = _StubProgressBar     # type: ignore[assignment,misc]
+tui.Prompt       = _StubPrompt          # type: ignore[assignment,misc]
 # These constants live on tui too
-tui.PROMPT_OPTIONS  = 'options'
-tui.PROMPT_YESNO    = 'yesno'
-tui.PROMPT_PASSWORD = 'password'
+tui.PROMPT_OPTIONS  = 'options'         # type: ignore[assignment]
+tui.PROMPT_YESNO    = 'yesno'           # type: ignore[assignment]
+tui.PROMPT_PASSWORD = 'password'        # type: ignore[assignment]
 
 # Make sure submodules that did `from tui import X` get our stubs.
 # Trick: re-bind the names in already-imported modules below as we encounter them.

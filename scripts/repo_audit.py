@@ -31,6 +31,7 @@ import subprocess
 from typing import Optional
 
 import apt_pkg
+from debian.deb822 import PkgRelation
 
 import utils
 from utils import _NMU_STRIP_FIELDS, strip_nmu_suffix
@@ -352,7 +353,7 @@ def _ver_holds(actual: str, op: str, want: str) -> bool:
         return False
 
 
-def _rel_satisfied_in_scope(state: RepoState, rel: dict,
+def _rel_satisfied_in_scope(state: RepoState, rel: 'PkgRelation.ParsedRelation',
                               scope: Optional[frozenset] = None,
                               exclude_provider: str = '') -> bool:
     """True if some pkg in `scope` satisfies `rel`.
@@ -364,6 +365,8 @@ def _rel_satisfied_in_scope(state: RepoState, rel: dict,
     """
     _target = rel.get('name', '')
     _vc = rel.get('version')
+    _op: 'str | None'
+    _wver: 'str | None'
     if _vc:
         _op, _wver = _vc
     else:
@@ -376,7 +379,7 @@ def _rel_satisfied_in_scope(state: RepoState, rel: dict,
     if _target != exclude_provider:
         _entry = state.packages.get(_target)
         if _entry is not None and _in_scope(_target):
-            if _op is None or _ver_holds(_entry['Version'], _op, _wver):
+            if _op is None or _wver is None or _ver_holds(_entry['Version'], _op, _wver):
                 return True
     # Virtual via Provides.  Per Debian Policy §7.5: a versioned
     # Provides counts "exactly as if it were a real package" for
@@ -391,7 +394,7 @@ def _rel_satisfied_in_scope(state: RepoState, rel: dict,
             continue
         if not _in_scope(_provider):
             continue
-        if _op is None:
+        if _op is None or _wver is None:
             return True
         if _prov_ver is not None and _ver_holds(_prov_ver, _op, _wver):
             return True

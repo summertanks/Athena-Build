@@ -503,7 +503,7 @@ class Cache:
                     # end-of-build collision gate can compare it against
                     # the fork's version.  See docs/collision-gate.md.
                     self._upstream_collisions[_pkg.package].append(
-                        (_mirror.id, _pkg.version)
+                        (_mirror.id, str(_pkg.version))
                     )
                     tui.console.print(
                         f"Local supersedes upstream {_pkg.package} v{_pkg.version} [{_mirror.id}]"
@@ -771,7 +771,7 @@ class Cache:
                     # Record upstream udeb version for end-of-build
                     # collision gate (parallels the deb-side check).
                     self._upstream_udeb_collisions[_udeb.package].append(
-                        (_mirror.id, _udeb.version)
+                        (_mirror.id, str(_udeb.version))
                     )
                     tui.console.print(
                         f"Local supersedes upstream udeb {_udeb.package} v{_udeb.version} [{_mirror.id}]"
