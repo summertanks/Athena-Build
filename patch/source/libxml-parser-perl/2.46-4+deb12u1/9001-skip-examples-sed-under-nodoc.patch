@@ -1,0 +1,38 @@
+Description: gate examples shebang sed on nodoc so the rule no-ops cleanly
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-21
+Bug-Athena: libxml-parser-perl's override_dh_installexamples runs
+ `sed -i -e'1s|/usr/local/bin/perl|/usr/bin/perl|' $(EG)/canonical
+ $(EG)/xmlcomments $(EG)/xmlstats $(EG)/xmlfilter` to rewrite the
+ example scripts' shebang line.
+ .
+ Under DEB_BUILD_OPTIONS=nodoc, dh_installexamples is a no-op, so
+ $(EG) (= debian/libxml-parser-perl/usr/share/doc/libxml-parser-perl/
+ examples) is never created.  sed then fails with
+   sed: can't read .../examples/canonical: No such file or directory
+ and the build dies at debian/rules:33.
+ .
+ Fix: wrap the sed in `ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))`
+ so the rule no-ops cleanly when nodoc is active.  Behaviour without
+ nodoc is unchanged — the sed still rewrites the example shebangs.
+ .
+ TEMPORARY: nodoc is a workaround for missing doc-build tooling in
+ the build pool, not a permanent policy.  DELETE THIS PATCH when
+ CONF-08 lands and nodoc is dropped from [Source] BuildOptions /
+ BuildProfiles in config/build.conf.
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -30,7 +30,9 @@
+
+ override_dh_installexamples:
+ 	dh_installexamples
++ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))
+ 	sed -i -e'1s|/usr/local/bin/perl|/usr/bin/perl|' $(EG)/canonical $(EG)/xmlcomments $(EG)/xmlstats $(EG)/xmlfilter
++endif
+
+ # install Encodings/README and Encodings/*.msg as documentation
+ override_dh_install:

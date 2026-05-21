@@ -1,0 +1,35 @@
+Description: gate examples shebang sed on nodoc so the rule no-ops cleanly
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-21
+Bug-Athena: libwww-perl's override_dh_installexamples runs
+ `sed -i '1s|^#!/usr/bin/env perl|#!/usr/bin/perl|'
+ $(TMP)/usr/share/doc/$(PACKAGE)/examples/*` to rewrite the shebang
+ on every shipped example script.
+ .
+ Under DEB_BUILD_OPTIONS=nodoc, dh_installexamples is a no-op, so the
+ examples/ directory is never created.  The shell glob expands to the
+ literal path and sed dies with
+   sed: can't read .../examples/*: No such file or directory
+ killing the build at debian/rules:17.
+ .
+ Fix: wrap the sed in `ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))`
+ so the rule no-ops cleanly when nodoc is active.  Behaviour without
+ nodoc is unchanged — the sed still rewrites the example shebangs.
+ .
+ TEMPORARY: nodoc is a workaround for missing doc-build tooling in
+ the build pool, not a permanent policy.  DELETE THIS PATCH when
+ CONF-08 lands and nodoc is dropped from [Source] BuildOptions /
+ BuildProfiles in config/build.conf.
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -14,4 +14,6 @@
+
+ override_dh_installexamples:
+ 	dh_installexamples
++ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))
+ 	sed -i '1s|^#!/usr/bin/env perl|#!/usr/bin/perl|' $(TMP)/usr/share/doc/$(PACKAGE)/examples/*
++endif
