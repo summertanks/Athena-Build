@@ -110,9 +110,19 @@ def strip_build_version(file: str) -> str:
 #                   into upstream-version letters like `2alpha`
 # Trailing `+` after the group means: strip MULTIPLE stacked layers
 # (`1.0-2+deb12u3+b1` → strip both → `1.0-2`).
+# Trailing `~?` consumes the pre-release tilde marker that constraint
+# versions commonly tack on AFTER the NMU suffix (e.g. libflatpak0's
+# `Depends: bubblewrap (>= 0.8.0-2+deb12u1~)` — the `~` means "any
+# build >= the pre-release of 0.8.0-2+deb12u1").  Without `~?`, the
+# regex required `$` immediately after the NMU group; the `~` blocked
+# the match and the constraint version survived strip unchanged,
+# producing spurious unresolved-dep findings against our stripped repo
+# (audit 2026-05-21 — libflatpak0 → bubblewrap).  Note: applies ONLY
+# when the `~` directly follows an NMU group; bare-version `~rc1`
+# pre-release markers (no NMU) are unaffected.
 _NMU_SUFFIX_RE = re.compile(
     r'(?:\+deb\d+u\d+|~deb\d+u\d+|~bpo\d+\+\d+|\+rpi\d+|\+rpt\d+|'
-    r'\+b\d+|(?<=\d)b\d*)+$'
+    r'\+b\d+|(?<=\d)b\d*)+~?$'
 )
 
 # Relation fields whose version constraints should also have NMU stripped.
