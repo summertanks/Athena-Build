@@ -1,0 +1,33 @@
+#!/bin/sh
+# athena-base-files preinst — divert the four upstream base-files
+# identity files BEFORE dpkg unpacks our content.  Without the
+# divert, dpkg would refuse to unpack our /etc/issue (etc.) because
+# base-files already claims that path (Essential package, can't be
+# removed).
+#
+# dpkg-divert --add --rename:
+#   - If the target path exists (it does — base-files is debootstrap-
+#     installed), renames it to *.upstream atomically.
+#   - Records that future unpacks of base-files's /etc/issue (etc.)
+#     will redirect to /etc/issue.upstream.
+#   - athena-base-files itself (the "diverter") is exempt from the
+#     redirect, so OUR /etc/issue installs at /etc/issue.
+#
+# --package athena-base-files scopes the divert: when the user later
+# `apt remove athena-base-files`, prerm's `--remove` call has a
+# matching anchor and undoes the rename.  Without --package the
+# divert is anonymous and surviving uninstalls would orphan it.
+
+set -e
+
+for f in /etc/issue /etc/issue.net /etc/motd /usr/lib/os-release; do
+    if ! dpkg-divert --listpackage "$f" 2>/dev/null | grep -q '^athena-base-files$'; then
+        dpkg-divert --add --rename \
+            --package athena-base-files \
+            --divert "${f}.upstream" \
+            "$f"
+    fi
+done
+
+#DEBHELPER#
+exit 0

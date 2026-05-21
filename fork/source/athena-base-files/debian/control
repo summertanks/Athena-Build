@@ -1,0 +1,34 @@
+Source: athena-base-files
+Section: admin
+Priority: optional
+Maintainer: Athena Linux <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+
+Package: athena-base-files
+Architecture: all
+Multi-Arch: foreign
+Depends: ${misc:Depends}, base-files
+Description: @DISTRIBUTION@ identity files (issue, motd, os-release)
+ Rebrands the four user-visible identity files shipped by Debian's
+ Essential base-files package so the installed system presents as
+ @DISTRIBUTION@ Linux (codename @CODENAME@):
+ .
+   * /etc/issue            — TTY login banner
+   * /etc/issue.net        — SSH/telnet login banner
+   * /etc/motd             — message of the day
+   * /usr/lib/os-release   — the canonical os-release file (and
+                             therefore /etc/os-release, which is a
+                             symlink to it on Debian)
+ .
+ base-files is Essential and cannot be cleanly replaced via apt
+ P/C/R, so this package leaves base-files in place and uses
+ dpkg-divert (preinst) to rename the four upstream files to
+ *.upstream and substitute our content at the canonical paths.
+ prerm reverses the diversions on package removal.
+ .
+ Reflected downstream:
+   - gnome-control-center About panel shows "@DISTRIBUTION@ Linux"
+   - The LOGO=asgard field resolves to the asgard.svg pixmap
+     shipped by athena-branding
+   - GRUB's lsb_release fallback returns @DISTRIBUTION@

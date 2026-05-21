@@ -1,3 +1,22 @@
+athena-branding (1.1.0) thor; urgency=low
+
+  * Displace upstream desktop-base via Provides/Conflicts/Replaces.
+    task-desktop's hard Depends on desktop-base previously dragged
+    Debian's branded wallpapers, plymouth theme, GRUB theme, emblem
+    icons, and a competing gschema override onto the installed
+    system; that closure is now blocked.
+  * Ship /usr/share/pixmaps/asgard.svg — distributor logo, gold Α
+    on a midnight disc, geometric anchor identical to the Aegis
+    wallpaper.  Read by gnome-control-center's About panel and
+    the user-account panel via /etc/os-release LOGO=asgard
+    (set by athena-base-files).
+  * Ship /etc/default/grub.d/50-athena.cfg setting
+    GRUB_DISTRIBUTOR="Asgard" so update-grub on the installed
+    system emits "Asgard GNU/Linux" menu entries instead of the
+    lsb_release-fallback literal "Debian".
+
+ -- Athena Linux <athena@local>  Wed, 21 May 2026 17:00:00 +0000
+
 athena-branding (1.0.0) thor; urgency=low
 
   * Initial release (FORK-01 Step 7, deb-half).

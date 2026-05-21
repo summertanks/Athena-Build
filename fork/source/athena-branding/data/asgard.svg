@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  @DISTRIBUTION@ logo — read by /etc/os-release LOGO=asgard, resolved
+  via gtk icon-theme lookup against /usr/share/pixmaps/asgard.svg
+  (xdg icon-theme spec fallback path).
+
+  Compositional anchor: same gold Α glyph used in the Aegis wallpaper,
+  set inside a midnight indigo disc with a thin gold ring.  Designed
+  to read cleanly at 16×16 (panel) through 256×256 (About panel).
+
+  256×256 viewBox; preserveAspectRatio xMidYMid.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" preserveAspectRatio="xMidYMid">
+  <defs>
+    <radialGradient id="disc" cx="50%" cy="35%" r="65%" fx="50%" fy="35%">
+      <stop offset="0%"  stop-color="#1f2c52"/>
+      <stop offset="100%" stop-color="#06091a"/>
+    </radialGradient>
+    <linearGradient id="goldStroke" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#f0d27b"/>
+      <stop offset="100%" stop-color="#a47a2b"/>
+    </linearGradient>
+  </defs>
+
+  <!-- disc with thin gold rim -->
+  <circle cx="128" cy="128" r="120" fill="url(#disc)"/>
+  <circle cx="128" cy="128" r="120" fill="none"
+          stroke="#c9a24a" stroke-width="3" opacity="0.85"/>
+
+  <!-- Α glyph: apex (128, 60); feet (78, 196), (178, 196);
+       crossbar between (95, 158) and (161, 158). -->
+  <g stroke="url(#goldStroke)" fill="none"
+     stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M 78 196 L 128 60 L 178 196" stroke-width="10"/>
+    <path d="M 95 158 L 161 158"          stroke-width="8"/>
+  </g>
+</svg>

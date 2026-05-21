@@ -1,0 +1,34 @@
+#!/bin/sh
+# athena-base-files postinst — install our rebranded identity files
+# from our package-owned /usr/share/athena-base-files/ into the
+# canonical paths.
+#
+# Why postinst cp instead of debian/install + /etc placement:
+# /etc/issue and /etc/issue.net are conffiles in base-files.  When
+# our package ALSO declares them under /etc (which debhelper auto-
+# flags as conffiles for /etc paths), dpkg's conffile-conflict
+# logic sees two packages claiming the same conffile path, gets
+# confused by the diversion-renamed canonical file, and writes our
+# shipped version to <path>.dpkg-dist while leaving the canonical
+# path empty.  Shipping to /usr/share/athena-base-files/ (a regular
+# data path, no conffile machinery) and copy-installing here keeps
+# us clear of that interaction.
+#
+# preinst's dpkg-divert call still runs (renaming base-files's
+# /etc/issue → /etc/issue.upstream) so that future base-files
+# upgrades route their /etc/issue write to .upstream and never
+# clobber the file we put at /etc/issue here.
+
+set -e
+
+case "$1" in
+    configure)
+        cp -f /usr/share/athena-base-files/issue       /etc/issue
+        cp -f /usr/share/athena-base-files/issue.net   /etc/issue.net
+        cp -f /usr/share/athena-base-files/motd        /etc/motd
+        cp -f /usr/share/athena-base-files/os-release  /usr/lib/os-release
+        ;;
+esac
+
+#DEBHELPER#
+exit 0
