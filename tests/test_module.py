@@ -6249,6 +6249,81 @@ def test_validate_selection_versioned_provides_still_flagged():
     )
 
 
+def test_canonical_names_filters_virtual_aliases_from_cohort():
+    """REGRESSION pin (2026-05-21): cohort scopes must exclude virtual-
+    alias names from selected_pkgs.keys().  The audit's
+    audit_conflict_cohort scope-checks names against this set; including
+    virtual aliases triggers false-positive conflicts on the canonical
+    Debian fork-replaces-upstream idiom (`X Provides: Y, X Breaks: Y`
+    means 'I take over Y's slot' — `Y` should NOT count as a separate
+    cohort member).
+
+    Concrete cases that triggered this fix:
+      - fuse3 Provides: fuse + fuse3 Breaks: fuse
+      - athena-tasksel-data Provides: tasksel-data
+                            + Conflicts: tasksel-data
+    Both flagged spurious conflicts before the canonical-only filter
+    landed; both clear cleanly after."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    class _Pkg:
+        def __init__(self, canonical):
+            self._fields = {'Package': canonical}
+        def __getitem__(self, k): return self._fields[k]
+
+    _real_fuse3 = _Pkg('fuse3')
+    _real_dirmngr = _Pkg('dirmngr')
+    # selected_pkgs has both canonical names AND virtual aliases.
+    # Mirrors parse_dependency:L494's Provides-walk behavior.
+    class _Tree:
+        selected_pkgs = {
+            'fuse3':   _real_fuse3,
+            'fuse':    _real_fuse3,    # virtual alias from fuse3's Provides
+            'dirmngr': _real_dirmngr,
+        }
+
+    _canonical = BuildSession._canonical_names(_Tree)
+    assert 'fuse3' in _canonical, "canonical name dropped"
+    assert 'dirmngr' in _canonical
+    assert 'fuse' not in _canonical, (
+        "virtual alias 'fuse' (pointing to fuse3) leaked into cohort — "
+        "would cause audit_conflict_cohort to false-positive on "
+        "fuse3 Breaks: fuse"
+    )
+
+
+def test_cohort_resolvers_route_through_canonical_names():
+    """Every cohort/corpus resolver must route through _canonical_names.
+    Anti-regression for any future resolver that re-introduces raw
+    selected_pkgs.keys() and brings back the virtual-alias false
+    positives."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    for _fn in ('_resolve_live_cohort',
+                '_resolve_deb_cohort',
+                '_resolve_udeb_cohort',
+                '_resolve_install_corpus',
+                '_resolve_installer_cohort'):
+        _m = re.search(
+            rf"\n    def {_fn}\b.*?(?=\n    def \w)",
+            _body, re.DOTALL,
+        )
+        assert _m is not None, f"{_fn} not found"
+        _method = _m.group(0)
+        assert '_canonical_names' in _method, (
+            f"{_fn} no longer uses _canonical_names — virtual aliases "
+            f"would leak into cohort, false-positive conflicts on the "
+            f"fork-replaces-upstream idiom"
+        )
+        assert 'selected_pkgs.keys()' not in _method, (
+            f"{_fn} reverted to raw selected_pkgs.keys() — would "
+            f"include virtual aliases.  Route through _canonical_names."
+        )
+
+
 def test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately():
     """source audit's output must label deb and udeb cohorts distinctly,
     so the operator can tell which cohort drives each missing source.
@@ -11859,6 +11934,8 @@ def main() -> int:
         test_explicit_provides_version_returns_none_for_unversioned_provides,
         test_validate_selection_unversioned_provides_no_spurious_break,
         test_validate_selection_versioned_provides_still_flagged,
+        test_canonical_names_filters_virtual_aliases_from_cohort,
+        test_cohort_resolvers_route_through_canonical_names,
         test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately,
         test_cmd_init_container_gated_on_cache_ready,
         test_autorun_step_lists_include_container_init,
