@@ -9,9 +9,13 @@ Package: athena-branding
 Architecture: all
 Multi-Arch: foreign
 Depends: ${misc:Depends}
-Description: @DISTRIBUTION@ desktop branding (wallpaper, gsettings defaults)
- Default desktop wallpaper and GNOME gsettings overrides establishing
- @DISTRIBUTION@'s visual identity (codename @CODENAME@).
+Provides: desktop-base (= 12.0.6)
+Conflicts: desktop-base
+Replaces: desktop-base
+Description: @DISTRIBUTION@ desktop branding (wallpaper, logo, GRUB, gsettings defaults)
+ Default desktop wallpaper, distributor identity, and GNOME gsettings
+ overrides establishing @DISTRIBUTION@'s visual identity (codename
+ @CODENAME@).
  .
  Ships:
    * /usr/share/backgrounds/athena/aegis-{light,dark}.{svg,png}
@@ -20,5 +24,15 @@ Description: @DISTRIBUTION@ desktop branding (wallpaper, gsettings defaults)
        — registers the wallpaper in GNOME's picker
    * /usr/share/glib-2.0/schemas/90_athena-branding.gschema.override
        — sets aegis-light/dark as default wallpaper for new users
+   * /usr/share/pixmaps/asgard.svg
+       — distributor logo, resolved by /etc/os-release LOGO=asgard
+         in gnome-control-center About + the user-account panel
+   * /etc/default/grub.d/50-athena.cfg
+       — sets GRUB_DISTRIBUTOR="@DISTRIBUTION@" so update-grub emits
+         "@DISTRIBUTION@ GNU/Linux" menu entries instead of the
+         lsb_release-fallback "Debian" default
  .
- No content carrying upstream Debian trademarks or identity.
+ Displaces upstream desktop-base via Provides+Conflicts+Replaces so
+ task-desktop's hard Depends on desktop-base resolves to us instead
+ of pulling in the upstream Debian-branded wallpaper set, plymouth
+ theme, GRUB theme, and emblem icons.

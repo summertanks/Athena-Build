@@ -4,3 +4,5 @@ _build/png/aegis-light.png                                    usr/share/backgrou
 _build/png/aegis-dark.png                                     usr/share/backgrounds/athena
 data/athena-backgrounds.xml                                   usr/share/gnome-background-properties
 data/90_athena-branding.gschema.override                      usr/share/glib-2.0/schemas
+data/asgard.svg                                               usr/share/pixmaps
+data/50-athena.cfg                                            etc/default/grub.d
