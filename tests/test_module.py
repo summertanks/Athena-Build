@@ -4975,6 +4975,112 @@ def test_cmd_strip_repo_registered_in_package_dispatcher():
         _body), "strip not dispatched in cmd_package"
 
 
+def test_cmd_package_cleanup_registered_in_package_dispatcher():
+    """`package cleanup` must be wired into cmd_package's dispatch.
+    The command identifies obsolete .debs (orphan source or version
+    drift) and ships in dry-run by default — `force` triggers actual
+    delete after a YESNO prompt."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    assert "'cleanup'" in _body, (
+        "cleanup must be advertised in cmd_package's help table"
+    )
+    assert re.search(
+        r"if action == 'cleanup':\s*\n\s+return self\.cmd_package_cleanup",
+        _body), "cleanup not dispatched in cmd_package"
+    # Body must define the method too.
+    assert 'def cmd_package_cleanup(' in _body
+
+
+def test_cmd_package_cleanup_dry_run_default_force_flag_required():
+    """`package cleanup` without `force` must NOT delete any files —
+    it's a dry-run by default.  Operator opt-in for the destructive
+    path is double-gated: pass `force` flag AND answer 'y' to the
+    YESNO prompt.
+
+    Source-text inspection because exercising the full method end-to-
+    end needs a fixture'd BuildSession + repo dir + control files."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # Find the method body.
+    _m = re.search(
+        r"\n    def cmd_package_cleanup\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m is not None, "cmd_package_cleanup body not found"
+    _method = _m.group(0)
+    # Dry-run banner appears BEFORE the YESNO prompt.
+    assert 'DRY-RUN' in _method, (
+        "cmd_package_cleanup must surface a DRY-RUN banner in the "
+        "no-force path"
+    )
+    # Force gate present.
+    assert "_force = 'force' in args" in _method, (
+        "cmd_package_cleanup must read a `force` flag from args"
+    )
+    # YESNO prompt is gated on _force.
+    assert 'if not _force:' in _method, (
+        "no-force path must short-circuit before any deletion"
+    )
+    # The actual delete loop only runs after force AND the prompt.
+    _delete_idx = _method.find('os.remove(_p)')
+    _prompt_idx = _method.find('PROMPT_YESNO')
+    assert _delete_idx != -1, "os.remove call missing — delete logic gone?"
+    assert _prompt_idx != -1, "PROMPT_YESNO missing — delete must be guarded"
+    assert _delete_idx > _prompt_idx, (
+        "delete loop must follow the YESNO prompt (not precede it)"
+    )
+
+
+def test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source():
+    """The categoriser's contract: a file whose FILENAME is in
+    src_pkg_files (predicted output of a selected source) is always
+    kept.  A file whose Source field names a source NOT in
+    selected_srcs is orphan → delete.  A file whose pkg name appears
+    in src_pkg_files at a different filename is version drift → delete.
+    A file whose source IS selected but whose pkg name does NOT appear
+    in any src_pkg_files entry is a production sibling → keep
+    (ships in /cdrom/pool but not selected for install).
+
+    Anti-regression for the original epoch-trap implementation that
+    compared Version fields raw — bsdutils Version 1:2.38.1-5 from
+    util-linux source 2.38.1-5 would false-positive as drift."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r"\n    def cmd_package_cleanup\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m is not None
+    _method = _m.group(0)
+    # Predicted-filename fast path: keep without opening the .deb.
+    assert 'if _f in _expected_files' in _method, (
+        "fast-path filename match missing — would needlessly open every "
+        ".deb's control file"
+    )
+    # Three categorisation buckets present.
+    assert '_orphan' in _method and '_drift' in _method, (
+        "cleanup must categorise into _orphan and _drift lists"
+    )
+    # Production-sibling preservation: source selected + pkg name not in
+    # any src_pkg_files entry → fall-through, not appended to _drift.
+    assert 'production sibling' in _method.lower(), (
+        "no comment / mention of production-sibling preservation — "
+        "easy to regress by adding an `else: _orphan.append(...)` "
+        "clause"
+    )
+    # Audit cache invalidation after delete — repo state shifted.
+    assert 'repo_audit.invalidate_cache' in _method, (
+        "audit cache must be invalidated after deletion"
+    )
+
+
 def test_audit_nmu_residue_detects_layered_versions():
     """audit_nmu_residue must flag any version with NMU layer remaining,
     in Version field OR in any dep-field version constraint."""
@@ -11690,6 +11796,9 @@ def main() -> int:
         test_buildcontainer_calls_strip_post_build,
         test_cmd_audit_nmu_registered_in_package_dispatcher,
         test_cmd_strip_repo_registered_in_package_dispatcher,
+        test_cmd_package_cleanup_registered_in_package_dispatcher,
+        test_cmd_package_cleanup_dry_run_default_force_flag_required,
+        test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source,
         test_audit_nmu_residue_detects_layered_versions,
         # apply_distro_suffix — bump bumped binaries with `+thor1`
         test_production_build_conf_has_noautodbgsym_in_build_options,
