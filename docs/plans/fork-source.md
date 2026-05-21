@@ -466,54 +466,41 @@ before committing to this approach (alternative is keep the patch).
 
 ---
 
-### Step 6 — `athena-base-files` for the target system
+### Step 6 — base-files rebrand for the target system
 
-**Purpose:** extend the same `fork/source/` mechanism to the target
-(installed) system.  Ship `/etc/os-release`, `/etc/hostname` default,
-`/etc/hosts` baseline as a proper deb instead of writing them from
-`chroot.py`.
+**Status (2026-05-21):** done via Path X (same-name fork), NOT the
+divert pattern originally outlined below.
 
-**New package:**
-```
-fork/source/athena-base-files/
-├── debian/
-│   ├── control          ← Package: athena-base-files
-│   │                      Depends: base-files
-│   │                      Section: misc
-│   │                      Architecture: all
-│   ├── postinst         ← dpkg-divert /etc/os-release, /etc/hostname;
-│   │                      install ours (Category 3: diversion, because
-│   │                      base-files is Essential)
-│   ├── prerm            ← reverse diverts on remove
-│   └── install
-└── data/
-    ├── os-release       ← NAME=Athena, VERSION_ID=, etc.
-    ├── hostname.default
-    └── hosts.template
-```
+**Actual delivery:** `fork/source/base-files/` — fork-supersede ships
+upstream's `base-files` source with a 5-file Asgard delta
+(`etc/issue`, `etc/issue.net`, `etc/os-release`, `share/motd`,
+`origins/debian`) at version `12.4+deb12u14+athena1`.  Industry survey
+of 8 Debian derivatives (Ubuntu, Mint, elementary, Pop!_OS, Kali,
+Parrot, Devuan, MX) showed 6 use same-name fork, 1 uses dpkg-divert,
+1 uncertain — same-name fork is the dominant pattern.  See
+`fork/source/README.md` "Pattern 4" for the package layout, and the
+commit `2e07c07` (predecessor working state with the divert pattern,
+tag `working-branding-divert-2026-05-21`) for the abandoned path.
 
-**Files modified:**
-- `scripts/chroot.py` — delete `/etc/os-release` write, hostname
-  write, /etc/hosts write (sections around lines 1171-1195 in the
-  current chroot.py)
-- `config/pkg.list [base]` — add `athena-base-files`
+A short-lived `fork/source/athena-base-files/` (1.0.0 → 1.0.1) tested
+the divert pattern in-tree; it shipped to a real VM, surfaced a
+conffile-clash trap (debhelper auto-flagging `/etc/issue` /
+`/etc/issue.net` as conffiles → dpkg saved our shipped content as
+`.dpkg-dist`), was fixed by routing via `/usr/share/` + postinst cp
+in 1.0.1, then retired in favour of Path X.  The lesson is captured
+in README.md Pattern 3.
 
-**Acceptance:**
-- Target system after install has `/etc/os-release` with
-  `NAME=Athena`
-- `chroot.py` loses ~50 LOC
-- `lsb_release -a` (if lsb-release deb is on target) shows Athena
-  in DISTRIB_ID
+**Re-merge process when upstream bumps base-files:**
+1. `source download` pulls the new `base-files_<new-version>.tar.xz`
+2. Extract and replace `fork/source/base-files/` content
+3. Reapply the 5-file delta + the changelog entry for
+   `<new-version>+athena<N>`
+4. `package reload base-files` rebuilds and reships
 
-**Risks:**
-- base-files is Essential; getting the divert wrong could brick
-  install.  Test on a throwaway VM first.
-- If `lsb-release` deb (not udeb) is installed on target, its
-  `/etc/lsb-release` overrides ours unless we extend
-  athena-base-files to divert that too.
-
-**Approval needed:** yes — discuss diversion vs Provides/Conflicts/Replaces
-before implementing.
+The collision gate accepts our version as long as
+`<upstream-version>+athena<N>` > the current upstream-snapshot
+version (validated by `apt_pkg.version_compare`).  When upstream
+moves past our bump base, the gate fires and prompts a rebase.
 
 ---
 

@@ -48,15 +48,12 @@ grub-pc-bin
 grub-efi-amd64-bin
 
 # Essential Packages
+# base-files: same-name fork at fork/source/base-files/, version
+# 12.4+deb12u14+athena1.  Re-merge required when upstream bumps
+# (pull new source, re-apply our 5-file delta: etc/issue, etc/
+# issue.net, etc/os-release, share/motd, origins/debian).  See
+# fork/source/README.md "Pattern 4: Same-name fork".
 base-files
-# Companion to base-files: rebrands /etc/issue, /etc/issue.net,
-# /etc/motd, /usr/lib/os-release via dpkg-divert.  Cannot replace
-# base-files outright (Essential); diverts the four user-visible
-# identity files while leaving everything else intact.  Provides
-# the LOGO=asgard wiring read by gnome-control-center's About
-# panel — works with the /usr/share/pixmaps/asgard.svg asset
-# shipped by athena-branding.
-athena-base-files
 base-passwd
 libc6
 zlib1g
