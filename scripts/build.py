@@ -2203,9 +2203,9 @@ class BuildSession:
                         f"pass `verbose` for full list)"
                     )
             if _drift:
-                _slice = _drift if verbose else _drift[:_show]
-                console.print(f"  First {len(_slice)} drift file(s):")
-                for _sub, _f, _src, _ in _slice:
+                _drift_slice = _drift if verbose else _drift[:_show]
+                console.print(f"  First {len(_drift_slice)} drift file(s):")
+                for _sub, _f, _src, _ in _drift_slice:
                     console.print(f"    {_sub}/{_f} (source: {_src})")
                 if len(_drift) > _show and not verbose:
                     console.print(
@@ -2245,7 +2245,7 @@ class BuildSession:
             self._report_gap_classification(unresolved, state, verbose=verbose)
         elif not verbose:
             from collections import Counter
-            _missing = Counter()
+            _missing: 'Counter[str]' = Counter()
             for _pkg, _field, _rel, _why in unresolved:
                 _first = _rel.split(' ', 1)[0].split(':', 1)[0]
                 if _first:
@@ -2282,6 +2282,7 @@ class BuildSession:
         namespace (see cache.py:520-525), so a single membership check
         covers both.  Repo virtual coverage uses state.provides_index.
         """
+        assert self.dep_tree is not None and self.cache is not None
         _in_dep_tree = set(self.dep_tree.selected_pkgs.keys())
         _in_repo = set(state.packages.keys())
         _in_repo_virtual = set(state.provides_index.keys())
@@ -2381,6 +2382,12 @@ class BuildSession:
           - which consumers reference it (with exact constraint)
         """
         console.print(f"\n=== Gap drill-in: {target} ===")
+        if self.cache is None or self.dep_tree is None:
+            console.print(
+                "  cache or dep_tree not built — run `build_cache` and "
+                "`dep parse` first for full drill-in"
+            )
+            return
 
         # Upstream cache state
         _up_versions = sorted(

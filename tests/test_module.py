@@ -683,7 +683,7 @@ def _gen_signed_fixture(tmpdir: str):
 
     gen_home = os.path.join(tmpdir, 'gen-home')
     os.makedirs(gen_home, mode=0o700)
-    gpg = gnupg.GPG(gnupghome=gen_home)
+    gpg = gnupg.GPG(gnupghome=gen_home)  # type: ignore[attr-defined]
     key_input = gpg.gen_key_input(
         name_real='Athena Test Signer',
         name_email='test@athena.local',
@@ -953,15 +953,15 @@ def _download_source_with_mocked_get(mock_resp_factory, expected_size: int = 100
 
     saved_console = utils.tui.console
     saved_bar     = utils.ProgressBar
-    utils.tui.console = _Cap()
-    utils.ProgressBar = _Bar
+    utils.tui.console = _Cap()        # type: ignore[assignment]
+    utils.ProgressBar = _Bar          # type: ignore[assignment,misc]
     try:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(utils.requests, 'get', return_value=mock_resp_factory()):
                 utils.download_source(_Dt(), tmp)
     finally:
         utils.tui.console = saved_console
-        utils.ProgressBar = saved_bar
+        utils.ProgressBar = saved_bar  # type: ignore[misc]
 
     return captured
 
@@ -3707,7 +3707,7 @@ def test_cmd_container_purge_resets_flag_and_drops_session_ref():
     # Stub the docker client so no real daemon is contacted.
     _client = _StubDockerClient(containers=[], images=[])
     _orig_from_env = _docker.from_env
-    _docker.from_env = lambda: _client
+    _docker.from_env = lambda: _client  # type: ignore[assignment,misc]
     try:
         _sess.cmd_container_purge('force')
     finally:
@@ -3747,7 +3747,7 @@ def test_cmd_container_purge_removes_athena_containers_and_images():
         images=[_img_athena_bw, _img_athena_tr],
     )
     _orig_from_env = _docker.from_env
-    _docker.from_env = lambda: _client
+    _docker.from_env = lambda: _client  # type: ignore[assignment,misc]
     try:
         _sess.cmd_container_purge('force')
     finally:
@@ -5667,12 +5667,12 @@ def _build_autorun_session_stub(*, all_done: bool, source_build_done: bool):
         selected_srcs = {f'src{i}': None for i in range(31)}
 
     sess = object.__new__(BuildSession)
-    sess.config = _Cfg()
+    sess.config = _Cfg()        # type: ignore[assignment]
     sess.tui = None
-    sess.cache = _Cache()
-    sess.dep_tree = _DT()
+    sess.cache = _Cache()       # type: ignore[assignment]
+    sess.dep_tree = _DT()       # type: ignore[assignment]
     sess.container = None
-    sess.flags = _Flags()
+    sess.flags = _Flags()       # type: ignore[assignment]
     sess.last_source_build_counts = (
         {'built': 26, 'tunneled': 2, 'failed': 0, 'skipped': 3, 'total': 31}
         if source_build_done else None
@@ -9819,8 +9819,8 @@ def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
     """Build a minimal pseudo-BuildConfig pointing at a tmpdir-scoped fork tree.
     Optionally populates fork/source/athena-installer-data/ with a valid
     debian/ layout so generate_fork_mirror has real input to chew on."""
-    class _BC: pass
-    bc = _BC()
+    from types import SimpleNamespace
+    bc = SimpleNamespace()
     bc.working_dir = tmp
     bc.dir_fork = os.path.join(tmp, 'fork')
     bc.dir_fork_source = os.path.join(bc.dir_fork, 'source')

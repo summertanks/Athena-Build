@@ -643,7 +643,7 @@ class DependencyTree:
                     # Check if it breaks
                     try:
                         _triggered = (_break_comparator == '' or
-                                      apt_pkg.check_dep(_pkg_ver, _break_comparator, _break_version))
+                                      apt_pkg.check_dep(_pkg_ver or '', _break_comparator, _break_version))
                     except Exception as e:
                         logger.warning(f"check_dep raised for breaks {_breaks_name} "
                                             f"({_pkg_ver} {_break_comparator} {_break_version}): {e}")
@@ -695,7 +695,7 @@ class DependencyTree:
                     # Check if conflicts
                     try:
                         _triggered = (_conflict_comparator == '' or
-                                      apt_pkg.check_dep(_pkg_ver, _conflict_comparator, _conflict_version))
+                                      apt_pkg.check_dep(_pkg_ver or '', _conflict_comparator, _conflict_version))
                     except Exception as e:
                         logger.warning(f"check_dep raised for conflicts {_conflicts_name} "
                                             f"({_pkg_ver} {_conflict_comparator} {_conflict_version}): {e}")
