@@ -1544,13 +1544,16 @@ class BuildSession:
         locally built ones if needed.
 
         Args:
-            src_pkg: Source package object with .pkgs (list of .deb filenames),
-                     .directory (pool path), and .package (source name).
+            src_pkg: Source package object — uses .directory (pool path)
+                     and .package (source name).  The list of binary
+                     filenames to download is resolved via the per-tree
+                     src_pkg_files maps (see _predicted_files_for_source).
 
         Returns:
             True if every binary package was downloaded successfully, False otherwise.
         """
-        if not src_pkg.pkgs:
+        _files = self._predicted_files_for_source(src_pkg.package)
+        if not _files:
             logger.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
             return False
 
@@ -1566,7 +1569,7 @@ class BuildSession:
         # Caller gates this on build_container_ready, so self.container
         # is non-None by the time we get here.
         assert self.container is not None
-        for _filename in src_pkg.pkgs:
+        for _filename in _files:
             _dest = os.path.join(self.container.repo_path, _filename)
 
             # Skip files already on disk — no integrity check here; the repo
@@ -1735,6 +1738,57 @@ class BuildSession:
         _selected -= getattr(self.dep_tree, 'installer_exclusive_pkg_names',
                               set())
         return frozenset(_selected)
+
+    def _predicted_files_for_source(self, src_name: str) -> 'list[str]':
+        """Union of deb-tree + udeb-tree predicted binary filenames for
+        this source.  Order: deb entries first, udeb appended.
+
+        Used by every reader that needs "what binaries will this source
+        produce in the repo after a successful build?" — check_build,
+        cmd_source_audit, cmd_source_repair, cmd_source_verify,
+        cmd_source_rescan, _do_tunnel.  Pulled here because the two
+        trees store per-tree maps (src_pkg_files); Source objects no
+        longer carry a .pkgs attribute (it leaked across trees — see
+        dependencytree.py:src_pkg_files docstring for full history).
+        """
+        _files: 'list[str]' = []
+        if self.dep_tree is not None:
+            _files.extend(self.dep_tree.src_pkg_files.get(src_name) or [])
+        if self.udeb_dep_tree is not None:
+            for _f in (self.udeb_dep_tree.src_pkg_files.get(src_name) or []):
+                if _f not in _files:
+                    _files.append(_f)
+        return _files
+
+    def _resolve_deb_cohort(self) -> Optional[frozenset]:
+        """Consumers audited as the .deb-cohort by package_audit's
+        DEP-GATE.  = dep_tree.selected_pkgs (everything we install via
+        debootstrap, tasksel/apt at install time, or live-chroot batch).
+
+        Excludes the udeb tree.  Audited separately so each cohort's
+        unresolved surface is visible — the old combined audit hid
+        per-cohort breakdowns and made it hard to tell which gap came
+        from which install path.
+        """
+        if not self.dep_tree or not self.dep_tree.selected_pkgs:
+            return None
+        return frozenset(self.dep_tree.selected_pkgs.keys())
+
+    def _resolve_udeb_cohort(self) -> Optional[frozenset]:
+        """Consumers audited as the .udeb-cohort by package_audit's
+        DEP-GATE.  = udeb_dep_tree.selected_pkgs (everything dpkg-
+        unpacked into the d-i installer ramdisk).
+
+        Resolution still spans the whole repo per Option B — udebs
+        with deb deps (~9 known upstream metadata cases like
+        at-spi2-core-udeb → libsystemd0, libgtk-4-1-udeb → libtiff6)
+        get resolved against deb providers, matching d-i's runtime
+        behaviour where the deb gets debootstrapped onto /target.
+        """
+        if (not self.udeb_dep_tree
+                or not self.udeb_dep_tree.selected_pkgs):
+            return None
+        return frozenset(self.udeb_dep_tree.selected_pkgs.keys())
 
     def _resolve_install_corpus(self) -> Optional[frozenset]:
         """[pkg + installer + live + pool] — your hard-dep gate scope.
@@ -1921,18 +1975,40 @@ class BuildSession:
             )
             return
 
-        _corpus = self._resolve_install_corpus()
-        if _corpus is None:
+        _deb_cohort = self._resolve_deb_cohort()
+        _udeb_cohort = self._resolve_udeb_cohort()
+        if _deb_cohort is None and _udeb_cohort is None:
             console.print(
                 "Note: dep_tree not built — falling back to repo/main-"
-                "wide dep gate.  Run `dep parse` first to scope to "
-                "[pkg+installer+live+pool]."
+                "wide dep gate.  Run `dep parse` first to scope by cohort."
             )
-        _unresolved, _weak = repo_audit.audit_dep_closure(
-            _state, consumer_set=_corpus,
-        )
+            _unresolved, _weak = repo_audit.audit_dep_closure(
+                _state, consumer_set=None,
+            )
+        else:
+            # Run each cohort independently.  Resolution scope is the
+            # whole repo in both passes (Option B): udebs with deb deps
+            # — at-spi2-core-udeb, libgtk-4-1-udeb, ppp-udeb, grub-
+            # installer (~9 upstream metadata cases) — resolve via
+            # debs.  Matches d-i runtime, where the deb gets debootstrapped
+            # onto /target rather than into the installer ramdisk.
+            _unresolved = []
+            _weak = []
+            _per_cohort = []
+            for _label, _consumer_set in (('deb', _deb_cohort),
+                                          ('udeb', _udeb_cohort)):
+                if _consumer_set is None:
+                    continue
+                _u, _w = repo_audit.audit_dep_closure(
+                    _state, consumer_set=_consumer_set,
+                )
+                _per_cohort.append((_label, _consumer_set, _u, _w))
+                _unresolved.extend(_u)
+                _weak.extend(_w)
 
-        # Drill-in mode short-circuits the overview/cohort sections.
+        # Drill-in mode short-circuits the overview/cohort sections —
+        # pass the merged unresolved list (gap classification is cohort-
+        # agnostic).
         if _drill_target:
             self._audit_gap_drill_in(_state, _unresolved, _drill_target)
             return
@@ -1940,22 +2016,33 @@ class BuildSession:
         _live = self._resolve_live_cohort()
         _installer = self._resolve_installer_cohort()
 
-        _scope = (
-            f"install corpus [pkg+installer+live+pool] ({len(_corpus)} pkgs)"
-            if _corpus is not None
-            else f"whole repo ({len(_state.packages)} pkgs)"
-        )
-        console.print(
-            f"\n=== DEP GATE (consumers = {_scope}; "
-            f"resolution = whole repo) ==="
-        )
-        console.print(
-            f"  UNRESOLVED Depends/Pre-Depends: {len(_unresolved)}"
-            + (f"\n  WEAK (Recommends unresolved):   {len(_weak)}"
-               if _strict else '')
-        )
-        self._report_unresolved(_unresolved, _weak, _state,
-                                verbose=_verbose, strict=_strict)
+        if _deb_cohort is None and _udeb_cohort is None:
+            # Whole-repo fallback path.
+            console.print(
+                f"\n=== DEP GATE (whole repo, "
+                f"{len(_state.packages)} pkgs) ==="
+            )
+            console.print(
+                f"  UNRESOLVED Depends/Pre-Depends: {len(_unresolved)}"
+                + (f"\n  WEAK (Recommends unresolved):   {len(_weak)}"
+                   if _strict else '')
+            )
+            self._report_unresolved(_unresolved, _weak, _state,
+                                    verbose=_verbose, strict=_strict)
+        else:
+            for _label, _consumer_set, _u, _w in _per_cohort:
+                console.print(
+                    f"\n=== DEP GATE ({_label} cohort, "
+                    f"{len(_consumer_set)} consumers; "
+                    f"resolution = whole repo) ==="
+                )
+                console.print(
+                    f"  UNRESOLVED Depends/Pre-Depends: {len(_u)}"
+                    + (f"\n  WEAK (Recommends unresolved):   {len(_w)}"
+                       if _strict else '')
+                )
+                self._report_unresolved(_u, _w, _state,
+                                        verbose=_verbose, strict=_strict)
 
         if _live is None:
             console.print(
@@ -3175,7 +3262,8 @@ class BuildSession:
         )
         for _name, _src in sorted(_srcs.items()):
             _bar.step(1)
-            if not _src.pkgs:
+            _expected = self._predicted_files_for_source(_name)
+            if not _expected:
                 _no_pkgs.append(_name)
                 continue
             # Tunneled packages register .result = TUNNELED and have
@@ -3192,7 +3280,7 @@ class BuildSession:
             except OSError:
                 pass
 
-            if self.container.check_build(_src):
+            if self.container.check_build(_src, _expected):
                 _ok.append(_name)
             else:
                 _needs_rebuild.append(_name)
@@ -3301,8 +3389,9 @@ class BuildSession:
         Algorithm (per source in the merged deb+udeb dep tree):
 
           1. If .result already exists → skip (don't overwrite).
-          2. If every `src.pkgs` filename exists in repo/ AND each is
-             a syntactically valid .deb (ar archive with the right
+          2. If every predicted filename (union across both dep_trees'
+             src_pkg_files maps) exists in repo/ AND each is a
+             syntactically valid .deb (ar archive with the right
              members per BuildContainer.is_ar_file) → write PASS.
           3. Otherwise → leave alone (genuinely needs rebuild).
 
@@ -3344,7 +3433,8 @@ class BuildSession:
         )
         for _name, _src in sorted(_srcs.items()):
             _bar.step(1)
-            if not _src.pkgs:
+            _expected = self._predicted_files_for_source(_name)
+            if not _expected:
                 _no_pkgs += 1
                 continue
             _result_file = os.path.join(
@@ -3356,7 +3446,7 @@ class BuildSession:
             # Filename + ar magic.  Doesn't verify internal Version
             # or Depends; that's `source verify`'s job (opt-in).
             _all_present = True
-            for _f in _src.pkgs:
+            for _f in _expected:
                 _path = os.path.join(self.config.dir_repo, _f)
                 if not os.path.isfile(_path):
                     _all_present = False
@@ -3434,67 +3524,81 @@ class BuildSession:
             )
             return
 
-        _main = os.path.join(self.config.dir_repo, 'main')
-        _missing_srcs: 'list[tuple]' = []  # (src, missing_files)
-        _mismatch_srcs: 'list[tuple]' = []  # (src, bad_files)
-        _ok = 0
-
         from buildcontainer import BuildContainer
-        for _src_name, _src in self.dep_tree.selected_srcs.items():
-            _expected_main = [
-                _f for _f in (_src.pkgs or [])
-                if utils.classify_repo_subdir(_f) == 'main'
-            ]
-            if not _expected_main:
-                # Source produces only -dev/-doc/-dbgsym/-tests — no
-                # main artifact to gate on.  Trust as OK.
-                _ok += 1
-                continue
-            _missing: 'list[str]' = []
-            _mismatch: 'list[str]' = []
-            for _f in _expected_main:
-                _p = os.path.join(_main, _f)
-                if not os.path.isfile(_p):
-                    _missing.append(_f)
+        _main = os.path.join(self.config.dir_repo, 'main')
+        _any_findings = False
+
+        # Audit deb and udeb cohorts SEPARATELY.  src_pkg_files lives
+        # per-tree (see dependencytree.py:src_pkg_files docstring); the
+        # old shared-Source.pkgs design let the udeb pass overwrite the
+        # deb pass's list, hiding deb-cohort gaps.  Split report keeps
+        # each cohort's "missing" surface visible.
+        _cohorts = [('deb', self.dep_tree)]
+        if self.udeb_dep_tree is not None and self.udeb_dep_tree.selected_srcs:
+            _cohorts.append(('udeb', self.udeb_dep_tree))
+
+        for _cohort_label, _tree in _cohorts:
+            _missing_srcs: 'list[tuple]' = []
+            _mismatch_srcs: 'list[tuple]' = []
+            _ok = 0
+            for _src_name in _tree.selected_srcs:
+                _expected_main = [
+                    _f for _f in (_tree.src_pkg_files.get(_src_name) or [])
+                    if utils.classify_repo_subdir(_f) == 'main'
+                ]
+                if not _expected_main:
+                    # Source has no main-tier predicted binary in THIS
+                    # cohort (e.g. a source whose deb cohort is all -doc
+                    # files).  Not a miss for this audit pass.
+                    _ok += 1
                     continue
-                if not BuildContainer.is_ar_file(_p):
-                    _mismatch.append(_f)
-            if _missing:
-                _missing_srcs.append((_src_name, _missing))
-            elif _mismatch:
-                _mismatch_srcs.append((_src_name, _mismatch))
-            else:
-                _ok += 1
+                _missing: 'list[str]' = []
+                _mismatch: 'list[str]' = []
+                for _f in _expected_main:
+                    _p = os.path.join(_main, _f)
+                    if not os.path.isfile(_p):
+                        _missing.append(_f)
+                        continue
+                    if not BuildContainer.is_ar_file(_p):
+                        _mismatch.append(_f)
+                if _missing:
+                    _missing_srcs.append((_src_name, _missing))
+                elif _mismatch:
+                    _mismatch_srcs.append((_src_name, _mismatch))
+                else:
+                    _ok += 1
 
-        console.print(
-            f"\n=== Source audit (repo/main scope) ===\n"
-            f"  ok         : {_ok} sources\n"
-            f"  missing    : {len(_missing_srcs)} sources "
-            f"(main binary not in repo/main)\n"
-            f"  mismatched : {len(_mismatch_srcs)} sources "
-            f"(file exists but not a valid ar archive)"
-        )
-        _show = len(_missing_srcs) if _verbose else min(30, len(_missing_srcs))
-        if _show:
-            console.print(f"\nFirst {_show} missing sources:")
-            for _src_name, _files in _missing_srcs[:_show]:
-                _sample = ', '.join(_files[:3])
-                if len(_files) > 3:
-                    _sample += f', … (+{len(_files) - 3})'
-                console.print(f"  {_src_name:30s} → {_sample}")
-        _show = (
-            len(_mismatch_srcs) if _verbose
-            else min(30, len(_mismatch_srcs))
-        )
-        if _show:
-            console.print(f"\nFirst {_show} mismatched sources:")
-            for _src_name, _files in _mismatch_srcs[:_show]:
-                _sample = ', '.join(_files[:3])
-                if len(_files) > 3:
-                    _sample += f', … (+{len(_files) - 3})'
-                console.print(f"  {_src_name:30s} → {_sample}")
+            console.print(
+                f"\n=== Source audit ({_cohort_label} cohort, "
+                f"repo/main scope) ===\n"
+                f"  ok         : {_ok} sources\n"
+                f"  missing    : {len(_missing_srcs)} sources "
+                f"(main binary not in repo/main)\n"
+                f"  mismatched : {len(_mismatch_srcs)} sources "
+                f"(file exists but not a valid ar archive)"
+            )
+            _show = (len(_missing_srcs) if _verbose
+                     else min(30, len(_missing_srcs)))
+            if _show:
+                console.print(f"\nFirst {_show} missing sources ({_cohort_label}):")
+                for _src_name, _files in _missing_srcs[:_show]:
+                    _sample = ', '.join(_files[:3])
+                    if len(_files) > 3:
+                        _sample += f', … (+{len(_files) - 3})'
+                    console.print(f"  {_src_name:30s} → {_sample}")
+            _show = (len(_mismatch_srcs) if _verbose
+                     else min(30, len(_mismatch_srcs)))
+            if _show:
+                console.print(f"\nFirst {_show} mismatched sources ({_cohort_label}):")
+                for _src_name, _files in _mismatch_srcs[:_show]:
+                    _sample = ', '.join(_files[:3])
+                    if len(_files) > 3:
+                        _sample += f', … (+{len(_files) - 3})'
+                    console.print(f"  {_src_name:30s} → {_sample}")
+            if _missing_srcs or _mismatch_srcs:
+                _any_findings = True
 
-        if _missing_srcs or _mismatch_srcs:
+        if _any_findings:
             console.print(
                 "\nNext: `source build` to rebuild missing/mismatched."
             )
@@ -3557,7 +3661,8 @@ class BuildSession:
         )
         for _name, _src in sorted(_srcs.items()):
             _bar.step(1)
-            if not _src.pkgs:
+            _expected = self._predicted_files_for_source(_name)
+            if not _expected:
                 _no_pkgs += 1
                 continue
             # Skip TUNNELED — verify doesn't apply to third-party pulls.
@@ -3575,7 +3680,7 @@ class BuildSession:
             # rebuild's concern).
             _any_missing = False
             _failing = None
-            for _f in _src.pkgs:
+            for _f in _expected:
                 _path = os.path.join(self.config.dir_repo, _f)
                 if not os.path.isfile(_path):
                     _any_missing = True
@@ -3814,11 +3919,17 @@ class BuildSession:
                 progress_bar.step(1)
                 continue
 
+            # Predicted artefacts (union across both dep_trees) — used by
+            # both check_build (skip-rebuild gate) and _do_tunnel.  Source
+            # objects no longer carry .pkgs; the per-tree maps live on
+            # DependencyTree.src_pkg_files.
+            _expected_files = self._predicted_files_for_source(_src_pkg.package)
+
             # Tunneled packages are always downloaded rather than built locally.
             # check_build() accepts 'TUNNELED' as a valid result so we can skip
             # packages that were already tunneled in a previous run.
             if _src_pkg.package in self.config.tunnel_packages:
-                if self.container.check_build(_src_pkg):
+                if self.container.check_build(_src_pkg, _expected_files):
                     logger.warning(f"Package {_src_pkg.package} already tunneled [SKIPPED]")
                     _skipped += 1
                     progress_bar.step(1)
@@ -3834,7 +3945,7 @@ class BuildSession:
                 continue
 
             # Skip packages with a valid existing build result unless force is set.
-            if not _force and self.container.check_build(_src_pkg):
+            if not _force and self.container.check_build(_src_pkg, _expected_files):
                 logger.info(f"Package {_src_pkg.package} already built [SKIPPED]")
                 _skipped = _skipped + 1
                 progress_bar.step(1)
