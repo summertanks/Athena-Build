@@ -304,6 +304,61 @@ def scan_repo_state(config, subdir: str = 'main',
     return _state
 
 
+def iter_packages_all_versions(config, subdir: str = 'main',
+                                refresh: bool = False):
+    """Yield every (filename, control_dict) pair across ALL versions of
+    every package in `subdir`.
+
+    Unlike scan_repo_state (which dedupes by highest version per name),
+    this iterator yields a separate record per .deb file on disk.
+    Needed by `package cleanup` and any other consumer that has to
+    operate per-file (e.g. to delete older versions that scan_repo_state
+    would hide).
+
+    CONF-01 Stage E (2026-05-22): replaces the per-file DebFile walk
+    in cmd_package_cleanup's _scan_for_obsoletes — was ~N×fork+exec+
+    tar-extract+parse; now a single dpkg-scanpackages run (cached
+    by scan_repo_state) + a fast apt_pkg.TagFile pass.  Order of
+    magnitude faster on a 5k-pkg repo.
+
+    The cached Packages file is the dpkg-scanpackages --multiversion
+    output — it already contains every version's stanza.
+    scan_repo_state's parser dedupes; this function reuses the same
+    cached file but skips the dedup step.
+
+    Args:
+        config:  BuildConfig (used for the dir-resolution + cache file).
+        subdir:  'main' / 'doc' / 'dbgsym' / 'tests'.
+        refresh: Force regen of the Packages snapshot (passed through
+                 to scan_repo_state).
+
+    Yields:
+        (filename, control_dict) — filename is the basename from the
+        Filename: field; control_dict has Package, Version, Source,
+        Filename, Size and every other field dpkg-scanpackages emitted.
+    """
+    # Reuse scan_repo_state for the cache + Packages-file generation.
+    # Discard its deduped `.packages` dict; we want the raw per-file
+    # stanzas from `.packages_file`.
+    _state = scan_repo_state(config, subdir=subdir, refresh=refresh)
+    if _state is None:
+        return
+    try:
+        with open(_state.packages_file) as _fh:
+            _tagfile = apt_pkg.TagFile(_fh)
+            for _section in _tagfile:
+                _filename = (_section.get('Filename') or '').strip()
+                if not _filename:
+                    continue
+                _basename = os.path.basename(_filename)
+                yield (_basename, dict(_section))
+    except OSError as e:
+        logger.error(
+            f"iter_packages_all_versions: cannot read {_state.packages_file}: {e}"
+        )
+        return
+
+
 def _build_provides_index(packages: dict) -> dict:
     """{virtual_name: [(provider_pkg, opt_version)]} from Provides
     fields.  Uses python-debian's PkgRelation parser — handles the
