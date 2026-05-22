@@ -169,10 +169,29 @@ class _DepDriftMixin:
                 return False, 'unresolved'
             if not _op:
                 return True, None
+            # STA-18 (extension): if `_name` is a virtual alias (the
+            # provider's Package field differs from `_name`), use the
+            # Provides clause's version not the provider's own Version.
+            # Without this, `gnome-control-center → desktop-base (>= 10.0.0)`
+            # resolves via `athena-branding` (which Provides:
+            # desktop-base (= 12.0.6)) but apt_pkg.check_dep gets
+            # athena-branding's own version `1.2.0` → spurious mismatch.
+            # _version_for_constraint_target handles both cases (real
+            # pkg → own version, alias → Provides clause version, or
+            # None for unversioned Provides which can't satisfy a
+            # versioned constraint per Policy §7.5).
+            _have = self._dependencytree._version_for_constraint_target(
+                _name, _name,
+            )
+            if _have is None:
+                return (
+                    False,
+                    f'unversioned Provides cannot satisfy {_op} {_ver}',
+                )
             try:
-                if apt_pkg.check_dep(str(_provider.version), _op, str(_ver)):
+                if apt_pkg.check_dep(_have, _op, str(_ver)):
                     return True, None
-                return False, f'version mismatch (have {_provider.version}, need {_op} {_ver})'
+                return False, f'version mismatch (have {_have}, need {_op} {_ver})'
             except SystemError as e:
                 return False, f'check_dep error: {e}'
 
