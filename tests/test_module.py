@@ -2445,6 +2445,7 @@ def test_iso_installer_stage_grub_cfg_copies_when_present():
     (data-vs-code contract)."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()         # _stage_grub_cfg prints via tui.console
     from iso_installer import _stage_grub_cfg
     _content = "set timeout=5\nmenuentry 'Test' { linux /boot/vmlinuz }\n"
     with tempfile.TemporaryDirectory() as _stage:
@@ -2457,6 +2458,89 @@ def test_iso_installer_stage_grub_cfg_copies_when_present():
             _dst = os.path.join(_stage, 'boot', 'grub', 'grub.cfg')
             with open(_dst) as fh:
                 assert fh.read() == _content, "engine must copy data layer verbatim"
+
+
+def test_iso_installer_stage_grub_cfg_copies_background_when_present():
+    """COMP-01f Phase 2: when installer/boot/grub-background.png exists,
+    _stage_grub_cfg must copy it to staging/boot/grub/grub-background.png
+    so grub.cfg's `background_image /boot/grub/grub-background.png` can
+    resolve at boot time.  Pin filename match (basename in grub.cfg ↔
+    staged filename) so a future rename doesn't silently break the
+    splash."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from iso_installer import _stage_grub_cfg
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(os.path.join(_stage, 'boot', 'grub'), exist_ok=True)
+        with tempfile.TemporaryDirectory() as _installer:
+            os.makedirs(os.path.join(_installer, 'boot'), exist_ok=True)
+            # grub.cfg (required)
+            with open(os.path.join(_installer, 'boot', 'grub.cfg'), 'w') as fh:
+                fh.write("background_image /boot/grub/grub-background.png\n")
+            # background asset (optional but present here)
+            _png_src = os.path.join(_installer, 'boot', 'grub-background.png')
+            with open(_png_src, 'wb') as fh:
+                fh.write(b'\x89PNG\r\n\x1a\n' + b'stub')   # PNG magic + body
+            assert _stage_grub_cfg(_stage, _installer) is True
+            _png_dst = os.path.join(_stage, 'boot', 'grub', 'grub-background.png')
+            assert os.path.exists(_png_dst), (
+                "background PNG not staged — grub.cfg's background_image "
+                "line will fail at boot"
+            )
+            with open(_png_dst, 'rb') as fh:
+                assert fh.read().startswith(b'\x89PNG'), "binary copy corrupted"
+
+
+def test_iso_installer_stage_grub_cfg_tolerates_missing_background():
+    """COMP-01f Phase 2: background PNG is optional.  When absent,
+    _stage_grub_cfg must still succeed (boot menu works in text mode
+    via grub.cfg's `if loadfont … ; then … fi` guard).  Pin the
+    cosmetic-not-load-bearing contract so a future overzealous error
+    handler doesn't promote "missing splash" to "build failure"."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from iso_installer import _stage_grub_cfg
+    with tempfile.TemporaryDirectory() as _stage:
+        os.makedirs(os.path.join(_stage, 'boot', 'grub'), exist_ok=True)
+        with tempfile.TemporaryDirectory() as _installer:
+            os.makedirs(os.path.join(_installer, 'boot'), exist_ok=True)
+            # ONLY grub.cfg — no background PNG.
+            with open(os.path.join(_installer, 'boot', 'grub.cfg'), 'w') as fh:
+                fh.write("menuentry 'x' {}\n")
+            assert _stage_grub_cfg(_stage, _installer) is True
+
+
+def test_installer_grub_cfg_wires_background_image():
+    """COMP-01f Phase 2: the shipped grub.cfg must include the gfxterm
+    + background_image setup (gated by `if loadfont`), and the
+    background filename must match the asset committed under
+    installer/boot/.  Anti-regression so a stray edit to grub.cfg
+    doesn't silently drop the splash."""
+    _cfg = os.path.join(_ROOT, 'installer', 'boot', 'grub.cfg')
+    assert os.path.isfile(_cfg), f"missing {_cfg}"
+    with open(_cfg) as fh:
+        _body = fh.read()
+    # Gated setup — `if loadfont` falls back to text if firmware can't
+    # do 800x600.
+    assert 'if loadfont' in _body, _body
+    assert 'insmod png' in _body, _body
+    assert 'insmod gfxterm' in _body, _body
+    assert 'terminal_output gfxterm' in _body, _body
+    assert 'background_image /boot/grub/grub-background.png' in _body, _body
+    # Asset committed at the path the grub.cfg references (basename match).
+    _png = os.path.join(_ROOT, 'installer', 'boot', 'grub-background.png')
+    assert os.path.isfile(_png), (
+        f"grub.cfg references background_image but {_png} is missing — "
+        f"run installer/boot/regenerate-bg.py to (re-)produce it"
+    )
+    # Quick sanity: PNG magic.
+    with open(_png, 'rb') as fh:
+        assert fh.read(8) == b'\x89PNG\r\n\x1a\n', (
+            f"{_png} does not start with the PNG magic bytes — file is "
+            f"corrupted or regenerate-bg.py output something else"
+        )
 
 
 def test_installer_chroot_dpkg_unpack_carries_required_force_flags():

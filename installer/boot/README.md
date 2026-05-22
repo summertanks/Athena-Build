@@ -3,25 +3,46 @@
 Boot-loader configuration + assets for the installer ISO.  Engine reads
 these at iso-build time (Phase 7), not at chroot-build time.
 
-## Files (when added in Phase 7)
+## Files
 
-| File                    | ISO path                       | Purpose |
-|-------------------------|--------------------------------|---------|
-| `isolinux.cfg`          | `/isolinux/isolinux.cfg`       | BIOS boot menu — entries, defaults, kernel cmdline |
-| `grub.cfg`              | `/boot/grub/grub.cfg`          | UEFI boot menu — same purpose for EFI hosts |
-| `splash.png`            | `/isolinux/splash.png`         | 640×480 indexed PNG, BIOS boot splash |
-| `theme.txt`             | `/boot/grub/themes/athena/theme.txt` | GRUB graphical theme (optional) |
+| File                    | ISO path                              | Purpose |
+|-------------------------|---------------------------------------|---------|
+| `grub.cfg`              | `/boot/grub/grub.cfg`                 | BIOS + UEFI boot menu — entries, defaults, kernel cmdline, gfxterm setup |
+| `grub-background.png`   | `/boot/grub/grub-background.png`      | 800×600 PNG background for the gfxterm boot menu (COMP-01f Phase 2 splash) |
+| `regenerate-bg.py`      | (not staged)                          | Regenerator for grub-background.png — run when palette/identity changes; not shipped on the ISO |
 
-## v1 status
+`iso_installer.py:_stage_grub_cfg` copies `grub.cfg` (required) and any
+listed optional assets (currently just `grub-background.png`) into the
+ISO's `/boot/grub/` at iso-build time.  A missing optional asset is
+non-fatal — GRUB's `if loadfont … ; then … fi` guard in `grub.cfg`
+falls back to text mode.
 
-**Empty.**  Phase 5 only builds the installer chroot.  Phase 7 wires
-`iso build installer`, at which point we'll either:
-- write minimal isolinux.cfg + grub.cfg pointing at the installer kernel/initrd, OR
-- generate them programmatically from a template in the engine (TBD).
+## Updating the boot background
 
-Either way, the assets live here, not in code.
+The PNG is a committed binary blob so the build doesn't depend on PIL /
+ImageMagick / librsvg at runtime.  When the visual identity changes
+(palette refresh, new resolution, etc.), regenerate from source:
+
+```
+python3 installer/boot/regenerate-bg.py
+git add installer/boot/grub-background.png
+```
+
+The generator is the single source of truth — it mirrors the Aegis
+visual identity from `fork/source/athena-branding/data/aegis-dark.svg`
+(midnight indigo radial gradient + sparse stars + gold-stroked Greek
+alpha).  Per `docs/branding-methodology.md` Pattern B (drop-in static
+asset we own) — no upstream GRUB patches, no per-version churn.
+
+## Why GRUB only (no isolinux)
+
+The installer ISO uses `grub-mkrescue` for both BIOS El-Torito and
+UEFI ESP boot — one toolchain, one config file (`grub.cfg`), one
+menu definition.  isolinux (the SYSLINUX BIOS bootloader) would be
+a parallel config we'd have to keep in sync; the maintenance cost
+isn't worth the legacy compatibility for our target hardware.
 
 ## Authoritative reference
 
-- isolinux: <https://wiki.syslinux.org/wiki/index.php?title=ISOLINUX>
 - grub: <https://www.gnu.org/software/grub/manual/grub/grub.html#Configuration>
+- grub gfxterm: <https://www.gnu.org/software/grub/manual/grub/grub.html#gfxterm>

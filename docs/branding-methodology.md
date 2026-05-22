@@ -340,7 +340,7 @@ Update this table when a new surface lands.
 | Installer generic title | **A-TEXT** | Same — `debian-installer/title` re-declared |
 | Installer hostname pre-fill | **A-VALUE** (debconf-set-selections) | `athena-installer-data` — `netcfg/get_hostname` set via `debconf-overrides.dat` (type=string) |
 | Installer visual theme (newt colour palette) | **Residue per § 7** | cdebconf-newt has compiled-in palette; rejected source patch per P1 |
-| Installer GRUB boot menu splash | **PENDING (optional)** | Future: static PNG under `installer/boot/` + `background_image` in grub.cfg + iso_installer.py staging |
+| Installer GRUB boot menu splash | **Pattern B** (drop-in static asset) | `installer/boot/grub-background.png` (committed binary, 800×600); `installer/boot/grub.cfg` `background_image` line gated by `if loadfont`; `iso_installer.py:_stage_grub_cfg` copies the asset alongside grub.cfg.  Regenerable via `installer/boot/regenerate-bg.py` (mirrors Aegis SVG identity in PIL).  Landed COMP-01f Phase 2 (2026-05-22). |
 | Pre-pkgsel.d hooks that apt-install Debian-only pkgs | F (reactive — to be replaced) | `installer_chroot._strip_debian_residue_hooks` | Hardcoded 2-entry list; CONF-10 for durable allowlist |
 
 ---
