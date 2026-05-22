@@ -2599,18 +2599,266 @@ class BuildSession:
         finally:
             _password = '*' * len(_password)  # noqa: F841
 
+    def cmd_migrate_repo_layout(self, *args):
+        """Migrate repo/ from segregated-by-role layout to apt-conformant
+        unified layout.
+
+        CONF-01 Stage C (2026-05-22) — ONE-SHOT operation.
+
+        Pre-migration:
+          repo/main/<pkg>.deb        ← regular binaries
+          repo/main/<pkg>.udeb       ← installer udebs
+          repo/main/<pkg>.dsc        ← source descriptions
+          repo/main/<pkg>.tar.*      ← source tarballs
+          repo/doc/<pkg>.deb         ← doc artifacts
+          repo/dbgsym/<pkg>.deb      ← debug symbols
+          repo/tests/<pkg>.deb       ← test artifacts
+
+        Post-migration:
+          repo/dists/<codename>/main/binary-amd64/<pkg>.deb
+          repo/dists/<codename>/main/debian-installer/binary-amd64/<pkg>.udeb
+          repo/dists/<codename>/main/source/<pkg>.{dsc,tar.*}
+          repo/dists/<codename>/doc/binary-amd64/<pkg>.deb
+          repo/dists/<codename>-debug/main/binary-amd64/<pkg>.deb
+          repo/dists/<codename>/tests/binary-amd64/<pkg>.deb
+
+        Per Q2 (docs/plans/conf-01-repo-layout-migration.md), dbgsym
+        moves to a SEPARATE suite `<codename>-debug` rather than a
+        component under the main suite — matches Debian's
+        `bookworm-debug` / Ubuntu's `jammy-debug` convention.
+
+        Safety:
+          1. Snapshot of repo/ to /tmp/repo-pre-migration-<ts>.tar
+             before any file moves (operator can restore via
+             `rm -rf repo && tar xf <snap> -C $(dirname $repo)`).
+          2. os.rename per file (atomic on same filesystem; half-
+             migrated state impossible).
+          3. PROMPT_YESNO confirmation unless `force` is passed.
+          4. Skip-if-dest-exists guard so a re-run after partial
+             migration doesn't clobber already-moved files.
+
+        Usage:
+          repo migrate_layout              — interactive (snapshot, prompt, migrate)
+          repo migrate_layout dry-run      — preview moves without touching fs
+          repo migrate_layout force        — skip the YESNO prompt
+        """
+        _dry_run = 'dry-run' in args or '--dry-run' in args
+        _force   = 'force' in args
+        import datetime as _dt
+        from collections import defaultdict
+
+        _codename = self.config.build_codename.strip('"').strip("'")
+        _repo = self.config.dir_repo
+        _arch = self.config.arch
+
+        # Migration map: (src_subdir, predicate, dst_subpath)
+        # predicate is either a single extension string or a tuple of
+        # extensions to match (.endswith).  For .deb specifically, also
+        # exclude .udeb (since "endswith('.deb')" matches both).
+        _SOURCE_EXTS = (
+            '.dsc',
+            '.tar.gz', '.tar.xz', '.tar.bz2', '.tar.zst',
+            '.debian.tar.gz', '.debian.tar.xz', '.debian.tar.bz2',
+            '.orig.tar.gz', '.orig.tar.xz', '.orig.tar.bz2',
+            # .changes / .buildinfo / .build are build-side artifacts
+            # — left in repo/main/ for now (separate ticket if we want
+            # to surface them somewhere).  Source clients (apt-get source)
+            # only need .dsc + tarballs.
+        )
+        _migrations = [
+            # (src_subdir, extension(s), destination_subpath_under_repo)
+            ('main',   '.udeb',
+             f'dists/{_codename}/main/debian-installer/binary-{_arch}'),
+            ('main',   '.deb',
+             f'dists/{_codename}/main/binary-{_arch}'),
+            ('main',   _SOURCE_EXTS,
+             f'dists/{_codename}/main/source'),
+            ('doc',    '.deb',
+             f'dists/{_codename}/doc/binary-{_arch}'),
+            ('dbgsym', '.deb',
+             f'dists/{_codename}-debug/main/binary-{_arch}'),
+            ('tests',  '.deb',
+             f'dists/{_codename}/tests/binary-{_arch}'),
+        ]
+
+        # Walk: build the full move list.
+        _moves: 'list[tuple[str, str]]' = []   # (src_abs, dst_abs)
+        for _src_subdir, _match, _dst_subpath in _migrations:
+            _src_dir = os.path.join(_repo, _src_subdir)
+            if not os.path.isdir(_src_dir):
+                continue
+            for _f in sorted(os.listdir(_src_dir)):
+                _src_abs = os.path.join(_src_dir, _f)
+                if not os.path.isfile(_src_abs):
+                    continue
+                # Match by extension(s).  Special-case .deb to NOT match
+                # .udeb (since 'foo.udeb'.endswith('.deb') is False
+                # but a future predicate could trip on it).
+                if isinstance(_match, str):
+                    if not _f.endswith(_match):
+                        continue
+                else:   # tuple
+                    if not any(_f.endswith(_ext) for _ext in _match):
+                        continue
+                _dst_abs = os.path.join(_repo, _dst_subpath, _f)
+                _moves.append((_src_abs, _dst_abs))
+
+        if not _moves:
+            console.print(
+                f"{_repo}/{{main,doc,dbgsym,tests}} has no files to "
+                f"migrate — already migrated, or repo is empty"
+            )
+            return
+
+        # Group for summary display
+        _by_dst = defaultdict(list)
+        for _src, _dst in _moves:
+            _key = os.path.relpath(os.path.dirname(_dst), _repo)
+            _by_dst[_key].append((_src, _dst))
+
+        console.print(f"Migration plan for {_repo}/:")
+        for _dst_subdir, _items in sorted(_by_dst.items()):
+            console.print(f"  → {_dst_subdir:60s} {len(_items)} file(s)")
+        console.print(f"Total: {len(_moves)} files to move")
+
+        if _dry_run:
+            console.print(
+                "[dry-run] No files moved.  Re-run without `dry-run` "
+                "to perform migration.",
+                tui.COLOR_HIGHLIGHT,
+            )
+            return
+
+        # Confirm unless --force
+        if not _force:
+            _resp = Prompt(
+                PROMPT_YESNO,
+                f"Migrate {len(_moves)} files in {_repo}/?  "
+                f"Snapshot will be created at /tmp/ first.",
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print("Aborted.")
+                return
+
+        # Snapshot before any file moves.  Uncompressed tar — fastest;
+        # /tmp space is usually plentiful and the snapshot is only
+        # kept until the operator confirms migration succeeded.
+        # Microsecond resolution — eliminates collision risk if two
+        # migrations run within the same second (test ordering or
+        # accidental operator double-invocation).
+        _ts = _dt.datetime.now().strftime('%Y%m%dT%H%M%S%f')
+        _snapshot = f'/tmp/repo-pre-migration-{_ts}.tar'
+        console.print(f"Snapshot: tar -cf {_snapshot} {_repo}/ ...")
+        _r = subprocess.run(
+            ['tar', '-cf', _snapshot, '-C', os.path.dirname(_repo),
+             os.path.basename(_repo)],
+            capture_output=True, text=True,
+        )
+        if _r.returncode != 0:
+            console.print(
+                f"ERROR: snapshot failed (rc={_r.returncode}): "
+                f"{_r.stderr.strip()[:200]}"
+            )
+            logger.error(
+                f"cmd_migrate_repo_layout snapshot: "
+                f"rc={_r.returncode}, stderr={_r.stderr.strip()}"
+            )
+            return
+        try:
+            _snap_mb = os.path.getsize(_snapshot) // (2 ** 20)
+            console.print(
+                f"Snapshot: {_snap_mb} MB written "
+                f"({_snapshot}) — restore via `rm -rf {_repo} && "
+                f"tar xf {_snapshot} -C {os.path.dirname(_repo)}`",
+                tui.COLOR_HIGHLIGHT,
+            )
+        except OSError:
+            pass
+
+        # Create all destination dirs up-front.
+        _dst_dirs = sorted({os.path.dirname(_dst) for _, _dst in _moves})
+        for _d in _dst_dirs:
+            try:
+                os.makedirs(_d, exist_ok=True)
+            except OSError as e:
+                console.print(f"ERROR: mkdir {_d}: {e}")
+                logger.error(f"cmd_migrate_repo_layout mkdir {_d}: {e}")
+                return
+
+        # Move each file with os.rename — atomic on same filesystem.
+        # If a destination already exists (operator re-ran after a
+        # partial migration), skip with a warning rather than clobber.
+        _n_moved = 0
+        _n_skipped = 0
+        _n_failed = 0
+        for _src, _dst in _moves:
+            if os.path.exists(_dst):
+                logger.warning(f"migrate: skip {_dst} (already exists)")
+                _n_skipped += 1
+                continue
+            try:
+                os.rename(_src, _dst)
+                _n_moved += 1
+            except OSError as e:
+                console.print(
+                    f"ERROR: rename {os.path.basename(_src)}: {e}"
+                )
+                logger.error(
+                    f"cmd_migrate_repo_layout rename "
+                    f"{_src} → {_dst}: {e}"
+                )
+                _n_failed += 1
+
+        # Best-effort rmdir of now-empty source subdirs.  Don't fail
+        # if non-empty (residual files we don't recognise — operator
+        # can investigate manually).
+        for _src_subdir in ('main', 'doc', 'dbgsym', 'tests'):
+            _src_dir = os.path.join(_repo, _src_subdir)
+            if os.path.isdir(_src_dir):
+                try:
+                    os.rmdir(_src_dir)
+                    console.print(f"  → removed empty {_src_subdir}/")
+                except OSError:
+                    _remaining = (sorted(os.listdir(_src_dir))[:5]
+                                  if os.path.isdir(_src_dir) else [])
+                    if _remaining:
+                        console.print(
+                            f"  → {_src_subdir}/ not empty after "
+                            f"migration; first 5: {_remaining}",
+                            tui.COLOR_WARNING,
+                        )
+
+        console.print(
+            f"Migration complete: {_n_moved} moved, "
+            f"{_n_skipped} skipped (dest existed), {_n_failed} failed",
+            tui.COLOR_HIGHLIGHT if _n_failed == 0 else tui.COLOR_ERROR,
+        )
+        if _n_failed > 0:
+            console.print(
+                f"Restore via `rm -rf {_repo} && "
+                f"tar xf {_snapshot} -C {os.path.dirname(_repo)}`"
+            )
+
     def cmd_repo(self, action: str = '', *args):
         """Dispatcher for `repo <action>` commands.
 
-        CONF-01 family — Stage B adds `index`; Stage C will add
+        CONF-01 family — Stage B added `index`; Stage C adds
         `migrate_layout`; COMP-02 later will add `publish`.
         """
         _table = {
-            'index': 'generate apt-repo metadata in-place under '
-                     'repo/dists/<codename>{,-debug}/',
+            'index':
+                'generate apt-repo metadata in-place under '
+                'repo/dists/<codename>{,-debug}/',
+            'migrate_layout':
+                'one-shot migration of repo/{main,doc,dbgsym,tests}/ '
+                'to apt-conformant unified layout under '
+                'repo/dists/<codename>{,-debug}/.  '
+                'Args: dry-run | force',
         }
         if action == 'index':
             return self.cmd_index_repo(*args)
+        if action == 'migrate_layout':
+            return self.cmd_migrate_repo_layout(*args)
         return self._group_help('repo', _table, action)
 
     def cmd_strip_repo(self, *args):
