@@ -1437,6 +1437,25 @@ class BuildConfig:
                     # condition shouldn't fail BuildConfig init.
                     pass
 
+            # CONF-01 Stage D fix-up: stale audit-Packages cache files
+            # in dir_temp (pre-Stage-D filename shape: no path-hash
+            # suffix).  These could serve empty cached packages
+            # against the new (populated) layout until the operator
+            # ran `package audit refresh`.  Hashing the path into
+            # the filename eliminates new collisions; this loop
+            # cleans up the old uncached files left behind.
+            try:
+                for _f in os.listdir(self.dir_temp):
+                    # Old shape: 'audit-Packages-<subdir>' (no hash)
+                    # New shape: 'audit-Packages-<subdir>-<hash>'
+                    if _f.startswith('audit-Packages-') and _f.count('-') == 2:
+                        try:
+                            os.remove(os.path.join(self.dir_temp, _f))
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+
             pathlib.Path(self.dir_patch).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_patch_empty).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_patch_source).mkdir(parents=True, exist_ok=True)
