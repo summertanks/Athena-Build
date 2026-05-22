@@ -24,6 +24,7 @@ Three primitives:
 All three operate on the same RepoState — single source of truth.
 """
 import dataclasses
+import hashlib
 import logging
 import os
 import re
@@ -214,7 +215,18 @@ def scan_repo_state(config, subdir: str = 'main',
 
     _temp_dir = config.dir_temp
     os.makedirs(_temp_dir, exist_ok=True)
-    _pkg_file = os.path.join(_temp_dir, f'audit-Packages-{subdir}')
+    # CONF-01 Stage D fix-up (2026-05-22): include a hash of the
+    # source dir path in the cache filename.  Without it, a cached
+    # audit-Packages-main from a pre-Stage-D scan (against the OLD
+    # repo/main path, empty post-migration) would collide with the
+    # NEW path's cache file → stale empty cache served forever until
+    # operator runs `package audit refresh`.  Hashing the dir path
+    # decouples them; old cache files are stranded harmlessly under
+    # the old name and the new path gets a fresh cache file.
+    _dir_hash = hashlib.sha256(_repo_dir.encode('utf-8')).hexdigest()[:8]
+    _pkg_file = os.path.join(
+        _temp_dir, f'audit-Packages-{subdir}-{_dir_hash}',
+    )
 
     # Cross-session cache: if the persisted Packages file is newer than
     # any file in repo/, skip the dpkg-scanpackages call entirely and
