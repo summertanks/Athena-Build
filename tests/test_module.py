@@ -2512,6 +2512,316 @@ def test_iso_installer_stage_grub_cfg_tolerates_missing_background():
             assert _stage_grub_cfg(_stage, _installer) is True
 
 
+def _make_fake_grub_deb(tmp_dir: str, pkg_name: str, version: str,
+                          payload_files: 'dict[str, bytes]') -> str:
+    """Synthesize a minimal .deb under tmp_dir for grub_assembly tests.
+    Returns the .deb path.
+
+    Build a real Debian archive (control.tar.gz + data.tar.gz inside
+    an ar(5) container) by hand-rolling — no dpkg-deb dependency in
+    the build step (since dpkg-deb on the test runner host is what
+    we're going to invoke at unpack time, and we don't want a
+    chicken-and-egg).  Uses python's tarfile + the ar(5) format spec.
+    """
+    import gzip
+    import io
+    import struct
+    import tarfile
+
+    def _write_tar_gz(out: io.BytesIO, files: 'dict[str, bytes]') -> bytes:
+        _tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=_tar_buf, mode='w') as _t:
+            for _path, _data in files.items():
+                _info = tarfile.TarInfo(name=_path)
+                _info.size = len(_data)
+                _info.mode = 0o755 if _path.endswith('/grub-mkrescue') or _path.endswith('/grub-mkimage') else 0o644
+                _t.addfile(_info, io.BytesIO(_data))
+        return gzip.compress(_tar_buf.getvalue())
+
+    _control_files = {
+        'control': (
+            f'Package: {pkg_name}\nVersion: {version}\n'
+            f'Architecture: amd64\nMaintainer: test\n'
+            f'Description: stub\n'
+        ).encode(),
+    }
+    _control_blob = _write_tar_gz(io.BytesIO(), _control_files)
+    _data_blob    = _write_tar_gz(io.BytesIO(), payload_files)
+    _deb_path     = os.path.join(tmp_dir, f'{pkg_name}_{version}_amd64.deb')
+
+    # ar(5) format: 8-byte magic "!<arch>\n", then per-member 60-byte header
+    # + payload (padded to even).  Three members: debian-binary, control.tar.gz,
+    # data.tar.gz.
+    def _ar_member(name: str, body: bytes) -> bytes:
+        _hdr = (
+            f'{name:<16}'      # 16 bytes name
+            f'{0:<12}'          # 12 bytes mtime
+            f'{0:<6}'           # 6 bytes uid
+            f'{0:<6}'           # 6 bytes gid
+            f'{644:<8}'         # 8 bytes mode
+            f'{len(body):<10}'  # 10 bytes size
+            '`\n'
+        )
+        _padded = body + (b'\n' if len(body) % 2 else b'')
+        return _hdr.encode() + _padded
+
+    with open(_deb_path, 'wb') as fh:
+        fh.write(b'!<arch>\n')
+        fh.write(_ar_member('debian-binary',  b'2.0\n'))
+        fh.write(_ar_member('control.tar.gz', _control_blob))
+        fh.write(_ar_member('data.tar.gz',    _data_blob))
+    # Sanity check we built a valid .deb by asking dpkg-deb to read it
+    import subprocess as _sp
+    _r = _sp.run(['dpkg-deb', '-I', _deb_path],
+                 capture_output=True, text=True)
+    if _r.returncode != 0 or 'Package: ' + pkg_name not in _r.stdout:
+        raise AssertionError(
+            f'fake .deb didn\'t round-trip via dpkg-deb -I '
+            f'(rc={_r.returncode}, stdout={_r.stdout!r}, '
+            f'stderr={_r.stderr!r})'
+        )
+    return _deb_path
+
+
+def test_grub_assembly_find_grub_deb_errors_when_missing():
+    """COMP-14: _find_grub_deb raises FileNotFoundError with a clear
+    message when a required grub .deb isn't in repo/main/.  Pin so a
+    future refactor doesn't swap to a silent fallback that masks the
+    "cache build didn't run" case."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from grub_assembly import _find_grub_deb
+    with tempfile.TemporaryDirectory() as _repo:
+        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
+        try:
+            _find_grub_deb(_repo, 'grub-pc-bin')
+        except FileNotFoundError as e:
+            assert 'grub-pc-bin' in str(e)
+            assert 'cache build' in str(e) or 'main/' in str(e)
+        else:
+            raise AssertionError(
+                '_find_grub_deb should raise FileNotFoundError when '
+                'no matching .deb exists in repo/main/'
+            )
+
+
+def test_grub_assembly_extract_grub_toolchain_unpacks_all_three():
+    """COMP-14: _extract_grub_toolchain runs dpkg-deb -x on each of
+    grub-common + grub-pc-bin + grub-efi-amd64-bin and the resulting
+    staging tree has the binaries + module dirs at the expected paths.
+    """
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from grub_assembly import _extract_grub_toolchain, GRUB_PKG_NAMES
+    assert set(GRUB_PKG_NAMES) == {
+        'grub-common', 'grub-pc-bin', 'grub-efi-amd64-bin',
+    }, GRUB_PKG_NAMES
+    with tempfile.TemporaryDirectory() as _repo:
+        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
+        # Synthesize the three .debs with a single sentinel file each
+        # so the unpacker has unambiguous output to check.
+        _make_fake_grub_deb(
+            os.path.join(_repo, 'main'),
+            'grub-common', '2.06-13',
+            {'usr/bin/grub-mkrescue': b'#!/bin/sh\nexit 0\n',
+             'usr/bin/grub-mkimage':  b'#!/bin/sh\nexit 0\n'},
+        )
+        _make_fake_grub_deb(
+            os.path.join(_repo, 'main'),
+            'grub-pc-bin', '2.06-13',
+            {'usr/lib/grub/i386-pc/all_video.mod': b'\x00'},
+        )
+        _make_fake_grub_deb(
+            os.path.join(_repo, 'main'),
+            'grub-efi-amd64-bin', '2.06-13',
+            {'usr/lib/grub/x86_64-efi/efi_gop.mod': b'\x00'},
+        )
+        with tempfile.TemporaryDirectory() as _dst:
+            _extract_grub_toolchain(_repo, _dst)
+            # All three packages' content landed at expected paths
+            assert os.path.isfile(os.path.join(_dst, 'usr/bin/grub-mkrescue'))
+            assert os.path.isfile(os.path.join(_dst, 'usr/bin/grub-mkimage'))
+            assert os.path.isfile(os.path.join(_dst, 'usr/lib/grub/i386-pc/all_video.mod'))
+            assert os.path.isfile(os.path.join(_dst, 'usr/lib/grub/x86_64-efi/efi_gop.mod'))
+
+
+def test_grub_assembly_runner_uses_our_directory_and_path():
+    """COMP-14: run_grub_mkrescue_from_repo must invoke the EXTRACTED
+    grub-mkrescue (not the host's), pass --directory= pointing at the
+    extracted modules, and PATH-prepend the extracted /usr/bin so
+    grub-mkrescue's internal callouts to grub-mkimage resolve to OUR
+    binary."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import grub_assembly as _ga
+
+    # Build a fake repo with the three real-ish grub .debs.  Don't
+    # call the real grub-mkrescue — record what args + env it'd see.
+    with tempfile.TemporaryDirectory() as _repo:
+        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
+        _make_fake_grub_deb(
+            os.path.join(_repo, 'main'),
+            'grub-common', '2.06-13',
+            {'usr/bin/grub-mkrescue': b'#!/bin/sh\nexit 0\n',
+             'usr/bin/grub-mkimage':  b'#!/bin/sh\nexit 0\n'},
+        )
+        _make_fake_grub_deb(
+            os.path.join(_repo, 'main'),
+            'grub-pc-bin', '2.06-13',
+            {'usr/lib/grub/i386-pc/all_video.mod': b'\x00'},
+        )
+        _make_fake_grub_deb(
+            os.path.join(_repo, 'main'),
+            'grub-efi-amd64-bin', '2.06-13',
+            {'usr/lib/grub/x86_64-efi/efi_gop.mod': b'\x00'},
+        )
+
+        _captured = {}
+        # Capture the ORIGINAL subprocess.run before patching, so the
+        # "delegate to real for dpkg-deb" path doesn't recurse into
+        # itself (subprocess.run is the patched function once we're
+        # inside the with-block).
+        _original_run = _ga.subprocess.run
+        def _fake_run(cmd, *_a, **kw):
+            class _R:
+                returncode = 0
+                stdout = ''
+                stderr = ''
+            # We mock subprocess.run for BOTH dpkg-deb (extraction)
+            # and the final grub-mkrescue.  Distinguish by argv[0]
+            # basename — only capture the grub-mkrescue invocation.
+            if isinstance(cmd, (list, tuple)) and cmd and os.path.basename(cmd[0]) == 'grub-mkrescue':
+                _captured['cmd'] = list(cmd)
+                _captured['env'] = dict(kw.get('env') or {})
+                return _R()
+            # Otherwise delegate to the REAL (pre-patch) subprocess.run
+            # so the dpkg-deb extraction actually populates the temp
+            # dir.  Using a captured reference avoids re-entering the
+            # patched function.
+            return _original_run(cmd, *_a, **kw)
+
+        _stage = '/some/stage'
+        _iso   = '/some/out.iso'
+        with patch.object(_ga.subprocess, 'run', side_effect=_fake_run):
+            _ok, _stdout, _stderr = _ga.run_grub_mkrescue_from_repo(
+                _repo, _stage, _iso,
+            )
+        assert _ok, (_ok, _stdout, _stderr)
+
+        _cmd = _captured.get('cmd')
+        assert _cmd, 'grub-mkrescue was never invoked'
+        # argv[0] is our extracted grub-mkrescue, NOT a bare
+        # `grub-mkrescue` (which would resolve via PATH to host's).
+        assert _cmd[0].endswith('/usr/bin/grub-mkrescue'), _cmd
+        assert _cmd[0] != 'grub-mkrescue', (
+            'argv[0] is bare `grub-mkrescue` — PATH-resolves to the host '
+            'binary, defeating the COMP-14 fix'
+        )
+        # --directory= points at our extracted modules.  We can't
+        # check os.path.isdir(_dir) after the call because the temp
+        # dir is auto-cleaned when run_grub_mkrescue_from_repo's
+        # tempfile.TemporaryDirectory context exits — but `_ok=True`
+        # above already proves the dir existed at the time the
+        # function's internal `if not os.path.isdir(_mod_dir)` check
+        # ran (which is the same moment as the grub-mkrescue call).
+        _dir_args = [_a for _a in _cmd if _a.startswith('--directory=')]
+        assert len(_dir_args) == 1, _cmd
+        _dir = _dir_args[0].split('=', 1)[1]
+        assert _dir.endswith('/usr/lib/grub'), _dir
+        # PATH-prepended with our extracted /usr/bin
+        _path = _captured.get('env', {}).get('PATH', '')
+        assert _path.split(':', 1)[0].endswith('/usr/bin'), _path
+        # The extracted /usr/bin (first PATH entry) is the SAME dir
+        # that the extracted grub-mkrescue lives in.
+        assert _path.split(':', 1)[0] == os.path.dirname(_cmd[0]), (
+            _path, _cmd[0],
+        )
+        # -o <iso_path>
+        assert '-o' in _cmd and _cmd[_cmd.index('-o') + 1] == _iso, _cmd
+        # final positional is the stage dir
+        assert _stage in _cmd, _cmd
+
+
+def test_grub_assembly_runner_returns_extraction_error_cleanly():
+    """COMP-14: when a required grub .deb is missing from repo/main/,
+    run_grub_mkrescue_from_repo returns (False, '', <message>) without
+    invoking grub-mkrescue.  Pin so the caller (iso_installer /
+    iso.py) doesn't see a NoneType / unhandled exception bubble up.
+    """
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from grub_assembly import run_grub_mkrescue_from_repo
+    with tempfile.TemporaryDirectory() as _repo:
+        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
+        # repo/main/ exists but has no grub .debs
+        _ok, _stdout, _stderr = run_grub_mkrescue_from_repo(
+            _repo, '/some/stage', '/some/out.iso',
+        )
+        assert _ok is False
+        assert _stdout == ''
+        assert 'grub-common' in _stderr or 'grub-pc-bin' in _stderr, _stderr
+
+
+def test_iso_installer_calls_grub_assembly_helper():
+    """COMP-14: iso_installer.py:_run_grub_mkrescue must route through
+    grub_assembly.run_grub_mkrescue_from_repo, not directly subprocess
+    out to bare `grub-mkrescue`.  Pin via code inspection so a future
+    refactor can't silently revert to host-grub contamination."""
+    _src = os.path.join(_ROOT, 'scripts', 'iso_installer.py')
+    with open(_src) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def _run_grub_mkrescue\(.*?(?=\n(?:def |\Z))',
+        _body, re.DOTALL,
+    )
+    assert _m, '_run_grub_mkrescue not found'
+    _fn = _m.group(0)
+    assert 'run_grub_mkrescue_from_repo' in _fn, (
+        "iso_installer._run_grub_mkrescue must delegate to "
+        "grub_assembly.run_grub_mkrescue_from_repo — REGRESSION to "
+        "pre-COMP-14 if it shells out to bare grub-mkrescue.  "
+        "Build host's grub would leak back into the ISO bootloader."
+    )
+    # Strip docstring before checking for the bare-subprocess pattern,
+    # so the "previously invoked bare grub-mkrescue" prose in the
+    # docstring doesn't trigger.
+    _fn_code = re.sub(r'""".*?"""', '', _fn, flags=re.DOTALL)
+    _fn_code = re.sub(r"'''.*?'''", '', _fn_code, flags=re.DOTALL)
+    assert "['grub-mkrescue'" not in _fn_code and '["grub-mkrescue"' not in _fn_code, (
+        "REGRESSION: iso_installer._run_grub_mkrescue is shelling out "
+        "to bare `grub-mkrescue` again — defeats COMP-14"
+    )
+
+
+def test_iso_py_calls_grub_assembly_helper():
+    """COMP-14: same pin for the LIVE ISO build (iso.py:build_iso).
+    The live ISO path had the identical bug (host grub leaking into
+    the assembled ISO) — fix lands in both places at once."""
+    _src = os.path.join(_ROOT, 'scripts', 'iso.py')
+    with open(_src) as fh:
+        _body = fh.read()
+    assert 'run_grub_mkrescue_from_repo' in _body, (
+        "scripts/iso.py must delegate to grub_assembly.run_grub_mkrescue_"
+        "from_repo — REGRESSION to pre-COMP-14 if it shells out to "
+        "bare grub-mkrescue."
+    )
+    # Strip docstrings + comments — same anti-prose-false-positive
+    # pattern as elsewhere in this file.
+    import re
+    _code = re.sub(r'""".*?"""', '', _body, flags=re.DOTALL)
+    _code = re.sub(r"'''.*?'''", '', _code, flags=re.DOTALL)
+    _code = '\n'.join(
+        _ln for _ln in _code.splitlines()
+        if not _ln.lstrip().startswith('#')
+    )
+    assert "['grub-mkrescue'" not in _code and '["grub-mkrescue"' not in _code, (
+        "REGRESSION: scripts/iso.py is shelling out to bare "
+        "`grub-mkrescue` again — defeats COMP-14"
+    )
+
+
 def test_installer_grub_cfg_wires_background_image():
     """COMP-01f Phase 2: the shipped grub.cfg must include the gfxterm
     + background_image setup (gated by `if loadfont`), and the
