@@ -72,6 +72,7 @@ def build_installer_iso(
     pkg_groups: Optional['dict[str, set]'] = None,
     group_meta: Optional['dict[str, dict[str, str]]'] = None,
     expected_kernel_pkg: Optional[str] = None,
+    dir_repo_main_udeb: Optional[str] = None,   # CONF-01 Stage D
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -79,9 +80,18 @@ def build_installer_iso(
         dir_chroot_installer: Path to the unpacked installer chroot
                               (the buildroot/installer/ produced by
                               cmd_build_chroot_installer).
-        dir_repo:             Path to repo/ containing built .debs + .udebs
-                              — bundled onto the ISO so the installer can
-                              apt-pull from /cdrom/pool at install time.
+        dir_repo:             Path to repo/main/ (in the CONF-01 unified
+                              layout this is repo/dists/<codename>/main/
+                              binary-<arch>/) — the dir holding regular
+                              .debs.  Used for kernel lookup + as the
+                              first source dir for pool staging.
+        dir_repo_main_udeb:   Path to repo/dists/<codename>/main/
+                              debian-installer/binary-<arch>/ — udebs
+                              live here post-CONF-01.  Optional for
+                              backwards-compat; when omitted, udebs are
+                              not staged to the ISO pool (legacy code
+                              expected them colocated with .debs in
+                              repo/main/, which no longer holds).
         dir_image:            Output directory for the ISO.
         installer_dir:        Path to the installer/ data-layer tree
                               (grub.cfg + future boot assets live here).
@@ -128,7 +138,14 @@ def build_installer_iso(
     if not _stage_base_include(_staging, base_include_pkgs):
         return False
 
-    if not _stage_pool(dir_repo, _staging, password, deb_whitelist):
+    # CONF-01 Stage D: pool sources are now nested under dists/<codename>/.
+    # Pass both .deb (binary-<arch>/) and .udeb (debian-installer/
+    # binary-<arch>/) source dirs so the staged pool ends up flat as
+    # the apt-cdrom logic on the target expects.
+    _pool_sources = [dir_repo]
+    if dir_repo_main_udeb is not None:
+        _pool_sources.append(dir_repo_main_udeb)
+    if not _stage_pool(_pool_sources, _staging, password, deb_whitelist):
         return False
 
     # Per-group package manifests still useful for operator inspection
@@ -666,9 +683,16 @@ def _debian_version_cmp(a: str, b: str) -> int:
 
 
 def _select_pool_files(
-    dir_repo: str, deb_whitelist,
-) -> tuple:
-    """Decide which files in repo/ ship on the installer ISO.
+    source_dirs: 'list[str]', deb_whitelist,
+) -> 'tuple[list[tuple[str, str]], int]':
+    """Decide which files across `source_dirs` ship on the installer ISO.
+
+    CONF-01 Stage D (2026-05-22): `source_dirs` is a LIST (was single
+    str pre-Stage D).  Multiple dirs because .debs and .udebs now
+    live in separate dirs under the unified apt-repo layout
+    (dists/<codename>/main/binary-<arch>/ vs main/debian-installer/
+    binary-<arch>/); the ISO's /cdrom/pool/ is FLAT, so we walk
+    multiple sources and merge into one staging tree.
 
     `deb_whitelist` is one of:
       - set/iterable of canonical package names: keep .deb iff its
@@ -690,7 +714,9 @@ def _select_pool_files(
         skipped.
       - Anything else (sources, stray files) is skipped.
 
-    Returns `(kept_list, skipped_count)`.
+    Returns `(kept_list, skipped_count)` where kept_list is a list of
+    (abs_source_path, filename) tuples — the caller flattens into
+    staging by basename.
 
     Design note: this filter intentionally does NOT cross-walk
     versions against any external metadata (cache versions, base_include,
@@ -701,25 +727,26 @@ def _select_pool_files(
     drift and still achieves the goal: drop older builds of the same
     package.
     """
-    try:
-        _entries = sorted(os.listdir(dir_repo))
-    except OSError:
-        return [], 0
-    if deb_whitelist is None:
-        _kept = [
-            n for n in _entries
-            if os.path.isfile(os.path.join(dir_repo, n))
-        ]
-        return _kept, 0
-    _udebs: list = []
-    _by_name: dict = {}   # canonical_name → (version_str, filename)
-    _skipped = 0
-    for _name in _entries:
-        _full = os.path.join(dir_repo, _name)
-        if not os.path.isfile(_full):
+    # Collect (src_dir, filename) across all source_dirs, sorted by
+    # filename for determinism.
+    _all: 'list[tuple[str, str]]' = []
+    for _src_dir in source_dirs:
+        try:
+            for _name in sorted(os.listdir(_src_dir)):
+                if os.path.isfile(os.path.join(_src_dir, _name)):
+                    _all.append((_src_dir, _name))
+        except OSError:
             continue
+
+    if deb_whitelist is None:
+        return _all, 0
+
+    _udebs: 'list[tuple[str, str]]' = []
+    _by_name: 'dict[str, tuple[str, tuple[str, str]]]' = {}   # name → (ver, (src_dir, fname))
+    _skipped = 0
+    for _src_dir, _name in _all:
         if _name.endswith('.udeb'):
-            _udebs.append(_name)
+            _udebs.append((_src_dir, _name))
             continue
         if not _name.endswith('.deb'):
             _skipped += 1
@@ -733,22 +760,27 @@ def _select_pool_files(
             continue
         _existing = _by_name.get(_pkg)
         if _existing is None:
-            _by_name[_pkg] = (_ver, _name)
+            _by_name[_pkg] = (_ver, (_src_dir, _name))
         elif _debian_version_cmp(_existing[0], _ver) < 0:
-            # Newer version wins; the older one becomes dead weight.
             _skipped += 1
-            _by_name[_pkg] = (_ver, _name)
+            _by_name[_pkg] = (_ver, (_src_dir, _name))
         else:
             _skipped += 1
-    _kept = _udebs + [_fn for _ver, _fn in _by_name.values()]
+    _kept = _udebs + [_pair for _ver, _pair in _by_name.values()]
     return _kept, _skipped
 
 
 def _stage_pool(
-    dir_repo: str, staging: str, password: str,
+    source_dirs: 'list[str]', staging: str, password: str,
     deb_whitelist=None,
 ) -> bool:
-    """Copy a filtered subset of repo/ → staging/pool/.
+    """Copy a filtered subset of source_dirs → staging/pool/ (FLAT).
+
+    CONF-01 Stage D: `source_dirs` is a LIST of source dirs (was a
+    single `dir_repo` pre-Stage D).  Walks each, merges into one
+    flat staging/pool/ — the apt-cdrom logic on the install target
+    expects flat pool/, regardless of how the build host organises
+    repo/.
 
     The installer reads from /cdrom/pool at runtime (matches the locked
     decision: file:///cdrom apt source, no network repo fallback).
@@ -761,27 +793,28 @@ def _stage_pool(
     (-rt, -cloud), old ABIs, live-exclusive packages — all dead weight
     on an installer ISO.
 
-    Uses rsync --files-from for the copy: handles arbitrary file counts
-    without hitting ARG_MAX, preserves modes/timestamps like cp -a,
-    runs under sudo for root-owned files in repo/.
+    Uses cp -a in batches (not rsync — caught 2026-05-12: rsync
+    isn't always on the host): handles arbitrary file counts
+    without hitting ARG_MAX, preserves modes/timestamps, runs under
+    sudo for root-owned files in repo/.
     """
     _dst = os.path.join(staging, 'pool')
-    _kept, _skipped = _select_pool_files(dir_repo, deb_whitelist)
+    _kept, _skipped = _select_pool_files(source_dirs, deb_whitelist)
     if not _kept:
         tui.console.print(
-            f"ERROR: pool selection produced 0 files from {dir_repo} — "
-            "whitelist likely too aggressive or repo/ is empty"
+            f"ERROR: pool selection produced 0 files from {source_dirs} "
+            f"— whitelist likely too aggressive or sources are empty"
         )
         logger.error(
-            f"_stage_pool: 0 files selected from {dir_repo} "
+            f"_stage_pool: 0 files selected from {source_dirs} "
             f"(whitelist size {len(deb_whitelist) if deb_whitelist else 'None'})"
         )
         return False
     # Estimate the kept-set size for the operator-facing log line.
     _bytes = 0
-    for _name in _kept:
+    for _src_dir, _name in _kept:
         try:
-            _bytes += os.path.getsize(os.path.join(dir_repo, _name))
+            _bytes += os.path.getsize(os.path.join(_src_dir, _name))
         except OSError:
             pass
     _mb = _bytes // (2 ** 20)
@@ -815,7 +848,7 @@ def _stage_pool(
     for _i in range(0, len(_kept), _BATCH):
         _chunk = _kept[_i:_i + _BATCH]
         _args = ['cp', '-a', '-t', _dst, '--']
-        _args.extend(os.path.join(dir_repo, _n) for _n in _chunk)
+        _args.extend(os.path.join(_src_dir, _n) for _src_dir, _n in _chunk)
         _r = _sudo(_args, password)
         if _r.returncode != 0:
             tui.console.print(

@@ -2151,6 +2151,105 @@ def test_cmd_repo_dispatcher_routes_migrate_layout_action():
     assert 'return self.cmd_migrate_repo_layout' in _fn, _fn
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CONF-01 Stage D — consumer refactor anti-regression
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_stage_d_no_old_repo_subdir_paths_in_production_code():
+    """CONF-01 Stage D regression pin: no production code path should
+    construct the OLD flat-layout paths `repo/main/`, `repo/doc/`,
+    `repo/dbgsym/`, `repo/tests/`.  After Stage D, these are all
+    nested under repo/dists/<codename>/<comp>/binary-<arch>/ and
+    reachable only via config.dir_repo_main / dir_repo_main_udeb /
+    deb_dest_for_filename / all_deb_dirs.
+
+    Scans scripts/ for the tell-tale `os.path.join(dir_repo, 'main')`
+    idiom + its variants.  Comments and docstrings are stripped so
+    documentation references to the old paths don't trigger.
+
+    The migration command (cmd_migrate_repo_layout) is exempted —
+    it's specifically for migrating from old to new layout, so it
+    legitimately knows about both."""
+    import re
+    _ALLOWED = {
+        'scripts/build.py:cmd_migrate_repo_layout',   # the migration itself
+        'scripts/utils.py',                            # BuildConfig path defs
+        'scripts/apt_repo.py',                         # dists/.../components literals
+    }
+    _BAD_PATTERNS = [
+        re.compile(r"os\.path\.join\([^)]*\bdir_repo\b[^)]*,\s*'main'\)"),
+        re.compile(r"os\.path\.join\([^)]*\bdir_repo\b[^)]*,\s*'doc'\)"),
+        re.compile(r"os\.path\.join\([^)]*\bdir_repo\b[^)]*,\s*'dbgsym'\)"),
+        re.compile(r"os\.path\.join\([^)]*\bdir_repo\b[^)]*,\s*'tests'\)"),
+    ]
+    _scripts_dir = os.path.join(_ROOT, 'scripts')
+    _findings = []
+    for _fname in os.listdir(_scripts_dir):
+        if not _fname.endswith('.py'):
+            continue
+        _path = os.path.join(_scripts_dir, _fname)
+        with open(_path) as fh:
+            _body = fh.read()
+        # Strip docstrings + comments so prose mentions don't trigger
+        _code = re.sub(r'""".*?"""', '', _body, flags=re.DOTALL)
+        _code = re.sub(r"'''.*?'''", '', _code, flags=re.DOTALL)
+        _code = '\n'.join(
+            _ln for _ln in _code.splitlines()
+            if not _ln.lstrip().startswith('#')
+        )
+        # Special exemption: cmd_migrate_repo_layout legitimately
+        # knows the old layout (it's how it knows what to migrate).
+        # Strip its body before checking.
+        _code = re.sub(
+            r'def cmd_migrate_repo_layout\(.*?(?=\n    def )',
+            '', _code, flags=re.DOTALL,
+        )
+        for _pat in _BAD_PATTERNS:
+            for _m in _pat.finditer(_code):
+                _findings.append(f"  scripts/{_fname}: {_m.group(0)}")
+    assert not _findings, (
+        "Stage D REGRESSION: production code is constructing old "
+        "flat-layout paths.  Use config.dir_repo_main / dir_repo_main_udeb "
+        "/ deb_dest_for_filename(filename) / all_deb_dirs() instead.\n"
+        + "\n".join(_findings)
+    )
+
+
+def test_stage_d_buildconfig_paths_use_new_nested_layout():
+    """CONF-01 Stage D contract: BuildConfig's dir_repo_main et al.
+    must point at the NEW nested apt-repo paths, not the old
+    flat ones.  Verify via attribute access on a real BuildConfig
+    instance constructed from the default build.conf."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import BuildConfig
+    _cfg = BuildConfig()
+    if not _cfg.is_valid:
+        # Test env doesn't have a writable working_dir — skip
+        # gracefully; the assertions can only run against a valid
+        # config.
+        import pytest as _pytest
+        _pytest.skip(f"BuildConfig invalid in test env: {_cfg.error()}")
+    # Each attr must contain the dists/ nesting (not be at repo root)
+    for _attr in ('dir_repo_main', 'dir_repo_main_udeb', 'dir_repo_main_source',
+                  'dir_repo_doc', 'dir_repo_dbgsym', 'dir_repo_tests'):
+        _val = getattr(_cfg, _attr)
+        assert '/dists/' in _val, (
+            f"{_attr} = {_val!r} doesn't use the new nested layout — "
+            f"Stage D regression"
+        )
+        assert _val.startswith(_cfg.dir_repo), (
+            f"{_attr} = {_val!r} doesn't start with dir_repo "
+            f"{_cfg.dir_repo!r}"
+        )
+    # The dbgsym attr specifically must be under the -debug suite (Q2)
+    assert '-debug/' in _cfg.dir_repo_dbgsym, (
+        f"dir_repo_dbgsym = {_cfg.dir_repo_dbgsym!r} must be under the "
+        f"<codename>-debug suite per Q2"
+    )
+
+
 def test_iso_installer_stage_disk_info_errors_when_dir_missing():
     """Phase 7 cdrom-detect fix: installer/disk/ MUST be present —
     without /cdrom/.disk/info, cdrom-detect rejects the disc and the
@@ -2358,7 +2457,8 @@ def test_iso_installer_select_pool_files_includes_udebs_unconditionally():
             with open(os.path.join(_repo, _name), 'w') as fh:
                 fh.write('')
         # Empty set whitelist — no deb names allowed.  Udebs still kept.
-        _kept, _skipped = _select_pool_files(_repo, deb_whitelist=set())
+        _kept, _skipped = _select_pool_files([_repo], deb_whitelist=set())
+        _kept = [_fn for _, _fn in _kept]
         assert len(_kept) == 3, _kept
         assert _skipped == 0
         assert all(n.endswith('.udeb') for n in _kept)
@@ -2381,8 +2481,9 @@ def test_iso_installer_select_pool_files_drops_dbgsym_unconditionally():
             with open(os.path.join(_repo, _name), 'w') as fh:
                 fh.write('')
         _kept, _skipped = _select_pool_files(
-            _repo, deb_whitelist={'acl', 'libc6'},
+            [_repo], deb_whitelist={'acl', 'libc6'},
         )
+        _kept = [_fn for _, _fn in _kept]
         assert sorted(_kept) == [
             'acl_2.3.1-3_amd64.deb', 'libc6_2.36-9_amd64.deb',
         ], _kept
@@ -2419,13 +2520,14 @@ def test_iso_installer_select_pool_files_filters_by_whitelist():
             with open(os.path.join(_repo, _name), 'w') as fh:
                 fh.write('')
         _kept, _skipped = _select_pool_files(
-            _repo,
+            [_repo],
             deb_whitelist={
                 'grub-pc',
                 'linux-image-6.1.0-47-amd64',
                 'systemd',
             },
         )
+        _kept = [_fn for _, _fn in _kept]
         assert sorted(_kept) == sorted(_keep), _kept
         assert _skipped == len(_drop), _skipped
 
@@ -2448,8 +2550,9 @@ def test_iso_installer_select_pool_files_keeps_highest_version_per_name():
             with open(os.path.join(_repo, _name), 'w') as fh:
                 fh.write('')
         _kept, _skipped = _select_pool_files(
-            _repo, deb_whitelist={'linux-image-amd64'},
+            [_repo], deb_whitelist={'linux-image-amd64'},
         )
+        _kept = [_fn for _, _fn in _kept]
         assert _kept == ['linux-image-amd64_6.1.170-3_amd64.deb'], _kept
         assert _skipped == 1
 
@@ -2477,8 +2580,9 @@ def test_iso_installer_select_pool_files_uses_debian_version_order():
             with open(os.path.join(_repo, _name), 'w') as fh:
                 fh.write('')
         _kept, _skipped = _select_pool_files(
-            _repo, deb_whitelist={'pkg'},
+            [_repo], deb_whitelist={'pkg'},
         )
+        _kept = [_fn for _, _fn in _kept]
         assert _kept == ['pkg_6.1.170-10_amd64.deb'], _kept
         assert _skipped == 1
 
@@ -2497,7 +2601,8 @@ def test_iso_installer_select_pool_files_legacy_mode_keeps_everything():
         ):
             with open(os.path.join(_repo, _name), 'w') as fh:
                 fh.write('')
-        _kept, _skipped = _select_pool_files(_repo, deb_whitelist=None)
+        _kept, _skipped = _select_pool_files([_repo], deb_whitelist=None)
+        _kept = [_fn for _, _fn in _kept]
         assert sorted(_kept) == [
             'bar-dbgsym_1_amd64.deb', 'baz_1_amd64.udeb',
             'foo_1_amd64.deb', 'random.txt',
@@ -3220,12 +3325,11 @@ def test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from installer_chroot import _resolve_udeb_files
 
-    with tempfile.TemporaryDirectory() as _repo:
-        # Post-segregation layout: installable .udebs live in repo/main/
-        _main = os.path.join(_repo, 'main')
-        os.makedirs(_main, exist_ok=True)
-        # File on disk: binNMU stripped (this is what dpkg-buildpackage emits)
-        _fake_path = os.path.join(_main, 'busybox-udeb_1.35.0-4_amd64.udeb')
+    with tempfile.TemporaryDirectory() as _udeb_dir:
+        # CONF-01 Stage D: _resolve_udeb_files takes the dir HOLDING
+        # udebs directly (was the parent of 'main/' pre-Stage D); the
+        # caller resolves config.dir_repo_main_udeb.
+        _fake_path = os.path.join(_udeb_dir, 'busybox-udeb_1.35.0-4_amd64.udeb')
         with open(_fake_path, 'wb') as fh:
             fh.write(b'')
         # Package record: binNMU preserved (this is what Packages index has)
@@ -3236,7 +3340,7 @@ def test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix():
         )
         class _UdebTree:
             selected_pkgs = {'busybox-udeb': pkg}
-        out = _resolve_udeb_files(_UdebTree(), _repo)
+        out = _resolve_udeb_files(_UdebTree(), _udeb_dir)
         assert out == [_fake_path], out
 
 
@@ -12690,9 +12794,15 @@ def test_cmd_source_repair_writes_pass_when_binaries_present():
             def verify_pkg_artifact(_path, _filename):
                 return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
 
-        # Stub config
+        # Stub config — CONF-01 Stage D: deb_dest_for_filename routes
+        # path lookups via the new nested apt-repo layout.  For this
+        # test we want planted .debs at top-level _repo, so stub returns
+        # _repo for every filename.
         class _Cfg:
             dir_repo = _repo
+            @staticmethod
+            def deb_dest_for_filename(_f):
+                return _repo
 
         # Stub dep tree
         class _Tree:
@@ -12758,7 +12868,10 @@ def test_cmd_source_repair_leaves_fail_result_untouched():
             @staticmethod
             def verify_pkg_artifact(_path, _f):
                 return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
-        class _Cfg: dir_repo = _repo
+        class _Cfg:
+            dir_repo = _repo
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -12806,7 +12919,10 @@ def test_cmd_source_repair_skips_when_binaries_missing():
             @staticmethod
             def verify_pkg_artifact(_path, _f):
                 return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
-        class _Cfg: dir_repo = _repo
+        class _Cfg:
+            dir_repo = _repo
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -12860,7 +12976,10 @@ def test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails():
             @staticmethod
             def verify_pkg_artifact(_path, _f):
                 return (False, 'version-mismatch:X!=Y')
-        class _Cfg: dir_repo = _repo
+        class _Cfg:
+            dir_repo = _repo
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -12911,7 +13030,10 @@ def test_cmd_source_repair_leaves_consistent_pass_alone():
             def is_ar_file(_path): return True
             @staticmethod
             def verify_pkg_artifact(_path, _f): return (True, 'ok')
-        class _Cfg: dir_repo = _repo
+        class _Cfg:
+            dir_repo = _repo
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -12961,7 +13083,10 @@ def test_cmd_source_repair_leaves_tunneled_marker_alone():
             @staticmethod
             def verify_pkg_artifact(_path, _f):
                 return (False, 'should-not-be-called-for-tunneled')
-        class _Cfg: dir_repo = _repo
+        class _Cfg:
+            dir_repo = _repo
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}

@@ -42,6 +42,7 @@ class _ChrootMixin:
     _dir_chroot: str
     _dir_image: str
     _dir_repo: str
+    _dir_repo_main: str   # CONF-01 Stage D — dists/<codename>/main/binary-<arch>/
     _dir_log: str
     _dir_preinstall_patch: str
     _dir_postinstall_patch: str
@@ -885,7 +886,10 @@ class _ChrootMixin:
         removes from emitted .debs).
         """
         file_list = []
-        _main = os.path.join(self._dir_repo, 'main')
+        # CONF-01 Stage D: dir_repo_main is now dists/<codename>/main/
+        # binary-<arch>/, not repo/main/.  Mixin reads it from the
+        # composer (BuildSystem).
+        _main = self._dir_repo_main
         for pkg in pkg_list:
             _filename = os.path.basename(
                 self._dependencytree.selected_pkgs[pkg]['Filename']

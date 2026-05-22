@@ -34,6 +34,7 @@ class _DepDriftMixin:
     # assignment here.
     _dependencytree: 'dependencytree.DependencyTree'
     _dir_repo: str
+    _dir_repo_main: str   # CONF-01 Stage D
     _config: 'utils.BuildConfig'
     strip_build_version: Callable[[str], str]
     normalize_repo_filename: Callable[[str], str]
@@ -84,7 +85,9 @@ class _DepDriftMixin:
             if not _filename:
                 continue
             _filename  = self.normalize_repo_filename(_filename)
-            _deb_path  = os.path.join(self._dir_repo, 'main', _filename)
+            # CONF-01 Stage D: _dir_repo_main is now dists/<codename>/
+            # main/binary-<arch>/, set by buildsystem.py composer.
+            _deb_path  = os.path.join(self._dir_repo_main, _filename)
             if not os.path.exists(_deb_path):
                 continue
             _proc = subprocess.run(

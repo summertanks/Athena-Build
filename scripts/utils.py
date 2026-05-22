@@ -1113,10 +1113,17 @@ class BuildConfig:
     dir_temp: str
     dir_source: str
     dir_repo: str
-    dir_repo_main: str
-    dir_repo_doc: str
-    dir_repo_dbgsym: str
-    dir_repo_tests: str
+    # The dir_repo_* attrs point at the *.deb / *.udeb dirs in the
+    # unified apt-repo layout (CONF-01 Stage D, 2026-05-22).  Each
+    # binary-<arch>/ subdir is also the location of its corresponding
+    # Packages index (co-located per Q1).  See
+    # docs/plans/conf-01-repo-layout-migration.md.
+    dir_repo_main: str           # dists/<codename>/main/binary-<arch>/
+    dir_repo_main_udeb: str      # dists/<codename>/main/debian-installer/binary-<arch>/
+    dir_repo_main_source: str    # dists/<codename>/main/source/  (.dsc, .tar.*)
+    dir_repo_doc: str            # dists/<codename>/doc/binary-<arch>/
+    dir_repo_dbgsym: str         # dists/<codename>-debug/main/binary-<arch>/   (Q2 — debug suite)
+    dir_repo_tests: str          # dists/<codename>/tests/binary-<arch>/
     dir_config: str
     dir_patch: str
     dir_gnupg: str
@@ -1318,14 +1325,40 @@ class BuildConfig:
             self.dir_temp = os.path.join(self.working_dir, config_parser.get('Directories', 'Temp'))
             self.dir_source = os.path.join(self.working_dir, config_parser.get('Directories', 'Source'))
             self.dir_repo = os.path.join(self.working_dir, config_parser.get('Directories', 'Repo'))
-            # repo/ is segregated by package role; see classify_repo_subdir.
-            # `-dev` packages live in main (build-essential, gcc-12, g++-12
-            # hard-depend on them at runtime).  All subdirs are mkdir+
-            # writability checked below.
-            self.dir_repo_main   = os.path.join(self.dir_repo, 'main')
-            self.dir_repo_doc    = os.path.join(self.dir_repo, 'doc')
-            self.dir_repo_dbgsym = os.path.join(self.dir_repo, 'dbgsym')
-            self.dir_repo_tests  = os.path.join(self.dir_repo, 'tests')
+            # repo/ uses the apt-conformant unified layout (CONF-01
+            # Stage D, 2026-05-22).  classify_repo_subdir's labels
+            # ('main' / 'doc' / 'dbgsym' / 'tests') still apply but now
+            # map to nested paths:
+            #   main   → dists/<codename>/main/binary-<arch>/
+            #   doc    → dists/<codename>/doc/binary-<arch>/
+            #   tests  → dists/<codename>/tests/binary-<arch>/
+            #   dbgsym → dists/<codename>-debug/main/binary-<arch>/
+            #            (Q2 — separate debug suite per Debian convention)
+            # Plus two siblings of main:
+            #   main udebs   → dists/<codename>/main/debian-installer/binary-<arch>/
+            #   main sources → dists/<codename>/main/source/  (.dsc, .tar.*)
+            # All dirs are mkdir+writability checked below.
+            _codename = self.build_codename if hasattr(self, 'build_codename') else 'thor'
+            # Strip stray surrounding quotes (build.conf VERSION="0.1" idiom)
+            _codename = _codename.strip('"').strip("'")
+            self._codename_for_repo = _codename
+            self.dir_repo_main = os.path.join(
+                self.dir_repo, 'dists', _codename, 'main',
+                f'binary-{self.arch}')
+            self.dir_repo_main_udeb = os.path.join(
+                self.dir_repo, 'dists', _codename, 'main',
+                'debian-installer', f'binary-{self.arch}')
+            self.dir_repo_main_source = os.path.join(
+                self.dir_repo, 'dists', _codename, 'main', 'source')
+            self.dir_repo_doc = os.path.join(
+                self.dir_repo, 'dists', _codename, 'doc',
+                f'binary-{self.arch}')
+            self.dir_repo_dbgsym = os.path.join(
+                self.dir_repo, 'dists', f'{_codename}-debug', 'main',
+                f'binary-{self.arch}')
+            self.dir_repo_tests = os.path.join(
+                self.dir_repo, 'dists', _codename, 'tests',
+                f'binary-{self.arch}')
             self.dir_config = os.path.join(self.working_dir, config_parser.get('Directories', 'Config'))
             self.dir_image = os.path.join(self.working_dir, config_parser.get('Directories', 'Image'))
             # The [Directories] Chroot value is the PARENT directory holding
@@ -1380,8 +1413,9 @@ class BuildConfig:
             pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_repo).mkdir(parents=True, exist_ok=True)
             for _sub in (
-                self.dir_repo_main, self.dir_repo_doc,
-                self.dir_repo_dbgsym, self.dir_repo_tests,
+                self.dir_repo_main, self.dir_repo_main_udeb,
+                self.dir_repo_main_source,
+                self.dir_repo_doc, self.dir_repo_dbgsym, self.dir_repo_tests,
             ):
                 pathlib.Path(_sub).mkdir(parents=True, exist_ok=True)
 
@@ -1433,6 +1467,62 @@ class BuildConfig:
             bool: True if config is valid, False otherwise
         """
         return self._config_valid
+
+    def deb_dir_for(self, label: str) -> str:
+        """Map classify_repo_subdir output (`main`/`doc`/`dbgsym`/`tests`)
+        to the on-disk dir where that role's regular .debs live in the
+        CONF-01 Stage D unified apt-repo layout.
+
+        Replaces the pre-CONF-01 idiom of
+        `os.path.join(config.dir_repo, label)` — which constructed
+        flat paths like repo/main/.  Now resolves via the suite-
+        component-arch nesting (e.g. main → dists/<codename>/main/
+        binary-<arch>/, dbgsym → dists/<codename>-debug/main/
+        binary-<arch>/).
+        """
+        _mapping = {
+            'main':   self.dir_repo_main,
+            'doc':    self.dir_repo_doc,
+            'dbgsym': self.dir_repo_dbgsym,
+            'tests':  self.dir_repo_tests,
+        }
+        if label not in _mapping:
+            raise ValueError(
+                f"unknown repo subdir label: {label!r} "
+                f"(expected one of {sorted(_mapping)})"
+            )
+        return _mapping[label]
+
+    def deb_dest_for_filename(self, filename: str) -> str:
+        """Compose classify_repo_subdir + deb_dir_for, with the udeb
+        special-case (udebs route to main's debian-installer/ sibling,
+        not main/binary-<arch>/).
+
+        The one helper callers (buildcontainer's _segregate, audits,
+        cleanups) should use to find "where does THIS .deb/.udeb go?"
+        — eliminates path-construction at the call site.
+        """
+        _label = classify_repo_subdir(filename)
+        if filename.endswith('.udeb') and _label == 'main':
+            return self.dir_repo_main_udeb
+        return self.deb_dir_for(_label)
+
+    def all_deb_dirs(self) -> 'list[str]':
+        """All on-disk dirs that hold .deb / .udeb files.  For repo
+        walks (cmd_strip_repo, cmd_package_cleanup, cmd_audit_nmu,
+        etc.) that need to find every binary artifact.
+
+        Replaces the pre-CONF-01 idiom of `for sub in _REPO_SUBDIRS:
+        join(dir_repo, sub)`.  Order is stable (binaries first, udebs
+        next, then doc/dbgsym/tests in alphabetical order).
+        """
+        return [
+            self.dir_repo_main,
+            self.dir_repo_main_udeb,
+            self.dir_repo_doc,
+            self.dir_repo_dbgsym,
+            self.dir_repo_tests,
+        ]
     
     def error(self) -> str:
         """
