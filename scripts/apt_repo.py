@@ -228,25 +228,43 @@ def generate_repo_indexes(
             f"components={_components})..."
         )
 
+        # Track which components actually had content — only these
+        # get listed in the suite's top-level Release Components: field
+        # (apt rejects the repo if Components: lists a component with
+        # no corresponding indexes).  Components with missing or empty
+        # binary-<arch>/ dirs are SKIPPED with INFO — not an error.
+        # Legitimate cases: -debug suite when no dbgsyms were built
+        # (nodoc/nostrip profiles often skip dbgsyms entirely); doc
+        # component when no -doc packages exist yet; etc.
+        _populated_components: 'list[str]' = []
+
         for _comp in _components:
             _binary_rel = f'dists/{_suite}/{_comp}/binary-{arch}'
             _binary_abs = os.path.join(repo_root, _binary_rel)
 
-            # Directory must exist (Stage C migration creates these).
-            # Fail clean if not — the message points at the missing dir
-            # so the operator knows EXACTLY what's needed.
+            # Missing directory → no content for this (suite, component)
+            # pair — skip cleanly with INFO.  Don't fail the whole
+            # operation just because one component is empty.
             if not os.path.isdir(_binary_abs):
                 tui.console.print(
-                    f"ERROR: {_binary_abs} missing — run "
-                    f"`package migrate_repo_layout` (Stage C) first, "
-                    f"or check that source build has emitted any .debs "
-                    f"for component {_comp}"
+                    f"  → {_suite}/{_comp}: no binary-{arch}/ dir, "
+                    f"skipping (no content)"
                 )
-                logger.error(
-                    f"generate_repo_indexes: {_binary_abs} absent for "
-                    f"suite={_suite} comp={_comp}"
+                continue
+
+            # Empty directory → same handling.  An empty Packages
+            # index is technically valid but it's clearer to just
+            # skip the component than to ship an empty one.
+            _deb_count = sum(
+                1 for _f in os.listdir(_binary_abs)
+                if _f.endswith('.deb')
+            )
+            if _deb_count == 0:
+                tui.console.print(
+                    f"  → {_suite}/{_comp}: no .debs in {_binary_rel}, "
+                    f"skipping (empty)"
                 )
-                return False
+                continue
 
             # Regular .deb Packages index.  cwd=repo_root so Filename:
             # records carry the full relative path (apt resolves them
@@ -259,6 +277,7 @@ def generate_repo_indexes(
             if not _write_subdir_release(
                     _binary_abs, _suite, _codename, _comp, arch, password):
                 return False
+            _populated_components.append(_comp)
 
             # Optional udeb subdir.  Only relevant for main of the
             # primary suite (thor); -debug suites and doc/tests
@@ -290,13 +309,25 @@ def generate_repo_indexes(
                         password):
                     return False
 
+        # Suite has zero populated components → skip the suite entirely.
+        # Don't generate a top-level Release for an empty suite; apt
+        # would refuse it for having Components: with no targets.
+        if not _populated_components:
+            tui.console.print(
+                f"  → dists/{_suite}/: no populated components, "
+                f"skipping suite entirely",
+            )
+            continue
+
         # Top-level dists/<suite>/Release.  apt-ftparchive walks the
-        # sub-tree and hashes every Packages/Sources file.
+        # sub-tree and hashes every Packages/Sources file.  Components:
+        # field lists ONLY the components we actually populated above
+        # (apt rejects the repo if Components: names a missing dir).
         _top_release = os.path.join(repo_root, 'dists', _suite, 'Release')
         if not _generate_top_release(
                 repo_root, _suite, _codename, version,
                 _top_release, password,
-                components=list(_components),
+                components=_populated_components,
                 description=_desc):
             return False
 
@@ -308,7 +339,7 @@ def generate_repo_indexes(
 
         tui.console.print(
             f"  → dists/{_suite}/ indexed (components: "
-            f"{', '.join(_components)})",
+            f"{', '.join(_populated_components)})",
             tui.COLOR_HIGHLIGHT,
         )
 
