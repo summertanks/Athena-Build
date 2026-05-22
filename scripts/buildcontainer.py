@@ -507,11 +507,13 @@ class BuildContainer:
                 #    dbgsym/tests).  See utils.classify_repo_subdir for
                 #    the suffix rule.  Done BEFORE strip so the strip's
                 #    in-place rewrites land at the final location.
-                self._segregate_built_artifacts(src_pkg)
+                #    Returns post-move absolute paths — fed to strip so
+                #    we don't rescan the whole repo (STA-19).
+                _emitted = self._segregate_built_artifacts(src_pkg)
                 # 2. Strip NMU/binNMU/backport suffix from the emitted
                 #    .debs (now in their subdirs).  Per-file decision;
                 #    only re-packs when residue exists.
-                self._strip_nmu_from_built_artifacts(src_pkg)
+                self._strip_nmu_from_built_artifacts(src_pkg, _emitted)
 
             return _build_result
 
@@ -540,47 +542,32 @@ class BuildContainer:
                         f"for {src_pkg.package}: {e}"
                     )
 
-    def _strip_nmu_from_built_artifacts(self, src_pkg) -> None:
-        """Walk repo/ for .deb/.udeb files whose Package: field belongs
-        to this source build and run utils.strip_nmu_from_deb on each.
+    def _strip_nmu_from_built_artifacts(self, src_pkg,
+                                          built_files: 'list[str]') -> None:
+        """Run utils.strip_nmu_from_deb on every just-emitted artifact.
 
-        Identification: read each file's Source: field via DebFile; match
-        against src_pkg.package.  Falls back to filename-prefix match
-        when Source: is absent (single-binary sources omit Source when
-        Source == Package).
+        `built_files` is the list of post-segregate absolute paths
+        returned by _segregate_built_artifacts — the files this source
+        build just produced.  We trust that list (we own the move that
+        created it) so no per-file Source-field check is needed.
+
+        Pre-STA-19 (fixed 2026-05-22): this method walked all of
+        repo/main + doc + dbgsym + tests, opened every .deb with
+        DebFile, and parsed each one's control to filter by Source:
+        field.  On a ~4500-pkg repo that was 4500 fork+exec+tar-extract
+        cycles per source build — a 2-3 minute wall-time stall (CPU +
+        I/O saturation) on every successful build, even tiny ones like
+        athena-installer-data which emit a single udeb.
 
         Failures are logged but don't propagate — strip is best-effort
         normalisation; a stripped failure leaves the .deb at upstream-
         layered version, surfaced later by `package audit_nmu`.
         """
-        from debian.debfile import DebFile
-        _src_name = src_pkg.package
-        # Post-segregate, artifacts live in subdirs.  Walk all of them.
-        _files: 'list[str]' = []
-        for _sub in ('main', 'doc', 'dbgsym', 'tests'):
-            _sub_path = os.path.join(self.repo_path, _sub)
-            try:
-                for _f in os.listdir(_sub_path):
-                    if _f.endswith('.deb') or _f.endswith('.udeb'):
-                        _files.append(os.path.join(_sub, _f))
-            except OSError:
-                continue
+        if not built_files:
+            return
         _n_rewritten = 0
-        for _f in _files:
-            _path = os.path.join(self.repo_path, _f)
-            # Quick filter by control's Source: field.  Some binaries
-            # in repo/ come from other source pkgs and shouldn't be
-            # touched here — they'll be stripped when their own source
-            # builds (or by the one-time `package strip` backfill).
-            try:
-                with DebFile(_path) as _deb:
-                    _src_field = (_deb.control.debcontrol().get('Source') or '').strip()
-                    _pkg_field = (_deb.control.debcontrol().get('Package') or '').strip()
-            except Exception:
-                continue
-            _origin = _src_field.split(' ', 1)[0].strip() if _src_field else _pkg_field
-            if _origin != _src_name:
-                continue
+        for _path in built_files:
+            _f = os.path.basename(_path)
             try:
                 _r = utils.strip_nmu_from_deb(_path)
                 if _r['status'] == 'rewritten':
@@ -595,10 +582,10 @@ class BuildContainer:
         if _n_rewritten:
             logger.info(
                 f"strip_nmu: normalised {_n_rewritten} artifact(s) "
-                f"from source {_src_name}"
+                f"from source {src_pkg.package}"
             )
 
-    def _segregate_built_artifacts(self, src_pkg) -> None:
+    def _segregate_built_artifacts(self, src_pkg) -> 'list[str]':
         """After dpkg-buildpackage's `cp *.deb /repo/`, the binaries
         land at repo/ ROOT (not in any subdir).  This pass classifies
         each by name and moves it to the right subdir per
@@ -611,9 +598,14 @@ class BuildContainer:
           tests   -test / -tests side artifacts
 
         Operates ONLY on the just-emitted files (those at repo/ root) —
-        existing subdir contents are left alone.  Skips when no files
-        at root (steady state).
+        existing subdir contents are left alone.  Returns the list of
+        post-move absolute paths so the caller
+        (_strip_nmu_from_built_artifacts) can iterate only the
+        just-emitted files (STA-19 fix — was rescanning the whole
+        repo + opening every .deb with DebFile to identify them).
+        Returns empty list on no-files-at-root (tunneled build).
         """
+        _moved_paths: 'list[str]' = []
         try:
             _files_at_root = [
                 _f for _f in os.listdir(self.repo_path)
@@ -624,10 +616,9 @@ class BuildContainer:
             logger.warning(
                 f"segregate: cannot list {self.repo_path}: {e}"
             )
-            return
+            return _moved_paths
         if not _files_at_root:
-            return
-        _moved = 0
+            return _moved_paths
         for _f in _files_at_root:
             _sub = utils.classify_repo_subdir(_f)
             _src = os.path.join(self.repo_path, _f)
@@ -640,16 +631,17 @@ class BuildContainer:
                     # filename.  Newer rebuild wins.
                     os.remove(_dst)
                 os.rename(_src, _dst)
-                _moved += 1
+                _moved_paths.append(_dst)
             except OSError as e:
                 logger.warning(
                     f"segregate: failed to move {_f} → {_sub}/: {e}"
                 )
-        if _moved:
+        if _moved_paths:
             logger.info(
-                f"segregate: {_moved} artifact(s) from {src_pkg.package} "
-                f"placed in repo/ subdirs"
+                f"segregate: {len(_moved_paths)} artifact(s) from "
+                f"{src_pkg.package} placed in repo/ subdirs"
             )
+        return _moved_paths
 
     def check_build(self, src_pkg: Source,
                     expected_files: 'list[str]') -> bool:

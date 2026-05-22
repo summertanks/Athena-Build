@@ -3254,7 +3254,6 @@ def test_installer_grub_cfg_has_preseed_kernel_cmdline():
     assert 'preseed/file=/preseed.cfg' in _content, _content
 
 
-
 def test_buildconfig_chroot_paths_under_shared_buildroot_parent():
     """Phase 5 (revised 2026-05-11): the [Directories] Chroot value is
     a PARENT dir holding both child chroots — `<parent>/live` and
@@ -4938,15 +4937,85 @@ def test_buildcontainer_calls_strip_post_build():
     assert re.search(
         r'def _strip_nmu_from_built_artifacts\(self', _body), (
         "BuildContainer needs a _strip_nmu_from_built_artifacts method "
-        "that walks repo/ for .debs of the just-built source")
-    # Pin: build() calls it on the success path
+        "that runs strip_nmu_from_deb on each just-built artifact")
+    # Pin: build() calls it on the success path, threading the file
+    # list returned by _segregate_built_artifacts (STA-19 — was rescanning
+    # the whole repo before, now only touches the just-emitted files).
     _m = re.search(
         r'def build\(self, src_pkg.*?(?=\n    def )',
         _body, re.DOTALL)
     assert _m, "BuildContainer.build not found"
-    assert 'self._strip_nmu_from_built_artifacts(src_pkg)' in _m.group(0), (
-        "BuildContainer.build must call self._strip_nmu_from_built_artifacts "
-        "on the success path so every fresh .deb enters repo/ normalised")
+    _build_body = _m.group(0)
+    assert 'self._strip_nmu_from_built_artifacts(src_pkg, _emitted)' in _build_body, (
+        "BuildContainer.build must call _strip_nmu_from_built_artifacts "
+        "with the file list returned by _segregate_built_artifacts — "
+        "REGRESSION to pre-STA-19 if the second arg is missing (would "
+        "re-introduce the 2-3 minute post-build stall)")
+    assert '_emitted = self._segregate_built_artifacts(src_pkg)' in _build_body, (
+        "_segregate_built_artifacts must return its moved-files list "
+        "so strip_nmu can iterate only those — REGRESSION to pre-STA-19 "
+        "if assignment is dropped")
+
+
+def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
+    """STA-19 anti-regression: _strip_nmu_from_built_artifacts must
+    NOT walk repo/ subdirs nor open .debs to filter by Source field.
+    Both were O(N) over the whole repo and caused a 2-3 minute
+    post-build stall on every source build (CPU + I/O saturation
+    from DebFile-opening ~4500 files to find the 1-50 we care about).
+
+    Pin via code inspection — function body must not contain the
+    tell-tale walk markers or DebFile import.  If a future refactor
+    legitimately needs to re-introduce a walk (unlikely), it should
+    do so behind a guard that proves the just-emitted list isn't
+    enough — and update this test accordingly."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def _strip_nmu_from_built_artifacts\(.*?(?=\n    def )',
+        _body, re.DOTALL)
+    assert _m, "_strip_nmu_from_built_artifacts not found"
+    _fn_body = _m.group(0)
+    # Strip docstrings + comments so anti-pattern checks don't match
+    # the explanatory text describing the OLD bug.  Crude but adequate
+    # for this purpose — we want to flag CODE that imports/uses the
+    # anti-patterns, not prose that mentions them.
+    _code_only = re.sub(r'""".*?"""', '', _fn_body, flags=re.DOTALL)
+    _code_only = re.sub(r"'''.*?'''", '', _code_only, flags=re.DOTALL)
+    _code_only = '\n'.join(
+        _ln for _ln in _code_only.splitlines()
+        if not _ln.lstrip().startswith('#')
+    )
+    # The anti-patterns we removed:
+    assert 'DebFile(' not in _code_only and 'import DebFile' not in _code_only, (
+        "STA-19 REGRESSION: _strip_nmu_from_built_artifacts opens "
+        "files with DebFile — the slow code path (4500 fork+exec+tar "
+        "cycles per build) we explicitly removed.  The just-emitted "
+        "file list from segregate already identifies what to touch."
+    )
+    assert 'os.listdir' not in _code_only, (
+        "STA-19 REGRESSION: _strip_nmu_from_built_artifacts walks the "
+        "repo via os.listdir — the slow code path.  Iterate the "
+        "built_files arg directly."
+    )
+    # Hard-coded subdir-name iteration is the tell-tale repo-walk
+    # pattern: `for _sub in ('main', 'doc', ...)`.  Looking at the
+    # tuple-literal form catches it without flagging the prose that
+    # mentions the subdirs in passing.
+    assert not re.search(r"for\s+\w+\s+in\s+\(\s*'main'", _code_only), (
+        "STA-19 REGRESSION: hard-coded subdir-name iteration suggests "
+        "a repo walk has been re-introduced.  Iterate built_files only."
+    )
+    # And the new signature must accept the file list.
+    assert re.search(
+        r'def _strip_nmu_from_built_artifacts\(self,\s*src_pkg,\s*\n?\s*built_files',
+        _fn_body
+    ), (
+        "_strip_nmu_from_built_artifacts must accept `built_files` as "
+        "its second positional arg (the list from segregate)."
+    )
 
 
 def test_cmd_audit_nmu_registered_in_package_dispatcher():
@@ -7265,7 +7334,6 @@ def test_parse_pkg_list_group_meta_flat_file_returns_base_only():
         assert meta == {'base': {}}
     finally:
         os.unlink(_path)
-
 
 
 def test_installer_list_includes_athena_pkgsel():
