@@ -5352,6 +5352,185 @@ def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# COMP-14 — grub-mkrescue runs inside the BuildContainer (bookworm GRUB
+# toolchain instead of build host's).  Helper method + call-site wiring.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_buildcontainer_run_grub_mkrescue_constructs_correct_docker_call():
+    """COMP-14: BuildContainer.run_grub_mkrescue must invoke
+    docker.containers.run with the right image, command, and volume
+    mounts so the produced ISO embeds bookworm's GRUB toolchain.
+
+    Pin the load-bearing pieces of the docker invocation:
+      - apt-get update + install of grub-common + grub-pc-bin +
+        grub-efi-amd64-bin + xorriso + mtools + dosfstools
+      - grub-mkrescue with -o /output/<basename> /staging
+      - chown back to host uid:gid so the ISO is operator-readable
+      - staging dir mounted at /staging
+      - output dir (parent of iso_path) mounted at /output
+    """
+    import sys
+    from unittest.mock import MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+
+    # Build a minimal BuildContainer without going through __init__ (which
+    # touches docker + snapshot + apt).  Inject only the attributes
+    # run_grub_mkrescue reads.
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc._image_tag = 'athenalinux:build-test'
+    _bc.mirrors = []   # empty → empty sources.list; OK for argv-shape pin
+    _bc.client = MagicMock()
+    _fake_container = MagicMock()
+    _fake_container.short_id = 'fakecid'
+    _fake_container.wait.return_value = {'StatusCode': 0}
+    _fake_container.logs.return_value = b'log line'
+    _bc.client.containers.run.return_value = _fake_container
+
+    _ok, _stdout, _stderr = _bc.run_grub_mkrescue(
+        '/some/staging', '/host/image/out.iso', password='unused',
+    )
+    assert _ok is True, (_ok, _stdout, _stderr)
+
+    # docker.containers.run was called once with our expected args
+    _call = _bc.client.containers.run.call_args
+    assert _call is not None, 'docker.containers.run was never called'
+    _args, _kwargs = _call.args, _call.kwargs
+    # image is positional arg 0; bash command via kwarg
+    assert _args[0] == 'athenalinux:build-test', _args
+    _cmd_arr = _kwargs.get('command')
+    assert _cmd_arr and _cmd_arr[:2] == ['/bin/bash', '-c'], _cmd_arr
+    _cmd_str = _cmd_arr[2]
+    # apt-install of the GRUB toolchain
+    for _pkg in ('grub-common', 'grub-pc-bin', 'grub-efi-amd64-bin',
+                 'xorriso', 'mtools', 'dosfstools'):
+        assert _pkg in _cmd_str, (
+            f"missing {_pkg} in apt-install — broken COMP-14 toolchain: "
+            f"{_cmd_str!r}"
+        )
+    # grub-mkrescue with the right output path + staging
+    assert 'grub-mkrescue -o /output/out.iso /staging' in _cmd_str, _cmd_str
+    # chown back to host uid:gid (so resulting ISO is operator-readable)
+    assert f'chown {os.getuid()}:{os.getgid()}' in _cmd_str, _cmd_str
+
+    # Volume mounts: staging → /staging, parent(iso) → /output
+    _vol = _kwargs.get('volumes')
+    assert _vol == {
+        '/some/staging': {'bind': '/staging', 'mode': 'rw'},
+        '/host/image':   {'bind': '/output',  'mode': 'rw'},
+    }, _vol
+
+    # Container is removed (no leak — same lifecycle as build())
+    _fake_container.remove.assert_called_once_with(force=True)
+
+
+def test_buildcontainer_run_grub_mkrescue_propagates_failure():
+    """Non-zero exit from docker container → (False, stdout, stderr)."""
+    import sys
+    from unittest.mock import MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc._image_tag = 'athenalinux:build-test'
+    _bc.mirrors = []
+    _bc.client = MagicMock()
+    _fake_container = MagicMock()
+    _fake_container.short_id = 'failcid'
+    _fake_container.wait.return_value = {'StatusCode': 42}
+    _fake_container.logs.return_value = b'grub-mkrescue: error: foo'
+    _bc.client.containers.run.return_value = _fake_container
+
+    _ok, _stdout, _stderr = _bc.run_grub_mkrescue(
+        '/some/staging', '/host/image/out.iso', password='unused',
+    )
+    assert _ok is False
+    # Container still removed on failure
+    _fake_container.remove.assert_called_once_with(force=True)
+
+
+def test_iso_installer_run_grub_mkrescue_routes_through_container():
+    """COMP-14: iso_installer._run_grub_mkrescue must delegate to
+    container.run_grub_mkrescue, NOT directly shell out to bare
+    `grub-mkrescue` (which would re-introduce host-grub contamination).
+    Pin via code inspection so a future refactor can't silently
+    regress."""
+    _src = os.path.join(_ROOT, 'scripts', 'iso_installer.py')
+    with open(_src) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def _run_grub_mkrescue\(.*?(?=\n(?:def |\Z))',
+        _body, re.DOTALL,
+    )
+    assert _m, '_run_grub_mkrescue not found'
+    _fn = _m.group(0)
+    assert 'container.run_grub_mkrescue' in _fn, (
+        "iso_installer._run_grub_mkrescue must delegate to "
+        "container.run_grub_mkrescue — REGRESSION to pre-COMP-14 "
+        "if it shells out to bare grub-mkrescue.  Build host's grub "
+        "would leak back into the ISO bootloader."
+    )
+    # Strip docstrings before checking the no-bare-subprocess assertion
+    _fn_code = re.sub(r'""".*?"""', '', _fn, flags=re.DOTALL)
+    _fn_code = re.sub(r"'''.*?'''", '', _fn_code, flags=re.DOTALL)
+    assert "['grub-mkrescue'" not in _fn_code and '["grub-mkrescue"' not in _fn_code, (
+        "REGRESSION: iso_installer._run_grub_mkrescue is shelling out "
+        "to bare `grub-mkrescue` again — defeats COMP-14"
+    )
+
+
+def test_iso_py_build_iso_routes_through_container():
+    """COMP-14: scripts/iso.py:build_iso must delegate to
+    container.run_grub_mkrescue, not shell out to bare grub-mkrescue.
+    Same anti-regression as the installer-ISO side."""
+    _src = os.path.join(_ROOT, 'scripts', 'iso.py')
+    with open(_src) as fh:
+        _body = fh.read()
+    assert 'container.run_grub_mkrescue' in _body, (
+        "scripts/iso.py:build_iso must delegate to "
+        "container.run_grub_mkrescue — REGRESSION to pre-COMP-14 if "
+        "it shells out to bare grub-mkrescue."
+    )
+    import re
+    _code = re.sub(r'""".*?"""', '', _body, flags=re.DOTALL)
+    _code = re.sub(r"'''.*?'''", '', _code, flags=re.DOTALL)
+    _code = '\n'.join(
+        _ln for _ln in _code.splitlines()
+        if not _ln.lstrip().startswith('#')
+    )
+    assert "['grub-mkrescue'" not in _code and '["grub-mkrescue"' not in _code, (
+        "REGRESSION: scripts/iso.py is shelling out to bare "
+        "`grub-mkrescue` again — defeats COMP-14"
+    )
+
+
+def test_build_py_threads_container_into_iso_callsites():
+    """COMP-14: build.py's cmd_build_iso_live + cmd_build_iso_installer
+    must pass self.container through to the ISO builders.  Pin via
+    code inspection so the wiring can't silently drop."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    # Live ISO: build_system.build_iso(container=self.container)
+    assert 'build_system.build_iso(container=self.container)' in _body, (
+        "cmd_build_iso_live must pass container=self.container to "
+        "build_iso — REGRESSION to pre-COMP-14 (host-grub leak) if "
+        "the kwarg is dropped"
+    )
+    # Installer ISO: requires both the call name AND the kwarg
+    # somewhere — count appearances of `container=self.container` to
+    # confirm both callsites are wired.
+    _calls = _body.count('container=self.container')
+    assert _calls >= 2, (
+        f"expected >=2 `container=self.container` (one each for live + "
+        f"installer ISO builds), found {_calls}.  REGRESSION to "
+        f"pre-COMP-14 if either kwarg is dropped"
+    )
+
+
 def test_cmd_audit_nmu_registered_in_package_dispatcher():
     """`package audit_nmu` must be wired into cmd_package's dispatch."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')

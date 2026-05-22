@@ -55,7 +55,7 @@ class _IsoMixin:
     _password: str
     _config: 'BuildConfig'
 
-    def build_iso(self) -> bool:
+    def build_iso(self, container=None) -> bool:
         """Create a bootable hybrid BIOS/EFI ISO from the assembled chroot.
 
         Steps:
@@ -196,33 +196,37 @@ class _IsoMixin:
         tui.console.print(f"squashfs created: {_sq_mb} MB")
 
         # ── Step 6: run grub-mkrescue ─────────────────────────────────────────
-        # grub-mkrescue produces a hybrid image bootable on BIOS and UEFI
-        # systems.  It requires grub-pc-bin, grub-efi-amd64-bin, and xorriso
-        # to be installed on the host.
-        #
-        # KNOWN LIMITATION (COMP-14): the host's grub-mkrescue is what's
-        # invoked here, so the build host's GRUB version embeds into the
-        # ISO's bootloader.  See iso_installer.py:_run_grub_mkrescue
-        # docstring for the deeper investigation.  Proper fix needs
-        # bind-mount or BuildContainer; tracked in COMP-14.
+        # COMP-14 fix path (b): run grub-mkrescue inside the build
+        # container so the ISO embeds bookworm's GRUB toolchain instead
+        # of the host's.  Eliminates the "host runs trixie → ISO
+        # bootloader self-reports 2.12-9+deb13u1" leakage path.
         _iso_name   = f"athena-{_version}-amd64.iso"
         _iso_path   = os.path.join(self._dir_image, _iso_name)
 
-        tui.console.print("Running grub-mkrescue...")
-        # Subprocess transcript routed through logger.debug — see comment
-        # above the mksquashfs invocation.
-        _proc = subprocess.run(
-            ['grub-mkrescue', '-o', _iso_path, _staging],
-            capture_output=True, text=True
+        if container is None:
+            tui.console.print(
+                "ERROR: grub-mkrescue requires the build container "
+                "(run `cache build` first to initialise it)"
+            )
+            logger.error("build_iso: container is None")
+            return False
+
+        tui.console.print(
+            "Running grub-mkrescue inside build container "
+            "(bookworm GRUB toolchain — see COMP-14)..."
         )
-        for _line in _proc.stdout.splitlines():
+        _ok, _stdout, _stderr = container.run_grub_mkrescue(
+            _staging, _iso_path, self._password,
+        )
+        for _line in _stdout.splitlines():
             logger.debug(_line)
-        for _line in _proc.stderr.splitlines():
+        for _line in _stderr.splitlines():
             logger.debug(_line)
 
-        if _proc.returncode != 0:
+        if not _ok:
             tui.console.print("ERROR: grub-mkrescue failed — see unified run log")
-            logger.error(f"build_iso: grub-mkrescue exited {_proc.returncode}")
+            _tail = _stderr.strip().splitlines()[-3:] if _stderr.strip() else []
+            logger.error(f"build_iso: grub-mkrescue failed; stderr_tail={_tail}")
             return False
 
         _iso_mb = os.path.getsize(_iso_path) // (2 ** 20)

@@ -542,6 +542,141 @@ class BuildContainer:
                         f"for {src_pkg.package}: {e}"
                     )
 
+    def run_grub_mkrescue(self, staging_dir: str, output_iso: str,
+                            password: str) -> 'tuple[bool, str, str]':
+        """Run grub-mkrescue inside the build container so the produced
+        ISO embeds BOOKWORM's GRUB toolchain instead of the host's.
+
+        COMP-14 fix path (b).  Eliminates host-GRUB contamination when
+        the build host runs a non-bookworm release (e.g. trixie ships
+        GRUB 2.12 vs our pinned 2.06).  The container's apt is already
+        pinned to OUR snapshot (see self.mirrors), so
+        `apt-get install grub-{common,pc-bin,efi-amd64-bin}` resolves
+        to the bookworm versions in the snapshot.  grub-mkrescue then
+        produces a hybrid BIOS+EFI image using OUR toolchain, with no
+        leakage of the host's GRUB into the produced ISO's bootloader.
+
+        Args:
+            staging_dir: ISO source tree (boot/grub/grub.cfg + assets
+                         + pool/ + .disk/).  Mounted into the container
+                         at /staging.
+            output_iso:  Output ISO path on the host.  Its parent dir
+                         is mounted at /output rw; grub-mkrescue
+                         writes the file there.  Resulting file's
+                         owner is normalised back to the invoking
+                         host UID via `sudo chown` (grub-mkrescue runs
+                         as root inside the container to read any
+                         root-owned files in /staging).
+            password:    Host sudo password — currently unused inside
+                         this method (container has passwordless sudo
+                         per Dockerfile) but accepted for symmetry
+                         with other ISO helpers that DO need it.
+
+        Returns (ok, stdout, stderr) for the caller to log and surface.
+        """
+        del password   # noqa: F841 — see Args.password rationale
+
+        # Path-prep + cmd construction
+        _output_dir   = os.path.dirname(os.path.abspath(output_iso))
+        _iso_basename = os.path.basename(output_iso)
+
+        # Pin container apt to the same snapshot the cache was built
+        # from — re-uses self.mirrors which already carry the snapshot
+        # timestamp (set during BuildContainer.__init__).  This is how
+        # `apt-get install grub-{common,pc-bin,efi-amd64-bin}` resolves
+        # to OUR 2.06 binaries instead of whatever bookworm-archive is
+        # currently serving (which might have drifted post-snapshot).
+        _apt_sources = ''.join(
+            f'deb [check-valid-until=no] {_m.url} {_m.suite} {_m.component}\n'
+            for _m in self.mirrors
+        )
+        _write_sources = (
+            f"sudo tee /etc/apt/sources.list >/dev/null <<'EOF'\n"
+            f"{_apt_sources}EOF\n"
+        )
+
+        # apt-get install: GRUB toolchain (mkrescue, mkimage, modules
+        # for BIOS + EFI) plus the boot-image assemblers grub-mkrescue
+        # invokes internally — xorriso for the ISO, mtools + dosfstools
+        # for the FAT-formatted EFI System Partition image.
+        _apt_install = (
+            'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && '
+            'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y '
+            'grub-common grub-pc-bin grub-efi-amd64-bin '
+            'xorriso mtools dosfstools'
+        )
+
+        # grub-mkrescue runs as root: /staging may carry root-owned
+        # files from sudo cp steps on the host (kernel, initrd,
+        # pool/*.deb extracted from chroot tarballs).  The container's
+        # athena user can't read those even though the mount is rw.
+        _mkrescue = f'sudo grub-mkrescue -o /output/{_iso_basename} /staging'
+
+        # Normalise the produced ISO's ownership back to the operator's
+        # uid so they can read/move it without sudo.  os.getuid/getgid
+        # reflects whoever invoked build-system.sh; container's root
+        # (uid 0 on host) writes the file, then chowns it.
+        _chown_host = (
+            f'sudo chown {os.getuid()}:{os.getgid()} /output/{_iso_basename}'
+        )
+
+        # set -e — `&&`-chain semantics; any step's failure aborts.
+        cmd_str = (
+            'set -e; '
+            f'{_write_sources}'
+            f'{_apt_install} && '
+            f'{_mkrescue} && '
+            f'{_chown_host}'
+        )
+
+        # Same init + finally cleanup pattern as build() for container
+        # lifecycle.  Container leaks on KeyboardInterrupt would
+        # accumulate in `docker ps -a` between runs otherwise.
+        container = None
+        try:
+            assert self.client is not None
+            container = self.client.containers.run(
+                self._image_tag,
+                command=['/bin/bash', '-c', cmd_str],
+                detach=True, auto_remove=False,
+                volumes={
+                    staging_dir: {'bind': '/staging', 'mode': 'rw'},
+                    _output_dir: {'bind': '/output',  'mode': 'rw'},
+                },
+            )
+            logger.info(
+                f"grub-mkrescue container {container.short_id} started "
+                f"(staging={staging_dir}, output={output_iso})"
+            )
+            _result = container.wait()
+            _exit_code = _result.get('StatusCode', -1)
+            _stdout = container.logs(stdout=True,  stderr=False).decode(
+                'utf-8', errors='replace')
+            _stderr = container.logs(stdout=False, stderr=True).decode(
+                'utf-8', errors='replace')
+            if _exit_code != 0:
+                logger.error(
+                    f"grub-mkrescue container {container.short_id} "
+                    f"exited {_exit_code}"
+                )
+            return (_exit_code == 0, _stdout, _stderr)
+        except docker.errors.APIError as e:
+            _cid = container.short_id if container is not None else '<not-started>'
+            logger.error(
+                f"Docker API error running grub-mkrescue "
+                f"(container {_cid}): {e}"
+            )
+            return (False, '', f'Docker API error: {e}')
+        finally:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except docker.errors.APIError as e:
+                    logger.warning(
+                        f"Failed to remove grub-mkrescue container "
+                        f"{container.short_id}: {e}"
+                    )
+
     def _strip_nmu_from_built_artifacts(self, src_pkg,
                                           built_files: 'list[str]') -> None:
         """Run utils.strip_nmu_from_deb on every just-emitted artifact.

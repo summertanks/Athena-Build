@@ -52,6 +52,7 @@ def build_installer_iso(
     installer_dir: str,
     password: str,
     iso_basename: str,
+    container,
     suite: str = 'athena',
     codename: str = 'athena',
     version: str = '0.1',
@@ -149,7 +150,7 @@ def build_installer_iso(
             return False
 
     _iso_path = os.path.join(dir_image, iso_basename)
-    if not _run_grub_mkrescue(_staging, _iso_path):
+    if not _run_grub_mkrescue(_staging, _iso_path, container, password):
         return False
 
     _report_iso(_iso_path)
@@ -1285,42 +1286,54 @@ def _export_pubkey_to_staging(
     return True
 
 
-def _run_grub_mkrescue(staging: str, iso_path: str) -> bool:
+def _run_grub_mkrescue(staging: str, iso_path: str,
+                         container, password: str) -> bool:
     """Produce the hybrid BIOS+EFI bootable ISO from the staging tree.
 
-    Same machinery as the live ISO build (iso.py:build_iso); we get
-    El-Torito BIOS boot + EFI System Partition boot from a single
-    invocation.  Requires grub-pc-bin + grub-efi-amd64-bin + xorriso
-    on the host — already gated by build-system.sh's startup checks.
+    COMP-14 fix path (b) — runs grub-mkrescue inside the build
+    container so the ISO embeds bookworm's GRUB toolchain instead of
+    the build host's.  Container's apt is pinned to OUR snapshot, so
+    `apt-get install grub-{common,pc-bin,efi-amd64-bin}` resolves to
+    2.06-13 regardless of what's installed on the host (build hosts
+    running Debian 13/trixie would otherwise leak GRUB 2.12 into the
+    ISO's bootloader — see ticket history).
 
-    KNOWN LIMITATION (COMP-14, reopened 2026-05-22): the host's
-    grub-mkrescue is the only practical way to produce hybrid BIOS+EFI
-    ISOs in a single invocation, so the build host's GRUB version
-    embeds into the ISO's bootloader.  Initial attempt at extracting
-    our repo's grub binaries + passing --directory= didn't work —
-    grub-mkrescue's --directory only retargets the modinfo.sh probe,
-    not the actual module-copy step (verified by md5sum'ing modules
-    extracted from the produced ISO: they matched host's modules
-    byte-for-byte even with our --directory).  Proper fix requires
-    bind-mount of /usr/lib/grub or running grub-mkrescue inside the
-    BuildContainer.  Tracked in COMP-14.
+    Args:
+        staging:   ISO source tree.
+        iso_path:  Output ISO file.
+        container: BuildContainer instance (host->container bridge).
+                   Required (post-COMP-14); see docstring above for why
+                   host grub-mkrescue is no longer used.
+        password:  Host sudo password — passed through to BuildContainer
+                   for symmetry with other ISO helpers (the container
+                   itself runs as root with passwordless sudo, so the
+                   password isn't actually needed inside).
     """
-    tui.console.print("Running grub-mkrescue...")
-    _r = subprocess.run(
-        ['grub-mkrescue', '-o', iso_path, staging],
-        capture_output=True, text=True,
+    if container is None:
+        tui.console.print(
+            "ERROR: grub-mkrescue requires the build container "
+            "(run `cache build` first to initialise it)"
+        )
+        logger.error("_run_grub_mkrescue: container is None")
+        return False
+    tui.console.print(
+        "Running grub-mkrescue inside build container "
+        "(bookworm GRUB toolchain — see COMP-14)..."
     )
-    for _line in _r.stdout.splitlines():
+    _ok, _stdout, _stderr = container.run_grub_mkrescue(
+        staging, iso_path, password,
+    )
+    for _line in _stdout.splitlines():
         logger.debug(_line)
-    for _line in _r.stderr.splitlines():
+    for _line in _stderr.splitlines():
         logger.debug(_line)
-    if _r.returncode != 0:
+    if not _ok:
         tui.console.print(
             "ERROR: grub-mkrescue failed — see unified run log"
         )
+        _tail = _stderr.strip().splitlines()[-3:] if _stderr.strip() else []
         logger.error(
-            f"_run_grub_mkrescue: rc={_r.returncode}, "
-            f"stderr_tail={_r.stderr.strip().splitlines()[-3:]}"
+            f"_run_grub_mkrescue: failed; stderr_tail={_tail}"
         )
         return False
     return True

@@ -3289,7 +3289,7 @@ class BuildSession:
                 self.flags.chroot_verified = True
 
             console.print("Building ISO...")
-            _result = build_system.build_iso()
+            _result = build_system.build_iso(container=self.container)
             if not _result:
                 console.print("ERROR: ISO build failed — check logs for details")
                 logger.error("build_iso() returned False")
@@ -3521,6 +3521,7 @@ class BuildSession:
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
                 iso_basename=_iso_basename,
+                container=self.container,
                 suite=_suite,
                 codename=_codename,
                 version=_version,
