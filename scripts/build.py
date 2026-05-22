@@ -2518,6 +2518,101 @@ class BuildSession:
             "non-conforming .deb in repo/."
         )
 
+    def cmd_index_repo(self, *args):
+        """Generate apt-repo metadata IN-PLACE under repo/dists/.
+
+        CONF-01 Stage B (2026-05-22).  Produces:
+          repo/dists/<codename>/Release, InRelease, Release.gpg
+          repo/dists/<codename>/main/binary-amd64/Packages*
+          repo/dists/<codename>/main/debian-installer/binary-amd64/Packages*
+          repo/dists/<codename>/main/source/Sources*
+          repo/dists/<codename>/doc/binary-amd64/Packages*
+          repo/dists/<codename>/tests/binary-amd64/Packages*
+          repo/dists/<codename>-debug/Release, InRelease, Release.gpg
+          repo/dists/<codename>-debug/main/binary-amd64/Packages*
+
+        Layout matches docs/plans/conf-01-repo-layout-migration.md.
+
+        REQUIRES Stage C (`package migrate_repo_layout`) to have run
+        first — Stage C is what creates the
+        dists/<suite>/<comp>/binary-<arch>/ directories with .debs at
+        their new paths.  Until Stage C runs, this command errors clean
+        with a "missing directory" message pointing at the next step.
+
+        Args: none (reads config.build_codename for the suite name).
+        """
+        del args   # no positional args today
+        import signing
+        import apt_repo
+
+        _codename = self.config.build_codename.strip('"').strip("'")
+        _suites_spec: 'dict[str, list[str]]' = {
+            _codename: ['main', 'doc', 'tests'],
+            f'{_codename}-debug': ['main'],
+        }
+        _codename_for_suite = {
+            _suite: _suite for _suite in _suites_spec
+        }
+        _description_for_suite = {
+            _codename: 'Athena Linux',
+            f'{_codename}-debug': 'Athena Linux — debug symbols',
+        }
+
+        _password = Prompt(
+            PROMPT_PASSWORD, "Enter sudo password",
+        ).get_response()
+        _r = subprocess.run(
+            ['sudo', '-S', '-v'],
+            input=_password + '\n',
+            capture_output=True, text=True,
+        )
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("cmd_index_repo: sudo -v failed")
+            _password = '*' * len(_password)
+            return
+
+        try:
+            _ok = apt_repo.generate_repo_indexes(
+                repo_root=self.config.dir_repo,
+                suites_spec=_suites_spec,
+                codename_for_suite=_codename_for_suite,
+                version=self.config.build_version,
+                arch=self.config.arch,
+                password=_password,
+                signing_homedir=signing.signing_home(self.config),
+                signing_pubkey_path=signing.signing_pubkey_path(self.config),
+                description_for_suite=_description_for_suite,
+            )
+            if not _ok:
+                console.print(
+                    "ERROR: apt-repo index generation failed — "
+                    "check log for details"
+                )
+                logger.error("cmd_index_repo: generate_repo_indexes returned False")
+                return
+            console.print(
+                f"apt-repo indexed: {self.config.dir_repo}/dists/"
+                f"{{{_codename},{_codename}-debug}}/",
+                tui.COLOR_HIGHLIGHT,
+            )
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
+
+    def cmd_repo(self, action: str = '', *args):
+        """Dispatcher for `repo <action>` commands.
+
+        CONF-01 family — Stage B adds `index`; Stage C will add
+        `migrate_layout`; COMP-02 later will add `publish`.
+        """
+        _table = {
+            'index': 'generate apt-repo metadata in-place under '
+                     'repo/dists/<codename>{,-debug}/',
+        }
+        if action == 'index':
+            return self.cmd_index_repo(*args)
+        return self._group_help('repo', _table, action)
+
     def cmd_strip_repo(self, *args):
         """One-time backfill: strip NMU suffix from every .deb/.udeb
         in repo/.
@@ -5017,6 +5112,7 @@ def main(banner: str) -> None:
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [pkg|live|installer|recommended|all]')
     tui.register_command('package',   session.cmd_package,   '\tPackages:   package tunnel')
+    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index')
     tui.register_command('container', session.cmd_container, '\tContainer:  container init')
     tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')

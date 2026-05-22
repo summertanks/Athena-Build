@@ -1587,6 +1587,182 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CONF-01 Stage B — generate_repo_indexes() multi-suite orchestrator
+# + cmd_index_repo dispatcher
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
+    """Stage B: generate_repo_indexes iterates over every (suite,
+    component) pair in suites_spec and scans each binary-<arch>/ dir.
+    Pin the call sequence so a future refactor doesn't accidentally
+    skip a suite or component."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    import tui as _tui
+
+    class _StubTui:
+        def __init__(self):
+            self._next_id = 0; self._widgets = {}
+        def add_widget(self, w):
+            wid = self._next_id; self._next_id += 1
+            self._widgets[wid] = w; return wid
+        def del_widget(self, wid): self._widgets.pop(wid, None)
+        def print(self, *_a, **_kw): pass
+    _saved_tui = _tui.tui_instance
+    _tui.tui_instance = _StubTui()
+
+    _calls = []
+    def _fake_sudo(cmd, _password):
+        _calls.append(tuple(cmd))
+        # bash -c writes stub Packages/Sources file
+        if cmd[0] == 'bash' and len(cmd) > 1 and '> ' in cmd[2]:
+            _target = cmd[2].split('> ')[1].strip().split()[0]
+            try:
+                with open(_target, 'w') as fh:
+                    fh.write("Package: stub\nVersion: 1.0\n")
+            except OSError:
+                pass
+        _r = type('R', (), {})()
+        _r.returncode = 0
+        _r.stderr = ''
+        return _r
+
+    def _fake_subprocess_run(cmd, *_a, **kw):
+        _calls.append(tuple(cmd))
+        if cmd[:2] == ['sudo', '-S'] and len(cmd) > 3 and 'cat >' in (cmd[3] if len(cmd) > 3 else ''):
+            _path = cmd[3].split('cat >')[1].strip()
+            _input = kw.get('input', '')
+            _, _, _content = _input.partition('\n')
+            with open(_path, 'w') as fh: fh.write(_content)
+        elif (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
+              cmd[2] == 'apt-ftparchive'):
+            _stdout = kw.get('stdout')
+            if _stdout is not None and hasattr(_stdout, 'write'):
+                _stdout.write(b'Suite: stub\nCodename: stub\n')
+        _r = type('R', (), {})()
+        _r.returncode = 0
+        _r.stderr = b''
+        return _r
+
+    try:
+        with tempfile.TemporaryDirectory() as _repo:
+            # Pre-create binary-amd64 dirs for thor (main + doc) and
+            # thor-debug (main).  Stage C will normally do this; here we
+            # do it manually as test setup.
+            _spec = {
+                'thor':       ['main', 'doc'],
+                'thor-debug': ['main'],
+            }
+            for _suite, _comps in _spec.items():
+                for _comp in _comps:
+                    os.makedirs(
+                        os.path.join(_repo, 'dists', _suite, _comp,
+                                     'binary-amd64'),
+                        exist_ok=True,
+                    )
+            with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
+                 patch.object(apt_repo.subprocess, 'run',
+                              side_effect=_fake_subprocess_run):
+                _ok = apt_repo.generate_repo_indexes(
+                    repo_root=_repo,
+                    suites_spec=_spec,
+                    codename_for_suite={'thor': 'thor', 'thor-debug': 'thor-debug'},
+                    version='0.1',
+                    arch='amd64',
+                    password='pw',
+                    signing_homedir=None,
+                    signing_pubkey_path=None,
+                )
+            assert _ok is True
+    finally:
+        _tui.tui_instance = _saved_tui
+
+    # All three components got a dpkg-scanpackages call (no -t udeb
+    # since none of the test fixtures created debian-installer/ subdirs)
+    _scan_shells = [' '.join(c) for c in _calls
+                    if c and c[0] == 'bash' and 'dpkg-scanpackages' in (c[2] if len(c) > 2 else '')]
+    assert len(_scan_shells) == 3, (
+        f"expected 3 dpkg-scanpackages invocations (thor/main + thor/doc "
+        f"+ thor-debug/main), got {len(_scan_shells)}: {_scan_shells}"
+    )
+    # Each scan invocation includes the suite+component path
+    assert any('dists/thor/main/binary-amd64' in _s for _s in _scan_shells), _scan_shells
+    assert any('dists/thor/doc/binary-amd64'  in _s for _s in _scan_shells), _scan_shells
+    assert any('dists/thor-debug/main/binary-amd64' in _s for _s in _scan_shells), _scan_shells
+    # Two apt-ftparchive release calls (one per suite)
+    _ftparchive_calls = [c for c in _calls
+                          if len(c) >= 3 and c[0] == 'sudo' and c[2] == 'apt-ftparchive']
+    assert len(_ftparchive_calls) == 2, (
+        f"expected 2 apt-ftparchive release calls (one per suite), "
+        f"got {len(_ftparchive_calls)}"
+    )
+
+
+def test_apt_repo_generate_repo_indexes_errors_when_binary_dir_missing():
+    """Stage B: if a (suite, component)'s binary-<arch>/ directory
+    doesn't exist, generate_repo_indexes fails CLEAN with a message
+    pointing at the missing path — signal that Stage C migration
+    hasn't run yet.  Pin so this doesn't accidentally regress to a
+    silent skip (which would produce an empty index)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    import tui as _tui
+
+    class _StubTui:
+        def __init__(self):
+            self._next_id = 0; self._widgets = {}
+        def add_widget(self, w):
+            wid = self._next_id; self._next_id += 1
+            self._widgets[wid] = w; return wid
+        def del_widget(self, wid): self._widgets.pop(wid, None)
+        def print(self, *_a, **_kw): pass
+    _saved_tui = _tui.tui_instance
+    _tui.tui_instance = _StubTui()
+    try:
+        with tempfile.TemporaryDirectory() as _repo:
+            # DON'T create the binary-amd64 dirs
+            _ok = apt_repo.generate_repo_indexes(
+                repo_root=_repo,
+                suites_spec={'thor': ['main']},
+                codename_for_suite={'thor': 'thor'},
+                version='0.1', arch='amd64', password='pw',
+            )
+            assert _ok is False
+    finally:
+        _tui.tui_instance = _saved_tui
+
+
+def test_cmd_repo_dispatcher_routes_index_action():
+    """Stage B: `repo index` action must dispatch to cmd_index_repo.
+    Pin via code inspection so a future dispatcher refactor doesn't
+    silently drop the routing (which would make `repo index` print a
+    help table instead of doing the index)."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def cmd_repo\(self.*?(?=\n    def )',
+        _body, re.DOTALL,
+    )
+    assert _m, 'cmd_repo dispatcher not found'
+    _fn = _m.group(0)
+    assert "action == 'index'" in _fn, _fn
+    assert 'return self.cmd_index_repo' in _fn, _fn
+
+    # And the `repo` command MUST be registered in the tui dispatch
+    # table at the bottom of build.py so the operator can actually type it.
+    assert "register_command('repo'" in _body, (
+        "`repo` command not wired into tui dispatch — operator can't "
+        "invoke `repo index` from the prompt"
+    )
+
+
 def test_iso_installer_stage_disk_info_errors_when_dir_missing():
     """Phase 7 cdrom-detect fix: installer/disk/ MUST be present —
     without /cdrom/.disk/info, cdrom-detect rejects the disc and the
