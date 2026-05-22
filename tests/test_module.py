@@ -6314,6 +6314,154 @@ def test_validate_selection_versioned_provides_still_flagged():
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STA-18 — Depends-arm aliasing: alias entries must use Provides clause
+# version (not provider's own Version field) when checking constraints
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sta18_make_dt():
+    """Shared stub DependencyTree + Package factory for STA-18 tests.
+
+    Mirrors the libgcc1 shape: a provider whose own Version: lacks the
+    epoch its Provides: clause declares.  Concrete bookworm case:
+    libgcc-s1 (Version: 12.2.0-14+deb12u1) declares
+    `Provides: libgcc1 (= 1:12.2.0-14+deb12u1)` — epoch 1 in the
+    Provides clause, epoch 0 in self.version.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    from debian.debian_support import Version
+
+    class _Pkg:
+        """Surface needed by _version_for_constraint_target + the
+        validate_selection alt-dep loop: __getitem__ for 'Package',
+        .version, .explicit_provides_version(name).  No real Provides
+        parsing — fixture hands the helper a name→version map."""
+        def __init__(self, name, version, *, provides=()):
+            self._fields = {'Package': name}
+            self.version = Version(version)
+            # provides shape: ((name, version_str_or_None), ...)
+            self._provides_map = {n: v for n, v in provides}
+            self.breaks = []
+            self.conflicts = []
+            self.alt_depends = []
+            self.recommends = []
+            self.constraints_satisfied = True
+        def __getitem__(self, k): return self._fields[k]
+        def explicit_provides_version(self, name):
+            _v = self._provides_map.get(name, '__MISSING__')
+            if _v == '__MISSING__' or _v is None:
+                return None
+            return Version(_v)
+
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt.selected_pkgs = {}
+    dt.pool_extras_pkg_names = set()
+    return dt, _Pkg
+
+
+def test_sta18_version_for_constraint_target_real_pkg():
+    """Helper returns the entry's own Version when entry IS the
+    constraint target (the canonical-name case)."""
+    dt, _Pkg = _sta18_make_dt()
+    foo = _Pkg('foo', '1.2.3')
+    dt.selected_pkgs['foo'] = foo
+    assert dt._version_for_constraint_target('foo', 'foo') == '1.2.3'
+
+
+def test_sta18_version_for_constraint_target_versioned_provides_with_epoch():
+    """LIBGCC1 SHAPE: provider's own Version lacks the epoch its Provides
+    clause declares.  Helper must return the Provides clause version
+    (with epoch), NOT the provider's Version field.  This is the bug
+    STA-18 is about — pre-fix, reads of selected_pkgs[alias].version
+    returned the provider's Version directly, dropping the epoch and
+    causing spurious 'unresolved dependency' WARNINGs."""
+    dt, _Pkg = _sta18_make_dt()
+    libgcc_s1 = _Pkg('libgcc-s1', '12.2.0-14+deb12u1',
+                     provides=[('libgcc1', '1:12.2.0-14+deb12u1')])
+    dt.selected_pkgs['libgcc-s1'] = libgcc_s1
+    dt.selected_pkgs['libgcc1']   = libgcc_s1   # virtual alias
+
+    # Direct entry lookup: real-pkg behaviour preserved
+    assert dt._version_for_constraint_target('libgcc-s1', 'libgcc-s1') == '12.2.0-14+deb12u1'
+    # Alias entry resolved via Provides clause — MUST carry the epoch
+    assert dt._version_for_constraint_target('libgcc1', 'libgcc1') == '1:12.2.0-14+deb12u1'
+    # Provides-fallback path (validate_selection's Site 3): entry_key is
+    # the provider's canonical name, target_name is the virtual alias
+    assert dt._version_for_constraint_target('libgcc-s1', 'libgcc1') == '1:12.2.0-14+deb12u1'
+
+
+def test_sta18_version_for_constraint_target_unversioned_provides_returns_none():
+    """When the provider declares `Provides: virt` UNVERSIONED, helper
+    returns None.  Per Debian Policy §7.5, an unversioned Provides
+    cannot satisfy a versioned constraint — callers MUST handle None
+    as 'not satisfied' for versioned constraints, 'satisfied' for
+    unversioned (existence-only) constraints."""
+    dt, _Pkg = _sta18_make_dt()
+    fwupd = _Pkg('fwupd', '1.8.12-2', provides=[('fwupdate', None)])
+    dt.selected_pkgs['fwupd']    = fwupd
+    dt.selected_pkgs['fwupdate'] = fwupd
+    assert dt._version_for_constraint_target('fwupdate', 'fwupdate') is None
+    assert dt._version_for_constraint_target('fwupd', 'fwupdate') is None
+
+
+def test_sta18_validate_selection_resolves_epoch_aliased_alt_dep():
+    """INTEGRATION: validate_selection's alt-dep loop on the libgcc1
+    shape.  Pre-fix, consumer `Depends: libgcc1 (>= 1:4.0)` failed
+    apt_pkg.check_dep against provider's stored '12.2.0-14+deb12u1'
+    (epoch 0 < epoch 1) → 'Alt-dep version constraint failed' WARNING
+    fired and _found stayed False.  Post-fix, the helper returns the
+    Provides clause version '1:12.2.0-14+deb12u1' (epoch 1) → check_dep
+    sees epoch 1 >= 1:4.0 → resolves cleanly, _found = True,
+    validate_selection returns True overall."""
+    dt, _Pkg = _sta18_make_dt()
+    libgcc_s1 = _Pkg('libgcc-s1', '12.2.0-14+deb12u1',
+                     provides=[('libgcc1', '1:12.2.0-14+deb12u1')])
+    # Consumer: alt_depends shape is list-of-OR-groups, OR-group is
+    # list of dep-tuples (name, version_str, comparator).
+    consumer = _Pkg('libwebrtc-audio-processing1', '0.3-1+b1')
+    consumer.alt_depends = [
+        [('libgcc1', '1:4.0', '>=')],
+    ]
+    dt.selected_pkgs = {
+        'libgcc-s1':                     libgcc_s1,
+        'libgcc1':                       libgcc_s1,   # virtual alias
+        'libwebrtc-audio-processing1':   consumer,
+    }
+    assert dt.validate_selection() is True, (
+        "STA-18 regression: consumer's `Depends: libgcc1 (>= 1:4.0)` "
+        "must resolve cleanly against libgcc-s1's `Provides: libgcc1 "
+        "(= 1:12.2.0-14+deb12u1)` — pre-fix the constraint check read "
+        "libgcc-s1.version directly (epoch 0), failed >= 1:4.0, and "
+        "emitted spurious 'unresolved dependency' WARNINGs"
+    )
+
+
+def test_sta18_validate_selection_unversioned_provides_cannot_satisfy_versioned_dep():
+    """SYMMETRY for STA-18: when Provides IS unversioned and the
+    consumer's constraint IS versioned, the constraint MUST NOT
+    satisfy (per Policy §7.5).  Pins behaviour so the helper's
+    None-handling can't accidentally over-loosen."""
+    _stub_tui()       # ERROR-path triggers tui.console.print
+    dt, _Pkg = _sta18_make_dt()
+    fwupd = _Pkg('fwupd', '1.8.12-2', provides=[('fwupdate', None)])
+    consumer = _Pkg('needsfwupdate', '1.0')
+    consumer.alt_depends = [
+        [('fwupdate', '12-7', '>=')],
+    ]
+    dt.selected_pkgs = {
+        'fwupd':         fwupd,
+        'fwupdate':      fwupd,    # virtual alias, unversioned Provides
+        'needsfwupdate': consumer,
+    }
+    assert dt.validate_selection() is False, (
+        "unversioned `Provides: fwupdate` MUST NOT satisfy `Depends: "
+        "fwupdate (>= 12-7)` (Policy §7.5) — the STA-18 fix dropped "
+        "the spurious-pass guard"
+    )
+
+
 def test_canonical_names_filters_virtual_aliases_from_cohort():
     """REGRESSION pin (2026-05-21): cohort scopes must exclude virtual-
     alias names from selected_pkgs.keys().  The audit's
