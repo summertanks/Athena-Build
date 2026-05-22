@@ -28,6 +28,7 @@ import logging
 import os
 import shutil
 import subprocess
+from typing import Optional
 
 import tui
 
@@ -147,6 +148,170 @@ def generate_apt_repo(
         "will sign next)",
         tui.COLOR_HIGHLIGHT,
     )
+    return True
+
+
+def generate_repo_indexes(
+    repo_root: str,
+    suites_spec: 'dict[str, list[str]]',
+    codename_for_suite: 'dict[str, str]',
+    version: str,
+    arch: str,
+    password: str,
+    signing_homedir: Optional[str] = None,
+    signing_pubkey_path: Optional[str] = None,
+    description_for_suite: Optional['dict[str, str]'] = None,
+) -> bool:
+    """Multi-suite apt-repo index generator — operates IN-PLACE on
+    repo_root/dists/, assuming the unified layout from CONF-01.
+
+    Distinct from generate_apt_repo (which is the single-suite ISO-
+    staging helper).  This one is what cmd_index_repo invokes against
+    repo/.
+
+    Args:
+      repo_root:           The apt root.  Indexes land under
+                           <repo_root>/dists/<suite>/<comp>/...
+                           Filename: records in produced Packages point
+                           at paths relative to repo_root (e.g.
+                           "dists/thor/main/binary-amd64/foo.deb").
+      suites_spec:         {suite_name: [component_name, ...]}.  Each
+                           (suite, component) pair must already have a
+                           directory at <repo_root>/dists/<suite>/<comp>/
+                           binary-<arch>/ — Stage C of CONF-01 creates
+                           these as part of the layout migration.  This
+                           helper FAILS clean if the directory is
+                           missing (signals "Stage C hasn't run yet").
+      codename_for_suite:  {suite_name: codename}.  The codename to
+                           write into per-subdir Release files.  Usually
+                           the codename IS the suite name (thor/thor),
+                           but Debian's convention for debug suites is
+                           Suite=bookworm-debug Codename=bookworm-debug,
+                           so we accept different values per suite.
+      version:             apt version string for the top-level Release.
+      arch:                'amd64' (or future cross-arch values).
+      password:            Cached sudo password — needed for dpkg-
+                           scanpackages writes to root-owned dirs.
+      signing_homedir:     Optional GPG homedir.  When provided,
+                           Release.gpg + InRelease are generated per
+                           suite via sign_release_files.
+      signing_pubkey_path: Unused here (the pubkey isn't shipped to
+                           repo_root the way the ISO ships it to
+                           .disk/archive-key.gpg — operators consume
+                           via their own keyring management).  Accepted
+                           for symmetry with generate_apt_repo.
+
+    Per (suite, component) pair, generates:
+      <comp>/binary-<arch>/{Packages, Packages.gz, Packages.xz, Release}
+    If <comp>/debian-installer/binary-<arch>/ exists (udeb subdir):
+      <comp>/debian-installer/binary-<arch>/{Packages, .gz, .xz, Release}
+    If <comp>/source/ exists (source subdir):
+      <comp>/source/{Sources, Sources.gz, Sources.xz, Release}
+
+    Per suite:
+      dists/<suite>/Release      via apt-ftparchive release
+      dists/<suite>/Release.gpg  if signing_homedir given (detached sig)
+      dists/<suite>/InRelease    if signing_homedir given (clearsigned)
+
+    Returns True iff every suite's indexes generated cleanly.
+    """
+    del signing_pubkey_path   # accepted for symmetry; unused here
+    if description_for_suite is None:
+        description_for_suite = {}
+
+    for _suite, _components in suites_spec.items():
+        _codename = codename_for_suite.get(_suite, _suite)
+        _desc = description_for_suite.get(_suite, f'Athena repo — {_suite}')
+
+        tui.console.print(
+            f"Indexing suite {_suite} (codename={_codename}, "
+            f"components={_components})..."
+        )
+
+        for _comp in _components:
+            _binary_rel = f'dists/{_suite}/{_comp}/binary-{arch}'
+            _binary_abs = os.path.join(repo_root, _binary_rel)
+
+            # Directory must exist (Stage C migration creates these).
+            # Fail clean if not — the message points at the missing dir
+            # so the operator knows EXACTLY what's needed.
+            if not os.path.isdir(_binary_abs):
+                tui.console.print(
+                    f"ERROR: {_binary_abs} missing — run "
+                    f"`package migrate_repo_layout` (Stage C) first, "
+                    f"or check that source build has emitted any .debs "
+                    f"for component {_comp}"
+                )
+                logger.error(
+                    f"generate_repo_indexes: {_binary_abs} absent for "
+                    f"suite={_suite} comp={_comp}"
+                )
+                return False
+
+            # Regular .deb Packages index.  cwd=repo_root so Filename:
+            # records carry the full relative path (apt resolves them
+            # from BASE-URL = repo_root).
+            if not _scan_packages_to(
+                    repo_root, _binary_rel,
+                    os.path.join(_binary_abs, 'Packages'),
+                    password, udeb=False):
+                return False
+            if not _write_subdir_release(
+                    _binary_abs, _suite, _codename, _comp, arch, password):
+                return False
+
+            # Optional udeb subdir.  Only relevant for main of the
+            # primary suite (thor); -debug suites and doc/tests
+            # components don't ship udebs.
+            _udeb_rel = f'dists/{_suite}/{_comp}/debian-installer/binary-{arch}'
+            _udeb_abs = os.path.join(repo_root, _udeb_rel)
+            if os.path.isdir(_udeb_abs):
+                if not _scan_packages_to(
+                        repo_root, _udeb_rel,
+                        os.path.join(_udeb_abs, 'Packages'),
+                        password, udeb=True):
+                    return False
+                if not _write_subdir_release(
+                        _udeb_abs, _suite, _codename, _comp, arch, password):
+                    return False
+
+            # Optional source subdir.  Same scope as udebs — main of
+            # the primary suite, not debug or side-component dirs.
+            _source_rel = f'dists/{_suite}/{_comp}/source'
+            _source_abs = os.path.join(repo_root, _source_rel)
+            if os.path.isdir(_source_abs):
+                if not _scan_sources_to(
+                        repo_root, _source_rel,
+                        os.path.join(_source_abs, 'Sources'),
+                        password):
+                    return False
+                if not _write_subdir_release(
+                        _source_abs, _suite, _codename, _comp, 'source',
+                        password):
+                    return False
+
+        # Top-level dists/<suite>/Release.  apt-ftparchive walks the
+        # sub-tree and hashes every Packages/Sources file.
+        _top_release = os.path.join(repo_root, 'dists', _suite, 'Release')
+        if not _generate_top_release(
+                repo_root, _suite, _codename, version,
+                _top_release, password,
+                components=list(_components),
+                description=_desc):
+            return False
+
+        # Sign the top-level Release per suite if a homedir was given.
+        if signing_homedir is not None:
+            if not sign_release_files(
+                    repo_root, _suite, signing_homedir, password):
+                return False
+
+        tui.console.print(
+            f"  → dists/{_suite}/ indexed (components: "
+            f"{', '.join(_components)})",
+            tui.COLOR_HIGHLIGHT,
+        )
+
     return True
 
 
@@ -295,12 +460,19 @@ def _write_subdir_release(
 def _generate_top_release(
     staging: str, suite: str, codename: str, version: str,
     output_path: str, password: str,
+    components: 'Optional[list[str]]' = None,    # Stage B (2026-05-22)
+    description: str = 'Athena installer disc',
 ) -> bool:
     """apt-ftparchive release dists/<suite>/ > dists/<suite>/Release.
 
     The -o flags pin distro identity — apt-ftparchive emits empty
     Suite/Codename/etc. otherwise and apt then refuses the repo with
     "Repository ... does not have a Release file."
+
+    `components` controls the Components: field listed in the produced
+    Release.  Single-suite ISO path uses the default ('main',).
+    Multi-component repo (Stage B+) passes ['main', 'doc', 'tests']
+    for the thor suite, ['main'] for thor-debug.
 
     NOT using `bash -c` for this call: some -o values can contain
     spaces (e.g. Description="Athena installer disc"), and shell
@@ -309,6 +481,8 @@ def _generate_top_release(
     production 2026-05-11.  Pass argv directly to subprocess.run with
     cwd= and stdout=file_handle for redirection.
     """
+    if components is None:
+        components = ['main']
     _opts = [
         '-o', 'APT::FTPArchive::Release::Origin=Athena',
         '-o', 'APT::FTPArchive::Release::Label=Athena',
@@ -316,8 +490,8 @@ def _generate_top_release(
         '-o', f'APT::FTPArchive::Release::Codename={codename}',
         '-o', f'APT::FTPArchive::Release::Version={version}',
         '-o', 'APT::FTPArchive::Release::Architectures=amd64',
-        '-o', 'APT::FTPArchive::Release::Components=main',
-        '-o', 'APT::FTPArchive::Release::Description=Athena installer disc',
+        '-o', f'APT::FTPArchive::Release::Components={" ".join(components)}',
+        '-o', f'APT::FTPArchive::Release::Description={description}',
     ]
     _argv = (
         ['sudo', '-S', 'apt-ftparchive'] + _opts +
