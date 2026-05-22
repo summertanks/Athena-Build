@@ -2591,10 +2591,11 @@ def test_grub_assembly_find_grub_deb_errors_when_missing():
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from grub_assembly import _find_grub_deb
-    with tempfile.TemporaryDirectory() as _repo:
-        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
+    with tempfile.TemporaryDirectory() as _repo_main:
+        # _repo_main IS the main/ subdir of repo/ — helper takes
+        # already-resolved main dir per the COMP-14-fix-fix renaming.
         try:
-            _find_grub_deb(_repo, 'grub-pc-bin')
+            _find_grub_deb(_repo_main, 'grub-pc-bin')
         except FileNotFoundError as e:
             assert 'grub-pc-bin' in str(e)
             assert 'cache build' in str(e) or 'main/' in str(e)
@@ -2616,28 +2617,23 @@ def test_grub_assembly_extract_grub_toolchain_unpacks_all_three():
     assert set(GRUB_PKG_NAMES) == {
         'grub-common', 'grub-pc-bin', 'grub-efi-amd64-bin',
     }, GRUB_PKG_NAMES
-    with tempfile.TemporaryDirectory() as _repo:
-        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
-        # Synthesize the three .debs with a single sentinel file each
-        # so the unpacker has unambiguous output to check.
+    with tempfile.TemporaryDirectory() as _repo_main:
+        # _repo_main IS the main/ subdir per the helper's contract.
         _make_fake_grub_deb(
-            os.path.join(_repo, 'main'),
-            'grub-common', '2.06-13',
+            _repo_main, 'grub-common', '2.06-13',
             {'usr/bin/grub-mkrescue': b'#!/bin/sh\nexit 0\n',
              'usr/bin/grub-mkimage':  b'#!/bin/sh\nexit 0\n'},
         )
         _make_fake_grub_deb(
-            os.path.join(_repo, 'main'),
-            'grub-pc-bin', '2.06-13',
+            _repo_main, 'grub-pc-bin', '2.06-13',
             {'usr/lib/grub/i386-pc/all_video.mod': b'\x00'},
         )
         _make_fake_grub_deb(
-            os.path.join(_repo, 'main'),
-            'grub-efi-amd64-bin', '2.06-13',
+            _repo_main, 'grub-efi-amd64-bin', '2.06-13',
             {'usr/lib/grub/x86_64-efi/efi_gop.mod': b'\x00'},
         )
         with tempfile.TemporaryDirectory() as _dst:
-            _extract_grub_toolchain(_repo, _dst)
+            _extract_grub_toolchain(_repo_main, _dst)
             # All three packages' content landed at expected paths
             assert os.path.isfile(os.path.join(_dst, 'usr/bin/grub-mkrescue'))
             assert os.path.isfile(os.path.join(_dst, 'usr/bin/grub-mkimage'))
@@ -2658,22 +2654,18 @@ def test_grub_assembly_runner_uses_our_directory_and_path():
 
     # Build a fake repo with the three real-ish grub .debs.  Don't
     # call the real grub-mkrescue — record what args + env it'd see.
-    with tempfile.TemporaryDirectory() as _repo:
-        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
+    with tempfile.TemporaryDirectory() as _repo_main:
         _make_fake_grub_deb(
-            os.path.join(_repo, 'main'),
-            'grub-common', '2.06-13',
+            _repo_main, 'grub-common', '2.06-13',
             {'usr/bin/grub-mkrescue': b'#!/bin/sh\nexit 0\n',
              'usr/bin/grub-mkimage':  b'#!/bin/sh\nexit 0\n'},
         )
         _make_fake_grub_deb(
-            os.path.join(_repo, 'main'),
-            'grub-pc-bin', '2.06-13',
+            _repo_main, 'grub-pc-bin', '2.06-13',
             {'usr/lib/grub/i386-pc/all_video.mod': b'\x00'},
         )
         _make_fake_grub_deb(
-            os.path.join(_repo, 'main'),
-            'grub-efi-amd64-bin', '2.06-13',
+            _repo_main, 'grub-efi-amd64-bin', '2.06-13',
             {'usr/lib/grub/x86_64-efi/efi_gop.mod': b'\x00'},
         )
 
@@ -2705,7 +2697,7 @@ def test_grub_assembly_runner_uses_our_directory_and_path():
         _iso   = '/some/out.iso'
         with patch.object(_ga.subprocess, 'run', side_effect=_fake_run):
             _ok, _stdout, _stderr = _ga.run_grub_mkrescue_from_repo(
-                _repo, _stage, _iso,
+                _repo_main, _stage, _iso,
             )
         assert _ok, (_ok, _stdout, _stderr)
 
@@ -2752,11 +2744,10 @@ def test_grub_assembly_runner_returns_extraction_error_cleanly():
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from grub_assembly import run_grub_mkrescue_from_repo
-    with tempfile.TemporaryDirectory() as _repo:
-        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
-        # repo/main/ exists but has no grub .debs
+    with tempfile.TemporaryDirectory() as _repo_main:
+        # _repo_main exists but has no grub .debs
         _ok, _stdout, _stderr = run_grub_mkrescue_from_repo(
-            _repo, '/some/stage', '/some/out.iso',
+            _repo_main, '/some/stage', '/some/out.iso',
         )
         assert _ok is False
         assert _stdout == ''

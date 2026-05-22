@@ -214,8 +214,10 @@ class _IsoMixin:
 
         tui.console.print("Running grub-mkrescue (using grub from repo/main/)...")
         from grub_assembly import run_grub_mkrescue_from_repo
+        # Helper wants the main/ subdir (where the flat .debs live);
+        # self._dir_repo is the top-level repo/, so join.
         _ok, _stdout, _stderr = run_grub_mkrescue_from_repo(
-            self._dir_repo, _staging, _iso_path,
+            os.path.join(self._dir_repo, 'main'), _staging, _iso_path,
         )
         for _line in _stdout.splitlines():
             logger.debug(_line)
