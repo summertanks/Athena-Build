@@ -2874,24 +2874,24 @@ class BuildSession:
           force — skip the PROMPT_YESNO confirmation
         """
         _force = 'force' in args
-        # Post-segregation: .debs live in repo/main / repo/doc / repo/
-        # dbgsym / repo/tests.  Walk all four so strip catches every
-        # tier (especially doc + main where most ~debNuN-leaky files
-        # ended up before the regex got the ~debNuN pattern added).
+        # Post-segregation: .debs live in dists/<codename>/<comp>/
+        # binary-<arch>/ (CONF-01 Stage D unified layout); udebs in
+        # main/debian-installer/binary-<arch>/; dbgsyms in
+        # dists/<codename>-debug/main/binary-<arch>/.  Walk all of
+        # them so strip catches every tier.
         _repo = self.config.dir_repo
         _files: 'list[str]' = []
-        for _sub in utils._REPO_SUBDIRS:
-            _sub_dir = os.path.join(_repo, _sub)
+        for _deb_dir in self.config.all_deb_dirs():
             try:
-                for _f in os.listdir(_sub_dir):
+                for _f in os.listdir(_deb_dir):
                     if _f.endswith('.deb') or _f.endswith('.udeb'):
-                        _files.append(os.path.join(_sub, _f))
+                        _files.append(os.path.join(_deb_dir, _f))
             except OSError:
                 continue
         _files.sort()
         if not _files:
             console.print(
-                f"{_repo} (subdirs main/doc/dbgsym/tests) has no "
+                f"{_repo} (dists/*/<comp>/binary-*/) has no "
                 f".deb/.udeb files — nothing to do"
             )
             return
@@ -2914,9 +2914,9 @@ class BuildSession:
         _bar = ProgressBar(
             label='Strip NMU', itr_label='pkgs', maxvalue=len(_files),
         )
-        for _f in _files:
+        for _path in _files:
             _bar.step(1)
-            _path = os.path.join(_repo, _f)
+            _f = os.path.basename(_path)
             try:
                 _r = utils.strip_nmu_from_deb(_path)
                 if _r['status'] == 'rewritten':
@@ -3016,20 +3016,24 @@ class BuildSession:
         _malformed: 'list[str]' = []
         _total = 0
 
-        for _sub in utils._REPO_SUBDIRS:
-            _sub_dir = os.path.join(self.config.dir_repo, _sub)
+        # CONF-01 Stage D: walk the new unified-layout dirs.  Labels
+        # ('main'/'doc'/'dbgsym'/'tests') are derived from the
+        # filename via classify_repo_subdir, so downstream reporting
+        # tuples carry the same meaning as pre-Stage D.
+        for _deb_dir in self.config.all_deb_dirs():
             try:
-                _entries = sorted(os.listdir(_sub_dir))
+                _entries = sorted(os.listdir(_deb_dir))
             except OSError:
                 continue
             for _f in _entries:
                 if not (_f.endswith('.deb') or _f.endswith('.udeb')):
                     continue
+                _sub = utils.classify_repo_subdir(_f)
                 _total += 1
                 # Fast path: predicted target — KEEP.
                 if _f in _expected_files:
                     continue
-                _path = os.path.join(_sub_dir, _f)
+                _path = os.path.join(_deb_dir, _f)
                 try:
                     with DebFile(_path) as _deb:
                         _ctrl = _deb.control.debcontrol()
@@ -3205,9 +3209,13 @@ class BuildSession:
         _bar = ProgressBar(
             label='Cleanup', itr_label='files', maxvalue=_n_obsolete,
         )
+        # CONF-01 Stage D: _sub is the classify_repo_subdir label; map
+        # to the on-disk dir via config.deb_dest_for_filename (which
+        # handles the udeb → debian-installer/binary-<arch>/ special
+        # case for us).
         for _sub, _f, *_ in _orphan:
             _bar.step(1)
-            _p = os.path.join(self.config.dir_repo, _sub, _f)
+            _p = os.path.join(self.config.deb_dest_for_filename(_f), _f)
             try:
                 os.remove(_p)
                 _deleted += 1
@@ -3216,7 +3224,7 @@ class BuildSession:
                 logger.error(f"cleanup: cannot remove {_p}: {e}")
         for _sub, _f, *_ in _drift:
             _bar.step(1)
-            _p = os.path.join(self.config.dir_repo, _sub, _f)
+            _p = os.path.join(self.config.deb_dest_for_filename(_f), _f)
             try:
                 os.remove(_p)
                 _deleted += 1
@@ -3542,7 +3550,7 @@ class BuildSession:
             _codename = self.config.build_codename.strip('"').strip("'")
             _ok = installer_chroot.build_installer_chroot(
                 udeb_tree=self.udeb_dep_tree,
-                dir_repo=self.config.dir_repo,
+                dir_udebs=self.config.dir_repo_main_udeb,
                 dir_chroot_installer=self.config.dir_chroot_installer,
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
@@ -3860,6 +3868,7 @@ class BuildSession:
             _ok = iso_installer.build_installer_iso(
                 dir_chroot_installer=self.config.dir_chroot_installer,
                 dir_repo=self.config.dir_repo_main,
+                dir_repo_main_udeb=self.config.dir_repo_main_udeb,
                 dir_image=self.config.dir_image,
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
@@ -4229,7 +4238,11 @@ class BuildSession:
             # or Depends; that's `source verify`'s job (opt-in).
             _all_present = True
             for _f in _expected:
-                _path = os.path.join(self.config.dir_repo, _f)
+                # CONF-01 Stage D: deb_dest_for_filename returns the
+                # correct nested dir for this artifact's role/type.
+                _path = os.path.join(
+                    self.config.deb_dest_for_filename(_f), _f,
+                )
                 if not os.path.isfile(_path):
                     _all_present = False
                     break
@@ -4307,7 +4320,9 @@ class BuildSession:
             return
 
         from buildcontainer import BuildContainer
-        _main = os.path.join(self.config.dir_repo, 'main')
+        # CONF-01 Stage D: main-tier binaries live at the new nested
+        # path; helper resolves the right dir (handles .deb vs .udeb).
+        _main = self.config.dir_repo_main
         _any_findings = False
 
         # Audit deb and udeb cohorts SEPARATELY.  src_pkg_files lives
@@ -4337,7 +4352,12 @@ class BuildSession:
                 _missing: 'list[str]' = []
                 _mismatch: 'list[str]' = []
                 for _f in _expected_main:
-                    _p = os.path.join(_main, _f)
+                    # deb_dest_for_filename handles the .deb / .udeb
+                    # split (both classify as 'main' but live in
+                    # different dirs post-Stage D).
+                    _p = os.path.join(
+                        self.config.deb_dest_for_filename(_f), _f,
+                    )
                     if not os.path.isfile(_p):
                         _missing.append(_f)
                         continue
@@ -4463,7 +4483,9 @@ class BuildSession:
             _any_missing = False
             _failing = None
             for _f in _expected:
-                _path = os.path.join(self.config.dir_repo, _f)
+                _path = os.path.join(
+                    self.config.deb_dest_for_filename(_f), _f,
+                )
                 if not os.path.isfile(_path):
                     _any_missing = True
                     break

@@ -28,6 +28,11 @@ class BuildContainer:
         # build.py wires it through, but tests that construct a
         # BuildContainer without a cache continue to work unchanged.
         self.cache = cache
+        # CONF-01 Stage D: keep the full config reference so segregate
+        # can route .deb / .udeb destinations via config.deb_dest_for_
+        # filename (which knows about the new unified apt-repo layout).
+        # Pre-CONF-01 code only needed the path strings below.
+        self.config = config
 
         self.build_path = config.dir_repo
         self.src_path = config.dir_source
@@ -755,9 +760,12 @@ class BuildContainer:
         if not _files_at_root:
             return _moved_paths
         for _f in _files_at_root:
-            _sub = utils.classify_repo_subdir(_f)
             _src = os.path.join(self.repo_path, _f)
-            _dst_dir = os.path.join(self.repo_path, _sub)
+            # CONF-01 Stage D: config helper routes to the right
+            # nested apt-repo dir (e.g. main → dists/<codename>/main/
+            # binary-<arch>/, main+.udeb → main/debian-installer/...,
+            # dbgsym → dists/<codename>-debug/main/binary-<arch>/).
+            _dst_dir = self.config.deb_dest_for_filename(_f)
             os.makedirs(_dst_dir, exist_ok=True)
             _dst = os.path.join(_dst_dir, _f)
             try:
@@ -769,7 +777,7 @@ class BuildContainer:
                 _moved_paths.append(_dst)
             except OSError as e:
                 logger.warning(
-                    f"segregate: failed to move {_f} → {_sub}/: {e}"
+                    f"segregate: failed to move {_f} → {_dst_dir}: {e}"
                 )
         if _moved_paths:
             logger.info(
@@ -824,11 +832,16 @@ class BuildContainer:
 
         for _file in expected_files:
             # Only main-classified binaries gate rebuild; missing
-            # -dev/-doc/-dbgsym/-tests are tolerated.
+            # -dev/-doc/-dbgsym/-tests are tolerated.  CONF-01 Stage D:
+            # deb_dest_for_filename returns the new nested location
+            # (main → dists/<codename>/main/binary-<arch>/ for .deb,
+            # → debian-installer/binary-<arch>/ for .udeb).
             _sub = utils.classify_repo_subdir(_file)
             if _sub != 'main':
                 continue
-            _filename = os.path.join(self.repo_path, 'main', _file)
+            _filename = os.path.join(
+                self.config.deb_dest_for_filename(_file), _file,
+            )
             if not os.path.isfile(_filename):
                 return False
             if not self.is_ar_file(_filename):

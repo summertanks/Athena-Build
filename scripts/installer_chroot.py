@@ -42,7 +42,7 @@ _OVERLAY_MAP = [
 
 def build_installer_chroot(
     udeb_tree,
-    dir_repo: str,
+    dir_udebs: str,
     dir_chroot_installer: str,
     installer_dir: str,
     password: str,
@@ -53,7 +53,12 @@ def build_installer_chroot(
     Args:
         udeb_tree:           DependencyTree against Cache.udeb_view() — the
                              udeb closure to unpack.
-        dir_repo:            Path to repo/ containing built .udeb files.
+        dir_udebs:           Path to the dir holding .udeb files.  CONF-01
+                             Stage D: this is repo/dists/<codename>/main/
+                             debian-installer/binary-<arch>/ in the unified
+                             layout.  Previously was repo/ (top-level) and
+                             we appended `main`; now resolved by caller for
+                             clarity.
         dir_chroot_installer: Target chroot dir (wiped + recreated).
         installer_dir:       Path to the installer/ data-layer tree.
         password:            Cached sudo password (caller validates with `sudo -v`).
@@ -68,7 +73,7 @@ def build_installer_chroot(
     if not _bootstrap_dpkg(dir_chroot_installer, password):
         return False
 
-    _udeb_files = _resolve_udeb_files(udeb_tree, dir_repo)
+    _udeb_files = _resolve_udeb_files(udeb_tree, dir_udebs)
     if not _udeb_files:
         tui.console.print(
             "ERROR: no udeb files resolved from repo — was 'source build "
@@ -216,12 +221,15 @@ def _bootstrap_dpkg(dir_chroot_installer: str, password: str) -> bool:
     return True
 
 
-def _resolve_udeb_files(udeb_tree, dir_repo: str) -> List[str]:
+def _resolve_udeb_files(udeb_tree, dir_udebs: str) -> List[str]:
     """Map udeb_tree.selected_pkgs canonical names → absolute .udeb
-    paths in repo/main.
+    paths.
 
-    repo/ is segregated by package role; udebs are installable so they
-    land in repo/main alongside .debs (see utils.classify_repo_subdir).
+    CONF-01 Stage D: `dir_udebs` is now the dir holding .udeb files
+    directly (in the unified apt-repo layout that's
+    repo/dists/<codename>/main/debian-installer/binary-<arch>/).
+    Pre-CONF-01 the param was the top-level repo/ and we joined 'main';
+    Stage D pushes the resolved path to the caller for clarity.
 
     Maps the cache's Packages-index Filename via strip_build_version
     (drops Debian buildd's +bN bin-NMU suffix).  Post-build NMU strip
@@ -232,7 +240,7 @@ def _resolve_udeb_files(udeb_tree, dir_repo: str) -> List[str]:
     notices if the list is too short.
     """
     _files: List[str] = []
-    _main = os.path.join(dir_repo, 'main')
+    _main = dir_udebs
     for _name in udeb_tree.selected_pkgs:
         _pkg = udeb_tree.selected_pkgs[_name]
         if _name != _pkg['Package']:

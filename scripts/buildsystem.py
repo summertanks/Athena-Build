@@ -29,6 +29,11 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         self._dir_image = config.dir_image
         self._dir_chroot = config.dir_chroot
         self._dir_repo = config.dir_repo
+        # CONF-01 Stage D: the new apt-repo layout nests .debs under
+        # dists/<codename>/main/binary-<arch>/.  Mixins (chroot, dep-
+        # drift) used to construct `repo/main/<deb>` paths inline; now
+        # they read this attr instead.
+        self._dir_repo_main = config.dir_repo_main
         self._dir_log = config.dir_log
         self._dir_preinstall_patch = config.dir_patch_preinstall
         self._dir_postinstall_patch = config.dir_patch_postinstall
