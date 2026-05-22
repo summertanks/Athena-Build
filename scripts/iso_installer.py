@@ -29,6 +29,15 @@ from typing import Optional
 
 import tui
 
+# apt-repo metadata generators — lifted from this module to scripts/apt_repo.py
+# in CONF-01 Stage A (2026-05-22).  See docs/plans/conf-01-repo-layout-migration.md.
+# Pure code motion; call sites below kept the same semantics.
+from apt_repo import (
+    generate_apt_repo,
+    sign_release_files,
+    export_pubkey_to_staging,
+)
+
 logger = logging.getLogger('athena')
 
 
@@ -131,7 +140,7 @@ def build_installer_iso(
         if not _stage_group_manifests(_staging, pkg_groups):
             return False
 
-    if not _generate_apt_repo(_staging, suite, codename, version, password):
+    if not generate_apt_repo(_staging, suite, codename, version, password):
         return False
 
     # Sign Release with the project key and ship the matching pubkey at
@@ -141,11 +150,11 @@ def build_installer_iso(
     # diagnosis in docs/known-issues.md).  Both params None ⇒ skip
     # signing (useful for tests).
     if signing_homedir is not None:
-        if not _sign_release_files(
+        if not sign_release_files(
                 _staging, suite, signing_homedir, password):
             return False
     if signing_pubkey_path is not None:
-        if not _export_pubkey_to_staging(
+        if not export_pubkey_to_staging(
                 _staging, signing_pubkey_path, password):
             return False
 
@@ -471,8 +480,8 @@ def _stage_disk_info(
 
     The codename in .disk/info MUST match the suite under dists/ for
     cdrom-detect to find the Release file.  Both come from the same
-    source (`build.conf [Build] CODENAME`): _generate_apt_repo names
-    dists/<codename>/ and this helper substitutes ${codename} in
+    source (`build.conf [Build] CODENAME`): apt_repo.generate_apt_repo
+    names dists/<codename>/ and this helper substitutes ${codename} in
     .disk/info.  Caught 2026-05-11 — earlier static .disk/info said
     "athena" but the build's actual codename was "thor", so
     cdrom-detect reported "Error reading Release file".
@@ -566,7 +575,6 @@ def _stage_base_include(staging: str, pkgs: Optional[list]) -> bool:
         f"base_include: {len(pkgs)} package(s) → .disk/base_include"
     )
     return True
-
 
 
 def _stage_group_manifests(staging: str, pkg_groups: 'dict[str, set]') -> bool:
@@ -834,456 +842,6 @@ def _bytes_in_dir(d: str) -> int:
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
     return 0
-
-
-def _generate_apt_repo(
-    staging: str, suite: str, codename: str, version: str, password: str,
-) -> bool:
-    """Generate apt-repo metadata under staging/dists/<suite>/.
-
-    Layout produced (Debian apt-repo convention):
-      dists/<suite>/Release                                        (top-level)
-      dists/<suite>/main/binary-amd64/{Release,Packages,Packages.gz,Packages.xz}
-      dists/<suite>/main/debian-installer/binary-amd64/{Release,Packages,Packages.gz,Packages.xz}
-      dists/<suite>/main/source/{Release,Sources,Sources.gz,Sources.xz}
-
-    Pool layout stays FLAT — apt reads Filename: from each Packages
-    record, which points into pool/ relative to the apt root.  No need
-    to restructure into pool/<comp>/<initial>/<src>/.
-
-    The Release file is unsigned at the end of this function — signing
-    happens in _sign_release_files, invoked from build_installer_iso
-    after the apt-repo is laid out.  Splitting the steps keeps each
-    helper focused on one job and makes the failure modes distinct
-    (apt-ftparchive failure vs gpg failure).
-
-    Tools used:
-      dpkg-scanpackages  — scans pool/ for .debs / .udebs, emits Packages
-      dpkg-scansources   — scans pool/ for .dsc, emits Sources
-      apt-ftparchive release — generates the top-level Release with
-                               SHA256 hashes of every Packages/Sources
-
-    All three are standard Debian utilities in dpkg-dev + apt-utils.
-    """
-    _COMPONENT = 'main'
-    _ARCH = 'amd64'
-
-    _suite_base   = os.path.join(staging, 'dists', suite)
-    _comp_base    = os.path.join(_suite_base, _COMPONENT)
-    _binary_dir   = os.path.join(_comp_base, f'binary-{_ARCH}')
-    _udeb_dir     = os.path.join(_comp_base, 'debian-installer', f'binary-{_ARCH}')
-    _source_dir   = os.path.join(_comp_base, 'source')
-
-    tui.console.print(f"Generating apt-repo metadata in dists/{suite}/...")
-
-    # Step 1: directory hierarchy.  Made user-owned (no sudo) so the
-    # subsequent sudo-driven dpkg-scanpackages output can write into them
-    # — the parent staging tree is user-owned too.  Files inside will
-    # become root-owned via the sudo invocation, which is fine.
-    for _d in (_binary_dir, _udeb_dir, _source_dir):
-        try:
-            os.makedirs(_d, exist_ok=True)
-        except OSError as e:
-            tui.console.print(f"ERROR: mkdir {_d}: {e}")
-            logger.error(f"_generate_apt_repo mkdir {_d}: {e}")
-            return False
-
-    # Step 2: regular .deb Packages index.  -m tolerates multiple
-    # versions of the same package without warning (we have multiple
-    # kernel ABIs etc. in repo/).  Run from staging/ so Filename:
-    # entries are relative paths like `pool/foo.deb`.
-    if not _scan_packages_to(
-            staging, 'pool', os.path.join(_binary_dir, 'Packages'),
-            password, udeb=False):
-        return False
-
-    # Step 3: udeb Packages index (Section: debian-installer records).
-    # dpkg-scanpackages -t udeb filters to .udeb files only.
-    if not _scan_packages_to(
-            staging, 'pool', os.path.join(_udeb_dir, 'Packages'),
-            password, udeb=True):
-        return False
-
-    # Step 4: source Sources index.  dpkg-scansources walks pool/ for
-    # .dsc files (which our source-build pipeline lands alongside .debs).
-    if not _scan_sources_to(
-            staging, 'pool', os.path.join(_source_dir, 'Sources'),
-            password):
-        return False
-
-    # Step 5: per-component Release files.  These pin Suite/Codename/
-    # Component/Architecture on each binary-arch / source dir so apt can
-    # verify they match what the top-level Release advertises.
-    for _dir, _arch_label in (
-        (_binary_dir, _ARCH),
-        (_udeb_dir,   _ARCH),
-        (_source_dir, 'source'),
-    ):
-        if not _write_subdir_release(
-                _dir, suite, codename, _COMPONENT, _arch_label, password):
-            return False
-
-    # Step 6: top-level dists/<suite>/Release.  apt-ftparchive release
-    # walks the sub-tree, hashes every Packages/Sources/Packages.gz/...,
-    # and emits the SHA256: block apt verifies.  -o flags carry the
-    # distro identity fields; without them apt-ftparchive emits empty
-    # Suite/Codename and apt refuses the repo.
-    if not _generate_top_release(
-            staging, suite, codename, version,
-            os.path.join(_suite_base, 'Release'), password):
-        return False
-
-    tui.console.print(
-        f"apt-repo: dists/{suite}/ ready (unsigned — _sign_release_files "
-        "will sign next)",
-        tui.COLOR_HIGHLIGHT,
-    )
-    return True
-
-
-def _scan_packages_to(
-    staging: str, pool_subdir: str, output_path: str,
-    password: str, udeb: bool,
-) -> bool:
-    """sudo dpkg-scanpackages -m [-t udeb] <pool_subdir> > <output> + compress.
-
-    Run with cwd=staging so Packages records carry relative Filename
-    entries (matching the layout apt walks via /cdrom/pool/...).
-    """
-    _flag = '-t udeb' if udeb else ''
-    _label = 'udebs' if udeb else 'debs'
-    tui.console.print(f"Scanning {pool_subdir}/ for {_label}...")
-    _shell = (
-        f'cd {staging} && '
-        f'dpkg-scanpackages -m {_flag} {pool_subdir} 2>/dev/null '
-        f'> {output_path}'
-    )
-    _r = _sudo(['bash', '-c', _shell], password)
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: dpkg-scanpackages ({_label}) failed: "
-            f"{_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_scan_packages_to {_label}: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
-        )
-        return False
-    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        tui.console.print(
-            f"ERROR: Packages output {output_path} is missing or empty"
-        )
-        logger.error(f"_scan_packages_to {_label}: empty output at {output_path}")
-        return False
-    _n = _count_records(output_path)
-    tui.console.print(f"  → {_n} {_label} indexed")
-    return _compress_index(output_path, password)
-
-
-def _scan_sources_to(
-    staging: str, pool_subdir: str, output_path: str, password: str,
-) -> bool:
-    """sudo dpkg-scansources <pool_subdir> > <output> + compress.
-
-    Same cwd trick as _scan_packages_to.  dpkg-scansources tolerates
-    pool/ subdirs with no .dsc — emits an empty Sources, still useful.
-    """
-    tui.console.print(f"Scanning {pool_subdir}/ for sources...")
-    _shell = (
-        f'cd {staging} && '
-        f'dpkg-scansources {pool_subdir} 2>/dev/null '
-        f'> {output_path}'
-    )
-    _r = _sudo(['bash', '-c', _shell], password)
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: dpkg-scansources failed: {_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_scan_sources_to: rc={_r.returncode}, stderr={_r.stderr.strip()}"
-        )
-        return False
-    _n = _count_records(output_path) if os.path.exists(output_path) else 0
-    tui.console.print(f"  → {_n} sources indexed")
-    return _compress_index(output_path, password)
-
-
-def _compress_index(path: str, password: str) -> bool:
-    """gzip -9k + xz -9k to produce Packages.gz / Packages.xz (or
-    Sources.gz / Sources.xz).  -k keeps the original uncompressed file
-    — apt accepts any of the three forms but the uncompressed one is
-    what's hashed in the per-subdir Release."""
-    for _tool in (['gzip', '-9', '-k', '-f', path],
-                  ['xz',   '-9', '-k', '-f', path]):
-        _r = _sudo(_tool, password)
-        if _r.returncode != 0:
-            tui.console.print(
-                f"ERROR: {_tool[0]} compress {path}: "
-                f"{_r.stderr.strip()[:200]}"
-            )
-            logger.error(
-                f"_compress_index {_tool[0]} {path}: rc={_r.returncode}, "
-                f"stderr={_r.stderr.strip()}"
-            )
-            return False
-    return True
-
-
-def _count_records(path: str) -> int:
-    """Count Packages/Sources records.  Each record is a Package: (or
-    a Source: stanza in Sources files) at column 0; records are
-    separated by a blank line.  Sources records use 'Package: <name>'
-    too (the field is named Package even in Sources)."""
-    try:
-        with open(path, 'r', errors='replace') as fh:
-            _content = fh.read()
-    except OSError:
-        return 0
-    return _content.count('\nPackage: ') + (
-        1 if _content.startswith('Package: ') else 0
-    )
-
-
-def _write_subdir_release(
-    target_dir: str, suite: str, codename: str, component: str,
-    arch_label: str, password: str,
-) -> bool:
-    """Write a minimal per-subdir Release file pinning Suite/Codename/
-    Component/Architecture.  apt cross-checks these against the top-level
-    Release; mismatch → apt refuses the repo with a useful error.
-    """
-    _content = (
-        f"Origin: Athena\n"
-        f"Label: Athena\n"
-        f"Archive: {suite}\n"
-        f"Suite: {suite}\n"
-        f"Codename: {codename}\n"
-        f"Component: {component}\n"
-        f"Architecture: {arch_label}\n"
-        f"Description: Athena installer media — {component}/{arch_label}\n"
-    )
-    _path = os.path.join(target_dir, 'Release')
-    # Write via sudo tee so the file lands root-owned next to the other
-    # root-owned index files in this subdir.
-    _shell = f"cat > {_path}"
-    _r = subprocess.run(
-        ['sudo', '-S', 'bash', '-c', _shell],
-        input=password + '\n' + _content,
-        capture_output=True, text=True,
-    )
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: write {_path}: {_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_write_subdir_release {_path}: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
-        )
-        return False
-    return True
-
-
-def _generate_top_release(
-    staging: str, suite: str, codename: str, version: str,
-    output_path: str, password: str,
-) -> bool:
-    """apt-ftparchive release dists/<suite>/ > dists/<suite>/Release.
-
-    The -o flags pin distro identity — apt-ftparchive emits empty
-    Suite/Codename/etc. otherwise and apt then refuses the repo with
-    "Repository ... does not have a Release file."
-
-    NOT using `bash -c` for this call: some -o values can contain
-    spaces (e.g. Description="Athena installer disc"), and shell
-    word-splitting would chop them into separate tokens — apt-ftparchive
-    then chokes with "Invalid operation installer".  Caught in
-    production 2026-05-11.  Pass argv directly to subprocess.run with
-    cwd= and stdout=file_handle for redirection.
-    """
-    _opts = [
-        '-o', 'APT::FTPArchive::Release::Origin=Athena',
-        '-o', 'APT::FTPArchive::Release::Label=Athena',
-        '-o', f'APT::FTPArchive::Release::Suite={suite}',
-        '-o', f'APT::FTPArchive::Release::Codename={codename}',
-        '-o', f'APT::FTPArchive::Release::Version={version}',
-        '-o', 'APT::FTPArchive::Release::Architectures=amd64',
-        '-o', 'APT::FTPArchive::Release::Components=main',
-        '-o', 'APT::FTPArchive::Release::Description=Athena installer disc',
-    ]
-    _argv = (
-        ['sudo', '-S', 'apt-ftparchive'] + _opts +
-        ['release', f'dists/{suite}']
-    )
-    try:
-        with open(output_path, 'wb') as fh:
-            _r = subprocess.run(
-                _argv,
-                input=(password + '\n').encode('utf-8'),
-                stdout=fh,
-                stderr=subprocess.PIPE,
-                cwd=staging,
-            )
-    except OSError as e:
-        tui.console.print(f"ERROR: open {output_path} for write: {e}")
-        logger.error(f"_generate_top_release open: {e}")
-        return False
-    _stderr = (_r.stderr or b'').decode('utf-8', errors='replace').strip()
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: apt-ftparchive release failed (rc={_r.returncode}): "
-            f"{_stderr[:200]}"
-        )
-        logger.error(
-            f"_generate_top_release: rc={_r.returncode}, stderr={_stderr}"
-        )
-        return False
-    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        tui.console.print(
-            f"ERROR: top-level Release at {output_path} is missing or empty"
-        )
-        logger.error(f"_generate_top_release: empty output at {output_path}")
-        return False
-    return True
-
-
-def _sign_release_files(
-    staging: str, suite: str, signing_homedir: str, password: str,
-) -> bool:
-    """Sign dists/<suite>/Release with our project key.
-
-    Produces two artifacts apt verifies on the target:
-      Release.gpg  — detached signature, classic v1 format
-      InRelease    — clearsigned (signature inline), modern preferred format
-
-    apt fetches InRelease first; if absent, falls back to
-    Release + Release.gpg.  Shipping both maximises compatibility with
-    older apt versions that don't speak InRelease.  Both files MUST be
-    signed by a key the target trusts — we ship the matching pubkey at
-    .disk/archive-key.gpg so the install-time hook can install it into
-    /target/etc/apt/trusted.gpg.d/ before its apt-cdrom add call.
-
-    Caught 2026-05-13: without these, apt-get update on the target said
-    "does not have a Release file" — apt-setup's verify step then
-    discarded 40cdrom's output and the installed target's sources.list
-    never got a working cdrom entry, so any post-install apt-get
-    install failed with "Unable to locate package".  See Phase C
-    diagnosis in docs/known-issues.md.
-    """
-    _release = os.path.join(staging, 'dists', suite, 'Release')
-    if not os.path.isfile(_release):
-        tui.console.print(
-            f"ERROR: {_release} missing — apt-repo generation must run first"
-        )
-        logger.error(f"_sign_release_files: {_release} absent")
-        return False
-    if not os.path.isdir(signing_homedir):
-        tui.console.print(
-            f"ERROR: signing homedir {signing_homedir} absent — run "
-            "'signing keygen' (or whatever sets up the project key) first"
-        )
-        logger.error(f"_sign_release_files: {signing_homedir} absent")
-        return False
-    _release_gpg = _release + '.gpg'
-    _inrelease   = os.path.join(os.path.dirname(_release), 'InRelease')
-    # gpg refuses to overwrite by default; remove any stale signatures
-    # from a previous build run first.
-    for _f in (_release_gpg, _inrelease):
-        if os.path.exists(_f):
-            try:
-                os.unlink(_f)
-            except OSError as e:
-                tui.console.print(f"ERROR: rm {_f}: {e}")
-                logger.error(f"_sign_release_files rm {_f}: {e}")
-                return False
-    # Detached, ASCII-armored signature → Release.gpg.  --batch + --yes
-    # so gpg never prompts (we always overwrite the previously-removed file).
-    _argv = [
-        'gpg', '--homedir', signing_homedir,
-        '--batch', '--yes',
-        '--output', _release_gpg,
-        '--detach-sign', '--armor',
-        _release,
-    ]
-    _r = subprocess.run(_argv, capture_output=True, text=True)
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: gpg --detach-sign Release: {_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_sign_release_files detach-sign: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
-        )
-        return False
-    # Clearsigned (signature wraps the original content) → InRelease.
-    _argv = [
-        'gpg', '--homedir', signing_homedir,
-        '--batch', '--yes',
-        '--output', _inrelease,
-        '--clearsign',
-        _release,
-    ]
-    _r = subprocess.run(_argv, capture_output=True, text=True)
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: gpg --clearsign Release: {_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_sign_release_files clearsign: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
-        )
-        return False
-    tui.console.print(
-        f"Release signed: dists/{suite}/Release.gpg + InRelease"
-    )
-    return True
-
-
-def _export_pubkey_to_staging(
-    staging: str, signing_pubkey_path: str, password: str,
-) -> bool:
-    """Copy the project pubkey to staging/.disk/archive-key.gpg.
-
-    The install-time hook (base-installer quilt patch, see
-    patch/source/base-installer/) reads this and copies it to
-    /target/etc/apt/trusted.gpg.d/athena-archive-keyring.gpg BEFORE
-    running its apt-cdrom add call.  Without the keyring installed,
-    apt rejects our signed Release with "NO_PUBKEY" and the chain
-    falls apart the same way an unsigned Release would.
-
-    The pubkey was already exported by signing.generate_key at project
-    setup time (CONF-02 phase 1); we just copy it onto the disc.  The
-    .disk/ directory is created earlier by _stage_disk_info, so we
-    just need a write into an existing user-owned dir — no sudo.
-    """
-    if not os.path.isfile(signing_pubkey_path):
-        tui.console.print(
-            f"ERROR: pubkey {signing_pubkey_path} missing — run "
-            "'signing keygen' (or whatever sets up the project key) first"
-        )
-        logger.error(
-            f"_export_pubkey_to_staging: {signing_pubkey_path} absent"
-        )
-        return False
-    _dst_dir = os.path.join(staging, '.disk')
-    if not os.path.isdir(_dst_dir):
-        tui.console.print(
-            f"ERROR: {_dst_dir} missing — _stage_disk_info must run first"
-        )
-        logger.error(f"_export_pubkey_to_staging: {_dst_dir} absent")
-        return False
-    _dst = os.path.join(_dst_dir, 'archive-key.gpg')
-    try:
-        shutil.copyfile(signing_pubkey_path, _dst)
-        os.chmod(_dst, 0o644)
-    except OSError as e:
-        tui.console.print(f"ERROR: copy pubkey to {_dst}: {e}")
-        logger.error(f"_export_pubkey_to_staging copy: {e}")
-        return False
-    tui.console.print(
-        "Pubkey exported: .disk/archive-key.gpg "
-        f"({os.path.getsize(_dst)} bytes)"
-    )
-    return True
 
 
 def _run_grub_mkrescue(staging: str, iso_path: str,

@@ -1445,7 +1445,7 @@ def test_iso_installer_count_records_zero_one_many():
     multiple records correctly."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _count_records
+    from apt_repo import _count_records
     with tempfile.NamedTemporaryFile('w', delete=False) as fh:
         _path = fh.name
     try:
@@ -1476,7 +1476,11 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
     import sys, tempfile
     from unittest.mock import patch, MagicMock
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import iso_installer, tui as _tui
+    import iso_installer  # noqa: F401 — apt_repo Mocks were originally
+                          # iso_installer-namespaced; kept import as
+                          # historical anchor while we transition
+    import apt_repo
+    import tui as _tui
 
     # Stub Tui so the helper's tui.console.print() calls don't crash
     # (_with_stub_tui decorator is defined further down in this file;
@@ -1542,10 +1546,10 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
         with tempfile.TemporaryDirectory() as _staging:
             # Pre-create pool so the cwd=staging cd works.
             os.makedirs(os.path.join(_staging, 'pool'), exist_ok=True)
-            with patch.object(iso_installer, '_sudo', side_effect=_fake_sudo), \
-                 patch.object(iso_installer.subprocess, 'run',
+            with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
+                 patch.object(apt_repo.subprocess, 'run',
                               side_effect=_fake_subprocess_run):
-                _ok = iso_installer._generate_apt_repo(
+                _ok = apt_repo.generate_apt_repo(
                     _staging, 'athena', 'athena', '0.1', 'pw')
             _assert_paths_staging = _staging  # keep for asserts below
             _assert_dirs_exist = all(os.path.isdir(p) for p in (
@@ -2038,7 +2042,7 @@ def test_iso_installer_sign_release_files_runs_both_gpg_invocations():
     import sys, tempfile
     from unittest.mock import patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _sign_release_files
+    from apt_repo import sign_release_files
     with tempfile.TemporaryDirectory() as _stage, \
          tempfile.TemporaryDirectory() as _gpgdir:
         _suite_dir = os.path.join(_stage, 'dists', 'thor')
@@ -2054,8 +2058,8 @@ def test_iso_installer_sign_release_files_runs_both_gpg_invocations():
                 _out = cmd[cmd.index('--output') + 1]
                 with open(_out, 'w') as fh: fh.write('FAKE-SIGNATURE\n')
             return _R()
-        with patch('iso_installer.subprocess.run', side_effect=_fake_run):
-            assert _sign_release_files(
+        with patch('apt_repo.subprocess.run', side_effect=_fake_run):
+            assert sign_release_files(
                 _stage, 'thor', _gpgdir, 'pw') is True
         # Exactly two gpg calls.
         _gpg_calls = [c for c in _calls if c[0] == 'gpg']
@@ -2085,12 +2089,12 @@ def test_iso_installer_sign_release_files_errors_when_release_missing():
     import sys, tempfile
     from unittest.mock import patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _sign_release_files
+    from apt_repo import sign_release_files
     with tempfile.TemporaryDirectory() as _stage, \
          tempfile.TemporaryDirectory() as _gpgdir:
         # Don't create dists/thor/Release
-        with patch('iso_installer.subprocess.run') as _mock:
-            assert _sign_release_files(
+        with patch('apt_repo.subprocess.run') as _mock:
+            assert sign_release_files(
                 _stage, 'thor', _gpgdir, 'pw') is False
             _mock.assert_not_called()
 
@@ -2102,14 +2106,14 @@ def test_iso_installer_sign_release_files_errors_when_homedir_missing():
     import sys, tempfile
     from unittest.mock import patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _sign_release_files
+    from apt_repo import sign_release_files
     with tempfile.TemporaryDirectory() as _stage:
         _suite_dir = os.path.join(_stage, 'dists', 'thor')
         os.makedirs(_suite_dir)
         with open(os.path.join(_suite_dir, 'Release'), 'w') as fh:
             fh.write('Suite: thor\n')
-        with patch('iso_installer.subprocess.run') as _mock:
-            assert _sign_release_files(
+        with patch('apt_repo.subprocess.run') as _mock:
+            assert sign_release_files(
                 _stage, 'thor', '/nonexistent/gpgdir', 'pw') is False
             _mock.assert_not_called()
 
@@ -2122,14 +2126,14 @@ def test_iso_installer_export_pubkey_to_staging_copies_to_disk_archive_key():
     break the install-time keyring install."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _export_pubkey_to_staging
+    from apt_repo import export_pubkey_to_staging
     with tempfile.TemporaryDirectory() as _stage, \
          tempfile.NamedTemporaryFile('wb', delete=False) as _pubkey_fh:
         _pubkey_fh.write(b'-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE\n')
         _pubkey_path = _pubkey_fh.name
     try:
         os.makedirs(os.path.join(_stage, '.disk'))
-        assert _export_pubkey_to_staging(_stage, _pubkey_path, 'pw') is True
+        assert export_pubkey_to_staging(_stage, _pubkey_path, 'pw') is True
         _dst = os.path.join(_stage, '.disk', 'archive-key.gpg')
         assert os.path.isfile(_dst), _dst
         with open(_dst, 'rb') as fh:
@@ -2146,10 +2150,10 @@ def test_iso_installer_export_pubkey_to_staging_errors_when_pubkey_missing():
     than ship an ISO that fails apt-cdrom verify at install time."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _export_pubkey_to_staging
+    from apt_repo import export_pubkey_to_staging
     with tempfile.TemporaryDirectory() as _stage:
         os.makedirs(os.path.join(_stage, '.disk'))
-        assert _export_pubkey_to_staging(
+        assert export_pubkey_to_staging(
             _stage, '/nonexistent/pubkey.gpg', 'pw') is False
 
 
@@ -2159,14 +2163,14 @@ def test_iso_installer_export_pubkey_to_staging_errors_when_disk_dir_missing():
     and skip the .disk/info disc-marker contract _stage_disk_info enforces)."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from iso_installer import _export_pubkey_to_staging
+    from apt_repo import export_pubkey_to_staging
     with tempfile.TemporaryDirectory() as _stage, \
          tempfile.NamedTemporaryFile('wb', delete=False) as _pubkey_fh:
         _pubkey_fh.write(b'KEY')
         _pubkey_path = _pubkey_fh.name
     try:
         # No .disk/ in _stage.
-        assert _export_pubkey_to_staging(_stage, _pubkey_path, 'pw') is False
+        assert export_pubkey_to_staging(_stage, _pubkey_path, 'pw') is False
     finally:
         os.unlink(_pubkey_path)
 
