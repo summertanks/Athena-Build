@@ -1,0 +1,37 @@
+#!/bin/sh
+# athena-branding.postinst — re-run update-grub so our GRUB_DISTRIBUTOR
+# + GRUB_BACKGROUND from /etc/default/grub.d/50-athena.cfg are baked
+# into /boot/grub/grub.cfg.
+#
+# Why this is needed despite grub's own postinst already running
+# update-grub: package install order during d-i pkgsel typically goes
+# grub-pc/grub-efi-amd64 FIRST (installed by base-installer), then
+# task-desktop's closure (which includes athena-branding via the
+# desktop-base displacement).  By the time athena-branding lands,
+# update-grub has already run once — without our 50-athena.cfg in
+# place — and won't re-run on its own.  Manually re-running ensures
+# the boot menu reflects our identity + background on first boot.
+#
+# No-op when update-grub isn't installed (live ISO / chroot without
+# grub — `command -v` returns non-zero, we exit 0 silently).
+
+set -e
+
+case "$1" in
+    configure)
+        if command -v update-grub >/dev/null 2>&1; then
+            # `|| true` so a transient update-grub warning (e.g.
+            # background PNG temporarily unreadable mid-unpack) doesn't
+            # fail the postinst and block install completion.  The
+            # config change is idempotent — next update-grub trigger
+            # picks it up.
+            update-grub || true
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

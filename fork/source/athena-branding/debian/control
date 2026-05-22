@@ -30,7 +30,19 @@ Description: @DISTRIBUTION@ desktop branding (wallpaper, logo, GRUB, gsettings d
    * /etc/default/grub.d/50-athena.cfg
        — sets GRUB_DISTRIBUTOR="@DISTRIBUTION@" so update-grub emits
          "@DISTRIBUTION@ GNU/Linux" menu entries instead of the
-         lsb_release-fallback "Debian" default
+         lsb_release-fallback "Debian" default; also sets
+         GRUB_BACKGROUND=/usr/share/athena-branding/grub-background.png
+         so the boot menu shows the Aegis splash
+   * /usr/share/athena-branding/grub-background.png
+       — 1920x1080 rendered from aegis-dark.svg at build time;
+         consumed by /etc/grub.d/05_debian_theme's GRUB_BACKGROUND
+         pickup
+ .
+ postinst re-runs update-grub on configure so the GRUB_DISTRIBUTOR +
+ GRUB_BACKGROUND from 50-athena.cfg are picked up when athena-branding
+ lands AFTER grub-pc/grub-efi-amd64 (the typical pkgsel/tasksel order
+ during d-i install — grub's own postinst has already run by the time
+ our package configures, and it won't re-run without a nudge).
  .
  Displaces upstream desktop-base via Provides+Conflicts+Replaces so
  task-desktop's hard Depends on desktop-base resolves to us instead
