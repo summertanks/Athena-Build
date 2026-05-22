@@ -520,8 +520,14 @@ class DependencyTree:
                     _selected_alt_pkg.append(_alt_dep)   # no version constraint — name match sufficient
                     continue
                 _alt_op = _alt_dep[2] if _alt_dep[2] in self._VALID_CONSTRAINTS else '>='
+                _pkg_ver = self._version_for_constraint_target(_alt_name, _alt_name)
+                if _pkg_ver is None:
+                    # Provider declares `Provides: <name>` unversioned —
+                    # per Policy §7.5 cannot satisfy a versioned alt-dep
+                    # constraint.  Skip this alt; another may satisfy.
+                    continue
                 try:
-                    if apt_pkg.check_dep(str(self.selected_pkgs[_alt_name].version), _alt_op, _alt_ver_str):
+                    if apt_pkg.check_dep(_pkg_ver, _alt_op, _alt_ver_str):
                         _selected_alt_pkg.append(_alt_dep)
                 except Exception:
                     _selected_alt_pkg.append(_alt_dep)   # can't evaluate — assume satisfied
@@ -572,6 +578,38 @@ class DependencyTree:
                                         f"on {_parsed_pkg.package} (from {_selected_pkg.package}): {e}")
 
         return _selected_pkg
+
+    def _version_for_constraint_target(self, entry_key: str,
+                                         target_name: str) -> 'Optional[str]':
+        """Return the version string to compare against a constraint
+        on `target_name`, given that `entry_key` is the selected_pkgs
+        entry that purports to satisfy it.
+
+        Two cases:
+          - entry IS the real package named `target_name` (Package field
+            matches): returns str(entry.version).
+          - entry provides `target_name` via Provides (Package field
+            differs, e.g. libgcc-s1 provides libgcc1): returns the
+            Provides clause version when one is declared, else None.
+
+        Returns None when the only Provides clause covering `target_name`
+        is unversioned.  Per Debian Policy §7.5, an unversioned Provides
+        cannot satisfy a versioned constraint — callers must treat None
+        as "name match only" (satisfies unversioned constraint only).
+
+        Fixes STA-18: previously `selected_pkgs[alias].version` was read
+        directly, returning the provider's own Version field even when
+        the Provides clause carried a different version (e.g. an epoch
+        the provider lacks — libgcc-s1's Version is 12.2.0-14+deb12u1
+        epoch 0, but its Provides: libgcc1 (= 1:12.2.0-14+deb12u1) is
+        epoch 1; a consumer Depends: libgcc1 (>= 1:4.0) then failed the
+        version compare and emitted spurious WARNINGs).
+        """
+        _obj = self.selected_pkgs[entry_key]
+        if _obj['Package'] == target_name:
+            return str(_obj.version)
+        _provided_ver = _obj.explicit_provides_version(target_name)
+        return str(_provided_ver) if _provided_ver is not None else None
 
     def validate_selection(self) -> bool:
 
@@ -726,19 +764,24 @@ class DependencyTree:
                         pkg_version = pkg[1]
                         pkg_constraint = pkg[2]
                         # Empty comparator = no version constraint, name-match alone satisfies (matches Breaks/Conflicts pattern)
+                        _pkg_ver = self._version_for_constraint_target(pkg_name, pkg_name)
                         try:
-                            _satisfies = (pkg_constraint == '' or
-                                          apt_pkg.check_dep(str(self.selected_pkgs[pkg_name].version),
-                                                            pkg_constraint, pkg_version))
+                            if pkg_constraint == '':
+                                _satisfies = True
+                            elif _pkg_ver is None:
+                                # unversioned Provides vs versioned constraint — see STA-18
+                                _satisfies = False
+                            else:
+                                _satisfies = apt_pkg.check_dep(_pkg_ver, pkg_constraint, pkg_version)
                         except Exception as e:
                             logger.warning(f"check_dep raised for {pkg_name} "
-                                                f"({self.selected_pkgs[pkg_name].version} {pkg_constraint} {pkg_version}): {e}")
+                                                f"({_pkg_ver} {pkg_constraint} {pkg_version}): {e}")
                             _satisfies = False
                         if _satisfies:
                             _found = True
                         else:
                             logger.warning(f"Alt-dep version constraint failed for {pkg_name} "
-                                                f"({self.selected_pkgs[pkg_name].version} {pkg_constraint} {pkg_version})")
+                                                f"({_pkg_ver} {pkg_constraint} {pkg_version})")
                     else:
                         # Lets try in Provides, little more complex
                         _provides_options = self.__cache.get_packages(pkg_name)
@@ -751,20 +794,27 @@ class DependencyTree:
                                 pkg_version = pkg[1]
                                 pkg_constraint = pkg[2]
                                 # Empty comparator = no version constraint, name-match alone satisfies
+                                # _pkg_name is the real provider; pkg_name is the virtual target —
+                                # use the Provides clause version of pkg_name as declared by _pkg_name.
+                                _pkg_ver = self._version_for_constraint_target(_pkg_name, pkg_name)
                                 try:
-                                    _satisfies = (pkg_constraint == '' or
-                                                  apt_pkg.check_dep(str(self.selected_pkgs[_pkg_name].version),
-                                                                    pkg_constraint, pkg_version))
+                                    if pkg_constraint == '':
+                                        _satisfies = True
+                                    elif _pkg_ver is None:
+                                        # unversioned Provides vs versioned constraint — see STA-18
+                                        _satisfies = False
+                                    else:
+                                        _satisfies = apt_pkg.check_dep(_pkg_ver, pkg_constraint, pkg_version)
                                 except Exception as e:
                                     logger.warning(f"check_dep raised for {_pkg_name} "
-                                                        f"({self.selected_pkgs[_pkg_name].version} "
+                                                        f"({_pkg_ver} "
                                                         f"{pkg_constraint} {pkg_version}): {e}")
                                     _satisfies = False
                                 if _satisfies:
                                     _found = True
                                 else:
                                     logger.warning(f"Alt-dep (via provides) version constraint failed for "
-                                                        f"{_pkg_name} ({self.selected_pkgs[_pkg_name].version} "
+                                                        f"{_pkg_name} ({_pkg_ver} "
                                                         f"{pkg_constraint} {pkg_version})")
 
                 if not _found:
