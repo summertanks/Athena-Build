@@ -66,10 +66,21 @@ class _DepDriftMixin:
             Package libnsl2 is not configured yet.
 
         Pass 1 — sync.  Overwrites depends / alt_depends / pre_depends /
-        alt_pre_depends on every canonical Package object with what dpkg-deb
-        reports.  All other fields (Version, Arch, Filename, …) are left
+        alt_pre_depends AND Version on every canonical Package object with
+        what dpkg-deb reports.  Other fields (Arch, Filename, …) are left
         untouched.  Drift is logged at info level (log tab only) in the form
         "Dep drift seen for package <pkg> from <cache_ver> to <disk_ver>".
+
+        CONF-01 Stage D fix-up (2026-05-22): the Version sync was added
+        because dep constraints emerging from on-disk .debs are
+        NMU-stripped (e.g. `(= 0.8-10)`), but the cache-derived Version
+        on the SAME Package object was still un-stripped (`0.8-10+deb12u1`).
+        _verify_dep_resolution then saw consumer-stripped vs provider-
+        unstripped and reported 144 spurious mismatches on a clean repo.
+        Syncing Version too keeps both sides of the dep constraint
+        consistent.  Pre-Stage-D this didn't bite because dep_drift's
+        path resolution missed the .debs entirely (empty old repo/main)
+        and sync was a no-op — accidentally consistent.
 
         Pass 2 — verify.  After every package is synced, walk every (now-
         synced) dep field and check that each named dep is in selected_pkgs
@@ -120,6 +131,20 @@ class _DepDriftMixin:
             _pkg_obj.alt_depends     = _deb_pkg.alt_depends
             _pkg_obj.pre_depends     = _deb_pkg.pre_depends
             _pkg_obj.alt_pre_depends = _deb_pkg.alt_pre_depends
+            # CONF-01 Stage D fix-up: sync Version too — see method
+            # docstring for the asymmetric-sync bug rationale.  Both
+            # .version attr and the underlying ['Version'] field need
+            # the update (different consumers read different surfaces).
+            _pkg_obj.version = _deb_pkg.version
+            try:
+                _pkg_obj['Version'] = _deb_pkg.get(
+                    'Version', _pkg_obj.get('Version', ''),
+                )
+            except (TypeError, KeyError):
+                # Some Package subclasses don't expose __setitem__;
+                # the .version attr update above is the load-bearing
+                # one for _verify_dep_resolution.
+                pass
 
         self._verify_dep_resolution()
 
