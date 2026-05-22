@@ -1,3 +1,6 @@
-data/athena-stubs.templates var/lib/dpkg/info
-data/lsb-release            etc
-data/default-release        etc
+data/athena-stubs.templates    var/lib/dpkg/info
+data/lsb-release               etc
+data/default-release           etc
+data/athena-overrides.templates usr/share/athena-installer-data
+data/debconf-overrides.dat     usr/share/athena-installer-data
+data/S40-athena-branding       lib/debian-installer-startup.d

@@ -1,33 +1,33 @@
-# installer/branding/
+# installer/branding/ — RETIRED
 
-debconf overrides that rewrite visible installer strings (the "Debian"
-→ "Athena" rebrand) without patching every step udeb's templates file.
+The Phase-6-original mechanism (overlay `debconf-overrides.dat` from
+this directory into the chroot at iso-build time) was replaced
+2026-05-22 by COMP-01f Phase 1: ship the overrides + startup hook
+inside `fork/source/athena-installer-data/`.
 
-## What is debconf-overrides.dat?
+## Where the overrides live now
 
-A `debconf-set-selections`-format file that, when applied in the
-installer chroot, overrides specific template defaults.  Same syntax as
-preseed but conceptually different: preseed pre-answers questions to
-skip prompts; overrides change what the prompt *says* when shown.
+- **Data file:** `fork/source/athena-installer-data/data/debconf-overrides.dat`
+  → installed to `/usr/share/athena-installer-data/debconf-overrides.dat`
+  in the installer ramdisk
+- **Apply hook:** `fork/source/athena-installer-data/data/S40-athena-branding`
+  → installed to `/lib/debian-installer-startup.d/S40-athena-branding`,
+  runs at install boot BEFORE main-menu
 
-Common overrides:
+## Why the move
 
-```
-# Main-menu title (shown at the top of every cdebconf screen)
-d-i debian-installer/main-menu-title string Athena installer main menu
+Per `docs/branding-methodology.md` Principles P1 + P2: branding is
+packaged content we own, not an engine-time overlay.  The udeb is
+versioned, auditable via `dpkg -l athena-installer-data`, ships in
+the same closure as the rest of the installer-side identity files,
+and follows the Kali / Devuan / Parrot pattern documented in § 3 of
+the methodology doc.
 
-# Step "title" templates (the menu item lines)
-d-i debian-installer/base-installer/title string Install the base system
-d-i debian-installer/user-setup-udeb/title string Set up users and passwords
-```
+## What this directory holds now
 
-## v1 status
+Nothing functional — the stub file `debconf-overrides.dat` here is
+retained only as a historical placeholder.  Editing it has no
+effect; the live file is in the fork pkg.
 
-**Shipped empty.**  The installer renders with stock "Debian installer"
-strings.  We rebrand progressively — populate this file once the basic
-flow boots, runs, and successfully installs a target system.
-
-The hard limit: a handful of strings are baked into compiled binaries
-(notably the `[!]` / `[!!]` priority sigils in cdebconf-newt) and
-cannot be overridden via this file.  Those require source patches
-under `patch/source/cdebconf/<ver>/`.
+This directory will be removed once a follow-up cleans up the empty
+scaffolding.

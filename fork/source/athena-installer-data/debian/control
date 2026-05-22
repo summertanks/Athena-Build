@@ -14,8 +14,12 @@ Description: @DISTRIBUTION@ installer-side data files
  Static data files needed by the Debian Installer ramdisk to run
  against a @DISTRIBUTION@ ISO: stub debconf templates that upstream
  udebs we don't ship would otherwise provide, release-identity
- files (/etc/lsb-release, /etc/default-release), and the
- debootstrap suite script for @CODENAME@.
+ files (/etc/lsb-release, /etc/default-release), the debootstrap
+ suite script for @CODENAME@, the debconf string-override file
+ plus startup hook that rebrands installer-visible strings to
+ @DISTRIBUTION@.
  .
  Built from local source under fork/source/ and ships only static
- files — no compiled code.
+ files — no compiled code.  Per docs/branding-methodology.md, no
+ upstream installer source is patched for branding; everything
+ ships here.

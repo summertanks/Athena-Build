@@ -166,4 +166,8 @@ See `scripts/fork_discovery.py` (Step 2 of FORK-01).
 
 | Package | Type | Purpose | Status |
 |---|---|---|---|
-| `athena-installer-data` | udeb | installer-side stub templates, release files, debootstrap codename, tasksel wrapper | scaffold only (Step 1) |
+| `athena-installer-data` | udeb | installer-side stub templates, release files, debootstrap codename, **debconf string overrides + newt palette + apply hooks** (COMP-01f Phases 1+2) | 1.1.0 |
+| `athena-branding` | deb | GNOME wallpaper picker, login wallpaper, GRUB distributor string, gsettings overrides, asgard logo | 1.1.0 |
+| `athena-pkgsel` | udeb | pkgsel companion — drives Software-selection step at install time | 1.0.0 |
+| `athena-tasksel` | udeb | tasksel companion — registers our `[group]` sections as tasks | 1.0.0 |
+| `base-files` | deb | same-name fork: `/etc/issue`, `/etc/os-release`, `/etc/motd`, vendor-origin file | 12.4+deb12u14+athena2 |

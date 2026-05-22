@@ -1,0 +1,42 @@
+# debconf-overrides.dat — @DISTRIBUTION@ installer VALUE overrides.
+#
+# This file holds debconf-set-selections lines that set the VALUE
+# portion of type=string / type=boolean / type=select /
+# type=multiselect templates.  Applied at installer startup by
+# S40-athena-branding.
+#
+# IMPORTANT — what this file CAN'T do:
+# For type=text and type=note templates, the displayed string IS the
+# template's Description field — there is no separate "value" to set,
+# so debconf-set-selections is a no-op.  Those overrides live in
+# `athena-overrides.templates` (loaded by the same S40 hook via
+# debconf-loadtemplate AFTER main-menu's templates are already in db,
+# so our re-declarations win the path conflict).
+#
+# This split is why the initial COMP-01f Phase 1 (2026-05-22) didn't
+# rebrand the main-menu title: type=text → wrong mechanism.  See
+# docs/branding-methodology.md § "value overrides vs description
+# overrides" for the canonical reference.
+
+# ---------- Network configuration ----------
+
+# Hostname field default.  ALSO set via preseed.cfg; mirror here so
+# the override is robust if a future workflow drops the preseed step.
+d-i netcfg/get_hostname string @BASE_ID@
+
+# ---------- Notes ----------
+#
+# Most installer-visible strings that look like "settable values" are
+# actually type=text or type=note (read-only displayed text rendered
+# from the template's Description field).  Those go in
+# athena-overrides.templates, not here.
+#
+# To extend value overrides: drop another `d-i <key> <type> <value>`
+# line above the Notes section.  Confirm the template is type=string
+# / boolean / select / multiselect first via:
+#
+#   dpkg-deb -e <udeb-shipping-the-template> | head -50
+#
+# or (in a built buildroot-installer) :
+#
+#   grep -A1 "^Template: <name>" buildroot-installer/var/lib/dpkg/info/*.templates
