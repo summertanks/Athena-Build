@@ -45,19 +45,20 @@ logger = logging.getLogger('athena')
 GRUB_PKG_NAMES = ('grub-common', 'grub-pc-bin', 'grub-efi-amd64-bin')
 
 
-def _find_grub_deb(repo_path: str, pkg_name: str) -> str:
-    """Locate the .deb for pkg_name in repo/main/.
+def _find_grub_deb(repo_main_dir: str, pkg_name: str) -> str:
+    """Locate the .deb for pkg_name in the given dir (expected to be
+    the `main/` subdir of repo/).
 
     Raises FileNotFoundError if missing — signals that cache build
     hasn't populated grub and the ISO build is premature (caller
     should surface a clear error so the operator runs `cache build`
     first).
     """
-    _glob = os.path.join(repo_path, 'main', f'{pkg_name}_*.deb')
+    _glob = os.path.join(repo_main_dir, f'{pkg_name}_*.deb')
     _matches = glob(_glob)
     if not _matches:
         raise FileNotFoundError(
-            f'{pkg_name} not in repo/main/ — looked for {_glob}.  '
+            f'{pkg_name} not in {repo_main_dir} — looked for {_glob}.  '
             f'Run cache build to populate repo/main/.'
         )
     if len(_matches) > 1:
@@ -74,8 +75,9 @@ def _find_grub_deb(repo_path: str, pkg_name: str) -> str:
     return _matches[0]
 
 
-def _extract_grub_toolchain(repo_path: str, dst_dir: str) -> None:
-    """dpkg-deb -x our grub debs into dst_dir.  After this returns,
+def _extract_grub_toolchain(repo_main_dir: str, dst_dir: str) -> None:
+    """dpkg-deb -x our grub debs (sourced from `repo_main_dir`, the
+    main/ subdir of repo/) into dst_dir.  After this returns,
     <dst_dir>/usr/bin/grub-mkrescue + grub-mkimage exist and
     <dst_dir>/usr/lib/grub/{i386-pc,x86_64-efi}/ are populated.
 
@@ -84,7 +86,7 @@ def _extract_grub_toolchain(repo_path: str, dst_dir: str) -> None:
     permission error, corrupt .deb, etc.).
     """
     for _name in GRUB_PKG_NAMES:
-        _deb = _find_grub_deb(repo_path, _name)
+        _deb = _find_grub_deb(repo_main_dir, _name)
         logger.debug(f'extracting {_deb} → {dst_dir}')
         _r = subprocess.run(
             ['dpkg-deb', '-x', _deb, dst_dir],
@@ -98,19 +100,26 @@ def _extract_grub_toolchain(repo_path: str, dst_dir: str) -> None:
 
 
 def run_grub_mkrescue_from_repo(
-    repo_path: str,
+    repo_main_dir: str,
     stage_dir: str,
     iso_path: str,
 ) -> Tuple[bool, str, str]:
-    """Run grub-mkrescue using OUR grub binaries from repo_path/main/
+    """Run grub-mkrescue using OUR grub binaries from `repo_main_dir`
     instead of the host's.
 
     Args:
-        repo_path: Path to the repo/ directory containing main/ with
-                   our grub-common/grub-pc-bin/grub-efi-amd64-bin .debs.
-        stage_dir: ISO source tree (boot/grub/grub.cfg + assets +
-                   /pool + .disk/ etc.).
-        iso_path:  Output ISO file.
+        repo_main_dir: Path to the `main/` subdir of repo/ — the dir
+                       holding our grub-common/grub-pc-bin/
+                       grub-efi-amd64-bin .debs as flat files.  Callers
+                       differ on what they have on hand: iso.py has
+                       `self._dir_repo` (top-level) so pass
+                       `os.path.join(self._dir_repo, 'main')`;
+                       iso_installer.py already has the main subdir
+                       via its `dir_repo` parameter (existing semantic,
+                       despite the variable's naming).
+        stage_dir:     ISO source tree (boot/grub/grub.cfg + assets +
+                       /pool + .disk/ etc.).
+        iso_path:      Output ISO file.
 
     Returns (ok, stdout, stderr) for the caller to log and surface.
     On extraction failure (missing .deb, dpkg-deb error) returns
@@ -121,7 +130,7 @@ def run_grub_mkrescue_from_repo(
         # exit.  Even if grub-mkrescue dies mid-run, cleanup is
         # automatic; the temp dir doesn't leak into successive builds.
         with tempfile.TemporaryDirectory(prefix='athena-grub-') as _gd:
-            _extract_grub_toolchain(repo_path, _gd)
+            _extract_grub_toolchain(repo_main_dir, _gd)
             _mkrescue = os.path.join(_gd, 'usr', 'bin', 'grub-mkrescue')
             _mod_dir  = os.path.join(_gd, 'usr', 'lib', 'grub')
             if not os.path.isfile(_mkrescue):
