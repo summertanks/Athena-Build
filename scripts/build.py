@@ -2981,8 +2981,6 @@ class BuildSession:
         Shared by cmd_package_cleanup (DELETE on `force`) and cmd_audit
         (warn-only).  Requires dep_check_ready — caller verifies.
         """
-        from debian.debfile import DebFile
-
         # Build the three reference sets:
         #   _expected_files     — exact predicted filenames across both
         #                         trees.  A file matching one is KEEP.
@@ -3016,46 +3014,38 @@ class BuildSession:
         _malformed: 'list[str]' = []
         _total = 0
 
-        # CONF-01 Stage D: walk the new unified-layout dirs.  Labels
-        # ('main'/'doc'/'dbgsym'/'tests') are derived from the
-        # filename via classify_repo_subdir, so downstream reporting
-        # tuples carry the same meaning as pre-Stage D.
-        for _deb_dir in self.config.all_deb_dirs():
-            try:
-                _entries = sorted(os.listdir(_deb_dir))
-            except OSError:
-                continue
-            for _f in _entries:
-                if not (_f.endswith('.deb') or _f.endswith('.udeb')):
-                    continue
-                _sub = utils.classify_repo_subdir(_f)
+        # CONF-01 Stage E (2026-05-22): walk the apt indexes instead
+        # of per-file DebFile opens.  repo_audit.iter_packages_all_versions
+        # uses dpkg-scanpackages' cached --multiversion output and
+        # parses it via apt_pkg.TagFile — same Source/Package/Size
+        # fields we need, but a single subprocess + fast in-process
+        # parse instead of N×(fork+exec+tar-extract).  On a 5k-pkg
+        # repo this is an order of magnitude faster.
+        for _sub in utils._REPO_SUBDIRS:
+            for _filename, _ctrl in repo_audit.iter_packages_all_versions(
+                    self.config, subdir=_sub):
                 _total += 1
-                # Fast path: predicted target — KEEP.
-                if _f in _expected_files:
+                if _filename in _expected_files:
                     continue
-                _path = os.path.join(_deb_dir, _f)
-                try:
-                    with DebFile(_path) as _deb:
-                        _ctrl = _deb.control.debcontrol()
-                    _pkg = (_ctrl.get('Package') or '').strip()
-                    _src_field = (_ctrl.get('Source') or '').strip()
-                except Exception:
-                    _malformed.append(os.path.join(_sub, _f))
-                    continue
+                _pkg = (_ctrl.get('Package') or '').strip()
+                _src_field = (_ctrl.get('Source') or '').strip()
                 # Source field is "name" or "name (version)" — drop the
-                # version qualifier; fall back to Package name when the
-                # control omits Source (single-binary sources).
+                # version qualifier; fall back to Package name when
+                # the control omits Source (single-binary sources).
                 _src_name = (_src_field.split(' ', 1)[0].strip()
                              if _src_field else _pkg)
-                _file_pkg = _f.split('_', 1)[0]
+                _file_pkg = _filename.split('_', 1)[0]
+                # Size comes from the index field; falls back to
+                # statting the on-disk file if missing (shouldn't
+                # happen — dpkg-scanpackages always emits Size).
+                try:
+                    _size = int(_ctrl.get('Size') or 0)
+                except (TypeError, ValueError):
+                    _size = 0
                 if _src_name not in _selected_srcs:
-                    _orphan.append(
-                        (_sub, _f, _src_name, os.path.getsize(_path))
-                    )
+                    _orphan.append((_sub, _filename, _src_name, _size))
                 elif _file_pkg in _selected_pkg_names:
-                    _drift.append(
-                        (_sub, _f, _src_name, os.path.getsize(_path))
-                    )
+                    _drift.append((_sub, _filename, _src_name, _size))
                 # else: pkg name not predicted but source IS selected —
                 # production sibling (lib*-i386, lib*-l10n, etc.) that
                 # ships in /cdrom/pool but isn't an install target.  KEEP.

@@ -6319,10 +6319,15 @@ def test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source():
     )
     assert _m_scan is not None, "_scan_stale_files helper not found"
     _scan = _m_scan.group(0)
-    # Predicted-filename fast path lives in the helper.
-    assert 'if _f in _expected_files' in _scan, (
+    # Predicted-filename fast path lives in the helper.  Either the
+    # pre-CONF-01 idiom (`_f`) or the Stage-E variant (`_filename`)
+    # — both indicate "skip per-deb work for known-good files".
+    assert (
+        'if _f in _expected_files' in _scan
+        or 'if _filename in _expected_files' in _scan
+    ), (
         "fast-path filename match missing from _scan_stale_files — "
-        "would needlessly open every .deb's control file"
+        "would needlessly parse every index entry's control fields"
     )
     # Production-sibling preservation lives in the helper.
     assert 'production sibling' in _scan.lower(), (
