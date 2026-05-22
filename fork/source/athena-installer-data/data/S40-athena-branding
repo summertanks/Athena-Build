@@ -1,0 +1,60 @@
+#!/bin/sh
+# S40-athena-branding — apply @DISTRIBUTION@ branding to the installer
+# debconf db AFTER main-menu (S20templates) has loaded its own
+# templates, so our re-declarations win on conflict.
+#
+# Two distinct override mechanisms (see docs/branding-methodology.md):
+#
+#  (1) TEMPLATES-FILE OVERRIDE (for type=text / type=note templates)
+#      The string the user sees IS the Description: field of the
+#      template — there is no separate "value" to set.  To rebrand,
+#      we ship our own templates file that re-declares the same
+#      template path with our Description, then `debconf-loadtemplate`
+#      it.  Since debconf is keyed by template path (not owning
+#      package), the LAST load wins.
+#      Used for: debian-installer/main-menu-title (the bug we hit
+#      first — was setting type=string via set-selections, no-op),
+#      debian-installer/title.
+#
+#  (2) VALUE OVERRIDE via debconf-set-selections (for type=string,
+#      type=boolean, type=select, type=multiselect)
+#      The template has a Description that's the prompt AND a
+#      separate user-input value.  set-selections sets the value
+#      portion; the prompt stays whatever the template said.
+#      Used for: netcfg/get_hostname (sets the pre-filled default).
+#
+# Per docs/branding-methodology.md Principle P1, neither mechanism
+# patches upstream source.  Both ship as files in our companion
+# udeb (athena-installer-data).
+
+set -e
+
+PKG=athena-installer-data
+TEMPLATES_OVERRIDE=/usr/share/athena-installer-data/athena-overrides.templates
+VALUE_OVERRIDES=/usr/share/athena-installer-data/debconf-overrides.dat
+
+# (1) Templates-file override — re-declares type=text templates with
+#     our Description.  debconf-loadtemplate overwrites by path, so
+#     calling it after S20templates ran lets us win the conflict.
+if [ -r "$TEMPLATES_OVERRIDE" ]; then
+    if debconf-loadtemplate "$PKG" "$TEMPLATES_OVERRIDE"; then
+        logger -t athena-branding "loaded $(grep -c ^Template: "$TEMPLATES_OVERRIDE") templates override(s) from $TEMPLATES_OVERRIDE"
+    else
+        logger -t athena-branding "debconf-loadtemplate $TEMPLATES_OVERRIDE failed (rc=$?)"
+    fi
+else
+    logger -t athena-branding "templates override $TEMPLATES_OVERRIDE not found — skipping"
+fi
+
+# (2) Value override via set-selections — for type=string et al.
+if [ -r "$VALUE_OVERRIDES" ]; then
+    if debconf-set-selections "$VALUE_OVERRIDES"; then
+        logger -t athena-branding "applied $(grep -cv '^[[:space:]]*\(#\|$\)' "$VALUE_OVERRIDES") value overrides from $VALUE_OVERRIDES"
+    else
+        logger -t athena-branding "debconf-set-selections $VALUE_OVERRIDES failed (rc=$?)"
+    fi
+else
+    logger -t athena-branding "value overrides $VALUE_OVERRIDES not found — skipping"
+fi
+
+exit 0

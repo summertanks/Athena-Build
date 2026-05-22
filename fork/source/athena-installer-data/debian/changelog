@@ -1,3 +1,81 @@
+athena-installer-data (1.2.0) thor; urgency=low
+
+  * COMP-01f Phase 1 (revised) — fix the override mechanism.
+    First attempt (1.1.0) shipped debconf-overrides.dat with type=string
+    set-selections for `debian-installer/main-menu-title`, but that
+    template is type=text — set-selections is a no-op on text/note
+    templates because the rendered string IS the Description field,
+    not a separate settable value.  Result on first install: hooks
+    fired (syslog confirmed S40 applied 72 lines) but main-menu screen
+    still said "Debian Installer Main menu".
+    .
+    Fix: split overrides into two mechanisms keyed by template type.
+    - data/athena-overrides.templates (lands at /usr/share/athena-
+      installer-data/) re-declares type=text templates with our
+      Description.  Loaded via `debconf-loadtemplate` in S40 AFTER
+      S20templates has already loaded main-menu's templates, so the
+      LAST load wins on path-key conflict.
+    - data/debconf-overrides.dat now only holds VALUE overrides
+      (type=string/boolean/select).  Currently just netcfg/get_hostname.
+    - data/S40-athena-branding rewritten to apply both mechanisms:
+      debconf-loadtemplate first, then debconf-set-selections.
+
+  * COMP-01f Phase 2 — REMOVED.  The S35-athena-palette + palette.athena
+    mechanism from 1.1.0 was confirmed broken on first install: the
+    hook fires (syslog confirms NEWT_COLORS_FILE=/etc/newt/palette.athena
+    was exported) but the palette doesn't apply.  Two stacking reasons:
+    (a) rootskel execs startup scripts as children rather than sourcing
+    them, so the export dies with S35's shell; (b) cdebconf-newt has
+    its own internal palette logic and doesn't honour newt's
+    NEWT_COLORS / NEWT_COLORS_FILE env vars regardless.  Per
+    Principle P1 we will NOT patch cdebconf-newt source — colour
+    rebrand is documented as irreducible residue in
+    docs/branding-methodology.md § 7 and accepted.
+
+ -- Athena Linux <athena@local>  Thu, 22 May 2026 01:45:00 +0000
+
+athena-installer-data (1.1.0) thor; urgency=low
+
+  * COMP-01f Phase 1: ship debconf-overrides + startup hook for
+    installer-visible string rebrand (no upstream source patches).
+    - data/debconf-overrides.dat (lands at /usr/share/athena-installer-
+      data/debconf-overrides.dat) holds the d-i template override
+      lines in debconf-set-selections format.  Currently overrides
+      main-menu-title, generic title, exit-confirmation title,
+      cdebconf/distribution, and netcfg/get_hostname.  Extend
+      incrementally as more visible strings surface.
+    - data/S40-athena-branding (lands at /lib/debian-installer-
+      startup.d/S40-athena-branding, +x) applies the overrides via
+      debconf-set-selections BEFORE main-menu (S60) so every consumer
+      udeb sees the overridden values.  Soft-fails on missing file
+      or apply error (cosmetic-only — don't block install).
+
+  * COMP-01f Phase 2: ship cdebconf-newt colour palette + apply hook.
+    Folded into the same udeb (rather than a separate athena-
+    installer-theme-udeb) per docs/branding-methodology.md — the
+    Devuan pattern (single companion udeb for both identity strings
+    and visual theme) suits a 2-file delta better than the Kali
+    pattern (separate themes pkg) which exists to support multiple
+    flavour themes.  If we later want flavour-themes, split out.
+    - data/palette.athena (lands at /etc/newt/palette.athena) holds
+      the newt colour palette: deep blue + bright-blue accents
+      matching the Aegis SVG runtime wallpaper.
+    - data/S35-athena-palette (lands at /lib/debian-installer-
+      startup.d/S35-athena-palette, +x) exports NEWT_COLORS_FILE so
+      cdebconf-newt picks up the palette before opening any dialog.
+      Runs before S40 (debconf overrides) and S60 (main-menu).
+
+  * Pattern source: Kali / Devuan / Parrot all use a companion udeb
+    + debconf-overrides + early startup hook shape, documented in
+    docs/branding-methodology.md § 3.  Per Principle P1 we
+    explicitly REJECT patching cdebconf or cdrom-detect source for
+    branding strings — every upstream point release would force a
+    patch refresh.  The irreducible residue (priority sigils baked
+    into cdebconf-newt, syslog messages baked into cdrom-detect) is
+    catalogued in § 7 and accepted.
+
+ -- Athena Linux <athena@local>  Thu, 22 May 2026 00:45:00 +0000
+
 athena-installer-data (1.0.1) thor; urgency=low
 
   * FORK-01 Step 4: migrate runtime dirs + release files + debootstrap

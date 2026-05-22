@@ -2798,6 +2798,165 @@ def test_athena_installer_data_ships_release_files_with_tokens():
         "BuildContainer._token_subst, must not duplicate here")
 
 
+def test_athena_installer_data_ships_templates_override():
+    """COMP-01f Phase 1 (1.2.0 revision): the type=text templates that
+    were initially shipped via debconf-set-selections (1.1.0 — silent
+    no-op because set-selections only sets VALUES, not Descriptions)
+    are now shipped via athena-overrides.templates + debconf-loadtemplate.
+
+    Pin presence + load-bearing template re-declarations so a refactor
+    doesn't silently drop them and regress to the 1.1.0 no-op state."""
+    _tpl = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                        'data', 'athena-overrides.templates')
+    assert os.path.isfile(_tpl), f"missing {_tpl}"
+    with open(_tpl) as fh:
+        _body = fh.read()
+    # Templates file format: stanzas separated by blank lines.  Each
+    # stanza must declare Template / Type / Description.  Pin the
+    # main-menu-title override (the most visible string).
+    assert 'Template: debian-installer/main-menu-title' in _body, _body
+    assert 'Type: text' in _body, _body
+    assert 'Description: @DISTRIBUTION@ installer main menu' in _body, _body
+
+    # debian/install wires it under /usr/share/athena-installer-data/
+    # so the apply hook can locate it via a stable path (vs
+    # /var/lib/dpkg/info/ where it'd auto-load before main-menu and
+    # lose the conflict).
+    _install = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                            'debian', 'install')
+    with open(_install) as fh:
+        _install_body = fh.read()
+    assert 'data/athena-overrides.templates' in _install_body, _install_body
+    assert 'usr/share/athena-installer-data' in _install_body, _install_body
+
+
+def test_athena_installer_data_ships_value_overrides():
+    """The slimmed debconf-overrides.dat — VALUE-type templates only
+    (type=string/boolean/select/multiselect).  Templates that were
+    incorrectly listed as type=string here in 1.1.0 (which made the
+    overrides silent no-ops because the real type is text) have moved
+    to athena-overrides.templates.  Pin what's left so the file isn't
+    accidentally repopulated with the wrong template types."""
+    _data = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                         'data', 'debconf-overrides.dat')
+    assert os.path.isfile(_data), f"missing {_data}"
+    with open(_data) as fh:
+        _body = fh.read()
+    # The one value override we currently ship.
+    assert 'd-i netcfg/get_hostname string @BASE_ID@' in _body, _body
+
+    # Anti-regression: NO Debian literal in any uncommented override
+    # line — would defeat the rebrand.
+    for _ln in _body.splitlines():
+        _stripped = _ln.strip()
+        if not _stripped or _stripped.startswith('#'):
+            continue
+        assert 'Debian' not in _stripped, (
+            f"Debian literal leaked into override line: {_stripped!r}")
+        # Anti-regression for the 1.1.0 bug: don't put type=text
+        # templates back into the value-overrides file.  Detect by
+        # asserting we don't see the known type=text template paths
+        # being set via debconf-set-selections syntax.
+        for _text_path in ('debian-installer/main-menu-title',
+                           'debian-installer/title'):
+            assert _text_path not in _stripped, (
+                f"REGRESSION: type=text template {_text_path!r} is in "
+                f"debconf-overrides.dat — set-selections is a no-op on "
+                f"type=text.  Move to athena-overrides.templates instead.  "
+                f"Offending line: {_stripped!r}"
+            )
+
+
+def test_athena_installer_data_branding_hook_applies_both_mechanisms():
+    """S40-athena-branding runs BOTH override mechanisms in the right
+    order: (1) debconf-loadtemplate for type=text overrides AFTER
+    S20templates already loaded main-menu's templates (path-key
+    conflict → LAST load wins); (2) debconf-set-selections for the
+    value-type overrides.
+
+    Anti-regression for the 1.1.0 bug where the hook only ran
+    set-selections, which is a no-op against type=text templates."""
+    _hook = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                         'data', 'S40-athena-branding')
+    assert os.path.isfile(_hook), f"missing {_hook}"
+    assert os.access(_hook, os.X_OK), (
+        f"{_hook} not executable — dh_install preserves source mode, "
+        f"so a non-executable source ships a non-executable hook that "
+        f"run-parts skips silently"
+    )
+    with open(_hook) as fh:
+        _body = fh.read()
+    assert '#!/bin/sh' in _body, "missing shebang"
+    # Both mechanisms must be wired in the hook.
+    assert 'debconf-loadtemplate' in _body, (
+        "hook must call debconf-loadtemplate for type=text overrides "
+        "(athena-overrides.templates) — REGRESSION to 1.1.0 if missing"
+    )
+    assert 'debconf-set-selections' in _body, (
+        "hook must also call debconf-set-selections for type=string "
+        "value overrides"
+    )
+    assert '/usr/share/athena-installer-data/athena-overrides.templates' in _body, _body
+    assert '/usr/share/athena-installer-data/debconf-overrides.dat' in _body, _body
+
+    # debian/install wires the hook to the correct startup-d path
+    _install = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                            'debian', 'install')
+    with open(_install) as fh:
+        _install_body = fh.read()
+    assert 'data/S40-athena-branding' in _install_body, _install_body
+    assert 'lib/debian-installer-startup.d' in _install_body, _install_body
+
+
+def test_athena_installer_data_no_broken_palette_mechanism():
+    """REGRESSION pin: the 1.1.0 S35-athena-palette + palette.athena
+    approach was confirmed broken on first install (rootskel execs
+    scripts as children → export dies; cdebconf-newt has compiled-in
+    palette → ignores newt env vars).  Removed in 1.2.0 and documented
+    as irreducible residue in docs/branding-methodology.md § 7.
+
+    Anti-regression: don't re-introduce the broken pattern.  If a
+    future cdebconf rev DOES start honouring an env var, that's a new
+    mechanism — needs its own design + test."""
+    _dead_palette = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                                  'data', 'palette.athena')
+    _dead_hook = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                               'data', 'S35-athena-palette')
+    assert not os.path.exists(_dead_palette), (
+        f"{_dead_palette} re-introduced — was removed in 1.2.0 because "
+        f"the mechanism is broken (cdebconf-newt ignores NEWT_COLORS_FILE).  "
+        f"See docs/branding-methodology.md § 7."
+    )
+    assert not os.path.exists(_dead_hook), (
+        f"{_dead_hook} re-introduced — same.  Don't re-add without "
+        f"first verifying cdebconf-newt has gained a runtime palette "
+        f"override path."
+    )
+
+    # And it must not be wired into debian/install
+    _install = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
+                            'debian', 'install')
+    with open(_install) as fh:
+        _install_body = fh.read()
+    assert 'palette.athena' not in _install_body, _install_body
+    assert 'S35-athena-palette' not in _install_body, _install_body
+
+
+def test_athena_installer_data_no_branding_patches_in_repo():
+    """Negative pin for Principle P1 (docs/branding-methodology.md):
+    we MUST NOT ship per-version patches against cdebconf or
+    cdrom-detect to rebrand strings.  Their absence is the principle;
+    a quilt patch directory appearing here would be the regression.
+    """
+    for _pkg in ('cdebconf', 'cdrom-detect', 'main-menu'):
+        _patch_dir = os.path.join(_ROOT, 'patch', 'source', _pkg)
+        assert not os.path.isdir(_patch_dir), (
+            f"{_patch_dir} exists — would violate Principle P1 (no "
+            f"per-version source patches for branding).  See "
+            f"docs/branding-methodology.md §§ 1, 6 (A1)."
+        )
+
+
 def test_buildcontainer_injects_athena_codename_env():
     """FORK-01 Step 4: BuildContainer.deb_build_env must set ATHENA_CODENAME
     from BuildConfig.build_codename so debian/rules in fork pkgs can

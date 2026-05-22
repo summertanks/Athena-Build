@@ -1,0 +1,7 @@
+Template: debian-installer/main-menu-title
+Type: text
+Description: @DISTRIBUTION@ installer main menu
+
+Template: debian-installer/title
+Type: text
+Description: @DISTRIBUTION@ installer
