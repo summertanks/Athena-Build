@@ -319,11 +319,16 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
     )
 
     # Per-binary artifacts across all repo/ subdirs (covers multi-binary
-    # forks that emit a mix of main/dev/doc/dbgsym/tests).
-    for _bin in binary_names:
-        _targets.extend(glob.glob(
-            os.path.join(buildconfig.dir_repo, '*', f'{_bin}_*'),
-        ))
+    # forks that emit a mix of main/dev/doc/dbgsym/tests).  CONF-01
+    # Stage D: artifacts now live nested under
+    # dists/<codename>/<comp>/binary-<arch>/ (.debs) or main/
+    # debian-installer/binary-<arch>/ (.udebs).  Walk config.
+    # all_deb_dirs() to cover all of them at once.
+    for _deb_dir in buildconfig.all_deb_dirs():
+        for _bin in binary_names:
+            _targets.extend(glob.glob(
+                os.path.join(_deb_dir, f'{_bin}_*'),
+            ))
 
     # Build-log sidecars (source-named)
     _build_log_dir = os.path.join(buildconfig.dir_log, 'build')

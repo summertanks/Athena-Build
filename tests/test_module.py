@@ -11230,14 +11230,22 @@ def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
     # into dir_source, dir_repo, dir_log/build for derived artifacts.
     bc.dir_source = os.path.join(tmp, 'source')
     bc.dir_repo   = os.path.join(tmp, 'repo')
-    # Post-segregation: repo/ has subdirs.  The fork tests that plant
-    # artifacts in repo go through dir_repo_main; the rest (dev/doc/
-    # dbgsym/tests) are created for completeness so fork_mirror's
-    # cross-subdir glob has all expected paths.
-    bc.dir_repo_main   = os.path.join(bc.dir_repo, 'main')
-    bc.dir_repo_doc    = os.path.join(bc.dir_repo, 'doc')
-    bc.dir_repo_dbgsym = os.path.join(bc.dir_repo, 'dbgsym')
-    bc.dir_repo_tests  = os.path.join(bc.dir_repo, 'tests')
+    # CONF-01 Stage D: unified apt-repo layout — paths nested under
+    # dists/<codename>/.  The fork tests that plant artifacts in
+    # repo target dir_repo_main (post-Stage D the binary-amd64/
+    # leaf); the rest (doc/dbgsym/tests) created for completeness so
+    # fork_mirror's all_deb_dirs() walk has all expected paths.
+    bc.dir_repo_main        = os.path.join(bc.dir_repo, 'dists', 'thor', 'main', 'binary-amd64')
+    bc.dir_repo_main_udeb   = os.path.join(bc.dir_repo, 'dists', 'thor', 'main', 'debian-installer', 'binary-amd64')
+    bc.dir_repo_main_source = os.path.join(bc.dir_repo, 'dists', 'thor', 'main', 'source')
+    bc.dir_repo_doc         = os.path.join(bc.dir_repo, 'dists', 'thor', 'doc', 'binary-amd64')
+    bc.dir_repo_dbgsym      = os.path.join(bc.dir_repo, 'dists', 'thor-debug', 'main', 'binary-amd64')
+    bc.dir_repo_tests       = os.path.join(bc.dir_repo, 'dists', 'thor', 'tests', 'binary-amd64')
+    # Stub the helper fork_mirror uses to walk all .deb dirs.
+    bc.all_deb_dirs = lambda: [
+        bc.dir_repo_main, bc.dir_repo_main_udeb, bc.dir_repo_doc,
+        bc.dir_repo_dbgsym, bc.dir_repo_tests,
+    ]
     bc.dir_log    = os.path.join(tmp, 'log')
     bc.build_codename = 'thor'
     bc.arch = 'amd64'
@@ -11246,7 +11254,8 @@ def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
     os.makedirs(bc.dir_fork_source_repo, exist_ok=True)
     os.makedirs(bc.dir_source, exist_ok=True)
     os.makedirs(bc.dir_repo,   exist_ok=True)
-    for _sub in (bc.dir_repo_main, bc.dir_repo_doc,
+    for _sub in (bc.dir_repo_main, bc.dir_repo_main_udeb,
+                 bc.dir_repo_main_source, bc.dir_repo_doc,
                  bc.dir_repo_dbgsym, bc.dir_repo_tests):
         os.makedirs(_sub, exist_ok=True)
     os.makedirs(os.path.join(bc.dir_log, 'build'), exist_ok=True)

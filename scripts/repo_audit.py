@@ -169,10 +169,16 @@ def scan_repo_state(config, subdir: str = 'main',
 
     `subdir` selects which segment of the segregated repo to scan:
       'main'    installable corpus — default, what `package audit` uses
-      'dev'     -dev side artifacts
       'doc'     -doc side artifacts
       'dbgsym'  -dbgsym side artifacts
       'tests'   -test / -tests side artifacts
+
+    CONF-01 Stage D (2026-05-22 fix-up): paths come from
+    config.deb_dir_for(subdir), which routes to the new nested
+    apt-repo layout (e.g. main → dists/<codename>/main/binary-<arch>/,
+    dbgsym → dists/<codename>-debug/main/binary-<arch>/).  Pre-Stage-D
+    code did `os.path.join(config.dir_repo, subdir)`, which resolved
+    to the OLD flat layout and is now wrong.
 
     Each subdir caches independently (separate persisted Packages file
     per subdir in dir_temp, separate in-memory cache key).
@@ -192,9 +198,14 @@ def scan_repo_state(config, subdir: str = 'main',
 
     Pass refresh=True to force regen unconditionally.
     """
-    _repo_dir = os.path.abspath(
-        os.path.join(config.dir_repo, subdir)
-    )
+    try:
+        _repo_dir = os.path.abspath(config.deb_dir_for(subdir))
+    except ValueError:
+        logger.error(
+            f"scan_repo_state: unknown subdir label {subdir!r} "
+            f"(expected one of main/doc/dbgsym/tests)"
+        )
+        return None
     _mtime = _repo_max_mtime(_repo_dir)
     if not refresh:
         _cached = _CACHE.get(_repo_dir)

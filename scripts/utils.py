@@ -1419,6 +1419,24 @@ class BuildConfig:
             ):
                 pathlib.Path(_sub).mkdir(parents=True, exist_ok=True)
 
+            # CONF-01 Stage D fix-up (2026-05-22): if any of the pre-
+            # Stage-D dir names exist at the repo root and are empty,
+            # rmdir them.  Stage C's migration removed them once but
+            # a pre-Stage-D version of this very block would have
+            # silently recreated them on the next session.  Now we
+            # actively clean up.  Skip non-empty dirs: those weren't
+            # successfully migrated and the operator should investigate
+            # manually before they're cleaned up.
+            for _legacy in ('main', 'doc', 'dbgsym', 'tests'):
+                _path = os.path.join(self.dir_repo, _legacy)
+                try:
+                    if os.path.isdir(_path) and not os.listdir(_path):
+                        os.rmdir(_path)
+                except OSError:
+                    # Best-effort: a permission error or race
+                    # condition shouldn't fail BuildConfig init.
+                    pass
+
             pathlib.Path(self.dir_patch).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_patch_empty).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_patch_source).mkdir(parents=True, exist_ok=True)
