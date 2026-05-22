@@ -3041,6 +3041,78 @@ def test_athena_installer_data_no_branding_patches_in_repo():
         )
 
 
+def test_athena_branding_ships_target_grub_background():
+    """athena-branding 1.2.0+ ships the target-system GRUB background.
+    Pin all four moving parts so a refactor doesn't silently drop one:
+      1. data/50-athena.cfg sets GRUB_BACKGROUND= to the canonical path
+      2. debian/rules renders grub-background.png from aegis-dark.svg
+      3. debian/install ships the rendered PNG under /usr/share/athena-branding/
+      4. debian/postinst re-runs update-grub on configure
+
+    Why this matters: observed 2026-05-22 on a fresh install — GRUB on
+    the installed target had our distributor string ("Asgard GNU/Linux")
+    but no graphical background.  Stock Debian's GRUB background ships
+    from desktop-base, which we displace via Provides+Conflicts+Replaces;
+    displacing without replacing left the background gap.  1.2.0 closes
+    it.  See docs/branding-methodology.md § 5 catalogue."""
+    _root = os.path.join(_ROOT, 'fork', 'source', 'athena-branding')
+
+    # 1. GRUB_BACKGROUND= line in 50-athena.cfg
+    _cfg = os.path.join(_root, 'data', '50-athena.cfg')
+    with open(_cfg) as fh:
+        _cfg_body = fh.read()
+    assert 'GRUB_BACKGROUND="/usr/share/athena-branding/grub-background.png"' in _cfg_body, (
+        f"GRUB_BACKGROUND missing or path changed in {_cfg} — the boot "
+        f"menu won't get a background.  See docs/branding-methodology.md "
+        f"§ 5 catalogue."
+    )
+
+    # 2. rsvg-convert renders grub-background.png in debian/rules
+    _rules = os.path.join(_root, 'debian', 'rules')
+    with open(_rules) as fh:
+        _rules_body = fh.read()
+    assert 'grub-background.png' in _rules_body, (
+        "debian/rules doesn't render grub-background.png — install will "
+        "fail or ship nothing"
+    )
+    assert 'aegis-dark.svg' in _rules_body, (
+        "GRUB background should come from aegis-dark.svg (readable menu "
+        "text on midnight sky) — light variant would wash out menu text"
+    )
+
+    # 3. debian/install ships the PNG to the canonical location
+    _install = os.path.join(_root, 'debian', 'install')
+    with open(_install) as fh:
+        _install_body = fh.read()
+    assert '_build/png/grub-background.png' in _install_body, _install_body
+    assert 'usr/share/athena-branding' in _install_body, _install_body
+
+    # 4. postinst exists, is executable, calls update-grub on configure
+    _postinst = os.path.join(_root, 'debian', 'postinst')
+    assert os.path.isfile(_postinst), (
+        f"missing {_postinst} — athena-branding installs AFTER grub in "
+        f"the typical d-i pkgsel order, so grub's own postinst-driven "
+        f"update-grub ran without seeing our 50-athena.cfg.  Without our "
+        f"postinst retriggering, the boot menu stays unbranded until next "
+        f"manual update-grub."
+    )
+    assert os.access(_postinst, os.X_OK), (
+        f"{_postinst} not executable — dpkg won't run it"
+    )
+    with open(_postinst) as fh:
+        _post_body = fh.read()
+    assert 'update-grub' in _post_body, _post_body
+    assert 'command -v update-grub' in _post_body, (
+        "postinst must guard update-grub on `command -v` so chroot/live "
+        "scenarios without grub don't fail the postinst"
+    )
+    assert '#DEBHELPER#' in _post_body, (
+        "debhelper marker missing — dh_installdeb won't splice the auto-"
+        "generated maintscript fragments (ldconfig, etc.) into the final "
+        "postinst"
+    )
+
+
 def test_buildcontainer_injects_athena_codename_env():
     """FORK-01 Step 4: BuildContainer.deb_build_env must set ATHENA_CODENAME
     from BuildConfig.build_codename so debian/rules in fork pkgs can

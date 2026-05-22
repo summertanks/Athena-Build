@@ -20,6 +20,11 @@ override_dh_auto_build:
 	mkdir -p _build/png
 	rsvg-convert -w 3840 -h 2160 -o _build/png/aegis-light.png data/aegis-light.svg
 	rsvg-convert -w 3840 -h 2160 -o _build/png/aegis-dark.png  data/aegis-dark.svg
+	# Target-system GRUB background — 1920x1080 keeps the alpha glyph
+	# crisp on modern panels.  GRUB scales down on lower-res monitors;
+	# 4:3 displays letterbox cleanly.  Rendered from the dark variant
+	# so the menu text stays readable against the midnight sky.
+	rsvg-convert -w 1920 -h 1080 -o _build/png/grub-background.png data/aegis-dark.svg
 
 override_dh_auto_clean:
 	rm -rf _build

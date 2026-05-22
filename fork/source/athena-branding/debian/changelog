@@ -1,3 +1,43 @@
+athena-branding (1.2.0) thor; urgency=low
+
+  * Ship target-system GRUB background image.  Observed 2026-05-22
+    on a fresh end-to-end install: GRUB on the installed target had
+    our distributor string ("Asgard GNU/Linux" menu entries via
+    1.1.0's GRUB_DISTRIBUTOR override) but no graphical background —
+    stock Debian's GRUB background ships from desktop-base, which we
+    displace via Provides+Conflicts+Replaces.  Displacing without
+    replacing left the background gap.
+
+  * data/50-athena.cfg now also sets
+        GRUB_BACKGROUND=/usr/share/athena-branding/grub-background.png
+    so /etc/grub.d/05_debian_theme's GRUB_BACKGROUND pickup paints
+    the boot menu with our Aegis splash.
+
+  * debian/rules grew a third rsvg-convert call rendering
+    data/aegis-dark.svg → _build/png/grub-background.png at 1920x1080
+    (the dark variant keeps menu text readable against the midnight
+    sky; GRUB scales to lower-res monitors automatically).
+
+  * debian/install ships _build/png/grub-background.png to
+    /usr/share/athena-branding/.
+
+  * debian/postinst (new) re-runs update-grub on configure so the
+    GRUB_DISTRIBUTOR + GRUB_BACKGROUND from 50-athena.cfg land in
+    /boot/grub/grub.cfg even when athena-branding installs AFTER
+    grub-pc/grub-efi-amd64 (the typical pkgsel/tasksel order — by
+    the time we configure, grub's own postinst-driven update-grub
+    has already run without seeing our 50-athena.cfg).  No-op when
+    update-grub isn't on PATH (live ISO / chroot without grub).
+    `|| true` on the update-grub call so transient warnings don't
+    block install completion.
+
+  * Pattern source: docs/branding-methodology.md § 5 catalogue —
+    runtime-system GRUB background follows the same Pattern B
+    drop-in-static-asset shape as the GNOME wallpaper.  Companion
+    to the installer-ISO GRUB splash shipped in COMP-01f Phase 2.
+
+ -- Athena Linux <athena@local>  Thu, 22 May 2026 08:00:00 +0000
+
 athena-branding (1.1.0) thor; urgency=low
 
   * Displace upstream desktop-base via Provides/Conflicts/Replaces.

@@ -330,6 +330,7 @@ Update this table when a new surface lands.
 | Login wallpaper | B + companion | `fork/source/athena-branding/` | gsettings override (90_ priority for late merge) |
 | User-settings logo (gnome-control-center About) | B | `/usr/share/pixmaps/asgard.svg` (athena-branding) | os-release `LOGO=asgard` triggers lookup |
 | GRUB distributor string | B + companion | `fork/source/athena-branding/` | `/etc/default/grub.d/50-athena.cfg` token-substituted |
+| Target-system GRUB boot menu background | **Pattern B** (drop-in static asset, owned by us) | `fork/source/athena-branding/` 1.2.0 — `data/50-athena.cfg` sets `GRUB_BACKGROUND=`; debian/rules renders `_build/png/grub-background.png` (1920×1080) from `data/aegis-dark.svg` via rsvg-convert; debian/install ships to `/usr/share/athena-branding/`; postinst re-runs update-grub on configure so the override takes effect even when athena-branding installs AFTER grub (typical pkgsel/tasksel order).  Closes the gap left by displacing desktop-base without replacing its GRUB-theme contribution. |
 | Installer hostname default | Preseed | `installer/preseed/preseed.cfg` | `netcfg/get_hostname seen false` re-prompts with our default |
 | Installer-side `/etc/lsb-release` | D (net-new udeb) | `fork/source/athena-installer-data/` | Token-substituted at build |
 | Installer-side `/etc/default-release` | D | `fork/source/athena-installer-data/` | Same |
