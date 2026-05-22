@@ -194,6 +194,41 @@ If you only want the warnings and errors from a session:
 grep -E "WARNING|ERROR" log/build-2026-05-09T*.log
 ```
 
+### Consuming the built repo as an apt source
+
+After `source build` populates `repo/`, run `repo index` to generate the apt metadata (signed `Release` + `InRelease`, per-component `Packages` and `Sources` indexes).  Layout produced (CONF-01, 2026-05-22):
+
+```
+repo/
+└── dists/
+    ├── <codename>/                              (the main suite)
+    │   ├── Release, InRelease, Release.gpg
+    │   ├── main/binary-amd64/{Packages*, Release, *.deb}
+    │   ├── main/debian-installer/binary-amd64/{Packages*, Release, *.udeb}
+    │   ├── main/source/{Sources*, Release, *.{dsc,tar.*}}
+    │   ├── doc/binary-amd64/{Packages*, Release, *.deb}
+    │   └── tests/binary-amd64/{Packages*, Release, *.deb}
+    └── <codename>-debug/                        (separate suite for dbgsyms)
+        ├── Release, InRelease, Release.gpg
+        └── main/binary-amd64/{Packages*, Release, *.deb}
+```
+
+`<codename>` is `[Build] CODENAME` in `config/build.conf` (`thor` by default).
+
+To consume locally via `apt`, drop a `sources.list.d` entry pointing at `file:///path/to/repo`:
+
+```
+# /etc/apt/sources.list.d/asgard-local.list
+deb [signed-by=/etc/apt/keyrings/asgard.gpg] file:///path/to/repo thor main
+# Optional add-ons:
+deb [signed-by=/etc/apt/keyrings/asgard.gpg] file:///path/to/repo thor doc tests
+deb [signed-by=/etc/apt/keyrings/asgard.gpg] file:///path/to/repo thor-debug main
+```
+
+`signed-by` should point at the project pubkey (`gnupg/pubkey.gpg`, exported during `key generate`).  For testing without the keyring, use `[trusted=yes]` instead — `apt-get update` will warn but proceed.
+
+Publishing the repo to a remote endpoint (S3, rsync, HTTP server) is COMP-02 — the same generated tree is byte-for-byte the right shape for a remote mirror.
+
 ### Common failure modes
 
 Things that go wrong, ordered by how often they actually bite:

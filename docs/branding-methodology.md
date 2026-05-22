@@ -209,7 +209,7 @@ grep -A1 "^Template: <path-you-want-to-override>" \
 ```
 Or before any build, inspect the source udeb directly:
 ```
-dpkg-deb -e repo/main/main-menu_<ver>_<arch>.udeb /tmp/mm
+dpkg-deb -e repo/dists/<codename>/main/debian-installer/binary-<arch>/main-menu_<ver>_<arch>.udeb /tmp/mm
 grep -A1 "^Template:" /tmp/mm/templates | less
 ```
 
