@@ -408,12 +408,20 @@ def _build_initrd(dir_chroot_installer: str, staging: str,
 
 
 def _stage_grub_cfg(staging: str, installer_dir: str) -> bool:
-    """Copy installer/boot/grub.cfg → staging/boot/grub/grub.cfg.
+    """Copy installer/boot/grub.cfg → staging/boot/grub/grub.cfg, and
+    any optional sibling boot assets (grub-background.png, etc.) into
+    the same staged dir so grub.cfg can reference them by their basename.
 
     If the operator hasn't provided a grub.cfg (file absent), this is an
     error — without it grub-mkrescue produces an unusable ISO with no
     boot entries.  v1 ships a default; the operator can edit but not
     delete it.
+
+    Optional assets (not fatal if absent):
+      - grub-background.png — referenced by grub.cfg's `background_image`
+        line for the COMP-01f Phase 2 boot splash.  When absent, GRUB's
+        `if loadfont … ; then … background_image …; fi` guard simply
+        skips the splash; boot still works in text mode.
     """
     _src = os.path.join(installer_dir, 'boot', 'grub.cfg')
     if not os.path.exists(_src):
@@ -423,7 +431,8 @@ def _stage_grub_cfg(staging: str, installer_dir: str) -> bool:
         )
         logger.error(f"_stage_grub_cfg: {_src} absent")
         return False
-    _dst = os.path.join(staging, 'boot', 'grub', 'grub.cfg')
+    _grub_dir = os.path.join(staging, 'boot', 'grub')
+    _dst = os.path.join(_grub_dir, 'grub.cfg')
     try:
         shutil.copy2(_src, _dst)
     except OSError as e:
@@ -431,6 +440,19 @@ def _stage_grub_cfg(staging: str, installer_dir: str) -> bool:
         logger.error(f"_stage_grub_cfg: {e}")
         return False
     tui.console.print(f"Boot menu: {_src} → boot/grub/grub.cfg")
+
+    # Optional boot assets — copy each if present; skip silently if not.
+    # Filenames here MUST match what grub.cfg references by basename.
+    for _asset in ('grub-background.png',):
+        _asrc = os.path.join(installer_dir, 'boot', _asset)
+        if not os.path.exists(_asrc):
+            continue
+        try:
+            shutil.copy2(_asrc, os.path.join(_grub_dir, _asset))
+            tui.console.print(f"Boot asset: {_asrc} → boot/grub/{_asset}")
+        except OSError as e:
+            # Non-fatal — background splash is cosmetic, not load-bearing.
+            logger.warning(f"_stage_grub_cfg: copy {_asset}: {e}")
     return True
 
 
