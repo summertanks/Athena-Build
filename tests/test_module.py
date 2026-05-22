@@ -1659,11 +1659,14 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
             }
             for _suite, _comps in _spec.items():
                 for _comp in _comps:
-                    os.makedirs(
-                        os.path.join(_repo, 'dists', _suite, _comp,
-                                     'binary-amd64'),
-                        exist_ok=True,
-                    )
+                    _d = os.path.join(_repo, 'dists', _suite, _comp,
+                                       'binary-amd64')
+                    os.makedirs(_d, exist_ok=True)
+                    # New semantics (post-2026-05-22): empty
+                    # binary-amd64/ → skip.  Put a stub .deb in each
+                    # so the indexer treats them as populated.
+                    with open(os.path.join(_d, 'stub.deb'), 'wb') as fh:
+                        fh.write(b'STUB')
             with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
                  patch.object(apt_repo.subprocess, 'run',
                               side_effect=_fake_subprocess_run):
@@ -1702,12 +1705,18 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
     )
 
 
-def test_apt_repo_generate_repo_indexes_errors_when_binary_dir_missing():
-    """Stage B: if a (suite, component)'s binary-<arch>/ directory
-    doesn't exist, generate_repo_indexes fails CLEAN with a message
-    pointing at the missing path — signal that Stage C migration
-    hasn't run yet.  Pin so this doesn't accidentally regress to a
-    silent skip (which would produce an empty index)."""
+def test_apt_repo_generate_repo_indexes_skips_when_binary_dir_missing():
+    """Stage B/C semantic: if a (suite, component)'s binary-<arch>/
+    directory doesn't exist OR is empty, generate_repo_indexes SKIPS
+    that component cleanly (not an error).  Legitimate cases:
+    -debug suite when no dbgsyms were built (nodoc/nostrip profiles);
+    doc component when no -doc packages exist yet.
+
+    Was an ERROR contract in early Stage B drafts; revised post-Stage C
+    operator testing 2026-05-22 (real repo had empty dbgsym/ from
+    nodoc build → spurious failure).  If ALL components in a suite
+    are skipped, the suite itself is skipped (no top-level Release).
+    """
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import apt_repo
@@ -1725,16 +1734,146 @@ def test_apt_repo_generate_repo_indexes_errors_when_binary_dir_missing():
     _tui.tui_instance = _StubTui()
     try:
         with tempfile.TemporaryDirectory() as _repo:
-            # DON'T create the binary-amd64 dirs
+            # Suite with ONE component, dir doesn't exist → suite skipped
+            # → returns True (no work was needed; nothing to error on).
             _ok = apt_repo.generate_repo_indexes(
                 repo_root=_repo,
                 suites_spec={'thor': ['main']},
                 codename_for_suite={'thor': 'thor'},
                 version='0.1', arch='amd64', password='pw',
             )
-            assert _ok is False
+            assert _ok is True
+            # AND no top-level Release was generated (suite was skipped)
+            assert not os.path.exists(
+                os.path.join(_repo, 'dists', 'thor', 'Release')
+            ), "empty suite must not produce a top-level Release"
     finally:
         _tui.tui_instance = _saved_tui
+
+
+def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others():
+    """Real-repo case from 2026-05-22 testing: a suite has some
+    populated components and some empty/missing ones (thor-debug had
+    no dbgsyms in the operator's nodoc build).  The populated ones
+    must still get indexed; the empty ones get a clean SKIP, not a
+    failure.  And the suite's top-level Release lists ONLY the
+    populated components (apt rejects Components: with a missing
+    target dir).
+    """
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    import tui as _tui
+
+    class _StubTui:
+        def __init__(self):
+            self._next_id = 0; self._widgets = {}
+        def add_widget(self, w):
+            wid = self._next_id; self._next_id += 1
+            self._widgets[wid] = w; return wid
+        def del_widget(self, wid): self._widgets.pop(wid, None)
+        def print(self, *_a, **_kw): pass
+    _saved_tui = _tui.tui_instance
+    _tui.tui_instance = _StubTui()
+
+    _calls = []
+    def _fake_sudo(cmd, _password):
+        _calls.append(tuple(cmd))
+        if cmd[0] == 'bash' and len(cmd) > 1 and '> ' in cmd[2]:
+            _target = cmd[2].split('> ')[1].strip().split()[0]
+            try:
+                with open(_target, 'w') as fh:
+                    fh.write("Package: stub\nVersion: 1.0\n")
+            except OSError:
+                pass
+        _r = type('R', (), {})()
+        _r.returncode = 0
+        _r.stderr = ''
+        return _r
+
+    def _fake_subprocess_run(cmd, *_a, **kw):
+        _calls.append(tuple(cmd))
+        if cmd[:2] == ['sudo', '-S'] and len(cmd) > 3 and 'cat >' in cmd[3]:
+            _path = cmd[3].split('cat >')[1].strip()
+            _input = kw.get('input', '')
+            _, _, _content = _input.partition('\n')
+            with open(_path, 'w') as fh: fh.write(_content)
+        elif (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
+              cmd[2] == 'apt-ftparchive'):
+            _stdout = kw.get('stdout')
+            if _stdout is not None and hasattr(_stdout, 'write'):
+                _stdout.write(b'Components: stub\n')
+        _r = type('R', (), {})()
+        _r.returncode = 0
+        _r.stderr = b''
+        return _r
+
+    try:
+        with tempfile.TemporaryDirectory() as _repo:
+            # thor: main + doc populated, tests empty (dir exists but no
+            # files), and the spec also lists `dbgsym` (typo / future-
+            # component) with no dir at all
+            os.makedirs(
+                os.path.join(_repo, 'dists', 'thor', 'main', 'binary-amd64'),
+            )
+            with open(
+                os.path.join(_repo, 'dists', 'thor', 'main', 'binary-amd64',
+                             'foo.deb'),
+                'wb',
+            ) as fh:
+                fh.write(b'STUB')
+            os.makedirs(
+                os.path.join(_repo, 'dists', 'thor', 'doc', 'binary-amd64'),
+            )
+            with open(
+                os.path.join(_repo, 'dists', 'thor', 'doc', 'binary-amd64',
+                             'bar-doc.deb'),
+                'wb',
+            ) as fh:
+                fh.write(b'STUB')
+            os.makedirs(
+                os.path.join(_repo, 'dists', 'thor', 'tests', 'binary-amd64'),
+            )   # exists but EMPTY
+            # 'dbgsym' component dir doesn't exist at all
+
+            with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
+                 patch.object(apt_repo.subprocess, 'run',
+                              side_effect=_fake_subprocess_run):
+                _ok = apt_repo.generate_repo_indexes(
+                    repo_root=_repo,
+                    suites_spec={
+                        'thor': ['main', 'doc', 'tests', 'dbgsym'],
+                    },
+                    codename_for_suite={'thor': 'thor'},
+                    version='0.1', arch='amd64', password='pw',
+                )
+            assert _ok is True
+    finally:
+        _tui.tui_instance = _saved_tui
+
+    # Two scan-packages calls (main + doc) — tests and dbgsym skipped
+    _scan_shells = [' '.join(c) for c in _calls
+                    if c and c[0] == 'bash' and 'dpkg-scanpackages' in (c[2] if len(c) > 2 else '')]
+    assert len(_scan_shells) == 2, (
+        f"expected 2 scans (main + doc); tests + dbgsym should be "
+        f"skipped (empty / missing).  Got {len(_scan_shells)}: {_scan_shells}"
+    )
+
+    # Top-level Release was generated (suite had at least one populated
+    # component).  And the Components: field passes ONLY the populated
+    # ones — pin this via the apt-ftparchive args.
+    _ftparchive = [c for c in _calls
+                    if len(c) >= 3 and c[0] == 'sudo' and c[2] == 'apt-ftparchive']
+    assert len(_ftparchive) == 1, _ftparchive
+    _argv_str = ' '.join(_ftparchive[0])
+    assert 'Components=main doc' in _argv_str, (
+        f"Components= should list only populated components (main + doc); "
+        f"got args: {_argv_str}"
+    )
+    assert 'tests' not in _argv_str and 'dbgsym' not in _argv_str, (
+        f"empty/missing components leaked into Components=: {_argv_str}"
+    )
 
 
 def test_cmd_repo_dispatcher_routes_index_action():
