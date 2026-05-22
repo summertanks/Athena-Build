@@ -128,7 +128,23 @@ class _IsoMixin:
         # in the package set) creates the user at first boot from this
         # kernel cmdline arg.
         _live_user = secrets.choice(_LIVE_USERNAMES)
+        # Graphics mode + Asgard background.  Mirrors installer/boot/grub.cfg
+        # — same gated-loadfont pattern + insmod all_video to give gfxterm
+        # a framebuffer to switch into + gfxmode=auto so firmware picks
+        # a mode it actually has.  Pre-fix, this grub.cfg had no video
+        # setup at all and GRUB's default-fallback ran with no
+        # all_video loaded → "no suitable video mode found booting in
+        # blind mode" → boot stalled.  Fixed 2026-05-22.
         _grub_cfg = (
+            'if loadfont /boot/grub/fonts/unicode.pf2 ; then\n'
+            '    set gfxmode=auto\n'
+            '    insmod all_video\n'
+            '    insmod gfxterm\n'
+            '    insmod png\n'
+            '    terminal_output gfxterm\n'
+            '    background_image /boot/grub/grub-background.png\n'
+            'fi\n'
+            '\n'
             'set default=0\n'
             'set timeout=5\n'
             '\n'
@@ -144,6 +160,33 @@ class _IsoMixin:
         with open(os.path.join(_staging_grub, 'grub.cfg'), 'w') as fh:
             fh.write(_grub_cfg)
         tui.console.print(f"grub.cfg written (live user: {_live_user})")
+
+        # Stage the Asgard splash PNG alongside grub.cfg so the
+        # background_image line above resolves at boot time.  Reuses
+        # the same asset the installer ISO uses (Pattern B drop-in
+        # static asset — see installer/boot/regenerate-bg.py for the
+        # generator).  Missing source is non-fatal: GRUB's `if
+        # loadfont` guard falls back to text mode and boot continues.
+        _bg_src = os.path.join(
+            self._config.working_dir, 'installer', 'boot',
+            'grub-background.png',
+        )
+        if os.path.isfile(_bg_src):
+            try:
+                shutil.copy2(
+                    _bg_src,
+                    os.path.join(_staging_grub, 'grub-background.png'),
+                )
+                tui.console.print(
+                    f"Boot asset: {_bg_src} → boot/grub/grub-background.png"
+                )
+            except OSError as e:
+                logger.warning(f"copy grub-background.png: {e}")
+        else:
+            logger.info(
+                f"grub-background.png not at {_bg_src} — boot menu "
+                f"will render in text mode"
+            )
 
         # ── Step 5: create squashfs ───────────────────────────────────────────
         # Runtime virtual directories (proc, sys, dev, run, tmp) must NOT be
