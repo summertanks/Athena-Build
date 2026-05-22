@@ -52,7 +52,6 @@ class _IsoMixin:
     _dir_chroot: str
     _dir_image: str
     _dir_log: str
-    _dir_repo: str
     _password: str
     _config: 'BuildConfig'
 
@@ -198,36 +197,32 @@ class _IsoMixin:
 
         # ── Step 6: run grub-mkrescue ─────────────────────────────────────────
         # grub-mkrescue produces a hybrid image bootable on BIOS and UEFI
-        # systems.  xorriso must be on the host.
+        # systems.  It requires grub-pc-bin, grub-efi-amd64-bin, and xorriso
+        # to be installed on the host.
         #
-        # COMP-14 fix (2026-05-22): previously invoked the host's
-        # /usr/bin/grub-mkrescue which silently leaked the build host's
-        # GRUB version into the ISO's bootloader (host = Debian 13/trixie
-        # → GRUB 2.12 → ISO bootloader self-reports 2.12, despite our
-        # repo/main/ shipping 2.06-13).  Now delegates to
-        # grub_assembly.run_grub_mkrescue_from_repo which extracts our
-        # grub-common + grub-pc-bin + grub-efi-amd64-bin into a temp dir
-        # and runs OUR grub-mkrescue with --directory= pointing at our
-        # modules.
+        # KNOWN LIMITATION (COMP-14): the host's grub-mkrescue is what's
+        # invoked here, so the build host's GRUB version embeds into the
+        # ISO's bootloader.  See iso_installer.py:_run_grub_mkrescue
+        # docstring for the deeper investigation.  Proper fix needs
+        # bind-mount or BuildContainer; tracked in COMP-14.
         _iso_name   = f"athena-{_version}-amd64.iso"
         _iso_path   = os.path.join(self._dir_image, _iso_name)
 
-        tui.console.print("Running grub-mkrescue (using grub from repo/main/)...")
-        from grub_assembly import run_grub_mkrescue_from_repo
-        # Helper wants the main/ subdir (where the flat .debs live);
-        # self._dir_repo is the top-level repo/, so join.
-        _ok, _stdout, _stderr = run_grub_mkrescue_from_repo(
-            os.path.join(self._dir_repo, 'main'), _staging, _iso_path,
+        tui.console.print("Running grub-mkrescue...")
+        # Subprocess transcript routed through logger.debug — see comment
+        # above the mksquashfs invocation.
+        _proc = subprocess.run(
+            ['grub-mkrescue', '-o', _iso_path, _staging],
+            capture_output=True, text=True
         )
-        for _line in _stdout.splitlines():
+        for _line in _proc.stdout.splitlines():
             logger.debug(_line)
-        for _line in _stderr.splitlines():
+        for _line in _proc.stderr.splitlines():
             logger.debug(_line)
 
-        if not _ok:
+        if _proc.returncode != 0:
             tui.console.print("ERROR: grub-mkrescue failed — see unified run log")
-            _tail = _stderr.strip().splitlines()[-3:] if _stderr.strip() else []
-            logger.error(f"build_iso: grub-mkrescue failed; stderr_tail={_tail}")
+            logger.error(f"build_iso: grub-mkrescue exited {_proc.returncode}")
             return False
 
         _iso_mb = os.path.getsize(_iso_path) // (2 ** 20)
