@@ -2522,13 +2522,32 @@ def test_installer_grub_cfg_wires_background_image():
     assert os.path.isfile(_cfg), f"missing {_cfg}"
     with open(_cfg) as fh:
         _body = fh.read()
-    # Gated setup — `if loadfont` falls back to text if firmware can't
-    # do 800x600.
+    # Gated setup — `if loadfont … ; then … fi` falls back to text
+    # if firmware can't provide a framebuffer.
     assert 'if loadfont' in _body, _body
-    assert 'insmod png' in _body, _body
+    # `insmod all_video` MUST be loaded before gfxterm — without a
+    # video driver, gfxterm has no framebuffer to switch into and
+    # the entire if-block silently fails (text mode persists, no
+    # splash).  This was the initial 2026-05-22 bug — pin the fix
+    # so a future grub.cfg edit doesn't reintroduce it.
+    assert 'insmod all_video' in _body, (
+        "REGRESSION: grub.cfg missing `insmod all_video` — gfxterm "
+        "has no framebuffer and background_image silently no-ops.  "
+        "Symptom: installer boot menu in text mode with no splash."
+    )
     assert 'insmod gfxterm' in _body, _body
+    assert 'insmod png' in _body, _body
     assert 'terminal_output gfxterm' in _body, _body
     assert 'background_image /boot/grub/grub-background.png' in _body, _body
+    # `gfxmode=auto` lets firmware pick a mode it actually advertises —
+    # hard-coded 800x600 was too restrictive (silently fell back to
+    # text on hardware that didn't offer that exact mode).
+    assert 'set gfxmode=auto' in _body, (
+        "REGRESSION: grub.cfg should use `set gfxmode=auto` not a "
+        "hard-coded resolution.  Hard-coded modes are firmware-"
+        "specific and the if-block fails silently on hardware that "
+        "doesn't advertise that exact mode."
+    )
     # Asset committed at the path the grub.cfg references (basename match).
     _png = os.path.join(_ROOT, 'installer', 'boot', 'grub-background.png')
     assert os.path.isfile(_png), (
