@@ -149,7 +149,7 @@ def build_installer_iso(
             return False
 
     _iso_path = os.path.join(dir_image, iso_basename)
-    if not _run_grub_mkrescue(_staging, _iso_path, dir_repo):
+    if not _run_grub_mkrescue(_staging, _iso_path):
         return False
 
     _report_iso(_iso_path)
@@ -1285,42 +1285,42 @@ def _export_pubkey_to_staging(
     return True
 
 
-def _run_grub_mkrescue(staging: str, iso_path: str, repo_path: str) -> bool:
+def _run_grub_mkrescue(staging: str, iso_path: str) -> bool:
     """Produce the hybrid BIOS+EFI bootable ISO from the staging tree.
 
     Same machinery as the live ISO build (iso.py:build_iso); we get
     El-Torito BIOS boot + EFI System Partition boot from a single
-    invocation.
+    invocation.  Requires grub-pc-bin + grub-efi-amd64-bin + xorriso
+    on the host — already gated by build-system.sh's startup checks.
 
-    COMP-14 fix (2026-05-22): previously invoked the HOST's
-    /usr/bin/grub-mkrescue, which silently leaked the build host's
-    GRUB version into the ISO's bootloader (host runs Debian 13/trixie
-    → host has GRUB 2.12 → ISO bootloader self-reports 2.12, despite
-    repo/main/grub-*_2.06-13_*.deb).  Now delegates to
-    grub_assembly.run_grub_mkrescue_from_repo which extracts our
-    grub-common + grub-pc-bin + grub-efi-amd64-bin into a temp dir
-    and runs OUR grub-mkrescue with --directory= pointing at our
-    modules.
+    KNOWN LIMITATION (COMP-14, reopened 2026-05-22): the host's
+    grub-mkrescue is the only practical way to produce hybrid BIOS+EFI
+    ISOs in a single invocation, so the build host's GRUB version
+    embeds into the ISO's bootloader.  Initial attempt at extracting
+    our repo's grub binaries + passing --directory= didn't work —
+    grub-mkrescue's --directory only retargets the modinfo.sh probe,
+    not the actual module-copy step (verified by md5sum'ing modules
+    extracted from the produced ISO: they matched host's modules
+    byte-for-byte even with our --directory).  Proper fix requires
+    bind-mount of /usr/lib/grub or running grub-mkrescue inside the
+    BuildContainer.  Tracked in COMP-14.
     """
-    from grub_assembly import run_grub_mkrescue_from_repo
-    tui.console.print("Running grub-mkrescue (using grub from repo/main/)...")
-    _ok, _stdout, _stderr = run_grub_mkrescue_from_repo(
-        repo_path, staging, iso_path,
+    tui.console.print("Running grub-mkrescue...")
+    _r = subprocess.run(
+        ['grub-mkrescue', '-o', iso_path, staging],
+        capture_output=True, text=True,
     )
-    for _line in _stdout.splitlines():
+    for _line in _r.stdout.splitlines():
         logger.debug(_line)
-    for _line in _stderr.splitlines():
+    for _line in _r.stderr.splitlines():
         logger.debug(_line)
-    if not _ok:
+    if _r.returncode != 0:
         tui.console.print(
             "ERROR: grub-mkrescue failed — see unified run log"
         )
-        # _stderr is also the extraction-failure reason when extraction
-        # short-circuited before grub-mkrescue ran (FileNotFoundError /
-        # RuntimeError → empty stdout, reason in stderr).
-        _tail = _stderr.strip().splitlines()[-3:] if _stderr.strip() else []
         logger.error(
-            f"_run_grub_mkrescue: failed; stderr_tail={_tail}"
+            f"_run_grub_mkrescue: rc={_r.returncode}, "
+            f"stderr_tail={_r.stderr.strip().splitlines()[-3:]}"
         )
         return False
     return True
