@@ -221,29 +221,28 @@ else
     echo "All ISO build tools found."
 fi
 
-# Checking disk image build tools (required for `iso build disk` only — COMP-09).
-# Warn-only because disk-image is opt-in; core pipeline doesn't need these.
+# Checking disk image build tools (required for `iso build disk` — COMP-09).
+# Gates startup — every tool below must be present.  Same pattern as
+# the ISO tools section above.
 echo "Checking disk image build tools..."
+DISK_TOOLS_OK=1
+DISK_MISSING_PKGS=()
 
-if [ -x "$(command -v rsync || true)" ]; then
-    echo "Using rsync $(rsync --version 2>/dev/null | head -n1 || true)"
-else
-    echo "W: rsync not found"
-fi
+# tool → providing package map.  When the tool is missing, the
+# matching package name gets appended to DISK_MISSING_PKGS for the
+# summary listing.
+declare -A _DISK_TOOL_PKG=(
+    [rsync]=rsync
+    [qemu-img]=qemu-utils
+    [mkfs.fat]=dosfstools
+    [losetup]=util-linux
+    [sfdisk]=util-linux
+    [mkfs.ext4]=e2fsprogs
+    [grub-install]=grub-common
+    [blkid]=util-linux
+)
 
-if [ -x "$(command -v qemu-img || true)" ]; then
-    echo "Using qemu-img $(qemu-img --version 2>/dev/null | head -n1 || true)"
-else
-    echo "W: qemu-img not found"
-fi
-
-if [ -x "$(command -v mkfs.fat || true)" ]; then
-    echo "Using mkfs.fat $(mkfs.fat 2>&1 | head -n1 || true)"
-else
-    echo "W: mkfs.fat not found"
-fi
-
-for _t in losetup sfdisk mkfs.ext4 grub-install blkid; do
+for _t in rsync qemu-img mkfs.fat losetup sfdisk mkfs.ext4 grub-install blkid; do
     _p=$(command -v "$_t" || true)
     if [ -z "$_p" ]; then
         for _d in /sbin /usr/sbin; do
@@ -254,8 +253,20 @@ for _t in losetup sfdisk mkfs.ext4 grub-install blkid; do
         echo "Using $_t $($_p --version 2>/dev/null | head -n1 || true)"
     else
         echo "W: $_t not found"
+        DISK_TOOLS_OK=0
+        DISK_MISSING_PKGS+=("${_DISK_TOOL_PKG[$_t]}")
     fi
 done
+
+if [[ $DISK_TOOLS_OK -eq 0 ]]; then
+    # Dedupe (util-linux covers losetup+sfdisk+blkid; would otherwise
+    # appear 3× in the message).
+    _UNIQ_PKGS=$(printf '%s\n' "${DISK_MISSING_PKGS[@]}" | sort -u | tr '\n' ' ')
+    echo "E: one or more disk image build tools missing: $_UNIQ_PKGS" >&2
+    exit 1
+else
+    echo "All disk image build tools found."
+fi
 
 # Checking build directories
 echo "Checking Build Directories (everything is relative to the script path)"
