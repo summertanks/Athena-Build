@@ -4724,6 +4724,7 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    import tui as _tui
     from build import BuildSession, BuildFlags
 
     _sess = BuildSession.__new__(BuildSession)
@@ -4735,6 +4736,22 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
     class _StubCfg:
         snapshot_enabled = False
     _sess.config = _StubCfg()
+
+    # Spinner inside cmd_build_cache reads tui.tui_instance — must be
+    # set or the constructor raises.  Earlier tests in the run may
+    # have left None behind (e.g. test_console_raises_when_no_tui_anywhere
+    # explicitly nulls it), so ordering on a clean CI host makes this
+    # test fail; assert it's present for THIS test rather than rely on
+    # accidental state from a sibling.
+    class _StubTui:
+        def __init__(self): self._next = 0
+        def add_widget(self, _w):
+            self._next += 1
+            return self._next
+        def del_widget(self, _id): pass
+        def print(self, *_a, **_kw): pass
+    _saved_tui = _tui.tui_instance
+    _tui.tui_instance = _StubTui()
 
     _ctor_calls = []
     class _StubCache:
@@ -4748,6 +4765,7 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
         _sess.cmd_build_cache('force')
     finally:
         build.Cache = _orig_Cache
+        _tui.tui_instance = _saved_tui
     assert len(_ctor_calls) == 1, (
         "cmd_build_cache with force MUST run Cache() even if cache_ready, "
         f"got {len(_ctor_calls)} call(s)")
