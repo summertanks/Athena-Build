@@ -26,7 +26,7 @@ logger = logging.getLogger('athena')
 #                  option `noautodbgsym`)
 #   repo/tests/    `-test` / `-tests` side artifacts
 #
-# Each subdir has its own Packages index.  `package audit` scopes repo/main.
+# Each subdir has its own Packages index.  `repo audit` scopes repo/main.
 _REPO_SUBDIRS = ('main', 'doc', 'dbgsym', 'tests')
 
 
@@ -1156,7 +1156,7 @@ class BuildConfig:
             installerlist_path = os.path.join(working_dir, 'config/installer.list')
             poollist_path = os.path.join(working_dir, 'config/pool.list')
 
-            parser = argparse.ArgumentParser(description='Dependency Parser - Athena Linux')
+            parser = argparse.ArgumentParser(description='Dependency Parser - Athena Build System')
             parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=False, default=working_dir)
             parser.add_argument('--config-file', type=str, help='Specify Configs File', required=False, default=config_path)
             parser.add_argument('--pkg-list', type=str, help='Specify user-selected pkg list', required=False, default=pkglist_path)
@@ -1441,7 +1441,7 @@ class BuildConfig:
             # in dir_temp (pre-Stage-D filename shape: no path-hash
             # suffix).  These could serve empty cached packages
             # against the new (populated) layout until the operator
-            # ran `package audit refresh`.  Hashing the path into
+            # ran `repo audit refresh`.  Hashing the path into
             # the filename eliminates new collisions; this loop
             # cleans up the old uncached files left behind.
             try:

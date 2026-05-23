@@ -1,6 +1,6 @@
 """Repo state scanner + closure auditor + bump planner.
 
-Shared substrate for `package audit_deps` and `package rebump`.
+Shared substrate for `repo audit` and `repo strip`.
 
 Replaces the per-file DebFile walk in build.py with a single
 `dpkg-scanpackages` subprocess that produces a canonical Packages
@@ -17,7 +17,7 @@ Three primitives:
       state.  Returns unresolved, conflicts, weak.
 
   audit_nmu_residue(state) -> list[(pkg, field, value, why), ...]
-      Derive what `package rebump` should do: which pkgs need a Version
+      Derive what `repo strip` should do: which pkgs need a Version
       bump, which need their Depends `(=)` refs rewritten, and the full
       bumped_pkg_set (already-bumped ∪ to-bump).
 
@@ -169,7 +169,7 @@ def scan_repo_state(config, subdir: str = 'main',
     """Generate + parse a Packages snapshot of one repo/ subdir.
 
     `subdir` selects which segment of the segregated repo to scan:
-      'main'    installable corpus — default, what `package audit` uses
+      'main'    installable corpus — default, what `repo audit` uses
       'doc'     -doc side artifacts
       'dbgsym'  -dbgsym side artifacts
       'tests'   -test / -tests side artifacts
@@ -220,7 +220,7 @@ def scan_repo_state(config, subdir: str = 'main',
     # audit-Packages-main from a pre-Stage-D scan (against the OLD
     # repo/main path, empty post-migration) would collide with the
     # NEW path's cache file → stale empty cache served forever until
-    # operator runs `package audit refresh`.  Hashing the dir path
+    # operator runs `repo audit refresh`.  Hashing the dir path
     # decouples them; old cache files are stranded harmlessly under
     # the old name and the new path gets a fresh cache file.
     _dir_hash = hashlib.sha256(_repo_dir.encode('utf-8')).hexdigest()[:8]
@@ -311,7 +311,7 @@ def iter_packages_all_versions(config, subdir: str = 'main',
 
     Unlike scan_repo_state (which dedupes by highest version per name),
     this iterator yields a separate record per .deb file on disk.
-    Needed by `package cleanup` and any other consumer that has to
+    Needed by `repo cleanup` and any other consumer that has to
     operate per-file (e.g. to delete older versions that scan_repo_state
     would hide).
 
@@ -392,7 +392,7 @@ def audit_nmu_residue(state: RepoState) -> 'list[tuple]':
     field) or a relation field name ('Depends', 'Conflicts', ...) when
     a version constraint inside it has NMU residue.
 
-    Used as a verification pass after `package strip` (and as a
+    Used as a verification pass after `repo strip` (and as a
     standing check that the post-build normaliser actually ran).
     Anything reported here means apt sees a non-normalised version
     constraint — install-time risk if the target ships at a stripped

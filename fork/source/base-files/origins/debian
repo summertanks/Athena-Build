@@ -1,4 +1,4 @@
-Vendor: Athena Linux
-Vendor-URL:
-Bugs:
+Vendor: Asgard Linux
+Vendor-URL: https://github.com/summertanks/Athena-Build
+Bugs: https://github.com/summertanks/Athena-Build/issues
 Parent-Vendor: Debian

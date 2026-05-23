@@ -98,15 +98,15 @@ class BuildContainer:
                 _client.ping()
                 self.client = _client
             except docker.errors.APIError:
-                tui.console.print("Athena Linux Docker: Couldn't connect to external server, reverting to local")
+                tui.console.print("Athena Build Docker: Couldn't connect to external server, reverting to local")
 
         if self.client is None:
             try:
                 self.client = docker.from_env()
                 self.client.ping()
             except docker.errors.APIError as e:
-                logger.error(f"Athena Linux Docker: Error {e}")
-                tui.console.print(f"Athena Linux Docker: Error {e}")
+                logger.error(f"Athena Build Docker: Error {e}")
+                tui.console.print(f"Athena Build Docker: Error {e}")
                 raise RuntimeError(f"Cannot connect to local Docker daemon: {e}")
 
         self._image_tag = f"athenalinux:build-{config.container_release}"
@@ -122,15 +122,15 @@ class BuildContainer:
                 tui.console.print(f"Dockerfile changed — rebuilding {_image_tag}")
                 _needs_build = True
             else:
-                tui.console.print(f"Using Athena Linux Image - {image.tags}")
+                tui.console.print(f"Using Athena Build Image - {image.tags}")
 
         except docker.errors.ImageNotFound:
             tui.console.print(f"Image not found — building {_image_tag}")
             _needs_build = True
 
         except docker.errors.APIError as e:
-            logger.error(f"Athena Linux Docker: Error {e}")
-            tui.console.print(f"Athena Linux Docker: Error {e}")
+            logger.error(f"Athena Build Docker: Error {e}")
+            tui.console.print(f"Athena Build Docker: Error {e}")
             tui.Exit(1)
 
         if _needs_build:
@@ -141,7 +141,7 @@ class BuildContainer:
                     labels={'athena.dockerfile.sha256': dockerfile_hash},
                     nocache=False, rm=True, )
 
-                tui.console.print(f"Athena Linux Image Built - {image.tags}")
+                tui.console.print(f"Athena Build Image Built - {image.tags}")
                 try:
                     with open(os.path.join(self.log_path, 'docker_build.log'), 'w') as fh:
                         for chunk in build_logs:
@@ -161,8 +161,8 @@ class BuildContainer:
                     raise RuntimeError(f"Cannot write Docker build log: {e}")
                 
             except docker.errors.APIError as e:
-                logger.error(f"Athena Linux Docker: Error {e}")
-                tui.console.print(f"Athena Linux Docker: Error {e}")
+                logger.error(f"Athena Build Docker: Error {e}")
+                tui.console.print(f"Athena Build Docker: Error {e}")
                 raise RuntimeError(f"Docker image build failed: {e}")
 
         self.image = image
@@ -525,10 +525,10 @@ class BuildContainer:
         except docker.errors.APIError as e:
             _cid = container.short_id if container is not None else '<not-started>'
             logger.error(
-                f"Athena Linux Docker error for {src_pkg.package} "
+                f"Athena Build Docker error for {src_pkg.package} "
                 f"(container {_cid}): {e}"
             )
-            tui.console.print(f"Athena Linux Docker: Error {e}")
+            tui.console.print(f"Athena Build Docker: Error {e}")
             return False
 
         finally:
@@ -701,7 +701,7 @@ class BuildContainer:
 
         Failures are logged but don't propagate — strip is best-effort
         normalisation; a stripped failure leaves the .deb at upstream-
-        layered version, surfaced later by `package audit_nmu`.
+        layered version, surfaced later by `repo audit_nmu`.
         """
         if not built_files:
             return
