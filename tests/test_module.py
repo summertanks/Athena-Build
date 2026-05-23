@@ -11559,6 +11559,142 @@ def test_scan_packages_with_progress_streams_and_steps_bar():
         assert _written == _stream
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# COMP-09 — disk_image module + `iso build disk` command
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_disk_image_module_exposes_build_disk_image_signature():
+    """Top-level entry exists with the expected positional + kwarg
+    surface.  Anti-regression so a refactor doesn't silently rename
+    the helper out from under cmd_build_iso_disk."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    assert hasattr(disk_image, 'build_disk_image'), (
+        "disk_image.build_disk_image is the operator entry point — must exist"
+    )
+    _sig = inspect.signature(disk_image.build_disk_image)
+    _params = list(_sig.parameters.keys())
+    # Required first four positionals: dir_chroot, output_qcow2,
+    # size_gb, password.  Plus optional container kwarg for the
+    # COMP-14 follow-up.
+    assert _params[:4] == ['dir_chroot', 'output_qcow2', 'size_gb', 'password'], (
+        f"build_disk_image signature changed; got {_params}"
+    )
+    assert 'container' in _params, (
+        "container kwarg must remain — present so the COMP-14 follow-"
+        "up can route grub-install through it without a signature break"
+    )
+
+
+def test_disk_image_required_tools_includes_essentials():
+    """The pre-flight tool check covers the load-bearing binaries.
+    Add NEW tools to _REQUIRED_TOOLS rather than scattering shutil.which
+    calls inside build_disk_image — keeps the failure message clean."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    for _tool in ('rsync', 'qemu-img', 'mkfs.fat', 'losetup',
+                  'sfdisk', 'mkfs.ext4', 'grub-install', 'blkid'):
+        assert _tool in disk_image._REQUIRED_TOOLS, (
+            f"{_tool} missing from _REQUIRED_TOOLS — disk image build "
+            f"would proceed without it and fail mid-pipeline"
+        )
+
+
+def test_disk_image_sfdisk_script_lays_out_three_partitions():
+    """The sfdisk script template must produce: 1 MB BIOS-boot, 100 MB
+    EFI (vfat), rest = root.  Pin via substring checks — small enough
+    to read end-to-end if the layout ever needs to change."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    _s = disk_image._SFDISK_SCRIPT_TEMPLATE
+    assert 'label: gpt' in _s, "must declare a GPT label"
+    # BIOS-boot type GUID
+    assert '21686148-6449-6E6F-744E-656564454649' in _s, (
+        "BIOS-boot partition type GUID missing"
+    )
+    # EFI System Partition type GUID
+    assert 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B' in _s, (
+        "ESP partition type GUID missing"
+    )
+    # Root linux-fs GUID
+    assert '0FC63DAF-8483-4772-8E79-3D69D8477DE4' in _s, (
+        "Linux filesystem partition type GUID missing"
+    )
+    # ESP must be marked bootable (per UEFI spec)
+    assert 'bootable' in _s
+
+
+def test_disk_image_need_tools_returns_missing_name():
+    """_need_tools returns the first missing tool's name (or None
+    when all are present).  Patch shutil.which + os.path.isfile to
+    force a known-missing tool and confirm the helper surfaces it."""
+    import sys
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    # When everything is found, returns None.
+    with patch.object(disk_image.shutil, 'which', return_value='/bin/anything'):
+        assert disk_image._need_tools() is None
+    # When all paths report missing, returns the first tool's name
+    # (i.e. _REQUIRED_TOOLS[0]).
+    with patch.object(disk_image.shutil, 'which', return_value=None), \
+         patch.object(disk_image.os.path, 'isfile', return_value=False):
+        _first = disk_image._REQUIRED_TOOLS[0]
+        assert disk_image._need_tools() == _first
+
+
+def test_cmd_iso_dispatcher_routes_disk_action():
+    """`iso build disk` must dispatch to cmd_build_iso_disk."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r"\n    def cmd_iso\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_iso dispatcher not found"
+    _disp = _m.group(0)
+    assert "'build disk'" in _disp, (
+        "`build disk` must appear in cmd_iso's help table"
+    )
+    assert re.search(
+        r"if _sub == 'disk':\s*\n\s+return self\.cmd_build_iso_disk",
+        _disp,
+    ), "disk subcommand not dispatched"
+
+
+def test_cmd_build_iso_disk_gates_on_chroot_verified_and_reads_size():
+    """cmd_build_iso_disk: chroot_verified gate (with force bypass)
+    + size_gb arg parsing (default from config, override via first
+    non-flag positional)."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r"\n    def cmd_build_iso_disk\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_build_iso_disk body not found"
+    _method = _m.group(0)
+    # Gate on chroot_verified with force bypass.
+    assert "self.flags.chroot_verified" in _method, (
+        "cmd_build_iso_disk must check chroot_verified flag"
+    )
+    assert "_force" in _method
+    # Size resolution: default from config, parsed from args.
+    assert "self.config.disk_image_size_gb" in _method, (
+        "cmd_build_iso_disk must read the configured default size"
+    )
+    # Calls into disk_image.build_disk_image
+    assert "disk_image.build_disk_image(" in _method
+
+
 def test_iso_build_uses_spinner_for_mksquashfs_and_grub_mkrescue():
     """Live ISO build wraps mksquashfs + grub-mkrescue in Spinners so
     the long subprocesses don't look like a hung TUI.  Source-text
