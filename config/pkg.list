@@ -119,9 +119,18 @@ dialog
 # FATAL apt-installs — d-i scripts abort if these aren't on target.
 # busybox, zstd: base-installer/library.sh kernel install path
 # grub-common, dmsetup: grub-installer
+# grub2-common: ships /usr/sbin/grub-install + update-grub.  The -bin
+# packages above (grub-pc-bin, grub-efi-amd64-bin) only ship modules,
+# not the driver script — needed (a) by `iso build disk` (COMP-09)
+# at build-time to chroot grub-install into the target, AND (b) on
+# the installed system itself so kernel updates can re-run
+# update-grub → grub-install to refresh the bootloader's kernel
+# reference (apt upgrade linux-image-* otherwise leaves grub pointing
+# at the removed old kernel).
 busybox
 zstd
 grub-common
+grub2-common
 dmsetup
 
 # TOLERANT (|| true) but their absence shows up as warnings/cosmetic
