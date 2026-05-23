@@ -225,28 +225,49 @@ class BuildContainer:
 
     def _write_snapshot_sources_cmd(self) -> str:
         """Shell snippet that REPLACES the container's apt sources with
-        our snapshot-pinned mirror list.
+        our snapshot-pinned mirror list AND writes an apt preferences
+        pin forcing snapshot versions to win over anything pre-installed
+        in the base image.
 
-        Caller writes the result before any `apt-get update` /
-        `apt-get install` runs.  Failing to call this leaves the base
-        image's sources in place — for `debian:bookworm-slim` that's a
-        deb822 file at `/etc/apt/sources.list.d/debian.sources` pointing
-        at the LIVE `deb.debian.org`, NOT our snapshot — and every
-        in-container apt operation silently bypasses the snapshot pin.
+        Three steps:
 
-        Drove the 2026-05-23 wpa→libcrypto3-udeb (>= 3.0.20) loop:
-        per-build apt was pulling from live deb.debian.org because
-        the previous shell-rewrite only touched /etc/apt/sources.list
-        (which doesn't exist on bookworm-slim's deb822 layout).
+          1. rm every apt source file the base image might have shipped:
+             old-style `/etc/apt/sources.list` + new-style deb822
+             `/etc/apt/sources.list.d/*.{sources,list}`.  Without this,
+             `debian:bookworm-slim`'s default deb822 file at
+             `/etc/apt/sources.list.d/debian.sources` continues to feed
+             apt with live deb.debian.org URLs and our snapshot pin is
+             a no-op.
 
-        Approach: rm every apt source file the base image might have
-        shipped (old-style /etc/apt/sources.list + new-style
-        /etc/apt/sources.list.d/*.{sources,list}), THEN write our own
-        single-file legacy-format list at /etc/apt/sources.list.
+          2. Write our snapshot-mirror list to `/etc/apt/sources.list`
+             in the legacy one-line format.
+
+          3. Write `/etc/apt/preferences.d/athena-snapshot` pinning
+             every package from `snapshot.debian.org` at Pin-Priority
+             1001.  Priority > 1000 is the apt-pinning threshold that
+             FORCES downgrade — without it, apt's default policy keeps
+             the base image's newer installed version even when our
+             snapshot advertises a lower one.  Drove the 2026-05-23
+             wpa→libcrypto3-udeb (>= 3.0.20) loop: bookworm-slim's
+             libssl3 was at 3.0.20-1~deb12u1, our snapshot's max is
+             3.0.19-1~deb12u2, and `apt-get upgrade --allow-downgrades`
+             refused to act because Pin-Priority 500 (default for
+             explicit sources) doesn't outrank "installed is newer."
+             At 1001 apt picks snapshot as Candidate and dist-upgrade
+             downgrades the installed set.
         """
         _apt_sources = ''.join(
             f'deb [check-valid-until=no] {_m.url} {_m.suite} {_m.component}\n'
             for _m in self.mirrors
+        )
+        # `origin snapshot.debian.org` matches the host of the mirror's
+        # URL.  Distinct from the Origin: header inside InRelease (which
+        # is `Origin: Debian` / `Origin: Debian-Security`).  This pin is
+        # broad — every pkg from a snapshot.debian.org URL wins.
+        _apt_pin = (
+            "Package: *\n"
+            "Pin: origin snapshot.debian.org\n"
+            "Pin-Priority: 1001\n"
         )
         return (
             "sudo rm -f /etc/apt/sources.list "
@@ -254,6 +275,9 @@ class BuildContainer:
             "/etc/apt/sources.list.d/*.list; "
             f"sudo tee /etc/apt/sources.list >/dev/null <<'EOF'\n"
             f"{_apt_sources}EOF\n"
+            "sudo tee /etc/apt/preferences.d/athena-snapshot "
+            ">/dev/null <<'EOF'\n"
+            f"{_apt_pin}EOF\n"
         )
 
     def build(self, src_pkg: Source, *,
@@ -451,27 +475,24 @@ class BuildContainer:
         # normalise the Version field + all dep-constraint version
         # references — stripping +bN, +debNuN, ~bpoN+N, +rpiN, etc.
         # so internal cross-refs resolve cleanly inside our repo.
-        # apt -y --allow-downgrades upgrade — align the container's
+        # apt -y --allow-downgrades dist-upgrade — align the container's
         # already-installed packages with snapshot's view BEFORE building.
-        # The base image (debian:bookworm-slim) ships libssl3 / libc6 / etc.
-        # at the LIVE mirror's current version, which can be NEWER than our
-        # snapshot's index advertises.  apt-get install (build-deps) below
-        # won't downgrade an already-installed pkg, so dpkg-shlibdeps would
-        # read the LIVE pkg's shlibs file and emit a Depends-constraint
-        # pointing at a version our snapshot/repo doesn't ship.
-        #
-        # Drove the 2026-05-23 wpa→libcrypto3-udeb (>= 3.0.20) phantom-bind:
-        # base image had libssl3 3.0.20-1~deb12u1, shlibs file said
-        # `udeb: libcrypto 3 libcrypto3-udeb (>= 3.0.20)`, every wpa rebuild
-        # baked that into the .udeb.  --allow-downgrades upgrades AND
-        # downgrades the installed set to whatever snapshot has; `upgrade`
-        # (not dist-upgrade) refuses to add/remove pkgs so the impact is
-        # bounded to version changes on already-installed names.
+        # The base image (debian:bookworm-slim) ships libssl3 / libc6 /
+        # libcrypto3-udeb's shlibs file etc. at the LIVE mirror's current
+        # version, which can be NEWER than our snapshot's index.  With
+        # the Pin-Priority 1001 written by _write_snapshot_sources_cmd,
+        # apt's Candidate for every snapshot-pkg becomes the snapshot
+        # version even when the installed version is newer.  dist-upgrade
+        # (not plain `upgrade`) is required because libssl3's downgrade
+        # cascades through dpkg / libc6 / libcap2 / krb5 / glib / openssl
+        # etc. — `upgrade` won't pull through dep-tree downgrades.
+        # `--allow-downgrades` then unlocks the actual version moves apt
+        # planned but refuses to execute under default -y.
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'{_write_sources}' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get -y ' \
-                  f'-o Acquire::Retries=5 --allow-downgrades upgrade; ' \
+                  f'-o Acquire::Retries=5 --allow-downgrades dist-upgrade; ' \
                   f'{_dep_install}' \
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
