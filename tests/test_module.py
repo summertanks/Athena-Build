@@ -13014,6 +13014,49 @@ def test_scan_repo_state_treats_empty_cache_file_as_missing():
     )
 
 
+def test_cmd_source_verify_iterates_cohorts_separately():
+    """cmd_source_verify must process deb and udeb cohorts as distinct
+    loops, each scoped to its own RepoState — never mixing the two
+    namespaces.  Pin the structural shape (not behaviour, since that
+    needs a full session) so a refactor can't quietly recombine them
+    and re-introduce the cross-namespace lookups."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def cmd_source_verify\(self.*?(?=\n    def \w)',
+        _body, re.DOTALL,
+    )
+    assert _m, 'cmd_source_verify body not found'
+    _fn = _m.group(0)
+    # Both repo-state subdirs must be scanned by name.
+    assert "scan_repo_state(self.config, 'main')" in _fn, (
+        "deb cohort must scan_repo_state for 'main'"
+    )
+    assert "scan_repo_state(self.config, 'main-udeb')" in _fn, (
+        "udeb cohort must scan_repo_state for 'main-udeb'"
+    )
+    # Cohort labels must be present so the report is two-section.
+    assert "'deb'" in _fn and "'udeb'" in _fn, (
+        "cmd_source_verify must label cohorts deb / udeb"
+    )
+    # Per-cohort extension filter — pin that .deb / .udeb are filtered
+    # separately rather than unioned.
+    assert "endswith(_ext)" in _fn, (
+        "predicted-files filter must use the per-cohort extension "
+        "(.deb for deb cohort, .udeb for udeb cohort)"
+    )
+    # _predicted_files_for_source unions both trees and would defeat
+    # the cohort split — must not be called from verify.
+    assert '_predicted_files_for_source' not in _fn, (
+        "cmd_source_verify must NOT call _predicted_files_for_source "
+        "(it unions both trees and would re-mix the cohort namespaces). "
+        "Use _tree.src_pkg_files directly with per-cohort extension "
+        "filtering."
+    )
+
+
 def test_deb_dir_for_recognises_main_udeb_label():
     """Pin: deb_dir_for must accept 'main-udeb' → dir_repo_main_udeb so
     repo_audit.scan_repo_state can drive a udeb-side RepoState (needed
@@ -15005,6 +15048,7 @@ def main() -> int:
         test_repo_audit_scan_uses_dpkg_scanpackages_and_apt_pkg,
         test_scan_repo_state_main_udeb_passes_t_udeb_to_scanpackages,
         test_scan_repo_state_treats_empty_cache_file_as_missing,
+        test_cmd_source_verify_iterates_cohorts_separately,
         test_deb_dir_for_recognises_main_udeb_label,
         test_repo_audit_closure_handles_conflicts_and_provides,
         test_cmd_source_rescan_registered_in_dispatcher,
