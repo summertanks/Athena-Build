@@ -2,7 +2,7 @@
 import hashlib
 import logging
 import os
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 import utils
 from utils import BuildConfig, version_no_epoch
 from package import Source
@@ -10,6 +10,12 @@ from package import Source
 import docker
 import docker.errors  # noqa: F401 — explicit import so `docker.errors.X` resolves under mypy
 import tui
+
+if TYPE_CHECKING:
+    # Type-only import — verify_pkg_artifact takes an optional RepoState
+    # parameter, resolved at call time via a lazy `import repo_audit`
+    # inside the function body so the runtime dep stays optional.
+    from repo_audit import RepoState
 
 logger = logging.getLogger('athena')
 
@@ -850,9 +856,11 @@ class BuildContainer:
         return True
 
     def verify_pkg_artifact(self, deb_path: str,
-                            expected_filename: str) -> 'Tuple[bool, str]':
+                            expected_filename: str,
+                            repo_state: 'Optional[RepoState]' = None,
+                            ) -> 'Tuple[bool, str]':
         """Deep-verify a single .deb / .udeb against its predicted
-        filename + the current cache state.
+        filename + a target resolution scope (repo or cache).
 
         Checks (in order, short-circuits on first failure):
 
@@ -863,19 +871,33 @@ class BuildContainer:
           5. Internal `Architecture:` field matches filename's arch part
              (also accepts `all` to match any arch suffix — for arch-
              independent .debs whose filename uses the build arch)
-          6. Every Depends + Pre-Depends OR-group resolvable via
-             self.cache.package_hashtable (at least one alternative in
-             each group has a version satisfying its constraint).
-             Skipped when self.cache is None (no cache to verify
-             against; trust).
+          6. Every Depends + Pre-Depends OR-group has at least one
+             alternative resolvable in the chosen scope.
+
+        Resolution scope:
+          - When `repo_state` is provided (a `repo_audit.RepoState`),
+            deps resolve against the repo's post-strip pristine versions
+            — which is what apt sees at install time on the installed
+            system.  This is the authoritative scope: the cache reflects
+            UPSTREAM's NMU-bumped versions (`libfoo 1.0-1+b1`), so a
+            strict-equal sibling `Depends: libfoo (= 1.0-1)` on a
+            post-strip .deb would falsely flag unsatisfied against
+            cache while installing fine against repo.  Honours Provides
+            per Debian Policy §7.5 via
+            `repo_audit._rel_satisfied_in_scope`.
+          - When `repo_state` is None, falls back to
+            `self.cache.package_hashtable` / `udeb_hashtable` (legacy
+            path).  Skipped when both are None (no scope to verify
+            against; returns 'ok-nocache').
 
         Returns (True, 'ok') on full pass; (False, diagnostic) on
         first failure.  Diagnostic format: short-token:detail for
         machine-friendly logging.
 
-        Used by check_build (skip-rebuild decision) and cmd_source_
-        repair (write-PASS decision) so both share the same notion
-        of "this artifact is good enough to skip building."
+        Used by `cmd_source_verify` (which passes repo_state for the
+        authoritative pre-ship check) and historically by check_build /
+        cmd_source_repair (which pass cache for cheap availability
+        checks).
         """
         if not os.path.isfile(deb_path):
             return (False, 'missing')
@@ -922,9 +944,33 @@ class BuildContainer:
         if _actual_arch not in (_exp_arch, 'all'):
             return (False, f'arch-mismatch:{_actual_arch}!={_exp_arch}')
 
-        # Depends resolution against cache.  Skip if no cache (some
-        # call sites construct BuildContainer without one — the
-        # filename + control check still has value).
+        # Dep resolution.  Prefer repo_state (authoritative — matches
+        # what apt sees on the installed system); fall back to cache
+        # (legacy path; over-reports on the NMU-bump-vs-strict-equal-
+        # sibling scenario because the cache reflects upstream's bumped
+        # versions while our .debs are at pristine post-strip).
+        from debian.deb822 import PkgRelation
+
+        if repo_state is not None:
+            from repo_audit import _rel_satisfied_in_scope
+            for _field in ('Depends', 'Pre-Depends'):
+                _deps_str = _ctrl.get(_field, '')
+                if not _deps_str or '${' in _deps_str:
+                    continue
+                try:
+                    _or_groups = PkgRelation.parse_relations(_deps_str)
+                except Exception:
+                    continue
+                for _or_group in _or_groups:
+                    if not any(_rel_satisfied_in_scope(repo_state, _r)
+                               for _r in _or_group):
+                        _names = ' | '.join(_d.get('name', '?')
+                                            for _d in _or_group)
+                        return (False, f'unsatisfied-{_field}:{_names}')
+            return (True, 'ok')
+
+        # Legacy cache-based path — preserved for callers that don't
+        # have a RepoState handy (test fixtures + back-compat).
         if self.cache is None:
             return (True, 'ok-nocache')
 
@@ -937,7 +983,6 @@ class BuildContainer:
         _lookup_table = (self.cache.udeb_hashtable if _is_udeb
                          else self.cache.package_hashtable)
 
-        from debian.deb822 import PkgRelation
         for _field in ('Depends', 'Pre-Depends'):
             _deps_str = _ctrl.get(_field, '')
             if not _deps_str:
