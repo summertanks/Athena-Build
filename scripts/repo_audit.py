@@ -28,7 +28,6 @@ import hashlib
 import logging
 import os
 import re
-import shutil
 import subprocess
 from typing import Callable, Optional
 
@@ -165,24 +164,6 @@ def invalidate_cache(repo_dir: Optional[str] = None) -> None:
         _CACHE.pop(os.path.abspath(repo_dir), None)
 
 
-def _count_pkg_files(_dir: str, include_udeb: bool = True,
-                       extensions: 'Optional[tuple[str, ...]]' = None) -> int:
-    """Count package-shaped files in `_dir` (top-level, no recursion).
-
-    Default extensions: ('deb', 'udeb') when include_udeb=True, ('deb',)
-    otherwise.  Pass `extensions=('dsc',)` for source scans.  Used to
-    size the per-file dpkg-scan{packages,sources} ProgressBar.
-    """
-    if extensions is None:
-        extensions = ('deb', 'udeb') if include_udeb else ('deb',)
-    _suffixes = tuple('.' + _e for _e in extensions)
-    try:
-        _entries = os.listdir(_dir)
-    except OSError:
-        return 0
-    return sum(1 for _f in _entries if _f.endswith(_suffixes))
-
-
 def _scan_packages_with_progress(
     argv: 'list[str]', output_path: str, count_dir: str,
     *, label_subdir: str = '',
@@ -192,143 +173,100 @@ def _scan_packages_with_progress(
     sudo_password: 'Optional[str]' = None,
     use_shell: bool = False,
 ) -> bool:
-    """Run `dpkg-scanpackages` (or `dpkg-scansources`) and tee its
-    stdout to `output_path`, stepping a ProgressBar once per emitted
-    stanza header.
+    """Run `dpkg-scanpackages` / `dpkg-scansources` and tee stdout to
+    `output_path`, wrapped in a Spinner.
 
-    dpkg-scanpackages emits one `Package: <name>` line per scanned
-    .deb/.udeb; dpkg-scansources emits `Package:` lines too.  Counting
-    those headers as they stream gives a real per-file progress signal
-    that a plain subprocess.run() can't surface.
-
-    Pre-counts files in `count_dir` to size the bar's maxvalue.  If
-    the count is 0 (caller dir empty / unreadable), falls back to a
-    Spinner (indeterminate progress) so the operator still sees activity.
+    Name kept for back-compat with the prior ProgressBar shape — the
+    "progress" is now indeterminate.  Streaming Perl stdout through
+    Python's pipe reader fails to flush mid-run reliably even with
+    `stdbuf -oL` (Python's BufferedReader re-buffers on top of the
+    Perl-side flush, so the bar stayed at 0/N for the whole scan —
+    operator-observed 2026-05-22 across both `repo audit` cold-cache
+    runs and `chroot build installer` pre-flight audit).  Spinner is
+    the honest signal.
 
     Args:
       argv:           argv for the scanner (dpkg-scanpackages / -scansources).
       output_path:    Tee target for stdout.  Overwrites existing.
-      count_dir:      Directory whose .deb/.udeb count sizes the bar.
-      label_subdir:   Optional sub-label for the bar (e.g. 'main', 'doc').
-      include_udeb:   Count .udeb alongside .deb (False for source scans).
+      count_dir:      Reserved (was for pre-counting bar maxvalue).
+                      Kept in signature for caller stability.
+      label_subdir:   Optional sub-label for the Spinner.
+      include_udeb:   Reserved (was for pre-count extension select).
+      count_extensions: Reserved (was for pre-count override).
       cwd:            Optional working dir for the subprocess.
-      sudo_password:  When set, runs argv under `sudo -S` and pipes the
-                      password on stdin (apt_repo._scan_packages_to needs
-                      sudo for root-owned output dirs).
-      use_shell:      Wrap argv as a single shell string (joins with spaces).
-                      Used by apt_repo's `cd … && dpkg-scanpackages …`
-                      pattern that needs cwd via shell.
+      sudo_password:  When set, runs argv under `sudo -S` and pipes
+                      the password on stdin; also drives the post-
+                      run `sudo install` of the tempfile into place.
+      use_shell:      Reserved; the new path uses shell redirection
+                      always (it's how we get stdout straight to the
+                      tempfile via `> path` under sudo).
 
     Returns True on success, False on subprocess failure (logs stderr).
-    Lazily imports tui — modules that stub repo_audit in tests don't
-    need a real Tui.
     """
-    _bar = None
+    del count_dir, include_udeb, count_extensions, use_shell
+
     _spin = None
-    _max = _count_pkg_files(
-        count_dir, include_udeb=include_udeb, extensions=count_extensions,
-    )
     try:
-        from tui import ProgressBar as _PB, Spinner as _Sp, tui_instance as _ti
+        from tui import Spinner as _Sp, tui_instance as _ti
         if _ti is not None:
             _label_base = ('dpkg-scanpackages' if 'scanpackages' in argv[0]
                            else 'dpkg-scansources')
             _label = (f"{_label_base} ({label_subdir})" if label_subdir
                       else _label_base)
-            if _max > 0:
-                _bar = _PB(label=_label, maxvalue=_max, show_rate=False)
-            else:
-                _spin = _Sp(_label)
+            _spin = _Sp(_label)
     except Exception:
-        _bar = None
         _spin = None
 
-    # dpkg-scanpackages / dpkg-scansources are Perl scripts; Perl's I/O
-    # layer block-buffers stdout when stdout is a pipe (default 4-8 KB
-    # buffer, only flushes on full or exit).  Without forcing line
-    # buffering, our line-by-line streaming reader gets nothing until
-    # the subprocess exits — the ProgressBar sits at 0/N for the whole
-    # run, defeating the purpose.  `stdbuf -oL` flips libc stdio to
-    # line-buffered via LD_PRELOAD; Perl's PerlIO layers respect that
-    # because they sit on top of libc's stdio.  Skipped silently if
-    # stdbuf isn't on PATH — bar will be stuck but the scan still works.
-    _stdbuf: 'list[str]' = (
-        ['stdbuf', '-oL'] if shutil.which('stdbuf') else []
-    )
-    if sudo_password is not None:
-        _real_argv: 'list[str]' = ['sudo', '-S'] + _stdbuf + list(argv)
-    else:
-        _real_argv = _stdbuf + list(argv)
-
-    if use_shell:
-        _popen_args: 'list[str] | str' = ' '.join(_real_argv)
-        _shell = True
-    else:
-        _popen_args = _real_argv
-        _shell = False
-
-    _stderr_buf: 'list[str]' = []
-    try:
-        _proc = subprocess.Popen(
-            _popen_args, shell=_shell, cwd=cwd,
-            stdin=subprocess.PIPE if sudo_password is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,
-        )
-    except FileNotFoundError:
-        logger.error(f"{argv[0]} not on PATH — install the `dpkg-dev` package")
-        if _bar is not None: _bar.close()
-        if _spin is not None: _spin.done()
-        return False
-
-    if sudo_password is not None and _proc.stdin is not None:
-        try:
-            _proc.stdin.write(sudo_password + '\n')
-            _proc.stdin.close()
-        except OSError:
-            pass
-
-    # Stream stdout to a user-owned tempfile first, then (if a sudo
-    # password is available) `sudo install` it atomically into place.
-    # Direct open(output_path, 'w') would fail when the destination
-    # directory is root-only-writable OR when a prior shell-redirect-
-    # under-sudo run left a root-owned file at output_path that the
-    # user can't truncate (the operator-observed Permission denied
-    # against repo/dists/<suite>/<comp>/binary-<arch>/Packages).
+    # Write to a user-owned tempfile first, then `sudo install`
+    # into place.  Direct open(output_path, 'w') would fail when a
+    # prior sudo-shell-redirect run left a root-owned file at
+    # output_path that the user can't truncate (operator-observed
+    # Permission denied at repo/dists/<suite>/<comp>/binary-<arch>/
+    # Packages, 2026-05-22).
     import tempfile as _tempfile
+    _parent = os.path.dirname(output_path) or '.'
     _tmp_fd, _tmp_path = _tempfile.mkstemp(
         prefix='scan-pkg-', suffix='.tmp',
-        dir=os.path.dirname(output_path) if os.access(
-            os.path.dirname(output_path), os.W_OK,
-        ) else None,
+        dir=_parent if os.access(_parent, os.W_OK) else None,
     )
-    try:
-        with os.fdopen(_tmp_fd, 'w') as _out:
-            assert _proc.stdout is not None
-            for _line in _proc.stdout:
-                _out.write(_line)
-                if _line.startswith('Package:') and _bar is not None:
-                    _bar.step(1)
-        # Drain stderr after stdout EOF (proc may still be writing).
-        if _proc.stderr is not None:
-            _stderr_buf.append(_proc.stderr.read() or '')
-        _rc = _proc.wait()
-    finally:
-        if _bar is not None: _bar.close()
-        if _spin is not None: _spin.done()
+    os.close(_tmp_fd)   # we'll let the subprocess shell open it via >
 
-    if _rc != 0:
-        _err = ''.join(_stderr_buf).strip()
-        logger.error(f"{argv[0]} failed (rc={_rc}): {_err[:400]}")
+    if sudo_password is not None:
+        _real_cmd = (
+            f'cd {cwd or "."} && '
+            f'{" ".join(argv)} 2>/dev/null > {_tmp_path}'
+        )
+        _r = subprocess.run(
+            ['sudo', '-S', 'bash', '-c', _real_cmd],
+            input=sudo_password + '\n',
+            capture_output=True, text=True,
+        )
+    else:
+        _real_cmd = (
+            f'cd {cwd or "."} && '
+            f'{" ".join(argv)} 2>/dev/null > {_tmp_path}'
+        )
+        _r = subprocess.run(
+            ['bash', '-c', _real_cmd],
+            capture_output=True, text=True,
+        )
+
+    if _spin is not None:
+        _spin.done()
+
+    if _r.returncode != 0:
+        _err = (_r.stderr or '').strip()
+        logger.error(f"{argv[0]} failed (rc={_r.returncode}): {_err[:400]}")
         try:
             os.unlink(_tmp_path)
         except OSError:
             pass
         return False
 
-    # Move tempfile into place.  If sudo is available use it (preserves
-    # the prior root-owned Packages semantics + clobbers any pre-
-    # existing root-owned file); otherwise plain rename.
+    # Move tempfile into place.  With sudo, `install` clobbers any
+    # pre-existing root-owned file at output_path and preserves the
+    # root-owned-644 semantics callers had under the original shell-
+    # redirect pattern.  Without sudo, plain os.replace.
     if sudo_password is not None:
         _mv = subprocess.run(
             ['sudo', '-S', 'install', '-m', '644', _tmp_path, output_path],

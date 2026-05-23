@@ -11515,48 +11515,50 @@ def test_source_audit_uses_per_source_progress_bar():
     )
 
 
-def test_scan_packages_with_progress_streams_and_steps_bar():
-    """The per-file scanner helper streams subprocess.Popen stdout,
-    tees to the output file, and steps the ProgressBar once per
-    `Package:` header line emitted.  Pin via a fake Popen returning
-    a 3-stanza stream and checking the output file contains all 3
-    stanzas."""
-    import sys, tempfile, io
+def test_scan_packages_with_progress_writes_output_via_subprocess_run():
+    """The Spinner-wrapped scanner helper invokes the scanner via
+    `bash -c 'cd … && <scanner> 2>/dev/null > <tempfile>'` through
+    subprocess.run, then moves the tempfile to output_path.  Pin
+    the post-run output presence + a successful return."""
+    import sys, tempfile
     from unittest.mock import patch, MagicMock
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import repo_audit
 
-    _stream = (
+    _stub_packages = (
         "Package: a\nVersion: 1.0\n\n"
         "Package: b\nVersion: 2.0\n\n"
-        "Package: c\nVersion: 3.0\n\n"
     )
 
-    def _fake_popen(*_a, **_kw):
-        _p = MagicMock()
-        _p.stdout = io.StringIO(_stream)
-        _p.stderr = io.StringIO("")
-        _p.stdin  = MagicMock()
-        _p.wait.return_value = 0
-        return _p
+    def _fake_run(argv, *_a, **kw):
+        # Identify the `bash -c '… > <tempfile>'` call and write the
+        # stub stanzas to that tempfile so subsequent move + checks
+        # see real content.  Anything else (the `sudo install` follow-
+        # up in the sudo path) just returns rc=0.
+        if (isinstance(argv, (list, tuple)) and len(argv) >= 3
+                and argv[0] == 'bash' and argv[1] == '-c'
+                and '> ' in argv[2]):
+            _target = argv[2].split('> ')[1].strip().split()[0]
+            with open(_target, 'w') as fh:
+                fh.write(_stub_packages)
+        _r = MagicMock()
+        _r.returncode = 0
+        _r.stderr = ''
+        return _r
 
     with tempfile.TemporaryDirectory() as _tmp:
-        # count_dir with 3 .deb files so the bar has maxvalue=3
-        for _name in ('a.deb', 'b.deb', 'c.deb'):
-            with open(os.path.join(_tmp, _name), 'wb') as fh:
-                fh.write(b'STUB')
         _out = os.path.join(_tmp, 'Packages')
-        with patch.object(repo_audit.subprocess, 'Popen',
-                          side_effect=_fake_popen):
+        with patch.object(repo_audit.subprocess, 'run', side_effect=_fake_run):
             _ok = repo_audit._scan_packages_with_progress(
                 ['dpkg-scanpackages', '--multiversion', _tmp, '/dev/null'],
                 _out, _tmp,
             )
         assert _ok is True
-        # Output file contains the full streamed stanzas.
+        # Output file moved into place + carries the stub stanzas.
+        assert os.path.isfile(_out)
         with open(_out) as fh:
             _written = fh.read()
-        assert _written == _stream
+        assert _written == _stub_packages
 
 
 # ─────────────────────────────────────────────────────────────────────────────
