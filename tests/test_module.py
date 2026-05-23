@@ -1628,25 +1628,20 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
     assert _assert_dirs_exist, (
         "dists/<suite>/main/{binary-amd64,debian-installer/binary-amd64,source} not created"
     )
-    # Post-helper-refactor (2026-05-22): scan calls now go through
-    # repo_audit._scan_packages_with_progress → subprocess.Popen
-    # (no shell wrapper).  argv shape is:
-    #   ['sudo', '-S', 'dpkg-scanpackages', '-m',          'pool']
-    #   ['sudo', '-S', 'dpkg-scanpackages', '-m', '-t', 'udeb', 'pool']
-    #   ['sudo', '-S', 'dpkg-scansources', 'pool']
+    # Scan calls go via `sudo bash -c 'cd <staging> && dpkg-scan...'`
+    # — Spinner-wrapped subprocess (reverted from Popen-streaming
+    # after 2026-05-22 operator report that the progressbar stayed
+    # stuck at 0/N).  Check the joined call strings for the scanner
+    # signatures.
     _argv_strings = [' '.join(c) for c in _calls if c]
     _joined = '\n'.join(_argv_strings)
-    # Argv may include `stdbuf -oL` between sudo and the scanner
-    # (helper prepends it when stdbuf is on PATH, to force Perl's
-    # stdout to line-buffered).  Assert each scanner is somewhere in
-    # the argv list rather than pinning a strict prefix.
-    assert any('dpkg-scanpackages' in c and '-m' in c and 'pool' in c
-               and '-t' not in c
-               for c in _calls), f"missing deb scan call; got:\n{_joined}"
-    assert any('dpkg-scanpackages' in c and '-t' in c and 'udeb' in c
-               for c in _calls), f"missing udeb scan call; got:\n{_joined}"
-    assert any('dpkg-scansources' in c and 'pool' in c
-               for c in _calls), f"missing source scan; got:\n{_joined}"
+    assert 'dpkg-scanpackages -m pool' in _joined, (
+        f"missing deb scan call; got:\n{_joined}")
+    assert 'dpkg-scanpackages -m -t udeb pool' in _joined, (
+        f"missing udeb scan call; got:\n{_joined}")
+    assert 'dpkg-scansources pool' in _joined, (
+        f"missing source scan; got:\n{_joined}"
+    )
     # apt-ftparchive lands as argv (no shell wrapper).
     _any_ftparchive = any(
         len(c) >= 3 and c[0] == 'sudo' and c[2] == 'apt-ftparchive'
@@ -1765,7 +1760,7 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
     # ['sudo', '-S', 'dpkg-scanpackages', '-m', '<pool_subdir>'] —
     # streamed via subprocess.Popen for per-file ProgressBar.
     _scan_argv = [c for c in _calls
-                  if c and 'dpkg-scanpackages' in c]
+                  if c and any('dpkg-scanpackages' in s for s in c)]
     _scan_strs = [' '.join(c) for c in _scan_argv]
     assert len(_scan_argv) == 3, (
         f"expected 3 dpkg-scanpackages invocations (thor/main + thor/doc "
@@ -1940,7 +1935,7 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
     # Post-helper-refactor: scans go via subprocess.Popen as
     # ['sudo', '-S', 'dpkg-scanpackages', '-m', '<pool_subdir>'].
     _scan_argv = [c for c in _calls
-                  if c and 'dpkg-scanpackages' in c]
+                  if c and any('dpkg-scanpackages' in s for s in c)]
     assert len(_scan_argv) == 2, (
         f"expected 2 scans (main + doc); tests + dbgsym should be "
         f"skipped (empty / missing).  Got {len(_scan_argv)}: "
