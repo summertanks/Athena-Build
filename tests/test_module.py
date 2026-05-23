@@ -1270,7 +1270,6 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_repo',      'strip',    'cmd_strip_repo'),
         ('cmd_repo',      'cleanup',  'cmd_package_cleanup'),
         ('cmd_repo',      'index',    'cmd_index_repo'),
-        ('cmd_repo',      'migrate_layout', 'cmd_migrate_repo_layout'),
         ('cmd_container', 'init',     'cmd_init_container'),
         ('cmd_container', 'purge',    'cmd_container_purge'),
         # cmd_chroot 'build' is now multi-token ('build live' / 'build
@@ -1995,253 +1994,6 @@ def test_cmd_repo_dispatcher_routes_index_action():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONF-01 Stage C — cmd_migrate_repo_layout one-shot migrator
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _stage_c_make_session_with_fake_repo(_repo: str, _codename: str = 'thor'):
-    """Build a minimal BuildSession with a config pointing at the fake
-    repo dir + sufficient stubs for cmd_migrate_repo_layout to run.
-    Returns (session, codename) — codename is what we'll thread through
-    for destination-path verification."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build as _build_module
-
-    # Use BuildSession.__new__ to skip __init__'s heavy setup, then
-    # inject the minimal attributes cmd_migrate_repo_layout reads.
-    _session = _build_module.BuildSession.__new__(_build_module.BuildSession)
-
-    class _StubConfig:
-        def __init__(self, repo, codename):
-            self.dir_repo = repo
-            self.build_codename = codename
-            self.arch = 'amd64'
-
-    _session.config = _StubConfig(_repo, _codename)   # type: ignore[assignment]
-    return _session, _codename
-
-
-def _stage_c_populate_fake_repo(_repo: str) -> 'dict[str, list[str]]':
-    """Populate _repo with fake .deb / .udeb / .dsc / .tar.* files
-    across {main, doc, dbgsym, tests}/.  Returns a dict mapping
-    subdir name to the list of filenames placed there (so the test
-    can assert the migration found exactly those files).
-    """
-    _layout = {
-        'main': [
-            'foo_1.0_amd64.deb',
-            'foo-bin_1.0_amd64.deb',
-            'foo-installer_1.0_amd64.udeb',
-            'foo_1.0.dsc',
-            'foo_1.0.tar.xz',
-            'foo_1.0.debian.tar.xz',
-        ],
-        'doc': [
-            'foo-doc_1.0_all.deb',
-            'bar-doc_2.0_all.deb',
-        ],
-        'dbgsym': [
-            'foo-dbgsym_1.0_amd64.deb',
-        ],
-        'tests': [
-            'foo-tests_1.0_all.deb',
-        ],
-    }
-    for _sub, _files in _layout.items():
-        _d = os.path.join(_repo, _sub)
-        os.makedirs(_d, exist_ok=True)
-        for _f in _files:
-            with open(os.path.join(_d, _f), 'wb') as fh:
-                fh.write(b'STUB')
-    return _layout
-
-
-def test_cmd_migrate_repo_layout_dry_run_touches_nothing():
-    """Stage C: `repo migrate_layout dry-run` must print the plan
-    without moving any files.  Pin so a future refactor doesn't
-    silently bypass the dry-run guard (which would be catastrophic
-    — the migration is destructive at scale)."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _stub_tui()
-    with tempfile.TemporaryDirectory() as _repo:
-        _layout = _stage_c_populate_fake_repo(_repo)
-        _session, _codename = _stage_c_make_session_with_fake_repo(_repo)
-
-        # Snapshot file count + mtimes BEFORE running dry-run
-        _before = {}
-        for _sub, _files in _layout.items():
-            for _f in _files:
-                _p = os.path.join(_repo, _sub, _f)
-                _before[_p] = os.stat(_p).st_mtime
-
-        _session.cmd_migrate_repo_layout('dry-run')
-
-        # NOTHING should have moved
-        for _p, _mtime in _before.items():
-            assert os.path.isfile(_p), (
-                f"dry-run moved/deleted {_p} — should have been no-op!"
-            )
-
-        # And the new layout dirs should NOT have been created
-        _dist_root = os.path.join(_repo, 'dists')
-        assert not os.path.exists(_dist_root), (
-            f"dry-run created {_dist_root} — should have been a true no-op"
-        )
-
-
-def test_cmd_migrate_repo_layout_moves_files_to_correct_destinations():
-    """Stage C happy path: migrate with `force` (skip prompt).  Verify
-    each file lands at the EXACT expected destination per the layout
-    map in docs/plans/conf-01-repo-layout-migration.md.  This is the
-    load-bearing test — if a path is wrong, .debs are silently
-    misplaced and apt won't find them after Stage D consumers
-    update."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _stub_tui()
-    with tempfile.TemporaryDirectory() as _repo:
-        _stage_c_populate_fake_repo(_repo)
-        _session, _codename = _stage_c_make_session_with_fake_repo(_repo)
-        _session.cmd_migrate_repo_layout('force')
-
-        # Expected destinations per the migration map
-        _expected_dests = {
-            # main/.deb → dists/<codename>/main/binary-amd64/
-            os.path.join(_repo, 'dists', _codename, 'main', 'binary-amd64',
-                         'foo_1.0_amd64.deb'),
-            os.path.join(_repo, 'dists', _codename, 'main', 'binary-amd64',
-                         'foo-bin_1.0_amd64.deb'),
-            # main/.udeb → dists/<codename>/main/debian-installer/binary-amd64/
-            os.path.join(_repo, 'dists', _codename, 'main', 'debian-installer',
-                         'binary-amd64', 'foo-installer_1.0_amd64.udeb'),
-            # main/sources → dists/<codename>/main/source/
-            os.path.join(_repo, 'dists', _codename, 'main', 'source',
-                         'foo_1.0.dsc'),
-            os.path.join(_repo, 'dists', _codename, 'main', 'source',
-                         'foo_1.0.tar.xz'),
-            os.path.join(_repo, 'dists', _codename, 'main', 'source',
-                         'foo_1.0.debian.tar.xz'),
-            # doc/.deb → dists/<codename>/doc/binary-amd64/
-            os.path.join(_repo, 'dists', _codename, 'doc', 'binary-amd64',
-                         'foo-doc_1.0_all.deb'),
-            os.path.join(_repo, 'dists', _codename, 'doc', 'binary-amd64',
-                         'bar-doc_2.0_all.deb'),
-            # dbgsym/.deb → dists/<codename>-debug/main/binary-amd64/
-            os.path.join(_repo, 'dists', f'{_codename}-debug', 'main',
-                         'binary-amd64', 'foo-dbgsym_1.0_amd64.deb'),
-            # tests/.deb → dists/<codename>/tests/binary-amd64/
-            os.path.join(_repo, 'dists', _codename, 'tests', 'binary-amd64',
-                         'foo-tests_1.0_all.deb'),
-        }
-        for _expected in _expected_dests:
-            assert os.path.isfile(_expected), (
-                f"file not at expected destination: {_expected}"
-            )
-
-        # Old subdirs should be empty (and rmdir'd by best-effort cleanup)
-        for _old_sub in ('main', 'doc', 'dbgsym', 'tests'):
-            _old_path = os.path.join(_repo, _old_sub)
-            assert not os.path.exists(_old_path) or os.listdir(_old_path) == [], (
-                f"old {_old_sub}/ still has files after migration: "
-                f"{os.listdir(_old_path) if os.path.exists(_old_path) else 'gone'}"
-            )
-        # Cleanup snapshots this test created
-        import glob as _g
-        for _snap in _g.glob('/tmp/repo-pre-migration-*.tar'):
-            try:
-                os.unlink(_snap)
-            except OSError:
-                pass
-
-
-def test_cmd_migrate_repo_layout_snapshot_tarball_created():
-    """Stage C safety net: a snapshot tarball lands in /tmp/ before any
-    file movement so the operator can restore on failure.  Pin so a
-    future "speed-up" refactor doesn't drop the snapshot."""
-    import sys, tempfile, glob
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _stub_tui()
-    with tempfile.TemporaryDirectory() as _repo:
-        _stage_c_populate_fake_repo(_repo)
-        _session, _codename = _stage_c_make_session_with_fake_repo(_repo)
-
-        _existing_snaps = set(glob.glob('/tmp/repo-pre-migration-*.tar'))
-        _session.cmd_migrate_repo_layout('force')
-        _new_snaps = set(glob.glob('/tmp/repo-pre-migration-*.tar')) - _existing_snaps
-        assert len(_new_snaps) == 1, (
-            f"expected exactly one new snapshot in /tmp/, got: {_new_snaps}"
-        )
-        _snap = _new_snaps.pop()
-        assert os.path.getsize(_snap) > 0, f"snapshot {_snap} is empty"
-        # Cleanup
-        os.unlink(_snap)
-
-
-def test_cmd_migrate_repo_layout_skips_when_dest_exists():
-    """Stage C re-run safety: if a destination file already exists
-    (operator re-ran after a partial migration), the helper SKIPS
-    rather than clobbering.  Pin so a future refactor doesn't change
-    this to overwrite (which would lose any post-migration edits)."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _stub_tui()
-    with tempfile.TemporaryDirectory() as _repo:
-        # Pre-populate only ONE main .deb (minimal case)
-        os.makedirs(os.path.join(_repo, 'main'), exist_ok=True)
-        with open(os.path.join(_repo, 'main', 'foo_1.0_amd64.deb'), 'wb') as fh:
-            fh.write(b'NEW-content')
-
-        # Simulate prior partial migration: same .deb already at dest
-        # with DIFFERENT content.
-        _session, _codename = _stage_c_make_session_with_fake_repo(_repo)
-        _dst_dir = os.path.join(_repo, 'dists', _codename, 'main', 'binary-amd64')
-        os.makedirs(_dst_dir, exist_ok=True)
-        _dst_path = os.path.join(_dst_dir, 'foo_1.0_amd64.deb')
-        with open(_dst_path, 'wb') as fh:
-            fh.write(b'PRE-EXISTING-content')
-
-        _session.cmd_migrate_repo_layout('force')
-
-        # Destination kept its pre-existing content (not clobbered)
-        with open(_dst_path, 'rb') as fh:
-            assert fh.read() == b'PRE-EXISTING-content', (
-                "destination was clobbered — migration must SKIP when "
-                "dest exists, not overwrite"
-            )
-        # Source preserved (skipped means not moved)
-        _src_path = os.path.join(_repo, 'main', 'foo_1.0_amd64.deb')
-        assert os.path.isfile(_src_path), (
-            "source moved despite dest-exists skip — should have stayed"
-        )
-
-        # Cleanup snapshot
-        import glob
-        for _snap in glob.glob('/tmp/repo-pre-migration-*.tar'):
-            try:
-                os.unlink(_snap)
-            except OSError:
-                pass
-
-
-def test_cmd_repo_dispatcher_routes_migrate_layout_action():
-    """Stage C: `repo migrate_layout` action must route to
-    cmd_migrate_repo_layout.  Same anti-regression pattern as the
-    index-action test."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    import re
-    _m = re.search(
-        r'def cmd_repo\(self.*?(?=\n    def )',
-        _body, re.DOTALL,
-    )
-    assert _m, 'cmd_repo dispatcher not found'
-    _fn = _m.group(0)
-    assert "action == 'migrate_layout'" in _fn, _fn
-    assert 'return self.cmd_migrate_repo_layout' in _fn, _fn
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONF-01 Stage D — consumer refactor anti-regression
@@ -2258,17 +2010,8 @@ def test_stage_d_no_old_repo_subdir_paths_in_production_code():
 
     Scans scripts/ for the tell-tale `os.path.join(dir_repo, 'main')`
     idiom + its variants.  Comments and docstrings are stripped so
-    documentation references to the old paths don't trigger.
-
-    The migration command (cmd_migrate_repo_layout) is exempted —
-    it's specifically for migrating from old to new layout, so it
-    legitimately knows about both."""
+    documentation references to the old paths don't trigger."""
     import re
-    _ALLOWED = {
-        'scripts/build.py:cmd_migrate_repo_layout',   # the migration itself
-        'scripts/utils.py',                            # BuildConfig path defs
-        'scripts/apt_repo.py',                         # dists/.../components literals
-    }
     _BAD_PATTERNS = [
         re.compile(r"os\.path\.join\([^)]*\bdir_repo\b[^)]*,\s*'main'\)"),
         re.compile(r"os\.path\.join\([^)]*\bdir_repo\b[^)]*,\s*'doc'\)"),
@@ -2289,13 +2032,6 @@ def test_stage_d_no_old_repo_subdir_paths_in_production_code():
         _code = '\n'.join(
             _ln for _ln in _code.splitlines()
             if not _ln.lstrip().startswith('#')
-        )
-        # Special exemption: cmd_migrate_repo_layout legitimately
-        # knows the old layout (it's how it knows what to migrate).
-        # Strip its body before checking.
-        _code = re.sub(
-            r'def cmd_migrate_repo_layout\(.*?(?=\n    def )',
-            '', _code, flags=re.DOTALL,
         )
         for _pat in _BAD_PATTERNS:
             for _m in _pat.finditer(_code):
@@ -11956,9 +11692,9 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
 def test_repo_dispatcher_advertises_merged_package_actions():
     """After the package→repo merge, the cmd_repo dispatcher must
     advertise the former cmd_package actions (tunnel/reload/audit/
-    audit_nmu/strip/cleanup) alongside its own (index/migrate_layout).
-    Anti-regression for accidentally re-introducing a `cmd_package`
-    helper or leaving an action un-dispatched."""
+    audit_nmu/strip/cleanup) alongside its own (index).  Anti-regression
+    for accidentally re-introducing a `cmd_package` helper or leaving
+    an action un-dispatched."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
@@ -11971,7 +11707,7 @@ def test_repo_dispatcher_advertises_merged_package_actions():
     assert _m, "cmd_repo dispatcher not found"
     _disp = _m.group(0)
     for _action in ('tunnel', 'reload', 'audit', 'audit_nmu',
-                    'strip', 'cleanup', 'index', 'migrate_layout'):
+                    'strip', 'cleanup', 'index'):
         assert f"'{_action}'" in _disp, (
             f"cmd_repo dispatcher missing action {_action!r}"
         )
