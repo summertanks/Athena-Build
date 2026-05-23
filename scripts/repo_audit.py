@@ -275,8 +275,22 @@ def _scan_packages_with_progress(
         except OSError:
             pass
 
+    # Stream stdout to a user-owned tempfile first, then (if a sudo
+    # password is available) `sudo install` it atomically into place.
+    # Direct open(output_path, 'w') would fail when the destination
+    # directory is root-only-writable OR when a prior shell-redirect-
+    # under-sudo run left a root-owned file at output_path that the
+    # user can't truncate (the operator-observed Permission denied
+    # against repo/dists/<suite>/<comp>/binary-<arch>/Packages).
+    import tempfile as _tempfile
+    _tmp_fd, _tmp_path = _tempfile.mkstemp(
+        prefix='scan-pkg-', suffix='.tmp',
+        dir=os.path.dirname(output_path) if os.access(
+            os.path.dirname(output_path), os.W_OK,
+        ) else None,
+    )
     try:
-        with open(output_path, 'w') as _out:
+        with os.fdopen(_tmp_fd, 'w') as _out:
             assert _proc.stdout is not None
             for _line in _proc.stdout:
                 _out.write(_line)
@@ -293,7 +307,37 @@ def _scan_packages_with_progress(
     if _rc != 0:
         _err = ''.join(_stderr_buf).strip()
         logger.error(f"{argv[0]} failed (rc={_rc}): {_err[:400]}")
+        try:
+            os.unlink(_tmp_path)
+        except OSError:
+            pass
         return False
+
+    # Move tempfile into place.  If sudo is available use it (preserves
+    # the prior root-owned Packages semantics + clobbers any pre-
+    # existing root-owned file); otherwise plain rename.
+    if sudo_password is not None:
+        _mv = subprocess.run(
+            ['sudo', '-S', 'install', '-m', '644', _tmp_path, output_path],
+            input=sudo_password + '\n',
+            capture_output=True, text=True,
+        )
+        try:
+            os.unlink(_tmp_path)
+        except OSError:
+            pass
+        if _mv.returncode != 0:
+            logger.error(
+                f"sudo install {_tmp_path} → {output_path} failed: "
+                f"{_mv.stderr.strip()[:400]}"
+            )
+            return False
+    else:
+        try:
+            os.replace(_tmp_path, output_path)
+        except OSError as e:
+            logger.error(f"rename {_tmp_path} → {output_path} failed: {e}")
+            return False
     return True
 
 

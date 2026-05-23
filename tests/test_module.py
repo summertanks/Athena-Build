@@ -1478,12 +1478,6 @@ def _make_fake_popen(calls_log: list):
     `Package: ...` stanza (enough to keep _scan_packages_with_progress
     happy without an actual dpkg-scanpackages run).
 
-    The fake process also writes its stub stanza to the output file by
-    inspecting the calling stack — actually, simpler: it returns a
-    process whose stdout produces stub lines, AND
-    _scan_packages_with_progress tees those lines to the output file
-    itself.  So no out-of-band file write needed.
-
     Used by the post-2026-05-22 apt_repo + repo_audit tests that pin
     the new Popen-based scanner pipeline.
     """
@@ -1499,6 +1493,32 @@ def _make_fake_popen(calls_log: list):
         _proc.stdin  = MagicMock()
         _proc.wait.return_value = 0
         return _proc
+    return _fake
+
+
+def _wrap_with_install_handler(inner_fake):
+    """Wrap an apt_repo `subprocess.run` fake to ALSO handle the
+    `sudo -S install -m 644 <src> <dst>` calls that repo_audit's
+    _scan_packages_with_progress emits to atomically place the
+    scanner tempfile.  Both fakes share the same subprocess module
+    object (apt_repo.subprocess IS repo_audit.subprocess IS the
+    stdlib `subprocess`), so chaining via one wrapper keeps both
+    branches exercised without one patch overriding the other."""
+    from unittest.mock import MagicMock
+    import shutil as _shutil
+    def _fake(argv, *a, **kw):
+        if (isinstance(argv, (list, tuple)) and len(argv) >= 7
+                and argv[:3] == ['sudo', '-S', 'install']):
+            _src, _dst = argv[5], argv[6]
+            try:
+                _shutil.move(_src, _dst)
+            except OSError:
+                pass
+            _r = MagicMock()
+            _r.returncode = 0
+            _r.stderr = ''
+            return _r
+        return inner_fake(argv, *a, **kw)
     return _fake
 
 
@@ -1585,9 +1605,10 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
             os.makedirs(os.path.join(_staging, 'pool'), exist_ok=True)
             import repo_audit
             _popen = _make_fake_popen(_calls)
+            _combined = _wrap_with_install_handler(_fake_subprocess_run)
             with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
                  patch.object(apt_repo.subprocess, 'run',
-                              side_effect=_fake_subprocess_run), \
+                              side_effect=_combined), \
                  patch.object(repo_audit.subprocess, 'Popen',
                               side_effect=_popen):
                 _ok = apt_repo.generate_apt_repo(
@@ -1715,9 +1736,10 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
                         fh.write(b'STUB')
             import repo_audit
             _popen = _make_fake_popen(_calls)
+            _combined = _wrap_with_install_handler(_fake_subprocess_run)
             with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
                  patch.object(apt_repo.subprocess, 'run',
-                              side_effect=_fake_subprocess_run), \
+                              side_effect=_combined), \
                  patch.object(repo_audit.subprocess, 'Popen',
                               side_effect=_popen):
                 _ok = apt_repo.generate_repo_indexes(
@@ -1892,9 +1914,10 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
 
             import repo_audit
             _popen = _make_fake_popen(_calls)
+            _combined = _wrap_with_install_handler(_fake_subprocess_run)
             with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
                  patch.object(apt_repo.subprocess, 'run',
-                              side_effect=_fake_subprocess_run), \
+                              side_effect=_combined), \
                  patch.object(repo_audit.subprocess, 'Popen',
                               side_effect=_popen):
                 _ok = apt_repo.generate_repo_indexes(
