@@ -160,11 +160,30 @@ def build_disk_image(
         tui.console.print(f"Attached at {_loop_dev}")
 
         # ── Step 3: sfdisk GPT ────────────────────────────────────────────
-        _r = subprocess.run(
-            ['sudo', '-S', 'sfdisk', '--wipe', 'always', _loop_dev],
-            input=password + '\n' + _SFDISK_SCRIPT_TEMPLATE,
-            capture_output=True, text=True,
+        # Write script to a tempfile + shell-redirect into sfdisk so
+        # sudo's stdin gets ONLY the password and sfdisk's stdin gets
+        # ONLY the script.  The combined-input approach left "label:
+        # gpt" prefixed with password residue under some sudo
+        # configurations (operator-observed "line 1: unsupported
+        # command" 2026-05-22).
+        import tempfile as _tempfile
+        _sf_fd, _sf_path = _tempfile.mkstemp(
+            prefix='sfdisk-', suffix='.script',
         )
+        try:
+            with os.fdopen(_sf_fd, 'w') as _fh:
+                _fh.write(_SFDISK_SCRIPT_TEMPLATE)
+            _r = subprocess.run(
+                ['sudo', '-S', 'bash', '-c',
+                 f'sfdisk --wipe always {_loop_dev} < {_sf_path}'],
+                input=password + '\n',
+                capture_output=True, text=True,
+            )
+        finally:
+            try:
+                os.unlink(_sf_path)
+            except OSError:
+                pass
         if _r.returncode != 0:
             tui.console.print(
                 f"ERROR: sfdisk failed: {_r.stderr.strip()[:200]}"
