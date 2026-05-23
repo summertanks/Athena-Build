@@ -11592,8 +11592,10 @@ def test_disk_image_module_exposes_build_disk_image_signature():
 
 def test_build_system_sh_checks_disk_image_tools():
     """The disk-image host-tool pre-flight lives in build-system.sh
-    (matches the iso-tools check pattern).  Pin the tool list so a
-    refactor doesn't drop a load-bearing binary's check."""
+    (matches the iso-tools gate pattern).  Pin the tool list so a
+    refactor doesn't drop a load-bearing binary's check, and pin the
+    gate behaviour: any miss → `exit 1` with the missing-package
+    summary listed."""
     _sh = os.path.join(_ROOT, 'build-system.sh')
     with open(_sh) as fh:
         _body = fh.read()
@@ -11605,6 +11607,16 @@ def test_build_system_sh_checks_disk_image_tools():
             f"section — disk image build would fail mid-pipeline with "
             f"a less obvious error"
         )
+    # Gate behaviour: DISK_TOOLS_OK flag + exit 1 on miss + the
+    # packages listing in the failure message.
+    assert 'DISK_TOOLS_OK' in _body, (
+        "disk-image tools check must set a gate flag (DISK_TOOLS_OK), "
+        "not just warn — missing tools should fail startup"
+    )
+    assert 'one or more disk image build tools missing' in _body, (
+        "disk-image gate must surface the failure summary line so the "
+        "operator sees the missing-packages list"
+    )
 
 
 def test_disk_image_sfdisk_script_lays_out_three_partitions():
