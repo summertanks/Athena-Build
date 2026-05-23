@@ -354,24 +354,27 @@ def _scan_packages_to(
 
     Run with cwd=staging so Packages records carry relative Filename
     entries (matching the layout apt walks via /cdrom/pool/...).
+    Streams stdout via repo_audit._scan_packages_with_progress so the
+    operator sees a per-file ProgressBar instead of a frozen TUI on
+    the multi-minute scan.
     """
-    _flag = '-t udeb' if udeb else ''
+    from repo_audit import _scan_packages_with_progress
     _label = 'udebs' if udeb else 'debs'
-    tui.console.print(f"Scanning {pool_subdir}/ for {_label}...")
-    _shell = (
-        f'cd {staging} && '
-        f'dpkg-scanpackages -m {_flag} {pool_subdir} 2>/dev/null '
-        f'> {output_path}'
+    _argv = ['dpkg-scanpackages', '-m']
+    if udeb:
+        _argv += ['-t', 'udeb']
+    _argv += [pool_subdir]
+    _count_dir = os.path.join(staging, pool_subdir)
+    _ok = _scan_packages_with_progress(
+        _argv, output_path, _count_dir,
+        label_subdir=f"{pool_subdir} {_label}",
+        include_udeb=udeb,
+        cwd=staging,
+        sudo_password=password,
     )
-    _r = _sudo(['bash', '-c', _shell], password)
-    if _r.returncode != 0:
+    if not _ok:
         tui.console.print(
-            f"ERROR: dpkg-scanpackages ({_label}) failed: "
-            f"{_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_scan_packages_to {_label}: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
+            f"ERROR: dpkg-scanpackages ({_label}) failed for {pool_subdir}"
         )
         return False
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
@@ -392,20 +395,21 @@ def _scan_sources_to(
 
     Same cwd trick as _scan_packages_to.  dpkg-scansources tolerates
     pool/ subdirs with no .dsc — emits an empty Sources, still useful.
+    Per-`.dsc` ProgressBar via _scan_packages_with_progress (counts
+    .dsc files for maxvalue; falls back to Spinner if zero).
     """
-    tui.console.print(f"Scanning {pool_subdir}/ for sources...")
-    _shell = (
-        f'cd {staging} && '
-        f'dpkg-scansources {pool_subdir} 2>/dev/null '
-        f'> {output_path}'
+    from repo_audit import _scan_packages_with_progress
+    _argv = ['dpkg-scansources', pool_subdir]
+    _ok = _scan_packages_with_progress(
+        _argv, output_path, os.path.join(staging, pool_subdir),
+        label_subdir=f"{pool_subdir} sources",
+        count_extensions=('dsc',),
+        cwd=staging,
+        sudo_password=password,
     )
-    _r = _sudo(['bash', '-c', _shell], password)
-    if _r.returncode != 0:
+    if not _ok:
         tui.console.print(
-            f"ERROR: dpkg-scansources failed: {_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_scan_sources_to: rc={_r.returncode}, stderr={_r.stderr.strip()}"
+            f"ERROR: dpkg-scansources failed for {pool_subdir}"
         )
         return False
     _n = _count_records(output_path) if os.path.exists(output_path) else 0

@@ -164,6 +164,139 @@ def invalidate_cache(repo_dir: Optional[str] = None) -> None:
         _CACHE.pop(os.path.abspath(repo_dir), None)
 
 
+def _count_pkg_files(_dir: str, include_udeb: bool = True,
+                       extensions: 'Optional[tuple[str, ...]]' = None) -> int:
+    """Count package-shaped files in `_dir` (top-level, no recursion).
+
+    Default extensions: ('deb', 'udeb') when include_udeb=True, ('deb',)
+    otherwise.  Pass `extensions=('dsc',)` for source scans.  Used to
+    size the per-file dpkg-scan{packages,sources} ProgressBar.
+    """
+    if extensions is None:
+        extensions = ('deb', 'udeb') if include_udeb else ('deb',)
+    _suffixes = tuple('.' + _e for _e in extensions)
+    try:
+        _entries = os.listdir(_dir)
+    except OSError:
+        return 0
+    return sum(1 for _f in _entries if _f.endswith(_suffixes))
+
+
+def _scan_packages_with_progress(
+    argv: 'list[str]', output_path: str, count_dir: str,
+    *, label_subdir: str = '',
+    include_udeb: bool = True,
+    count_extensions: 'Optional[tuple[str, ...]]' = None,
+    cwd: 'Optional[str]' = None,
+    sudo_password: 'Optional[str]' = None,
+    use_shell: bool = False,
+) -> bool:
+    """Run `dpkg-scanpackages` (or `dpkg-scansources`) and tee its
+    stdout to `output_path`, stepping a ProgressBar once per emitted
+    stanza header.
+
+    dpkg-scanpackages emits one `Package: <name>` line per scanned
+    .deb/.udeb; dpkg-scansources emits `Package:` lines too.  Counting
+    those headers as they stream gives a real per-file progress signal
+    that a plain subprocess.run() can't surface.
+
+    Pre-counts files in `count_dir` to size the bar's maxvalue.  If
+    the count is 0 (caller dir empty / unreadable), falls back to a
+    Spinner (indeterminate progress) so the operator still sees activity.
+
+    Args:
+      argv:           argv for the scanner (dpkg-scanpackages / -scansources).
+      output_path:    Tee target for stdout.  Overwrites existing.
+      count_dir:      Directory whose .deb/.udeb count sizes the bar.
+      label_subdir:   Optional sub-label for the bar (e.g. 'main', 'doc').
+      include_udeb:   Count .udeb alongside .deb (False for source scans).
+      cwd:            Optional working dir for the subprocess.
+      sudo_password:  When set, runs argv under `sudo -S` and pipes the
+                      password on stdin (apt_repo._scan_packages_to needs
+                      sudo for root-owned output dirs).
+      use_shell:      Wrap argv as a single shell string (joins with spaces).
+                      Used by apt_repo's `cd … && dpkg-scanpackages …`
+                      pattern that needs cwd via shell.
+
+    Returns True on success, False on subprocess failure (logs stderr).
+    Lazily imports tui — modules that stub repo_audit in tests don't
+    need a real Tui.
+    """
+    _bar = None
+    _spin = None
+    _max = _count_pkg_files(
+        count_dir, include_udeb=include_udeb, extensions=count_extensions,
+    )
+    try:
+        from tui import ProgressBar as _PB, Spinner as _Sp, tui_instance as _ti
+        if _ti is not None:
+            _label_base = ('dpkg-scanpackages' if 'scanpackages' in argv[0]
+                           else 'dpkg-scansources')
+            _label = (f"{_label_base} ({label_subdir})" if label_subdir
+                      else _label_base)
+            if _max > 0:
+                _bar = _PB(label=_label, maxvalue=_max, show_rate=False)
+            else:
+                _spin = _Sp(_label)
+    except Exception:
+        _bar = None
+        _spin = None
+
+    if sudo_password is not None:
+        _real_argv: 'list[str]' = ['sudo', '-S'] + list(argv)
+    else:
+        _real_argv = list(argv)
+
+    if use_shell:
+        _popen_args: 'list[str] | str' = ' '.join(_real_argv)
+        _shell = True
+    else:
+        _popen_args = _real_argv
+        _shell = False
+
+    _stderr_buf: 'list[str]' = []
+    try:
+        _proc = subprocess.Popen(
+            _popen_args, shell=_shell, cwd=cwd,
+            stdin=subprocess.PIPE if sudo_password is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+    except FileNotFoundError:
+        logger.error(f"{argv[0]} not on PATH — install the `dpkg-dev` package")
+        if _bar is not None: _bar.close()
+        if _spin is not None: _spin.done()
+        return False
+
+    if sudo_password is not None and _proc.stdin is not None:
+        try:
+            _proc.stdin.write(sudo_password + '\n')
+            _proc.stdin.close()
+        except OSError:
+            pass
+
+    try:
+        with open(output_path, 'w') as _out:
+            assert _proc.stdout is not None
+            for _line in _proc.stdout:
+                _out.write(_line)
+                if _line.startswith('Package:') and _bar is not None:
+                    _bar.step(1)
+        # Drain stderr after stdout EOF (proc may still be writing).
+        if _proc.stderr is not None:
+            _stderr_buf.append(_proc.stderr.read() or '')
+        _rc = _proc.wait()
+    finally:
+        if _bar is not None: _bar.close()
+        if _spin is not None: _spin.done()
+
+    if _rc != 0:
+        _err = ''.join(_stderr_buf).strip()
+        logger.error(f"{argv[0]} failed (rc={_rc}): {_err[:400]}")
+        return False
+    return True
+
+
 def scan_repo_state(config, subdir: str = 'main',
                      refresh: bool = False) -> Optional[RepoState]:
     """Generate + parse a Packages snapshot of one repo/ subdir.
@@ -248,42 +381,15 @@ def scan_repo_state(config, subdir: str = 'main',
         # dedupe by highest version in the parse step.  /dev/null is the
         # (empty) override file.
         #
-        # Spinner so the operator sees the long dpkg-scanpackages pass
-        # is alive — on a 5k-pkg repo (.deb control area extract per
-        # file) this runs ~90s with no per-file output.  Imported lazily
-        # so test code paths that stub repo_audit don't pull tui in.
-        _spin = None
-        try:
-            from tui import Spinner as _Spinner, tui_instance as _ti
-            if _ti is not None:
-                _spin = _Spinner(
-                    f"dpkg-scanpackages {os.path.basename(_repo_dir)} "
-                    f"({subdir} subdir)"
-                )
-        except Exception:
-            _spin = None
-        try:
-            try:
-                with open(_pkg_file, 'wb') as _fh:
-                    subprocess.run(
-                        ['dpkg-scanpackages', '--multiversion',
-                         _repo_dir, '/dev/null'],
-                        stdout=_fh, stderr=subprocess.PIPE, check=True,
-                    )
-            except subprocess.CalledProcessError as e:
-                logger.error(
-                    f"dpkg-scanpackages failed: "
-                    f"{e.stderr.decode(errors='replace').strip()}"
-                )
-                return None
-            except FileNotFoundError:
-                logger.error(
-                    "dpkg-scanpackages not on PATH — install the `dpkg-dev` package"
-                )
-                return None
-        finally:
-            if _spin is not None:
-                _spin.done()
+        # Per-file ProgressBar: pre-count .debs for maxvalue, then
+        # stream stdout line-by-line and step on every `Package:` header
+        # (one per scanned file).  Without this the operator stares at
+        # a frozen TUI for ~90s on a 5k-pkg fresh-cache audit.
+        if not _scan_packages_with_progress(
+                ['dpkg-scanpackages', '--multiversion',
+                 _repo_dir, '/dev/null'],
+                _pkg_file, _repo_dir, label_subdir=subdir):
+            return None
 
     apt_pkg.init_system()
     _packages: dict = {}
