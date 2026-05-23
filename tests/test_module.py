@@ -11644,12 +11644,12 @@ def test_disk_image_grub_install_uses_absolute_path_and_env_path():
     _path = os.path.join(_ROOT, 'scripts', 'disk_image.py')
     with open(_path) as fh:
         _body = fh.read()
-    # Absolute path to grub-install + update-grub.
+    # Absolute path to grub-install (the grub.cfg generation path
+    # uses the hand-rolled minimal cfg unconditionally — update-grub
+    # was removed 2026-05-23 after producing a chroot'd cfg the
+    # booted grub couldn't load).
     assert '/usr/sbin/grub-install' in _body, (
         "grub-install must be invoked with absolute path inside chroot"
-    )
-    assert '/usr/sbin/update-grub' in _body, (
-        "update-grub must be invoked with absolute path inside chroot"
     )
     # Explicit env PATH belt-and-suspenders for sub-processes spawned
     # by grub-install (grub-mkimage, grub-probe, etc.).
@@ -11657,6 +11657,33 @@ def test_disk_image_grub_install_uses_absolute_path_and_env_path():
     assert "'env'" in _body, (
         "chroot calls must run via `env PATH=...` prefix"
     )
+
+
+def test_disk_image_writes_minimal_grub_cfg_unconditionally():
+    """`update-grub` inside a chrooted target is fragile (os-prober
+    can fail, /etc/default/grub may be missing, generated cfg may
+    have paths that don't work post-boot).  Operator hit a grub-
+    shell-on-boot 2026-05-23 because update-grub returned 0 but
+    produced an unusable cfg.  Pin: build_disk_image must call
+    _write_minimal_grub_cfg unconditionally (not as a fallback), and
+    must NOT invoke update-grub."""
+    _path = os.path.join(_ROOT, 'scripts', 'disk_image.py')
+    with open(_path) as fh:
+        _body = fh.read()
+    # update-grub call must not appear in build_disk_image's flow.
+    # (The helper function _write_minimal_grub_cfg can still mention
+    # `grub-mkconfig` in its docstring — substring check on the
+    # chroot'd call.)
+    assert "'/usr/sbin/update-grub'" not in _body, (
+        "update-grub must not be called from build_disk_image — the "
+        "hand-rolled minimal grub.cfg is the deterministic path"
+    )
+    # And the unconditional call to _write_minimal_grub_cfg exists.
+    import re
+    assert re.search(
+        r"if not _write_minimal_grub_cfg\(_mnt, _root_uuid, password\):",
+        _body,
+    ), "_write_minimal_grub_cfg must be invoked unconditionally"
 
 
 def test_disk_image_efi_only_fallback_when_no_bios_modules():

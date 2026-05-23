@@ -385,32 +385,28 @@ def build_disk_image(
                     "(grub-pc-bin not installed) — EFI-only image"
                 )
 
-            # grub-mkconfig via update-grub.  Soft failure (log+warn)
-            # because the bootloader is already installed; grub.cfg
-            # absence just means the boot menu has no entries — easy
-            # to add manually post-boot, doesn't brick the image.
-            _r = _sudo(
-                ['env', _chroot_env, 'chroot', _mnt,
-                 '/usr/sbin/update-grub'],
-                password,
-            )
-            if _r.returncode != 0:
-                logger.warning(
-                    f"update-grub returned rc={_r.returncode}: "
-                    f"{_r.stderr.strip()[:200]}"
-                )
+            # grub.cfg generation.  We unconditionally write a hand-
+            # rolled minimal cfg instead of running `update-grub`
+            # inside the chroot — update-grub is fragile under chroot
+            # (depends on os-prober scanning host disks, /etc/default/
+            # grub presence, the /etc/grub.d/* scripts producing a cfg
+            # whose embedded paths actually work post-boot).  Operator
+            # hit a grub-shell-on-boot situation 2026-05-23 where
+            # update-grub appeared to succeed but produced a cfg that
+            # the booted grub couldn't load.
+            #
+            # The minimal cfg is deterministic: one menuentry, kernel
+            # found by UUID, no os-prober.  When the operator wants
+            # a richer menu (multi-kernel, fallback entries), they
+            # run `update-grub` post-boot from the running system —
+            # at that point /etc/default/grub + os-prober work the
+            # way they're designed to.
+            if not _write_minimal_grub_cfg(_mnt, _root_uuid, password):
                 tui.console.print(
-                    "W: update-grub failed — wrote a minimal grub.cfg "
-                    "manually instead"
+                    "ERROR: minimal grub.cfg write failed — "
+                    "image will not boot"
                 )
-                # Fall back to a hand-rolled minimal grub.cfg pointing
-                # at the first vmlinuz-* in /boot.
-                if not _write_minimal_grub_cfg(_mnt, _root_uuid, password):
-                    tui.console.print(
-                        "ERROR: minimal grub.cfg fallback also failed — "
-                        "image will not boot"
-                    )
-                    return False
+                return False
         finally:
             _spin.done()
 
