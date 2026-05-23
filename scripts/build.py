@@ -54,14 +54,11 @@ from tui import setup_file_logging
 logger = logging.getLogger('athena')
 
 asciiart_logo = (
-    '╔══════════════════════════════════════════════════════════════╗\n'
-    '║                                                              ║\n'
-    '║                    ATHENA  BUILD  SYSTEM                     ║\n'
-    '║                                                              ║\n'
-    '║    author : Harkirat S Virk                                  ║\n'
-    '║    github : https://github.com/summertanks/Athena-Build      ║\n'
-    '║                                                              ║\n'
-    '╚══════════════════════════════════════════════════════════════╝'
+    '╭─╮╶┬╴╷ ╷╭─╴╭╮╷╭─╮   ╭╮ ╷ ╷╷╷  ╶┬╮   ╭─╮╷ ╷╭─╮╶┬╴╭─╴╭┬╮\n'
+    '├─┤ │ ├─┤├╴ │╰┤├─┤   ├┴╮│ │││   ││   ╰─╮╰┬╯╰─╮ │ ├╴ │││\n'
+    '╵ ╵ ╵ ╵ ╵╰─╴╵ ╵╵ ╵   ╰─╯╰─╯╵╰─╴╶┴╯   ╰─╯ ╵ ╰─╯ ╵ ╰─╴╵ ╵\n'
+    '@Harkirat S Virk\n'
+    'https://github.com/summertanks/Athena-Build'
 )
 
 # TODO: make all apt_pkg.parse functions arch specific
@@ -2038,6 +2035,20 @@ class BuildSession:
 
         _deb_cohort = self._resolve_deb_cohort()
         _udeb_cohort = self._resolve_udeb_cohort()
+        # Progress bar wrapping the dep-gate iteration(s).  Each cohort
+        # walks state.packages once; on a 5k-pkg repo with two cohorts
+        # that's 10k iterations of PkgRelation.parse + scope checks
+        # (multi-second).  show_rate=False because rate isn't useful
+        # here — pkgs-per-second varies wildly with how much Depends
+        # text each entry carries.
+        _n_iter_cohorts = sum(
+            1 for _c in (_deb_cohort, _udeb_cohort) if _c is not None
+        ) or 1
+        _bar = ProgressBar(
+            label='Audit dep-gate',
+            maxvalue=len(_state.packages) * _n_iter_cohorts,
+            show_rate=False,
+        )
         if _deb_cohort is None and _udeb_cohort is None:
             console.print(
                 "Note: dep_tree not built — falling back to repo/main-"
@@ -2045,6 +2056,7 @@ class BuildSession:
             )
             _unresolved, _weak = repo_audit.audit_dep_closure(
                 _state, consumer_set=None,
+                progress_cb=lambda: _bar.step(1),
             )
         else:
             # Run each cohort independently.  Resolution scope is the
@@ -2062,10 +2074,12 @@ class BuildSession:
                     continue
                 _u, _w = repo_audit.audit_dep_closure(
                     _state, consumer_set=_consumer_set,
+                    progress_cb=lambda: _bar.step(1),
                 )
                 _per_cohort.append((_label, _consumer_set, _u, _w))
                 _unresolved.extend(_u)
                 _weak.extend(_w)
+        _bar.close()
 
         # Drill-in mode short-circuits the overview/cohort sections —
         # pass the merged unresolved list (gap classification is cohort-
@@ -2111,9 +2125,16 @@ class BuildSession:
                 "run `dep parse` first"
             )
         else:
-            _live_conflicts = _dedupe_bidirectional_conflicts(
-                repo_audit.audit_conflict_cohort(_state, _live)
+            _bar_lc = ProgressBar(
+                label='Audit live conflicts',
+                maxvalue=len(_state.packages), show_rate=False,
             )
+            _live_conflicts = _dedupe_bidirectional_conflicts(
+                repo_audit.audit_conflict_cohort(
+                    _state, _live, progress_cb=lambda: _bar_lc.step(1),
+                )
+            )
+            _bar_lc.close()
             console.print(
                 f"\n=== LIVE CONFLICTS (cohort = "
                 f"{len(_live)} pkgs in live chroot) ===\n"
@@ -2127,9 +2148,17 @@ class BuildSession:
                 "not built; run `dep parse` first"
             )
         else:
-            _inst_conflicts = _dedupe_bidirectional_conflicts(
-                repo_audit.audit_conflict_cohort(_state, _installer)
+            _bar_ic = ProgressBar(
+                label='Audit inst conflicts',
+                maxvalue=len(_state.packages), show_rate=False,
             )
+            _inst_conflicts = _dedupe_bidirectional_conflicts(
+                repo_audit.audit_conflict_cohort(
+                    _state, _installer,
+                    progress_cb=lambda: _bar_ic.step(1),
+                )
+            )
+            _bar_ic.close()
             console.print(
                 f"\n=== INSTALLER CONFLICTS (cohort = "
                 f"{len(_installer)} udebs in d-i ramdisk) ===\n"
@@ -2495,7 +2524,14 @@ class BuildSession:
         if not _state.packages:
             console.print("repo/ has no .deb/.udeb files — nothing to audit")
             return
-        _findings = repo_audit.audit_nmu_residue(_state)
+        _bar = ProgressBar(
+            label='Audit NMU residue',
+            maxvalue=len(_state.packages), show_rate=False,
+        )
+        _findings = repo_audit.audit_nmu_residue(
+            _state, progress_cb=lambda: _bar.step(1),
+        )
+        _bar.close()
         if not _findings:
             console.print(
                 f"NMU audit OK: {len(_state.packages)} pkgs scanned, "
