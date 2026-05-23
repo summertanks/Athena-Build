@@ -11590,18 +11590,20 @@ def test_disk_image_module_exposes_build_disk_image_signature():
     )
 
 
-def test_disk_image_required_tools_includes_essentials():
-    """The pre-flight tool check covers the load-bearing binaries.
-    Add NEW tools to _REQUIRED_TOOLS rather than scattering shutil.which
-    calls inside build_disk_image — keeps the failure message clean."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import disk_image
-    for _tool in ('rsync', 'qemu-img', 'mkfs.fat', 'losetup',
-                  'sfdisk', 'mkfs.ext4', 'grub-install', 'blkid'):
-        assert _tool in disk_image._REQUIRED_TOOLS, (
-            f"{_tool} missing from _REQUIRED_TOOLS — disk image build "
-            f"would proceed without it and fail mid-pipeline"
+def test_build_system_sh_checks_disk_image_tools():
+    """The disk-image host-tool pre-flight lives in build-system.sh
+    (matches the iso-tools check pattern).  Pin the tool list so a
+    refactor doesn't drop a load-bearing binary's check."""
+    _sh = os.path.join(_ROOT, 'build-system.sh')
+    with open(_sh) as fh:
+        _body = fh.read()
+    for _tool in ('rsync', 'qemu-img', 'mkfs.fat',
+                  'losetup', 'sfdisk', 'mkfs.ext4',
+                  'grub-install', 'blkid'):
+        assert _tool in _body, (
+            f"{_tool} no longer checked in build-system.sh disk-image "
+            f"section — disk image build would fail mid-pipeline with "
+            f"a less obvious error"
         )
 
 
@@ -11628,25 +11630,6 @@ def test_disk_image_sfdisk_script_lays_out_three_partitions():
     )
     # ESP must be marked bootable (per UEFI spec)
     assert 'bootable' in _s
-
-
-def test_disk_image_need_tools_returns_missing_name():
-    """_need_tools returns the first missing tool's name (or None
-    when all are present).  Patch shutil.which + os.path.isfile to
-    force a known-missing tool and confirm the helper surfaces it."""
-    import sys
-    from unittest.mock import patch
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import disk_image
-    # When everything is found, returns None.
-    with patch.object(disk_image.shutil, 'which', return_value='/bin/anything'):
-        assert disk_image._need_tools() is None
-    # When all paths report missing, returns the first tool's name
-    # (i.e. _REQUIRED_TOOLS[0]).
-    with patch.object(disk_image.shutil, 'which', return_value=None), \
-         patch.object(disk_image.os.path, 'isfile', return_value=False):
-        _first = disk_image._REQUIRED_TOOLS[0]
-        assert disk_image._need_tools() == _first
 
 
 def test_cmd_iso_dispatcher_routes_disk_action():
