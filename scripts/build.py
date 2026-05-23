@@ -4099,6 +4099,106 @@ class BuildSession:
             ]
         return (None, _force, _subset, _names, _profile_override)
 
+    def cmd_build_iso_disk(self, *args):
+        """COMP-09 — Build a pre-installed bootable qcow2 disk image
+        from the LIVE chroot.
+
+        Usage: iso build disk [size_gb] [force]
+
+          size_gb — disk image size in GB (default from
+                    `[Build] DiskImageSizeGB`, fallback 5).  Sparse
+                    qcow2 — actual on-disk footprint depends on the
+                    chroot's payload, not this number.
+          force   — bypass chroot_verified gate, same semantics as
+                    `iso build live force`.
+
+        Output: image/<distribution>-<version>-<arch>.qcow2
+
+        Boots directly into the running OS (no installer step).
+        Suitable for VM / cloud deployment.
+
+        Prerequisites:
+          - Chroot built + verified (chroot_verified flag).
+          - Host packages: rsync, dosfstools (mkfs.fat), qemu-utils
+            (qemu-img).  Plus losetup/sfdisk/mkfs.ext4/grub-install/
+            blkid from util-linux + grub-* (all in default Debian
+            install).  Helper checks at entry and surfaces the first
+            missing tool with an actionable message.
+
+        Known v1 limitation: grub-install runs on the build host, so
+        the produced disk image's GRUB binaries reflect the host's
+        GRUB version (analogous to pre-COMP-14 ISO leakage).  Follow-
+        up will move grub-install into the build container.
+        """
+        import disk_image
+
+        _force = 'force' in args
+        # First non-flag arg is the size; ignore unknown flags.
+        _size_gb = self.config.disk_image_size_gb
+        for _a in args:
+            if _a == 'force':
+                continue
+            try:
+                _size_gb = int(_a)
+                break
+            except ValueError:
+                console.print(
+                    f"Ignoring unknown arg: {_a!r} (expected size_gb "
+                    f"integer or `force`)"
+                )
+
+        if not _force and not self.flags.chroot_verified:
+            if self.flags.chroot_ready:
+                console.print(
+                    "Chroot built but verification failed — re-run "
+                    "`chroot verify` after fixing, or pass `force`"
+                )
+            else:
+                console.print("Run `chroot build` first")
+            return
+
+        # Cache sudo password — same pattern as cmd_build_iso_live.
+        _password = Prompt(
+            PROMPT_PASSWORD, "Enter sudo password",
+        ).get_response()
+        _r = subprocess.run(
+            ['sudo', '-S', '-v'],
+            input=_password + '\n',
+            capture_output=True, text=True,
+        )
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("cmd_build_iso_disk: sudo -v failed")
+            _password = '*' * len(_password)
+            return
+
+        try:
+            _version  = self.config.build_version.strip('"').strip("'")
+            _distro   = self.config.build_distribution.strip('"').strip("'")
+            _arch     = self.config.arch
+            _out_name = f'{_distro.lower()}-{_version}-{_arch}.qcow2'
+            _out_path = os.path.join(self.config.dir_image, _out_name)
+
+            console.print(
+                f"Building {_size_gb} GB pre-installed disk image: "
+                f"{_out_path}"
+            )
+            _ok = disk_image.build_disk_image(
+                dir_chroot=self.config.dir_chroot,
+                output_qcow2=_out_path,
+                size_gb=_size_gb,
+                password=_password,
+                container=self.container,
+            )
+            if not _ok:
+                console.print(
+                    "ERROR: disk image build failed — see logs for details"
+                )
+                logger.error("cmd_build_iso_disk: build_disk_image returned False")
+                return
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
+
     def cmd_source_rescan(self, *args):
         """Report what `source build` would rebuild against the current
         cache + repo state, without triggering any builds.
@@ -5236,10 +5336,12 @@ class BuildSession:
         _table = {
             'build live':      'wrap live chroot into bootable hybrid BIOS/EFI ISO',
             'build installer': 'wrap installer chroot + kernel + pool into hybrid BIOS+EFI ISO',
+            'build disk':      'pre-installed bootable qcow2 disk image from '
+                               'live chroot (`iso build disk [size_gb]`)',
         }
         if action == 'build':
             if not args:
-                console.print("Usage: iso build <live | installer>")
+                console.print("Usage: iso build <live | installer | disk>")
                 return self._group_help('iso', _table)
             _sub = args[0]
             _rest = args[1:]
@@ -5247,6 +5349,8 @@ class BuildSession:
                 return self.cmd_build_iso_live(*_rest)
             if _sub == 'installer':
                 return self.cmd_build_iso_installer(*_rest)
+            if _sub == 'disk':
+                return self.cmd_build_iso_disk(*_rest)
             return self._group_help('iso', _table, f'build {_sub}')
         return self._group_help('iso', _table, action)
 

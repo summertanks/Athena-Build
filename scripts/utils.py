@@ -1261,6 +1261,13 @@ class BuildConfig:
             self.include_recommends_in_repo = config_parser.getboolean(
                 'Build', 'IncludeRecommendsInRepo', fallback=True
             )
+            # COMP-09: default size for `iso build disk` output.  Sparse
+            # qcow2 — actual on-disk footprint is much smaller (~chroot
+            # size + metadata).  Operator overrides via `iso build disk
+            # <n>` arg.
+            self.disk_image_size_gb = config_parser.getint(
+                'Build', 'DiskImageSizeGB', fallback=5,
+            )
             # CONF-02: identity for the project's signing key — used by
             # generate_signing_key / verify_signing_key / print signing.
             # Format 'Name <email>'.  See [Repo] section in build.conf.
