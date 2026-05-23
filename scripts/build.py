@@ -226,12 +226,23 @@ class BuildSession:
         else:
             console.print("Snapshot pinning: disabled (live mirrors)", tui.COLOR_INFO)
 
+        # Top-level Spinner that covers the whole Cache() construction.
+        # Cache() internally raises its own ProgressBars during the
+        # record-index passes (per-mirror Packages/Sources/d-i Packages)
+        # — both render together in the TUI's widget stack.  The
+        # spinner signals "the overall cache build is alive" during the
+        # quiet phases between those bars (mirror fetch, cross-validation,
+        # dep-graph internals).
+        _spin = Spinner("Building Cache (mirrors + indices + dep graph)")
         try:
-            self.cache = Cache(self.config)
-        except Exception as e:
-            console.print(f"ERROR: build cache - {e}")
-            logger.error(f"Cache() raised: {e}")
-            return
+            try:
+                self.cache = Cache(self.config)
+            except Exception as e:
+                console.print(f"ERROR: build cache - {e}")
+                logger.error(f"Cache() raised: {e}")
+                return
+        finally:
+            _spin.done()
 
         if not self.cache.is_valid:
             console.print(f"ERROR: build cache - {self.cache.error_str}")
@@ -2035,20 +2046,6 @@ class BuildSession:
 
         _deb_cohort = self._resolve_deb_cohort()
         _udeb_cohort = self._resolve_udeb_cohort()
-        # Progress bar wrapping the dep-gate iteration(s).  Each cohort
-        # walks state.packages once; on a 5k-pkg repo with two cohorts
-        # that's 10k iterations of PkgRelation.parse + scope checks
-        # (multi-second).  show_rate=False because rate isn't useful
-        # here — pkgs-per-second varies wildly with how much Depends
-        # text each entry carries.
-        _n_iter_cohorts = sum(
-            1 for _c in (_deb_cohort, _udeb_cohort) if _c is not None
-        ) or 1
-        _bar = ProgressBar(
-            label='Audit dep-gate',
-            maxvalue=len(_state.packages) * _n_iter_cohorts,
-            show_rate=False,
-        )
         if _deb_cohort is None and _udeb_cohort is None:
             console.print(
                 "Note: dep_tree not built — falling back to repo/main-"
@@ -2056,7 +2053,6 @@ class BuildSession:
             )
             _unresolved, _weak = repo_audit.audit_dep_closure(
                 _state, consumer_set=None,
-                progress_cb=lambda: _bar.step(1),
             )
         else:
             # Run each cohort independently.  Resolution scope is the
@@ -2074,12 +2070,10 @@ class BuildSession:
                     continue
                 _u, _w = repo_audit.audit_dep_closure(
                     _state, consumer_set=_consumer_set,
-                    progress_cb=lambda: _bar.step(1),
                 )
                 _per_cohort.append((_label, _consumer_set, _u, _w))
                 _unresolved.extend(_u)
                 _weak.extend(_w)
-        _bar.close()
 
         # Drill-in mode short-circuits the overview/cohort sections —
         # pass the merged unresolved list (gap classification is cohort-
@@ -2125,16 +2119,9 @@ class BuildSession:
                 "run `dep parse` first"
             )
         else:
-            _bar_lc = ProgressBar(
-                label='Audit live conflicts',
-                maxvalue=len(_state.packages), show_rate=False,
-            )
             _live_conflicts = _dedupe_bidirectional_conflicts(
-                repo_audit.audit_conflict_cohort(
-                    _state, _live, progress_cb=lambda: _bar_lc.step(1),
-                )
+                repo_audit.audit_conflict_cohort(_state, _live)
             )
-            _bar_lc.close()
             console.print(
                 f"\n=== LIVE CONFLICTS (cohort = "
                 f"{len(_live)} pkgs in live chroot) ===\n"
@@ -2148,17 +2135,9 @@ class BuildSession:
                 "not built; run `dep parse` first"
             )
         else:
-            _bar_ic = ProgressBar(
-                label='Audit inst conflicts',
-                maxvalue=len(_state.packages), show_rate=False,
-            )
             _inst_conflicts = _dedupe_bidirectional_conflicts(
-                repo_audit.audit_conflict_cohort(
-                    _state, _installer,
-                    progress_cb=lambda: _bar_ic.step(1),
-                )
+                repo_audit.audit_conflict_cohort(_state, _installer)
             )
-            _bar_ic.close()
             console.print(
                 f"\n=== INSTALLER CONFLICTS (cohort = "
                 f"{len(_installer)} udebs in d-i ramdisk) ===\n"
@@ -2524,14 +2503,7 @@ class BuildSession:
         if not _state.packages:
             console.print("repo/ has no .deb/.udeb files — nothing to audit")
             return
-        _bar = ProgressBar(
-            label='Audit NMU residue',
-            maxvalue=len(_state.packages), show_rate=False,
-        )
-        _findings = repo_audit.audit_nmu_residue(
-            _state, progress_cb=lambda: _bar.step(1),
-        )
-        _bar.close()
+        _findings = repo_audit.audit_nmu_residue(_state)
         if not _findings:
             console.print(
                 f"NMU audit OK: {len(_state.packages)} pkgs scanned, "
@@ -2638,8 +2610,86 @@ class BuildSession:
                 f"{{{_codename},{_codename}-debug}}/",
                 tui.COLOR_HIGHLIGHT,
             )
+            self._print_repo_index_summary(_codename, _suites_spec)
         finally:
             _password = '*' * len(_password)  # noqa: F841
+
+    def _print_repo_index_summary(
+        self, codename: str,
+        suites_spec: 'dict[str, list[str]]',
+    ) -> None:
+        """Post-index summary: per-suite + per-component file counts +
+        total on-disk size of dists/ + suite-level Release presence.
+
+        Quick at-a-glance confirmation that the index landed
+        completely; surfaces empty components and missing signatures
+        without re-running the full audit.
+        """
+        _root = self.config.dir_repo
+        console.print("\n=== repo index summary ===")
+        _total_files = 0
+        _total_bytes = 0
+        for _suite, _components in suites_spec.items():
+            _suite_dir = os.path.join(_root, 'dists', _suite)
+            if not os.path.isdir(_suite_dir):
+                console.print(f"  {_suite:25s} : not generated (skipped)")
+                continue
+            _has_release   = os.path.isfile(os.path.join(_suite_dir, 'Release'))
+            _has_rel_gpg   = os.path.isfile(os.path.join(_suite_dir, 'Release.gpg'))
+            _has_inrelease = os.path.isfile(os.path.join(_suite_dir, 'InRelease'))
+            _sig_marker = (
+                'signed' if (_has_rel_gpg and _has_inrelease)
+                else 'unsigned' if _has_release
+                else 'missing'
+            )
+            console.print(
+                f"\n  suite: {_suite}  (Release: {_sig_marker})"
+            )
+            for _comp in _components:
+                # Walk dists/<suite>/<comp>/ for binary-*/ + source/.
+                _comp_dir = os.path.join(_suite_dir, _comp)
+                if not os.path.isdir(_comp_dir):
+                    console.print(
+                        f"    {_comp:8s} : empty (not in this suite)"
+                    )
+                    continue
+                _subdirs = []
+                for _walk_root, _dirs, _files in os.walk(_comp_dir):
+                    _has_packages = any(
+                        _f == 'Packages' for _f in _files
+                    )
+                    _has_sources = any(
+                        _f == 'Sources' for _f in _files
+                    )
+                    if _has_packages or _has_sources:
+                        _rel = os.path.relpath(_walk_root, _suite_dir)
+                        _n_payload = sum(
+                            1 for _f in _files
+                            if _f.endswith(('.deb', '.udeb', '.dsc'))
+                        )
+                        _bytes_here = sum(
+                            os.path.getsize(os.path.join(_walk_root, _f))
+                            for _f in _files
+                            if os.path.isfile(os.path.join(_walk_root, _f))
+                        )
+                        _kind = ('Sources' if _has_sources else 'Packages')
+                        _subdirs.append((_rel, _kind, _n_payload, _bytes_here))
+                        _total_files += _n_payload
+                        _total_bytes += _bytes_here
+                if not _subdirs:
+                    console.print(
+                        f"    {_comp:8s} : empty component"
+                    )
+                    continue
+                for _rel, _kind, _n, _b in _subdirs:
+                    console.print(
+                        f"    {_rel:50s}  {_kind:8s} "
+                        f"{_n:5d} files  {_b // (2 ** 20):5d} MB"
+                    )
+        console.print(
+            f"\n  Total payload: {_total_files} file(s), "
+            f"{_total_bytes // (2 ** 20)} MB across dists/"
+        )
 
     def cmd_migrate_repo_layout(self, *args):
         """Migrate repo/ from segregated-by-role layout to apt-conformant
@@ -4402,37 +4452,51 @@ class BuildSession:
             _missing_srcs: 'list[tuple]' = []
             _mismatch_srcs: 'list[tuple]' = []
             _ok = 0
-            for _src_name in _tree.selected_srcs:
-                _expected_main = [
-                    _f for _f in (_tree.src_pkg_files.get(_src_name) or [])
-                    if utils.classify_repo_subdir(_f) == 'main'
-                ]
-                if not _expected_main:
-                    # Source has no main-tier predicted binary in THIS
-                    # cohort (e.g. a source whose deb cohort is all -doc
-                    # files).  Not a miss for this audit pass.
-                    _ok += 1
-                    continue
-                _missing: 'list[str]' = []
-                _mismatch: 'list[str]' = []
-                for _f in _expected_main:
-                    # deb_dest_for_filename handles the .deb / .udeb
-                    # split (both classify as 'main' but live in
-                    # different dirs post-Stage D).
-                    _p = os.path.join(
-                        self.config.deb_dest_for_filename(_f), _f,
-                    )
-                    if not os.path.isfile(_p):
-                        _missing.append(_f)
+            # Per-source ProgressBar — each iteration does at least
+            # one is_ar_file open+seek per predicted main binary
+            # (often 3-10 files per source).  500+ source corpus =
+            # multi-second silence.  show_rate=False since per-source
+            # cost varies (single .deb vs. multi-deb sources).
+            _bar = ProgressBar(
+                label=f'Audit {_cohort_label} sources',
+                maxvalue=max(1, len(_tree.selected_srcs)),
+                show_rate=False,
+            )
+            try:
+                for _src_name in _tree.selected_srcs:
+                    _bar.step(1)
+                    _expected_main = [
+                        _f for _f in (_tree.src_pkg_files.get(_src_name) or [])
+                        if utils.classify_repo_subdir(_f) == 'main'
+                    ]
+                    if not _expected_main:
+                        # Source has no main-tier predicted binary in
+                        # THIS cohort (e.g. a source whose deb cohort is
+                        # all -doc files).  Not a miss for this audit.
+                        _ok += 1
                         continue
-                    if not BuildContainer.is_ar_file(_p):
-                        _mismatch.append(_f)
-                if _missing:
-                    _missing_srcs.append((_src_name, _missing))
-                elif _mismatch:
-                    _mismatch_srcs.append((_src_name, _mismatch))
-                else:
-                    _ok += 1
+                    _missing: 'list[str]' = []
+                    _mismatch: 'list[str]' = []
+                    for _f in _expected_main:
+                        # deb_dest_for_filename handles the .deb / .udeb
+                        # split (both classify as 'main' but live in
+                        # different dirs post-Stage D).
+                        _p = os.path.join(
+                            self.config.deb_dest_for_filename(_f), _f,
+                        )
+                        if not os.path.isfile(_p):
+                            _missing.append(_f)
+                            continue
+                        if not BuildContainer.is_ar_file(_p):
+                            _mismatch.append(_f)
+                    if _missing:
+                        _missing_srcs.append((_src_name, _missing))
+                    elif _mismatch:
+                        _mismatch_srcs.append((_src_name, _mismatch))
+                    else:
+                        _ok += 1
+            finally:
+                _bar.close()
 
             console.print(
                 f"\n=== Source audit ({_cohort_label} cohort, "

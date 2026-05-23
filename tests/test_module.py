@@ -1472,6 +1472,36 @@ def test_iso_installer_count_records_zero_one_many():
     assert _count_records('/nonexistent/file') == 0
 
 
+def _make_fake_popen(calls_log: list):
+    """Build a side_effect for `subprocess.Popen` that records the argv
+    and returns a fake process whose stdout streams a single stub
+    `Package: ...` stanza (enough to keep _scan_packages_with_progress
+    happy without an actual dpkg-scanpackages run).
+
+    The fake process also writes its stub stanza to the output file by
+    inspecting the calling stack — actually, simpler: it returns a
+    process whose stdout produces stub lines, AND
+    _scan_packages_with_progress tees those lines to the output file
+    itself.  So no out-of-band file write needed.
+
+    Used by the post-2026-05-22 apt_repo + repo_audit tests that pin
+    the new Popen-based scanner pipeline.
+    """
+    from unittest.mock import MagicMock
+    import io
+    def _fake(argv, *_a, **_kw):
+        calls_log.append(tuple(argv) if isinstance(argv, (list, tuple)) else (argv,))
+        _proc = MagicMock()
+        # stdout: stub Packages stanza ending with a Package: line so
+        # the bar steps at least once.
+        _proc.stdout = io.StringIO("Package: stub\nVersion: 1.0\n\n")
+        _proc.stderr = io.StringIO("")
+        _proc.stdin  = MagicMock()
+        _proc.wait.return_value = 0
+        return _proc
+    return _fake
+
+
 def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
     """Pin the order of operations in _generate_apt_repo: mkdir
     binary-amd64 + debian-installer/binary-amd64 + source, then
@@ -1553,9 +1583,13 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
         with tempfile.TemporaryDirectory() as _staging:
             # Pre-create pool so the cwd=staging cd works.
             os.makedirs(os.path.join(_staging, 'pool'), exist_ok=True)
+            import repo_audit
+            _popen = _make_fake_popen(_calls)
             with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
                  patch.object(apt_repo.subprocess, 'run',
-                              side_effect=_fake_subprocess_run):
+                              side_effect=_fake_subprocess_run), \
+                 patch.object(repo_audit.subprocess, 'Popen',
+                              side_effect=_popen):
                 _ok = apt_repo.generate_apt_repo(
                     _staging, 'athena', 'athena', '0.1', 'pw')
             _assert_paths_staging = _staging  # keep for asserts below
@@ -1567,22 +1601,27 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
             ))
     finally:
         _tui.tui_instance = _saved_tui
-    assert _ok is True
+    assert _ok is True, (
+        f"generate_apt_repo returned False; calls so far:\n{_calls}"
+    )
     assert _assert_dirs_exist, (
         "dists/<suite>/main/{binary-amd64,debian-installer/binary-amd64,source} not created"
     )
-    # Sanity-check the call sequence carries dpkg-scanpackages (deb +
-    # udeb) + dpkg-scansources + apt-ftparchive release.  The scan
-    # helpers use `bash -c` (shell redirection for file output); the
-    # apt-ftparchive release helper goes via subprocess.run argv
-    # directly (avoids word-splitting issues — see fix 2026-05-11).
-    _shell_strings = [' '.join(c) for c in _calls if c and 'bash' in c[0]]
-    _joined_shell = '\n'.join(_shell_strings)
-    assert 'dpkg-scanpackages -m  pool' in _joined_shell, (
-        f"missing deb scan call; got:\n{_joined_shell}")
-    assert 'dpkg-scanpackages -m -t udeb pool' in _joined_shell, (
-        f"missing udeb scan call; got:\n{_joined_shell}")
-    assert 'dpkg-scansources pool' in _joined_shell, "missing source scan"
+    # Post-helper-refactor (2026-05-22): scan calls now go through
+    # repo_audit._scan_packages_with_progress → subprocess.Popen
+    # (no shell wrapper).  argv shape is:
+    #   ['sudo', '-S', 'dpkg-scanpackages', '-m',          'pool']
+    #   ['sudo', '-S', 'dpkg-scanpackages', '-m', '-t', 'udeb', 'pool']
+    #   ['sudo', '-S', 'dpkg-scansources', 'pool']
+    _argv_strings = [' '.join(c) for c in _calls if c]
+    _joined = '\n'.join(_argv_strings)
+    assert 'sudo -S dpkg-scanpackages -m pool' in _joined, (
+        f"missing deb scan call; got:\n{_joined}")
+    assert 'sudo -S dpkg-scanpackages -m -t udeb pool' in _joined, (
+        f"missing udeb scan call; got:\n{_joined}")
+    assert 'sudo -S dpkg-scansources pool' in _joined, (
+        f"missing source scan; got:\n{_joined}"
+    )
     # apt-ftparchive lands as argv (no shell wrapper).
     _any_ftparchive = any(
         len(c) >= 3 and c[0] == 'sudo' and c[2] == 'apt-ftparchive'
@@ -1674,9 +1713,13 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
                     # so the indexer treats them as populated.
                     with open(os.path.join(_d, 'stub.deb'), 'wb') as fh:
                         fh.write(b'STUB')
+            import repo_audit
+            _popen = _make_fake_popen(_calls)
             with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
                  patch.object(apt_repo.subprocess, 'run',
-                              side_effect=_fake_subprocess_run):
+                              side_effect=_fake_subprocess_run), \
+                 patch.object(repo_audit.subprocess, 'Popen',
+                              side_effect=_popen):
                 _ok = apt_repo.generate_repo_indexes(
                     repo_root=_repo,
                     suites_spec=_spec,
@@ -1687,22 +1730,25 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
                     signing_homedir=None,
                     signing_pubkey_path=None,
                 )
-            assert _ok is True
+            assert _ok is True, f"generate_repo_indexes False; calls: {_calls}"
     finally:
         _tui.tui_instance = _saved_tui
 
-    # All three components got a dpkg-scanpackages call (no -t udeb
-    # since none of the test fixtures created debian-installer/ subdirs)
-    _scan_shells = [' '.join(c) for c in _calls
-                    if c and c[0] == 'bash' and 'dpkg-scanpackages' in (c[2] if len(c) > 2 else '')]
-    assert len(_scan_shells) == 3, (
+    # All three components got a dpkg-scanpackages call.  Post-helper-
+    # refactor (2026-05-22): argv shape is
+    # ['sudo', '-S', 'dpkg-scanpackages', '-m', '<pool_subdir>'] —
+    # streamed via subprocess.Popen for per-file ProgressBar.
+    _scan_argv = [c for c in _calls
+                  if len(c) >= 4 and c[0] == 'sudo' and c[2] == 'dpkg-scanpackages']
+    _scan_strs = [' '.join(c) for c in _scan_argv]
+    assert len(_scan_argv) == 3, (
         f"expected 3 dpkg-scanpackages invocations (thor/main + thor/doc "
-        f"+ thor-debug/main), got {len(_scan_shells)}: {_scan_shells}"
+        f"+ thor-debug/main), got {len(_scan_argv)}: {_scan_strs}"
     )
     # Each scan invocation includes the suite+component path
-    assert any('dists/thor/main/binary-amd64' in _s for _s in _scan_shells), _scan_shells
-    assert any('dists/thor/doc/binary-amd64'  in _s for _s in _scan_shells), _scan_shells
-    assert any('dists/thor-debug/main/binary-amd64' in _s for _s in _scan_shells), _scan_shells
+    assert any('dists/thor/main/binary-amd64' in _s for _s in _scan_strs), _scan_strs
+    assert any('dists/thor/doc/binary-amd64'  in _s for _s in _scan_strs), _scan_strs
+    assert any('dists/thor-debug/main/binary-amd64' in _s for _s in _scan_strs), _scan_strs
     # Two apt-ftparchive release calls (one per suite)
     _ftparchive_calls = [c for c in _calls
                           if len(c) >= 3 and c[0] == 'sudo' and c[2] == 'apt-ftparchive']
@@ -1844,9 +1890,13 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
             )   # exists but EMPTY
             # 'dbgsym' component dir doesn't exist at all
 
+            import repo_audit
+            _popen = _make_fake_popen(_calls)
             with patch.object(apt_repo, '_sudo', side_effect=_fake_sudo), \
                  patch.object(apt_repo.subprocess, 'run',
-                              side_effect=_fake_subprocess_run):
+                              side_effect=_fake_subprocess_run), \
+                 patch.object(repo_audit.subprocess, 'Popen',
+                              side_effect=_popen):
                 _ok = apt_repo.generate_repo_indexes(
                     repo_root=_repo,
                     suites_spec={
@@ -1859,12 +1909,15 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
     finally:
         _tui.tui_instance = _saved_tui
 
-    # Two scan-packages calls (main + doc) — tests and dbgsym skipped
-    _scan_shells = [' '.join(c) for c in _calls
-                    if c and c[0] == 'bash' and 'dpkg-scanpackages' in (c[2] if len(c) > 2 else '')]
-    assert len(_scan_shells) == 2, (
+    # Two scan-packages calls (main + doc) — tests and dbgsym skipped.
+    # Post-helper-refactor: scans go via subprocess.Popen as
+    # ['sudo', '-S', 'dpkg-scanpackages', '-m', '<pool_subdir>'].
+    _scan_argv = [c for c in _calls
+                  if len(c) >= 4 and c[0] == 'sudo' and c[2] == 'dpkg-scanpackages']
+    assert len(_scan_argv) == 2, (
         f"expected 2 scans (main + doc); tests + dbgsym should be "
-        f"skipped (empty / missing).  Got {len(_scan_shells)}: {_scan_shells}"
+        f"skipped (empty / missing).  Got {len(_scan_argv)}: "
+        f"{[ ' '.join(c) for c in _scan_argv ]}"
     )
 
     # Top-level Release was generated (suite had at least one populated
@@ -11363,6 +11416,125 @@ def test_audit_nmu_residue_invokes_progress_cb_per_pkg():
     assert len(_calls) == 2
     # And the actual residue is still detected:
     assert any(f[0] == 'p' for f in _findings), _findings
+
+
+def test_cache_build_wraps_cache_construction_in_spinner():
+    """`cmd_build_cache` wraps Cache(self.config) in a Spinner so the
+    quiet phases between record-index ProgressBars (mirror fetch,
+    cross-validation, dep-graph internals) don't look like a frozen
+    TUI.  Source-text inspection — exercising the full cache build
+    needs network access + the actual snapshot.
+    """
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r"\n    def cmd_build_cache\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_build_cache body not found"
+    _method = _m.group(0)
+    assert 'Spinner(' in _method, (
+        "cmd_build_cache must wrap Cache() in a Spinner"
+    )
+    # Spinner must be done()'d in a finally so a Cache() exception
+    # doesn't leak the spinner widget.
+    assert 'try:' in _method and 'finally:' in _method
+    assert '_spin.done()' in _method
+
+
+def test_repo_index_prints_post_run_summary():
+    """`cmd_index_repo` calls _print_repo_index_summary after a
+    successful index run.  Summary surfaces per-suite Release sig
+    state + per-component file counts + total payload — quick at-a-
+    glance confirmation the index landed completely.
+    """
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # The summary helper is defined as a method.
+    assert 'def _print_repo_index_summary(' in _body, (
+        "_print_repo_index_summary helper missing"
+    )
+    # cmd_index_repo invokes it.
+    _m = re.search(
+        r"\n    def cmd_index_repo\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_index_repo body not found"
+    assert 'self._print_repo_index_summary(' in _m.group(0), (
+        "cmd_index_repo must call _print_repo_index_summary after a "
+        "successful index run"
+    )
+
+
+def test_source_audit_uses_per_source_progress_bar():
+    """`cmd_source_audit` wraps its per-cohort selected_srcs walk in
+    a ProgressBar — 500+ sources × multi-file ar-validity checks each
+    is enough to look frozen without progress feedback."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r"\n    def cmd_source_audit\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_source_audit body not found"
+    _method = _m.group(0)
+    assert 'ProgressBar(' in _method, (
+        "cmd_source_audit must wrap its selected_srcs walk in a ProgressBar"
+    )
+    assert 'show_rate=False' in _method, (
+        "cmd_source_audit ProgressBar must use show_rate=False "
+        "(per-source ar-validity check time variance is high)"
+    )
+
+
+def test_scan_packages_with_progress_streams_and_steps_bar():
+    """The per-file scanner helper streams subprocess.Popen stdout,
+    tees to the output file, and steps the ProgressBar once per
+    `Package:` header line emitted.  Pin via a fake Popen returning
+    a 3-stanza stream and checking the output file contains all 3
+    stanzas."""
+    import sys, tempfile, io
+    from unittest.mock import patch, MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+
+    _stream = (
+        "Package: a\nVersion: 1.0\n\n"
+        "Package: b\nVersion: 2.0\n\n"
+        "Package: c\nVersion: 3.0\n\n"
+    )
+
+    def _fake_popen(*_a, **_kw):
+        _p = MagicMock()
+        _p.stdout = io.StringIO(_stream)
+        _p.stderr = io.StringIO("")
+        _p.stdin  = MagicMock()
+        _p.wait.return_value = 0
+        return _p
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        # count_dir with 3 .deb files so the bar has maxvalue=3
+        for _name in ('a.deb', 'b.deb', 'c.deb'):
+            with open(os.path.join(_tmp, _name), 'wb') as fh:
+                fh.write(b'STUB')
+        _out = os.path.join(_tmp, 'Packages')
+        with patch.object(repo_audit.subprocess, 'Popen',
+                          side_effect=_fake_popen):
+            _ok = repo_audit._scan_packages_with_progress(
+                ['dpkg-scanpackages', '--multiversion', _tmp, '/dev/null'],
+                _out, _tmp,
+            )
+        assert _ok is True
+        # Output file contains the full streamed stanzas.
+        with open(_out) as fh:
+            _written = fh.read()
+        assert _written == _stream
 
 
 def test_iso_build_uses_spinner_for_mksquashfs_and_grub_mkrescue():
