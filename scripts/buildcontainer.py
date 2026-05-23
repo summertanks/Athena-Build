@@ -425,9 +425,27 @@ class BuildContainer:
         # normalise the Version field + all dep-constraint version
         # references — stripping +bN, +debNuN, ~bpoN+N, +rpiN, etc.
         # so internal cross-refs resolve cleanly inside our repo.
+        # apt -y --allow-downgrades upgrade — align the container's
+        # already-installed packages with snapshot's view BEFORE building.
+        # The base image (debian:bookworm-slim) ships libssl3 / libc6 / etc.
+        # at the LIVE mirror's current version, which can be NEWER than our
+        # snapshot's index advertises.  apt-get install (build-deps) below
+        # won't downgrade an already-installed pkg, so dpkg-shlibdeps would
+        # read the LIVE pkg's shlibs file and emit a Depends-constraint
+        # pointing at a version our snapshot/repo doesn't ship.
+        #
+        # Drove the 2026-05-23 wpa→libcrypto3-udeb (>= 3.0.20) phantom-bind:
+        # base image had libssl3 3.0.20-1~deb12u1, shlibs file said
+        # `udeb: libcrypto 3 libcrypto3-udeb (>= 3.0.20)`, every wpa rebuild
+        # baked that into the .udeb.  --allow-downgrades upgrades AND
+        # downgrades the installed set to whatever snapshot has; `upgrade`
+        # (not dist-upgrade) refuses to add/remove pkgs so the impact is
+        # bounded to version changes on already-installed names.
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'{_write_sources}' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
+                  f'sudo DEBIAN_FRONTEND=noninteractive apt-get -y ' \
+                  f'-o Acquire::Retries=5 --allow-downgrades upgrade; ' \
                   f'{_dep_install}' \
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
