@@ -223,6 +223,39 @@ class BuildContainer:
         except OSError:
             return ''
 
+    def _write_snapshot_sources_cmd(self) -> str:
+        """Shell snippet that REPLACES the container's apt sources with
+        our snapshot-pinned mirror list.
+
+        Caller writes the result before any `apt-get update` /
+        `apt-get install` runs.  Failing to call this leaves the base
+        image's sources in place — for `debian:bookworm-slim` that's a
+        deb822 file at `/etc/apt/sources.list.d/debian.sources` pointing
+        at the LIVE `deb.debian.org`, NOT our snapshot — and every
+        in-container apt operation silently bypasses the snapshot pin.
+
+        Drove the 2026-05-23 wpa→libcrypto3-udeb (>= 3.0.20) loop:
+        per-build apt was pulling from live deb.debian.org because
+        the previous shell-rewrite only touched /etc/apt/sources.list
+        (which doesn't exist on bookworm-slim's deb822 layout).
+
+        Approach: rm every apt source file the base image might have
+        shipped (old-style /etc/apt/sources.list + new-style
+        /etc/apt/sources.list.d/*.{sources,list}), THEN write our own
+        single-file legacy-format list at /etc/apt/sources.list.
+        """
+        _apt_sources = ''.join(
+            f'deb [check-valid-until=no] {_m.url} {_m.suite} {_m.component}\n'
+            for _m in self.mirrors
+        )
+        return (
+            "sudo rm -f /etc/apt/sources.list "
+            "/etc/apt/sources.list.d/*.sources "
+            "/etc/apt/sources.list.d/*.list; "
+            f"sudo tee /etc/apt/sources.list >/dev/null <<'EOF'\n"
+            f"{_apt_sources}EOF\n"
+        )
+
     def build(self, src_pkg: Source, *,
               profiles_override=None, options_override=None) -> bool:
         """Build a single source package inside the container.
@@ -392,8 +425,8 @@ class BuildContainer:
         )
 
         # Pin the container's apt to the exact mirrors our cache was built
-        # from.  Without this the base image's stock sources.list (live
-        # mirror) is used, and a security update landing between our cache
+        # from.  Without this the base image's stock sources (live mirror)
+        # are used, and a security update landing between our cache
         # snapshot and the build run will produce dep version skew between
         # the .deb we build and what the cache thinks.
         #
@@ -409,14 +442,7 @@ class BuildContainer:
         #      mirror.
         # When the snapshot rolls forward, this option silently becomes
         # a no-op (current InRelease is within Valid-Until again).
-        _apt_sources = ''.join(
-            f'deb [check-valid-until=no] {_m.url} {_m.suite} {_m.component}\n'
-            for _m in self.mirrors
-        )
-        _write_sources = (
-            f"sudo tee /etc/apt/sources.list >/dev/null <<'EOF'\n"
-            f"{_apt_sources}EOF\n"
-        )
+        _write_sources = self._write_snapshot_sources_cmd()
 
         # `-b` (--build=binary) skips the source rebuild step.  No
         # version-bump is performed; the produced .debs ship at the
@@ -615,14 +641,7 @@ class BuildContainer:
         # `apt-get install grub-{common,pc-bin,efi-amd64-bin}` resolves
         # to OUR 2.06 binaries instead of whatever bookworm-archive is
         # currently serving (which might have drifted post-snapshot).
-        _apt_sources = ''.join(
-            f'deb [check-valid-until=no] {_m.url} {_m.suite} {_m.component}\n'
-            for _m in self.mirrors
-        )
-        _write_sources = (
-            f"sudo tee /etc/apt/sources.list >/dev/null <<'EOF'\n"
-            f"{_apt_sources}EOF\n"
-        )
+        _write_sources = self._write_snapshot_sources_cmd()
 
         # apt-get install: GRUB toolchain (mkrescue, mkimage, modules
         # for BIOS + EFI) plus the boot-image assemblers grub-mkrescue
