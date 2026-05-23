@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import tempfile
 from typing import TYPE_CHECKING, Optional
 
 import tui
@@ -166,8 +167,7 @@ def build_disk_image(
         # gpt" prefixed with password residue under some sudo
         # configurations (operator-observed "line 1: unsupported
         # command" 2026-05-22).
-        import tempfile as _tempfile
-        _sf_fd, _sf_path = _tempfile.mkstemp(
+        _sf_fd, _sf_path = tempfile.mkstemp(
             prefix='sfdisk-', suffix='.script',
         )
         try:
@@ -287,8 +287,7 @@ def build_disk_image(
         # Tempfile + sudo install pattern (same rationale as the
         # sfdisk step): keeps sudo's stdin = password only, never
         # mixed with the content we're writing.
-        import tempfile as _tempfile
-        _fs_fd, _fs_path = _tempfile.mkstemp(prefix='fstab-', suffix='.txt')
+        _fs_fd, _fs_path = tempfile.mkstemp(prefix='fstab-', suffix='.txt')
         try:
             with os.fdopen(_fs_fd, 'w') as _fh:
                 _fh.write(_fstab)
@@ -407,8 +406,70 @@ def build_disk_image(
                     "image will not boot"
                 )
                 return False
+
+            # ESP shim — write /boot/efi/EFI/BOOT/grub.cfg that
+            # explicitly searches for the root UUID we measured
+            # post-mkfs and chainloads the real cfg.
+            # `grub-install --removable` embeds a prefix discovered
+            # by grub-probe inside the chroot; grub-probe occasion-
+            # ally guesses wrong when /boot/grub lives on a loop
+            # device under a chroot bind-mount, and BOOTX64.EFI
+            # then drops straight to `grub>` because its embedded
+            # UUID doesn't match the actual root partition at boot
+            # (operator-observed 2026-05-23).
+            if not _write_efi_shim_cfg(_mnt, _root_uuid, password):
+                tui.console.print(
+                    "ERROR: ESP shim grub.cfg write failed — "
+                    "image may not autoboot"
+                )
+                return False
+
+            # Verify what actually landed on disk — the operator
+            # has spent rounds debugging "did my change ship?"
+            # because we previously had no signal.  Echo the first
+            # lines of both cfgs + a stat of all_video.mod so the
+            # log + console show ground truth.
+            _verify_grub_artifacts(_mnt, password)
         finally:
             _spin.done()
+
+        # CRITICAL: unmount + detach loop BEFORE qemu-img convert.
+        # qemu-img reads the underlying raw file directly; ext4 keeps
+        # writes in its page cache until umount flushes them through
+        # the loop device to the raw file.  Converting while mounted
+        # captures stale block data — the cfg files write OK and
+        # _verify_grub_artifacts sees them on the mounted fs, but the
+        # qcow2 ends up missing /boot/grub/grub.cfg and the ESP shim
+        # because those writes hadn't reached the raw file yet
+        # (operator-observed 2026-05-23 — grub drops to `grub>` because
+        # the cfg the build wrote was never persisted to the image).
+        if _bind_mounted:
+            for _sub in ('dev/pts', 'dev', 'sys', 'proc'):
+                _sudo(['umount', os.path.join(_mnt, _sub)],
+                      password, capture=True)
+            _bind_mounted = False
+        if _efi_mounted:
+            _r = _sudo(['umount', os.path.join(_mnt, 'boot', 'efi')],
+                       password, capture=True)
+            if _r.returncode != 0:
+                tui.console.print(
+                    f"ERROR: pre-convert umount ESP failed: "
+                    f"{_r.stderr.strip()[:200]}"
+                )
+                return False
+            _efi_mounted = False
+        if _root_mounted:
+            _r = _sudo(['umount', _mnt], password, capture=True)
+            if _r.returncode != 0:
+                tui.console.print(
+                    f"ERROR: pre-convert umount root failed: "
+                    f"{_r.stderr.strip()[:200]}"
+                )
+                return False
+            _root_mounted = False
+        if _loop_dev is not None:
+            _sudo(['losetup', '-d', _loop_dev], password, capture=True)
+            _loop_dev = None
 
         return _convert_to_qcow2(_raw, output_qcow2, password)
 
@@ -416,7 +477,10 @@ def build_disk_image(
         # Reverse-order cleanup.  Each step uses || true semantics —
         # we want to attempt ALL teardown even if one step fails (else
         # /dev/loopN stays held and the operator has to manually
-        # losetup -d before retrying).
+        # losetup -d before retrying).  The flags above were cleared
+        # on the happy path so this finally block is a no-op then;
+        # on early-return failure paths the partitions are still
+        # mounted and these branches actually do the teardown.
         if _bind_mounted:
             for _sub in ('dev/pts', 'dev', 'sys', 'proc'):
                 _sudo(['umount', os.path.join(_mnt, _sub)],
@@ -470,14 +534,21 @@ def _write_minimal_grub_cfg(mnt: str, root_uuid: str,
     _k_name  = _vmlinuz[-1]
     _i_name  = _initrd[-1]
 
+    # `insmod all_video` is REQUIRED.  Without it grub's `linux`
+    # command can't allocate a framebuffer for the EFI handover and
+    # aborts with "no suitable video mode found", dropping the boot
+    # to a grub command-line shell (operator-observed 2026-05-23 on
+    # qcow2→vmdk in VMware).  all_video pulls in efi_gop, efi_uga,
+    # vbe, vga as available — covers EFI + legacy BIOS.
     _cfg = (
-        f"# Minimal grub.cfg — generated by Athena Build COMP-09\n"
-        f"# (update-grub fallback path).  Single entry; replace via\n"
-        f"# `grub-mkconfig -o /boot/grub/grub.cfg` from the booted system.\n"
-        f"set timeout=3\n"
-        f"set default=0\n"
-        f"\n"
+        "# Minimal grub.cfg — generated by Asgard installer.\n"
+        "# Single entry; replace via `grub-mkconfig -o /boot/grub/grub.cfg`\n"
+        "# from the booted system for a fuller menu.\n"
+        "set timeout=3\n"
+        "set default=0\n"
+        "\n"
         f"menuentry 'Asgard Linux' {{\n"
+        f"    insmod all_video\n"
         f"    insmod gzio\n"
         f"    insmod part_gpt\n"
         f"    insmod ext2\n"
@@ -486,8 +557,7 @@ def _write_minimal_grub_cfg(mnt: str, root_uuid: str,
         f"    initrd /boot/{_i_name}\n"
         f"}}\n"
     )
-    import tempfile as _tempfile
-    _fd, _tmp = _tempfile.mkstemp(prefix='grub-cfg-', suffix='.txt')
+    _fd, _tmp = tempfile.mkstemp(prefix='grub-cfg-', suffix='.txt')
     try:
         with os.fdopen(_fd, 'w') as _fh:
             _fh.write(_cfg)
@@ -509,6 +579,100 @@ def _write_minimal_grub_cfg(mnt: str, root_uuid: str,
         )
         return False
     return True
+
+
+def _write_efi_shim_cfg(mnt: str, root_uuid: str,
+                          password: str) -> bool:
+    """Write /boot/efi/EFI/BOOT/grub.cfg — a tiny shim that does an
+    explicit UUID search and chainloads /boot/grub/grub.cfg.
+
+    Why: `grub-install --target=x86_64-efi --removable` writes
+    BOOTX64.EFI with a prefix discovered via grub-probe.  Under
+    chroot bind-mounts, grub-probe sometimes detects the wrong
+    device for /boot/grub, embedding a UUID that doesn't match
+    the actual root partition at boot.  Some firmware/grub
+    combinations ALSO load /EFI/BOOT/grub.cfg from the ESP before
+    falling back to the embedded prefix — this shim covers that
+    path with the UUID we already know to be correct.
+    """
+    _esp_cfg_dir = os.path.join(mnt, 'boot', 'efi', 'EFI', 'BOOT')
+    _r = _sudo(['mkdir', '-p', _esp_cfg_dir], password, capture=True)
+    if _r.returncode != 0:
+        logger.error(f"mkdir ESP shim dir: {_r.stderr.strip()}")
+        return False
+    _cfg = (
+        "# ESP shim cfg — chains to real /boot/grub/grub.cfg via\n"
+        "# explicit UUID search.  Generated by Asgard installer.\n"
+        "insmod all_video\n"
+        "insmod part_gpt\n"
+        "insmod ext2\n"
+        "insmod search_fs_uuid\n"
+        f"search --no-floppy --fs-uuid --set=root {root_uuid}\n"
+        "set prefix=($root)/boot/grub\n"
+        "configfile ($root)/boot/grub/grub.cfg\n"
+    )
+    _fd, _tmp = tempfile.mkstemp(prefix='esp-shim-', suffix='.cfg')
+    try:
+        with os.fdopen(_fd, 'w') as _fh:
+            _fh.write(_cfg)
+        _r = _sudo(
+            ['install', '-m', '644', _tmp,
+             os.path.join(_esp_cfg_dir, 'grub.cfg')],
+            password,
+        )
+    finally:
+        try:
+            os.unlink(_tmp)
+        except OSError:
+            pass
+    if _r.returncode != 0:
+        logger.error(f"install ESP shim cfg: {_r.stderr.strip()}")
+        return False
+    return True
+
+
+def _verify_grub_artifacts(mnt: str, password: str) -> None:
+    """Operator-facing proof of what landed on disk.  Reads back
+    both grub.cfg files + lists /boot/grub/x86_64-efi/all_video.mod
+    so the build console shows ground truth (not just our intent).
+
+    Never fatal — purely informational.  All output goes through
+    tui.console so the operator sees it during interactive runs and
+    log captures it during scripted runs.
+    """
+    for _label, _path in (
+        ('root grub.cfg',
+         os.path.join(mnt, 'boot', 'grub', 'grub.cfg')),
+        ('ESP shim',
+         os.path.join(mnt, 'boot', 'efi', 'EFI', 'BOOT', 'grub.cfg')),
+    ):
+        _r = _sudo(['cat', _path], password, capture=True)
+        if _r.returncode != 0:
+            tui.console.print(
+                f"VERIFY: {_label} MISSING at {_path} — boot will fail"
+            )
+            continue
+        _has_video = 'insmod all_video' in _r.stdout
+        _marker    = 'OK' if _has_video else 'NO all_video'
+        tui.console.print(
+            f"VERIFY: {_label} present ({len(_r.stdout)} bytes, "
+            f"{_marker})"
+        )
+    # Module presence — `insmod all_video` is a no-op if the module
+    # file isn't on disk for grub to load at runtime.
+    _mod_path = os.path.join(
+        mnt, 'boot', 'grub', 'x86_64-efi', 'all_video.mod',
+    )
+    _r = _sudo(['stat', '-c', '%s', _mod_path], password, capture=True)
+    if _r.returncode != 0:
+        tui.console.print(
+            f"VERIFY: all_video.mod MISSING at {_mod_path} — "
+            "grub-install didn't copy modules"
+        )
+    else:
+        tui.console.print(
+            f"VERIFY: all_video.mod present ({_r.stdout.strip()} bytes)"
+        )
 
 
 def _read_uuid(partition: str, password: str) -> str:
