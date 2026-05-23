@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 # Excludes virtual-package names (fat-modules etc.) — those resolve to
 # kernel-ABI-specific real packages whose names we don't know until
 # build time.
-NEW_SEEDS = frozenset({
+_NEW_SEEDS = frozenset({
     # base
     'anna', 'archdetect', 'cdebconf-udeb', 'di-utils', 'di-utils-reboot',
     'di-utils-shell', 'libdebconfclient0-udeb', 'libdebian-installer4-udeb',
@@ -39,7 +39,7 @@ NEW_SEEDS = frozenset({
 })
 
 
-FIELD_HEADER_RE = re.compile(r'^([A-Za-z][A-Za-z0-9\-]*)[ \t]*:[ \t]*(.*)$')
+_FIELD_HEADER_RE = re.compile(r'^([A-Za-z][A-Za-z0-9\-]*)[ \t]*:[ \t]*(.*)$')
 
 
 def parse_stanzas(content: str) -> List[Tuple[int, Dict[str, str], List[str]]]:
@@ -75,7 +75,7 @@ def parse_stanzas(content: str) -> List[Tuple[int, Dict[str, str], List[str]]]:
                     f'continuation at line {_lineno} with no preceding field'
                 )
             continue
-        _m = FIELD_HEADER_RE.match(_raw)
+        _m = _FIELD_HEADER_RE.match(_raw)
         if _m:
             _last_field = _m.group(1)
             _cur_fields[_last_field] = _m.group(2)
@@ -151,14 +151,14 @@ def main(path: str) -> int:
 
     _stanzas = parse_stanzas(_content)
     print(f"Parsed {len(_stanzas)} stanzas from {path}")
-    print(f"  ({len(NEW_SEEDS)} package names tracked as 'newly-seeded by phase B')")
+    print(f"  ({len(_NEW_SEEDS)} package names tracked as 'newly-seeded by phase B')")
     print()
 
     _any_issue = False
     _new_seen = 0
     for _line_start, _fields, _raw in _stanzas:
         _pkg = _fields.get('Package', '<no-package>')
-        _is_new = _pkg in NEW_SEEDS
+        _is_new = _pkg in _NEW_SEEDS
         if _is_new:
             _new_seen += 1
         _issues = audit_stanza(_fields, _line_start, _raw)
@@ -171,7 +171,7 @@ def main(path: str) -> int:
             print(f"        fields: {sorted(_fields.keys())}")
             print()
 
-    print(f"Summary: {_new_seen}/{len(NEW_SEEDS)} new-seed stanzas observed")
+    print(f"Summary: {_new_seen}/{len(_NEW_SEEDS)} new-seed stanzas observed")
     if not _any_issue:
         print("No issues found by static checks.")
         print()
