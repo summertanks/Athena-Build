@@ -29,7 +29,7 @@ import logging
 import os
 import re
 import subprocess
-from typing import Optional
+from typing import Callable, Optional
 
 import apt_pkg
 from debian.deb822 import PkgRelation
@@ -247,24 +247,43 @@ def scan_repo_state(config, subdir: str = 'main',
         # extract).  --multiversion emits every version present; we
         # dedupe by highest version in the parse step.  /dev/null is the
         # (empty) override file.
+        #
+        # Spinner so the operator sees the long dpkg-scanpackages pass
+        # is alive — on a 5k-pkg repo (.deb control area extract per
+        # file) this runs ~90s with no per-file output.  Imported lazily
+        # so test code paths that stub repo_audit don't pull tui in.
+        _spin = None
         try:
-            with open(_pkg_file, 'wb') as _fh:
-                subprocess.run(
-                    ['dpkg-scanpackages', '--multiversion',
-                     _repo_dir, '/dev/null'],
-                    stdout=_fh, stderr=subprocess.PIPE, check=True,
+            from tui import Spinner as _Spinner, tui_instance as _ti
+            if _ti is not None:
+                _spin = _Spinner(
+                    f"dpkg-scanpackages {os.path.basename(_repo_dir)} "
+                    f"({subdir} subdir)"
                 )
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                f"dpkg-scanpackages failed: "
-                f"{e.stderr.decode(errors='replace').strip()}"
-            )
-            return None
-        except FileNotFoundError:
-            logger.error(
-                "dpkg-scanpackages not on PATH — install the `dpkg-dev` package"
-            )
-            return None
+        except Exception:
+            _spin = None
+        try:
+            try:
+                with open(_pkg_file, 'wb') as _fh:
+                    subprocess.run(
+                        ['dpkg-scanpackages', '--multiversion',
+                         _repo_dir, '/dev/null'],
+                        stdout=_fh, stderr=subprocess.PIPE, check=True,
+                    )
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    f"dpkg-scanpackages failed: "
+                    f"{e.stderr.decode(errors='replace').strip()}"
+                )
+                return None
+            except FileNotFoundError:
+                logger.error(
+                    "dpkg-scanpackages not on PATH — install the `dpkg-dev` package"
+                )
+                return None
+        finally:
+            if _spin is not None:
+                _spin.done()
 
     apt_pkg.init_system()
     _packages: dict = {}
@@ -383,7 +402,9 @@ def _build_provides_index(packages: dict) -> dict:
     return _index
 
 
-def audit_nmu_residue(state: RepoState) -> 'list[tuple]':
+def audit_nmu_residue(state: RepoState,
+                       progress_cb: Optional[Callable[[], None]] = None
+                       ) -> 'list[tuple]':
     """Walk every pkg in state; report any field whose value still
     carries an NMU/binNMU/backport suffix.
 
@@ -406,6 +427,8 @@ def audit_nmu_residue(state: RepoState) -> 'list[tuple]':
     )
 
     for _pkg, _entry in state.packages.items():
+        if progress_cb is not None:
+            progress_cb()
         _ver = _entry.get('Version', '')
         if _ver and strip_nmu_suffix(_ver) != _ver:
             _findings.append((_pkg, 'Version', _ver, 'pkg own Version'))
@@ -480,7 +503,8 @@ def _rel_satisfied_in_scope(state: RepoState, rel: 'PkgRelation.ParsedRelation',
 
 
 def audit_dep_closure(state: RepoState,
-                       consumer_set: Optional[frozenset] = None
+                       consumer_set: Optional[frozenset] = None,
+                       progress_cb: Optional['Callable[[], None]'] = None
                        ) -> 'tuple[list, list]':
     """Hard dependency gate.
 
@@ -511,6 +535,8 @@ def audit_dep_closure(state: RepoState,
         return consumer_set is None or name in consumer_set
 
     for _pkg, _entry in state.packages.items():
+        if progress_cb is not None:
+            progress_cb()
         if not _is_consumer(_pkg):
             continue
         for _field in _HARD_DEP_FIELDS:
@@ -545,7 +571,9 @@ def audit_dep_closure(state: RepoState,
     return _unresolved, _weak
 
 
-def audit_conflict_cohort(state: RepoState, cohort: frozenset) -> list:
+def audit_conflict_cohort(state: RepoState, cohort: frozenset,
+                            progress_cb: Optional[Callable[[], None]] = None
+                            ) -> list:
     """Hard conflict gate: within a cohort (a set of pkgs that get
     installed SIMULTANEOUSLY), no pkg's Conflicts/Breaks may resolve
     to another pkg in the same cohort.
@@ -568,6 +596,8 @@ def audit_conflict_cohort(state: RepoState, cohort: frozenset) -> list:
     _conflicts: list = []
 
     for _pkg, _entry in state.packages.items():
+        if progress_cb is not None:
+            progress_cb()
         if _pkg not in cohort:
             continue
         _self_name = _pkg

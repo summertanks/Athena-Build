@@ -213,7 +213,6 @@ class _IsoMixin:
                 # contents via a glob pattern as a fallback
                 _exclude_args += ['-e', os.path.join(_dir_path, '*')]
 
-        tui.console.print("Creating squashfs — this may take several minutes...")
         _cmd = (
             ['sudo', '-S', 'mksquashfs', self._dir_chroot, _squashfs,
              '-comp', 'xz', '-noappend'] + _exclude_args
@@ -221,10 +220,18 @@ class _IsoMixin:
         # Subprocess transcript routed through logger.debug — the file
         # handler attached by setup_file_logging() captures it in the
         # unified run log, replacing the legacy mksquashfs.log file.
-        _proc = subprocess.run(
-            _cmd, input=self._password + '\n',
-            capture_output=True, text=True
+        # Spinner so the operator sees the long mksquashfs xz pass is
+        # still going (typical: several minutes on a ~2 GB chroot).
+        _spin = tui.Spinner(
+            f"Creating squashfs (xz, {self._dir_chroot} → {_squashfs})"
         )
+        try:
+            _proc = subprocess.run(
+                _cmd, input=self._password + '\n',
+                capture_output=True, text=True
+            )
+        finally:
+            _spin.done()
         for _line in _proc.stdout.splitlines():
             logger.debug(_line)
         for _line in _proc.stderr.splitlines():
@@ -254,13 +261,15 @@ class _IsoMixin:
             logger.error("build_iso: container is None")
             return False
 
-        tui.console.print(
-            "Running grub-mkrescue inside build container "
-            "(bookworm GRUB toolchain — see COMP-14)..."
+        _spin = tui.Spinner(
+            f"Running grub-mkrescue (bookworm container) → {_iso_name}"
         )
-        _ok, _stdout, _stderr = container.run_grub_mkrescue(
-            _staging, _iso_path, self._password,
-        )
+        try:
+            _ok, _stdout, _stderr = container.run_grub_mkrescue(
+                _staging, _iso_path, self._password,
+            )
+        finally:
+            _spin.done()
         for _line in _stdout.splitlines():
             logger.debug(_line)
         for _line in _stderr.splitlines():

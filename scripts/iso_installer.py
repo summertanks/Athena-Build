@@ -396,9 +396,6 @@ def _build_initrd(dir_chroot_installer: str, staging: str,
     available in the file log via stderr capture if needed.
     """
     _initrd = os.path.join(staging, 'boot', 'initrd.gz')
-    tui.console.print(
-        f"Building monolithic initrd from {dir_chroot_installer}..."
-    )
     # `find . -print0 | cpio --null -o -H newc | gzip > initrd.gz`
     # Run as a single shell pipeline under sudo so cpio can read the
     # root-owned files.  cd into the chroot so paths inside the cpio are
@@ -408,7 +405,14 @@ def _build_initrd(dir_chroot_installer: str, staging: str,
         f"find . -print0 | cpio --null -o -H newc --quiet | "
         f"gzip -9 > {_initrd}"
     )
-    _r = _sudo(['bash', '-c', _shell_cmd], password)
+    # Spinner — cpio|gzip on a 200-300 MB installer chroot takes
+    # 30-60s with no per-file output (--quiet).  Without a spinner
+    # the TUI looks frozen mid-iso-build.
+    _spin = tui.Spinner(f"Packing initrd (cpio | gzip) → {_initrd}")
+    try:
+        _r = _sudo(['bash', '-c', _shell_cmd], password)
+    finally:
+        _spin.done()
     if _r.returncode != 0:
         tui.console.print(
             f"ERROR: cpio|gzip pipeline failed (rc={_r.returncode}): "
@@ -907,13 +911,15 @@ def _run_grub_mkrescue(staging: str, iso_path: str,
         )
         logger.error("_run_grub_mkrescue: container is None")
         return False
-    tui.console.print(
-        "Running grub-mkrescue inside build container "
-        "(bookworm GRUB toolchain — see COMP-14)..."
+    _spin = tui.Spinner(
+        f"Running grub-mkrescue (bookworm container) → {os.path.basename(iso_path)}"
     )
-    _ok, _stdout, _stderr = container.run_grub_mkrescue(
-        staging, iso_path, password,
-    )
+    try:
+        _ok, _stdout, _stderr = container.run_grub_mkrescue(
+            staging, iso_path, password,
+        )
+    finally:
+        _spin.done()
     for _line in _stdout.splitlines():
         logger.debug(_line)
     for _line in _stderr.splitlines():

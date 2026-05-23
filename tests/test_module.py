@@ -11290,6 +11290,129 @@ def test_cli_progress_bar_prints_start_and_finish_markers():
     assert 'SmokeTest [done: 10/10]' in out_v
 
 
+def test_audit_dep_closure_invokes_progress_cb_per_pkg():
+    """`audit_dep_closure` accepts an optional progress_cb that fires
+    once per (package, cohort) iteration.  Pin so cmd_audit's
+    ProgressBar plumbing doesn't silently break on a refactor.
+    Synthesises a 3-pkg RepoState + counts callback firings."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from repo_audit import audit_dep_closure, RepoState
+
+    _state = RepoState(
+        packages={
+            'a': {'Package': 'a', 'Version': '1', 'Depends': 'b'},
+            'b': {'Package': 'b', 'Version': '1'},
+            'c': {'Package': 'c', 'Version': '1', 'Depends': 'absent (>= 99)'},
+        },
+        provides_index={},
+        packages_file='',
+        repo_mtime=0.0,
+    )
+    _calls: list = []
+    audit_dep_closure(
+        _state, consumer_set=None,
+        progress_cb=lambda: _calls.append(1),
+    )
+    assert len(_calls) == 3, (
+        f"progress_cb fired {len(_calls)} times; expected one fire per "
+        f"package in state (3 packages)"
+    )
+
+
+def test_audit_conflict_cohort_invokes_progress_cb_per_pkg():
+    """Same plumbing as audit_dep_closure, for the conflict gate."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from repo_audit import audit_conflict_cohort, RepoState
+
+    _state = RepoState(
+        packages={
+            'x': {'Package': 'x', 'Version': '1'},
+            'y': {'Package': 'y', 'Version': '1'},
+        },
+        provides_index={},
+        packages_file='',
+        repo_mtime=0.0,
+    )
+    _calls: list = []
+    audit_conflict_cohort(
+        _state, cohort=frozenset(['x', 'y']),
+        progress_cb=lambda: _calls.append(1),
+    )
+    assert len(_calls) == 2
+
+
+def test_audit_nmu_residue_invokes_progress_cb_per_pkg():
+    """audit_nmu_residue mirrors the per-pkg progress_cb contract."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from repo_audit import audit_nmu_residue, RepoState
+
+    _state = RepoState(
+        packages={
+            'p': {'Package': 'p', 'Version': '1.0+deb12u1'},   # has NMU
+            'q': {'Package': 'q', 'Version': '1.0'},           # clean
+        },
+        provides_index={},
+        packages_file='',
+        repo_mtime=0.0,
+    )
+    _calls: list = []
+    _findings = audit_nmu_residue(_state, progress_cb=lambda: _calls.append(1))
+    assert len(_calls) == 2
+    # And the actual residue is still detected:
+    assert any(f[0] == 'p' for f in _findings), _findings
+
+
+def test_iso_build_uses_spinner_for_mksquashfs_and_grub_mkrescue():
+    """Live ISO build wraps mksquashfs + grub-mkrescue in Spinners so
+    the long subprocesses don't look like a hung TUI.  Source-text
+    inspection — exercising the full build needs sudo + the actual
+    pipeline.  Anti-regression for accidentally dropping the spinner
+    on a refactor."""
+    _path = os.path.join(_ROOT, 'scripts', 'iso.py')
+    with open(_path) as fh:
+        _body = fh.read()
+    # mksquashfs call has a Spinner directly above (within ~10 lines).
+    import re
+    _msq = re.search(
+        r"tui\.Spinner\([^)]*Creating squashfs[^)]*\).*?mksquashfs",
+        _body, re.DOTALL,
+    )
+    assert _msq, "iso.py mksquashfs is no longer wrapped in a Spinner"
+    _grub = re.search(
+        r"tui\.Spinner\([^)]*grub-mkrescue[^)]*\).*?container\.run_grub_mkrescue",
+        _body, re.DOTALL,
+    )
+    assert _grub, "iso.py grub-mkrescue is no longer wrapped in a Spinner"
+
+
+def test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue():
+    """Installer ISO build wraps the cpio|gzip initrd pack and the
+    container grub-mkrescue in Spinners.  Both take 30-60s each
+    silently on a typical installer chroot."""
+    _path = os.path.join(_ROOT, 'scripts', 'iso_installer.py')
+    with open(_path) as fh:
+        _body = fh.read()
+    import re
+    _initrd = re.search(
+        r"tui\.Spinner\([^)]*initrd[^)]*\).*?_sudo\(\['bash'",
+        _body, re.DOTALL,
+    )
+    assert _initrd, (
+        "iso_installer.py _build_initrd cpio|gzip pipeline no longer "
+        "wrapped in a Spinner"
+    )
+    _grub = re.search(
+        r"tui\.Spinner\([^)]*grub-mkrescue[^)]*\).*?container\.run_grub_mkrescue",
+        _body, re.DOTALL,
+    )
+    assert _grub, (
+        "iso_installer.py _run_grub_mkrescue is no longer wrapped in a Spinner"
+    )
+
+
 def test_progress_bar_show_rate_false_omits_rate_column():
     """The new show_rate kwarg drops the trailing {rate} column from
     the default fmt — build progress bars (source_build, chroot, iso,
