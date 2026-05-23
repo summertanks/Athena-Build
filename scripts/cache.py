@@ -23,6 +23,42 @@ from tui import ProgressBar, Spinner
 logger = logging.getLogger('athena')
 
 
+def _lookup_packages(hashtable: 'Dict[str, Dict[Version, List[Package]]]',
+                     package_name: str,
+                     version: 'Optional[Version]' = None,
+                     constraint: str = '') -> 'List[Package]':
+    """Shared backend for Cache.get_packages and UdebCacheView.get_packages.
+
+    If version is omitted, all versions are returned.
+    If version is given without constraint, constraint defaults to '>='.
+    If both are given, only packages whose version satisfies
+    apt_pkg.check_dep(pkg_ver, constraint, version) are returned.
+
+    Use .get() rather than bracket access: callers pass defaultdict
+    hashtables; bracket access on a missing key would silently create
+    an empty entry — every unresolved name would bloat the table and
+    skew len() counts.
+    """
+    if version is None:
+        result: 'List[Package]' = []
+        for _pkgs in hashtable.get(package_name, {}).values():
+            result.extend(_pkgs)
+        return result
+
+    _constraint = constraint if constraint in utils.VALID_CONSTRAINTS else '>='
+    result = []
+    for _pkg_version, _pkgs in hashtable.get(package_name, {}).items():
+        try:
+            if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
+                result.extend(_pkgs)
+        except (SystemError, ValueError):
+            # apt_pkg.Error inherits from SystemError; ValueError covers
+            # str() of a Version that can't be coerced.  Silently skip
+            # constraint failures — the candidate just doesn't qualify.
+            pass
+    return result
+
+
 # gcc-N or gcc-N-base — the C compiler's own package and the matching libgcc
 # base symbol package for major gcc release N.  Used by Cache.build_cache to
 # pick the latest gcc major present in the index and drop older majors from
@@ -44,8 +80,10 @@ class Cache:
 
     _arch_table: DpkgArchTable
 
-    # Operators accepted by apt_pkg.check_dep; anything else defaults to '>='
-    _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
+    # Operators accepted by apt_pkg.check_dep; anything else defaults to '>='.
+    # Sourced from utils.VALID_CONSTRAINTS so cache + dependencytree stay
+    # in lockstep (HK-01b consolidation).
+    _VALID_CONSTRAINTS = utils.VALID_CONSTRAINTS
 
     def __init__(self, buildconfig: BuildConfig):
         """Builds the Cache by fetching Packages + Sources for every Mirror
@@ -805,34 +843,10 @@ class Cache:
 
     def get_packages(self, package_name: str,
                      version: Optional[Version] = None, constraint: str = '') -> List[Package]:
-        """Return packages matching name.
-
-        If version is omitted, all versions are returned.
-        If version is given without constraint, constraint defaults to '>='.
-        If both are given, only packages whose version satisfies
-        apt_pkg.check_dep(pkg_ver, constraint, version) are returned.
-        """
-        # Use .get() instead of direct bracket access: package_hashtable is a defaultdict, so
-        # bracket access on a missing key silently creates an empty entry — every unresolved
-        # package name would permanently bloat the table and skew len() counts.
-        if version is None:
-            result: List[Package] = []
-            for _pkgs in self.package_hashtable.get(package_name, {}).values():
-                result.extend(_pkgs)
-            return result
-
-        _constraint = constraint if constraint in self._VALID_CONSTRAINTS else '>='
-        result = []
-        for _pkg_version, _pkgs in self.package_hashtable.get(package_name, {}).items():
-            try:
-                if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
-                    result.extend(_pkgs)
-            except (SystemError, ValueError):
-                # apt_pkg.Error inherits from SystemError; ValueError covers
-                # str() of a Version that can't be coerced.  Silently skip
-                # constraint failures — the candidate just doesn't qualify.
-                pass
-        return result
+        """Return packages matching name from the deb hashtable.  See
+        :func:`_lookup_packages` for semantics."""
+        return _lookup_packages(self.package_hashtable, package_name,
+                                version, constraint)
 
     def udeb_view(self) -> 'UdebCacheView':
         """Return a thin Cache-shaped view that exposes
@@ -875,18 +889,5 @@ class UdebCacheView:
                      version: Optional[Version] = None,
                      constraint: str = '') -> List[Package]:
         """Same semantics as Cache.get_packages but against the udeb table."""
-        if version is None:
-            result: List[Package] = []
-            for _pkgs in self.package_hashtable.get(package_name, {}).values():
-                result.extend(_pkgs)
-            return result
-
-        _constraint = constraint if constraint in Cache._VALID_CONSTRAINTS else '>='
-        result = []
-        for _pkg_version, _pkgs in self.package_hashtable.get(package_name, {}).items():
-            try:
-                if apt_pkg.check_dep(str(_pkg_version), _constraint, str(version)):
-                    result.extend(_pkgs)
-            except (SystemError, ValueError):
-                pass
-        return result
+        return _lookup_packages(self.package_hashtable, package_name,
+                                version, constraint)

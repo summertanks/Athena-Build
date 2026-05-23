@@ -15,6 +15,31 @@ from typing import List, Optional
 logger = logging.getLogger('athena')
 
 
+# Version constraint operators accepted by apt_pkg.check_dep — the seven
+# Debian-defined comparison sigils.  Anything else falls back to '>='
+# at call sites (defensive default for malformed input).  Centralised
+# here so the cache + dependency-tree modules import from one source of
+# truth rather than each carrying its own identical copy.
+VALID_CONSTRAINTS = frozenset({'=', '>=', '<=', '>>', '<<', '>', '<'})
+
+
+# Defaults previously hardcoded as `fallback=` literals inline in
+# BuildConfig.__init__ (HK-01e consolidation).  Promoted here so the
+# next-time-we-need-it edit happens in one place and is greppable.
+#
+# _DEFAULT_CONTAINER_RELEASE — Debian release the build container
+# pins to when [Build] CONTAINER_RELEASE is absent.  Today's only
+# tested target is bookworm; trixie would work but is unverified.
+# A non-Debian distro under COMP-11 would override this.
+_DEFAULT_CONTAINER_RELEASE = 'bookworm'
+
+# _DEFAULT_SECURITY_KEYRING — InRelease verification keyring.  The
+# host-installed debian-archive-keyring is the canonical default on
+# any Debian-derived build host.  A fork shipping its own keyring
+# would override via [Security] Keyring.
+_DEFAULT_SECURITY_KEYRING = '/usr/share/keyrings/debian-archive-keyring.gpg'
+
+
 # repo/ is segregated by package role.  Layout:
 #   repo/main/     installable binaries (base + pkg.list + live + installer +
 #                  pool, plus udebs).  ALSO includes -dev side artifacts —
@@ -1252,7 +1277,7 @@ class BuildConfig:
             self.build_codename     = _strip_quotes(config_parser.get('Build', 'CODENAME'))
             self.build_version      = _strip_quotes(config_parser.get('Build', 'VERSION'))
 
-            self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback='bookworm')
+            self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback=_DEFAULT_CONTAINER_RELEASE)
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
             # When true, depth-1 Recommends of selected packages are
             # pulled into selected_pkgs / selected_srcs (downloaded but not
@@ -1306,7 +1331,7 @@ class BuildConfig:
             # Cache.__get_files emits a per-build WARN when bypassed.
             self.security_keyring = config_parser.get(
                 'Security', 'Keyring',
-                fallback='/usr/share/keyrings/debian-archive-keyring.gpg'
+                fallback=_DEFAULT_SECURITY_KEYRING
             ).strip()
             self.security_disabled = config_parser.getboolean(
                 'Security', 'Disabled', fallback=False

@@ -60,10 +60,11 @@ def _auto_pick_candidate(candidates, prefer_name=None):
 class DependencyTree:
 
     # Operators accepted by apt_pkg.check_dep for version constraint checks.
-    # Defined here (above first use) so the class body reads top-down rather
-    # than relying on Python's runtime-name-resolution to find the attribute
-    # several methods above where it is declared.
-    _VALID_CONSTRAINTS = {'=', '>=', '<=', '>>', '<<', '>', '<'}
+    # Sourced from utils.VALID_CONSTRAINTS so the cache + dep-tree modules
+    # stay in lockstep (HK-01b consolidation).  Bound at class scope so
+    # `self._VALID_CONSTRAINTS` lookups resolve top-down without depending
+    # on Python's runtime-name-resolution.
+    _VALID_CONSTRAINTS = utils.VALID_CONSTRAINTS
 
     def __init__(self, cache: Cache, select_recommended: bool, arch: str,
                  build_profiles: frozenset = frozenset(), lookahead=None,

@@ -18,8 +18,15 @@ Each step sets a flag in _progress_flags so later commands can verify prerequisi
 without re-running earlier work.
 """
 
+import atexit
 import faulthandler
-faulthandler.enable(open('/tmp/athena_crash.log', 'w'))
+
+# Module-level handle so reload-during-dev cleans up + atexit pairs the
+# close on normal exit.  The previous form (faulthandler.enable(open(...)))
+# leaked the fd for the process lifetime.
+_FAULT_LOG = open('/tmp/athena_crash.log', 'w')
+faulthandler.enable(_FAULT_LOG)
+atexit.register(_FAULT_LOG.close)
 
 import tui
 import datetime
