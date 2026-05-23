@@ -28,6 +28,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 from typing import Callable, Optional
 
@@ -242,10 +243,22 @@ def _scan_packages_with_progress(
         _bar = None
         _spin = None
 
+    # dpkg-scanpackages / dpkg-scansources are Perl scripts; Perl's I/O
+    # layer block-buffers stdout when stdout is a pipe (default 4-8 KB
+    # buffer, only flushes on full or exit).  Without forcing line
+    # buffering, our line-by-line streaming reader gets nothing until
+    # the subprocess exits — the ProgressBar sits at 0/N for the whole
+    # run, defeating the purpose.  `stdbuf -oL` flips libc stdio to
+    # line-buffered via LD_PRELOAD; Perl's PerlIO layers respect that
+    # because they sit on top of libc's stdio.  Skipped silently if
+    # stdbuf isn't on PATH — bar will be stuck but the scan still works.
+    _stdbuf: 'list[str]' = (
+        ['stdbuf', '-oL'] if shutil.which('stdbuf') else []
+    )
     if sudo_password is not None:
-        _real_argv: 'list[str]' = ['sudo', '-S'] + list(argv)
+        _real_argv: 'list[str]' = ['sudo', '-S'] + _stdbuf + list(argv)
     else:
-        _real_argv = list(argv)
+        _real_argv = _stdbuf + list(argv)
 
     if use_shell:
         _popen_args: 'list[str] | str' = ' '.join(_real_argv)
