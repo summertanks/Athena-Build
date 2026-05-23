@@ -4389,7 +4389,7 @@ class BuildSession:
             )
 
     def cmd_source_verify(self, *args):
-        """Opt-in deep audit: report .debs whose internal Version
+        """Opt-in deep audit: report .debs / .udebs whose internal Version
         mismatches the predicted filename, or whose Depends no longer
         resolve against the repo we ship.
 
@@ -4401,9 +4401,26 @@ class BuildSession:
         fail to install on a clean Thor system (e.g. Depends pointing
         at a sibling-binary version that's not actually in the repo).
 
+        Cohort split (matches `source audit`'s shape):
+
+          Deb cohort  — every .deb under dep_tree.selected_srcs.
+            Deps resolve against repo/dists/<codename>/main/binary-<arch>/
+            ONLY.  Udeb dirs are NOT consulted — a regular .deb depending
+            on a `.udeb` name would surface as unsatisfied here, which
+            is correct (apt on the installed system can't see udebs).
+
+          Udeb cohort — every .udeb under udeb_dep_tree.selected_srcs.
+            Deps resolve against
+            repo/dists/<codename>/main/debian-installer/binary-<arch>/
+            ONLY.  Deb dirs are NOT consulted — udebs live in the d-i
+            parallel namespace; debootstrap on /target never reads from
+            here.
+
+        Each cohort prints its own counters + failing-sources list.
+
         Resolution scope is repo/ (post-strip pristine versions), NOT
-        the cache.  The cache reflects upstream's NMU-bumped versions
-        — `libfoo 1.0-1+b1` while our stripped .deb says
+        the cache.  The cache reflects upstream's NMU-bumped versions —
+        `libfoo 1.0-1+b1` while our stripped .deb says
         `Depends: libfoo (= 1.0-1)`.  Resolving against cache would
         over-report 50+ false positives per build (every strict-equal
         sibling reference where upstream had a binNMU).  apt at install
@@ -4431,115 +4448,162 @@ class BuildSession:
 
         _verbose = 'verbose' in args
 
-        # Scan the deb + udeb repo states ONCE up-front.  These are
-        # the lookup tables verify_pkg_artifact resolves Depends
-        # against (instead of the cache, which carries upstream's
-        # NMU-bumped versions and would false-positive every strict-
-        # equal sibling reference).
+        # Per-cohort scan + verify.  Each cohort resolves Depends ONLY
+        # against its own namespace's repo state — deb→main, udeb→main-
+        # udeb.  Strict separation: a .deb's Depends entry that names
+        # a udeb (rare, but allowed by upstream Debian for some bridging
+        # cases) would fail here, which is the honest answer because
+        # apt on /target can't pull from the d-i pool.
         import repo_audit
-        _deb_state  = repo_audit.scan_repo_state(self.config, 'main')
-        _udeb_state = repo_audit.scan_repo_state(self.config, 'main-udeb')
-        if _deb_state is None and _udeb_state is None:
+        _cohorts: 'list[tuple[str, object, object, str]]' = []
+        _deb_state = repo_audit.scan_repo_state(self.config, 'main')
+        if self.dep_tree is not None and self.dep_tree.selected_srcs:
+            _cohorts.append(
+                ('deb', self.dep_tree, _deb_state, '.deb'),
+            )
+        if (self.udeb_dep_tree is not None
+                and self.udeb_dep_tree.selected_srcs):
+            _udeb_state = repo_audit.scan_repo_state(self.config, 'main-udeb')
+            _cohorts.append(
+                ('udeb', self.udeb_dep_tree, _udeb_state, '.udeb'),
+            )
+
+        if not _cohorts:
             console.print(
-                "source verify: repo state scan failed for both "
-                "main and main-udeb — cannot resolve Depends.",
+                "source verify: no selected sources to verify; "
+                "run `dep parse` first.",
                 tui.COLOR_ERROR,
             )
             return
 
-        _srcs = dict(self.dep_tree.selected_srcs)
-        if self.udeb_dep_tree is not None:
-            for _name, _src in self.udeb_dep_tree.selected_srcs.items():
-                if _name not in _srcs:
-                    _srcs[_name] = _src
-
-        _ok = 0
-        _failed = []         # [(pkg_name, first_failing_binary, diagnostic)]
-        _skipped_tunneled = 0
-        _skipped_missing = 0  # binaries absent — not verify's concern, repair handles
-        _no_pkgs = 0
-
-        _bar = ProgressBar(
-            label='Verify', maxvalue=len(_srcs), show_rate=False,
-        )
-        for _name, _src in sorted(_srcs.items()):
-            _bar.step(1)
-            _expected = self._predicted_files_for_source(_name)
-            if not _expected:
-                _no_pkgs += 1
+        _any_failures = False
+        for _label, _tree, _state, _ext in _cohorts:
+            if _state is None:
+                console.print(
+                    f"source verify ({_label} cohort): repo state scan "
+                    f"failed — cannot resolve Depends.",
+                    tui.COLOR_ERROR,
+                )
                 continue
-            # Skip TUNNELED — verify doesn't apply to third-party pulls.
-            _result_file = os.path.join(
-                self.container.buildlog_path, _name + '.result')
-            try:
-                with open(_result_file) as fh:
-                    if fh.readline().strip() == 'TUNNELED':
-                        _skipped_tunneled += 1
-                        continue
-            except OSError:
-                pass
-            # Quick precheck: skip if any binary is missing (verify
-            # only judges present binaries; missing ones are repair /
-            # rebuild's concern).
-            _any_missing = False
-            _failing = None
-            for _f in _expected:
-                _path = os.path.join(
-                    self.config.deb_dest_for_filename(_f), _f,
-                )
-                if not os.path.isfile(_path):
-                    _any_missing = True
-                    break
-                # Pick the repo state that matches the artifact type
-                # (.udeb resolves against the d-i parallel namespace).
-                _state = _udeb_state if _f.endswith('.udeb') else _deb_state
-                _verify_ok, _reason = self.container.verify_pkg_artifact(
-                    _path, _f, repo_state=_state,
-                )
-                if not _verify_ok:
-                    _failing = (_f, _reason)
-                    break
-            if _any_missing:
-                _skipped_missing += 1
-                continue
-            if _failing is None:
-                _ok += 1
-            else:
-                _failed.append((_name,) + _failing)
-                logger.info(
-                    f"source verify {_name}: {_failing[0]}: {_failing[1]}"
-                )
-        _bar.close()
 
-        console.print("Source verify (deep audit):")
-        console.print(f"  {_ok:5d}  pass deep verify (binaries internally consistent)")
-        console.print(f"  {len(_failed):5d}  FAIL — present in repo/ but verify rejected")
-        if _skipped_tunneled:
-            console.print(f"  {_skipped_tunneled:5d}  skipped (TUNNELED — third-party pull)")
-        if _skipped_missing:
-            console.print(
-                f"  {_skipped_missing:5d}  skipped (binaries missing — repair/rebuild concern)"
+            _ok = 0
+            _failed: 'list[tuple]' = []   # [(src, first_failing_bin, diag)]
+            _skipped_tunneled = 0
+            _skipped_missing = 0
+            _no_pkgs = 0
+
+            _bar = ProgressBar(
+                label=f'Verify {_label}',
+                maxvalue=max(1, len(_tree.selected_srcs)),
+                show_rate=False,
             )
-        if _no_pkgs:
-            console.print(f"  {_no_pkgs:5d}  no binaries declared")
+            try:
+                for _name, _src in sorted(_tree.selected_srcs.items()):
+                    _bar.step(1)
+                    # Filter THIS cohort's predicted files only — we
+                    # never look at the other tree's binaries here.
+                    _expected = [
+                        _f for _f in (_tree.src_pkg_files.get(_name) or [])
+                        if _f.endswith(_ext)
+                    ]
+                    if not _expected:
+                        _no_pkgs += 1
+                        continue
+                    # Skip TUNNELED — verify doesn't apply to third-
+                    # party pulls.  TUNNELED is per-source, not per-
+                    # cohort; counts in whichever cohort iterates it.
+                    _result_file = os.path.join(
+                        self.container.buildlog_path, _name + '.result')
+                    try:
+                        with open(_result_file) as fh:
+                            if fh.readline().strip() == 'TUNNELED':
+                                _skipped_tunneled += 1
+                                continue
+                    except OSError:
+                        pass
+                    _any_missing = False
+                    _failing = None
+                    for _f in _expected:
+                        _path = os.path.join(
+                            self.config.deb_dest_for_filename(_f), _f,
+                        )
+                        if not os.path.isfile(_path):
+                            _any_missing = True
+                            break
+                        _verify_ok, _reason = self.container.verify_pkg_artifact(
+                            _path, _f, repo_state=_state,
+                        )
+                        if not _verify_ok:
+                            _failing = (_f, _reason)
+                            break
+                    if _any_missing:
+                        _skipped_missing += 1
+                        continue
+                    if _failing is None:
+                        _ok += 1
+                    else:
+                        _failed.append((_name,) + _failing)
+                        logger.info(
+                            f"source verify {_label} {_name}: "
+                            f"{_failing[0]}: {_failing[1]}"
+                        )
+            finally:
+                _bar.close()
 
-        if _failed:
-            # Aggregate by failure-type prefix for quick triage.
-            from collections import Counter
-            _types = Counter()
-            for _, _, _diag in _failed:
-                _prefix = _diag.split(':', 1)[0] if ':' in _diag else _diag
-                _types[_prefix] += 1
             console.print("")
-            console.print("Failure types:")
-            for _k, _v in _types.most_common():
-                console.print(f"  {_v:5d}  {_k}")
+            console.print(
+                f"=== Source verify ({_label} cohort, deep audit) ==="
+            )
+            console.print(
+                f"  {_ok:5d}  pass deep verify "
+                f"(binaries internally consistent)"
+            )
+            console.print(
+                f"  {len(_failed):5d}  FAIL — present in repo/ but verify "
+                f"rejected"
+            )
+            if _skipped_tunneled:
+                console.print(
+                    f"  {_skipped_tunneled:5d}  skipped "
+                    f"(TUNNELED — third-party pull)"
+                )
+            if _skipped_missing:
+                console.print(
+                    f"  {_skipped_missing:5d}  skipped "
+                    f"(binaries missing — repair/rebuild concern)"
+                )
+            if _no_pkgs:
+                console.print(
+                    f"  {_no_pkgs:5d}  no {_ext} binaries declared "
+                    f"(side-artifact-only source in this cohort)"
+                )
 
-        if _verbose and _failed:
+            if _failed:
+                _any_failures = True
+                from collections import Counter
+                _types: 'Counter[str]' = Counter()
+                for _, _, _diag in _failed:
+                    _prefix = _diag.split(':', 1)[0] if ':' in _diag else _diag
+                    _types[_prefix] += 1
+                console.print("")
+                console.print(f"Failure types ({_label}):")
+                for _k, _v in _types.most_common():
+                    console.print(f"  {_v:5d}  {_k}")
+
+            if _verbose and _failed:
+                console.print("")
+                console.print(
+                    f"Failing sources ({_label}, {len(_failed)}):"
+                )
+                for _src_name, _f, _diag in _failed:
+                    console.print(f"  {_src_name}: {_f}: {_diag}")
+
+        if not _any_failures:
             console.print("")
-            console.print(f"Failing sources ({len(_failed)}):")
-            for _src_name, _f, _diag in _failed:
-                console.print(f"  {_src_name}: {_f}: {_diag}")
+            console.print(
+                "All cohorts pass deep verify.",
+                tui.COLOR_HIGHLIGHT,
+            )
 
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
