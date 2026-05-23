@@ -3235,6 +3235,182 @@ def test_installer_grub_cfg_wires_background_image():
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# COMP-12 Phase F — installer_smoke harness pattern parser
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _smoke_import():
+    """Import tests/installer_smoke/known_bad_patterns.py without
+    polluting sys.path globally."""
+    import importlib.util
+    _path = os.path.join(_ROOT, 'tests', 'installer_smoke',
+                         'known_bad_patterns.py')
+    assert os.path.isfile(_path), f"missing {_path}"
+    _spec = importlib.util.spec_from_file_location(
+        'installer_smoke_known_bad_patterns', _path,
+    )
+    assert _spec is not None and _spec.loader is not None
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    return _mod
+
+
+def test_installer_smoke_scan_log_returns_empty_on_clean_log():
+    """A serial log with no known-bad patterns produces an empty
+    findings list.  Anti-regression so the harness doesn't start
+    flagging clean logs as failures."""
+    import tempfile
+    _mod = _smoke_import()
+    with tempfile.NamedTemporaryFile('w', suffix='.log', delete=False) as _fh:
+        _fh.write(
+            'May 22 12:34:56 main-menu[123]: INFO: Menu item localechooser selected\n'
+            'May 22 12:34:57 anna: anna 1.91\n'
+            'May 22 12:34:58 main-menu[123]: INFO: Falling back to the package description for brltty-udeb\n'
+        )
+        _path = _fh.name
+    try:
+        _findings = _mod.scan_log(_path)
+        assert _findings == [], _findings
+        assert not _mod.has_fatal(_findings)
+    finally:
+        os.unlink(_path)
+
+
+def test_installer_smoke_scan_log_catches_each_fatal_pattern():
+    """Every 'fatal' pattern in KNOWN_BAD must match a synthesized
+    log line that should trigger it.  Catches regex typos (e.g.
+    accidentally escaping a literal that shouldn't be escaped).
+    """
+    import tempfile
+    import re as _re_mod
+    _mod = _smoke_import()
+    _fatal_entries = [_e for _e in _mod.KNOWN_BAD if _e[1] == 'fatal']
+    assert _fatal_entries, 'KNOWN_BAD has no fatal entries — empty test'
+    for _re_src, _sev, _meaning in _fatal_entries:
+        # Build a synthetic line that should match by inserting a
+        # literal substring from the regex source.  This is crude but
+        # sufficient — each pattern is a short literal phrase.
+        _re_compiled = _re_mod.compile(_re_src)
+        # Generate a sample matching line.  For most KNOWN_BAD patterns
+        # the source IS the literal phrase; for `WARNING \*\*:.*main-menu`
+        # we need to construct a matching line manually.
+        _sample = _build_sample_for_pattern(_re_src)
+        assert _re_compiled.search(_sample), (
+            f"pattern {_re_src!r} doesn't match its own synthesized "
+            f"sample {_sample!r} — fix the test sample or the pattern"
+        )
+        # Now run through scan_log against a single-line log:
+        with tempfile.NamedTemporaryFile('w', suffix='.log', delete=False) as _fh:
+            _fh.write(_sample + '\n')
+            _path = _fh.name
+        try:
+            _findings = _mod.scan_log(_path)
+            _found = [_f for _f in _findings if _f['pattern'] == _re_src]
+            assert _found, (
+                f"scan_log didn't surface pattern {_re_src!r} on its "
+                f"sample line {_sample!r}; got {_findings}"
+            )
+            assert _found[0]['severity'] == 'fatal'
+            assert _mod.has_fatal(_findings)
+        finally:
+            os.unlink(_path)
+
+
+def _build_sample_for_pattern(re_src: str) -> str:
+    """Produce a line that should match `re_src`.  For patterns with
+    regex metachars (literal-dot escapes, .* wildcards, escaped
+    asterisks), construct a sample by hand-substituting escaped
+    metachars to their literal form so the synthesized line matches.
+    """
+    _specials = {
+        r'WARNING \*\*:.*main-menu':
+            'May 22 12:34:56 something WARNING **: foo main-menu bar',
+    }
+    if re_src in _specials:
+        return _specials[re_src]
+    # Generic case: turn `\.` into `.`, `\*` into `*`, `.*` into
+    # `_anything_`, then prepend a syslog-ish timestamp prefix.
+    _literal = (
+        re_src
+        .replace(r'.*', '_anything_')
+        .replace(r'\.', '.')
+        .replace(r'\*', '*')
+    )
+    return f'May 22 12:34:56 stub: {_literal}'
+
+
+def test_installer_smoke_scan_log_distinguishes_warn_from_fatal():
+    """Warns shouldn't trigger has_fatal — they're tracking-only."""
+    import tempfile
+    _mod = _smoke_import()
+    _warns = [_e for _e in _mod.KNOWN_BAD if _e[1] == 'warn']
+    if not _warns:
+        return   # no warns defined; test is a no-op
+    _re_src = _warns[0][0]
+    _sample = _build_sample_for_pattern(_re_src)
+    with tempfile.NamedTemporaryFile('w', suffix='.log', delete=False) as _fh:
+        _fh.write(_sample + '\n')
+        _path = _fh.name
+    try:
+        _findings = _mod.scan_log(_path)
+        assert _findings, f"scan_log missed warn pattern {_re_src!r}"
+        assert all(_f['severity'] == 'warn' for _f in _findings), _findings
+        assert not _mod.has_fatal(_findings), (
+            "has_fatal returned True for a warn-only finding"
+        )
+    finally:
+        os.unlink(_path)
+
+
+def test_installer_smoke_scan_log_handles_missing_file():
+    """A nonexistent log path returns [] (not an exception).  The
+    harness uses this when QEMU dies before producing any serial
+    output — the scan should fail gracefully + the harness reports
+    'QEMU exited rc=N, 0 bytes log' instead of crashing."""
+    _mod = _smoke_import()
+    _findings = _mod.scan_log('/tmp/this-path-definitely-does-not-exist-12345.log')
+    assert _findings == []
+
+
+def test_installer_smoke_known_bad_extends_with_extra_patterns():
+    """scan_log accepts caller-supplied extra patterns — used by
+    operators who want a one-shot ad-hoc gate without editing the
+    canonical KNOWN_BAD list.  Pin the extension surface so a
+    refactor doesn't drop it."""
+    import tempfile
+    _mod = _smoke_import()
+    _extra = [(r'ad-hoc-regression-XYZ', 'fatal', 'test-only pattern')]
+    with tempfile.NamedTemporaryFile('w', suffix='.log', delete=False) as _fh:
+        _fh.write('something something ad-hoc-regression-XYZ here\n')
+        _path = _fh.name
+    try:
+        _findings = _mod.scan_log(_path, extra_patterns=_extra)
+        assert any(_f['pattern'] == r'ad-hoc-regression-XYZ'
+                   for _f in _findings), _findings
+    finally:
+        os.unlink(_path)
+
+
+def test_installer_smoke_run_module_has_required_modes():
+    """The run.py entry point must expose --quick (default) + --full
+    modes per the README contract.  Code-inspection anti-regression.
+    """
+    _path = os.path.join(_ROOT, 'tests', 'installer_smoke', 'run.py')
+    with open(_path) as fh:
+        _body = fh.read()
+    assert "'--quick'" in _body, "--quick mode flag missing from run.py"
+    assert "'--full'" in _body, "--full mode flag missing from run.py"
+    assert "'--iso'" in _body, "--iso arg missing from run.py"
+    assert "'--mode'" in _body, "--mode (bios/efi) arg missing from run.py"
+    assert 'qemu-system-x86_64' in _body, (
+        "run.py must invoke qemu-system-x86_64"
+    )
+    # The known-bad parser must be wired in.
+    assert 'known_bad_patterns' in _body
+    assert 'scan_log' in _body
+
+
 def test_installer_chroot_dpkg_unpack_carries_required_force_flags():
     """REGRESSION (2026-05-11): _dpkg_unpack must invoke dpkg with at
     least --force-depends + --force-overwrite + --no-triggers, with
