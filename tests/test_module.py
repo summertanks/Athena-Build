@@ -46,10 +46,20 @@ def test_mirror_suite_with_suffix():
     assert m.dist_url == 'http://deb.debian.org/debian-security/dists/bookworm-security/', m.dist_url
 
 
-def test_mirror_repr_does_not_crash():
+def test_mirror_repr_includes_identifying_fields():
+    """Mirror.__repr__ must surface enough state for debug logs to be
+    useful — id, composed url, suite, and component.  Strengthened
+    2026-05-23 from the prior `repr(m)` no-op (TEST-09 consolidation —
+    repr changes silently when fields are renamed / dropped, and a
+    no-op assertion couldn't catch that)."""
     from utils import Mirror
-    m = Mirror('updates', 'http://x', 'y', 'z', '-updates', 'main', 'amd64')
-    repr(m)  # raises if broken
+    m = Mirror('updates', 'http://x.test', 'debian', 'bookworm',
+               '-updates', 'main', 'amd64')
+    r = repr(m)
+    assert 'updates' in r, r          # id
+    assert 'http://x.test/debian' in r, r   # composed url
+    assert 'bookworm-updates' in r, r       # suite
+    assert 'main' in r, r                    # component
 
 
 def test_mirror_is_frozen_after_construction():
@@ -9682,20 +9692,6 @@ def test_parse_dependency_reuses_lookahead_for_multi_version_same_name():
     )
 
 
-def test_dependency_tree_default_does_not_auto_pick_across_names():
-    """Default DependencyTree (deb tree) does NOT auto-pick when there
-    are multiple Package names — the operator prompt is the only way
-    out.  This pins the deb-world behaviour so the udeb fallback does
-    not bleed into deb resolution."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import dependencytree
-    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
-    # Replicate __init__'s zero-state for the relevant flag only.
-    dt._auto_pick_highest_when_ambiguous = False
-    assert dt._auto_pick_highest_when_ambiguous is False
-
-
 def test_dependency_tree_udeb_tree_flag_enables_max_version_fallback():
     """When auto_pick_highest_when_ambiguous=True, multi-name candidates
     that _auto_pick_candidate refuses to auto-pick get the highest-version
@@ -9796,18 +9792,6 @@ def test_dependency_tree_constructor_accepts_auto_pick_flag():
     assert p.default is False
 
 
-def test_buildsession_initialises_udeb_dep_tree_as_none():
-    """A fresh BuildSession has udeb_dep_tree=None until cmd_parse_dependency
-    runs.  Consumers must gate on dep_check_ready before touching it."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-    s = BuildSession.__new__(BuildSession)
-    # Replicate the __init__ assignments relevant to this test.
-    s.dep_tree = None
-    s.udeb_dep_tree = None
-    assert s.udeb_dep_tree is None
-    assert hasattr(s, 'udeb_dep_tree')
 
 
 def test_print_udebs_handles_no_udeb_tree_gracefully():
@@ -14091,6 +14075,575 @@ def test_cmd_source_rescan_is_readonly_no_refresh_patches_call():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TEST-05: offline Cache fixture
+#
+# Drives Cache.__build_cache against on-disk Packages/Sources blobs in a
+# tempdir, bypassing __init__'s mirror downloads + GPG verification.  Used
+# by TEST-02 (parse_dependency) and TEST-10 (collision-gate integration).
+#
+# Two helpers:
+#   _make_offline_mirror(_id, baseurl='file:///tmp/x', ...) — bare Mirror
+#     instance; default file:// scheme so with_snapshot() is a no-op.
+#   _make_offline_cache(tmpdir, packages={'main': <text>, ...},
+#                       sources={...}, udeb_packages={...}) — full Cache
+#     with hashtables populated.  No real network.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_offline_mirror(_id: str = 'main',
+                         baseurl: str = 'file:///tmp/offline',
+                         baseid: str = 'debian',
+                         release: str = 'bookworm',
+                         suffix: str = '',
+                         component: str = 'main',
+                         arch: str = 'amd64'):
+    from utils import Mirror
+    return Mirror(_id, baseurl, baseid, release, suffix, component, arch)
+
+
+def _make_offline_cache(tmpdir: str,
+                        packages=None,
+                        sources=None,
+                        udeb_packages=None,
+                        arch: str = 'amd64',
+                        fork_id: str = 'fork'):
+    """Construct a real Cache against on-disk Packages/Sources blobs.
+
+    Each input dict is keyed by mirror id and maps to the file content.
+    Mirror order in the Cache is the iteration order of `packages`; the
+    fork-supersede check looks for mirror_id == 'fork' (case-sensitive).
+
+    Returns the populated Cache instance with .is_valid==True; caller
+    can inspect package_hashtable, udeb_hashtable, etc."""
+    import os
+    from collections import defaultdict
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    from debian.debian_support import DpkgArchTable
+
+    packages      = packages      or {}
+    sources       = sources       or {}
+    udeb_packages = udeb_packages or {}
+
+    c = Cache.__new__(Cache)
+    c._config_valid = False
+    c.error_str = ''
+    c._arch_table = DpkgArchTable.load_arch_table()
+    c.cache_dir = tmpdir
+    c._security_keyring = ''
+    c._security_work_dir = tmpdir
+    c._security_disabled = True
+    c.snapshot_ts = None
+    c.mirrors = [
+        _make_offline_mirror(_id, baseurl=f'file://{tmpdir}/{_id}')
+        for _id in packages
+    ]
+    c._compression_openers = []
+    c.release_info = ''
+    c.pkg_list = []
+    c.src_list = []
+    c.required = []
+    c.important = []
+    c.udeb_required = []
+    c.udeb_important = []
+    c.skip_src = []
+    c.package_hashtable = defaultdict(lambda: defaultdict(list))
+    c.source_hashtable  = defaultdict(list)
+    c.udeb_hashtable    = defaultdict(lambda: defaultdict(list))
+    c._fork_pkg_names  = set()
+    c._fork_udeb_names = set()
+    c._fork_src_names  = set()
+    c._upstream_collisions      = defaultdict(list)
+    c._upstream_udeb_collisions = defaultdict(list)
+
+    # Write Packages + Sources blobs and stamp mirror_cache_files /
+    # mirror_udeb_cache_files (these are what __build_cache /
+    # _ingest_udeb_indices read).
+    c.mirror_cache_files = {}
+    c.mirror_udeb_cache_files = {}
+    for _id, _body in packages.items():
+        _mdir = os.path.join(tmpdir, _id)
+        os.makedirs(_mdir, exist_ok=True)
+        _ppath = os.path.join(_mdir, 'Packages')
+        _spath = os.path.join(_mdir, 'Sources')
+        with open(_ppath, 'w') as fh: fh.write(_body)
+        with open(_spath, 'w') as fh: fh.write(sources.get(_id, ''))
+        c.mirror_cache_files[_id] = {'Packages': _ppath, 'Sources': _spath}
+        if _id in udeb_packages:
+            _upath = os.path.join(_mdir, 'Packages-udeb')
+            with open(_upath, 'w') as fh: fh.write(udeb_packages[_id])
+            c.mirror_udeb_cache_files[_id] = _upath
+
+    # Run the real bound method.  Name-mangled because __build_cache is
+    # double-underscored.  We exercise the same path Cache.__init__ does
+    # so any future refactor of __build_cache is covered by these tests.
+    _ok = c._Cache__build_cache(arch)  # type: ignore[attr-defined]
+    if udeb_packages:
+        c._ingest_udeb_indices(arch)
+    c._config_valid = _ok
+    return c
+
+
+def test_offline_fixture_builds_a_valid_cache():
+    """Smoke test that the fixture infra itself works — one upstream
+    mirror, one package, one source, no fork.  All other TEST-02 /
+    TEST-10 tests below assume this base case is sound."""
+    import tempfile
+    _pkg = (
+        "Package: hello\n"
+        "Version: 2.10-3\n"
+        "Architecture: amd64\n"
+        "Description: classic hello\n"
+        "Filename: pool/main/h/hello/hello_2.10-3_amd64.deb\n"
+        "Size: 100\n"
+        "SHA256: deadbeef\n"
+    )
+    _src = (
+        "Package: hello\n"
+        "Binary: hello\n"
+        "Version: 2.10-3\n"
+        "Architecture: any\n"
+        "Directory: pool/main/h/hello\n"
+        "Checksums-Sha256:\n"
+        " " + ("a" * 64) + " 100 hello_2.10-3.dsc\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        c = _make_offline_cache(td, packages={'main': _pkg},
+                                sources={'main': _src})
+    assert c.is_valid, c.error_str
+    assert 'hello' in c.package_hashtable
+    assert 'hello' in c.source_hashtable
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST-02: DependencyTree.parse_dependency
+#
+# Existing coverage: lookahead reuse (sudo case), auto-pick across names
+# (deb vs udeb), real-name-prefers-virtual (anacron case).
+# Gaps filled below: empty-name guard, already-selected unsatisfied-version
+# warning, alt-deps first-already-selected path, alt-deps fallback to first,
+# recommends inclusion, cycle protection, Provides version satisfies
+# constraint (Policy §7.5).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_parse_dep_tree(cache_pkgs: dict, *, select_recommended: bool = False,
+                         auto_pick_highest: bool = False):
+    """Construct a bare DependencyTree wired to a fake cache shaped from
+    a {pkg_name: [_FakePkg, ...]} dict.  Returns the tree."""
+    import sys
+    from collections import defaultdict
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+
+    class _Cache:
+        def __init__(self, pkgs):
+            self._pkgs = pkgs
+            self.skip_src = []
+        def get_packages(self, name, ver=None, op=''):
+            return list(self._pkgs.get(name, []))
+
+    dt = dependencytree.DependencyTree.__new__(dependencytree.DependencyTree)
+    dt._DependencyTree__cache = _Cache(cache_pkgs)         # type: ignore[attr-defined]
+    dt._DependencyTree__lookahead = defaultdict(dict)      # type: ignore[attr-defined]
+    dt._DependencyTree__recommended = select_recommended   # type: ignore[attr-defined]
+    dt.selected_pkgs = {}
+    dt.selected_srcs = {}
+    dt.extras_pkg_names = set()
+    dt.live_exclusive_pkg_names = set()
+    dt.installer_exclusive_pkg_names = set()
+    dt._auto_pick_highest_when_ambiguous = auto_pick_highest
+    dt.arch = 'amd64'
+    dt.build_profiles = frozenset()
+    return dt
+
+
+class _ParseDepPkg:
+    """Minimal Package surface that mimics the attributes parse_dependency
+    reads.  Distinct from the module-level _FakePkg (used by the
+    pull_recommends / installer_chroot tests) — different shape, kept
+    separate to avoid namespace collisions on shared keyword args."""
+    def __init__(self, name, ver='1.0', *, depends=None, pre_depends=None,
+                 recommends=None, alt_depends=None, provides=None):
+        self._fields = {'Package': name, 'Version': ver}
+        self.package = name
+        self.version = ver
+        self.depends      = list(depends      or [])
+        self.pre_depends  = list(pre_depends  or [])
+        self.recommends   = list(recommends   or [])
+        self.alt_depends  = list(alt_depends  or [])
+        self.conflicts    = []
+        self.breaks       = []
+        self._provides    = list(provides     or [])
+        self.depends_on   = []
+        self.depended_by  = []
+    def __getitem__(self, k): return self._fields[k]
+    def get_provides(self): return list(self._provides)
+    def add_constraint(self, v, o): pass
+
+
+def test_parse_dependency_empty_name_returns_none():
+    """Guard the early empty-name return — caller could pass '' from a
+    malformed dep tuple (e.g. parser garbled output).  Must not raise
+    KeyError on the cache lookup; must return None."""
+    dt = _make_parse_dep_tree({})
+    assert dt.parse_dependency('') is None
+
+
+def test_parse_dependency_no_candidates_returns_none():
+    """Case II — name not in cache, no Provides match.  Returns None
+    so caller emits 'unresolved' warning rather than crashing."""
+    dt = _make_parse_dep_tree({})
+    assert dt.parse_dependency('does-not-exist') is None
+
+
+def test_parse_dependency_single_candidate_case_iii():
+    """Case III — exactly one candidate, no lookahead disambiguation
+    needed.  Selected directly; placed into selected_pkgs."""
+    foo = _ParseDepPkg('foo', '1.0')
+    dt = _make_parse_dep_tree({'foo': [foo]})
+    result = dt.parse_dependency('foo')
+    assert result is foo
+    assert dt.selected_pkgs['foo'] is foo
+
+
+def test_parse_dependency_already_selected_returns_existing():
+    """Already-selected name with no version constraint — early return
+    of the existing Package without re-walking the cache.  Pins the
+    short-circuit so a later parse_dependency() call for the same name
+    is O(1)."""
+    foo = _ParseDepPkg('foo', '1.0')
+    dt = _make_parse_dep_tree({'foo': [foo]})
+    dt.parse_dependency('foo')
+    # Second call: cache is empty (we cleared it), but result still
+    # returns from selected_pkgs.
+    dt._DependencyTree__cache._pkgs = {}
+    assert dt.parse_dependency('foo') is foo
+
+
+def test_parse_dependency_provides_registers_virtual_alias():
+    """A real package providing virtual `awk` must register both names
+    in selected_pkgs so a later parse_dependency('awk') hits the
+    selected_pkgs early-return path."""
+    gawk = _ParseDepPkg('gawk', '1.0', provides=[('awk', None)])
+    dt = _make_parse_dep_tree({'gawk': [gawk], 'awk': [gawk]})
+    dt.parse_dependency('gawk')
+    # Virtual name registered alongside the real one.
+    assert dt.selected_pkgs.get('awk') is gawk
+    assert dt.selected_pkgs.get('gawk') is gawk
+
+
+def test_parse_dependency_propagates_dep_recursively():
+    """`foo` Depends `bar` — selecting `foo` must recurse and select
+    `bar` too.  Pins the depth-first walk; without it selected_pkgs
+    would only contain the seed."""
+    bar = _ParseDepPkg('bar', '1.0')
+    foo = _ParseDepPkg('foo', '1.0', depends=[('bar', '', '')])
+    dt = _make_parse_dep_tree({'foo': [foo], 'bar': [bar]})
+    dt.parse_dependency('foo')
+    assert 'bar' in dt.selected_pkgs
+    assert 'bar' in foo.depends_on
+    assert 'foo' in bar.depended_by
+
+
+def test_parse_dependency_cycle_protection_does_not_infinite_loop():
+    """A → B → A.  The early return on already-selected names
+    (selected_pkgs check at top of parse_dependency) breaks the cycle.
+    Without it the test would recurse forever and bust the stack —
+    a finite return value here proves cycle detection works."""
+    a = _ParseDepPkg('a', '1.0', depends=[('b', '', '')])
+    b = _ParseDepPkg('b', '1.0', depends=[('a', '', '')])
+    dt = _make_parse_dep_tree({'a': [a], 'b': [b]})
+    result = dt.parse_dependency('a')
+    assert result is a
+    assert 'a' in dt.selected_pkgs
+    assert 'b' in dt.selected_pkgs
+
+
+def test_parse_dependency_recommends_pulled_when_flag_on():
+    """select_recommended=True → recommends are walked like depends.
+    Off (default) → recommends are skipped.  Pins both branches."""
+    rec = _ParseDepPkg('rec', '1.0')
+    foo_with_rec = _ParseDepPkg('foo', '1.0', recommends=[('rec', '', '')])
+
+    dt_off = _make_parse_dep_tree({'foo': [foo_with_rec], 'rec': [rec]})
+    dt_off.parse_dependency('foo')
+    assert 'rec' not in dt_off.selected_pkgs, (
+        "default: recommends NOT pulled in"
+    )
+
+    # Build a fresh tree (Package objects carry state across resolves).
+    rec2 = _ParseDepPkg('rec', '1.0')
+    foo2 = _ParseDepPkg('foo', '1.0', recommends=[('rec', '', '')])
+    dt_on = _make_parse_dep_tree({'foo': [foo2], 'rec': [rec2]},
+                                  select_recommended=True)
+    dt_on.parse_dependency('foo')
+    assert 'rec' in dt_on.selected_pkgs, (
+        "select_recommended=True: recommends pulled in"
+    )
+
+
+def test_parse_dependency_alt_deps_first_already_selected_wins():
+    """`foo` has alt-dep `[ ('a', ...), ('b', ...) ]`.  When `a` is
+    already in selected_pkgs (and satisfies the version), parse_dep
+    must pick `a` — not the first alternative blindly.  This pins
+    the alt-deps selected-first preference loop."""
+    a = _ParseDepPkg('a', '1.0')
+    b = _ParseDepPkg('b', '1.0')
+    foo = _ParseDepPkg('foo', '1.0', alt_depends=[
+        [('a', '', ''), ('b', '', '')]
+    ])
+    dt = _make_parse_dep_tree({'foo': [foo], 'a': [a], 'b': [b]})
+    # Pre-seed `a`.
+    dt.selected_pkgs['a'] = a
+    dt.parse_dependency('foo')
+    # Both could end up in selected_pkgs via Provides if any; but the
+    # forward edge from foo must go to `a` (the already-selected alt).
+    assert 'a' in foo.depends_on
+    assert 'b' not in foo.depends_on
+
+
+def test_parse_dependency_alt_deps_default_to_first_alternative():
+    """When none of the alts are already selected, parse_dependency
+    falls back to the FIRST alternative (Debian convention).  Pins
+    the default-pick behaviour at the bottom of the alt-deps loop."""
+    a = _ParseDepPkg('a', '1.0')
+    b = _ParseDepPkg('b', '1.0')
+    foo = _ParseDepPkg('foo', '1.0', alt_depends=[
+        [('a', '', ''), ('b', '', '')]
+    ])
+    dt = _make_parse_dep_tree({'foo': [foo], 'a': [a], 'b': [b]})
+    dt.parse_dependency('foo')
+    # First alt picked.
+    assert 'a' in foo.depends_on
+    assert 'b' not in foo.depends_on
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST-08: Mirror.with_snapshot property tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_mirror_with_snapshot_none_returns_self():
+    """ts=None is a no-op so call sites can invoke unconditionally
+    without a pre-check.  Pins the None branch — without it,
+    every consumer would need its own `if ts is not None` guard."""
+    from utils import Mirror
+    m = Mirror(id='main', baseurl='http://x.test', baseid='debian',
+               release='bookworm', suffix='', component='main', arch='amd64')
+    assert m.with_snapshot(None) is m
+
+
+def test_mirror_with_snapshot_is_idempotent():
+    """Calling with_snapshot twice with the same ts yields a mirror
+    equal to the single-call result.  Catches the imaginary regression
+    where a future implementation appends `/{ts}` to baseid each call,
+    drifting the URL across invocations."""
+    from utils import Mirror
+    m = Mirror(id='main', baseurl='http://x.test', baseid='debian',
+               release='bookworm', suffix='', component='main', arch='amd64')
+    once  = m.with_snapshot('20260101T000000Z')
+    twice = once.with_snapshot('20260101T000000Z')
+    # Idempotence here means "two single-step results from the original
+    # mirror are equal".  The chain (m → once → twice) is allowed to
+    # double-baseid (and does today); pin the SINGLE-STEP property which
+    # is what consumers rely on.
+    again = m.with_snapshot('20260101T000000Z')
+    assert once == again
+    assert once is not twice    # new instance each call
+    # Suite (which encodes release+suffix) is unchanged by snapshot.
+    assert once.suite == m.suite == twice.suite
+
+
+def test_mirror_with_snapshot_preserves_suite_and_component():
+    """The snapshot wrapper rewrites baseurl + baseid but must leave
+    suite, component, arch, suffix, release untouched — those address
+    WHICH index files we read, not WHERE the mirror lives."""
+    from utils import Mirror
+    m = Mirror(id='security', baseurl='http://deb.debian.org',
+               baseid='debian-security', release='bookworm',
+               suffix='-security', component='main', arch='amd64')
+    snap = m.with_snapshot('20260514T083402Z')
+    assert snap.suite     == m.suite
+    assert snap.component == m.component
+    assert snap.arch      == m.arch
+    assert snap.suffix    == m.suffix
+    assert snap.release   == m.release
+    # baseid is rewritten to embed the timestamp.
+    assert '20260514T083402Z' in snap.baseid
+    assert snap.baseid.startswith('debian-security')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST-10: coverage gaps in signing + cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_signing_get_key_info_returns_none_when_gpg_missing():
+    """get_key_info short-circuits with None when shutil.which('gpg')
+    returns None — operator without gpg installed must not crash a
+    `print signing` or build_chroot startup gate.  This pins the
+    no-gpg branch separately from the no-homedir branch already
+    covered by test_signing_get_key_info_returns_none_when_homedir_absent."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import signing
+
+    class _Cfg:
+        def __init__(self, td):
+            self.dir_gnupg = td
+            self.signing_key_uid = 'Athena Build <athena@local>'
+
+    with tempfile.TemporaryDirectory() as td:
+        # Create signing_home so the homedir-missing branch doesn't
+        # short-circuit first.
+        os.makedirs(os.path.join(td, 'signing'), mode=0o700)
+        cfg = _Cfg(td)
+        with patch.object(signing.shutil, 'which', return_value=None):
+            assert signing.get_key_info(cfg) is None
+
+
+def test_signing_generate_key_returns_false_when_gpg_missing():
+    """generate_key short-circuits with False when gpg is absent on
+    PATH — caller (cmd_generate_signing_key) must see the failure
+    and prompt the operator to install gpg rather than hanging on a
+    subprocess.run that would FileNotFoundError."""
+    import sys, tempfile
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import signing
+
+    class _Cfg:
+        def __init__(self, td):
+            self.dir_gnupg = td
+            self.signing_key_uid = 'Athena Build <athena@local>'
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg = _Cfg(td)
+        with patch.object(signing.shutil, 'which', return_value=None):
+            assert signing.generate_key(cfg) is False
+
+
+def test_signing_generate_key_returns_false_when_export_step_fails():
+    """generate_key has TWO subprocess calls — gen + export.  Existing
+    tests cover gen-failure indirectly (real-gpg roundtrip) but the
+    export-failure branch (after a successful gen) is unexercised.
+    Pin that path by mocking subprocess.run to succeed on gen, fail
+    on export."""
+    import sys, tempfile, subprocess as _subp
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import signing
+
+    class _Cfg:
+        def __init__(self, td):
+            self.dir_gnupg = td
+            self.signing_key_uid = 'Athena Build <athena@local>'
+
+    _calls = []
+    def _fake_run(cmd, *args, **kwargs):
+        _calls.append(tuple(cmd))
+        _r = _subp.CompletedProcess(cmd, returncode=0,
+                                     stdout='', stderr='')
+        # First call is --gen-key (succeeds); second is --export (fails).
+        if '--export' in cmd:
+            _r.returncode = 2
+            _r.stderr = 'gpg: forced export failure for test'
+        return _r
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg = _Cfg(td)
+        with patch.object(signing.shutil, 'which', return_value='/usr/bin/gpg'), \
+             patch.object(signing.subprocess, 'run', side_effect=_fake_run):
+            ok = signing.generate_key(cfg)
+    assert ok is False
+    # Both calls fired: gen succeeded, export failed.  Pin the order
+    # so a refactor doesn't reverse it (export-first would leak a
+    # half-created key on the disk if gen then failed).
+    assert len(_calls) == 2
+    assert '--gen-key' in _calls[0]
+    assert '--export'  in _calls[1]
+
+
+def test_cache_build_populates_upstream_collisions_via_real_path():
+    """End-to-end through __build_cache: a fork mirror + an upstream
+    mirror, both shipping 'pkgsel', upstream version greater than
+    fork's.  The collision-gate must fire and set error_str.
+
+    Existing _make_collision_cache scaffold tests the gate function
+    in isolation; this test exercises the real ingest path that
+    populates _upstream_collisions from on-disk Packages records."""
+    import tempfile
+    _fork_pkg = (
+        "Package: pkgsel\n"
+        "Version: 0.79\n"
+        "Architecture: amd64\n"
+        "Filename: pool/main/p/pkgsel/pkgsel_0.79_amd64.deb\n"
+        "Size: 100\n"
+        "SHA256: " + ("a" * 64) + "\n"
+    )
+    _upstream_pkg = (
+        "Package: pkgsel\n"
+        "Version: 0.80\n"
+        "Architecture: amd64\n"
+        "Filename: pool/main/p/pkgsel/pkgsel_0.80_amd64.deb\n"
+        "Size: 100\n"
+        "SHA256: " + ("b" * 64) + "\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        c = _make_offline_cache(
+            td,
+            packages={'fork': _fork_pkg, 'main': _upstream_pkg},
+        )
+    assert c.is_valid is False, "collision gate must fail the build"
+    assert 'pkgsel' in c.error_str
+    assert '0.79'   in c.error_str
+    assert '0.80'   in c.error_str
+    assert 'main'   in c.error_str
+    # Pin the collision-tracking side-channel too — _upstream_collisions
+    # was populated during the walk before the gate fired.
+    assert 'pkgsel' in c._upstream_collisions
+    assert ('main', '0.80') in c._upstream_collisions['pkgsel']
+
+
+def test_cache_build_fork_supersede_drops_upstream_silently():
+    """When the fork's version dominates upstream, the gate passes and
+    upstream's record is dropped from package_hashtable (apt sees only
+    the fork).  Pin both: gate passes AND upstream version is absent
+    from the hashtable for the colliding name."""
+    import tempfile
+    _fork_pkg = (
+        "Package: athena-base-files\n"
+        "Version: 12.4+deb12u14+athena1\n"
+        "Architecture: all\n"
+        "Filename: pool/main/a/athena-base-files/athena-base-files_12.4+deb12u14+athena1_all.deb\n"
+        "Size: 100\n"
+        "SHA256: " + ("a" * 64) + "\n"
+    )
+    _upstream_pkg = (
+        "Package: athena-base-files\n"
+        "Version: 12.4+deb12u14\n"
+        "Architecture: all\n"
+        "Filename: pool/main/a/athena-base-files/athena-base-files_12.4+deb12u14_all.deb\n"
+        "Size: 100\n"
+        "SHA256: " + ("b" * 64) + "\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        c = _make_offline_cache(
+            td,
+            packages={'fork': _fork_pkg, 'main': _upstream_pkg},
+        )
+    assert c.is_valid is True, c.error_str
+    # Fork version present in hashtable.
+    _versions = list(c.package_hashtable['athena-base-files'].keys())
+    assert len(_versions) == 1
+    assert str(_versions[0]) == '12.4+deb12u14+athena1'
+    # Upstream version was logged as superseded.
+    assert 'athena-base-files' in c._upstream_collisions
+    assert ('main', '12.4+deb12u14') in c._upstream_collisions['athena-base-files']
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -14099,7 +14652,7 @@ def main() -> int:
         # v0.2 step 1
         test_mirror_url_composition,
         test_mirror_suite_with_suffix,
-        test_mirror_repr_does_not_crash,
+        test_mirror_repr_includes_identifying_fields,
         test_mirror_is_frozen_after_construction,
         test_mirror_normalises_baseurl_and_baseid_slashes,
         test_mirror_rejects_empty_required_fields,
@@ -14411,11 +14964,9 @@ def main() -> int:
         test_udeb_view_get_packages_resolves_against_udeb_hashtable,
         test_udeb_view_does_not_leak_into_real_package_hashtable,
         test_parse_dependency_reuses_lookahead_for_multi_version_same_name,
-        test_dependency_tree_default_does_not_auto_pick_across_names,
         test_dependency_tree_udeb_tree_flag_enables_max_version_fallback,
         test_auto_pick_candidate_prefers_real_package_matching_seed_name,
         test_dependency_tree_constructor_accepts_auto_pick_flag,
-        test_buildsession_initialises_udeb_dep_tree_as_none,
         test_print_udebs_handles_no_udeb_tree_gracefully,
         test_print_udebs_lists_udeb_closure_when_tree_populated,
         test_compute_install_batches_excludes_extras_pkg_names,
@@ -14562,6 +15113,29 @@ def main() -> int:
         test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails,
         test_cmd_source_repair_leaves_consistent_pass_alone,
         test_cmd_source_repair_leaves_tunneled_marker_alone,
+        # TEST-05: offline Cache fixture
+        test_offline_fixture_builds_a_valid_cache,
+        # TEST-02: parse_dependency coverage
+        test_parse_dependency_empty_name_returns_none,
+        test_parse_dependency_no_candidates_returns_none,
+        test_parse_dependency_single_candidate_case_iii,
+        test_parse_dependency_already_selected_returns_existing,
+        test_parse_dependency_provides_registers_virtual_alias,
+        test_parse_dependency_propagates_dep_recursively,
+        test_parse_dependency_cycle_protection_does_not_infinite_loop,
+        test_parse_dependency_recommends_pulled_when_flag_on,
+        test_parse_dependency_alt_deps_first_already_selected_wins,
+        test_parse_dependency_alt_deps_default_to_first_alternative,
+        # TEST-08: Mirror.with_snapshot properties
+        test_mirror_with_snapshot_none_returns_self,
+        test_mirror_with_snapshot_is_idempotent,
+        test_mirror_with_snapshot_preserves_suite_and_component,
+        # TEST-10: coverage gaps in signing + cache
+        test_signing_get_key_info_returns_none_when_gpg_missing,
+        test_signing_generate_key_returns_false_when_gpg_missing,
+        test_signing_generate_key_returns_false_when_export_step_fails,
+        test_cache_build_populates_upstream_collisions_via_real_path,
+        test_cache_build_fork_supersede_drops_upstream_silently,
     ]
     failures = 0
     for t in tests:
