@@ -1,6 +1,6 @@
-# (C) Athena Linux Project
+# (C) Athena Build Project
 """
-build.py — top-level orchestrator for the Athena Linux build system.
+build.py — top-level orchestrator for the Athena Build System.
 
 Responsibilities:
   - Parse build configuration and APT cache
@@ -53,10 +53,16 @@ from tui import setup_file_logging
 
 logger = logging.getLogger('athena')
 
-asciiart_logo = '╔══╦╗╔╗─────────╔╗╔╗\n' \
-                '║╔╗║╚╣╚╦═╦═╦╦═╗─║║╠╬═╦╦╦╦╦╗\n' \
-                '║╠╣║╔╣║║╩╣║║║╬╚╗║╚╣║║║║║╠║╣\n' \
-                '╚╝╚╩═╩╩╩═╩╩═╩══╝╚═╩╩╩═╩═╩╩╝'
+asciiart_logo = (
+    '╔══════════════════════════════════════════════════════════════╗\n'
+    '║                                                              ║\n'
+    '║                    ATHENA  BUILD  SYSTEM                     ║\n'
+    '║                                                              ║\n'
+    '║    author : Harkirat S Virk                                  ║\n'
+    '║    github : https://github.com/summertanks/Athena-Build      ║\n'
+    '║                                                              ║\n'
+    '╚══════════════════════════════════════════════════════════════╝'
+)
 
 # TODO: make all apt_pkg.parse functions arch specific
 
@@ -600,7 +606,7 @@ class BuildSession:
 
     def cmd_clean_download(self, *args):
         """Wipe tunneled .deb downloads.  These are re-fetched on
-        demand by `package tunnel` so cleaning is safe."""
+        demand by `repo tunnel` so cleaning is safe."""
         self._wipe_dir_contents(
             'download', self.config.dir_download,
             sudo=False, skip_prompt='force' in args)
@@ -1647,7 +1653,7 @@ class BuildSession:
             packages.append(src)
 
         _success = _failed = 0
-        progress_bar = ProgressBar(label='Tunnel', itr_label='pkgs', maxvalue=len(packages))
+        progress_bar = ProgressBar(label='Tunnel', maxvalue=len(packages), show_rate=False)
         
         for _src_pkg in packages:
             _result = self._do_tunnel(_src_pkg)
@@ -1967,7 +1973,7 @@ class BuildSession:
             for _pkg, _field, _other, _rel in _inst_conflicts[:_show]:
                 console.print(f"  {_pkg}  {_field}: {_rel}  → {_other}")
         console.print(
-            "\nRun `package audit verbose` for the full lists."
+            "\nRun `repo audit verbose` for the full lists."
         )
         _resp = Prompt(
             PROMPT_YESNO,
@@ -2133,7 +2139,7 @@ class BuildSession:
 
         # Soft-warn section.  Doesn't gate the audit — these aren't broken
         # constraints, they're "shouldn't be in the pool" residue.  Mirrors
-        # the categorisation `package cleanup` uses, without the deletion
+        # the categorisation `repo cleanup` uses, without the deletion
         # half.  Surfaces the silent-drift scenarios that DID bite us —
         # apt picks the highest version per name and the lower one becomes
         # a phantom, so dep-resolution looks fine right up until install
@@ -2153,7 +2159,7 @@ class BuildSession:
 
         Lists counts (and a short preview) of orphan-source and
         version-drift residue under repo/.  Doesn't delete — the
-        operator runs `package cleanup` when they want to act.
+        operator runs `repo cleanup` when they want to act.
         """
         _orphan, _drift, _malformed, _total = self._scan_stale_files()
         _n_stale = len(_orphan) + len(_drift)
@@ -2185,7 +2191,7 @@ class BuildSession:
             )
             # Short preview — one line per source for orphans (collapses
             # the task-* family case), individual lines for drift.  Full
-            # detail lives in `package cleanup` (dry-run).
+            # detail lives in `repo cleanup` (dry-run).
             _show = 5 if not verbose else max(len(_orphan), len(_drift))
             if _orphan:
                 from collections import defaultdict
@@ -2213,7 +2219,7 @@ class BuildSession:
                         f"pass `verbose` for full list)"
                     )
             console.print(
-                "  Run `package cleanup` to review/remove (dry-run by "
+                "  Run `repo cleanup` to review/remove (dry-run by "
                 "default).",
                 tui.COLOR_INFO,
             )
@@ -2367,12 +2373,12 @@ class BuildSession:
             "  build_failed     → check log/build/<name>.result; rebuild\n"
             "  missed_by_parse  → add target to pkg.list / live.list / pool.list\n"
             "  transitional     → update consumer pkg (upstream dropped target)\n"
-            "  other            → `package audit_nmu` first; then drill in"
-            " with `package audit <target>`"
+            "  other            → `repo audit_nmu` first; then drill in"
+            " with `repo audit <target>`"
         )
 
     def _audit_gap_drill_in(self, state, unresolved, target: str) -> None:
-        """Per-target diagnostic for `package audit_gap <name>`.
+        """Per-target diagnostic for `repo audit_gap <name>`.
 
         Surfaces enough state to root-cause why `<name>` is unresolved:
           - in upstream cache?  (with versions if so)
@@ -2511,10 +2517,10 @@ class BuildSession:
         if not _verbose and len(_findings) > _show:
             console.print(
                 f"  … and {len(_findings) - _show} more "
-                f"(run `package audit_nmu verbose` for full list)"
+                f"(run `repo audit_nmu verbose` for full list)"
             )
         console.print(
-            "Fix: `package strip` re-applies the strip to every "
+            "Fix: `repo strip` re-applies the strip to every "
             "non-conforming .deb in repo/."
         )
 
@@ -2533,7 +2539,7 @@ class BuildSession:
 
         Layout matches docs/plans/conf-01-repo-layout-migration.md.
 
-        REQUIRES Stage C (`package migrate_repo_layout`) to have run
+        REQUIRES Stage C (`repo migrate_layout`) to have run
         first — Stage C is what creates the
         dists/<suite>/<comp>/binary-<arch>/ directories with .debs at
         their new paths.  Until Stage C runs, this command errors clean
@@ -2554,8 +2560,8 @@ class BuildSession:
             _suite: _suite for _suite in _suites_spec
         }
         _description_for_suite = {
-            _codename: 'Athena Linux',
-            f'{_codename}-debug': 'Athena Linux — debug symbols',
+            _codename: 'Asgard Linux',
+            f'{_codename}-debug': 'Asgard Linux — debug symbols',
         }
 
         _password = Prompt(
@@ -2842,19 +2848,51 @@ class BuildSession:
     def cmd_repo(self, action: str = '', *args):
         """Dispatcher for `repo <action>` commands.
 
-        CONF-01 family — Stage B added `index`; Stage C adds
-        `migrate_layout`; COMP-02 later will add `publish`.
+        Merged from the former `package` and `repo` commands — the
+        whole repo lifecycle (tunnel a pre-built .deb in, audit
+        constraints, strip NMU residue, clean up obsoletes, index
+        metadata, migrate layout, reload a fork after edit) lives
+        under one verb.
         """
         _table = {
-            'index':
-                'generate apt-repo metadata in-place under '
-                'repo/dists/<codename>{,-debug}/',
-            'migrate_layout':
-                'one-shot migration of repo/{main,doc,dbgsym,tests}/ '
-                'to apt-conformant unified layout under '
-                'repo/dists/<codename>{,-debug}/.  '
-                'Args: dry-run | force',
+            'tunnel':         'pull prebuilt .debs from Debian repo '
+                              '(repo tunnel [pkg…])',
+            'reload':         'rebuild a fork pkg after a local edit '
+                              '(repo reload <pkg>...)',
+            'audit':          'dep + conflict audit (repo/main) + gap '
+                              'classification.  Pass a target name to '
+                              'drill in: `repo audit lsb-base`.',
+            'audit_nmu':      'walk repo/ for any .deb whose Version or '
+                              'dep constraints still carry an NMU/binNMU/'
+                              'backport suffix (+bN, +debNuN, ~bpoN+N, '
+                              'etc.)',
+            'strip':          'one-time backfill: strip NMU suffixes from '
+                              'every .deb/.udeb in repo/.  Future fresh '
+                              'builds get stripped automatically '
+                              'post-dpkg-buildpackage.',
+            'cleanup':        'delete obsolete .debs/.udebs from repo/ '
+                              '(orphan source / version drift).  Dry-run '
+                              'by default; pass `force` to actually '
+                              'delete.',
+            'index':          'generate apt-repo metadata in-place under '
+                              'repo/dists/<codename>{,-debug}/',
+            'migrate_layout': 'one-shot migration of repo/{main,doc,dbgsym,'
+                              'tests}/ to apt-conformant unified layout '
+                              'under repo/dists/<codename>{,-debug}/.  '
+                              'Args: dry-run | force',
         }
+        if action == 'tunnel':
+            return self.cmd_tunnel_package(*args)
+        if action == 'reload':
+            return self.cmd_reload_fork(*args)
+        if action == 'audit':
+            return self.cmd_audit(*args)
+        if action == 'audit_nmu':
+            return self.cmd_audit_nmu(*args)
+        if action == 'strip':
+            return self.cmd_strip_repo(*args)
+        if action == 'cleanup':
+            return self.cmd_package_cleanup(*args)
         if action == 'index':
             return self.cmd_index_repo(*args)
         if action == 'migrate_layout':
@@ -2912,7 +2950,7 @@ class BuildSession:
         _rewritten = _unchanged = _failed = 0
         _total_strips = 0
         _bar = ProgressBar(
-            label='Strip NMU', itr_label='pkgs', maxvalue=len(_files),
+            label='Strip NMU', maxvalue=len(_files), show_rate=False,
         )
         for _path in _files:
             _bar.step(1)
@@ -2953,7 +2991,7 @@ class BuildSession:
             f"Strip complete: {_rewritten} rewritten, "
             f"{_unchanged} unchanged, {_failed} failed.  "
             f"{_total_strips} suffix(es) stripped in total.  "
-            f"Run `package audit_nmu` to confirm zero residue."
+            f"Run `repo audit_nmu` to confirm zero residue."
         )
 
     def _scan_stale_files(self) -> 'tuple[list, list, list, int]':
@@ -3177,7 +3215,7 @@ class BuildSession:
         if not _force:
             console.print(
                 "\nDRY-RUN — no files were deleted.  "
-                "Pass `package cleanup force` to actually delete.",
+                "Pass `repo cleanup force` to actually delete.",
                 tui.COLOR_INFO,
             )
             return
@@ -3197,7 +3235,7 @@ class BuildSession:
         _deleted = 0
         _delete_failed = 0
         _bar = ProgressBar(
-            label='Cleanup', itr_label='files', maxvalue=_n_obsolete,
+            label='Cleanup', maxvalue=_n_obsolete, show_rate=False,
         )
         # CONF-01 Stage D: _sub is the classify_repo_subdir label; map
         # to the on-disk dir via config.deb_dest_for_filename (which
@@ -3229,7 +3267,7 @@ class BuildSession:
         console.print(
             f"\nCleanup complete: {_deleted} deleted, "
             f"{_delete_failed} failed.  "
-            f"Run `package audit` to confirm constraints still resolve."
+            f"Run `repo audit` to confirm constraints still resolve."
         )
 
     def cmd_reload_fork(self, *pkgs):
@@ -3991,8 +4029,8 @@ class BuildSession:
         Use cases:
           * After a snapshot drift, see how many packages have shifted
             and would queue for rebuild before committing to the time.
-          * After `package rebump` (or a fork edit), confirm the
-            rebuild surface narrowed to what you expected.
+          * After a fork edit, confirm the rebuild surface narrowed
+            to what you expected.
           * Pre-flight a long `autorun` so you know roughly how much
             work is queued.
 
@@ -4039,7 +4077,7 @@ class BuildSession:
         # (a few stat() calls + ar magic check), a 1500+ source corpus
         # is ~2-5s and operator wants to see motion.
         _bar = ProgressBar(
-            label='Rescan', itr_label='srcs', maxvalue=len(_srcs),
+            label='Rescan', maxvalue=len(_srcs), show_rate=False,
         )
         for _name, _src in sorted(_srcs.items()):
             _bar.step(1)
@@ -4210,7 +4248,7 @@ class BuildSession:
         _no_pkgs = 0         # source declares no binaries
 
         _bar = ProgressBar(
-            label='Repair', itr_label='srcs', maxvalue=len(_srcs),
+            label='Repair', maxvalue=len(_srcs), show_rate=False,
         )
         for _name, _src in sorted(_srcs.items()):
             _bar.step(1)
@@ -4449,7 +4487,7 @@ class BuildSession:
         _no_pkgs = 0
 
         _bar = ProgressBar(
-            label='Verify', itr_label='srcs', maxvalue=len(_srcs),
+            label='Verify', maxvalue=len(_srcs), show_rate=False,
         )
         for _name, _src in sorted(_srcs.items()):
             _bar.step(1)
@@ -4729,10 +4767,22 @@ class BuildSession:
         # autorun summary can report them as distinct categories.
         _built = _tunneled = _failed = _skipped = 0
         _total = len(packages)
-        progress_bar = ProgressBar(label='Source Build', itr_label='pkgs', maxvalue=_total)
+        # Per-package label (just the pkg name, fixed-width); the
+        # (A/B) count is conveyed by {value}/{total} on the bar, so
+        # don't duplicate it in the label.  show_rate=False — per-
+        # package source-build time varies enormously (firefox: 90min,
+        # libfoo: 2s), so an avg pkg/s rate is misleading noise.
+        progress_bar = ProgressBar(
+            label='Source Build',
+            label_width=24,
+            maxvalue=_total,
+            show_rate=False,
+        )
 
         for _index, _src_pkg in enumerate(packages, start=1):
-            progress_bar.label(f'({_index}/{_total}) {_src_pkg.package[:20]}')
+            progress_bar.label(_src_pkg.package)
+            _ = _index   # surfaced via {value} on the bar
+
 
             # Packages on the skip_src list are excluded unconditionally — typically
             # packages that are known to be unbuildable in the current environment.
@@ -5050,41 +5100,6 @@ class BuildSession:
             return self.cmd_source_audit(*args)
         return self._group_help('source', _table, action)
 
-    def cmd_package(self, action: str = '', *args):
-        _table = {
-            'tunnel': 'pull prebuilt .debs from Debian repo (package tunnel [pkg…])',
-            'rebump': 're-stamp every NMU-layered .deb/.udeb in repo/ with '
-                      '+<DistroSuffix>, then close strict-equal refs '
-                      '(one-time backfill; avoids 24-36h source rebuild)',
-            'reload': 'rebuild a fork pkg after a local edit, without the '
-                      'full cache + dep cycle (package reload <pkg>...)',
-            'audit':      'dep + conflict audit (repo/main) + gap '
-                          'classification.  Pass a target name to drill '
-                          'in: `package audit lsb-base`.',
-            'audit_nmu':  'walk repo/ for any .deb whose Version or dep '
-                          'constraints still carry an NMU/binNMU/backport '
-                          'suffix (+bN, +debNuN, ~bpoN+N, etc.)',
-            'strip':      'one-time backfill: strip NMU suffixes from every '
-                          '.deb/.udeb in repo/.  Future fresh builds get '
-                          'stripped automatically post-dpkg-buildpackage.',
-            'cleanup':    'delete obsolete .debs/.udebs from repo/ (orphan '
-                          'source / version drift).  Dry-run by default; '
-                          'pass `force` to actually delete.',
-        }
-        if action == 'tunnel':
-            return self.cmd_tunnel_package(*args)
-        if action == 'reload':
-            return self.cmd_reload_fork(*args)
-        if action == 'audit':
-            return self.cmd_audit(*args)
-        if action == 'audit_nmu':
-            return self.cmd_audit_nmu(*args)
-        if action == 'strip':
-            return self.cmd_strip_repo(*args)
-        if action == 'cleanup':
-            return self.cmd_package_cleanup(*args)
-        return self._group_help('package', _table, action)
-
     def cmd_container(self, action: str = '', *args):
         _table = {
             'init':  'build the Docker build sandbox image',
@@ -5371,8 +5386,7 @@ def main(banner: str) -> None:
     tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [pkg|live|installer|recommended|all]')
-    tui.register_command('package',   session.cmd_package,   '\tPackages:   package tunnel')
-    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index')
+    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index | audit | audit_nmu | strip | cleanup | tunnel | reload | migrate_layout')
     tui.register_command('container', session.cmd_container, '\tContainer:  container init')
     tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')
@@ -5381,7 +5395,7 @@ def main(banner: str) -> None:
     tui.register_command('print',     session.cmd_print,     '\tPrint build state — try: print help')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
-    console.print("Starting Source Build System for Athena Linux...", tui.COLOR_HIGHLIGHT)
+    console.print("Starting Athena Build System...", tui.COLOR_HIGHLIGHT)
     console.print(f"\tArch\t\t\t{config.arch}")
     console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
     console.print(f"\tBuild Distribution\t{config.build_distribution} {config.build_version} ({config.build_codename})")
@@ -5391,6 +5405,6 @@ def main(banner: str) -> None:
 
 
 if __name__ == '__main__':
-    build_banner = "Athena Build Environment v0.1"
+    build_banner = "Athena Build System v0.1"
     print(asciiart_logo)
     main(build_banner)

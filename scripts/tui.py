@@ -1213,37 +1213,63 @@ class Prompt:
 class ProgressBar:
     """Animated progress bar rendered as a live widget in the active tab.
 
-    Default format::
+    Default format (with rate)::
 
         Label [████████░░░░░░░░░░░░] 42/100  0.50it/s
 
+    With ``show_rate=False`` the trailing rate column is omitted — used
+    by build progress bars where avg-package-rate isn't informative
+    (per-pkg variance is huge for source builds).
+
     Args:
-        label:        Left-side label (max 20 chars).
+        label:        Left-side label.  Truncated to 20 chars by default;
+                      pass ``label_width`` to pin a different width
+                      (also ljust-padded so the bar doesn't shift when
+                      the label text length changes between updates —
+                      source_build uses this).
         itr_label:    Rate unit suffix, e.g. ``'pkg/s'`` (max 8 chars).
+                      Ignored when ``show_rate=False``.
         bar_width:    Visual fill width, clamped to [10, 60].
         scale_factor: Rate prefix — ``''`` (auto), ``'K'``, ``'M'``, or ``'G'``.
         maxvalue:     Total step count (≥ 1).
         fmt:          Override format string.  Available tokens:
                       ``{label}``, ``{bar}``, ``{value}``, ``{total}``,
-                      ``{rate}``, ``{pct}``.
+                      ``{rate}``, ``{pct}``.  When omitted, the default
+                      is built from ``show_rate``.
+        show_rate:    Include the trailing ``{rate}`` column.  Default
+                      True for back-compat.  Pass False for build
+                      progress bars (source_build, container init,
+                      chroot, iso) where per-package timing variance
+                      makes an avg rate misleading.
+        label_width:  Pin label column to N chars (ljust + truncate).
+                      Default ``min(20, len(label))``.  Bars whose
+                      label changes per-step (source_build cycles
+                      through package names) should pin this so the
+                      bar doesn't dance horizontally.
     """
 
     RUNNING = 1
     PAUSED  = 2
     STOPPED = 3
 
-    _DEFAULT_FMT = '  {label} [{bar}] {value}/{total}  {rate}'
+    _DEFAULT_FMT_WITH_RATE = '  {label} [{bar}] {value}/{total}  {rate}'
+    _DEFAULT_FMT_NO_RATE   = '  {label} [{bar}] {value}/{total}'
     _SCALE: Dict[str, float] = {'K': 1e3, 'M': 1e6, 'G': 1e9}
 
     def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40,
                  scale_factor: str = '', maxvalue: int = 100, fmt: str = '',
+                 show_rate: bool = True, label_width: int = 0,
                  tui: 'Optional[Tui]' = None) -> None:
         _tui = tui if tui is not None else tui_instance
         if _tui is None:
             raise RuntimeError('No Tui instance — create Tui before using ProgressBar')
 
         self._tui          = _tui
-        self._label        = label[:20]
+        # label_width pins the label column.  Default: truncate at 20
+        # (legacy behaviour).  When pinned, ljust-pad so subsequent
+        # label() updates with shorter strings don't shrink the bar.
+        self._label_width  = label_width if label_width > 0 else 20
+        self._label        = label[:self._label_width].ljust(self._label_width)
         self._itr_label    = itr_label[:8]
         self._max          = max(1, maxvalue)
         self._value        = 0
@@ -1251,7 +1277,12 @@ class ProgressBar:
         self._t0           = time.time_ns()
         self._scale_factor = scale_factor if scale_factor in ('', 'K', 'M', 'G') else ''
         self._bar_width    = max(10, min(60, bar_width))
-        self._fmt          = fmt if fmt else self._DEFAULT_FMT
+        self._show_rate    = show_rate
+        if fmt:
+            self._fmt = fmt
+        else:
+            self._fmt = (self._DEFAULT_FMT_WITH_RATE if show_rate
+                         else self._DEFAULT_FMT_NO_RATE)
         self._widget_id    = _tui.add_widget(self)
 
     def __str__(self) -> str:
@@ -1312,8 +1343,10 @@ class ProgressBar:
         self._max = max(1, value)
 
     def label(self, message: str) -> None:
-        """Update the displayed label."""
-        self._label = message.strip()[:20]
+        """Update the displayed label.  ljust-padded to the pinned
+        label_width so the bar doesn't shift horizontally between
+        updates (source_build cycles per-package names through here)."""
+        self._label = message.strip()[:self._label_width].ljust(self._label_width)
 
     def reset(self) -> None:
         """Reset value and timer."""
@@ -1637,7 +1670,7 @@ def register_command(name: str, fn, tooltip: str = '') -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    tui = Tui('Athena Build Environment v0.1')
+    tui = Tui('Athena Build System v0.1')
     tui_instance = tui
 
     signal.signal(signal.SIGINT, tui.sig_shutdown)

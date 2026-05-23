@@ -63,8 +63,11 @@ def _is_progress_bar(widget: object) -> bool:
 def _widget_label(widget: object) -> str:
     """Pull the human-readable label off a widget.  ProgressBar stores
     it in `_label` (mutated by .label()); fall back to the class name
-    if the attribute is absent."""
-    return getattr(widget, '_label', type(widget).__name__)
+    if the attribute is absent.  ProgressBar pins label_width via
+    ljust-padding so the TUI bar doesn't shift between updates — strip
+    that trailing whitespace before printing the linear CLI marker
+    where horizontal stability isn't a concern."""
+    return getattr(widget, '_label', type(widget).__name__).rstrip()
 
 
 class Cli:

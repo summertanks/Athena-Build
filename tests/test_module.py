@@ -1227,7 +1227,7 @@ def test_buildsession_constructible_with_stub_tui():
                           'cmd_print',
                           # Group dispatchers (noun-verb command surface).
                           'cmd_cache', 'cmd_dep', 'cmd_patch',
-                          'cmd_source', 'cmd_package', 'cmd_container',
+                          'cmd_source', 'cmd_repo', 'cmd_container',
                           'cmd_chroot', 'cmd_iso', 'cmd_key', 'cmd_clean'):
                 _fn = getattr(session, _name)
                 assert callable(_fn), f"{_name} not callable"
@@ -1253,7 +1253,14 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_patch',     'refresh',  'cmd_patch_refresh'),
         ('cmd_source',    'download', 'cmd_source_download'),
         ('cmd_source',    'build',    'cmd_source_build'),
-        ('cmd_package',   'tunnel',   'cmd_tunnel_package'),
+        ('cmd_repo',      'tunnel',   'cmd_tunnel_package'),
+        ('cmd_repo',      'reload',   'cmd_reload_fork'),
+        ('cmd_repo',      'audit',    'cmd_audit'),
+        ('cmd_repo',      'audit_nmu','cmd_audit_nmu'),
+        ('cmd_repo',      'strip',    'cmd_strip_repo'),
+        ('cmd_repo',      'cleanup',  'cmd_package_cleanup'),
+        ('cmd_repo',      'index',    'cmd_index_repo'),
+        ('cmd_repo',      'migrate_layout', 'cmd_migrate_repo_layout'),
         ('cmd_container', 'init',     'cmd_init_container'),
         ('cmd_container', 'purge',    'cmd_container_purge'),
         # cmd_chroot 'build' is now multi-token ('build live' / 'build
@@ -6379,34 +6386,34 @@ def test_build_py_threads_container_into_iso_callsites():
     )
 
 
-def test_cmd_audit_nmu_registered_in_package_dispatcher():
-    """`package audit_nmu` must be wired into cmd_package's dispatch."""
+def test_cmd_audit_nmu_registered_in_repo_dispatcher():
+    """`repo audit_nmu` must be wired into cmd_repo's dispatch."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
     import re
     assert "'audit_nmu'" in _body, (
-        "audit_nmu must be advertised in cmd_package's help table")
+        "audit_nmu must be advertised in cmd_repo's help table")
     assert re.search(
         r"if action == 'audit_nmu':\s*\n\s+return self\.cmd_audit_nmu",
-        _body), "audit_nmu not dispatched in cmd_package"
+        _body), "audit_nmu not dispatched in cmd_repo"
 
 
-def test_cmd_strip_repo_registered_in_package_dispatcher():
-    """`package strip` must be wired into cmd_package's dispatch."""
+def test_cmd_strip_repo_registered_in_repo_dispatcher():
+    """`repo strip` must be wired into cmd_repo's dispatch."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
     import re
     assert "'strip'" in _body, (
-        "strip must be advertised in cmd_package's help table")
+        "strip must be advertised in cmd_repo's help table")
     assert re.search(
         r"if action == 'strip':\s*\n\s+return self\.cmd_strip_repo",
-        _body), "strip not dispatched in cmd_package"
+        _body), "strip not dispatched in cmd_repo"
 
 
-def test_cmd_package_cleanup_registered_in_package_dispatcher():
-    """`package cleanup` must be wired into cmd_package's dispatch.
+def test_cmd_package_cleanup_registered_in_repo_dispatcher():
+    """`repo cleanup` must be wired into cmd_repo's dispatch.
     The command identifies obsolete .debs (orphan source or version
     drift) and ships in dry-run by default — `force` triggers actual
     delete after a YESNO prompt."""
@@ -6415,17 +6422,17 @@ def test_cmd_package_cleanup_registered_in_package_dispatcher():
         _body = fh.read()
     import re
     assert "'cleanup'" in _body, (
-        "cleanup must be advertised in cmd_package's help table"
+        "cleanup must be advertised in cmd_repo's help table"
     )
     assert re.search(
         r"if action == 'cleanup':\s*\n\s+return self\.cmd_package_cleanup",
-        _body), "cleanup not dispatched in cmd_package"
+        _body), "cleanup not dispatched in cmd_repo"
     # Body must define the method too.
     assert 'def cmd_package_cleanup(' in _body
 
 
 def test_cmd_package_cleanup_dry_run_default_force_flag_required():
-    """`package cleanup` without `force` must NOT delete any files —
+    """`repo cleanup` without `force` must NOT delete any files —
     it's a dry-run by default.  Operator opt-in for the destructive
     path is double-gated: pass `force` flag AND answer 'y' to the
     YESNO prompt.
@@ -6481,7 +6488,7 @@ def test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source():
     util-linux source 2.38.1-5 would false-positive as drift.
 
     Categorisation now lives in the shared `_scan_stale_files` helper
-    (refactored 2026-05-21 to also serve `package audit`'s STALE
+    (refactored 2026-05-21 to also serve `repo audit`'s STALE
     section as a warn-only surface).  cmd_package_cleanup delegates
     to it and adds the dry-run/force/delete machinery."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
@@ -6528,7 +6535,7 @@ def test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source():
 
 
 def test_package_audit_includes_stale_files_warning_section():
-    """`package audit` must call _scan_stale_files (via the
+    """`repo audit` must call _scan_stale_files (via the
     _report_stale_files_warning helper) so the operator sees orphan-
     source and version-drift residue surfaced as a soft warning at
     the end of every audit run.  Audit is the natural place to flag
@@ -6570,8 +6577,8 @@ def test_package_audit_includes_stale_files_warning_section():
         "helper must surface a STALE FILES section header"
     )
     # NOT a hard gate — must point operator to cleanup, not abort.
-    assert 'package cleanup' in _helper, (
-        "warn-only path must point operator at `package cleanup` for "
+    assert 'repo cleanup' in _helper, (
+        "warn-only path must point operator at `repo cleanup` for "
         "the actual action"
     )
     # Helper must NOT call os.remove — warn-only.
@@ -11283,6 +11290,98 @@ def test_cli_progress_bar_prints_start_and_finish_markers():
     assert 'SmokeTest [done: 10/10]' in out_v
 
 
+def test_progress_bar_show_rate_false_omits_rate_column():
+    """The new show_rate kwarg drops the trailing {rate} column from
+    the default fmt — build progress bars (source_build, chroot, iso,
+    strip, cleanup) use this because per-pkg time variance is enormous
+    and an avg pkg/s rate is misleading.  Pinned via __str__ output
+    inspection."""
+    cli, out, _e, restore = _fresh_cli()
+    try:
+        from tui import ProgressBar
+        _bar_with    = ProgressBar(label='WithRate',    maxvalue=10)
+        _bar_without = ProgressBar(label='WithoutRate', maxvalue=10, show_rate=False)
+        for _ in range(5):
+            _bar_with.step()
+            _bar_without.step()
+        _s_with    = str(_bar_with)
+        _s_without = str(_bar_without)
+    finally:
+        restore()
+    # With rate: trailing 'it/s' (or similar) substring present.
+    assert 'it/s' in _s_with, _s_with
+    # Without rate: no rate column anywhere.
+    assert 'it/s' not in _s_without, _s_without
+    # Both still show value/total.
+    assert '5/10' in _s_with and '5/10' in _s_without
+
+
+def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
+    """label_width pins the label column to N chars (ljust + truncate)
+    so subsequent .label() calls with shorter strings keep the bar
+    horizontally stable.  Anti-regression for source_build where the
+    label cycles through package names of wildly different lengths
+    (firefox-esr → ca-certificates → libc6) — without pinning the bar
+    would dance left/right between updates."""
+    cli, out, _e, restore = _fresh_cli()
+    try:
+        from tui import ProgressBar
+        _bar = ProgressBar(label='Short', label_width=24, maxvalue=10, show_rate=False)
+        _s_short = str(_bar)
+        # Mid-iteration label swap to a longer + then shorter string.
+        _bar.label('linux-image-amd64-modules')   # >24 chars — truncates
+        _s_long  = str(_bar)
+        _bar.label('libc6')                       # 5 chars — ljust-pads
+        _s_pad   = str(_bar)
+    finally:
+        restore()
+    # The "[" of the bar should sit at the same column in all three.
+    # Find the first "[" position (after the leading spaces + label).
+    _pos_short = _s_short.find('[')
+    _pos_long  = _s_long.find('[')
+    _pos_pad   = _s_pad.find('[')
+    assert _pos_short == _pos_long == _pos_pad, (
+        f"label column shifted between updates: short={_pos_short} "
+        f"long={_pos_long} pad={_pos_pad}; bar must stay horizontally "
+        f"stable"
+    )
+
+
+def test_repo_dispatcher_advertises_merged_package_actions():
+    """After the package→repo merge, the cmd_repo dispatcher must
+    advertise the former cmd_package actions (tunnel/reload/audit/
+    audit_nmu/strip/cleanup) alongside its own (index/migrate_layout).
+    Anti-regression for accidentally re-introducing a `cmd_package`
+    helper or leaving an action un-dispatched."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # Body of cmd_repo.
+    _m = re.search(
+        r"\n    def cmd_repo\b.*?(?=\n    def \w)",
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_repo dispatcher not found"
+    _disp = _m.group(0)
+    for _action in ('tunnel', 'reload', 'audit', 'audit_nmu',
+                    'strip', 'cleanup', 'index', 'migrate_layout'):
+        assert f"'{_action}'" in _disp, (
+            f"cmd_repo dispatcher missing action {_action!r}"
+        )
+    # The old cmd_package helper must be gone — no leftover dispatcher
+    # to call.  Anti-back-compat sticking around silently.
+    assert 'def cmd_package(' not in _body, (
+        "cmd_package dispatcher must be removed after the merge — "
+        "`package` is no longer a registered command"
+    )
+    # And `register_command('package'` must be gone too.
+    assert "register_command('package'" not in _body, (
+        "'package' must not be a registered top-level command after "
+        "the merge into 'repo'"
+    )
+
+
 def test_cli_spinner_does_not_print_start_marker():
     """Spinner registration is silent — it prints its own `… done` line
     on done().  CLI mode must NOT add a duplicate start/finish marker
@@ -12011,7 +12110,7 @@ def test_binary_names_from_control_extracts_all_package_stanzas():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# package reload — dep-hash classification + sidecar plumbing
+# repo reload — dep-hash classification + sidecar plumbing
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_minimal_pkg(tmp_root: str, source: str, version: str,
@@ -12037,7 +12136,7 @@ def _make_minimal_pkg(tmp_root: str, source: str, version: str,
 
 
 def test_compute_dep_hash_changes_on_depends_field_edit():
-    """Adding a new Depends: must shift the dep-hash so package reload
+    """Adding a new Depends: must shift the dep-hash so repo reload
     can gate the change as 'dep-affecting'."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -12128,7 +12227,7 @@ def test_load_pkg_hashes_returns_empty_strings_when_sidecars_missing():
 
 def test_persist_tree_hash_writes_both_sidecars():
     """_persist_tree_hash must produce BOTH .tree-hash AND .dep-hash
-    sidecars so package reload's two-stage decision has both baselines."""
+    sidecars so repo reload's two-stage decision has both baselines."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
@@ -12200,8 +12299,8 @@ def test_no_stale_progressbar_methods_in_build_py():
             f"Likely confused with Spinner.done() or a removed method.")
 
 
-def test_cmd_audit_registered_under_package_dispatcher():
-    """`package audit` must be wired into cmd_package's dispatch."""
+def test_cmd_audit_registered_under_repo_dispatcher():
+    """`repo audit` must be wired into cmd_repo's dispatch."""
     from build import BuildSession
     assert hasattr(BuildSession, 'cmd_audit'), (
         "BuildSession is missing cmd_audit")
@@ -12211,13 +12310,13 @@ def test_cmd_audit_registered_under_package_dispatcher():
     import re
     assert re.search(
         r"if action == 'audit':\s*\n\s+return self\.cmd_audit",
-        _body), "audit not dispatched in cmd_package"
+        _body), "audit not dispatched in cmd_repo"
     assert "'audit'" in _body, (
-        "audit must be advertised in cmd_package's help table")
+        "audit must be advertised in cmd_repo's help table")
 
 
 def test_cmd_audit_runs_three_checks():
-    """`package audit` must invoke ALL THREE primitives:
+    """`repo audit` must invoke ALL THREE primitives:
       - audit_dep_closure (hard dep gate over whole repo)
       - audit_conflict_cohort × 2 (live cohort + installer cohort)
     Hard-coded into the cmd body so a single command surfaces all three
@@ -13579,9 +13678,9 @@ def main() -> int:
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
         test_buildcontainer_calls_strip_post_build,
-        test_cmd_audit_nmu_registered_in_package_dispatcher,
-        test_cmd_strip_repo_registered_in_package_dispatcher,
-        test_cmd_package_cleanup_registered_in_package_dispatcher,
+        test_cmd_audit_nmu_registered_in_repo_dispatcher,
+        test_cmd_strip_repo_registered_in_repo_dispatcher,
+        test_cmd_package_cleanup_registered_in_repo_dispatcher,
         test_cmd_package_cleanup_dry_run_default_force_flag_required,
         test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source,
         test_audit_nmu_residue_detects_layered_versions,
@@ -13825,7 +13924,7 @@ def main() -> int:
         test_persist_tree_hash_writes_both_sidecars,
         test_wipe_fork_pkg_outputs_removes_both_hash_sidecars,
         test_no_stale_progressbar_methods_in_build_py,
-        test_cmd_audit_registered_under_package_dispatcher,
+        test_cmd_audit_registered_under_repo_dispatcher,
         test_cmd_audit_runs_three_checks,
         test_resolve_live_cohort_subtracts_pool_and_installer,
         test_resolve_installer_cohort_uses_udeb_tree,

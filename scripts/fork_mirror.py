@@ -193,7 +193,7 @@ def _discover_fork_source_trees(dir_fork_source: str) -> List[str]:
 
 # debian/control fields that influence apt resolution / dep tree.  When
 # any of these change, the cache + dep tree are stale and need a full
-# rebuild — `package reload` refuses the light path in that case.
+# rebuild — `repo reload` refuses the light path in that case.
 # Everything else (Description, Maintainer, Homepage, Vcs-*, Standards-
 # Version, file content under data/ tasks/, Makefile changes, etc.) is
 # package-local and a light reload is safe.
@@ -208,7 +208,7 @@ def _compute_dep_hash(pkg_dir: str) -> str:
     """SHA256 over debian/changelog version + debian/control's dep-
     affecting fields, in stable canonical form.
 
-    Used by `package reload` to distinguish "this edit only affects
+    Used by `repo reload` to distinguish "this edit only affects
     package content" (light rebuild safe) from "this edit changes apt
     resolution" (need to re-run cache build + dep parse).
 
@@ -390,7 +390,7 @@ def _check_and_invalidate_fork_pkg(pkg_dir: str, buildconfig) -> bool:
 
 def _persist_tree_hash(pkg_dir: str, buildconfig) -> None:
     """Write current tree-hash AND dep-hash AFTER successful regen.
-    Both sidecars are kept in lockstep so `package reload`'s
+    Both sidecars are kept in lockstep so `repo reload`'s
     light-vs-gate decision has consistent baselines.  Idempotent."""
     _pkg_name = os.path.basename(pkg_dir)
     _tree_file = os.path.join(
@@ -548,7 +548,7 @@ def _build_packages_stanzas(pkg_dirs: List[str], build_arch: str
         # First stanza is Source: ...; subsequent are per-binary
         _src_stanza = _stanzas[0]
         _src_name   = _src_stanza.get('Source', _pkg_name)
-        _maintainer = _src_stanza.get('Maintainer', 'Athena Linux <athena@local>')
+        _maintainer = _src_stanza.get('Maintainer', 'Athena Build <athena@local>')
 
         for _bin in _stanzas[1:]:
             _text = _format_packages_stanza(_bin, _src_name, _ver,
@@ -666,7 +666,7 @@ def _format_sources_stanza(dsc: Deb822, files: List[str]) -> str:
         _fields.append(f'Binary: {dsc["Binary"]}')
     _fields.append(f'Version: {dsc["Version"]}')
     _fields.append(
-        f'Maintainer: {dsc.get("Maintainer", "Athena Linux <athena@local>")}'
+        f'Maintainer: {dsc.get("Maintainer", "Athena Build <athena@local>")}'
     )
     _fields.append(f'Architecture: {dsc.get("Architecture", "all")}')
     if 'Standards-Version' in dsc:

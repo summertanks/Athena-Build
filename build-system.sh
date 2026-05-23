@@ -34,7 +34,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-echo -e "Athena Linux Build System Check..."
+echo -e "Athena Build System Check..."
 
 # Parsing args
 ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless' -- "$@") || exit
