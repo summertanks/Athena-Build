@@ -12964,6 +12964,69 @@ def test_repo_audit_scan_uses_dpkg_scanpackages_and_apt_pkg():
         "apt_pkg.version_compare so highest version wins")
 
 
+def test_scan_repo_state_main_udeb_passes_t_udeb_to_scanpackages():
+    """Regression for source-verify-2026-05-23: scanning the udeb dir
+    without `-t udeb` produces an empty Packages file with no error,
+    silently breaking every udeb dep lookup.  Pin that the main-udeb
+    subdir branch adds `-t udeb` to the dpkg-scanpackages argv."""
+    _bc = os.path.join(_ROOT, 'scripts', 'repo_audit.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # Body of scan_repo_state.
+    _m = re.search(
+        r'def scan_repo_state\(.*?(?=\ndef \w)',
+        _body, re.DOTALL,
+    )
+    assert _m, 'scan_repo_state body not found'
+    _fn = _m.group(0)
+    assert "subdir == 'main-udeb'" in _fn, (
+        "scan_repo_state must branch on subdir == 'main-udeb' to add "
+        "-t udeb; without it, dpkg-scanpackages defaults to .deb-only "
+        "and produces an empty Packages file"
+    )
+    assert "'-t', 'udeb'" in _fn, (
+        "scan_repo_state must pass -t udeb when scanning the udeb dir"
+    )
+
+
+def test_scan_repo_state_treats_empty_cache_file_as_missing():
+    """Defensive guard: a zero-byte cached Packages file (e.g. from a
+    pre-fix run that scanned udebs without -t udeb) must NOT be served
+    as a cache hit on subsequent runs — re-scan instead."""
+    _bc = os.path.join(_ROOT, 'scripts', 'repo_audit.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def scan_repo_state\(.*?(?=\ndef \w)',
+        _body, re.DOTALL,
+    )
+    assert _m, 'scan_repo_state body not found'
+    _fn = _m.group(0)
+    # Pin the empty-file check.  Both shapes acceptable:
+    #   os.stat(...).st_size > 0
+    #   os.path.getsize(...) > 0
+    assert ('st_size > 0' in _fn) or ('getsize' in _fn and '> 0' in _fn), (
+        "scan_repo_state must require a non-zero cached Packages file "
+        "before honouring the cache; otherwise an empty file (e.g. from "
+        "a pre-fix scan that produced 0 records) is served forever"
+    )
+
+
+def test_deb_dir_for_recognises_main_udeb_label():
+    """Pin: deb_dir_for must accept 'main-udeb' → dir_repo_main_udeb so
+    repo_audit.scan_repo_state can drive a udeb-side RepoState (needed
+    by `source verify`)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import BuildConfig
+    _cfg = BuildConfig()
+    if not _cfg.is_valid:
+        return
+    assert _cfg.deb_dir_for('main-udeb') == _cfg.dir_repo_main_udeb
+
+
 def test_repo_audit_closure_handles_conflicts_and_provides():
     """The audit primitives must walk hard deps, conflicts, AND honour
     versioned Provides for virtual-target resolution per Debian Policy
@@ -14940,6 +15003,9 @@ def main() -> int:
         test_repo_max_mtime_detects_delete_and_rename,
         test_repo_audit_module_exports,
         test_repo_audit_scan_uses_dpkg_scanpackages_and_apt_pkg,
+        test_scan_repo_state_main_udeb_passes_t_udeb_to_scanpackages,
+        test_scan_repo_state_treats_empty_cache_file_as_missing,
+        test_deb_dir_for_recognises_main_udeb_label,
         test_repo_audit_closure_handles_conflicts_and_provides,
         test_cmd_source_rescan_registered_in_dispatcher,
         test_cmd_source_rescan_method_uses_check_build,

@@ -361,11 +361,19 @@ def scan_repo_state(config, subdir: str = 'main',
     # just re-parse the cached file.  Cuts the per-build gate from ~90s
     # to ~3s when repo/ hasn't changed since last session.  Honours the
     # explicit refresh flag.
+    #
+    # Empty-file guard: a zero-byte cache file is treated as missing
+    # and re-scanned.  Defensive against pre-fix runs that landed an
+    # empty Packages snapshot on disk (e.g. main-udeb scanned without
+    # `-t udeb` before 2026-05-23 produced 0 records → 0 bytes).
+    # Without this, the stale empty file would be served forever
+    # until the operator manually deletes it or the repo's mtime
+    # advances past the cache's mtime.
     _skip_scan = False
     if not refresh:
         try:
-            _pkgfile_mtime = os.path.getmtime(_pkg_file)
-            if _pkgfile_mtime >= _mtime:
+            _stat = os.stat(_pkg_file)
+            if _stat.st_size > 0 and _stat.st_mtime >= _mtime:
                 _skip_scan = True
         except OSError:
             pass
@@ -376,13 +384,24 @@ def scan_repo_state(config, subdir: str = 'main',
         # dedupe by highest version in the parse step.  /dev/null is the
         # (empty) override file.
         #
+        # `-t udeb` is REQUIRED when scanning a udeb-only dir: by
+        # default dpkg-scanpackages picks `.deb` files only — pointed
+        # at a dir of `.udeb` files it produces an empty Packages with
+        # NO error.  Silent miss: every dep-lookup against the resulting
+        # (empty) RepoState then reports unsatisfied.  This bit
+        # `source verify` 2026-05-23 — 84 phantom udeb→udeb missed-deps
+        # all from the wrong scanner type.
+        #
         # Per-file ProgressBar: pre-count .debs for maxvalue, then
         # stream stdout line-by-line and step on every `Package:` header
         # (one per scanned file).  Without this the operator stares at
         # a frozen TUI for ~90s on a 5k-pkg fresh-cache audit.
+        _scan_argv = ['dpkg-scanpackages', '--multiversion']
+        if subdir == 'main-udeb':
+            _scan_argv += ['-t', 'udeb']
+        _scan_argv += [_repo_dir, '/dev/null']
         if not _scan_packages_with_progress(
-                ['dpkg-scanpackages', '--multiversion',
-                 _repo_dir, '/dev/null'],
+                _scan_argv,
                 _pkg_file, _repo_dir, label_subdir=subdir):
             return None
 
