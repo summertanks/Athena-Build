@@ -13247,6 +13247,101 @@ def test_verify_pkg_artifact_fails_on_unsatisfied_depends():
         assert 'unsatisfied-Depends' in _why, _why
 
 
+def test_verify_pkg_artifact_repo_state_overrides_cache_resolution():
+    """Regression for the 54-false-positive bug 2026-05-23.
+
+    Scenario: a .deb at pristine `Depends: libbar (= 2.5)`.  The cache
+    has libbar at upstream's NMU-bumped `2.5+b1` (cache reflects
+    upstream Packages indices, not our post-strip repo).  Cache-based
+    resolution would falsely flag this as unsatisfied because
+    `Version('2.5+b1') == Version('2.5')` is False.
+
+    With repo_state passed in, resolution must hit the post-strip
+    pristine version (matching the .deb's Depends literal) and pass.
+
+    Pins the contract: when repo_state is non-None, verify_pkg_artifact
+    uses ONLY repo_state, NEVER the cache, so a cache-vs-repo skew
+    cannot leak through."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _path = os.path.join(_tmp, 'foo_1.0_amd64.deb')
+        _build_minimal_deb(_path, 'foo', '1.0', 'amd64',
+                            depends='libbar (= 2.5)')
+
+        # Cache reflects upstream's NMU-bumped libbar — would fail
+        # strict-equal resolution against pristine `(= 2.5)`.
+        from collections import defaultdict
+        class _Cache: pass
+        _cache = _Cache()
+        _cache.package_hashtable = defaultdict(lambda: defaultdict(list))
+        _cache.package_hashtable['libbar']['2.5+b1'] = ['<placeholder>']
+        _cache.udeb_hashtable = defaultdict(lambda: defaultdict(list))
+
+        # Repo state: post-strip pristine libbar 2.5 — what apt actually
+        # sees at install time.
+        import repo_audit
+        _state = repo_audit.RepoState(
+            packages={'libbar': {'Package': 'libbar', 'Version': '2.5'}},
+            provides_index={},
+            packages_file='/dev/null',
+            repo_mtime=0.0,
+        )
+
+        _bc = _make_buildcontainer_stub(cache=_cache, repo=_tmp)
+
+        # Without repo_state: false-positive (cache-only path).
+        _ok, _why = _bc.verify_pkg_artifact(_path, 'foo_1.0_amd64.deb')
+        assert not _ok and 'unsatisfied-Depends' in _why, (
+            f"cache-only path should over-report; got ({_ok}, {_why}).  "
+            "If this passes, the legacy cache-resolution path is doing "
+            "something other than the documented strict-equal lookup."
+        )
+
+        # With repo_state: passes (authoritative).
+        _ok, _why = _bc.verify_pkg_artifact(
+            _path, 'foo_1.0_amd64.deb', repo_state=_state,
+        )
+        assert _ok, (
+            f"repo_state resolution should satisfy `libbar (= 2.5)` "
+            f"against the pristine repo entry; got ({_ok}, {_why})"
+        )
+
+
+def test_verify_pkg_artifact_repo_state_still_fails_when_actually_unsatisfied():
+    """The repo_state path must still report unsatisfied-Depends for
+    genuinely-missing deps — not a blanket "always pass when repo_state
+    is given".  Otherwise the fix would mask real install failures."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _path = os.path.join(_tmp, 'foo_1.0_amd64.deb')
+        _build_minimal_deb(_path, 'foo', '1.0', 'amd64',
+                            depends='libnonexistent (>= 1.0)')
+
+        import repo_audit
+        _state = repo_audit.RepoState(
+            packages={'libbar': {'Package': 'libbar', 'Version': '2.5'}},
+            provides_index={},
+            packages_file='/dev/null',
+            repo_mtime=0.0,
+        )
+
+        _bc = _make_buildcontainer_stub(cache=None, repo=_tmp)
+        _ok, _why = _bc.verify_pkg_artifact(
+            _path, 'foo_1.0_amd64.deb', repo_state=_state,
+        )
+        assert not _ok, "missing dep should fail verify even with repo_state"
+        assert 'unsatisfied-Depends' in _why, _why
+        assert 'libnonexistent' in _why, _why
+
+
 def test_verify_pkg_artifact_passes_on_satisfied_depends():
     """When Depends are present in the cache at a satisfying version,
     verify must pass."""
@@ -14855,6 +14950,8 @@ def main() -> int:
         test_verify_pkg_artifact_ok_when_all_fields_match,
         test_verify_pkg_artifact_fails_on_internal_version_mismatch,
         test_verify_pkg_artifact_fails_on_unsatisfied_depends,
+        test_verify_pkg_artifact_repo_state_overrides_cache_resolution,
+        test_verify_pkg_artifact_repo_state_still_fails_when_actually_unsatisfied,
         test_verify_pkg_artifact_passes_on_satisfied_depends,
         test_verify_pkg_artifact_strips_epoch_from_internal_version,
         test_verify_pkg_artifact_resolves_udeb_deps_via_udeb_hashtable,

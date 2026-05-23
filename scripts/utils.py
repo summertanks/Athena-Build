@@ -1538,22 +1538,32 @@ class BuildConfig:
         return self._config_valid
 
     def deb_dir_for(self, label: str) -> str:
-        """Map classify_repo_subdir output (`main`/`doc`/`dbgsym`/`tests`)
-        to the on-disk dir where that role's regular .debs live in the
-        CONF-01 Stage D unified apt-repo layout.
+        """Map a repo subdir label to its on-disk dir under the CONF-01
+        Stage D unified apt-repo layout.
+
+        Recognised labels:
+          main       → dists/<codename>/main/binary-<arch>/        (.deb)
+          main-udeb  → dists/<codename>/main/debian-installer/
+                        binary-<arch>/                              (.udeb)
+          doc        → dists/<codename>/doc/binary-<arch>/
+          dbgsym     → dists/<codename>-debug/main/binary-<arch>/
+          tests      → dists/<codename>/tests/binary-<arch>/
+
+        The four non-`main-udeb` labels match `classify_repo_subdir`
+        output; `main-udeb` is the parallel udeb namespace inside main,
+        added so `repo_audit.scan_repo_state` can produce a RepoState
+        for the udeb side (used by `source verify`).
 
         Replaces the pre-CONF-01 idiom of
         `os.path.join(config.dir_repo, label)` — which constructed
-        flat paths like repo/main/.  Now resolves via the suite-
-        component-arch nesting (e.g. main → dists/<codename>/main/
-        binary-<arch>/, dbgsym → dists/<codename>-debug/main/
-        binary-<arch>/).
+        flat paths like repo/main/.
         """
         _mapping = {
-            'main':   self.dir_repo_main,
-            'doc':    self.dir_repo_doc,
-            'dbgsym': self.dir_repo_dbgsym,
-            'tests':  self.dir_repo_tests,
+            'main':      self.dir_repo_main,
+            'main-udeb': self.dir_repo_main_udeb,
+            'doc':       self.dir_repo_doc,
+            'dbgsym':    self.dir_repo_dbgsym,
+            'tests':     self.dir_repo_tests,
         }
         if label not in _mapping:
             raise ValueError(

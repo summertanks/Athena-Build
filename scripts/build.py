@@ -4391,7 +4391,7 @@ class BuildSession:
     def cmd_source_verify(self, *args):
         """Opt-in deep audit: report .debs whose internal Version
         mismatches the predicted filename, or whose Depends no longer
-        resolve in the current cache.
+        resolve against the repo we ship.
 
         Usage: source verify [verbose]
 
@@ -4399,17 +4399,19 @@ class BuildSession:
         Use as a pre-ship sanity check: BEFORE making a release ISO,
         run this to surface artifacts that exist in repo/ but would
         fail to install on a clean Thor system (e.g. Depends pointing
-        at a cache version that has since drifted away).
+        at a sibling-binary version that's not actually in the repo).
 
-        Why this is opt-in:  source build / check_build only gate on
-        filename + ar-magic for performance (~5s scan over 1500 srcs).
-        Deep verify is ~30-40s and tends to over-report on the
-        rebump-vs-cross-source-strict-equal scenario: a binary's
-        `Depends: libfoo (= 5.4-1)` won't satisfy against a cached
-        `libfoo 5.4-1+thor1` even though both sides are equivalent
-        modulo our distro suffix.  Run verify, look at the per-
-        binary diagnostic in log/athena.log, decide which findings
-        are real vs noise.
+        Resolution scope is repo/ (post-strip pristine versions), NOT
+        the cache.  The cache reflects upstream's NMU-bumped versions
+        — `libfoo 1.0-1+b1` while our stripped .deb says
+        `Depends: libfoo (= 1.0-1)`.  Resolving against cache would
+        over-report 50+ false positives per build (every strict-equal
+        sibling reference where upstream had a binNMU).  apt at install
+        time only sees repo/, so repo is the only honest gate.
+
+        Performance: ~30-40s (one DebFile open + control parse per
+        binary).  source build / check_build use filename + ar-magic
+        only (~5s scan).
 
         Reports (verbose):
           - per-source list of failing binaries + first-failure
@@ -4428,6 +4430,22 @@ class BuildSession:
             return
 
         _verbose = 'verbose' in args
+
+        # Scan the deb + udeb repo states ONCE up-front.  These are
+        # the lookup tables verify_pkg_artifact resolves Depends
+        # against (instead of the cache, which carries upstream's
+        # NMU-bumped versions and would false-positive every strict-
+        # equal sibling reference).
+        import repo_audit
+        _deb_state  = repo_audit.scan_repo_state(self.config, 'main')
+        _udeb_state = repo_audit.scan_repo_state(self.config, 'main-udeb')
+        if _deb_state is None and _udeb_state is None:
+            console.print(
+                "source verify: repo state scan failed for both "
+                "main and main-udeb — cannot resolve Depends.",
+                tui.COLOR_ERROR,
+            )
+            return
 
         _srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
@@ -4472,7 +4490,12 @@ class BuildSession:
                 if not os.path.isfile(_path):
                     _any_missing = True
                     break
-                _verify_ok, _reason = self.container.verify_pkg_artifact(_path, _f)
+                # Pick the repo state that matches the artifact type
+                # (.udeb resolves against the d-i parallel namespace).
+                _state = _udeb_state if _f.endswith('.udeb') else _deb_state
+                _verify_ok, _reason = self.container.verify_pkg_artifact(
+                    _path, _f, repo_state=_state,
+                )
                 if not _verify_ok:
                     _failing = (_f, _reason)
                     break
