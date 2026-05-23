@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 from typing import TYPE_CHECKING, Optional
 
@@ -48,20 +47,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger('athena')
 
-
-# Host tools that must exist for the build.  Checked before any work.
-_REQUIRED_TOOLS = (
-    'rsync',          # bin paths (PATH)
-    'qemu-img',
-    'mkfs.fat',
-    'losetup',        # /sbin
-    'sfdisk',         # /sbin
-    'mkfs.ext4',      # /sbin
-    'grub-install',   # /sbin
-    'blkid',          # /sbin
-    'mount',
-    'umount',
-)
 
 # sfdisk script that produces our 3-partition layout.  GPT label;
 # part 1 = 1 MB BIOS-boot (no fs), part 2 = 100 MB ESP (vfat), part 3
@@ -92,22 +77,6 @@ def _sudo(argv: list, password: str,
         input=password + '\n',
         capture_output=capture, text=True,
     )
-
-
-def _need_tools() -> Optional[str]:
-    """Return the name of the first missing tool, or None if all
-    present.  Used to fail clean with an actionable message before
-    starting any sudo work."""
-    # /sbin isn't always on the non-root PATH; resolve absolute paths
-    # via shutil.which AND falling back to /sbin /usr/sbin if needed.
-    for _tool in _REQUIRED_TOOLS:
-        if shutil.which(_tool):
-            continue
-        if any(os.path.isfile(os.path.join(_p, _tool))
-               for _p in ('/sbin', '/usr/sbin')):
-            continue
-        return _tool
-    return None
 
 
 def _wait_partitions(loop_dev: str, password: str,
@@ -144,16 +113,6 @@ def build_disk_image(
     breaking the caller signature.
     """
     del container   # v1: all on host; follow-up moves grub-install in-container
-    _missing = _need_tools()
-    if _missing is not None:
-        tui.console.print(
-            f"ERROR: `iso build disk` requires `{_missing}` on the "
-            f"host — install it (`apt install rsync dosfstools "
-            f"qemu-utils` covers the usual gaps)"
-        )
-        logger.error(f"build_disk_image: missing tool {_missing}")
-        return False
-
     if not os.path.isdir(dir_chroot):
         tui.console.print(f"ERROR: chroot dir not found: {dir_chroot}")
         return False

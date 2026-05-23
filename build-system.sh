@@ -221,6 +221,42 @@ else
     echo "All ISO build tools found."
 fi
 
+# Checking disk image build tools (required for `iso build disk` only — COMP-09).
+# Warn-only because disk-image is opt-in; core pipeline doesn't need these.
+echo "Checking disk image build tools..."
+
+if [ -x "$(command -v rsync || true)" ]; then
+    echo "Using rsync $(rsync --version 2>/dev/null | head -n1 || true)"
+else
+    echo "W: rsync not found"
+fi
+
+if [ -x "$(command -v qemu-img || true)" ]; then
+    echo "Using qemu-img $(qemu-img --version 2>/dev/null | head -n1 || true)"
+else
+    echo "W: qemu-img not found"
+fi
+
+if [ -x "$(command -v mkfs.fat || true)" ]; then
+    echo "Using mkfs.fat $(mkfs.fat 2>&1 | head -n1 || true)"
+else
+    echo "W: mkfs.fat not found"
+fi
+
+for _t in losetup sfdisk mkfs.ext4 grub-install blkid; do
+    _p=$(command -v "$_t" || true)
+    if [ -z "$_p" ]; then
+        for _d in /sbin /usr/sbin; do
+            [ -x "$_d/$_t" ] && _p="$_d/$_t" && break
+        done
+    fi
+    if [ -n "$_p" ]; then
+        echo "Using $_t $($_p --version 2>/dev/null | head -n1 || true)"
+    else
+        echo "W: $_t not found"
+    fi
+done
+
 # Checking build directories
 echo "Checking Build Directories (everything is relative to the script path)"
 mkdir -p $BUILD_DIR/$DIR_TMP
