@@ -11619,6 +11619,133 @@ def test_build_system_sh_checks_disk_image_tools():
     )
 
 
+def test_disk_image_has_bios_modules_probes_chroot_dir():
+    """`_has_bios_modules(mnt)` returns True iff <mnt>/usr/lib/grub/
+    i386-pc/ exists.  Used to decide whether to attempt BIOS
+    grub-install (skipping cleanly when grub-pc-bin wasn't installed
+    in the chroot — operator's pkg.list may not include it)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Empty mnt — no i386-pc/ → False.
+        assert disk_image._has_bios_modules(_tmp) is False
+        # Create the dir → True.
+        os.makedirs(os.path.join(_tmp, 'usr', 'lib', 'grub', 'i386-pc'))
+        assert disk_image._has_bios_modules(_tmp) is True
+
+
+def test_disk_image_grub_install_uses_absolute_path_and_env_path():
+    """Operator-observed failure (2026-05-22): bare `grub-install`
+    inside `chroot _mnt grub-install` returned ENOENT because sudo's
+    secure_path didn't include /usr/sbin and PATH lookup inside the
+    chroot missed it.  Fix: use absolute `/usr/sbin/grub-install` +
+    explicit `env PATH=...` prefix.  Pin both to prevent regression."""
+    _path = os.path.join(_ROOT, 'scripts', 'disk_image.py')
+    with open(_path) as fh:
+        _body = fh.read()
+    # Absolute path to grub-install + update-grub.
+    assert '/usr/sbin/grub-install' in _body, (
+        "grub-install must be invoked with absolute path inside chroot"
+    )
+    assert '/usr/sbin/update-grub' in _body, (
+        "update-grub must be invoked with absolute path inside chroot"
+    )
+    # Explicit env PATH belt-and-suspenders for sub-processes spawned
+    # by grub-install (grub-mkimage, grub-probe, etc.).
+    assert "PATH=/usr/local/sbin" in _body
+    assert "'env'" in _body, (
+        "chroot calls must run via `env PATH=...` prefix"
+    )
+
+
+def test_disk_image_efi_only_fallback_when_no_bios_modules():
+    """When the chroot has no /usr/lib/grub/i386-pc/ (grub-pc-bin
+    not installed), BIOS grub-install must be SKIPPED — not attempted
+    and failed.  Source-text pin: the `if _has_bios_modules(_mnt):`
+    gate must wrap the BIOS install branch."""
+    _path = os.path.join(_ROOT, 'scripts', 'disk_image.py')
+    with open(_path) as fh:
+        _body = fh.read()
+    import re
+    # The BIOS grub-install call must live inside an if _has_bios_modules
+    # block (heuristic: pattern shows up before the i386-pc invocation).
+    _m = re.search(
+        r"if _has_bios_modules\(_mnt\):.*?--target=i386-pc",
+        _body, re.DOTALL,
+    )
+    assert _m, (
+        "BIOS grub-install must be gated on _has_bios_modules(_mnt) — "
+        "running it unconditionally on a chroot without i386-pc modules "
+        "fails the whole build"
+    )
+
+
+def test_disk_image_minimal_grub_cfg_writes_uuid_kernel_line():
+    """The hand-rolled grub.cfg fallback (used when update-grub fails)
+    must reference the root UUID and an actual /boot/vmlinuz-* kernel
+    from the mounted target."""
+    import sys, tempfile
+    from unittest.mock import patch, MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+
+    with tempfile.TemporaryDirectory() as _mnt:
+        # Set up <mnt>/boot/vmlinuz-* + initrd.img-* + grub dir
+        os.makedirs(os.path.join(_mnt, 'boot', 'grub'))
+        for _f in ('vmlinuz-6.1.0-45-amd64', 'initrd.img-6.1.0-45-amd64'):
+            with open(os.path.join(_mnt, 'boot', _f), 'w') as fh:
+                fh.write('stub')
+
+        # Capture the install call to inspect what got written.
+        _captured = {}
+        def _fake_sudo(argv, _password, capture=True):
+            # ['install', '-m', '644', <tmp>, <dest>]
+            if argv[0] == 'install':
+                _src = argv[3]
+                with open(_src) as fh:
+                    _captured['content'] = fh.read()
+                _captured['dest'] = argv[4]
+            _r = MagicMock()
+            _r.returncode = 0
+            _r.stderr = ''
+            return _r
+
+        with patch.object(disk_image, '_sudo', side_effect=_fake_sudo):
+            _ok = disk_image._write_minimal_grub_cfg(
+                _mnt, 'aaaa-bbbb-cccc-dddd', 'pw',
+            )
+        assert _ok is True
+        # Content checks:
+        _c = _captured['content']
+        assert 'aaaa-bbbb-cccc-dddd' in _c, (
+            f"root UUID missing from grub.cfg:\n{_c}"
+        )
+        assert 'vmlinuz-6.1.0-45-amd64' in _c, (
+            f"kernel filename missing from grub.cfg:\n{_c}"
+        )
+        assert 'initrd.img-6.1.0-45-amd64' in _c, (
+            f"initrd filename missing from grub.cfg:\n{_c}"
+        )
+        # Destination is /boot/grub/grub.cfg under the mount.
+        assert _captured['dest'].endswith('/boot/grub/grub.cfg')
+
+
+def test_disk_image_minimal_grub_cfg_fails_clean_when_no_kernel():
+    """When /boot has no vmlinuz-* (chroot built without a kernel
+    package somehow), the fallback returns False instead of writing
+    a broken grub.cfg.  Surfaces the gap to the operator."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    with tempfile.TemporaryDirectory() as _mnt:
+        os.makedirs(os.path.join(_mnt, 'boot', 'grub'))
+        # No vmlinuz-* present.
+        assert disk_image._write_minimal_grub_cfg(
+            _mnt, 'uuid-x', 'pw',
+        ) is False
+
+
 def test_disk_image_sfdisk_script_lays_out_three_partitions():
     """The sfdisk script template must produce: 1 MB BIOS-boot, 100 MB
     EFI (vfat), rest = root.  Pin via substring checks — small enough

@@ -284,11 +284,24 @@ def build_disk_image(
         _fstab = _FSTAB_TEMPLATE.format(
             root_uuid=_root_uuid, efi_uuid=_efi_uuid,
         )
-        _r = subprocess.run(
-            ['sudo', '-S', 'tee', os.path.join(_mnt, 'etc', 'fstab')],
-            input=password + '\n' + _fstab,
-            capture_output=True, text=True,
-        )
+        # Tempfile + sudo install pattern (same rationale as the
+        # sfdisk step): keeps sudo's stdin = password only, never
+        # mixed with the content we're writing.
+        import tempfile as _tempfile
+        _fs_fd, _fs_path = _tempfile.mkstemp(prefix='fstab-', suffix='.txt')
+        try:
+            with os.fdopen(_fs_fd, 'w') as _fh:
+                _fh.write(_fstab)
+            _r = _sudo(
+                ['install', '-m', '644', _fs_path,
+                 os.path.join(_mnt, 'etc', 'fstab')],
+                password,
+            )
+        finally:
+            try:
+                os.unlink(_fs_path)
+            except OSError:
+                pass
         if _r.returncode != 0:
             tui.console.print(
                 f"ERROR: write fstab: {_r.stderr.strip()[:200]}"
@@ -312,27 +325,28 @@ def build_disk_image(
         _bind_mounted = True
 
         _spin = tui.Spinner(
-            f"grub-install BIOS + EFI into chroot ({_loop_dev})"
+            f"grub-install EFI{' + BIOS' if _has_bios_modules(_mnt) else ''} "
+            f"into chroot ({_loop_dev})"
         )
         try:
-            # BIOS (i386-pc) — writes MBR + embeds core.img into part 1
-            _r = _sudo(
-                ['chroot', _mnt,
-                 'grub-install', '--target=i386-pc',
-                 '--boot-directory=/boot', _loop_dev],
-                password,
+            # EFI (x86_64-efi) is mandatory — every modern hypervisor /
+            # cloud platform boots EFI by default.  --removable writes
+            # EFI/BOOT/BOOTX64.EFI so any firmware boots it without
+            # needing NVRAM entries.  --no-nvram suppresses host NVRAM
+            # writes (we're building an image, not configuring the
+            # host's boot order).
+            #
+            # Absolute path + explicit env PATH to insulate against:
+            # (a) sudo configs whose secure_path doesn't include /usr/
+            # sbin, and (b) the chroot's own PATH being unset.  Both
+            # bit operator on first run (2026-05-22).
+            _chroot_env = (
+                'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:'
+                '/usr/bin:/sbin:/bin'
             )
-            if _r.returncode != 0:
-                tui.console.print(
-                    f"ERROR: grub-install BIOS: "
-                    f"{_r.stderr.strip()[:200]}"
-                )
-                return False
-            # EFI (x86_64-efi) — --removable writes BOOTX64.EFI so any
-            # firmware boots it without NVRAM entries.
             _r = _sudo(
-                ['chroot', _mnt,
-                 'grub-install', '--target=x86_64-efi',
+                ['env', _chroot_env, 'chroot', _mnt,
+                 '/usr/sbin/grub-install', '--target=x86_64-efi',
                  '--efi-directory=/boot/efi', '--removable',
                  '--no-nvram'],
                 password,
@@ -343,21 +357,60 @@ def build_disk_image(
                     f"{_r.stderr.strip()[:200]}"
                 )
                 return False
-            # grub-mkconfig produces /boot/grub/grub.cfg from the
-            # installed kernel(s).  Uses the chroot's /etc/default/grub
-            # if any; otherwise system defaults.
+
+            # BIOS (i386-pc) is OPPORTUNISTIC.  Skip if the chroot
+            # doesn't have grub-pc-bin's modules at /usr/lib/grub/
+            # i386-pc/ — operator's pkg.list may not include it
+            # (config check above), or upstream resolution dropped it.
+            # EFI image still boots cleanly on any UEFI firmware.
+            if _has_bios_modules(_mnt):
+                _r = _sudo(
+                    ['env', _chroot_env, 'chroot', _mnt,
+                     '/usr/sbin/grub-install', '--target=i386-pc',
+                     '--boot-directory=/boot', _loop_dev],
+                    password,
+                )
+                if _r.returncode != 0:
+                    logger.warning(
+                        f"grub-install BIOS returned rc={_r.returncode}: "
+                        f"{_r.stderr.strip()[:200]} — EFI-only image"
+                    )
+                    tui.console.print(
+                        "W: BIOS grub-install failed — image will be "
+                        "EFI-only (UEFI hypervisors only)"
+                    )
+            else:
+                tui.console.print(
+                    "W: /usr/lib/grub/i386-pc not in chroot "
+                    "(grub-pc-bin not installed) — EFI-only image"
+                )
+
+            # grub-mkconfig via update-grub.  Soft failure (log+warn)
+            # because the bootloader is already installed; grub.cfg
+            # absence just means the boot menu has no entries — easy
+            # to add manually post-boot, doesn't brick the image.
             _r = _sudo(
-                ['chroot', _mnt, 'update-grub'],
+                ['env', _chroot_env, 'chroot', _mnt,
+                 '/usr/sbin/update-grub'],
                 password,
             )
             if _r.returncode != 0:
-                # update-grub failure is a soft warning — bootloader is
-                # installed; just missing the menu config.  Log and
-                # continue.
                 logger.warning(
                     f"update-grub returned rc={_r.returncode}: "
                     f"{_r.stderr.strip()[:200]}"
                 )
+                tui.console.print(
+                    "W: update-grub failed — wrote a minimal grub.cfg "
+                    "manually instead"
+                )
+                # Fall back to a hand-rolled minimal grub.cfg pointing
+                # at the first vmlinuz-* in /boot.
+                if not _write_minimal_grub_cfg(_mnt, _root_uuid, password):
+                    tui.console.print(
+                        "ERROR: minimal grub.cfg fallback also failed — "
+                        "image will not boot"
+                    )
+                    return False
         finally:
             _spin.done()
 
@@ -380,6 +433,86 @@ def build_disk_image(
         if _loop_dev is not None:
             _sudo(['losetup', '-d', _loop_dev], password, capture=True)
         _sudo(['rmdir', _mnt], password, capture=True)
+
+
+def _has_bios_modules(mnt: str) -> bool:
+    """Check if the chroot has grub's i386-pc modules at
+    /usr/lib/grub/i386-pc/.  Required for BIOS grub-install — when
+    grub-pc-bin isn't installed, this dir doesn't exist and BIOS
+    install fails cryptically.  Operator-observed 2026-05-22 with a
+    chroot that had grub-efi-amd64-bin but not grub-pc-bin."""
+    return os.path.isdir(os.path.join(mnt, 'usr', 'lib', 'grub', 'i386-pc'))
+
+
+def _write_minimal_grub_cfg(mnt: str, root_uuid: str,
+                              password: str) -> bool:
+    """Last-resort fallback when chroot'd update-grub fails: hand-roll
+    a minimal /boot/grub/grub.cfg that boots the first vmlinuz-* in
+    /boot.  Single menu entry, 3-second timeout.
+
+    Real-world cases where update-grub fails:
+      - grub-mkconfig scripts can't find /etc/default/grub
+      - os-prober errors out under chroot's restricted view of /dev
+      - mkconfig assumes a specific filesystem layout we don't have
+    """
+    # Discover the kernel — glob /boot/vmlinuz-* in the mounted target.
+    _boot = os.path.join(mnt, 'boot')
+    try:
+        _vmlinuz = sorted(_f for _f in os.listdir(_boot)
+                          if _f.startswith('vmlinuz-'))
+        _initrd  = sorted(_f for _f in os.listdir(_boot)
+                          if _f.startswith('initrd.img-'))
+    except OSError as e:
+        logger.error(f"list {_boot} for kernel: {e}")
+        return False
+    if not _vmlinuz:
+        logger.error(f"no vmlinuz-* in {_boot}")
+        return False
+    if not _initrd:
+        logger.error(f"no initrd.img-* in {_boot}")
+        return False
+    _k_name  = _vmlinuz[-1]
+    _i_name  = _initrd[-1]
+
+    _cfg = (
+        f"# Minimal grub.cfg — generated by Athena Build COMP-09\n"
+        f"# (update-grub fallback path).  Single entry; replace via\n"
+        f"# `grub-mkconfig -o /boot/grub/grub.cfg` from the booted system.\n"
+        f"set timeout=3\n"
+        f"set default=0\n"
+        f"\n"
+        f"menuentry 'Asgard Linux' {{\n"
+        f"    insmod gzio\n"
+        f"    insmod part_gpt\n"
+        f"    insmod ext2\n"
+        f"    search --no-floppy --fs-uuid --set=root {root_uuid}\n"
+        f"    linux  /boot/{_k_name} root=UUID={root_uuid} ro quiet\n"
+        f"    initrd /boot/{_i_name}\n"
+        f"}}\n"
+    )
+    import tempfile as _tempfile
+    _fd, _tmp = _tempfile.mkstemp(prefix='grub-cfg-', suffix='.txt')
+    try:
+        with os.fdopen(_fd, 'w') as _fh:
+            _fh.write(_cfg)
+        # /boot/grub/ exists post-grub-install (EFI install creates it).
+        _r = _sudo(
+            ['install', '-m', '644', _tmp,
+             os.path.join(mnt, 'boot', 'grub', 'grub.cfg')],
+            password,
+        )
+    finally:
+        try:
+            os.unlink(_tmp)
+        except OSError:
+            pass
+    if _r.returncode != 0:
+        logger.error(
+            f"install minimal grub.cfg: rc={_r.returncode}, "
+            f"stderr={_r.stderr.strip()}"
+        )
+        return False
+    return True
 
 
 def _read_uuid(partition: str, password: str) -> str:
