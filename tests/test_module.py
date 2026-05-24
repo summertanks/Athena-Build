@@ -11903,17 +11903,17 @@ def test_tui_footer_height_is_two_rows():
     )
 
 
-def test_tui_status_bar_uses_reverse_video_attribute():
-    """ARCH-14 P1: status bar (row 1 of footer) uses curses.A_REVERSE
-    rather than a colored bg pair.  Reverse-video matches the
-    operator's chosen terminal palette flipped — palette-independent
-    and matches Claude-CLI's understated look.
+def test_tui_status_bar_uses_fixed_bright_color_pair():
+    """ARCH-14 P1 (revised 2026-05-24): status bar (row 1 of footer)
+    uses a fixed bright color pair (COLOR_FOOTER) rather than
+    A_REVERSE.  Reverse-video blended badly with transparent / themed
+    terminals; a fixed bg keeps the bar legible regardless of the
+    operator's palette.
 
     Code-inspection test (pinning the implementation choice) — the
     new _refreshfooter is too tangled to instantiate without a real
     curses session at this phase, so we verify the contract via
-    source inspection.  Phase 1's fake-curses harness (deferred to a
-    later phase) would let us assert this behaviourally."""
+    source inspection."""
     _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
     import re
     _m = re.search(
@@ -11922,22 +11922,26 @@ def test_tui_status_bar_uses_reverse_video_attribute():
     )
     assert _m, '_refreshfooter not found'
     _body = _m.group(0)
-    # The status row must be filled with A_REVERSE — confirm the
-    # row-fill pattern AND that COLOR_FOOTER (blue bg) is NOT used
-    # anymore.
-    assert 'A_REVERSE' in _body, (
-        "status bar must use curses.A_REVERSE attribute for the "
-        "subtle reverse-video look (ARCH-14 P1 decision)"
+    # The status row must use COLOR_FOOTER (fixed bright pair).
+    assert 'COLOR_FOOTER' in _body, (
+        "status bar must use the COLOR_FOOTER pair for its fixed "
+        "bright background"
     )
-    assert "' * max_x" in _body or "' '" in _body, (
-        "status bar must fill the full row with reverse-video spaces "
-        "so the bg is uniform across the line"
+    assert "' * max_x" in _body, (
+        "status bar must fill the full row with spaces so the bg is "
+        "uniform across the line"
     )
-    # COLOR_FOOTER pair used to set a blue bg; new layout drops that.
-    assert 'COLOR_FOOTER' not in _body, (
-        "_refreshfooter must NOT use COLOR_FOOTER (colored bg); the "
-        "new layout uses A_REVERSE for palette-independent reverse "
-        "video instead"
+    # The row-1 fill / banner / tags / hint must NOT use bare A_REVERSE
+    # for the bg fill (A_REVERSE on the cmdline cursor in row 0 is
+    # still fine — that's per-cell highlight, not background).  Scope
+    # to the row-1 SECTION comment marker (── Row 1:) rather than the
+    # earlier docstring mention of "Row 1".
+    _row1_idx = _body.find('── Row 1')
+    assert _row1_idx > 0, '── Row 1 section marker not found in _refreshfooter'
+    _row1_body = _body[_row1_idx:]
+    assert 'A_REVERSE' not in _row1_body, (
+        'status bar (row 1) must NOT use A_REVERSE — it blends badly '
+        'with themed/transparent terminals; use COLOR_FOOTER instead'
     )
 
 
@@ -16067,7 +16071,7 @@ def main() -> int:
         test_cli_logging_handlers_bound_to_cli_after_init,
         # ARCH-14 P1 — TUI layout reshape
         test_tui_footer_height_is_two_rows,
-        test_tui_status_bar_uses_reverse_video_attribute,
+        test_tui_status_bar_uses_fixed_bright_color_pair,
         test_tui_tab_content_region_height_equals_lines_minus_footer,
         # ARCH-14 P2 — scrollback
         test_tui_max_buffer_lines_capped,
