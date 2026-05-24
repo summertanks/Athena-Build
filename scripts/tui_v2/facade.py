@@ -50,7 +50,17 @@ class Console:
     verbatim and let the renderer translate)."""
 
     def print(self, message: str, attribute: Optional[int] = None) -> None:
-        _post(PrintEvent(message, attribute or 0))
+        # Resolve COLOR_* index → curses attr at the producer side
+        # so the dispatcher buffer stores usable attrs (no sentinel
+        # collision with SEVERITY_*).  Done via the renderer helper
+        # if a dispatcher is bound; otherwise pass through as 0.
+        attr = 0
+        if attribute and _dispatcher is not None:
+            try:
+                attr = _dispatcher._renderer.attr_for_color(attribute)
+            except Exception:
+                attr = 0
+        _post(PrintEvent(message, attr))
 
     def INFO(self, message: str) -> None:
         from .events import LogEvent
