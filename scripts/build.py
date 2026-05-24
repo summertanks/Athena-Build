@@ -2386,20 +2386,33 @@ class BuildSession:
                     f"  {_no_pkgs:5d}  no {_ext} binaries declared"
                 )
             if _failed:
-                from collections import Counter
+                from collections import Counter, defaultdict
                 _types: 'Counter[str]' = Counter()
-                for _, _, _diag in _failed:
+                _by_type: 'dict[str, list[str]]' = defaultdict(list)
+                for _src_name, _f, _diag in _failed:
                     _prefix = (_diag.split(':', 1)[0]
                                if ':' in _diag else _diag)
                     _types[_prefix] += 1
+                    _by_type[_prefix].append(_src_name)
                 console.print("")
                 console.print(f"  Failure types ({_label}):")
                 for _k, _v in _types.most_common():
                     console.print(f"    {_v:5d}  {_k}")
+
+                # Concise list of failing source names, grouped by
+                # failure type.  Wrapped to terminal-friendly width.
+                console.print("")
+                console.print(f"  Failing sources ({_label}):")
+                for _prefix, _names in _by_type.items():
+                    self._print_wrapped_names(
+                        f"    {_prefix} ({len(_names)})",
+                        sorted(set(_names)),
+                    )
+
             if verbose and _failed:
                 console.print("")
                 console.print(
-                    f"  Failing sources ({_label}, {len(_failed)}):"
+                    f"  Per-binary detail ({_label}, {len(_failed)}):"
                 )
                 for _src_name, _f, _diag in _failed:
                     console.print(f"    {_src_name}: {_f}: {_diag}")
@@ -2418,16 +2431,24 @@ class BuildSession:
             return
         from collections import Counter
         _by_field = Counter(f[1] for f in _findings)
+        _pkgs_with_residue = sorted({f[0] for f in _findings})
         console.print(
             f"  {len(_findings):5d} finding(s) across "
-            f"{len({f[0] for f in _findings})} pkg(s):"
+            f"{len(_pkgs_with_residue)} pkg(s):"
         )
         for _field, _count in _by_field.most_common():
             console.print(f"    {_count:5d}  {_field}")
-        _show = len(_findings) if verbose else min(20, len(_findings))
-        if _show:
-            console.print(f"  First {_show}:")
-            for _pkg, _field, _val, _why in _findings[:_show]:
+        # Concise: list pkg NAMES wrapped to terminal width.  Verbose:
+        # full per-finding detail (pkg + field + raw value + why).
+        console.print("")
+        self._print_wrapped_names(
+            f"  Affected pkgs ({len(_pkgs_with_residue)})",
+            _pkgs_with_residue,
+        )
+        if verbose:
+            console.print("")
+            console.print(f"  Per-finding detail ({len(_findings)}):")
+            for _pkg, _field, _val, _why in _findings:
                 console.print(
                     f"    {_pkg:30s}  {_field:14s}  {_val}  — {_why}"
                 )
@@ -4668,16 +4689,50 @@ class BuildSession:
                     f"→  {_cmd_map[_subset]}"
                 )
 
-        if _verbose:
-            for _state in ('needs_build', 'stale_pass', 'repairable',
-                           'needs_sync'):
-                _names = _by_state.get(_state, [])
+        # Concise failure list — shown by default whenever any
+        # actionable state is non-empty.  One line per state, names
+        # wrapped to fit terminal width.  `verbose` adds per-name
+        # subset annotation.
+        _actionable = ('needs_build', 'stale_pass', 'repairable',
+                       'needs_sync')
+        _any_actionable = any(_by_state.get(_s) for _s in _actionable)
+        if _any_actionable:
+            console.print("")
+            console.print("Failures:")
+            for _state in _actionable:
+                _names = sorted(_by_state.get(_state, []))
                 if not _names:
                     continue
-                console.print("")
-                console.print(f"[{_state}] ({len(_names)}):")
-                for _n in sorted(_names):
-                    console.print(f"  {_n}  ({_subset_for(_n)})")
+                if _verbose:
+                    console.print(f"  [{_state}] ({len(_names)}):")
+                    for _n in _names:
+                        console.print(f"    {_n}  ({_subset_for(_n)})")
+                else:
+                    self._print_wrapped_names(
+                        f"  {_state} ({len(_names)})", _names,
+                    )
+
+    @staticmethod
+    def _print_wrapped_names(label: str, names: 'list[str]',
+                              wrap: int = 72) -> None:
+        """Print `label: name, name, name, …` with names wrapped to
+        `wrap` columns past the label's indent.  Keeps the failure
+        summary compact (one logical line per state, wrapped to
+        terminal width rather than ballooning to N lines for N names).
+        """
+        _indent = '    '
+        _line = f"{label}: "
+        _first = True
+        for _n in names:
+            _piece = _n if _first else ', ' + _n
+            if len(_line) + len(_piece) > wrap and not _first:
+                console.print(_line)
+                _line = _indent + _n
+            else:
+                _line += _piece
+            _first = False
+        if _line.strip():
+            console.print(_line)
 
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
