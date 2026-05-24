@@ -11870,12 +11870,117 @@ def test_select_toggle_and_save_round_trip():
     assert groups['devel'] == ['git', 'vim']
 
 
-def test_select_add_package_appends_to_group():
-    """Adding a name appends it (selected) to the group's entry list."""
-    ctl, _t, _p = _select_controller('[base]\nbash\n')
+def test_select_add_package_inline_input_appends_to_group():
+    """'a' enters inline add-mode; typing a name + Enter appends it
+    (selected) to the current group — WITHOUT touching the dispatcher
+    prompt (which would cancel the shell's idle prompt)."""
+    ctl, ft, _p = _select_controller('[base]\nbash\n')
+    ctl.activate()
     assert ctl._entry('base', 'htop') is None
-    ctl._groups['base'].append(['htop', True])
+    # Cursor on the base header (row 0) — 'a' targets [base].
+    assert ctl.handle_key('a') is True
+    assert ctl._input_mode == 'add'
+    # The selector must NOT have called the dispatcher prompt.
+    # (_FakeTui.prompt returns '' and records nothing — assert add-mode
+    # is driven purely by handle_key, never by a prompt round-trip.)
+    for ch in 'htop':
+        assert ctl.handle_key(ch) is True
+    assert ctl._input_buffer == 'htop'
+    ctl.handle_key('\n')
+    assert ctl._input_mode is None
     assert ctl._entry('base', 'htop') == ['htop', True]
+    assert ctl._unsaved is True
+
+
+def test_select_quit_without_save_does_not_use_dispatcher_prompt():
+    """Regression: quitting with unsaved edits must NOT call
+    request_prompt (which cancels the shell's pending prompt and kills
+    the shell, ignoring all later commands).  Instead it enters an
+    inline y/n confirm handled by handle_key; 'n' tears down cleanly."""
+    ctl, ft, _p = _select_controller('[base]\nbash\ncoreutils\n')
+    ctl.activate()
+
+    # Make an edit so the quit path takes the confirm branch.
+    ctl.handle_key('KEY_DOWN')   # → bash
+    ctl.handle_key(' ')          # toggle off
+    assert ctl._unsaved is True
+
+    # 'q' must NOT post a dispatcher prompt — it enters inline confirm.
+    ft.prompt_calls = 0
+    orig_prompt = ft.prompt
+    def _counting_prompt(*a, **k):
+        ft.prompt_calls += 1
+        return orig_prompt(*a, **k)
+    ft.prompt = _counting_prompt
+
+    assert ctl.handle_key('q') is True
+    assert ctl._input_mode == 'quit'
+    assert ft.prompt_calls == 0, 'quit must not call the dispatcher prompt'
+
+    # 'n' → discard + teardown (tab removed, key handler cleared).
+    assert ctl.handle_key('n') is True
+    assert ctl._input_mode is None
+    assert ft.removed == ['select']
+    assert ft.cleared is True
+    assert ft.prompt_calls == 0
+
+
+def test_select_quit_confirm_yes_saves_then_teardown():
+    """Inline quit-confirm 'y' saves the model then tears down."""
+    import utils
+    ctl, ft, path = _select_controller('[base]\nbash\ncoreutils\n')
+    ctl.activate()
+    ctl.handle_key('KEY_DOWN')   # → bash
+    ctl.handle_key(' ')          # toggle bash off
+    ctl.handle_key('q')          # → inline confirm
+    assert ctl._input_mode == 'quit'
+    ctl.handle_key('y')          # save + teardown
+    assert ctl._input_mode is None
+    assert ft.removed == ['select'] and ft.cleared is True
+    # bash dropped on disk.
+    assert utils.parse_pkg_list_groups(path) == {'base': ['coreutils']}
+
+
+def test_select_save_preserves_comments_and_appends_new():
+    """Regression: write_pkg_list must preserve the file header
+    comment block + inline `#` notes + blank lines (the buggy
+    regenerate-from-scratch version stripped them).  Edits applied as
+    a minimal diff: drop unselected, append new at end of group."""
+    import select_packages, utils
+    body = (
+        '# pkg.list header comment\n'
+        '# second header line\n'
+        '\n'
+        '[base]\n'
+        '## Description: core\n'
+        '# inline note about bash\n'
+        'bash\n'
+        'coreutils\n'
+        '\n'
+        '[devel]\n'
+        'git\n'
+    )
+    ctl, _t, path = _select_controller(body)
+    # Drop coreutils, add htop to base.
+    ctl._entry('base', 'coreutils')[1] = False
+    ctl._groups['base'].append(['htop', True])
+    select_packages.write_pkg_list(path, ctl._groups, ctl._meta)
+
+    with open(path) as f:
+        new = f.read()
+    # Comments + blank lines preserved verbatim.
+    assert '# pkg.list header comment' in new
+    assert '# second header line' in new
+    assert '# inline note about bash' in new
+    assert '## Description: core' in new
+    # Edits applied.
+    assert 'coreutils' not in new        # dropped
+    assert 'htop' in new                 # appended
+    assert 'bash' in new and 'git' in new
+    # Structure still parses correctly.
+    groups = utils.parse_pkg_list_groups(path)
+    assert groups['base'] == ['bash', 'htop']
+    assert groups['devel'] == ['git']
 
 
 def test_select_flat_file_round_trips_without_header():
@@ -15410,9 +15515,12 @@ def main() -> int:
         # COMP-06 — package-set selector
         test_select_loads_groups_all_selected,
         test_select_toggle_and_save_round_trip,
-        test_select_add_package_appends_to_group,
+        test_select_add_package_inline_input_appends_to_group,
+        test_select_save_preserves_comments_and_appends_new,
         test_select_flat_file_round_trips_without_header,
         test_select_key_toggle_sets_unsaved_and_rerenders,
+        test_select_quit_without_save_does_not_use_dispatcher_prompt,
+        test_select_quit_confirm_yes_saves_then_teardown,
         test_select_approx_closure_sums_first_provider_bfs,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,

@@ -77,6 +77,18 @@ class SelectPackages:
         self._scroll = 0      # top visible row index
         self._unsaved = False
 
+        # Inline input mode — the selector owns ALL its keystrokes via
+        # the dispatcher's key interceptor and NEVER calls
+        # request_prompt (doing so would cancel the shell's idle prompt
+        # and kill the shell thread, since the dispatcher has a single
+        # pending-prompt slot).  Instead, 'add' and 'quit-confirm'
+        # render an input line inside the select tab and capture keys
+        # here.  None = navigation mode; 'add' = typing a pkg name;
+        # 'quit' = y/n confirm.
+        self._input_mode: Optional[str] = None
+        self._input_buffer = ''
+        self._add_group = ''   # group the 'add' input targets
+
         # Lazy per-package metadata cache:
         #   name -> {'size': int_kb, 'deps': int, 'desc': str,
         #            'closure': Optional[int_kb]}   (None = not yet computed)
@@ -232,9 +244,16 @@ class SelectPackages:
                 if is_cursor:
                     self._ensure_closure(row.name)
 
-        # Help line at the bottom.
-        out.append(('  ↑↓ move  SPACE toggle  a add  d drop  [ ] group  '
-                    's save  q quit', info_a))
+        # Bottom line: inline input prompt when active, else the help.
+        if self._input_mode == 'add':
+            group = self._add_group or '?'
+            out.append((f'  add to [{group}]: {self._input_buffer}_', rev))
+        elif self._input_mode == 'quit':
+            out.append(('  Unsaved changes — save before quit?  '
+                        'y = save+quit   n/Esc = discard+quit', rev))
+        else:
+            out.append(('  ↑↓ move  SPACE toggle  a add  d drop  [ ] group  '
+                        's save  q quit', info_a))
         self._tui.set_tab_buffer(self.TAB, out)
 
     def _format_pkg_row(self, row: _Row, is_cursor: bool) -> str:
@@ -268,49 +287,92 @@ class SelectPackages:
 
     # ─── Key handling (runs on the dispatcher thread) ────────────────────
     def handle_key(self, key: str) -> bool:
-        """Return True if the key was consumed by the selector."""
+        """Return True if the key was consumed by the selector.
+
+        The selector owns EVERY keystroke except F-keys (so tab-switch
+        still works) and KEY_RESIZE (so the renderer reflows).  This
+        keeps stray keys out of the shell's idle command line and means
+        the selector never needs the dispatcher prompt — input modes
+        ('add', 'quit') are handled inline below."""
+        # Always let the dispatcher handle resize + F-key tab switches.
+        if key == 'KEY_RESIZE':
+            return False
+        if key.startswith('KEY_F(') and key.endswith(')'):
+            return False
+
+        # ── Inline input mode (add / quit-confirm) ──────────────────────
+        if self._input_mode is not None:
+            self._handle_input_key(key)
+            return True
+
         rows = self._rows()
         if not rows:
             if key in ('q', 'Q'):
                 self._teardown()
-                return True
-            return False
+            return True
 
         if key == 'KEY_UP':
             self._move_cursor(-1, rows)
-            return True
-        if key == 'KEY_DOWN':
+        elif key == 'KEY_DOWN':
             self._move_cursor(1, rows)
-            return True
-        if key == 'KEY_PPAGE':
+        elif key == 'KEY_PPAGE':
             self._move_cursor(-(max(1, self._tui.viewport_rows() - 3)), rows)
-            return True
-        if key == 'KEY_NPAGE':
+        elif key == 'KEY_NPAGE':
             self._move_cursor(max(1, self._tui.viewport_rows() - 3), rows)
-            return True
-        if key == ' ':
+        elif key == ' ':
             self._toggle_current(rows)
-            return True
-        if key in ('d', 'D'):
+        elif key in ('d', 'D'):
             self._set_current(rows, False)
-            return True
-        if key == ']':
+        elif key == ']':
             self._jump_group(rows, +1)
-            return True
-        if key == '[':
+        elif key == '[':
             self._jump_group(rows, -1)
-            return True
-        if key in ('a', 'A'):
-            self._add_package(rows)
-            return True
-        if key in ('s', 'S'):
+        elif key in ('a', 'A'):
+            self._begin_add(rows)
+        elif key in ('s', 'S'):
             self._save()
-            return True
-        if key in ('q', 'Q'):
+        elif key in ('q', 'Q'):
             self._quit()
-            return True
-        # F-keys / other → fall through so tab-switch still works.
-        return False
+        # Any other key is swallowed (kept out of the shell cmdline).
+        return True
+
+    def _handle_input_key(self, key: str) -> None:
+        """Keystroke handling while an inline input line is active."""
+        if self._input_mode == 'quit':
+            # y/n confirm — single keystroke.
+            ch = key.lower()
+            if ch == 'y':
+                self._input_mode = None
+                self._save()
+                self._teardown()
+            elif ch in ('n', '\x1b'):   # n or Esc → discard + quit
+                self._input_mode = None
+                self._teardown()
+            # any other key: ignore, keep waiting.
+            return
+
+        # 'add' mode — line editor.
+        if key in ('\n', '\r'):
+            name = self._input_buffer.strip()
+            self._input_mode = None
+            self._input_buffer = ''
+            if name:
+                self._commit_add(name)
+            else:
+                self._render()
+            return
+        if key == '\x1b':          # Esc → cancel add
+            self._input_mode = None
+            self._input_buffer = ''
+            self._render()
+            return
+        if key in ('KEY_BACKSPACE', '\x7f', '\x08'):
+            self._input_buffer = self._input_buffer[:-1]
+            self._render()
+            return
+        if len(key) == 1 and key.isprintable():
+            self._input_buffer += key
+            self._render()
 
     def _move_cursor(self, delta: int, rows: List[_Row]) -> None:
         new = max(0, min(self._cursor + delta, len(rows) - 1))
@@ -363,27 +425,22 @@ class SelectPackages:
                 break
         self._render()
 
-    def _add_package(self, rows: List[_Row]) -> None:
-        """Prompt for a package name; add it to the current group.
+    def _begin_add(self, rows: List[_Row]) -> None:
+        """Enter inline 'add' input mode for the current group."""
+        self._add_group = (rows[self._cursor].group if self._cursor < len(rows)
+                           else next(iter(self._groups), 'base'))
+        self._input_mode = 'add'
+        self._input_buffer = ''
+        self._render()
 
-        Runs the blocking prompt on a worker thread so the dispatcher
-        loop (which called us) isn't re-entered — request_prompt would
-        deadlock if called on the dispatcher thread."""
-        cur_group = (rows[self._cursor].group if self._cursor < len(rows)
-                     else next(iter(self._groups), 'base'))
-
-        def _work() -> None:
-            name = self._tui.prompt(f'Add package to [{cur_group}]: ').strip()
-            if not name:
-                return
-            if self._cache and not self._cache.get_packages(name):
-                self._tui.print(f'  select: "{name}" not in cache — added anyway')
-            if self._entry(cur_group, name) is None:
-                self._groups[cur_group].append([name, True])
-                self._unsaved = True
-            self._render()
-
-        threading.Thread(target=_work, daemon=True, name='select-add').start()
+    def _commit_add(self, name: str) -> None:
+        group = self._add_group or next(iter(self._groups), 'base')
+        if self._cache and not self._cache.get_packages(name):
+            self._tui.print(f'  select: "{name}" not in cache — added anyway')
+        if self._entry(group, name) is None:
+            self._groups.setdefault(group, []).append([name, True])
+            self._unsaved = True
+        self._render()
 
     def _save(self) -> None:
         write_pkg_list(self._path, self._groups, self._meta)
@@ -395,48 +452,108 @@ class SelectPackages:
         if not self._unsaved:
             self._teardown()
             return
-
-        def _work() -> None:
-            resp = self._tui.prompt('Unsaved changes — save before quit? [y/n]: ')
-            if resp.strip().lower() in ('y', 'yes'):
-                self._save()
-            self._teardown()
-
-        threading.Thread(target=_work, daemon=True, name='select-quit').start()
+        # Enter inline y/n confirm — handled by _handle_input_key.
+        self._input_mode = 'quit'
+        self._render()
 
 
 def write_pkg_list(path: str, groups: Dict[str, List[List]],
                    meta: Dict[str, Dict[str, str]]) -> None:
-    """Serialise the edited model back to `path`.
+    """Serialise the edited model back to `path` — MINIMAL DIFF.
 
-    Preserves group order, `## Description:` comments, and within-group
-    ordering.  Drops unselected entries.  Atomic (temp + rename).
+    Re-reads the original file and edits it line-by-line rather than
+    regenerating from the model, so ALL comments (the file header,
+    inline `#` notes, blank lines) and original ordering are preserved.
+    Only two kinds of change are applied:
 
-    A single-group `base`-only model with no description is written
-    flat (no `[base]` header) to keep round-trips clean for legacy
-    flat pkg.list files."""
-    lines: List[str] = []
-    gnames = list(groups.keys())
-    flat = (gnames == ['base'] and not meta.get('base', {}).get('description'))
+      - A package line that is now UNSELECTED is dropped.
+      - A newly-ADDED selected package is appended at the end of its
+        group block (just before the next `[group]` header, or EOF).
 
-    if flat:
-        for name, sel in groups['base']:
-            if sel:
-                lines.append(name)
+    Groups present in the model but absent from the file are appended
+    whole (header + `## Description:` + selected names).  Atomic write
+    (temp + os.replace).
+
+    Falls back to a from-scratch flat emit only when the file doesn't
+    exist yet (first-ever save of a flat model)."""
+    import re
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            orig = f.read().splitlines()
+    except OSError:
+        orig = []
+
+    section_re = re.compile(r'^\s*\[([^\]]*)\]\s*$')
+    has_sections = any(section_re.match(line) for line in orig)
+
+    # Selected-name set per group (membership test) + ordered list (append).
+    sel_set = {g: {n for n, s in entries if s} for g, entries in groups.items()}
+    sel_ord = {g: [n for n, s in entries if s] for g, entries in groups.items()}
+
+    out: List[str] = []
+
+    if not has_sections:
+        # Flat file (or brand-new).  Preserve comments/blanks; keep
+        # selected base pkgs in original order; append new ones.
+        seen: set = set()
+        base_set = sel_set.get('base', set())
+        for line in orig:
+            s = line.strip()
+            if not s or s.startswith('#'):
+                out.append(line)
+            elif s in base_set:
+                out.append(line)
+                seen.add(s)
+            # else: unselected package → drop
+        for n in sel_ord.get('base', []):
+            if n not in seen:
+                out.append(n)
     else:
-        for gname in gnames:
-            lines.append(f'[{gname}]')
-            desc = meta.get(gname, {}).get('description')
-            if desc:
-                lines.append(f'## Description: {desc}')
-            for name, sel in groups[gname]:
-                if sel:
-                    lines.append(name)
-            lines.append('')   # blank line between groups
-        while lines and lines[-1] == '':
-            lines.pop()
+        # INI file.  Walk lines, tracking the current group; drop
+        # unselected pkg lines; flush newly-added pkgs at each group
+        # boundary (and at EOF).
+        cur: Optional[str] = None
+        seen_per: Dict[str, set] = {}
 
-    body = '\n'.join(lines) + '\n'
+        def _flush_new(group: Optional[str]) -> None:
+            if group is None:
+                return
+            already = seen_per.setdefault(group, set())
+            for n in sel_ord.get(group, []):
+                if n not in already:
+                    out.append(n)
+                    already.add(n)
+
+        for line in orig:
+            m = section_re.match(line)
+            if m:
+                _flush_new(cur)        # finish the group we're leaving
+                cur = m.group(1).strip()
+                seen_per.setdefault(cur, set())
+                out.append(line)
+                continue
+            s = line.strip()
+            if not s or s.startswith('#'):
+                out.append(line)
+                continue
+            if cur is not None and s in sel_set.get(cur, set()):
+                out.append(line)
+                seen_per[cur].add(s)
+            # else: unselected package → drop
+        _flush_new(cur)                # last group at EOF
+
+        # Groups in the model that never appeared in the file → append.
+        for g in groups:
+            if g not in seen_per:
+                out.append(f'[{g}]')
+                desc = meta.get(g, {}).get('description')
+                if desc:
+                    out.append(f'## Description: {desc}')
+                for n in sel_ord.get(g, []):
+                    out.append(n)
+
+    body = '\n'.join(out).rstrip('\n') + '\n'
     tmp = f'{path}.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         f.write(body)
