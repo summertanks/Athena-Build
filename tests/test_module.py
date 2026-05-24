@@ -11958,10 +11958,13 @@ def test_tui_max_buffer_lines_capped():
         'win': None, 'panel': None,
         'buffer': [], 'scroll_offset': 0, 'selected': False,
     }
-    _bound = _tui.Tui._append_lines.__get__(
-        type('S', (), {'MAX_BUFFER_LINES': 100})(), _tui.Tui
-    )
-    _bound(_fake_tab, [(f'line {i}', 0) for i in range(150)])
+    # ARCH-14 P7: _append_lines reads _resolution['x'] + calls
+    # self._entry_display_rows internally; bypass Tui.__init__ via
+    # object.__new__ to inherit the full method set without curses.
+    _stub = object.__new__(_tui.Tui)
+    _stub._resolution = {'x': 80}
+    _stub.MAX_BUFFER_LINES = 100   # tighter cap for this test
+    _stub._append_lines(_fake_tab, [(f'line {i}', 0) for i in range(150)])
     assert len(_fake_tab['buffer']) == 100, (
         f"buffer should be capped at 100, got {len(_fake_tab['buffer'])}"
     )
@@ -11983,22 +11986,27 @@ def test_tui_scroll_offset_increments_when_appending_while_scrolled():
     # Stuck-at-bottom case: scroll_offset stays 0.
     _fake = {'win': None, 'panel': None, 'buffer': [],
              'scroll_offset': 0, 'selected': False}
-    _bound = _tui.Tui._append_lines.__get__(
-        type('S', (), {'MAX_BUFFER_LINES': 10000})(), _tui.Tui
-    )
+    # ARCH-14 P7: _append_lines uses self._entry_display_rows internally;
+    # bypass Tui.__init__ via object.__new__ so we inherit the full
+    # method set without spinning up curses.
+    _stub = object.__new__(_tui.Tui)
+    _stub._resolution = {'x': 80}
+    _bound = _stub._append_lines
     _bound(_fake, [(f'line {i}', 0) for i in range(5)])
     assert _fake['scroll_offset'] == 0, (
         "scroll_offset must stay 0 (auto-stick) when at-bottom on append"
     )
 
-    # Scrolled-away case: offset increments by # of new lines.
+    # Scrolled-away case: offset increments by display-row count of new
+    # entries.  All short lines @ width 80 → 1 row each → 3 total.
     _fake2 = {'win': None, 'panel': None,
               'buffer': [(f'old {i}', 0) for i in range(20)],
               'scroll_offset': 10, 'selected': False}
     _bound(_fake2, [(f'new {i}', 0) for i in range(3)])
     assert _fake2['scroll_offset'] == 13, (
-        f"scroll_offset should be 13 (10+3) after appending 3 lines "
-        f"while scrolled 10 above bottom; got {_fake2['scroll_offset']}"
+        f"scroll_offset should be 13 (10+3 display rows) after appending "
+        f"3 short lines while scrolled 10 above bottom; got "
+        f"{_fake2['scroll_offset']}"
     )
 
 
@@ -12398,9 +12406,16 @@ def test_tui_tab_lists_ambiguous_prefixes_on_console():
             self.printed.append((msg, attr))
         COLOR_INFO = 7
 
+    # _complete_command calls curses.color_pair() for the >1-match
+    # printout; that needs a real curses session.  Patch it to a
+    # plain int so the test exercises pure dispatch logic without
+    # needing initscr().
+    import curses as _curses
+    from unittest.mock import patch
     _ft = _FakeTui()
     _bound = _tui.Tui._complete_command.__get__(_ft, _tui.Tui)
-    _bound()
+    with patch.object(_curses, 'color_pair', return_value=0):
+        _bound()
 
     assert _cmd.current == 'h', (
         'ambiguous-prefix completion must NOT mutate current'
@@ -12544,10 +12559,12 @@ def test_log_tab_handler_falls_back_to_log_for_unknown_stage_tab():
 
 
 def test_tui_resize_clamps_scroll_offset_to_content_rows():
-    """ARCH-14 P6: on resize, scroll_offset is capped at
-    `max(0, len(buffer) - content_rows)` — past that point the top of
-    the buffer is already fully visible and further scrolling would
-    just pad with blank space."""
+    """ARCH-14 P6 (revised P7 2026-05-24): on resize, scroll_offset is
+    capped at `max(0, total_display_rows - content_rows)`.  P7 moved
+    scroll_offset from logical-line units to display-row units so
+    long lines wrap on resize, so the clamp now goes through
+    _total_display_rows(tab, new_w) — wider terminals shrink the
+    wrap count and the offset shrinks with it."""
     _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
     import re
     _m = re.search(
@@ -12556,11 +12573,145 @@ def test_tui_resize_clamps_scroll_offset_to_content_rows():
     )
     assert _m, '_create_windows not found'
     _body = _m.group(0)
-    # Pin the clamp expression — `new_h` is the content-rows variable
-    # at this point in _create_windows.
-    assert 'len(tab[\'buffer\']) - new_h' in _body, (
-        'resize must clamp scroll_offset at len(buffer) - content_rows '
-        '(was -1 in P2; tightened in P6)'
+    # Pin: resize clamp goes through the wrap-aware helper, not raw
+    # `len(tab['buffer'])`.
+    assert '_total_display_rows(tab, new_w)' in _body, (
+        'resize must clamp scroll_offset via _total_display_rows so '
+        'wrap is recomputed for the new width (P7)'
+    )
+    # And the clamp is `total - new_h` (content rows = footer-free row count).
+    assert '_total - new_h' in _body, (
+        'resize clamp must use the new content-rows height (new_h)'
+    )
+
+
+def test_tui_wrap_line_splits_at_width_char_boundary():
+    """ARCH-14 P7: _wrap_line splits a long string into chunks of at
+    most `width` chars.  Char-based (not word-based) so log output
+    wraps predictably.  Empty input returns [''] so blank entries
+    still contribute one display row."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    w = _tui.Tui._wrap_line
+
+    # Short string fits — single chunk, unchanged.
+    assert w('hello', 80) == ['hello']
+    # Exactly equals width — single chunk.
+    assert w('a' * 10, 10) == ['a' * 10]
+    # One over — splits into two; second chunk is the remainder.
+    assert w('a' * 11, 10) == ['a' * 10, 'a']
+    # Multiple of width — even split.
+    assert w('abcdef', 2) == ['ab', 'cd', 'ef']
+    # Ragged — last chunk shorter.
+    assert w('abcdefg', 3) == ['abc', 'def', 'g']
+    # Empty — still one (blank) chunk so the entry occupies one row.
+    assert w('', 80) == ['']
+    # Zero / negative width — no split (avoids div-by-zero).
+    assert w('hello', 0) == ['hello']
+    assert w('hello', -1) == ['hello']
+
+
+def test_tui_entry_display_rows_counts_wrap():
+    """ARCH-14 P7: _entry_display_rows returns the wrapped row count
+    for a single entry; always >= 1 so blank entries occupy a row."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    r = _tui.Tui._entry_display_rows
+    assert r('hello', 80) == 1
+    assert r('a' * 80, 80) == 1
+    assert r('a' * 81, 80) == 2
+    assert r('a' * 160, 80) == 2
+    assert r('a' * 161, 80) == 3
+    assert r('', 80) == 1
+    assert r('hello', 0) == 1   # width=0 fallback
+
+
+def test_tui_total_display_rows_sums_across_buffer():
+    """ARCH-14 P7: _total_display_rows sums wrapped rows over all
+    buffer entries.  Used by the resize / PgUp clamps."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+
+    # Bind through Tui directly — _total_display_rows is a regular
+    # method but only uses `self._entry_display_rows` (classmethod).
+    # Using an `object.__new__(Tui)` bypasses singleton init.
+    _stub = object.__new__(_tui.Tui)
+    tab = {'buffer': [
+        ('short',       0),    # 1 row at width 80
+        ('a' * 100,     0),    # 2 rows at width 80 (100 / 80 = 2)
+        ('',            0),    # 1 row (blank)
+        ('b' * 240,     0),    # 3 rows
+    ]}
+    assert _stub._total_display_rows(tab, 80) == 1 + 2 + 1 + 3   # 7
+
+    # Narrower width inflates the count.
+    assert _stub._total_display_rows(tab, 10) == 1 + 10 + 1 + 24   # 36
+
+    # Wider width collapses to one row per entry except the empty.
+    assert _stub._total_display_rows(tab, 1000) == 4
+
+
+def test_tui_append_lines_scroll_increments_by_display_rows():
+    """ARCH-14 P7: when scrolled away, _append_lines bumps
+    scroll_offset by the new entries' DISPLAY-ROW count (not raw
+    line count) so the visible anchor stays put on long wrapped
+    lines."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+
+    # Bypass Tui.__init__ but populate the fields _append_lines
+    # touches.  Width = 10 so the wrap math is observable in small
+    # numbers.
+    _stub = object.__new__(_tui.Tui)
+    _stub._resolution = {'x': 10, 'y': 24}
+
+    # Scrolled-away case: short + long-wrapping line.
+    tab = {'win': None, 'buffer': [('old', 0)],
+           'scroll_offset': 5, 'selected': False}
+    # 'short' = 1 row at width 10; 'longline' = 1 row; 'a'*25 = 3 rows.
+    _stub._append_lines(tab, [('short', 0), ('longline', 0), ('a' * 25, 0)])
+    assert tab['scroll_offset'] == 5 + 1 + 1 + 3, (
+        f'expected 10 (5 + 1 + 1 + 3 display rows); got '
+        f'{tab["scroll_offset"]}'
+    )
+
+    # At-bottom case: scroll_offset stays 0 regardless of wrap.
+    tab2 = {'win': None, 'buffer': [], 'scroll_offset': 0,
+            'selected': False}
+    _stub._append_lines(tab2, [('a' * 100, 0)])   # 10 display rows at w=10
+    assert tab2['scroll_offset'] == 0
+
+
+def test_tui_refreshtab_wraps_long_line_into_multiple_display_rows():
+    """ARCH-14 P7: _refreshtab walks the buffer back-to-front, wraps
+    each entry to the window width, and renders the bottom
+    content_rows worth of DISPLAY rows.  Pin via source inspection
+    that the wrap helper is invoked + the display-row collection
+    pattern is in place."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _m = re.search(r'def _refreshtab\(self.*?(?=\n    @|\n    def )',
+                   _src, re.DOTALL)
+    assert _m, '_refreshtab not found'
+    _body = _m.group(0)
+    assert '_wrap_line' in _body, (
+        '_refreshtab must invoke _wrap_line to expand entries into '
+        'display rows (P7)'
+    )
+    assert 'max_y, max_x' in _body, (
+        '_refreshtab must read window width (max_x) for wrap'
+    )
+    # The display-row units shift means PgUp/PgDn handlers also use
+    # the wrap-aware helper, not raw len(buffer).
+    _hk_m = re.search(r'def _handle_key\(self.*?(?=\n    def )',
+                      _src, re.DOTALL)
+    _hk = _hk_m.group(0)
+    assert '_total_display_rows(active' in _hk, (
+        'PgUp clamp must use _total_display_rows so wrap is accounted for'
     )
 
 
@@ -16096,6 +16247,12 @@ def main() -> int:
         test_log_tab_handler_falls_back_to_log_for_unknown_stage_tab,
         test_tui_resize_clamps_scroll_offset_to_content_rows,
         test_tui_tab_entry_cursor_field_removed,
+        # ARCH-14 P7 — render-time line wrap (resize-aware reflow)
+        test_tui_wrap_line_splits_at_width_char_boundary,
+        test_tui_entry_display_rows_counts_wrap,
+        test_tui_total_display_rows_sums_across_buffer,
+        test_tui_append_lines_scroll_increments_by_display_rows,
+        test_tui_refreshtab_wraps_long_line_into_multiple_display_rows,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,
         # FORK-01 Step 2 — fork mirror generation + cache integration
