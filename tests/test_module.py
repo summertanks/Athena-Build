@@ -1228,7 +1228,7 @@ def test_buildsession_constructible_with_stub_tui():
             # Command handlers are bound methods on the session so the TUI
             # can register them directly without lambdas / closures.
             for _name in ('cmd_build_cache', 'cmd_parse_dependency',
-                          'cmd_source_download', 'cmd_init_container',
+                          'cmd_source_sync', 'cmd_init_container',
                           'cmd_source_build', 'cmd_tunnel_package',
                           'cmd_build_chroot_live', 'cmd_build_chroot_installer',
                           'cmd_build_iso_live', 'cmd_build_iso_installer',
@@ -1261,14 +1261,13 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_cache',     'build',    'cmd_build_cache'),
         ('cmd_dep',       'parse',    'cmd_parse_dependency'),
         ('cmd_patch',     'refresh',  'cmd_patch_refresh'),
-        ('cmd_source',    'download', 'cmd_source_download'),
+        ('cmd_source',    'sync',     'cmd_source_sync'),
         ('cmd_source',    'build',    'cmd_source_build'),
         ('cmd_repo',      'tunnel',   'cmd_tunnel_package'),
         ('cmd_repo',      'reload',   'cmd_reload_fork'),
         ('cmd_repo',      'audit',    'cmd_audit'),
         ('cmd_repo',      'audit_nmu','cmd_audit_nmu'),
-        ('cmd_repo',      'strip',    'cmd_strip_repo'),
-        ('cmd_repo',      'cleanup',  'cmd_package_cleanup'),
+        ('cmd_repo',      'repair',   'cmd_repo_repair'),
         ('cmd_repo',      'index',    'cmd_index_repo'),
         ('cmd_container', 'init',     'cmd_init_container'),
         ('cmd_container', 'purge',    'cmd_container_purge'),
@@ -6239,20 +6238,29 @@ def test_cmd_audit_nmu_registered_in_repo_dispatcher():
 
 
 def test_cmd_strip_repo_registered_in_repo_dispatcher():
-    """`repo strip` must be wired into cmd_repo's dispatch."""
+    """`repo repair strip` must route to cmd_strip_repo via the repair
+    sub-dispatcher (post 2026-05-23 rename: was `repo strip`)."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
     import re
-    assert "'strip'" in _body, (
-        "strip must be advertised in cmd_repo's help table")
+    # repo repair sub-dispatcher body
+    _m = re.search(
+        r'def cmd_repo_repair\(self.*?(?=\n    def \w)',
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_repo_repair sub-dispatcher not found"
+    _disp = _m.group(0)
+    assert "'strip'" in _disp, (
+        "strip must be advertised in cmd_repo_repair's table")
     assert re.search(
         r"if action == 'strip':\s*\n\s+return self\.cmd_strip_repo",
-        _body), "strip not dispatched in cmd_repo"
+        _disp), "strip not dispatched in cmd_repo_repair"
 
 
 def test_cmd_package_cleanup_registered_in_repo_dispatcher():
-    """`repo cleanup` must be wired into cmd_repo's dispatch.
+    """`repo repair cleanup` must route to cmd_package_cleanup via the
+    repair sub-dispatcher (post 2026-05-23 rename: was `repo cleanup`).
     The command identifies obsolete .debs (orphan source or version
     drift) and ships in dry-run by default — `force` triggers actual
     delete after a YESNO prompt."""
@@ -6260,13 +6268,19 @@ def test_cmd_package_cleanup_registered_in_repo_dispatcher():
     with open(_bc) as fh:
         _body = fh.read()
     import re
-    assert "'cleanup'" in _body, (
-        "cleanup must be advertised in cmd_repo's help table"
+    _m = re.search(
+        r'def cmd_repo_repair\(self.*?(?=\n    def \w)',
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_repo_repair sub-dispatcher not found"
+    _disp = _m.group(0)
+    assert "'cleanup'" in _disp, (
+        "cleanup must be advertised in cmd_repo_repair's table"
     )
     assert re.search(
         r"if action == 'cleanup':\s*\n\s+return self\.cmd_package_cleanup",
-        _body), "cleanup not dispatched in cmd_repo"
-    # Body must define the method too.
+        _disp), "cleanup not dispatched in cmd_repo_repair"
+    # Body must define the underlying method.
     assert 'def cmd_package_cleanup(' in _body
 
 
@@ -7003,13 +7017,13 @@ def test_autorun_summary_aborted_marks_stage_and_partial_state():
         started=_dt.datetime(2026, 5, 9, 12, 0, 0),
         finished=_dt.datetime(2026, 5, 9, 12, 30, 0),
         elapsed=1800,
-        aborted_at='source download',
+        aborted_at='source sync',
     )
     output = _capture_console_print(
         lambda: print_commands.summary(sess, timing=timing)
     )
     assert 'ABORTED' in output
-    assert "'source download'" in output
+    assert "'source sync'" in output
     assert '30m 00s' in output
     assert 'Source build   : not run' in output
     assert 'Chroot (live)  : not built' in output
@@ -10259,7 +10273,7 @@ def test_refresh_patches_keeps_result_when_patch_older_than_result():
 
 
 def test_source_download_iterates_both_deb_and_udeb_trees():
-    """Phase 4 regression guard: cmd_source_download must call
+    """Phase 4 regression guard: cmd_source_sync must call
     utils.download_source for the udeb tree too — otherwise sources that
     exist only in udeb_dep_tree (base-installer, debian-installer-utils,
     debootstrap, etc.) never land in dir_source and `source build
@@ -10269,16 +10283,16 @@ def test_source_download_iterates_both_deb_and_udeb_trees():
     import sys, inspect
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
-    src = inspect.getsource(BuildSession.cmd_source_download)
+    src = inspect.getsource(BuildSession.cmd_source_sync)
     # Both tree references must appear in the code (size + download call).
     assert 'self.dep_tree.download_size' in src or '_deb_size' in src, (
-        "cmd_source_download must include deb tree download size")
+        "cmd_source_sync must include deb tree download size")
     assert 'self.udeb_dep_tree.download_size' in src or '_udeb_size' in src, (
-        "cmd_source_download must include udeb tree download size")
+        "cmd_source_sync must include udeb tree download size")
     assert 'utils.download_source(self.dep_tree' in src, (
-        "cmd_source_download must call download_source on deb tree")
+        "cmd_source_sync must call download_source on deb tree")
     assert 'utils.download_source(' in src and 'self.udeb_dep_tree' in src, (
-        "cmd_source_download must also call download_source on udeb tree")
+        "cmd_source_sync must also call download_source on udeb tree")
 
 
 def test_autorun_installer_runs_source_build_then_source_build_installer():
@@ -11707,7 +11721,7 @@ def test_repo_dispatcher_advertises_merged_package_actions():
     assert _m, "cmd_repo dispatcher not found"
     _disp = _m.group(0)
     for _action in ('tunnel', 'reload', 'audit', 'audit_nmu',
-                    'strip', 'cleanup', 'index'):
+                    'repair', 'index'):
         assert f"'{_action}'" in _disp, (
             f"cmd_repo dispatcher missing action {_action!r}"
         )
