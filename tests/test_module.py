@@ -1266,7 +1266,6 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_repo',      'tunnel',   'cmd_tunnel_package'),
         ('cmd_repo',      'reload',   'cmd_reload_fork'),
         ('cmd_repo',      'audit',    'cmd_audit'),
-        ('cmd_repo',      'audit_nmu','cmd_audit_nmu'),
         ('cmd_repo',      'repair',   'cmd_repo_repair'),
         ('cmd_repo',      'index',    'cmd_index_repo'),
         ('cmd_container', 'init',     'cmd_init_container'),
@@ -6224,17 +6223,39 @@ def test_build_py_threads_container_into_iso_callsites():
     )
 
 
-def test_cmd_audit_nmu_registered_in_repo_dispatcher():
-    """`repo audit_nmu` must be wired into cmd_repo's dispatch."""
+def test_cmd_audit_nmu_residue_absorbed_into_cmd_audit():
+    """P3 (2026-05-23): `repo audit_nmu` no longer exists as a
+    standalone verb.  Its logic — audit_nmu_residue + reporting —
+    lives in cmd_audit's _report_nmu_residue helper, run as the
+    final section of every `repo audit` invocation.  Pin both:
+    (a) the standalone verb is gone, (b) the absorbed helper is
+    called from cmd_audit."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
+    # (a) Standalone verb gone.
+    assert 'def cmd_audit_nmu(' not in _body, (
+        "cmd_audit_nmu must be removed — its logic was absorbed into "
+        "cmd_audit's _report_nmu_residue (P3 2026-05-23)"
+    )
+    assert "if action == 'audit_nmu'" not in _body, (
+        "'audit_nmu' must not be a cmd_repo action — absorbed into "
+        "'repo audit'"
+    )
+    # (b) Absorbed helper exists + is called from cmd_audit.
+    assert 'def _report_nmu_residue(' in _body, (
+        "_report_nmu_residue helper must exist as the NMU-residue "
+        "section of cmd_audit"
+    )
     import re
-    assert "'audit_nmu'" in _body, (
-        "audit_nmu must be advertised in cmd_repo's help table")
-    assert re.search(
-        r"if action == 'audit_nmu':\s*\n\s+return self\.cmd_audit_nmu",
-        _body), "audit_nmu not dispatched in cmd_repo"
+    _m = re.search(
+        r'def cmd_audit\(self.*?(?=\n    def \w)',
+        _body, re.DOTALL,
+    )
+    assert _m, 'cmd_audit body not found'
+    assert 'self._report_nmu_residue(' in _m.group(0), (
+        "cmd_audit must call _report_nmu_residue as one of its sections"
+    )
 
 
 def test_cmd_strip_repo_registered_in_repo_dispatcher():
@@ -11686,10 +11707,10 @@ def test_progress_bar_label_width_pins_column_so_label_updates_dont_shift():
 
 def test_repo_dispatcher_advertises_merged_package_actions():
     """After the package→repo merge, the cmd_repo dispatcher must
-    advertise the former cmd_package actions (tunnel/reload/audit/
-    audit_nmu/strip/cleanup) alongside its own (index).  Anti-regression
-    for accidentally re-introducing a `cmd_package` helper or leaving
-    an action un-dispatched."""
+    advertise the former cmd_package actions (tunnel/reload/audit)
+    alongside its own (repair/index).  audit_nmu was absorbed into
+    'audit' itself in P3 (2026-05-23).  strip/cleanup moved under
+    'repair' (P1)."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
@@ -11701,8 +11722,7 @@ def test_repo_dispatcher_advertises_merged_package_actions():
     )
     assert _m, "cmd_repo dispatcher not found"
     _disp = _m.group(0)
-    for _action in ('tunnel', 'reload', 'audit', 'audit_nmu',
-                    'repair', 'index'):
+    for _action in ('tunnel', 'reload', 'audit', 'repair', 'index'):
         assert f"'{_action}'" in _disp, (
             f"cmd_repo dispatcher missing action {_action!r}"
         )
@@ -13009,46 +13029,59 @@ def test_scan_repo_state_treats_empty_cache_file_as_missing():
     )
 
 
-def test_cmd_source_verify_iterates_cohorts_separately():
-    """cmd_source_verify must process deb and udeb cohorts as distinct
-    loops, each scoped to its own RepoState — never mixing the two
-    namespaces.  Pin the structural shape (not behaviour, since that
-    needs a full session) so a refactor can't quietly recombine them
-    and re-introduce the cross-namespace lookups."""
+def test_content_integrity_absorbed_into_cmd_audit_per_cohort():
+    """P3 (2026-05-23): `source verify` is no longer a standalone verb.
+    Its per-cohort deep-verify logic moved into cmd_audit's
+    _report_content_integrity helper.  Pin both the absence of the
+    old verb AND the per-cohort separation in the new home."""
     _bc = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bc) as fh:
         _body = fh.read()
+    # Old verb gone.
+    assert 'def cmd_source_verify(' not in _body, (
+        "cmd_source_verify must be removed — absorbed into cmd_audit "
+        "as _report_content_integrity (P3 2026-05-23)"
+    )
+    assert "if action == 'verify'" not in _body[:_body.find(
+        'def cmd_chroot') if 'def cmd_chroot' in _body else len(_body)
+    ] or "return self.cmd_source_verify" not in _body, (
+        "'verify' source-action must not route to cmd_source_verify "
+        "(chroot/key verify subcommands remain — different namespace)"
+    )
+    # Absorbed helper exists.
+    assert 'def _report_content_integrity(' in _body, (
+        "_report_content_integrity helper must exist as the integrity "
+        "section of cmd_audit"
+    )
     import re
     _m = re.search(
-        r'def cmd_source_verify\(self.*?(?=\n    def \w)',
+        r'def _report_content_integrity\(self.*?(?=\n    def \w)',
         _body, re.DOTALL,
     )
-    assert _m, 'cmd_source_verify body not found'
+    assert _m, '_report_content_integrity body not found'
     _fn = _m.group(0)
-    # Both repo-state subdirs must be scanned by name.
-    assert "scan_repo_state(self.config, 'main')" in _fn, (
-        "deb cohort must scan_repo_state for 'main'"
+    # Per-cohort iteration — same separation as the old cmd_source_verify.
+    assert "'deb'" in _fn and "'udeb'" in _fn, (
+        "integrity section must iterate per cohort (deb + udeb), each "
+        "scoped to its own namespace's RepoState"
     )
-    assert "scan_repo_state(self.config, 'main-udeb')" in _fn, (
+    assert "endswith(_ext)" in _fn, (
+        "predicted-files filter must use per-cohort extension"
+    )
+    # Both repo-state subdirs are still scanned — deb_state passed in
+    # by caller (cmd_audit), udeb_state scanned inline.
+    assert "'main-udeb'" in _fn, (
         "udeb cohort must scan_repo_state for 'main-udeb'"
     )
-    # Cohort labels must be present so the report is two-section.
-    assert "'deb'" in _fn and "'udeb'" in _fn, (
-        "cmd_source_verify must label cohorts deb / udeb"
+    # cmd_audit must call this helper as one of its sections.
+    _m2 = re.search(
+        r'def cmd_audit\(self.*?(?=\n    def \w)',
+        _body, re.DOTALL,
     )
-    # Per-cohort extension filter — pin that .deb / .udeb are filtered
-    # separately rather than unioned.
-    assert "endswith(_ext)" in _fn, (
-        "predicted-files filter must use the per-cohort extension "
-        "(.deb for deb cohort, .udeb for udeb cohort)"
-    )
-    # _predicted_files_for_source unions both trees and would defeat
-    # the cohort split — must not be called from verify.
-    assert '_predicted_files_for_source' not in _fn, (
-        "cmd_source_verify must NOT call _predicted_files_for_source "
-        "(it unions both trees and would re-mix the cohort namespaces). "
-        "Use _tree.src_pkg_files directly with per-cohort extension "
-        "filtering."
+    assert _m2, 'cmd_audit body not found'
+    assert 'self._report_content_integrity(' in _m2.group(0), (
+        "cmd_audit must call _report_content_integrity as one of its "
+        "sections"
     )
 
 
@@ -14788,7 +14821,7 @@ def main() -> int:
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
         test_buildcontainer_calls_strip_post_build,
-        test_cmd_audit_nmu_registered_in_repo_dispatcher,
+        test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
         test_cmd_package_cleanup_registered_in_repo_dispatcher,
         test_cmd_package_cleanup_dry_run_default_force_flag_required,
@@ -15045,7 +15078,7 @@ def main() -> int:
         test_repo_audit_scan_uses_dpkg_scanpackages_and_apt_pkg,
         test_scan_repo_state_main_udeb_passes_t_udeb_to_scanpackages,
         test_scan_repo_state_treats_empty_cache_file_as_missing,
-        test_cmd_source_verify_iterates_cohorts_separately,
+        test_content_integrity_absorbed_into_cmd_audit_per_cohort,
         test_deb_dir_for_recognises_main_udeb_label,
         test_repo_audit_closure_handles_conflicts_and_provides,
         test_cmd_source_audit_classifies_rebuilds_by_subset,
