@@ -505,16 +505,18 @@ class Tui:
             # Destroying windows invalidates their panels in undefined GC order;
             # resize/mvwin keeps the C-level window+panel objects intact.
 
-            # Clamp tab scroll state to the new height before resizing.
-            # ARCH-14 P6: cap at len(buffer) - content_rows (was -1).
-            # Past this point the top of the buffer is fully visible
-            # and further scrolling would just pad the visible window
-            # with blank space.
+            # Clamp tab scroll state to the new size before resizing.
+            # ARCH-14 P7: scroll_offset is in DISPLAY-ROW units, so
+            # the clamp uses the wrapped-row total at the NEW width.
+            # Wider terminals collapse wrapped lines (fewer rows →
+            # smaller max offset); narrower terminals expand them.
             new_h = tc['h']
+            new_w = tc['w']
             for tab in self._tabs.values():
+                _total = self._total_display_rows(tab, new_w)
                 tab['scroll_offset'] = min(
                     tab['scroll_offset'],
-                    max(0, len(tab['buffer']) - new_h),
+                    max(0, _total - new_h),
                 )
 
             try:
@@ -642,13 +644,42 @@ class Tui:
             self._safe_addstr(self._footer, 1, x, tag, attr)
             x += len(tag) + 1
 
+    @staticmethod
+    def _wrap_line(text: str, width: int) -> List[str]:
+        """ARCH-14 P7: split *text* into chunks of at most *width* chars.
+
+        Char-based (not word-based) — predictable for log output where
+        a wrapped URL / hex digest / stack frame is easier to read in
+        deterministic columns than at word boundaries.  Empty input
+        returns `['']` (one blank chunk) so empty buffer entries still
+        contribute one display row, preserving caller line counts."""
+        if width <= 0 or not text:
+            return [text]
+        if len(text) <= width:
+            return [text]
+        return [text[i:i + width] for i in range(0, len(text), width)]
+
+    @classmethod
+    def _entry_display_rows(cls, text: str, width: int) -> int:
+        """Number of display rows a single buffer entry occupies at
+        the given width.  Always >= 1 so blank entries render."""
+        if width <= 0 or not text:
+            return 1
+        return max(1, -(-len(text) // width))   # ceil-div
+
+    def _total_display_rows(self, tab: _TabEntry, width: int) -> int:
+        """Total display-row count for a tab at the given width.  Used
+        by the resize / PgUp clamps to bound scroll_offset accurately
+        (post-wrap, one buffer entry can occupy multiple display rows)."""
+        return sum(self._entry_display_rows(t, width) for t, _ in tab['buffer'])
+
     def _refreshtab(self) -> None:
         active = self._activetab
         buffer = active['buffer']
         window = active['win']
 
         try:
-            max_y, _ = window.getmaxyx()
+            max_y, max_x = window.getmaxyx()
         except curses.error:
             return
 
@@ -662,18 +693,37 @@ class Tui:
 
         window.erase()
 
-        # Compute visible buffer slice from scroll_offset (ARCH-14 P2).
-        # scroll_offset = number of rows above the bottom; 0 = sticky
-        # at-bottom.  end = the index AFTER the last visible row.
-        _so   = max(0, active.get('scroll_offset', 0))
-        _so   = min(_so, max(0, len(buffer) - 1))   # never scroll past head
-        end   = max(0, len(buffer) - _so)
-        start_idx = max(0, end - content_rows)
+        # ── ARCH-14 P7: build display rows by wrapping each entry ──────────
+        # Walk the buffer back-to-front so we can stop early once we've
+        # collected enough rows to fill the viewport AND the
+        # scroll_offset region above it.  Each entry expands to >= 1
+        # display rows (see _wrap_line).  scroll_offset is in
+        # DISPLAY-ROW units (resize-stable since wrap recomputes here).
+        _so = max(0, active.get('scroll_offset', 0))
+        need = content_rows + _so
+
+        display: List[Tuple[str, int]] = []   # bottom-up; reversed below
+        i = len(buffer) - 1
+        while i >= 0 and len(display) < need:
+            text, attr = buffer[i]
+            wrapped = self._wrap_line(text.rstrip('\n'), max_x)
+            for chunk in reversed(wrapped):
+                display.append((chunk, attr))
+            i -= 1
+        display.reverse()   # now top → bottom
+
+        # Clamp _so so the user can't scroll past the head of the
+        # collected display rows.  The collected slice may be shorter
+        # than `need` if the buffer ran out — in that case max_off=0.
+        max_off = max(0, len(display) - content_rows)
+        _so = min(_so, max_off)
+        end   = len(display) - _so
+        start = max(0, end - content_rows)
 
         row = 0
-        for idx in range(start_idx, end):
-            text, attr = buffer[idx]
-            self._safe_addstr(window, row, 0, text.rstrip('\n'), attr)
+        for r in range(start, end):
+            text, attr = display[r]
+            self._safe_addstr(window, row, 0, text, attr)
             row += 1
 
         # Widgets appear immediately after the last rendered buffer line
@@ -970,21 +1020,25 @@ class Tui:
 
         active = self._activetab
 
-        # ── Page Up / Down: scroll tab content (ARCH-14 P3) ──────────────
+        # ── Page Up / Down: scroll tab content (ARCH-14 P3, P7) ───────────
         # Replaces Up/Down's prior scroll role.  Scroll by the tab's
-        # content-row height for "screenful" jumps.
+        # content-row height for "screenful" jumps.  ARCH-14 P7:
+        # scroll_offset is in DISPLAY-ROW units, so the max-offset
+        # clamp accounts for wrapped long lines (was: capped at
+        # `len(buffer) - 1` which under-counted on narrow terminals).
         if c == 'KEY_PPAGE':
-            _max_off = max(0, len(active['buffer']) - 1)
-            _jump = max(1, self._tab_coords.get('h', 1))
+            _h = max(1, self._tab_coords.get('h', 1))
+            _w = max(1, self._tab_coords.get('w', 80))
+            _max_off = max(0, self._total_display_rows(active, _w) - _h)
             active['scroll_offset'] = min(_max_off,
-                                          active['scroll_offset'] + _jump)
+                                          active['scroll_offset'] + _h)
             self._dirty = True
             return
 
         if c == 'KEY_NPAGE':
-            _jump = max(1, self._tab_coords.get('h', 1))
+            _h = max(1, self._tab_coords.get('h', 1))
             active['scroll_offset'] = max(0,
-                                          active['scroll_offset'] - _jump)
+                                          active['scroll_offset'] - _h)
             self._dirty = True
             return
 
@@ -1192,34 +1246,51 @@ class Tui:
         """Append (text, attr) tuples to *tab*'s buffer, applying the
         MAX_BUFFER_LINES cap and preserving scroll_offset semantics.
 
+        scroll_offset is in DISPLAY-ROW units (ARCH-14 P7) — wrapped
+        long lines count as multiple rows, so increments use the
+        per-entry wrap count, not the raw `len(lines)`.
+
         When `scroll_offset == 0` (user at-bottom): new lines naturally
         become visible because _refreshtab anchors `end = len(buffer)`.
 
         When `scroll_offset > 0` (user scrolled away): increment
-        scroll_offset by the number of new lines so the visible window
-        stays anchored at the same buffer indices the user was reading.
+        scroll_offset by the new entries' total display-row count so
+        the visible window stays anchored at the same content.
 
         On overflow (post-append `len > MAX`): drop the oldest
         (post-append - MAX) entries from the front; decrement
-        scroll_offset by the same amount so the anchor follows the
-        SHIFTED indices.  If scroll_offset would go negative (user was
-        viewing entries that just got dropped), clamp to 0 — they're
-        gone, snap back to bottom.
+        scroll_offset by their display-row count so the anchor
+        follows.  Anchor going negative → clamp to 0 (the user was
+        viewing entries that just got evicted, snap back to bottom).
 
         Shared mutator for both _log (logger.* calls) and print
         (Console.print).
         """
         if not lines:
             return
-        _n = len(lines)
+        # Width source: prefer the tab's window (post-setup);
+        # fall back to _resolution (set during _create_windows).
+        try:
+            width = tab['win'].getmaxyx()[1] if tab.get('win') else 0
+        except curses.error:
+            width = 0
+        if width <= 0:
+            width = max(1, self._resolution.get('x', 80))
+
         tab['buffer'].extend(lines)
         if tab['scroll_offset'] > 0:
-            tab['scroll_offset'] += _n
+            tab['scroll_offset'] += sum(
+                self._entry_display_rows(t, width) for t, _ in lines
+            )
         if len(tab['buffer']) > self.MAX_BUFFER_LINES:
             _drop = len(tab['buffer']) - self.MAX_BUFFER_LINES
-            del tab['buffer'][:_drop]
             if tab['scroll_offset'] > 0:
-                tab['scroll_offset'] = max(0, tab['scroll_offset'] - _drop)
+                dropped_rows = sum(
+                    self._entry_display_rows(t, width)
+                    for t, _ in tab['buffer'][:_drop]
+                )
+                tab['scroll_offset'] = max(0, tab['scroll_offset'] - dropped_rows)
+            del tab['buffer'][:_drop]
 
     def _log(self, severity: int, message: str) -> None:
         """Route a [TS] [SEV] message to the default 'log' tab."""
@@ -1281,9 +1352,12 @@ class Tui:
                 return
             con = self._tabs['console']
             con['buffer'] = con['buffer'][:mark]
-            # Clamp scroll_offset so it can't reference dropped lines.
+            # Clamp scroll_offset (display-row units, ARCH-14 P7) so
+            # it can't reference dropped lines.
+            _w = max(1, self._resolution.get('x', 80))
             con['scroll_offset'] = min(
-                con['scroll_offset'], max(0, len(con['buffer']) - 1),
+                con['scroll_offset'],
+                max(0, self._total_display_rows(con, _w) - 1),
             )
             self._dirty = True
 
@@ -1894,13 +1968,28 @@ class _LogTabHandler(logging.Handler):
             if t is None:
                 return  # no Tui yet — drop, same as Console facade did pre-Tui
             msg = self.format(record)
-            if record.levelno >= logging.ERROR:
-                sev = t.SEVERITY_ERROR
-            elif record.levelno >= logging.WARNING:
-                sev = t.SEVERITY_WARNING
+            # ARCH-14 P6 routing path requires Tui.SEVERITY_* +
+            # _log_to_tab.  Fall back to the legacy ERROR/WARNING/INFO
+            # surface when those are absent so test stubs and external
+            # Tui-shaped backends (e.g. headless Cli) keep working
+            # without per-call adaptation.
+            if (hasattr(t, '_log_to_tab') and hasattr(t, 'SEVERITY_ERROR')
+                    and hasattr(t, 'SEVERITY_WARNING')
+                    and hasattr(t, 'SEVERITY_INFO')):
+                if record.levelno >= logging.ERROR:
+                    sev = t.SEVERITY_ERROR
+                elif record.levelno >= logging.WARNING:
+                    sev = t.SEVERITY_WARNING
+                else:
+                    sev = t.SEVERITY_INFO
+                t._log_to_tab(self._tab_for_logger(record.name), sev, msg)
             else:
-                sev = t.SEVERITY_INFO
-            t._log_to_tab(self._tab_for_logger(record.name), sev, msg)
+                if record.levelno >= logging.ERROR:
+                    t.ERROR(msg)
+                elif record.levelno >= logging.WARNING:
+                    t.WARNING(msg)
+                else:
+                    t.INFO(msg)
         except Exception:
             self.handleError(record)
 
