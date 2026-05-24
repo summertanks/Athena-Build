@@ -1140,12 +1140,12 @@ class BuildSession:
         # has changed since the last build (see ~line 1261 below).
         # The name "refresh" is misleading by today's standards;
         # callers expecting read-only semantics MUST NOT invoke this.
-        # Read-only commands (cmd_source_rescan, cmd_print*, anything
+        # Read-only commands (cmd_source_audit, cmd_print*, anything
         # whose name suggests "show / scan / status") are pinned by
         # test_readonly_named_commands_have_no_destructive_calls() to
         # never reach here.
         #
-        # Discovered the hard way 2026-05-19: cmd_source_rescan called
+        # Discovered the hard way 2026-05-19: the prior cmd_source_rescan called
         # this on entry to "make the count reflect current patch
         # state" — over-counted by 47 packages because the side
         # effect wiped their PASS state.
@@ -1869,7 +1869,7 @@ class BuildSession:
         Used by every reader that needs "what binaries will this source
         produce in the repo after a successful build?" — check_build,
         cmd_source_audit, cmd_source_repair, cmd_source_verify,
-        cmd_source_rescan, _do_tunnel.  Pulled here because the two
+        cmd_source_audit, _do_tunnel.  Pulled here because the two
         trees store per-tree maps (src_pkg_files); Source objects no
         longer carry a .pkgs attribute (it leaked across trees — see
         dependencytree.py:src_pkg_files docstring for full history).
@@ -4024,217 +4024,176 @@ class BuildSession:
         finally:
             _password = '*' * len(_password)  # noqa: F841
 
-    def cmd_source_rescan(self, *args):
-        """Report what `source build` would rebuild against the current
-        cache + repo state, without triggering any builds.
+    # ─────────────────────────────────────────────────────────────────
+    # Source state classifier — shared by cmd_source_audit (reports)
+    # and cmd_source_repair (acts).  Pure read-only: walks disk only,
+    # never mutates .result / .patchhash / source files.
+    # ─────────────────────────────────────────────────────────────────
 
-        Usage: source rescan [verbose]
+    def _is_patch_state_stale(self, pkg: str, src) -> bool:
+        """Pure-read predicate: would `_refresh_patches`'s invalidation
+        pass DELETE this source's .result file?  Mirrors the logic in
+        `_refresh_patches` (lines ~1240 onwards) but without the
+        destructive os.remove calls.
 
-        Iterates every source package in the resolved dep tree (deb +
-        udeb sides merged).  For each, runs the same `check_build`
-        gate that `source build` uses to decide skip-vs-rebuild: PASS
-        result file present AND every expected binary filename present
-        in repo/ as a valid `.deb`.  Prints counts and, with `verbose`,
-        the list of source-package names that would rebuild.
-
-        Use cases:
-          * After a snapshot drift, see how many packages have shifted
-            and would queue for rebuild before committing to the time.
-          * After a fork edit, confirm the rebuild surface narrowed
-            to what you expected.
-          * Pre-flight a long `autorun` so you know roughly how much
-            work is queued.
-
-        Prereqs: `cache build` + `dep parse` + `container init` must
-        have run earlier in the session — same as source build's own
-        gates (we share `check_build`, which lives on BuildContainer).
+        Stale iff .result exists AND the on-disk patch SET differs
+        from the .patchhash baseline.  No baseline → assumed fresh
+        (migration path: the baseline gets written on the next
+        `_refresh_patches`).
         """
-        if not (self.flags.cache_ready and self.flags.dep_check_ready
-                and self.flags.build_container_ready):
-            console.print(
-                "source rescan needs cache build + dep parse + container "
-                "init to have run first.",
-                tui.COLOR_ERROR,
-            )
-            return
-
-        _verbose = 'verbose' in args
-
-        # Merge deb + udeb dep trees (shared source_hashtable means
-        # duplicates auto-dedupe by source name).
-        _srcs = dict(self.dep_tree.selected_srcs)
-        if self.udeb_dep_tree is not None:
-            for _name, _src in self.udeb_dep_tree.selected_srcs.items():
-                if _name not in _srcs:
-                    _srcs[_name] = _src
-
-        _ok = []
-        _needs_rebuild = []
-        _no_pkgs = []  # source declares no binaries (unusual)
-        _tunneled = []
-
-        # NOTE: do NOT call the patch-refresh helper here despite the
-        # temptation.  That helper DELETES .result files when it
-        # detects patch-set content changes (line ~1261 of build.py)
-        # — a destructive side effect inappropriate for a read-only
-        # scan command.  Trade-off: if the operator added/removed
-        # patches since the last `dep parse`, this count misses those
-        # invalidations.  Run `dep parse` first if patches changed.
-        # Found 2026-05-19: rescan was over-counting because the
-        # patch-refresh side effect was wiping PASS state for any
-        # source whose patch hash diverged.
-
-        # Progress feedback — even though each check_build is fast
-        # (a few stat() calls + ar magic check), a 1500+ source corpus
-        # is ~2-5s and operator wants to see motion.
-        _bar = ProgressBar(
-            label='Rescan', maxvalue=len(_srcs), show_rate=False,
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        _result_file = os.path.join(_buildlog, pkg + '.result')
+        if not os.path.exists(_result_file):
+            return False
+        _patch_dir = os.path.join(
+            self.config.dir_patch_source, pkg,
+            utils.version_no_epoch(src.version),
         )
-        for _name, _src in sorted(_srcs.items()):
-            _bar.step(1)
-            _expected = self._predicted_files_for_source(_name)
-            if not _expected:
-                _no_pkgs.append(_name)
-                continue
-            # Tunneled packages register .result = TUNNELED and have
-            # check_build return True regardless of repo/ presence —
-            # they're pulled at chroot-build time, not produced.
-            _result_file = os.path.join(
-                self.container.buildlog_path, _name + '.result')
-            try:
-                with open(_result_file) as fh:
-                    _first_line = fh.readline().strip()
-                    if _first_line == 'TUNNELED':
-                        _tunneled.append(_name)
-                        continue
-            except OSError:
-                pass
+        _hash_file = os.path.join(_buildlog, pkg + '.patchhash')
+        try:
+            with open(_hash_file, 'r') as fh:
+                _stored_hash = fh.read().strip() or None
+        except OSError:
+            _stored_hash = None
+        # Patch removal case: no patches now but baseline existed for
+        # a non-empty set → hash differs → stale.
+        _current_hash = utils.patch_set_hash(
+            _patch_dir, src.patch_list or [],
+        )
+        if _stored_hash is None:
+            # No baseline yet — first encounter post-upgrade.  Existing
+            # .result is presumed to match the current set.
+            return False
+        return _stored_hash != _current_hash
 
-            if self.container.check_build(_src, _expected):
-                _ok.append(_name)
-            else:
-                _needs_rebuild.append(_name)
-        _bar.close()
+    _SOURCE_STATES = (
+        'ok',             # binaries present + valid, .result=PASS,
+                          # patches unchanged
+        'no_pkgs',        # source declares no main-tier binaries
+        'tunneled',       # .result=TUNNELED (third-party pull, not built)
+        'fail',           # .result=FAIL — explicit prior-build failure
+                          # marker.  Repair LEAVES ALONE (operator
+                          # signal: "this is known broken; don't
+                          # second-guess").
+        'needs_sync',     # source files missing or .verified absent
+        'needs_build',    # binaries missing or invalid (legitimate rebuild)
+        'stale_pass',     # .result=PASS but state has drifted (binaries
+                          # gone OR patches changed) — repair would CLEAR
+        'repairable',     # binaries present + valid but .result MISSING
+                          # — repair would WRITE PASS
+    )
 
-        # Classify each rebuild candidate by which `source build <mode>`
-        # would address it.  Priority order (only ONE label per source):
-        #   1. pkg          : in selected_srcs but NOT in any exclusion set
-        #                     → `source build` (bare, or `source build pkg`)
-        #   2. installer    : in installer_exclusive OR in udeb dep tree
-        #                     → `source build installer`
-        #   3. live         : in live_exclusive_src_names
-        #                     → `source build live`
-        #   4. recommended  : in extras_src_names (Recommends-only depth-1)
-        #                     → `source build recommended`
-        # Overlapping sources (e.g. shared between pkg-list and live) get
-        # the highest-priority tag.
-        _live_set    = self.dep_tree.live_exclusive_src_names
-        _inst_set    = self.dep_tree.installer_exclusive_src_names
-        _extras_set  = self.dep_tree.extras_src_names
-        _udeb_names: set = set()
-        if self.udeb_dep_tree is not None:
-            _udeb_names = set(self.udeb_dep_tree.selected_srcs.keys())
+    def _source_state(self, pkg: str, src) -> str:
+        """Classify one source's current state.  Returns one of
+        `_SOURCE_STATES`.  Pure-read.
 
-        def _subset_for(name: str) -> str:
-            if (name not in _live_set and name not in _inst_set
-                    and name not in _extras_set and name not in _udeb_names):
-                return 'pkg'
-            if name in _inst_set or name in _udeb_names:
-                return 'installer'
-            if name in _live_set:
-                return 'live'
-            if name in _extras_set:
-                return 'recommended'
-            return 'unclassified'
+        Resolution order matters — earlier conditions short-circuit:
+          1. no predicted binaries → 'no_pkgs'
+          2. .result=TUNNELED → 'tunneled' (pulled, not built)
+          3. .result=FAIL → 'fail' (explicit marker; repair leaves alone
+             — operator built and saw it fail; don't overwrite the
+             diagnosis just because binaries happen to exist now)
+          4. any source file missing on disk OR .verified sidecar
+             absent → 'needs_sync'
+          5. any predicted binary missing or not-ar → 'stale_pass'
+             (if .result=PASS) else 'needs_build'
+          6. .result MISSING but binaries valid → 'repairable'
+             (.result EXISTS with non-PASS / non-FAIL content also
+             classifies here — atypical content treated as missing)
+          7. .result=PASS but patches have changed → 'stale_pass'
+          8. otherwise → 'ok'
+        """
+        _expected = self._predicted_files_for_source(pkg)
+        if not _expected:
+            return 'no_pkgs'
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        _result_file = os.path.join(_buildlog, pkg + '.result')
+        _result_first_line = ''
+        _result_exists = False
+        try:
+            with open(_result_file) as fh:
+                _result_first_line = fh.readline().strip()
+                _result_exists = True
+        except OSError:
+            pass
+        if _result_first_line == 'TUNNELED':
+            return 'tunneled'
+        if _result_first_line == 'FAIL':
+            return 'fail'
 
-        from collections import defaultdict as _dd
-        _by_subset = _dd(list)
-        for _n in _needs_rebuild:
-            _by_subset[_subset_for(_n)].append(_n)
+        # (4) source files — every entry in src.files must exist on
+        # disk with a .verified sidecar (download_source's gate).
+        _sync_ok = True
+        for _fname in src.files:
+            _path = os.path.join(self.config.dir_source, _fname)
+            if not os.path.isfile(_path):
+                _sync_ok = False
+                break
+            if not os.path.isfile(_path + '.verified'):
+                _sync_ok = False
+                break
+        if not _sync_ok:
+            return 'needs_sync'
 
-        _total = len(_srcs)
-        console.print("Source rescan against current cache + repo:")
-        console.print(f"  {len(_ok):5d}  built + verified")
-        console.print(f"  {len(_needs_rebuild):5d}  would rebuild")
-        if _tunneled:
-            console.print(f"  {len(_tunneled):5d}  tunneled (pulled, not built)")
-        if _no_pkgs:
-            console.print(f"  {len(_no_pkgs):5d}  no binaries declared (skipped)")
-        console.print(f"  {_total:5d}  total source packages")
+        # (5) predicted binaries.
+        _all_present = True
+        # Caller has gated on build_container_ready (see source audit /
+        # source repair) — self.container is set.  is_ar_file is a
+        # staticmethod so accessing it through the class works without
+        # the optional-None unwrap mypy wants.
+        assert self.container is not None
+        for _f in _expected:
+            _path = os.path.join(self.config.deb_dest_for_filename(_f), _f)
+            if not os.path.isfile(_path):
+                _all_present = False
+                break
+            if not self.container.is_ar_file(_path):
+                _all_present = False
+                break
 
-        # Subset breakdown — tells operator which `source build <mode>`
-        # addresses each chunk of the rebuild queue.
-        if _needs_rebuild:
-            _cmd_map = {
-                'pkg':          'source build',
-                'installer':    'source build installer',
-                'live':         'source build live',
-                'recommended':  'source build recommended',
-                'unclassified': '(none — investigate)',
-            }
-            console.print("")
-            console.print("Rebuild queue by subset:")
-            for _subset in ('pkg', 'installer', 'live', 'recommended',
-                            'unclassified'):
-                _names = _by_subset.get(_subset, [])
-                if not _names:
-                    continue
-                console.print(
-                    f"  {len(_names):5d}  {_subset:<13s}  →  {_cmd_map[_subset]}"
-                )
+        if not _all_present:
+            return 'stale_pass' if _result_first_line == 'PASS' else 'needs_build'
 
-        if _verbose and _needs_rebuild:
-            console.print("")
-            console.print(f"Would rebuild ({len(_needs_rebuild)}), grouped by subset:")
-            for _subset in ('pkg', 'installer', 'live', 'recommended',
-                            'unclassified'):
-                _names = sorted(_by_subset.get(_subset, []))
-                if not _names:
-                    continue
-                console.print(f"  [{_subset}] ({len(_names)}):")
-                for _n in _names:
-                    console.print(f"    {_n}")
-        elif _needs_rebuild and not _verbose:
-            console.print("")
-            console.print(
-                "(pass `source rescan verbose` to list the "
-                f"{len(_needs_rebuild)} rebuild candidates by subset + name)",
-                tui.COLOR_INFO,
-            )
+        # (6) binaries valid; .result classification.
+        if not _result_exists:
+            return 'repairable'
+        if _result_first_line != 'PASS':
+            # Non-PASS / non-FAIL / non-TUNNELED content — atypical.
+            # Treat as missing to let repair restore.
+            return 'repairable'
+
+        # (7) patches changed since last build.
+        if self._is_patch_state_stale(pkg, src):
+            return 'stale_pass'
+
+        # (8) clean.
+        return 'ok'
+
 
     def cmd_source_repair(self, *args):
-        """One-shot: restore `.result=PASS` files for sources whose
-        binaries already exist in repo/ but whose .result is missing.
+        """Align .result files with current source state.  MUTATOR.
 
         Usage: source repair [verbose]
 
-        Designed for recovering from accidental .result deletion —
-        notably the 2026-05-19 incident where `cmd_source_rescan`
-        called the destructive `_refresh_patches` and wiped ~47
-        .result files whose corresponding .debs were still valid in
-        repo/.  Without this, those sources would re-enter the source
-        build queue and waste hours rebuilding artifacts that already
-        exist.
+        Walks every source via `_source_state` and acts on each state:
 
-        Algorithm (per source in the merged deb+udeb dep tree):
+          repairable  — binaries valid but .result missing  → WRITE PASS.
+                        (Original 2026-05-19 use case: recover from the
+                        cmd_source_rescan/_refresh_patches incident
+                        that wiped ~47 .result files.)
+          stale_pass  — .result=PASS but state drifted (binaries gone
+                        OR patches changed)  → CLEAR .result (and its
+                        .patchhash if patches changed).  Next
+                        `source build` will rebuild.
+          others      — leave alone.  needs_build / needs_sync /
+                        tunneled / ok / no_pkgs are not repair's
+                        concern; `source audit` reports them.
 
-          1. If .result already exists → skip (don't overwrite).
-          2. If every predicted filename (union across both dep_trees'
-             src_pkg_files maps) exists in repo/ AND each is a
-             syntactically valid .deb (ar archive with the right
-             members per BuildContainer.is_ar_file) → write PASS.
-          3. Otherwise → leave alone (genuinely needs rebuild).
+        `source repair` does NOT trigger a rebuild itself — it only
+        adjusts the .result sidecars so the NEXT `source build` does
+        the right thing.
 
-        Repair is the ONLY thing this command mutates.  Doesn't touch
-        repo/, doesn't invoke BuildContainer.build, doesn't refresh
-        patches.  Predicted-filename match comes from `dep parse`'s
-        resolution — for the repair to be correct, the dep tree's
-        view of expected filenames must match what's actually in
-        repo/ (which is true post-rebump for any pkg whose source
-        version hasn't drifted).
-
-        Prereqs: cache build + dep parse + container init (same as
-        source build's gates).
+        Prereqs: cache build + dep parse + container init.
         """
         if not (self.flags.cache_ready and self.flags.dep_check_ready
                 and self.flags.build_container_ready):
@@ -4253,210 +4212,295 @@ class BuildSession:
                 if _name not in _srcs:
                     _srcs[_name] = _src
 
-        _repaired = []
-        _already_ok = 0      # .result already present, skipped
-        _need_rebuild = []   # binaries missing — will rebuild as expected
-        _no_pkgs = 0         # source declares no binaries
+        _restored: 'list[str]' = []
+        _cleared:  'list[str]' = []
+        _other:    'dict[str, int]' = {}
 
         _bar = ProgressBar(
-            label='Repair', maxvalue=len(_srcs), show_rate=False,
+            label='Source repair', maxvalue=max(1, len(_srcs)),
+            show_rate=False,
         )
-        for _name, _src in sorted(_srcs.items()):
-            _bar.step(1)
-            _expected = self._predicted_files_for_source(_name)
-            if not _expected:
-                _no_pkgs += 1
-                continue
-            _result_file = os.path.join(
-                self.container.buildlog_path, _name + '.result')
-            if os.path.exists(_result_file):
-                _already_ok += 1
-                continue
-            # Shallow check — same as BuildContainer.check_build.
-            # Filename + ar magic.  Doesn't verify internal Version
-            # or Depends; that's `source verify`'s job (opt-in).
-            _all_present = True
-            for _f in _expected:
-                # CONF-01 Stage D: deb_dest_for_filename returns the
-                # correct nested dir for this artifact's role/type.
-                _path = os.path.join(
-                    self.config.deb_dest_for_filename(_f), _f,
-                )
-                if not os.path.isfile(_path):
-                    _all_present = False
-                    break
-                if not self.container.is_ar_file(_path):
-                    _all_present = False
-                    break
-            if not _all_present:
-                _need_rebuild.append(_name)
-                continue
-            try:
-                with open(_result_file, 'w') as fh:
-                    fh.write('PASS\n')
-                _repaired.append(_name)
-                logger.info(f"source repair: restored {_result_file}")
-            except OSError as e:
-                console.print(
-                    f"ERROR: cannot write {_result_file}: {e}",
-                    tui.COLOR_ERROR,
-                )
-        _bar.close()
+        try:
+            for _name, _src in sorted(_srcs.items()):
+                _bar.step(1)
+                _state = self._source_state(_name, _src)
+                _result_file = os.path.join(
+                    self.container.buildlog_path, _name + '.result')
+                if _state == 'repairable':
+                    try:
+                        with open(_result_file, 'w') as fh:
+                            fh.write('PASS\n')
+                        _restored.append(_name)
+                        logger.info(f"source repair: restored {_result_file}")
+                    except OSError as e:
+                        console.print(
+                            f"ERROR: cannot write {_result_file}: {e}",
+                            tui.COLOR_ERROR,
+                        )
+                elif _state == 'stale_pass':
+                    # Clear .result + .patchhash so next source build
+                    # rebuilds.  Both removals are best-effort; logging
+                    # captures any rmdir-style edge cases.
+                    _hash_file = _result_file.replace(
+                        '.result', '.patchhash',
+                    )
+                    _removed_any = False
+                    for _f in (_result_file, _hash_file):
+                        try:
+                            os.remove(_f)
+                            _removed_any = True
+                        except FileNotFoundError:
+                            pass
+                        except OSError as e:
+                            logger.warning(
+                                f"source repair: cannot remove {_f}: {e}"
+                            )
+                    if _removed_any:
+                        _cleared.append(_name)
+                        logger.info(
+                            f"source repair: cleared stale {_result_file}"
+                        )
+                else:
+                    _other[_state] = _other.get(_state, 0) + 1
+        finally:
+            _bar.close()
 
         console.print("Source repair:")
         console.print(
-            f"  {len(_repaired):5d}  .result restored to PASS "
-            "(binaries present, will skip rebuild)"
+            f"  {len(_restored):5d}  .result restored to PASS "
+            "(binaries present, .result was missing)"
         )
         console.print(
-            f"  {len(_need_rebuild):5d}  binaries missing "
-            "(legitimate rebuilds — left alone)"
+            f"  {len(_cleared):5d}  stale .result cleared "
+            "(binaries gone or patches changed)"
         )
-        console.print(
-            f"  {_already_ok:5d}  .result already present (untouched)"
-        )
-        if _no_pkgs:
-            console.print(
-                f"  {_no_pkgs:5d}  source declares no binaries (skipped)"
-            )
+        for _state in self._SOURCE_STATES:
+            if _state in ('repairable', 'stale_pass'):
+                continue
+            _n = _other.get(_state, 0)
+            if _n:
+                console.print(f"  {_n:5d}  {_state}  (no action)")
 
-        if _verbose and _repaired:
-            console.print("")
-            console.print(f"Restored ({len(_repaired)}):")
-            for _n in _repaired:
-                console.print(f"  {_n}")
+        if _verbose and (_restored or _cleared):
+            if _restored:
+                console.print("")
+                console.print(f"Restored ({len(_restored)}):")
+                for _n in _restored:
+                    console.print(f"  {_n}")
+            if _cleared:
+                console.print("")
+                console.print(f"Cleared ({len(_cleared)}):")
+                for _n in _cleared:
+                    console.print(f"  {_n}")
 
     def cmd_source_audit(self, *args):
-        """Walk dep_tree.selected_srcs; for each source, check whether
-        its main-tier binaries are present in repo/main at the right
-        filename.  Reports sources that still need building.
+        """READ-ONLY: report the build-state of every selected source.
 
-        Categories per source:
-          missing    — at least one main binary not in repo/main
-          mismatched — file exists but is not a valid ar archive
-                       (broken from a partial build / disk issue)
-          ok         — all main binaries present + readable
+        Usage: source audit [verbose] [summary]
 
-        -dev / -doc / -dbgsym / -tests binaries are NOT checked here —
-        they're side artifacts and shouldn't gate the rebuild decision
-        (matches BuildContainer.check_build semantics).
+        Audits dep_tree + udeb_dep_tree (merged).  Classifies each
+        source into one of `_SOURCE_STATES` via `_source_state` —
+        the same classifier `source repair` consults — and reports
+        counts per state, optionally broken down by subset
+        (base / live / installer / pool / recommended).
 
-        Usage: source audit [verbose]
+        States surfaced:
+          ok            — source files synced + binaries present + valid,
+                          .result=PASS, patches unchanged.  Nothing to do.
+          needs_sync    — source files missing or .verified sidecar
+                          absent → run `source sync <pkg>` (or `source
+                          sync` for bulk).
+          needs_build   — binaries missing or invalid → run `source build`.
+          stale_pass    — WARN: .result=PASS but state has drifted
+                          (binaries gone OR patches changed since last
+                          successful build) → run `source repair` to
+                          clear the lie; next `source build` will rebuild.
+          repairable    — WARN: binaries valid but .result missing
+                          (accidental wipe / pre-policy build) → run
+                          `source repair` to write PASS without rebuilding.
+          tunneled      — .result=TUNNELED (third-party pull).  Not built.
+          no_pkgs       — source declares no main-tier binary in either
+                          tree (rare; side-artifact-only sources).
 
-        Prerequisite: cache + dep parse must have run.
+        `summary` arg prints only the rebuild-queue count + subset
+        breakdown — the operator's "how much work remains" view.
 
-        Companion to `source rescan`: rescan uses BuildContainer's
-        check_build per-source (gated by ar-validity); this command
-        gives the operator a top-level view of "how much rebuilding
-        remains" without driving any state.
+        Read-only by design: never writes .result, never invokes
+        BuildContainer.build, never calls _refresh_patches.  Mutating
+        the build state is `source repair`'s job (which uses the same
+        classifier).
+
+        Prereqs: cache + dep parse + container init.
         """
-        _verbose = 'verbose' in args
-        if not (self.dep_tree and self.dep_tree.selected_srcs):
+        if not (self.flags.cache_ready and self.flags.dep_check_ready
+                and self.flags.build_container_ready):
             console.print(
-                "source audit requires dep_tree.selected_srcs — run "
-                "`dep parse` first."
+                "source audit needs cache build + dep parse + container "
+                "init to have run first.",
+                tui.COLOR_ERROR,
             )
             return
 
-        from buildcontainer import BuildContainer
-        # CONF-01 Stage D: main-tier binaries live at the new nested
-        # path; helper resolves the right dir (handles .deb vs .udeb).
-        _main = self.config.dir_repo_main
-        _any_findings = False
+        _verbose = 'verbose' in args
+        _summary = 'summary' in args
 
-        # Audit deb and udeb cohorts SEPARATELY.  src_pkg_files lives
-        # per-tree (see dependencytree.py:src_pkg_files docstring); the
-        # old shared-Source.pkgs design let the udeb pass overwrite the
-        # deb pass's list, hiding deb-cohort gaps.  Split report keeps
-        # each cohort's "missing" surface visible.
-        _cohorts = [('deb', self.dep_tree)]
-        if self.udeb_dep_tree is not None and self.udeb_dep_tree.selected_srcs:
-            _cohorts.append(('udeb', self.udeb_dep_tree))
+        # Merge deb + udeb dep trees.  Source objects shared via
+        # source_hashtable, so the dict-update naturally dedupes.
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _name, _src in self.udeb_dep_tree.selected_srcs.items():
+                if _name not in _srcs:
+                    _srcs[_name] = _src
 
-        for _cohort_label, _tree in _cohorts:
-            _missing_srcs: 'list[tuple]' = []
-            _mismatch_srcs: 'list[tuple]' = []
-            _ok = 0
-            # Per-source ProgressBar — each iteration does at least
-            # one is_ar_file open+seek per predicted main binary
-            # (often 3-10 files per source).  500+ source corpus =
-            # multi-second silence.  show_rate=False since per-source
-            # cost varies (single .deb vs. multi-deb sources).
-            _bar = ProgressBar(
-                label=f'Audit {_cohort_label} sources',
-                maxvalue=max(1, len(_tree.selected_srcs)),
-                show_rate=False,
+        # Per-state buckets — names only, in name order.
+        from collections import defaultdict as _dd
+        _by_state: 'dict[str, list[str]]' = _dd(list)
+
+        _bar = ProgressBar(
+            label='Source audit', maxvalue=max(1, len(_srcs)),
+            show_rate=False,
+        )
+        try:
+            for _name, _src in sorted(_srcs.items()):
+                _bar.step(1)
+                _state = self._source_state(_name, _src)
+                _by_state[_state].append(_name)
+        finally:
+            _bar.close()
+
+        # Subset classifier — which `source build <mode>` addresses
+        # each source.  Priority: pkg > installer > live > recommended.
+        _live_set    = self.dep_tree.live_exclusive_src_names
+        _inst_set    = self.dep_tree.installer_exclusive_src_names
+        _pool_set    = self.dep_tree.pool_extras_src_names
+        _extras_set  = self.dep_tree.extras_src_names
+        _udeb_names: set = set()
+        if self.udeb_dep_tree is not None:
+            _udeb_names = set(self.udeb_dep_tree.selected_srcs.keys())
+
+        def _subset_for(name: str) -> str:
+            if (name not in _live_set and name not in _inst_set
+                    and name not in _pool_set
+                    and name not in _extras_set
+                    and name not in _udeb_names):
+                return 'pkg'
+            if name in _inst_set or name in _udeb_names:
+                return 'installer'
+            if name in _live_set:
+                return 'live'
+            if name in _pool_set:
+                return 'pool'
+            if name in _extras_set:
+                return 'recommended'
+            return 'unclassified'
+
+        # ── summary mode ────────────────────────────────────────────
+        # Just the rebuild-queue count + subset breakdown.  Operator
+        # wants "how much work remains?" — nothing more.
+        _rebuild_candidates = (
+            _by_state.get('needs_build', [])
+            + _by_state.get('stale_pass', [])
+        )
+        _by_subset: 'dict[str, list[str]]' = _dd(list)
+        for _n in _rebuild_candidates:
+            _by_subset[_subset_for(_n)].append(_n)
+
+        if _summary:
+            console.print(
+                f"Source audit (summary): {len(_rebuild_candidates)} "
+                f"source(s) need build / repair."
             )
-            try:
-                for _src_name in _tree.selected_srcs:
-                    _bar.step(1)
-                    _expected_main = [
-                        _f for _f in (_tree.src_pkg_files.get(_src_name) or [])
-                        if utils.classify_repo_subdir(_f) == 'main'
-                    ]
-                    if not _expected_main:
-                        # Source has no main-tier predicted binary in
-                        # THIS cohort (e.g. a source whose deb cohort is
-                        # all -doc files).  Not a miss for this audit.
-                        _ok += 1
+            if _rebuild_candidates:
+                _cmd_map = {
+                    'pkg':          'source build',
+                    'installer':    'source build installer',
+                    'live':         'source build live',
+                    'pool':         'source build (pool)',
+                    'recommended':  'source build recommended',
+                    'unclassified': '(none — investigate)',
+                }
+                for _subset in ('pkg', 'installer', 'live', 'pool',
+                                'recommended', 'unclassified'):
+                    _names = _by_subset.get(_subset, [])
+                    if not _names:
                         continue
-                    _missing: 'list[str]' = []
-                    _mismatch: 'list[str]' = []
-                    for _f in _expected_main:
-                        # deb_dest_for_filename handles the .deb / .udeb
-                        # split (both classify as 'main' but live in
-                        # different dirs post-Stage D).
-                        _p = os.path.join(
-                            self.config.deb_dest_for_filename(_f), _f,
-                        )
-                        if not os.path.isfile(_p):
-                            _missing.append(_f)
-                            continue
-                        if not BuildContainer.is_ar_file(_p):
-                            _mismatch.append(_f)
-                    if _missing:
-                        _missing_srcs.append((_src_name, _missing))
-                    elif _mismatch:
-                        _mismatch_srcs.append((_src_name, _mismatch))
-                    else:
-                        _ok += 1
-            finally:
-                _bar.close()
+                    console.print(
+                        f"  {len(_names):5d}  {_subset:<13s}  "
+                        f"→  {_cmd_map[_subset]}"
+                    )
+            return
 
+        # ── full report ─────────────────────────────────────────────
+        _total = len(_srcs)
+        console.print("Source audit (read-only):")
+        console.print(f"  {len(_by_state.get('ok',[])):5d}  ok "
+                      "(synced, built, .result=PASS, patches fresh)")
+        console.print(f"  {len(_by_state.get('needs_build',[])):5d}  "
+                      "needs_build (binaries missing/invalid)")
+        if _by_state.get('stale_pass'):
             console.print(
-                f"\n=== Source audit ({_cohort_label} cohort, "
-                f"repo/main scope) ===\n"
-                f"  ok         : {_ok} sources\n"
-                f"  missing    : {len(_missing_srcs)} sources "
-                f"(main binary not in repo/main)\n"
-                f"  mismatched : {len(_mismatch_srcs)} sources "
-                f"(file exists but not a valid ar archive)"
+                f"  {len(_by_state['stale_pass']):5d}  "
+                "stale_pass (WARN: .result=PASS but state drifted; "
+                "run `source repair`)",
+                tui.COLOR_WARNING,
             )
-            _show = (len(_missing_srcs) if _verbose
-                     else min(30, len(_missing_srcs)))
-            if _show:
-                console.print(f"\nFirst {_show} missing sources ({_cohort_label}):")
-                for _src_name, _files in _missing_srcs[:_show]:
-                    _sample = ', '.join(_files[:3])
-                    if len(_files) > 3:
-                        _sample += f', … (+{len(_files) - 3})'
-                    console.print(f"  {_src_name:30s} → {_sample}")
-            _show = (len(_mismatch_srcs) if _verbose
-                     else min(30, len(_mismatch_srcs)))
-            if _show:
-                console.print(f"\nFirst {_show} mismatched sources ({_cohort_label}):")
-                for _src_name, _files in _mismatch_srcs[:_show]:
-                    _sample = ', '.join(_files[:3])
-                    if len(_files) > 3:
-                        _sample += f', … (+{len(_files) - 3})'
-                    console.print(f"  {_src_name:30s} → {_sample}")
-            if _missing_srcs or _mismatch_srcs:
-                _any_findings = True
+        if _by_state.get('repairable'):
+            console.print(
+                f"  {len(_by_state['repairable']):5d}  "
+                "repairable (binaries valid but .result missing; "
+                "run `source repair`)",
+                tui.COLOR_WARNING,
+            )
+        if _by_state.get('needs_sync'):
+            console.print(
+                f"  {len(_by_state['needs_sync']):5d}  "
+                "needs_sync (source files missing or .verified absent; "
+                "run `source sync`)",
+                tui.COLOR_WARNING,
+            )
+        if _by_state.get('tunneled'):
+            console.print(
+                f"  {len(_by_state['tunneled']):5d}  tunneled "
+                "(.result=TUNNELED, third-party pull)"
+            )
+        if _by_state.get('no_pkgs'):
+            console.print(
+                f"  {len(_by_state['no_pkgs']):5d}  no_pkgs "
+                "(source declares no main-tier binary)"
+            )
+        console.print(f"  {_total:5d}  total")
 
-        if _any_findings:
-            console.print(
-                "\nNext: `source build` to rebuild missing/mismatched."
-            )
+        if _rebuild_candidates:
+            console.print("")
+            console.print("Rebuild queue by subset:")
+            _cmd_map = {
+                'pkg':          'source build',
+                'installer':    'source build installer',
+                'live':         'source build live',
+                'pool':         'source build (pool)',
+                'recommended':  'source build recommended',
+                'unclassified': '(none — investigate)',
+            }
+            for _subset in ('pkg', 'installer', 'live', 'pool',
+                            'recommended', 'unclassified'):
+                _names = _by_subset.get(_subset, [])
+                if not _names:
+                    continue
+                console.print(
+                    f"  {len(_names):5d}  {_subset:<13s}  "
+                    f"→  {_cmd_map[_subset]}"
+                )
+
+        if _verbose:
+            for _state in ('needs_build', 'stale_pass', 'repairable',
+                           'needs_sync'):
+                _names = _by_state.get(_state, [])
+                if not _names:
+                    continue
+                console.print("")
+                console.print(f"[{_state}] ({len(_names)}):")
+                for _n in sorted(_names):
+                    console.print(f"  {_n}  ({_subset_for(_n)})")
 
     def cmd_source_verify(self, *args):
         """Opt-in deep audit: report .debs / .udebs whose internal Version
@@ -5190,27 +5234,27 @@ class BuildSession:
             'sync':     'fetch source tarballs: `source sync` (bulk) or '
                         '`source sync <pkg> [force]` (per-pkg)',
             'build':    'build sources: source build [force] [pkg | live | installer | recommended | all | <pkg>…] [[profile,…]]',
-            'rescan':   'report what source build would rebuild (source rescan [verbose])',
-            'repair':   'restore .result=PASS for sources whose binaries exist in repo/ '
-                        '(recovers from accidental .result deletion)',
+            'audit':    'READ-ONLY: report build-state of every source — '
+                        'ok / needs_sync / needs_build / stale_pass / '
+                        'repairable / tunneled.  Add `summary` for terse '
+                        'count + subset breakdown.',
+            'repair':   'MUTATOR: align .result with current state.  '
+                        'Writes PASS where binaries are valid but .result '
+                        'is missing; clears stale PASS where binaries '
+                        'are gone or patches changed.',
             'verify':   'opt-in deep audit: report .debs whose internal Version mismatches the '
                         'filename or whose Depends no longer resolve in cache (source verify [verbose])',
-            'audit':    'walk dep_tree.selected_srcs; report sources whose main '
-                        'binaries are missing from repo/main or whose versions '
-                        'mismatch.  Tells you which sources still need building.',
         }
         if action == 'sync':
             return self.cmd_source_sync(*args)
         if action == 'build':
             return self.cmd_source_build(*args)
-        if action == 'rescan':
-            return self.cmd_source_rescan(*args)
+        if action == 'audit':
+            return self.cmd_source_audit(*args)
         if action == 'repair':
             return self.cmd_source_repair(*args)
         if action == 'verify':
             return self.cmd_source_verify(*args)
-        if action == 'audit':
-            return self.cmd_source_audit(*args)
         return self._group_help('source', _table, action)
 
     def cmd_container(self, action: str = '', *args):
