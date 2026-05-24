@@ -12,7 +12,7 @@ Responsibilities:
   - Expose all of the above as interactive TUI commands
 
 Typical operator workflow:
-    cache build → dep parse → source sync → container init → source build
+    cache build → cache parse → source sync → container init → source build
 
 Each step sets a flag in _progress_flags so later commands can verify prerequisites
 without re-running earlier work.
@@ -738,7 +738,7 @@ class BuildSession:
                 and self.dep_tree is not None
                 and 'force' not in args):
             console.print(
-                "dep parse: already complete — pass `force` to re-resolve, "
+                "cache parse: already complete — pass `force` to re-resolve, "
                 "or change config/{pkg,live,installer,pool}.list and re-run "
                 "after a cache rebuild",
                 tui.COLOR_INFO,
@@ -1354,7 +1354,7 @@ class BuildSession:
         least once.
         """
         if not self.flags.dep_check_ready:
-            console.print("Dependency tree not ready, run 'dep parse' first")
+            console.print("Dependency tree not ready, run 'cache parse' first")
             return
         self._refresh_patches()
 
@@ -1494,7 +1494,7 @@ class BuildSession:
         second pass via the on-disk sha check.
         """
         if not self.flags.dep_check_ready:
-            console.print("Run 'dep parse' first")
+            console.print("Run 'cache parse' first")
             return
 
         _force = 'force' in args
@@ -1562,7 +1562,7 @@ class BuildSession:
             if _src is None:
                 console.print(
                     f"source sync {_name}: not in dep_tree.selected_srcs "
-                    f"(run `dep parse` if you expect it to be there)",
+                    f"(run `cache parse` if you expect it to be there)",
                     tui.COLOR_WARNING,
                 )
                 continue
@@ -1701,7 +1701,7 @@ class BuildSession:
         first).  Skips packages whose result file already says TUNNELED or PASS.
         """
         if not self.flags.dep_check_ready:
-            console.print("Run 'dep parse' first")
+            console.print("Run 'cache parse' first")
             return
 
         # Fall back to the config list if no names were given on the command line.
@@ -1851,7 +1851,7 @@ class BuildSession:
             in the live closure)
 
         Returns None when dep_tree isn't populated (operator hasn't
-        run `dep parse`).  Caller should fall back to a coarser check
+        run `cache parse`).  Caller should fall back to a coarser check
         or print a hint.
         """
         if not self.dep_tree or not self.dep_tree.selected_pkgs:
@@ -1934,7 +1934,7 @@ class BuildSession:
         because they never install.
 
         Returns None when dep_tree isn't populated (operator hasn't
-        run `dep parse`); caller falls back to whole-repo audit with
+        run `cache parse`); caller falls back to whole-repo audit with
         a hint.
         """
         if not self.dep_tree or not self.dep_tree.selected_pkgs:
@@ -1984,7 +1984,7 @@ class BuildSession:
         per-source classify is a few stat() calls.
 
         If dep_tree isn't built (operator hit chroot build before
-        dep parse), gate is skipped with a hint — the source-build
+        cache parse), gate is skipped with a hint — the source-build
         flag guard above already catches that miss-ordering.
         """
         if not (self.dep_tree and self.dep_tree.selected_srcs):
@@ -2064,7 +2064,7 @@ class BuildSession:
           - any conflict within the installer cohort
 
         When dep_tree / udeb_dep_tree aren't populated, the relevant
-        cohort check is skipped with a hint to run `dep parse`.  Dep
+        cohort check is skipped with a hint to run `cache parse`.  Dep
         check still runs unconditionally.
 
         I/O error → don't gate (fall back to install-time discovery).
@@ -2221,7 +2221,7 @@ class BuildSession:
         if _deb_cohort is None and _udeb_cohort is None:
             console.print(
                 "Note: dep_tree not built — falling back to repo/main-"
-                "wide dep gate.  Run `dep parse` first to scope by cohort."
+                "wide dep gate.  Run `cache parse` first to scope by cohort."
             )
             _unresolved, _weak = repo_audit.audit_dep_closure(
                 _state, consumer_set=None,
@@ -2288,7 +2288,7 @@ class BuildSession:
         if _live is None:
             console.print(
                 "\n=== LIVE CONFLICTS ===\n  skipped — dep_tree not built; "
-                "run `dep parse` first"
+                "run `cache parse` first"
             )
         else:
             _live_conflicts = _dedupe_bidirectional_conflicts(
@@ -2304,7 +2304,7 @@ class BuildSession:
         if _installer is None:
             console.print(
                 "\n=== INSTALLER CONFLICTS ===\n  skipped — udeb_dep_tree "
-                "not built; run `dep parse` first"
+                "not built; run `cache parse` first"
             )
         else:
             _inst_conflicts = _dedupe_bidirectional_conflicts(
@@ -2331,7 +2331,7 @@ class BuildSession:
         else:
             console.print(
                 "\n=== STALE FILES ===\n  skipped — dep_tree not built; "
-                "run `dep parse` first"
+                "run `cache parse` first"
             )
 
         # ── CONTENT INTEGRITY (was `source verify`) ─────────────────
@@ -2785,7 +2785,7 @@ class BuildSession:
         if self.cache is None or self.dep_tree is None:
             console.print(
                 "  cache or dep_tree not built — run `build_cache` and "
-                "`dep parse` first for full drill-in"
+                "`cache parse` first for full drill-in"
             )
             return
 
@@ -3304,7 +3304,7 @@ class BuildSession:
         """
         if not self.flags.dep_check_ready:
             console.print(
-                "Run `dep parse` first — cleanup needs selected_srcs "
+                "Run `cache parse` first — cleanup needs selected_srcs "
                 "to know what's NOT obsolete"
             )
             return
@@ -3459,7 +3459,7 @@ class BuildSession:
              - tree-hash matches: NO-OP (no content change since last build)
              - dep-hash differs: GATE — print the gating fields, refuse the
                light path.  Operator must do a full cycle:
-                   cache build force → dep parse force →
+                   cache build force → cache parse force →
                    source sync force → source build <pkg>
              - tree-hash differs but dep-hash matches: LIGHT PATH:
                  a. Wipe the pkg's derived artifacts (fork tarball,
@@ -3470,13 +3470,13 @@ class BuildSession:
                  d. Invoke `source build force <pkg>` to rebuild.
                  e. Persist updated hashes (done by generate_fork_mirror).
 
-        Prereqs: cache build + dep parse + container init must have
+        Prereqs: cache build + cache parse + container init must have
         run earlier in the session.  The reload only avoids RE-RUNNING
         them; it doesn't bypass them entirely.
 
         Why this exists: editing a fork file (e.g. fix a typo in
         debian/rules) used to require `cache build force` →
-        `dep parse force` → `source sync force` →
+        `cache parse force` → `source sync force` →
         `source build <pkg>`, with each force flag manually remembered
         because the *_ready flags don't auto-invalidate.  This command
         does the right thing in one step for the common case (content
@@ -3498,7 +3498,7 @@ class BuildSession:
         if not (self.flags.cache_ready and self.flags.dep_check_ready
                 and self.flags.build_container_ready):
             console.print(
-                "package reload requires cache build + dep parse + container "
+                "package reload requires cache build + cache parse + container "
                 "init to have run earlier in this session.  For first-run, "
                 "use `autorun installer` or the per-step sequence.",
                 tui.COLOR_ERROR,
@@ -3550,7 +3550,7 @@ class BuildSession:
                 console.print(
                     "  Full restart required:\n"
                     "    cache build force\n"
-                    "    dep parse force\n"
+                    "    cache parse force\n"
                     "    source sync force\n"
                     f"    source build {_pkg}",
                     tui.COLOR_INFO,
@@ -3721,7 +3721,7 @@ class BuildSession:
         On success sets self.flags.chroot_installer_ready.
         """
         if not self.flags.dep_check_ready:
-            console.print("Run 'dep parse' first")
+            console.print("Run 'cache parse' first")
             return
         if not self.flags.source_build_ready:
             console.print(
@@ -3730,7 +3730,7 @@ class BuildSession:
             return
         if self.udeb_dep_tree is None:
             console.print(
-                "Udeb dep tree not built — re-run 'dep parse' (it populates "
+                "Udeb dep tree not built — re-run 'cache parse' (it populates "
                 "udeb_dep_tree alongside the deb tree)"
             )
             return
@@ -4505,12 +4505,12 @@ class BuildSession:
         adjusts the .result sidecars so the NEXT `source build` does
         the right thing.
 
-        Prereqs: cache build + dep parse + container init.
+        Prereqs: cache build + cache parse + container init.
         """
         if not (self.flags.cache_ready and self.flags.dep_check_ready
                 and self.flags.build_container_ready):
             console.print(
-                "source repair needs cache build + dep parse + container "
+                "source repair needs cache build + cache parse + container "
                 "init to have run first.",
                 tui.COLOR_ERROR,
             )
@@ -4642,12 +4642,12 @@ class BuildSession:
         the build state is `source repair`'s job (which uses the same
         classifier).
 
-        Prereqs: cache + dep parse + container init.
+        Prereqs: cache + cache parse + container init.
         """
         if not (self.flags.cache_ready and self.flags.dep_check_ready
                 and self.flags.build_container_ready):
             console.print(
-                "source audit needs cache build + dep parse + container "
+                "source audit needs cache build + cache parse + container "
                 "init to have run first.",
                 tui.COLOR_ERROR,
             )
@@ -4866,7 +4866,7 @@ class BuildSession:
             The extracted tree carries the upstream debian/ — operator
             edits in place.
           - Invalidates cache_ready + dep_check_ready so the next
-            `cache build` + `dep parse` pick the fork up.
+            `cache build` + `cache parse` pick the fork up.
 
         Reload (fork tree already exists):
           - Delegates to the former `repo reload` logic — light-touch
@@ -4878,7 +4878,7 @@ class BuildSession:
           - Toggles a `.disabled` marker file at fork/source/<pkg>/.
             fork_mirror skips disabled trees during cache ingest.
           - Both operations invalidate cache + dep_tree so the change
-            takes effect on the next `cache build` + `dep parse`.
+            takes effect on the next `cache build` + `cache parse`.
 
         Replaces the standalone `repo reload <pkg>...` command (P4
         2026-05-23).
@@ -4995,7 +4995,7 @@ class BuildSession:
         if not _sources:
             console.print(
                 f"source fork {pkg}: source not in cache — check spelling, "
-                f"or `dep parse` may need to run first to populate "
+                f"or `cache parse` may need to run first to populate "
                 f"selected_srcs",
                 tui.COLOR_ERROR,
             )
@@ -5066,7 +5066,7 @@ class BuildSession:
         console.print(
             f"  Next steps:\n"
             f"    1. Edit fork/source/{pkg}/ as needed\n"
-            f"    2. `cache build force` + `dep parse force` to "
+            f"    2. `cache build force` + `cache parse force` to "
             f"pick up the fork\n"
             f"    3. `source build {pkg}` to build",
             tui.COLOR_INFO,
@@ -5081,7 +5081,7 @@ class BuildSession:
             self.flags.dep_check_ready = False
             console.print(
                 "  cache + dep state invalidated — run `cache build` "
-                "+ `dep parse` to propagate the fork change",
+                "+ `cache parse` to propagate the fork change",
                 tui.COLOR_INFO,
             )
 
@@ -5573,21 +5573,31 @@ class BuildSession:
             console.print(f"  {group} {_action}\t{_desc}")
 
     def cmd_cache(self, action: str = '', *args):
+        """Cache + package-universe operations.
+
+        `build` / `purge` manage the local apt cache; `parse`, `select`,
+        and `info` are read-side operations over it (dep-closure
+        resolution, interactive package selection, per-package info).
+        Merged here because all five operate on the same cached package
+        universe (was `cache`, `cache parse`, `select` as three groups)."""
         _table = {
-            'build': 'build apt cache from configured mirrors',
-            'purge': 'delete every file in the cache directory (re-fetched on next build)',
+            'build':  'build apt cache from configured mirrors',
+            'purge':  'delete every file in the cache directory (re-fetched on next build)',
+            'parse':  'resolve full dep closure for selected packages',
+            'select': 'interactively toggle packages in pkg.list (curses only)',
+            'info':   'show concise info + relations for a package: cache info <pkg>',
         }
         if action == 'build':
             return self.cmd_build_cache(*args)
         if action == 'purge':
             return self.cmd_cache_purge(*args)
-        return self._group_help('cache', _table, action)
-
-    def cmd_dep(self, action: str = '', *args):
-        _table = {'parse': 'resolve full dep closure for selected packages'}
         if action == 'parse':
             return self.cmd_parse_dependency(*args)
-        return self._group_help('dep', _table, action)
+        if action == 'select':
+            return self.cmd_cache_select(*args)
+        if action == 'info':
+            return self.cmd_cache_info(*args)
+        return self._group_help('cache', _table, action)
 
     def cmd_patch(self, action: str = '', *args):
         _table = {'refresh': 're-scan patch/source/ tree (after out-of-band edits)'}
@@ -5595,8 +5605,8 @@ class BuildSession:
             return self.cmd_patch_refresh(*args)
         return self._group_help('patch', _table, action)
 
-    def cmd_select(self, *args):
-        """COMP-06 — interactive package-set selector.
+    def cmd_cache_select(self, *args):
+        """COMP-06 — interactive package-set selector (`cache select`).
 
         Opens a `select` tab where the operator toggles packages in
         `config/pkg.list` and adds new ones from the cache, then saves.
@@ -5607,12 +5617,89 @@ class BuildSession:
             console.print("Run 'cache build' first (selector needs package metadata)")
             return
         if not hasattr(tui.tui_instance, 'set_tab_key_handler'):
-            console.print("select: interactive selector needs the curses TUI "
+            console.print("cache select: interactive selector needs the curses TUI "
                           "(not available in --headless mode); edit "
                           f"{self.config.pkglist_path} by hand")
             return
         from select_packages import SelectPackages
         SelectPackages(self.config, self.cache, tui.tui_instance).activate()
+
+    def cmd_cache_info(self, *args):
+        """`cache info <pkg>` — concise package facts + relations.
+
+        Looks the name up in the cache and prints identity (version,
+        arch, section, priority, installed size, source), the one-line
+        description, and the relation fields (Depends, Pre-Depends,
+        Recommends, Suggests, Provides, Conflicts, Breaks, Replaces).
+        Alternatives render as `a | b`.  If the dep tree is built, also
+        notes whether the package is in the selected closure and lists
+        a few reverse-dependencies."""
+        if not self.flags.cache_ready or self.cache is None:
+            console.print("Run 'cache build' first")
+            return
+        if not args:
+            console.print("Usage: cache info <pkg_name>")
+            return
+        name = args[0]
+        pkgs = self.cache.get_packages(name)
+        if not pkgs:
+            console.print(f'cache info: "{name}" not found in cache')
+            return
+
+        from print_commands import _fmt_dep, _fmt_dep_group
+        pkg = pkgs[0]   # best candidate (highest version)
+
+        def _size(p):
+            try:
+                kb = int(p.get('Installed-Size', '0') or 0)
+            except (ValueError, TypeError):
+                return '?'
+            if kb < 1024:
+                return f'{kb} KB'
+            return f'{kb / 1024.0:.1f} MB'
+
+        console.print(f'  {pkg.get("Package", name)}  '
+                      f'{pkg.get("Version", "?")}  ({pkg.get("Architecture", "?")})',
+                      tui.COLOR_HIGHLIGHT)
+        console.print(f'    Section      : {pkg.get("Section", "-")}')
+        console.print(f'    Priority     : {pkg.get("Priority", "-")}')
+        console.print(f'    Installed    : {_size(pkg)}')
+        _src = pkg.get('Source', '') or pkg.get('Package', name)
+        console.print(f'    Source       : {_src}')
+        if len(pkgs) > 1:
+            _vers = ', '.join(str(p.get('Version', '?')) for p in pkgs[:6])
+            console.print(f'    Versions     : {len(pkgs)} available ({_vers})')
+        _desc = (pkg.get('Description', '') or '').split('\n')[0].strip()
+        if _desc:
+            console.print(f'    Description  : {_desc}')
+
+        # Relations.  `.depends`/`.pre_depends`/... are single-tuple
+        # lists; `.alt_depends`/`.conflicts`/... are groups (lists of
+        # tuples) rendered with ` | `.
+        def _line(label, singles, groups=()):
+            parts = [_fmt_dep(t) for t in singles]
+            parts += [_fmt_dep_group(g) for g in groups]
+            if parts:
+                console.print(f'    {label:<13}: {", ".join(parts)}')
+
+        _line('Depends',     getattr(pkg, 'depends', []),      getattr(pkg, 'alt_depends', []))
+        _line('Pre-Depends', getattr(pkg, 'pre_depends', []),  getattr(pkg, 'alt_pre_depends', []))
+        _line('Recommends',  getattr(pkg, 'recommends', []))
+        _line('Suggests',    getattr(pkg, 'suggests', []))
+        _line('Provides',    [], getattr(pkg, 'provides', []))
+        _line('Conflicts',   [], getattr(pkg, 'conflicts', []))
+        _line('Breaks',      [], getattr(pkg, 'breaks', []))
+        _line('Replaces',    [], getattr(pkg, 'replaces', []))
+
+        # Dep-tree context (only if parsed).
+        if self.dep_tree is not None:
+            selected = name in self.dep_tree.selected_pkgs
+            console.print(f'    In closure   : {"yes" if selected else "no"}')
+            rdeps = getattr(pkg, 'depended_by', []) or []
+            if rdeps:
+                _shown = ', '.join(rdeps[:8])
+                _more = f'  (+{len(rdeps) - 8} more)' if len(rdeps) > 8 else ''
+                console.print(f'    Required by  : {_shown}{_more}')
 
     def cmd_source(self, action: str = '', *args):
         _table = {
@@ -5749,7 +5836,7 @@ class BuildSession:
         existing UX); explicit `autorun live` or `autorun installer`
         run their respective pipelines.
 
-        Both pipelines share the early stages (cache → dep parse →
+        Both pipelines share the early stages (cache → cache parse →
         source sync → container init → source build pkg) and diverge
         at the subset-specific source build + chroot build, then converge
         on `iso build *` to produce the bootable image.
@@ -5775,7 +5862,7 @@ class BuildSession:
         """
         _steps = [
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
-            (self.cmd_parse_dependency,  'dep_check_ready',       'dep parse'),
+            (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
             (self.cmd_source_sync,       'download_ready',        'source sync'),
             (self.cmd_init_container,    'build_container_ready', 'container init'),
             (self.cmd_source_build,                                  # bare = pkg
@@ -5799,7 +5886,7 @@ class BuildSession:
         """
         _steps = [
             (self.cmd_build_cache,       'cache_ready',                'cache build'),
-            (self.cmd_parse_dependency,  'dep_check_ready',            'dep parse'),
+            (self.cmd_parse_dependency,  'dep_check_ready',            'cache parse'),
             (self.cmd_source_sync,       'download_ready',             'source sync'),
             (self.cmd_init_container,    'build_container_ready',      'container init'),
             (self.cmd_source_build,                                       # bare = pkg
@@ -5932,10 +6019,8 @@ def main(banner: str) -> None:
     # tip ≤ 80 cols.  Tips that need to enumerate many sub-actions
     # use `<subcmd>` and direct the operator at `<cmd>` (bare) which
     # prints the full per-action table via _group_help.
-    tui.register_command('cache',     session.cmd_cache,     'Cache:      cache <build|purge>')
+    tui.register_command('cache',     session.cmd_cache,     'Cache:      cache <build|purge|parse|select|info <pkg>>')
     tui.register_command('clean',     session.cmd_clean,     'Clean:      clean <subcmd> — run `clean` for the list')
-    tui.register_command('dep',       session.cmd_dep,       'Deps:       dep parse')
-    tui.register_command('select',    session.cmd_select,    'Select:     toggle packages in pkg.list (interactive)')
     tui.register_command('patch',     session.cmd_patch,     'Patches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|fork>')
     tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|audit|repair|tunnel>')

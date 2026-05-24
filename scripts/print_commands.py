@@ -78,7 +78,7 @@ def _fmt_dep_group(group) -> str:
 def _require_dep_check(session) -> bool:
     """Print 'run parse_dependency first' and return False if not ready."""
     if not session.flags.dep_check_ready:
-        tui.console.print("Run 'parse_dependency' first")
+        tui.console.print("Run 'cache parse' first")
         return False
     return True
 
@@ -86,7 +86,7 @@ def _require_dep_check(session) -> bool:
 def _require_cache(session) -> bool:
     """Print 'run build_cache first' and return False if not ready."""
     if not session.flags.cache_ready or session.cache is None:
-        tui.console.print("Run 'build_cache' first")
+        tui.console.print("Run 'cache build' first")
         return False
     return True
 
@@ -545,7 +545,7 @@ def _print_udebs(session, *_extras) -> None:
         return
     udeb_tree = getattr(session, 'udeb_dep_tree', None)
     if udeb_tree is None:
-        tui.console.print("Udeb tree not built — re-run 'dep parse'")
+        tui.console.print("Udeb tree not built — re-run 'cache parse'")
         return
     pkgs = udeb_tree.selected_pkgs
     real_pkgs = {k: v for k, v in pkgs.items() if k == v['Package']}
