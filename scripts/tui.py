@@ -541,10 +541,12 @@ class Tui:
         Row 0 (screen row N-2): command prompt — `$ ` or `[…] ` followed
         by the in-progress command text and a blinking cursor.
 
-        Row 1 (screen row N-1): single-line status bar with reverse-
-        video styling (terminal-default bg/fg flipped via A_REVERSE
-        attribute — works on any palette, matches Claude-CLI
-        understated look).  Content layout:
+        Row 1 (screen row N-1): single-line status bar with a fixed
+        bright background (COLOR_FOOTER pair, WHITE on bright bg,
+        default blue — RHEL / Debian-installer convention).  Switched
+        2026-05-24 from the previous reverse-video approach so the
+        bar reads the same regardless of terminal palette/theme.
+        Content layout:
           - Left:  banner ("Athena Build …")
           - Center-left: tab tags, active in A_BOLD
           - Right: resource stats + key hint
@@ -601,13 +603,14 @@ class Tui:
             self._safe_addstr(self._footer, 0, cmd_x + local_cur, ' ',
                               curses.A_REVERSE)
 
-        # ── Row 1: status bar (reverse video) ────────────────────────────
-        # Fill the whole row with reverse-video spaces so the bg is
-        # uniform; overlay text segments with A_REVERSE.  Using the
-        # A_REVERSE attribute rather than a color pair keeps the bar
-        # palette-independent (matches whatever the user's terminal
-        # bg/fg is, just flipped).
-        self._safe_addstr(self._footer, 1, 0, ' ' * max_x, curses.A_REVERSE)
+        # ── Row 1: status bar (fixed bright color pair) ───────────────────
+        # Uses COLOR_FOOTER (WHITE on bright bg, default blue) so the
+        # bar is terminal-palette-independent.  Switched 2026-05-24
+        # from the prior reverse-video approach — that blended badly
+        # with transparent / themed terminals.
+        bar_attr  = curses.color_pair(self.COLOR_FOOTER)
+        bar_bold  = bar_attr | curses.A_BOLD
+        self._safe_addstr(self._footer, 1, 0, ' ' * max_x, bar_attr)
 
         banner  = self._banner
         res_str = self._psutil.value
@@ -617,18 +620,16 @@ class Tui:
         right_x  = max_x
         if len(hint) + 4 < max_x:
             right_x -= len(hint)
-            self._safe_addstr(self._footer, 1, right_x, hint, curses.A_REVERSE)
+            self._safe_addstr(self._footer, 1, right_x, hint, bar_attr)
         if res_str and len(res_str) + 4 < right_x:
             right_x -= (len(res_str) + 2)
-            self._safe_addstr(self._footer, 1, right_x, res_str,
-                              curses.A_REVERSE)
+            self._safe_addstr(self._footer, 1, right_x, res_str, bar_attr)
 
         # Banner (left).
         banner_text = f' {banner} '
         if len(banner_text) >= right_x:
             banner_text = banner_text[:right_x - 1]
-        self._safe_addstr(self._footer, 1, 0, banner_text,
-                          curses.A_REVERSE | curses.A_BOLD)
+        self._safe_addstr(self._footer, 1, 0, banner_text, bar_bold)
 
         # Tab tags fill the middle.  Flat RHEL-style format:
         # active = "[name]" with A_BOLD; inactive = " name ".
@@ -637,7 +638,7 @@ class Tui:
             tag = f'[{tab_name}]' if tab['selected'] else f' {tab_name} '
             if x + len(tag) + 1 >= right_x:
                 break
-            attr = (curses.A_REVERSE | curses.A_BOLD) if tab['selected'] else curses.A_REVERSE
+            attr = bar_bold if tab['selected'] else bar_attr
             self._safe_addstr(self._footer, 1, x, tag, attr)
             x += len(tag) + 1
 
@@ -898,7 +899,13 @@ class Tui:
             curses.init_pair(self.COLOR_WARNING,   self.warning_color,   self.bg_color)
             curses.init_pair(self.COLOR_ERROR,     self.error_color,     self.bg_color)
             curses.init_pair(self.COLOR_HIGHLIGHT, self.highlight_color, self.bg_color)
-            curses.init_pair(self.COLOR_FOOTER,    self.fg_color,        self.bg_footer)
+            # Status bar uses a fixed bright bg (no A_REVERSE) so the
+            # bar reads the same regardless of terminal palette/theme
+            # — A_REVERSE blended badly with transparent / themed
+            # terminals (2026-05-24 feedback).  WHITE-on-BLUE is the
+            # RHEL/Debian-installer convention; override via the
+            # `bg_footer` class attribute.
+            curses.init_pair(self.COLOR_FOOTER,    curses.COLOR_WHITE,   self.bg_footer)
             curses.init_pair(self.COLOR_INFO,      self.info_color,      self.bg_color)
             Tui._log_map = {
                 self.SEVERITY_ERROR:   ('[ERROR]', curses.color_pair(self.COLOR_ERROR)   | curses.A_BOLD),
