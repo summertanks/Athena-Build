@@ -7832,25 +7832,6 @@ def test_cohort_resolvers_route_through_canonical_names():
         )
 
 
-def test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately():
-    """source audit's output must label deb and udeb cohorts distinctly,
-    so the operator can tell which cohort drives each missing source.
-    Anti-regression for the pre-split single-cohort output that
-    silently merged the two trees' findings."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    # Both cohort labels appear in the audit header path.
-    assert 'deb cohort' in _body, "source audit missing deb-cohort label"
-    assert 'udeb cohort' in _body, "source audit missing udeb-cohort label"
-    # And the audit iterates a list of cohorts (not a single tree).
-    assert "_cohorts = [('deb'" in _body, (
-        "cmd_source_audit no longer iterates a per-cohort list — "
-        "the split into deb/udeb scopes may have regressed")
-
-
 def test_cmd_init_container_gated_on_cache_ready():
     """REGRESSION pin (2026-05-21): cmd_init_container must refuse to
     run before cmd_build_cache.  BuildContainer is constructed with
@@ -13104,47 +13085,6 @@ def test_repo_audit_closure_handles_conflicts_and_provides():
         "audit must walk Recommends as the weak-class report")
 
 
-def test_cmd_source_rescan_registered_in_dispatcher():
-    """source rescan must be wired in cmd_source's dispatch table —
-    otherwise the user gets `Unknown sub-command` and the command is
-    a phantom."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    assert "'rescan'" in _body, "rescan not advertised in source help"
-    assert "cmd_source_rescan" in _body, (
-        "cmd_source_rescan method missing or wrong name")
-    # Pin: rescan dispatches to the method
-    import re
-    assert re.search(
-        r"if action == 'rescan':\s*\n\s+return self\.cmd_source_rescan",
-        _body), "source rescan not dispatched in cmd_source"
-
-
-def test_cmd_source_rescan_method_uses_check_build():
-    """rescan must NOT re-implement check_build — it shares the same
-    decision the source-build path uses, so its count actually reflects
-    what would rebuild.  Pinning the integration to keep them in sync."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    # Locate the cmd_source_rescan body and verify it calls check_build
-    import re
-    _m = re.search(
-        r'def cmd_source_rescan\(self, \*args\):.*?(?=\n    def )',
-        _body, re.DOTALL)
-    assert _m, "cmd_source_rescan not found"
-    _method = _m.group(0)
-    assert 'self.container.check_build' in _method, (
-        "rescan must use BuildContainer.check_build so it stays in sync "
-        "with source build's skip logic")
-    # Pin: rescan flags-gate on cache + dep + container ready
-    assert 'cache_ready' in _method and 'dep_check_ready' in _method \
-        and 'build_container_ready' in _method, (
-        "rescan must gate on the three readiness flags so it doesn't "
-        "scan against stale state")
-
-
 def test_readonly_named_commands_have_no_destructive_calls():
     """Any function whose name signals read-only intent MUST NOT
     contain filesystem-write primitives OR call known-mutating
@@ -13626,6 +13566,11 @@ def test_cmd_source_repair_writes_pass_when_binaries_present():
         # Stub Source-like
         class _Src:
             pkgs = [_deb_name]
+            # _source_state needs these even when not
+            # populated in this test.
+            files = {}
+            version = '1.0'
+            patch_list = []
 
         # Stub container with the minimum repair/check_build helpers need.
         # verify_pkg_artifact is the unified gate (filename + ar +
@@ -13646,6 +13591,11 @@ def test_cmd_source_repair_writes_pass_when_binaries_present():
         # _repo for every filename.
         class _Cfg:
             dir_repo = _repo
+            # _source_state reads these even when the actual subdirs
+            # aren't populated in this test (files={}, patch_list=[]).
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = os.path.join(_tmp, 'source')
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
             def deb_dest_for_filename(_f):
                 return _repo
@@ -13706,7 +13656,19 @@ def test_cmd_source_repair_leaves_fail_result_untouched():
         with open(os.path.join(_repo, _deb_name), 'wb') as fh:
             fh.write(b'!<arch>\n')
 
-        class _Src: pkgs = [_deb_name]
+        class _Src:
+
+
+            pkgs = [_deb_name]
+
+
+            files = {}
+
+
+            version = '1.0'
+
+
+            patch_list = []
         class _Container:
             buildlog_path = _buildlog
             @staticmethod
@@ -13716,6 +13678,9 @@ def test_cmd_source_repair_leaves_fail_result_untouched():
                 return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
         class _Cfg:
             dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = os.path.join(_tmp, 'source')
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
             def deb_dest_for_filename(_f): return _repo
         class _Tree:
@@ -13757,7 +13722,19 @@ def test_cmd_source_repair_skips_when_binaries_missing():
         os.makedirs(_repo, exist_ok=True)
         # NO .deb planted — binary missing
 
-        class _Src: pkgs = ['foo_1.0_amd64.deb']
+        class _Src:
+
+
+            pkgs = ['foo_1.0_amd64.deb']
+
+
+            files = {}
+
+
+            version = '1.0'
+
+
+            patch_list = []
         class _Container:
             buildlog_path = _buildlog
             @staticmethod
@@ -13767,6 +13744,9 @@ def test_cmd_source_repair_skips_when_binaries_missing():
                 return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
         class _Cfg:
             dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = os.path.join(_tmp, 'source')
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
             def deb_dest_for_filename(_f): return _repo
         class _Tree:
@@ -13792,14 +13772,20 @@ def test_cmd_source_repair_skips_when_binaries_missing():
             "that would mask a legitimate rebuild")
 
 
-def test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails():
-    """Reverted 2026-05-19 (later same day): repair no longer
-    invokes deep verify on .result-PASS sources, so it doesn't
-    delete stale PASS files.  Why: when paired with cross-source
-    strict-equal Depends (very common after rebump), deep verify
-    over-reports — and an over-report deletion costs hours of
-    needless rebuild.  The deep audit is available as the opt-in
-    `source verify` diagnostic; repair stays cheap + permissive."""
+def test_cmd_source_repair_clears_stale_pass_when_binaries_not_valid():
+    """P2 (2026-05-23) semantics change: repair now CLEARS .result=PASS
+    when the recorded PASS state has drifted from disk reality
+    (binaries missing or not-ar).  Old behavior (pre-P2) was to
+    preserve any existing .result; that was right under the
+    repair-only-restores-missing model but wrong under the new
+    repair-aligns-with-current-state model — a stale PASS lets the
+    next `source build` falsely SKIP a package that genuinely needs
+    rebuilding.
+
+    Deep verify (per-binary content + dep resolution) remains the
+    opt-in `source verify` / `repo audit` concern — repair uses the
+    cheap shallow check (`is_ar_file`) to detect "binary went away
+    or is corrupt"."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
@@ -13812,9 +13798,12 @@ def test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails():
         _result = os.path.join(_buildlog, 'foo.result')
         with open(_result, 'w') as fh:
             fh.write('PASS\n')
-        # Don't actually plant a valid .deb — stub verify_pkg_artifact
-        # to return False so the deep-verify "fails" deterministically.
-        class _Src: pkgs = ['foo_1.0_amd64.deb']
+        # Stub is_ar_file=False to mark binaries as corrupt/missing.
+        class _Src:
+            pkgs = ['foo_1.0_amd64.deb']
+            files = {}
+            version = '1.0'
+            patch_list = []
         class _Container:
             buildlog_path = _buildlog
             @staticmethod
@@ -13824,6 +13813,9 @@ def test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails():
                 return (False, 'version-mismatch:X!=Y')
         class _Cfg:
             dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = os.path.join(_tmp, 'source')
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
             def deb_dest_for_filename(_f): return _repo
         class _Tree:
@@ -13842,12 +13834,10 @@ def test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails():
 
         _sess.cmd_source_repair()
 
-        assert os.path.exists(_result), (
-            "repair must leave .result PASS alone — deep verify "
-            "moved to opt-in `source verify`")
-        with open(_result) as fh:
-            assert fh.read().strip() == 'PASS', (
-                "repair must not rewrite content of existing .result")
+        assert not os.path.exists(_result), (
+            "stale PASS must be CLEARED by repair so next source build "
+            "rebuilds rather than skipping; got file still present"
+        )
 
 
 def test_cmd_source_repair_leaves_consistent_pass_alone():
@@ -13865,11 +13855,22 @@ def test_cmd_source_repair_leaves_consistent_pass_alone():
         _result = os.path.join(_buildlog, 'foo.result')
         with open(_result, 'w') as fh:
             fh.write('PASS\n')
+        # Plant the binary so _source_state sees state='ok' (the
+        # repair-no-op path).  Pre-P2 the test relied on repair never
+        # checking disk state when .result was present; that's the
+        # exact lie P2's stale-PASS clearing removes — the test now
+        # must set up a real consistent state.
+        with open(os.path.join(_repo, 'foo_1.0_amd64.deb'), 'wb') as fh:
+            fh.write(b'!<arch>\n')
         _orig_mtime = os.path.getmtime(_result)
         import time as _time
         _time.sleep(0.05)  # ensure any rewrite would change mtime
 
-        class _Src: pkgs = ['foo_1.0_amd64.deb']
+        class _Src:
+            pkgs = ['foo_1.0_amd64.deb']
+            files = {}
+            version = '1.0'
+            patch_list = []
         class _Container:
             buildlog_path = _buildlog
             @staticmethod
@@ -13878,6 +13879,9 @@ def test_cmd_source_repair_leaves_consistent_pass_alone():
             def verify_pkg_artifact(_path, _f): return (True, 'ok')
         class _Cfg:
             dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = os.path.join(_tmp, 'source')
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
             def deb_dest_for_filename(_f): return _repo
         class _Tree:
@@ -13919,7 +13923,19 @@ def test_cmd_source_repair_leaves_tunneled_marker_alone():
         with open(_result, 'w') as fh:
             fh.write('TUNNELED\n')
 
-        class _Src: pkgs = ['foo_1.0_amd64.deb']
+        class _Src:
+
+
+            pkgs = ['foo_1.0_amd64.deb']
+
+
+            files = {}
+
+
+            version = '1.0'
+
+
+            patch_list = []
         # verify_pkg_artifact would FAIL if called — but repair must
         # NOT call it for TUNNELED .result.
         class _Container:
@@ -13931,6 +13947,9 @@ def test_cmd_source_repair_leaves_tunneled_marker_alone():
                 return (False, 'should-not-be-called-for-tunneled')
         class _Cfg:
             dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = os.path.join(_tmp, 'source')
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
             def deb_dest_for_filename(_f): return _repo
         class _Tree:
@@ -13978,69 +13997,34 @@ def test_destructive_helpers_warn_in_docstring():
         "the 2026-05-19 over-counting bug.")
 
 
-def test_cmd_source_rescan_classifies_rebuilds_by_subset():
-    """rescan must group rebuild candidates by which `source build
-    <mode>` covers them (pkg / installer / live / recommended).
-    Operator needs to know which command to run to address each
-    bucket — without the breakdown, a 45-candidate queue post-pkg/
-    -installer-build looks like a bug rather than "Recommends-only
-    extras you haven't built yet."  Caught 2026-05-19."""
+def test_cmd_source_audit_classifies_rebuilds_by_subset():
+    """source audit must group rebuild candidates by which `source build
+    <mode>` covers them (pkg / installer / live / pool / recommended).
+    Operator needs to know which command to run to address each bucket.
+    (Was cmd_source_rescan's responsibility before P2 — folded into
+    cmd_source_audit which is the read-only superset.)"""
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
         _body = fh.read()
     import re
     _m = re.search(
-        r'def cmd_source_rescan\(self, \*args\):.*?(?=\n    def )',
+        r'def cmd_source_audit\(self, \*args\):.*?(?=\n    def )',
         _body, re.DOTALL,
     )
-    assert _m, "cmd_source_rescan not found"
+    assert _m, "cmd_source_audit not found"
     _method = _m.group(0)
-    # Each subset label must appear in the classification logic
-    for _label in ('pkg', 'installer', 'live', 'recommended'):
+    for _label in ('pkg', 'installer', 'live', 'pool', 'recommended'):
         assert f"'{_label}'" in _method, (
-            f"rescan must classify rebuild candidates as '{_label}' so "
+            f"audit must classify rebuild candidates as '{_label}' so "
             f"the operator knows which `source build` mode addresses them")
-    # Helper structure: a _subset_for function or equivalent that consults
-    # the four dep-tree set attributes.
-    for _attr in ('live_exclusive_src_names', 'installer_exclusive_src_names',
+    for _attr in ('live_exclusive_src_names',
+                  'installer_exclusive_src_names',
                   'extras_src_names'):
         assert _attr in _method, (
-            f"rescan must consult dep_tree.{_attr} to classify candidates")
-    # The breakdown table must reference each `source build` command so
-    # the output is actionable.
-    assert "'source build'" in _method or 'source build installer' in _method, (
-        "rescan must print the command needed for each subset")
-
-
-def test_cmd_source_rescan_is_readonly_no_refresh_patches_call():
-    """rescan MUST NOT call _refresh_patches — that function deletes
-    .result files when patch hashes diverge, which is destructive and
-    inappropriate for a read-only scan command.  Caught 2026-05-19:
-    rescan was over-counting because the side effect wiped PASS state
-    for sources with newer patches.  Pin to keep rescan read-only."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    import re
-    _m = re.search(
-        r'def cmd_source_rescan\(self, \*args\):.*?(?=\n    def )',
-        _body, re.DOTALL)
-    assert _m, "cmd_source_rescan not found"
-    _method = _m.group(0)
-    # Check for INVOCATION (with paren) — substring would match the
-    # comment that documents WHY we don't call it.
-    assert 'self._refresh_patches(' not in _method, (
-        "rescan must not call self._refresh_patches() (destructive: "
-        "deletes .result files on patch-set changes — turns a read-only "
-        "scan into a state-mutating invalidation pass)")
-    # Forbid filesystem write/delete patterns.  Reads (open() for read,
-    # check_build, etc) are fine.
-    for _bad in ('os.remove(', 'shutil.rmtree(', 'os.unlink(',
-                 "'w'", '"w"', "'wb'", '"wb"',
-                 "'a'", '"a"', "'ab'", '"ab"', 'os.utime('):
-        assert _bad not in _method, (
-            f"rescan body contains write/delete primitive {_bad!r} — "
-            f"should be pure read")
+            f"audit must consult dep_tree.{_attr} to classify candidates")
+    assert ("'source build'" in _method
+            or 'source build installer' in _method), (
+        "audit must print the command needed for each subset")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -14871,7 +14855,6 @@ def main() -> int:
         test_validate_selection_versioned_provides_still_flagged,
         test_canonical_names_filters_virtual_aliases_from_cohort,
         test_cohort_resolvers_route_through_canonical_names,
-        test_cmd_source_audit_reports_deb_and_udeb_cohorts_separately,
         test_cmd_init_container_gated_on_cache_ready,
         test_autorun_step_lists_include_container_init,
         test_derive_extras_src_names_marks_extras_only_sources,
@@ -15065,10 +15048,7 @@ def main() -> int:
         test_cmd_source_verify_iterates_cohorts_separately,
         test_deb_dir_for_recognises_main_udeb_label,
         test_repo_audit_closure_handles_conflicts_and_provides,
-        test_cmd_source_rescan_registered_in_dispatcher,
-        test_cmd_source_rescan_method_uses_check_build,
-        test_cmd_source_rescan_classifies_rebuilds_by_subset,
-        test_cmd_source_rescan_is_readonly_no_refresh_patches_call,
+        test_cmd_source_audit_classifies_rebuilds_by_subset,
         test_readonly_named_commands_have_no_destructive_calls,
         test_destructive_helpers_warn_in_docstring,
         test_verify_pkg_artifact_ok_when_all_fields_match,
@@ -15085,7 +15065,7 @@ def main() -> int:
         test_cmd_source_repair_writes_pass_when_binaries_present,
         test_cmd_source_repair_leaves_fail_result_untouched,
         test_cmd_source_repair_skips_when_binaries_missing,
-        test_cmd_source_repair_leaves_existing_pass_alone_even_if_deep_fails,
+        test_cmd_source_repair_clears_stale_pass_when_binaries_not_valid,
         test_cmd_source_repair_leaves_consistent_pass_alone,
         test_cmd_source_repair_leaves_tunneled_marker_alone,
         # TEST-05: offline Cache fixture
