@@ -27,7 +27,10 @@ import psutil
 
 from . import facade, widgets
 from .dispatcher import Dispatcher
-from .events import PrintEvent, Shutdown, StatusEvent
+from .events import (
+    ClearTab, ConsoleTrim, LogEvent, PrintEvent, Shutdown, StatusEvent,
+    WidgetAdd, WidgetRemove, WidgetTick,
+)
 from .logging_bridge import LOGGER_NAME, setup_logging
 from .render import (
     COLOR_ERROR, COLOR_FOOTER, COLOR_HIGHLIGHT, COLOR_INFO, COLOR_NORMAL,
@@ -141,6 +144,53 @@ class Tui:
     def sig_shutdown(self, signum: int, frame: Any) -> None:
         self.exit(signum)
 
+    # ─── Legacy-compatibility proxy methods ──────────────────────────────
+    # The existing `scripts/tui.py:Console` facade resolves
+    # `tui_instance.X(...)` directly.  build.py imports `console`,
+    # `Prompt`, `ProgressBar`, `Spinner` from the legacy module — they
+    # all dispatch through `tui_instance`.  Expose the same surface
+    # here so v2 is a drop-in replacement without touching call sites.
+
+    def print(self, message: str, attribute: Optional[int] = None) -> None:
+        """Legacy Console.print → PrintEvent."""
+        self.dispatcher.post(PrintEvent(message, attribute or 0))
+
+    def INFO(self, message: str) -> None:
+        self.dispatcher.post(LogEvent(SEVERITY_INFO, f'[INFO ] {message}'))
+
+    def WARNING(self, message: str) -> None:
+        self.dispatcher.post(LogEvent(SEVERITY_WARNING, f'[WARN ] {message}'))
+
+    def ERROR(self, message: str) -> None:
+        self.dispatcher.post(LogEvent(SEVERITY_ERROR, f'[ERROR] {message}'))
+
+    def console_mark(self) -> int:
+        return self.dispatcher.console_mark()
+
+    def console_trim_to(self, mark: int) -> None:
+        self.dispatcher.post(ConsoleTrim(mark))
+
+    def add_widget(self, widget: object) -> int:
+        """Add a widget (legacy ProgressBar/Spinner construction path).
+
+        Posts a WidgetAdd event so the renderer picks it up.  Returns
+        id(widget) immediately so the legacy widget's __init__ has
+        something to store in `self._widget_id` — that id is what
+        WidgetRemove uses at close()."""
+        self.dispatcher.post(WidgetAdd(widget))
+        return id(widget)
+
+    def del_widget(self, wid: int) -> None:
+        self.dispatcher.post(WidgetRemove(wid))
+
+    def prompt(self, message: str, masked: bool = False,
+                keymode: bool = False) -> str:
+        """Legacy Prompt.get_response calls this directly on
+        tui_instance.  Translates the masked/keymode flags into v2's
+        single `mode` string and round-trips through the dispatcher."""
+        mode = ('key' if keymode else ('masked' if masked else 'line'))
+        return self.dispatcher.request_prompt(message, mode)
+
     # ─── Internal: dispatcher thread wrapper ─────────────────────────────
     def _run_dispatcher(self) -> None:
         try:
@@ -195,7 +245,6 @@ class Tui:
             self.dispatcher.post(PrintEvent(f'    {name:<14}{tip}'))
 
     def _cmd_clear(self, name: str = 'console') -> None:
-        from .events import ClearTab
         self.dispatcher.post(ClearTab(name))
 
     def _cmd_history(self) -> None:
