@@ -4959,349 +4959,6 @@ def test_cache_purge_empty_dir_is_noop():
         assert sess.flags.cache_ready is True
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TUI primitives accept Tui explicitly (no singleton required)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def test_console_with_explicit_tui_does_not_touch_singleton():
-    """Constructing Console(tui=stub) routes calls to the stub, not to
-    whatever is in tui_instance — so tests can isolate the TUI without
-    monkey-patching module state."""
-    import tui as _tui
-
-    captured = []
-    class _StubTui:
-        def print(self, m, attr=None): captured.append(('print', m))
-        def ERROR(self, m): captured.append(('error', m))
-        def INFO(self, m):  captured.append(('info', m))
-        def WARNING(self, m): captured.append(('warning', m))
-        def console_mark(self): return 42
-        def console_trim_to(self, n): captured.append(('trim_to', n))
-
-    saved = _tui.tui_instance
-    _tui.tui_instance = None        # force singleton path to fail
-    try:
-        c = _tui.Console(tui=_StubTui())
-        c.print('hello', None)
-        c.error('uh-oh')
-        c.info('fyi')
-        c.warning('careful')
-        assert c.mark() == 42
-        c.trim_to(7)
-    finally:
-        _tui.tui_instance = saved
-
-    kinds = [k for k, _ in captured]
-    assert kinds == ['print', 'error', 'info', 'warning', 'trim_to'], kinds
-
-
-def test_console_singleton_fallback_when_tui_omitted():
-    """Console() with no arg keeps the legacy behaviour: resolve through
-    the module-level tui_instance at call time."""
-    import tui as _tui
-
-    captured = []
-    class _Sentinel:
-        def print(self, m, attr=None): captured.append(m)
-        def ERROR(self, m): pass
-        def INFO(self, m): pass
-        def WARNING(self, m): pass
-
-    saved = _tui.tui_instance
-    _tui.tui_instance = _Sentinel()
-    try:
-        c = _tui.Console()           # no explicit tui → singleton fallback
-        c.print('routed-via-singleton')
-    finally:
-        _tui.tui_instance = saved
-
-    assert captured == ['routed-via-singleton'], captured
-
-
-def test_console_raises_when_no_tui_anywhere():
-    """No explicit tui AND no singleton → RuntimeError on use."""
-    import tui as _tui
-    saved = _tui.tui_instance
-    _tui.tui_instance = None
-    try:
-        c = _tui.Console()
-        raised = False
-        try:
-            c.print('should not be sent')
-        except RuntimeError as e:
-            raised = True
-            assert 'No Tui instance' in str(e), str(e)
-        assert raised
-    finally:
-        _tui.tui_instance = saved
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# single logging adapter routes by level into the Tui
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _logger_test_with_stub_tui():
-    """Set up _StubTui as tui_instance and configure logger handlers.
-    Returns (captured_list, restore_callable)."""
-    import tui as _tui
-
-    captured = []
-    class _StubTui:
-        # Mirror Tui's severity constants so _LogTabHandler.emit can pick
-        # the right ones when routing via _log_to_tab.  ARCH-14 P6 made
-        # the handler dispatch through _log_to_tab instead of the bare
-        # ERROR/WARNING/INFO methods; the stub still exposes both surfaces
-        # so this fixture covers the new routing AND the historical
-        # contract.
-        SEVERITY_INFO    = 0
-        SEVERITY_WARNING = 1
-        SEVERITY_ERROR   = 2
-        def print(self, m, attr=None): captured.append(('print', m, attr))
-        def ERROR(self, m): captured.append(('error', m))
-        def WARNING(self, m): captured.append(('warning', m))
-        def INFO(self, m): captured.append(('info', m))
-        def _log_to_tab(self, tab, sev, m):
-            # Translate (tab_name, severity) back into the old single-tab
-            # capture shape so existing assertions continue to work.
-            if sev == self.SEVERITY_ERROR:
-                self.ERROR(m)
-            elif sev == self.SEVERITY_WARNING:
-                self.WARNING(m)
-            else:
-                self.INFO(m)
-
-    saved = _tui.tui_instance
-    _tui.tui_instance = _StubTui()
-    _tui.setup_logging()  # binds handlers via tui_instance fallback
-
-    def restore():
-        _tui.tui_instance = saved
-        _tui.setup_logging(saved)  # rebind to original (or None)
-    return captured, restore
-
-
-def test_logger_info_routes_to_log_tab():
-    """logging.getLogger('athena').info(...) → Tui.INFO (log tab)."""
-    import logging as _logging
-    import tui as _tui
-
-    captured, restore = _logger_test_with_stub_tui()
-    try:
-        _logging.getLogger(_tui.LOGGER_NAME).info('hi from logger')
-    finally:
-        restore()
-
-    assert ('info', 'hi from logger') in captured, captured
-    # Must NOT also reach the console tab
-    assert not any(k == 'print' for k, *_ in captured), captured
-
-
-def test_logger_warning_routes_to_log_tab():
-    import logging as _logging
-    import tui as _tui
-
-    captured, restore = _logger_test_with_stub_tui()
-    try:
-        _logging.getLogger(_tui.LOGGER_NAME).warning('mirror lag')
-    finally:
-        restore()
-
-    assert ('warning', 'mirror lag') in captured, captured
-
-
-def test_logger_error_routes_to_log_tab():
-    import logging as _logging
-    import tui as _tui
-
-    captured, restore = _logger_test_with_stub_tui()
-    try:
-        _logging.getLogger(_tui.LOGGER_NAME).error('GPG verify failed')
-    finally:
-        restore()
-
-    assert ('error', 'GPG verify failed') in captured, captured
-
-
-def test_logger_display_level_routes_to_console_tab():
-    """logger.log(DISPLAY, ...) → Tui.print (console tab); NOT the log tab."""
-    import logging as _logging
-    import tui as _tui
-
-    captured, restore = _logger_test_with_stub_tui()
-    try:
-        _logging.getLogger(_tui.LOGGER_NAME).log(_tui.DISPLAY, 'building cache')
-    finally:
-        restore()
-
-    # Reached console tab
-    assert any(entry[0] == 'print' and entry[1] == 'building cache'
-               for entry in captured), captured
-    # Did NOT also leak to the log tab
-    assert not any(k in ('info', 'warning', 'error') for k, *_ in captured), captured
-
-
-def test_logger_display_propagates_attribute_extra():
-    """The optional 'attribute' extra reaches Tui.print as its colour arg."""
-    import logging as _logging
-    import tui as _tui
-
-    captured, restore = _logger_test_with_stub_tui()
-    try:
-        log = _logging.getLogger(_tui.LOGGER_NAME)
-        log.log(_tui.DISPLAY, 'green text', extra={'attribute': _tui.COLOR_HIGHLIGHT})
-    finally:
-        restore()
-
-    found = [e for e in captured if e[0] == 'print']
-    assert len(found) == 1, captured
-    assert found[0] == ('print', 'green text', _tui.COLOR_HIGHLIGHT), found
-
-
-def test_logger_debug_is_dropped_below_handler_threshold():
-    """logger.debug(...) is suppressed: _LogTabHandler is INFO-gated."""
-    import logging as _logging
-    import tui as _tui
-
-    captured, restore = _logger_test_with_stub_tui()
-    try:
-        _logging.getLogger(_tui.LOGGER_NAME).debug('chatter')
-    finally:
-        restore()
-
-    assert captured == [], captured
-
-
-def test_setup_logging_is_idempotent():
-    """Calling setup_logging() twice does not duplicate handlers."""
-    import logging as _logging
-    import tui as _tui
-
-    captured, restore = _logger_test_with_stub_tui()
-    try:
-        _tui.setup_logging()  # second call
-        _logging.getLogger(_tui.LOGGER_NAME).info('once')
-    finally:
-        restore()
-
-    info_hits = [e for e in captured if e[0] == 'info' and e[1] == 'once']
-    assert len(info_hits) == 1, captured
-
-
-def test_setup_file_logging_writes_records_to_timestamped_file():
-    """setup_file_logging(dir) attaches a FileHandler that captures DEBUG
-    and above into a build-<timestamp>.log; the path returned must exist
-    and contain records emitted after the call."""
-    import logging as _logging
-    import os, tempfile, glob
-    import tui as _tui
-
-    saved_handlers = list(_logging.getLogger(_tui.LOGGER_NAME).handlers)
-    saved_tui = _tui.tui_instance
-    _tui.tui_instance = None  # tab handlers no-op
-    _tui.setup_logging()      # clean slate
-
-    with tempfile.TemporaryDirectory() as d:
-        try:
-            path = _tui.setup_file_logging(d, name='build')
-            assert path.endswith('.log'), path
-            assert os.path.dirname(path) == os.path.abspath(d)
-
-            log = _logging.getLogger(_tui.LOGGER_NAME)
-            log.debug('chroot transcript line')
-            log.info('cache loaded')
-            log.warning('mirror lag')
-            log.error('GPG verify failed')
-
-            # Flush handler buffers before reading.
-            for h in log.handlers:
-                h.flush()
-
-            with open(path, 'r') as fh:
-                content = fh.read()
-
-            assert 'chroot transcript line' in content, content
-            assert 'cache loaded' in content, content
-            assert 'mirror lag' in content, content
-            assert 'GPG verify failed' in content, content
-            assert '[DEBUG' in content and '[INFO' in content, content
-        finally:
-            log = _logging.getLogger(_tui.LOGGER_NAME)
-            for h in list(log.handlers):
-                log.removeHandler(h)
-                try: h.close()
-                except Exception: pass
-            for h in saved_handlers:
-                log.addHandler(h)
-            _tui.tui_instance = saved_tui
-
-
-def test_setup_logging_preserves_filehandler_added_before_it():
-    """Regression: build.py main() opens the FileHandler via
-    setup_file_logging() *before* Tui(banner) constructs the Tui (which
-    calls setup_logging() again).  setup_logging must not nuke the
-    FileHandler — otherwise the per-run log file ends up empty."""
-    import logging as _logging
-    import os, tempfile
-    import tui as _tui
-
-    saved_handlers = list(_logging.getLogger(_tui.LOGGER_NAME).handlers)
-    saved_tui = _tui.tui_instance
-    _tui.tui_instance = None
-
-    with tempfile.TemporaryDirectory() as d:
-        try:
-            _tui.setup_logging()
-            path = _tui.setup_file_logging(d, name='build')
-            # Now simulate Tui.__init__ re-calling setup_logging — the
-            # FileHandler must survive.
-            _tui.setup_logging()
-
-            log = _logging.getLogger(_tui.LOGGER_NAME)
-            file_handlers = [h for h in log.handlers
-                             if isinstance(h, _logging.FileHandler)]
-            assert len(file_handlers) == 1, log.handlers
-
-            log.info('still alive after re-setup')
-            for h in log.handlers:
-                h.flush()
-            assert os.path.exists(path)
-            with open(path) as fh:
-                content = fh.read()
-            assert 'still alive after re-setup' in content, content
-        finally:
-            log = _logging.getLogger(_tui.LOGGER_NAME)
-            for h in list(log.handlers):
-                log.removeHandler(h)
-                try: h.close()
-                except Exception: pass
-            for h in saved_handlers:
-                log.addHandler(h)
-            _tui.tui_instance = saved_tui
-
-
-def test_logger_warning_does_not_leak_to_console_tab():
-    """Regression: _ConsoleTabHandler must filter strictly on
-    levelno == DISPLAY.  A bare `level=DISPLAY` floor would let
-    WARNING (30) and ERROR (40) pass through and double-print into
-    the console tab on top of the log tab routing."""
-    import logging as _logging
-    import tui as _tui
-
-    captured, restore = _logger_test_with_stub_tui()
-    try:
-        log = _logging.getLogger(_tui.LOGGER_NAME)
-        log.warning('mirror lag')
-        log.error('GPG verify failed')
-    finally:
-        restore()
-
-    # Must NOT reach the console tab via Tui.print
-    leaked = [e for e in captured if e[0] == 'print']
-    assert leaked == [], f'logger.warning/error leaked to console tab: {leaked}'
-    # But should reach the log tab
-    assert any(e[0] == 'warning' for e in captured), captured
-    assert any(e[0] == 'error'   for e in captured), captured
-
 
 def test_setup_file_logging_filename_has_timestamp():
     """Two calls in quick succession produce distinct files (timestamped)."""
@@ -11870,853 +11527,7 @@ def test_cli_logging_handlers_bound_to_cli_after_init():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ARCH-14 P1 — TUI layout reshape (two-row footer + reverse-video status bar)
-#
-# Pure code-inspection tests for the visual contract.  No fake-curses
-# harness yet (lands when behavioural tests in later phases need it).
-# These pin the structural invariants of the new layout so a future
-# refactor can't silently regress: FOOTER_HEIGHT=2, _refreshfooter
-# uses A_REVERSE attr for the status row, tab content region == N-2
-# rows.
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def test_tui_footer_height_is_two_rows():
-    """ARCH-14 P1: footer occupies exactly the bottom 2 rows of the
-    screen.  Row N-2 = prompt; row N-1 = reverse-video status bar.
-    The pre-P1 layout used 5 rows; pinning the new value prevents an
-    accidental revert."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    assert _tui.Tui.FOOTER_HEIGHT == 2, (
-        f"FOOTER_HEIGHT must be 2 (ARCH-14 P1); got "
-        f"{_tui.Tui.FOOTER_HEIGHT}.  The two-row layout pins prompt "
-        f"at N-2 and status at N-1; a different value breaks the row "
-        f"math every later phase depends on."
-    )
-    # BOX_WIDTH dropped to 0 — no border around the footer in the
-    # new layout.  Internal offsets that read BOX_WIDTH expect 0.
-    assert _tui.Tui.BOX_WIDTH == 0, (
-        f"BOX_WIDTH must be 0 (no footer border in the new layout); "
-        f"got {_tui.Tui.BOX_WIDTH}"
-    )
-
-
-def test_tui_status_bar_uses_fixed_bright_color_pair():
-    """ARCH-14 P1 (revised 2026-05-24): status bar (row 1 of footer)
-    uses a fixed bright color pair (COLOR_FOOTER) rather than
-    A_REVERSE.  Reverse-video blended badly with transparent / themed
-    terminals; a fixed bg keeps the bar legible regardless of the
-    operator's palette.
-
-    Code-inspection test (pinning the implementation choice) — the
-    new _refreshfooter is too tangled to instantiate without a real
-    curses session at this phase, so we verify the contract via
-    source inspection."""
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _m = re.search(
-        r'def _refreshfooter\(self.*?(?=\n    def )',
-        _src, re.DOTALL,
-    )
-    assert _m, '_refreshfooter not found'
-    _body = _m.group(0)
-    # The status row must use COLOR_FOOTER (fixed bright pair).
-    assert 'COLOR_FOOTER' in _body, (
-        "status bar must use the COLOR_FOOTER pair for its fixed "
-        "bright background"
-    )
-    assert "' * max_x" in _body, (
-        "status bar must fill the full row with spaces so the bg is "
-        "uniform across the line"
-    )
-    # The row-1 fill / banner / tags / hint must NOT use bare A_REVERSE
-    # for the bg fill (A_REVERSE on the cmdline cursor in row 0 is
-    # still fine — that's per-cell highlight, not background).  Scope
-    # to the row-1 SECTION comment marker (── Row 1:) rather than the
-    # earlier docstring mention of "Row 1".
-    _row1_idx = _body.find('── Row 1')
-    assert _row1_idx > 0, '── Row 1 section marker not found in _refreshfooter'
-    _row1_body = _body[_row1_idx:]
-    assert 'A_REVERSE' not in _row1_body, (
-        'status bar (row 1) must NOT use A_REVERSE — it blends badly '
-        'with themed/transparent terminals; use COLOR_FOOTER instead'
-    )
-
-
-def test_tui_max_buffer_lines_capped():
-    """ARCH-14 P2: each tab's buffer caps at MAX_BUFFER_LINES.  Append
-    past the cap drops the oldest entries from the front."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    # Exercise _append_lines directly with a minimal fake tab — avoids
-    # spinning up a real curses session.  The helper is the single
-    # mutation point for both _log and print, so this covers both.
-    _fake_tab = {
-        'win': None, 'panel': None,
-        'buffer': [], 'scroll_offset': 0, 'selected': False,
-    }
-    # ARCH-14 P7: _append_lines reads _resolution['x'] + calls
-    # self._entry_display_rows internally; bypass Tui.__init__ via
-    # object.__new__ to inherit the full method set without curses.
-    _stub = object.__new__(_tui.Tui)
-    _stub._resolution = {'x': 80}
-    _stub.MAX_BUFFER_LINES = 100   # tighter cap for this test
-    _stub._append_lines(_fake_tab, [(f'line {i}', 0) for i in range(150)])
-    assert len(_fake_tab['buffer']) == 100, (
-        f"buffer should be capped at 100, got {len(_fake_tab['buffer'])}"
-    )
-    # Newest 100 should be present; oldest 50 dropped from front.
-    assert _fake_tab['buffer'][0][0] == 'line 50', _fake_tab['buffer'][0]
-    assert _fake_tab['buffer'][-1][0] == 'line 149', _fake_tab['buffer'][-1]
-
-
-def test_tui_scroll_offset_increments_when_appending_while_scrolled():
-    """ARCH-14 P2: when user is scrolled away (scroll_offset > 0),
-    appending more lines must INCREASE scroll_offset by the number of
-    new lines — keeps the visible window anchored at the same buffer
-    indices the user was reading.  Auto-stick (scroll_offset == 0)
-    case: offset stays 0 so new content shows at bottom."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-
-    # Stuck-at-bottom case: scroll_offset stays 0.
-    _fake = {'win': None, 'panel': None, 'buffer': [],
-             'scroll_offset': 0, 'selected': False}
-    # ARCH-14 P7: _append_lines uses self._entry_display_rows internally;
-    # bypass Tui.__init__ via object.__new__ so we inherit the full
-    # method set without spinning up curses.
-    _stub = object.__new__(_tui.Tui)
-    _stub._resolution = {'x': 80}
-    _bound = _stub._append_lines
-    _bound(_fake, [(f'line {i}', 0) for i in range(5)])
-    assert _fake['scroll_offset'] == 0, (
-        "scroll_offset must stay 0 (auto-stick) when at-bottom on append"
-    )
-
-    # Scrolled-away case: offset increments by display-row count of new
-    # entries.  All short lines @ width 80 → 1 row each → 3 total.
-    _fake2 = {'win': None, 'panel': None,
-              'buffer': [(f'old {i}', 0) for i in range(20)],
-              'scroll_offset': 10, 'selected': False}
-    _bound(_fake2, [(f'new {i}', 0) for i in range(3)])
-    assert _fake2['scroll_offset'] == 13, (
-        f"scroll_offset should be 13 (10+3 display rows) after appending "
-        f"3 short lines while scrolled 10 above bottom; got "
-        f"{_fake2['scroll_offset']}"
-    )
-
-
-def _bare_commands_instance():
-    """Construct a _Commands without invoking its constructor — bypasses
-    the isinstance(tui, Tui) gate so tests don't need a curses session.
-    Populates the fields the P3 methods touch."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    _c = object.__new__(_tui.Tui._Commands)
-    _c._tui = None
-    _c.current = ''
-    _c._history = []
-    _c._history_idx = None
-    _c._history_draft = ''
-    _c._reg = {}
-    _c._masked = False
-    _c._cursor = 0
-    return _c
-
-
-def test_tui_left_arrow_moves_edit_cursor_not_scroll():
-    """ARCH-14 P3: KEY_LEFT/RIGHT now move the edit cursor within
-    `current` (no longer horizontal-scroll the visible window).  Pin
-    the semantics through _Commands' new helpers and confirm
-    _handle_key wires the keys to them (not to scroll_offset)."""
-    _c = _bare_commands_instance()
-    _c.current = 'hello'
-    _c._cursor = 5   # at end-of-line
-
-    # Walk cursor leftward, end → start.
-    for expected in (4, 3, 2, 1, 0):
-        assert _c.move_cursor_left() is True
-        assert _c._cursor == expected
-    # At start: further left is a no-op (returns False).
-    assert _c.move_cursor_left() is False
-    assert _c._cursor == 0
-
-    # Right brings it back, bounded at len(current).
-    for expected in (1, 2, 3, 4, 5):
-        assert _c.move_cursor_right() is True
-        assert _c._cursor == expected
-    assert _c.move_cursor_right() is False
-    assert _c._cursor == 5
-
-    # _handle_key must route KEY_LEFT/RIGHT to the cursor helpers, not
-    # to scroll_offset (that's KEY_PPAGE/NPAGE's job post-P3).
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _m = re.search(r'def _handle_key\(self.*?(?=\n    def )', _src, re.DOTALL)
-    assert _m, '_handle_key not found'
-    _body = _m.group(0)
-    assert "c == 'KEY_LEFT'" in _body and 'move_cursor_left' in _body, (
-        'KEY_LEFT must call move_cursor_left() (P3 cursor semantics)'
-    )
-    assert "c == 'KEY_RIGHT'" in _body and 'move_cursor_right' in _body, (
-        'KEY_RIGHT must call move_cursor_right() (P3 cursor semantics)'
-    )
-
-
-def test_tui_backspace_deletes_at_cursor():
-    """ARCH-14 P3: Backspace deletes the char *before* the edit cursor
-    (was: strip the last char of the line).  Confirms insert + delete
-    leave `current` and `_cursor` consistent."""
-    _c = _bare_commands_instance()
-    _c.insert_at_cursor('h')
-    _c.insert_at_cursor('e')
-    _c.insert_at_cursor('l')
-    _c.insert_at_cursor('l')
-    _c.insert_at_cursor('o')
-    assert _c.current == 'hello' and _c._cursor == 5
-
-    # Walk back two, insert 'XX' — should produce 'helXXlo' with cursor
-    # right after the inserted block.
-    _c.move_cursor_left(); _c.move_cursor_left()
-    _c.insert_at_cursor('XX')
-    assert _c.current == 'helXXlo', _c.current
-    assert _c._cursor == 5, _c._cursor   # 3 (after 'hel') + 2 ('XX')
-
-    # Backspace deletes 'X' (the char just before cursor) → 'helXlo'.
-    assert _c.delete_before_cursor() is True
-    assert _c.current == 'helXlo', _c.current
-    assert _c._cursor == 4
-
-    # Backspace at start is a no-op.
-    _c._cursor = 0
-    assert _c.delete_before_cursor() is False
-    assert _c.current == 'helXlo'
-
-
-def test_tui_up_arrow_walks_history():
-    """ARCH-14 P3: KEY_UP/DOWN now walk command history (was: scroll
-    tab).  First Up stashes the in-progress draft; Down past newest
-    restores it."""
-    _c = _bare_commands_instance()
-    _c.add_history('first')
-    _c.add_history('second')
-    _c.add_history('third')
-
-    # Type a draft, then Up — draft should be stashed.
-    _c.set_current('draft-in-progress')
-    assert _c.history_prev() is True
-    assert _c.current == 'third'
-    assert _c._history_draft == 'draft-in-progress'
-
-    # Walk to oldest, then one more Up is a no-op (returns False).
-    assert _c.history_prev() is True and _c.current == 'second'
-    assert _c.history_prev() is True and _c.current == 'first'
-    assert _c.history_prev() is False and _c.current == 'first'
-
-    # Walk back down to newest, then one more Down restores draft.
-    assert _c.history_next() is True and _c.current == 'second'
-    assert _c.history_next() is True and _c.current == 'third'
-    assert _c.history_next() is True
-    assert _c.current == 'draft-in-progress', (
-        'past-newest Down must restore the stashed draft'
-    )
-    assert _c._history_idx is None
-
-    # _handle_key must wire KEY_UP/DOWN to history walk.
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
-                      _src, re.DOTALL).group(0)
-    assert "c == 'KEY_UP'" in _body and 'history_prev' in _body
-    assert "c == 'KEY_DOWN'" in _body and 'history_next' in _body
-
-
-def test_tui_pageup_scrolls_tab_by_content_rows():
-    """ARCH-14 P3: KEY_PPAGE/NPAGE replace Up/Down as the scroll
-    keys, jumping by a screenful (the tab's content-row height).  Pin
-    via source inspection: _handle_key handler for KEY_PPAGE/NPAGE
-    must read `_tab_coords` height and mutate `scroll_offset`."""
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
-                      _src, re.DOTALL).group(0)
-    assert "c == 'KEY_PPAGE'" in _body, (
-        'KEY_PPAGE handler must exist (P3 scroll-back key)'
-    )
-    assert "c == 'KEY_NPAGE'" in _body, (
-        'KEY_NPAGE handler must exist (P3 scroll-forward key)'
-    )
-    # Must jump by tab content height, not 1 line at a time.
-    assert '_tab_coords' in _body and "'h'" in _body, (
-        'PageUp/Down must read the tab content height from _tab_coords'
-    )
-    # Must mutate scroll_offset (not e.g. cursor).
-    assert "scroll_offset" in _body
-
-
-def test_tui_default_tabs_include_per_stage_tabs():
-    """ARCH-14 P4: the six default tabs (console, log, cache, build,
-    chroot, iso) are created on TUI init.  Pin the constant to lock in
-    insertion order — that order drives the F1..F6 mapping."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    assert _tui.Tui._DEFAULT_TABS == (
-        'console', 'log', 'cache', 'build', 'chroot', 'iso',
-    ), (
-        f"_DEFAULT_TABS must include the six per-stage tabs in this "
-        f"order (drives F1..F6 binding); got {_tui.Tui._DEFAULT_TABS!r}"
-    )
-    # Both call sites in tui.py use the constant (not a hard-coded
-    # tuple) so the assertion above is load-bearing.
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    assert "('console', 'log')" not in _src, (
-        "hard-coded ('console', 'log') tuple resurrected — must use "
-        "self._DEFAULT_TABS so adding/removing default tabs is one edit"
-    )
-
-
-def test_tui_f1_directly_activates_first_tab():
-    """ARCH-14 P4: KEY_F(1) → activate the first tab in insertion
-    order.  Test via _activate_tab_by_index directly with a fake
-    `_tabs` so we don't need a real curses session."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    from collections import OrderedDict
-
-    class _FakeTui:
-        def __init__(self):
-            self._tabs = OrderedDict([
-                ('console', {'selected': True}),
-                ('log',     {'selected': False}),
-                ('cache',   {'selected': False}),
-            ])
-            self.activated = []
-        def _activate(self, name):
-            self.activated.append(name)
-            for v in self._tabs.values():
-                v['selected'] = False
-            self._tabs[name]['selected'] = True
-        def ERROR(self, msg): pass
-
-    _ft = _FakeTui()
-    _bound = _tui.Tui._activate_tab_by_index.__get__(_ft, _tui.Tui)
-
-    # F1 → first tab (index 0).
-    _bound(0)
-    assert _ft.activated == ['console'], _ft.activated
-    assert _ft._tabs['console']['selected'] is True
-
-    # F3 → third tab.
-    _bound(2)
-    assert _ft.activated == ['console', 'cache']
-    assert _ft._tabs['cache']['selected'] is True
-    assert _ft._tabs['console']['selected'] is False
-
-    # F12 → out of range, silent no-op (no crash, no _activate call).
-    _bound(11)
-    assert _ft.activated == ['console', 'cache'], (
-        'out-of-range F-key index must be silently ignored'
-    )
-
-    # _handle_key must wire KEY_F(...) strings to this helper.
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
-                      _src, re.DOTALL).group(0)
-    assert "startswith('KEY_F(')" in _body, (
-        '_handle_key must detect KEY_F(n) strings emitted by curses'
-    )
-    assert '_activate_tab_by_index' in _body, (
-        '_handle_key must dispatch Fn keys to _activate_tab_by_index'
-    )
-
-
-def test_tui_alt_f1_activates_first_tab():
-    """ARCH-14 P4: terminals that send Alt+Fn as ESC + KEY_F(n) emit
-    two keystrokes; the bare ESC must be swallowed (not inserted into
-    the cmdline) so the following KEY_F(n) fires the tab switch
-    cleanly on the next loop iteration."""
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
-                      _src, re.DOTALL).group(0)
-    # ESC handler returns BEFORE the printable-char insert path; the
-    # plain `if c == '\\x1b': return` pattern is what allows ESC+Fn to
-    # collapse to a clean tab switch on the next keystroke.
-    assert "c == '\\x1b'" in _body, (
-        'bare ESC must be explicitly swallowed (else it falls through '
-        'to insert_at_cursor and becomes an edit) — required for '
-        'Alt+Fn handling on terminals that split the sequence'
-    )
-
-
-def test_tui_tab_key_no_longer_cycles_tabs():
-    """ARCH-14 P4: the Tab key (`\\t`) no longer cycles through tabs
-    (that role moves to F1..Fn).  Tab key is reserved for P5
-    completion — until then it's a no-op."""
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
-                      _src, re.DOTALL).group(0)
-    # Must NOT call _enable_next_tab from the `\t` branch.
-    # The simplest pin: the body's `c == '\\t'` handler line and the
-    # 5 lines after it (the handler body) must not mention
-    # _enable_next_tab.
-    _tab_branch_m = re.search(r"if c == '\\t':(.*?)(?=\n        if |\n        # |\Z)",
-                              _body, re.DOTALL)
-    assert _tab_branch_m, r"no `if c == '\t':` branch found in _handle_key"
-    _tab_branch = _tab_branch_m.group(1)
-    assert '_enable_next_tab' not in _tab_branch, (
-        'Tab key must no longer call _enable_next_tab (P4 retires '
-        'tab-cycling on Tab; use F-keys instead, completion comes in P5)'
-    )
-
-
-def test_tui_add_tab_creates_window_and_appears_in_status_bar():
-    """ARCH-14 P4: Tui.add_tab(name) adds a new tab at runtime.
-    Idempotent (re-adding an existing name is a no-op, not an error).
-    The new tab is visible to the status-bar renderer because
-    _refreshfooter iterates self._tabs.items()."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    from collections import OrderedDict
-
-    class _FakeTui:
-        _DEFAULT_TABS = _tui.Tui._DEFAULT_TABS
-        def __init__(self):
-            self._tabs = OrderedDict([
-                ('console', {'selected': True}),
-            ])
-            self._is_setup = True
-            self._too_small = False
-            self._dirty = False
-            self._tab_coords = {'h': 20, 'w': 80, 'y': 0, 'x': 0}
-            self.created = []
-            self.errors = []
-        def _create_tab(self, coords):
-            self.created.append(coords)
-            return {'win': None, 'panel': None, 'buffer': [],
-                    'scroll_offset': 0, 'selected': False}
-        def ERROR(self, msg):
-            self.errors.append(msg)
-
-    _ft = _FakeTui()
-    _bound = _tui.Tui.add_tab.__get__(_ft, _tui.Tui)
-
-    _bound('extra')
-    assert 'extra' in _ft._tabs
-    assert _ft.created == [_ft._tab_coords]
-    assert _ft._dirty is True
-
-    # Idempotent — re-adding the same name is silent.
-    _ft._dirty = False
-    _ft.created.clear()
-    _bound('extra')
-    assert _ft.created == [], 'duplicate add_tab must not re-create the window'
-    assert _ft.errors == [], 'duplicate add_tab must NOT error (just no-op)'
-
-    # Empty name rejected with an error message.
-    _bound('')
-    assert _ft.errors, 'add_tab("") must surface an error'
-
-    # The status-bar renderer iterates over self._tabs.items, so the
-    # new tab automatically appears in the tag strip.
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _body = re.search(r'def _refreshfooter\(self.*?(?=\n    def )',
-                      _src, re.DOTALL).group(0)
-    assert 'self._tabs.items()' in _body, (
-        'status-bar renderer must iterate self._tabs.items() so '
-        'add_tab tabs show up without further wiring'
-    )
-
-
-def test_tui_tab_completes_unique_prefix():
-    """ARCH-14 P5: Tab on a unique prefix replaces `current` with the
-    full command name followed by a trailing space (hints "arg next")
-    and parks the cursor at the end."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-
-    _cmd = _bare_commands_instance()
-    _cmd._reg = {
-        'history': (None, ''),
-        'help':    (None, ''),
-        'quit':    (None, ''),
-    }
-    _cmd.current = 'hi'
-    _cmd._cursor = 2
-
-    class _FakeTui:
-        def __init__(self):
-            self._cmd = _cmd
-            self.printed = []
-            self._dirty = False
-        def print(self, msg, attr=0):
-            self.printed.append((msg, attr))
-        COLOR_INFO = 7
-
-    _ft = _FakeTui()
-    _bound = _tui.Tui._complete_command.__get__(_ft, _tui.Tui)
-    _bound()
-
-    assert _cmd.current == 'history ', (
-        f"unique prefix `hi` must complete to `history ` (with trailing "
-        f"space); got {_cmd.current!r}"
-    )
-    assert _cmd._cursor == len('history ')
-    assert _ft.printed == [], (
-        'unique-prefix completion must NOT print to console'
-    )
-    assert _ft._dirty is True
-
-
-def test_tui_tab_lists_ambiguous_prefixes_on_console():
-    """ARCH-14 P5: Tab on an ambiguous prefix prints all matches to
-    the console tab and leaves `current` unchanged so the user can
-    keep typing to narrow."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-
-    _cmd = _bare_commands_instance()
-    _cmd._reg = {
-        'help':    (None, ''),
-        'history': (None, ''),
-        'quit':    (None, ''),
-    }
-    _cmd.current = 'h'
-    _cmd._cursor = 1
-
-    class _FakeTui:
-        def __init__(self):
-            self._cmd = _cmd
-            self.printed = []
-            self._dirty = False
-        def print(self, msg, attr=0):
-            self.printed.append((msg, attr))
-        COLOR_INFO = 7
-
-    # _complete_command calls curses.color_pair() for the >1-match
-    # printout; that needs a real curses session.  Patch it to a
-    # plain int so the test exercises pure dispatch logic without
-    # needing initscr().
-    import curses as _curses
-    from unittest.mock import patch
-    _ft = _FakeTui()
-    _bound = _tui.Tui._complete_command.__get__(_ft, _tui.Tui)
-    with patch.object(_curses, 'color_pair', return_value=0):
-        _bound()
-
-    assert _cmd.current == 'h', (
-        'ambiguous-prefix completion must NOT mutate current'
-    )
-    assert _cmd._cursor == 1
-    assert len(_ft.printed) == 1
-    msg, _attr = _ft.printed[0]
-    assert 'help' in msg and 'history' in msg, (
-        f'matches list must include all candidates; got {msg!r}'
-    )
-    assert 'quit' not in msg, (
-        'non-matching commands must be omitted from the candidates list'
-    )
-
-
-def test_tui_tab_with_empty_line_is_noop():
-    """ARCH-14 P5: Tab on an empty `current` is a silent no-op — every
-    registered name matches the empty prefix, so listing them would be
-    noise (use `help` instead).  Wait — actually with prefix='', every
-    name matches, and the >1-match branch fires, dumping the full list
-    to console.  Test the actual behaviour: with empty line + multiple
-    commands, the >1 branch fires; with empty line + 1 command, that
-    sole command completes.  With ' ' already typed (past cmd-name),
-    Tab is unconditionally a no-op."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-
-    # Case 1: current contains a space → Tab is a no-op regardless.
-    _cmd = _bare_commands_instance()
-    _cmd._reg = {'help': (None, ''), 'history': (None, '')}
-    _cmd.current = 'help '
-    _cmd._cursor = 5
-
-    class _FakeTui:
-        def __init__(self):
-            self._cmd = _cmd
-            self.printed = []
-            self._dirty = False
-        def print(self, msg, attr=0):
-            self.printed.append((msg, attr))
-        COLOR_INFO = 7
-
-    _ft = _FakeTui()
-    _bound = _tui.Tui._complete_command.__get__(_ft, _tui.Tui)
-    _bound()
-    assert _cmd.current == 'help ', (
-        'Tab past the command-name position must not mutate current'
-    )
-    assert _ft.printed == []
-    assert _ft._dirty is False
-
-    # Case 2: registry empty → silent no-op.
-    _cmd2 = _bare_commands_instance()
-    _cmd2._reg = {}
-    _cmd2.current = 'anything'
-    _cmd2._cursor = 8
-    _ft2 = _FakeTui()
-    _ft2._cmd = _cmd2
-    _bound2 = _tui.Tui._complete_command.__get__(_ft2, _tui.Tui)
-    _bound2()
-    assert _cmd2.current == 'anything'
-    assert _ft2.printed == []
-
-
-def test_log_tab_handler_routes_by_logger_name():
-    """ARCH-14 P6: `_LogTabHandler._tab_for_logger` maps
-    'athena.<stage>' → '<stage>' and bare 'athena' → 'log'.  Pin the
-    mapping so per-stage routing keeps working."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    f = _tui._LogTabHandler._tab_for_logger
-    assert f('athena')           == 'log',    'bare athena → log'
-    assert f('athena.cache')     == 'cache',  'stage suffix becomes tab name'
-    assert f('athena.build')     == 'build'
-    assert f('athena.chroot')    == 'chroot'
-    assert f('athena.iso')       == 'iso'
-    # Multi-level — pick only the first segment after `athena.`.
-    assert f('athena.cache.sub') == 'cache', (
-        'nested loggers must collapse to the top-level stage tab'
-    )
-    # Foreign logger names → log fallback.
-    assert f('urllib3')          == 'log',    'unknown logger → log fallback'
-    assert f('asyncio')          == 'log'
-
-
-def test_log_tab_handler_falls_back_to_log_for_unknown_stage_tab():
-    """ARCH-14 P6: Tui._log_to_tab routes unknown tab names to 'log'
-    so a stray sub-logger never silently loses records."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    import datetime
-
-    _calls = []
-
-    class _FakeTui:
-        SEVERITY_INFO    = 0
-        SEVERITY_WARNING = 1
-        SEVERITY_ERROR   = 2
-        MAX_BUFFER_LINES = 10000
-        _log_map = {
-            0: ('[INFO ]', 0),
-            1: ('[WARN ]', 0),
-            2: ('[ERROR]', 0),
-        }
-        def __init__(self):
-            import threading
-            self._log_lock = threading.Lock()
-            self._tabs = {
-                'log':   {'buffer': [], 'scroll_offset': 0},
-                'cache': {'buffer': [], 'scroll_offset': 0},
-            }
-            self._dirty = False
-        def _append_lines(self, tab, lines):
-            tab['buffer'].extend(lines)
-            _calls.append((id(tab), lines))
-
-    _ft = _FakeTui()
-    _bound = _tui.Tui._log_to_tab.__get__(_ft, _tui.Tui)
-
-    # Known tab → routed there.
-    _bound('cache', 0, 'hello cache')
-    assert len(_ft._tabs['cache']['buffer']) == 1
-    assert _ft._tabs['log']['buffer'] == []
-
-    # Unknown tab → falls back to 'log'.
-    _bound('iso', 0, 'iso tab not present in fake')   # falls back
-    assert len(_ft._tabs['log']['buffer']) == 1, (
-        "unknown tab must fall back to 'log' — fake has no 'iso' tab "
-        "so the record should land in 'log'"
-    )
-
-    # Unknown severity is silently dropped (matches prior _log behaviour).
-    _ft._tabs['log']['buffer'].clear()
-    _bound('log', 99, 'bogus severity')
-    assert _ft._tabs['log']['buffer'] == [], (
-        'unknown severity must drop the record, not crash'
-    )
-
-
-def test_tui_resize_clamps_scroll_offset_to_content_rows():
-    """ARCH-14 P6 (revised P7 2026-05-24): on resize, scroll_offset is
-    capped at `max(0, total_display_rows - content_rows)`.  P7 moved
-    scroll_offset from logical-line units to display-row units so
-    long lines wrap on resize, so the clamp now goes through
-    _total_display_rows(tab, new_w) — wider terminals shrink the
-    wrap count and the offset shrinks with it."""
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _m = re.search(
-        r'def _create_windows\(self.*?(?=\n    def )',
-        _src, re.DOTALL,
-    )
-    assert _m, '_create_windows not found'
-    _body = _m.group(0)
-    # Pin: resize clamp goes through the wrap-aware helper, not raw
-    # `len(tab['buffer'])`.
-    assert '_total_display_rows(tab, new_w)' in _body, (
-        'resize must clamp scroll_offset via _total_display_rows so '
-        'wrap is recomputed for the new width (P7)'
-    )
-    # And the clamp is `total - new_h` (content rows = footer-free row count).
-    assert '_total - new_h' in _body, (
-        'resize clamp must use the new content-rows height (new_h)'
-    )
-
-
-def test_tui_wrap_line_splits_at_width_char_boundary():
-    """ARCH-14 P7: _wrap_line splits a long string into chunks of at
-    most `width` chars.  Char-based (not word-based) so log output
-    wraps predictably.  Empty input returns [''] so blank entries
-    still contribute one display row."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    w = _tui.Tui._wrap_line
-
-    # Short string fits — single chunk, unchanged.
-    assert w('hello', 80) == ['hello']
-    # Exactly equals width — single chunk.
-    assert w('a' * 10, 10) == ['a' * 10]
-    # One over — splits into two; second chunk is the remainder.
-    assert w('a' * 11, 10) == ['a' * 10, 'a']
-    # Multiple of width — even split.
-    assert w('abcdef', 2) == ['ab', 'cd', 'ef']
-    # Ragged — last chunk shorter.
-    assert w('abcdefg', 3) == ['abc', 'def', 'g']
-    # Empty — still one (blank) chunk so the entry occupies one row.
-    assert w('', 80) == ['']
-    # Zero / negative width — no split (avoids div-by-zero).
-    assert w('hello', 0) == ['hello']
-    assert w('hello', -1) == ['hello']
-
-
-def test_tui_entry_display_rows_counts_wrap():
-    """ARCH-14 P7: _entry_display_rows returns the wrapped row count
-    for a single entry; always >= 1 so blank entries occupy a row."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-    r = _tui.Tui._entry_display_rows
-    assert r('hello', 80) == 1
-    assert r('a' * 80, 80) == 1
-    assert r('a' * 81, 80) == 2
-    assert r('a' * 160, 80) == 2
-    assert r('a' * 161, 80) == 3
-    assert r('', 80) == 1
-    assert r('hello', 0) == 1   # width=0 fallback
-
-
-def test_tui_total_display_rows_sums_across_buffer():
-    """ARCH-14 P7: _total_display_rows sums wrapped rows over all
-    buffer entries.  Used by the resize / PgUp clamps."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-
-    # Bind through Tui directly — _total_display_rows is a regular
-    # method but only uses `self._entry_display_rows` (classmethod).
-    # Using an `object.__new__(Tui)` bypasses singleton init.
-    _stub = object.__new__(_tui.Tui)
-    tab = {'buffer': [
-        ('short',       0),    # 1 row at width 80
-        ('a' * 100,     0),    # 2 rows at width 80 (100 / 80 = 2)
-        ('',            0),    # 1 row (blank)
-        ('b' * 240,     0),    # 3 rows
-    ]}
-    assert _stub._total_display_rows(tab, 80) == 1 + 2 + 1 + 3   # 7
-
-    # Narrower width inflates the count.
-    assert _stub._total_display_rows(tab, 10) == 1 + 10 + 1 + 24   # 36
-
-    # Wider width collapses to one row per entry except the empty.
-    assert _stub._total_display_rows(tab, 1000) == 4
-
-
-def test_tui_append_lines_scroll_increments_by_display_rows():
-    """ARCH-14 P7: when scrolled away, _append_lines bumps
-    scroll_offset by the new entries' DISPLAY-ROW count (not raw
-    line count) so the visible anchor stays put on long wrapped
-    lines."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import tui as _tui
-
-    # Bypass Tui.__init__ but populate the fields _append_lines
-    # touches.  Width = 10 so the wrap math is observable in small
-    # numbers.
-    _stub = object.__new__(_tui.Tui)
-    _stub._resolution = {'x': 10, 'y': 24}
-
-    # Scrolled-away case: short + long-wrapping line.
-    tab = {'win': None, 'buffer': [('old', 0)],
-           'scroll_offset': 5, 'selected': False}
-    # 'short' = 1 row at width 10; 'longline' = 1 row; 'a'*25 = 3 rows.
-    _stub._append_lines(tab, [('short', 0), ('longline', 0), ('a' * 25, 0)])
-    assert tab['scroll_offset'] == 5 + 1 + 1 + 3, (
-        f'expected 10 (5 + 1 + 1 + 3 display rows); got '
-        f'{tab["scroll_offset"]}'
-    )
-
-    # At-bottom case: scroll_offset stays 0 regardless of wrap.
-    tab2 = {'win': None, 'buffer': [], 'scroll_offset': 0,
-            'selected': False}
-    _stub._append_lines(tab2, [('a' * 100, 0)])   # 10 display rows at w=10
-    assert tab2['scroll_offset'] == 0
-
-
-def test_tui_refreshtab_wraps_long_line_into_multiple_display_rows():
-    """ARCH-14 P7: _refreshtab walks the buffer back-to-front, wraps
-    each entry to the window width, and renders the bottom
-    content_rows worth of DISPLAY rows.  Pin via source inspection
-    that the wrap helper is invoked + the display-row collection
-    pattern is in place."""
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _m = re.search(r'def _refreshtab\(self.*?(?=\n    @|\n    def )',
-                   _src, re.DOTALL)
-    assert _m, '_refreshtab not found'
-    _body = _m.group(0)
-    assert '_wrap_line' in _body, (
-        '_refreshtab must invoke _wrap_line to expand entries into '
-        'display rows (P7)'
-    )
-    assert 'max_y, max_x' in _body, (
-        '_refreshtab must read window width (max_x) for wrap'
-    )
-    # The display-row units shift means PgUp/PgDn handlers also use
-    # the wrap-aware helper, not raw len(buffer).
-    _hk_m = re.search(r'def _handle_key\(self.*?(?=\n    def )',
-                      _src, re.DOTALL)
-    _hk = _hk_m.group(0)
-    assert '_total_display_rows(active' in _hk, (
-        'PgUp clamp must use _total_display_rows so wrap is accounted for'
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# tui_v2 — clean-slate event-dispatcher TUI (ARCH-14 P9 follow-up)
+# tui (event-dispatcher TUI; was tui_v2 during the side-by-side phase)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _v2_fake_renderer():
@@ -12736,10 +11547,10 @@ def _v2_fake_renderer():
 
 
 def test_v2_wrap_helpers_round_trip():
-    """tui_v2.wrap mirrors the legacy P7 helpers — same contract."""
+    """tui.wrap mirrors the legacy P7 helpers — same contract."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2 import wrap
+    from tui import wrap
     assert wrap.wrap_line('hello', 80) == ['hello']
     assert wrap.wrap_line('a' * 11, 10) == ['a' * 10, 'a']
     assert wrap.wrap_line('', 80) == ['']
@@ -12752,7 +11563,7 @@ def test_v2_state_append_and_scroll():
     """State.tabs[name].append handles scroll_offset in display-row units."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2.state import State
+    from tui.state import State
 
     s = State()
     assert 'console' in s.tabs and 'log' in s.tabs
@@ -12777,7 +11588,7 @@ def test_v2_cmdline_edit_and_history():
     """CmdLine matches legacy _Commands semantics (cursor edit + history)."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2.state import CmdLine
+    from tui.state import CmdLine
 
     c = CmdLine()
     for ch in 'hello':
@@ -12805,8 +11616,8 @@ def test_v2_dispatcher_key_events_edit_cmdline():
     """KeyEvents in the no-prompt path edit the cmdline."""
     import sys, threading, time
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2.dispatcher import Dispatcher
-    from tui_v2.events import KeyEvent, Shutdown
+    from tui.dispatcher import Dispatcher
+    from tui.events import KeyEvent, Shutdown
 
     d = Dispatcher(_v2_fake_renderer())
     t = threading.Thread(target=d.run, daemon=True)
@@ -12826,8 +11637,8 @@ def test_v2_dispatcher_prompt_future_round_trip():
     """request_prompt blocks caller, dispatcher fulfills via Enter."""
     import sys, threading, time
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2.dispatcher import Dispatcher
-    from tui_v2.events import KeyEvent, Shutdown
+    from tui.dispatcher import Dispatcher
+    from tui.events import KeyEvent, Shutdown
 
     d = Dispatcher(_v2_fake_renderer())
     threading.Thread(target=d.run, daemon=True).start()
@@ -12852,8 +11663,8 @@ def test_v2_dispatcher_tab_switch_by_index():
     """F-key activates nth tab; out-of-range silently no-ops."""
     import sys, threading, time
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2.dispatcher import Dispatcher
-    from tui_v2.events import KeyEvent, Shutdown
+    from tui.dispatcher import Dispatcher
+    from tui.events import KeyEvent, Shutdown
 
     d = Dispatcher(_v2_fake_renderer())
     threading.Thread(target=d.run, daemon=True).start()
@@ -12868,28 +11679,48 @@ def test_v2_dispatcher_tab_switch_by_index():
 
 
 def test_v2_dispatcher_progressbar_widget_lifecycle():
-    """ProgressBar add/remove via dispatcher events."""
+    """ProgressBar add/remove flow via the duck-typed tui_instance
+    contract: __init__ → tui_instance.add_widget(self) → dispatcher
+    sees WidgetAdd; close() → del_widget → WidgetRemove."""
     import sys, threading, time
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2 import widgets
-    from tui_v2.dispatcher import Dispatcher
-    from tui_v2.events import Shutdown
+    import tui as _pkg
+    from tui import widgets
+    from tui.dispatcher import Dispatcher
+    from tui.events import Shutdown, WidgetAdd, WidgetRemove
 
     d = Dispatcher(_v2_fake_renderer())
-    widgets.set_dispatcher(d)
-    threading.Thread(target=d.run, daemon=True).start()
-    time.sleep(0.02)
 
-    bar = widgets.ProgressBar('Test', maxvalue=100)
-    time.sleep(0.05)
-    assert bar in d.state.widgets
-    bar.step(50)
-    time.sleep(0.05)
-    assert bar.value == 50
-    bar.close()
-    time.sleep(0.05)
-    assert bar not in d.state.widgets
-    d.post(Shutdown(0))
+    # Bridge: stand-in for the real Tui — exposes the duck-typed
+    # surface widgets call (add_widget / del_widget / print) and
+    # forwards into the dispatcher under test.
+    class _Bridge:
+        def add_widget(self, w):
+            d.post(WidgetAdd(w))
+            return id(w)
+        def del_widget(self, wid):
+            d.post(WidgetRemove(wid))
+        def print(self, msg, attr=None):
+            pass
+
+    _saved = _pkg.tui_instance
+    _pkg.tui_instance = _Bridge()
+    try:
+        threading.Thread(target=d.run, daemon=True).start()
+        time.sleep(0.02)
+
+        bar = widgets.ProgressBar('Test', maxvalue=100)
+        time.sleep(0.05)
+        assert bar in d.state.widgets
+        bar.step(50)
+        time.sleep(0.05)
+        assert bar.value == 50
+        bar.close()
+        time.sleep(0.05)
+        assert bar not in d.state.widgets
+        d.post(Shutdown(0))
+    finally:
+        _pkg.tui_instance = _saved
 
 
 def test_v2_dispatcher_adaptive_idle_no_widgets():
@@ -12898,8 +11729,8 @@ def test_v2_dispatcher_adaptive_idle_no_widgets():
     we can verify no events get processed during a 200ms idle window."""
     import sys, threading, time
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2.dispatcher import Dispatcher
-    from tui_v2.events import Shutdown
+    from tui.dispatcher import Dispatcher
+    from tui.events import Shutdown
 
     r = _v2_fake_renderer()
     d = Dispatcher(r)
@@ -12919,9 +11750,9 @@ def test_v2_logging_bridge_routes_by_stage():
     """LogTabHandler emits LogEvents tagged with the right tab."""
     import sys, threading, time, logging as _logging
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from tui_v2.dispatcher import Dispatcher
-    from tui_v2.events import Shutdown
-    from tui_v2.logging_bridge import setup_logging
+    from tui.dispatcher import Dispatcher
+    from tui.events import Shutdown
+    from tui.logging_bridge import setup_logging
 
     d = Dispatcher(_v2_fake_renderer())
     threading.Thread(target=d.run, daemon=True).start()
@@ -12943,52 +11774,6 @@ def test_v2_logging_bridge_routes_by_stage():
     # Bare athena should NOT have leaked into cache/iso.
     assert not any('plain athena' in line for line in cache_buf)
     d.post(Shutdown(0))
-
-
-def test_tui_tab_entry_cursor_field_removed():
-    """ARCH-14 P6: the deprecated `cursor` field is gone from
-    _TabEntry, _create_tab, and all write sites.  Pin its absence so a
-    regression in any of those paths surfaces immediately."""
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    # _TabEntry definition no longer mentions cursor.
-    import re
-    _tabentry_m = re.search(r'class _TabEntry\(TypedDict\):(.*?)(?=\nclass |\n# -)',
-                            _src, re.DOTALL)
-    assert _tabentry_m, '_TabEntry not found'
-    assert 'cursor' not in _tabentry_m.group(1), (
-        '_TabEntry must no longer declare a `cursor` field'
-    )
-    # No tab-dict literal with 'cursor': in either tui.py.
-    assert "'cursor':" not in _src, (
-        "no remaining 'cursor': writes in tui.py (P6 prune)"
-    )
-    # _cmd_input_width method is also gone (made dead by P3 cmdline render).
-    assert '_cmd_input_width' not in _src, (
-        '_cmd_input_width was dead post-P3; must be removed in P6'
-    )
-
-
-def test_tui_tab_content_region_height_equals_lines_minus_footer():
-    """ARCH-14 P1: tab content region height = LINES - FOOTER_HEIGHT
-    = N-2.  Pin via _calculateResolution: tab_coords['h'] computed
-    as `lines - self.FOOTER_HEIGHT`."""
-    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
-    import re
-    _m = re.search(
-        r'def _calculateResolution\(self.*?(?=\n    def )',
-        _src, re.DOTALL,
-    )
-    assert _m, '_calculateResolution not found'
-    _body = _m.group(0)
-    assert 'lines - self.FOOTER_HEIGHT' in _body, (
-        "tab content height must be (lines - FOOTER_HEIGHT) — any "
-        "other expression would break the row math"
-    )
-    # Footer y-position = lines - FOOTER_HEIGHT (pinned to bottom).
-    assert "'y': lines - self.FOOTER_HEIGHT" in _body, (
-        "footer must be positioned at y = lines - FOOTER_HEIGHT "
-        "(bottom of the screen)"
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16200,19 +14985,6 @@ def main() -> int:
         test_installer_grub_cfg_has_preseed_kernel_cmdline,
         test_buildconfig_chroot_paths_under_shared_buildroot_parent,
         test_build_flags_carries_chroot_installer_ready_default_false,
-        test_console_with_explicit_tui_does_not_touch_singleton,
-        test_console_singleton_fallback_when_tui_omitted,
-        test_console_raises_when_no_tui_anywhere,
-        test_logger_info_routes_to_log_tab,
-        test_logger_warning_routes_to_log_tab,
-        test_logger_error_routes_to_log_tab,
-        test_logger_display_level_routes_to_console_tab,
-        test_logger_display_propagates_attribute_extra,
-        test_logger_debug_is_dropped_below_handler_threshold,
-        test_setup_logging_is_idempotent,
-        test_setup_file_logging_writes_records_to_timestamped_file,
-        test_setup_logging_preserves_filehandler_added_before_it,
-        test_logger_warning_does_not_leak_to_console_tab,
         test_setup_file_logging_filename_has_timestamp,
         test_download_file_returns_http_status_detail_on_404,
         test_download_file_success_returns_size_and_empty_detail,
@@ -16450,40 +15222,7 @@ def main() -> int:
         test_cli_prompt_reads_stdin,
         test_cli_keymode_prompt_reads_and_discards,
         test_cli_logging_handlers_bound_to_cli_after_init,
-        # ARCH-14 P1 — TUI layout reshape
-        test_tui_footer_height_is_two_rows,
-        test_tui_status_bar_uses_fixed_bright_color_pair,
-        test_tui_tab_content_region_height_equals_lines_minus_footer,
-        # ARCH-14 P2 — scrollback
-        test_tui_max_buffer_lines_capped,
-        test_tui_scroll_offset_increments_when_appending_while_scrolled,
-        # ARCH-14 P3 — editable cmdline + history
-        test_tui_left_arrow_moves_edit_cursor_not_scroll,
-        test_tui_backspace_deletes_at_cursor,
-        test_tui_up_arrow_walks_history,
-        test_tui_pageup_scrolls_tab_by_content_rows,
-        # ARCH-14 P4 — tab switching + per-stage tabs
-        test_tui_default_tabs_include_per_stage_tabs,
-        test_tui_f1_directly_activates_first_tab,
-        test_tui_alt_f1_activates_first_tab,
-        test_tui_tab_key_no_longer_cycles_tabs,
-        test_tui_add_tab_creates_window_and_appears_in_status_bar,
-        # ARCH-14 P5 — Tab-key command completion
-        test_tui_tab_completes_unique_prefix,
-        test_tui_tab_lists_ambiguous_prefixes_on_console,
-        test_tui_tab_with_empty_line_is_noop,
-        # ARCH-14 P6 — per-stage logger routing + cleanup
-        test_log_tab_handler_routes_by_logger_name,
-        test_log_tab_handler_falls_back_to_log_for_unknown_stage_tab,
-        test_tui_resize_clamps_scroll_offset_to_content_rows,
-        test_tui_tab_entry_cursor_field_removed,
-        # ARCH-14 P7 — render-time line wrap (resize-aware reflow)
-        test_tui_wrap_line_splits_at_width_char_boundary,
-        test_tui_entry_display_rows_counts_wrap,
-        test_tui_total_display_rows_sums_across_buffer,
-        test_tui_append_lines_scroll_increments_by_display_rows,
-        test_tui_refreshtab_wraps_long_line_into_multiple_display_rows,
-        # tui_v2 — clean-slate event-dispatcher TUI
+        # tui — event-dispatcher TUI (replaces legacy ARCH-14 P1-P7 tests)
         test_v2_wrap_helpers_round_trip,
         test_v2_state_append_and_scroll,
         test_v2_cmdline_edit_and_history,

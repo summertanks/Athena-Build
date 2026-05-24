@@ -1,21 +1,19 @@
-"""Widgets — live overlays rendered on the console tab.
+"""Widgets — live overlays managed via the tui_instance singleton.
 
-Widget contract (duck-typed; no formal Protocol needed):
-    __str__(self) -> str
-        Return the rendered string.  Called by the Renderer.
+ProgressBar / Spinner resolve `tui_instance` at construction and call
+`tui_instance.add_widget(self)` (legacy contract).  Both backends
+implement `add_widget` and `del_widget`:
 
-    next_frame_at(self) -> Optional[float]
-        Wall-clock monotonic time at which this widget wants its next
-        redraw, or None when the widget doesn't animate on its own
-        (e.g. ProgressBar only updates on step()).
+  - Cli (headless): prints `[start]` / `[done: N/M]` markers, stores
+    the widget in a dict for lifetime accounting.
+  - Tui (curses):   posts WidgetAdd / WidgetRemove events; the
+    dispatcher renders the widget overlaid on the console tab and
+    the WIDGET_IDLE_TIMEOUT cap drives animation at ~10 fps without
+    per-step event posts.
 
-Widgets register with the dispatcher via WidgetAdd events.  When state
-changes that should be visible (step, label update), they post a
-WidgetTick to wake the dispatcher; the next render picks it up.
-
-ProgressBar.step() and Spinner stay independent of the renderer — they
-hold a reference to the dispatcher and post events.  The renderer
-never imports widgets; it just calls str(w) on whatever's in the list.
+`__str__` is the rendered representation called by the curses
+Renderer.  `next_frame_at` is a Tui-side animation hint — the
+dispatcher uses it to wake at the next desired frame.  Cli ignores it.
 """
 from __future__ import annotations
 
@@ -24,30 +22,21 @@ from math import floor
 from typing import Any, Dict, Optional
 
 
-# ── Dispatcher reference (set by tui.py at construction) ─────────────────
-_dispatcher: Optional[Any] = None
-
-
-def set_dispatcher(d: Any) -> None:
-    """Wire the singleton dispatcher reference.  Called once by Tui."""
-    global _dispatcher
-    _dispatcher = d
-
-
-def _post(event: Any) -> None:
-    """Post helper that no-ops when no dispatcher is bound (test mode)."""
-    if _dispatcher is not None:
-        _dispatcher.post(event)
+def _instance() -> Any:
+    """Resolve the active backend (Tui or Cli) at call time."""
+    import tui as _pkg
+    return _pkg.tui_instance
 
 
 # ── ProgressBar ──────────────────────────────────────────────────────────
 class ProgressBar:
     """Bar widget with a label, fill, value/total, and rate.
 
-    Identical visual format to the legacy Tui ProgressBar so operators
-    don't see a behavior change.  `step()` posts a WidgetTick to
-    schedule a redraw; otherwise the bar is quiescent (next_frame_at
-    returns None — no per-frame animation cost when idle)."""
+    Identical visual format to the legacy ProgressBar so operators
+    don't see a behavior change.  `step()` mutates the internal
+    counter; under the Tui backend the dispatcher polls at
+    WIDGET_IDLE_TIMEOUT (~100 ms) and renders the current state.
+    Under Cli, step is silent (no per-step output)."""
 
     RUNNING = 1
     PAUSED  = 2
@@ -60,9 +49,6 @@ class ProgressBar:
     def __init__(self, label: str, itr_label: str = 'it/s', bar_width: int = 40,
                  scale_factor: str = '', maxvalue: int = 100, fmt: str = '',
                  show_rate: bool = True, label_width: int = 0) -> None:
-        # Lazy-import to avoid cycle: tui_v2/__init__.py imports facade,
-        # which would import widgets at top level.
-        from .events import WidgetAdd
         self._label_width  = label_width if label_width > 0 else 20
         self._label        = label[:self._label_width].ljust(self._label_width)
         self._itr_label    = itr_label[:8]
@@ -75,13 +61,13 @@ class ProgressBar:
         self._show_rate    = show_rate
         self._fmt = fmt or (self._DEFAULT_FMT_WITH_RATE if show_rate
                             else self._DEFAULT_FMT_NO_RATE)
-        _post(WidgetAdd(self))
+        b = _instance()
+        self._widget_id = b.add_widget(self) if b is not None else id(self)
 
-    # ── Animation contract ──────────────────────────────────────────────
+    # ── Animation contract (read by the Tui dispatcher) ─────────────────
     def next_frame_at(self) -> Optional[float]:
-        """ProgressBar doesn't animate on its own — it advances only
-        when step() is called.  Returning None means the dispatcher
-        sleeps until the next event (typically step()'s WidgetTick)."""
+        """ProgressBar doesn't have a fixed frame rate — the
+        dispatcher's WIDGET_IDLE_TIMEOUT cap drives polling."""
         return None
 
     # ── Mutation ────────────────────────────────────────────────────────
@@ -90,19 +76,14 @@ class ProgressBar:
         return self._value
 
     def step(self, value: int = 1) -> None:
-        """Advance by `value` units.  Posts a WidgetTick to redraw."""
         if self._state != self.RUNNING:
             return
         self._value = min(self._value + value, self._max)
         if self._value >= self._max:
             self._state = self.STOPPED
-        from .events import WidgetTick
-        _post(WidgetTick())
 
     def label(self, message: str) -> None:
         self._label = message.strip()[:self._label_width].ljust(self._label_width)
-        from .events import WidgetTick
-        _post(WidgetTick())
 
     def pause(self) -> None:
         if self._state == self.RUNNING:
@@ -123,13 +104,14 @@ class ProgressBar:
     def close(self, persist: bool = False) -> None:
         """Stop the bar and remove it from the widget list.
 
-        `persist=True` posts the final rendered line to the console
+        `persist=True` prints the final rendered line to the console
         tab so the operator sees it after the bar disappears."""
-        from .events import PrintEvent, WidgetRemove
         self._state = self.STOPPED
-        if persist:
-            _post(PrintEvent(str(self)))
-        _post(WidgetRemove(id(self)))
+        b = _instance()
+        if persist and b is not None:
+            b.print(str(self))
+        if b is not None:
+            b.del_widget(self._widget_id)
 
     # ── Render ──────────────────────────────────────────────────────────
     def __str__(self) -> str:
@@ -164,20 +146,21 @@ class ProgressBar:
 class Spinner:
     """Animated spinner — cycles a glyph every 100 ms.
 
-    Unlike ProgressBar, Spinner DOES animate on its own — next_frame_at
-    returns the time of the next frame so the dispatcher wakes for it.
-    10 fps is the visible-perception sweet spot."""
+    Unlike ProgressBar, Spinner DOES animate on its own —
+    `next_frame_at` returns the time of the next frame so the Tui
+    dispatcher wakes for it.  10 fps is the visible-perception sweet
+    spot."""
 
     _FRAMES = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
     _FRAME_INTERVAL = 0.1     # 100 ms / 10 fps
 
     def __init__(self, message: str) -> None:
-        from .events import WidgetAdd
         self._message = message[:70]
         self._frame   = 0
         self._last_t  = time.monotonic()
         self._done    = False
-        _post(WidgetAdd(self))
+        b = _instance()
+        self._widget_id = b.add_widget(self) if b is not None else id(self)
 
     def next_frame_at(self) -> Optional[float]:
         if self._done:
@@ -192,7 +175,8 @@ class Spinner:
         return f'  {self._FRAMES[self._frame]}  {self._message}'
 
     def done(self) -> None:
-        from .events import PrintEvent, WidgetRemove
         self._done = True
-        _post(PrintEvent(f'  ✓  {self._message} done'))
-        _post(WidgetRemove(id(self)))
+        b = _instance()
+        if b is not None:
+            b.print(f'  ✓  {self._message} done')
+            b.del_widget(self._widget_id)
