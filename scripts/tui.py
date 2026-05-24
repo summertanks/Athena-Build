@@ -67,8 +67,14 @@ class Tui:
     _instance: Optional['Tui'] = None
 
     # ── Layout ────────────────────────────────────────────────────────────
-    BOX_WIDTH     = 1
-    FOOTER_HEIGHT = 5     # top-border + 3 content rows + bottom-border
+    # Two-row footer pinned to the bottom of the screen.  Top of the
+    # footer (row N-2) is the command prompt line; bottom (row N-1) is
+    # a single-line reverse-video status bar carrying banner + tab
+    # tags + resource stats.  The rest of the screen (rows 0..N-3,
+    # i.e. N-2 rows) is the scrollable tab content region.  Widgets
+    # (ProgressBar/Spinner) overlay the bottom rows of the tab region.
+    BOX_WIDTH     = 0     # no border around the footer in the new layout
+    FOOTER_HEIGHT = 2     # row 0 = prompt; row 1 = status bar
     MIN_COLS      = 80
     MIN_LINES     = 24
     BANNER_MAX    = 50
@@ -392,71 +398,86 @@ class Tui:
     # =====================================================================
 
     def _refreshfooter(self) -> None:
+        """Draw the two-row footer at the bottom of the screen.
+
+        Row 0 (screen row N-2): command prompt — `$ ` or `[…] ` followed
+        by the in-progress command text and a blinking cursor.
+
+        Row 1 (screen row N-1): single-line status bar with reverse-
+        video styling (terminal-default bg/fg flipped via A_REVERSE
+        attribute — works on any palette, matches Claude-CLI
+        understated look).  Content layout:
+          - Left:  banner ("Athena Build …")
+          - Center-left: tab tags, active in A_BOLD
+          - Right: resource stats + key hint
+        """
         # `_footer` is typed Optional only because it's None during the
         # pre-init window; by the time the draw loop reaches us it must
         # be set, or there's no curses screen to draw on.
         assert self._footer is not None
         max_y, max_x = self._footer.getmaxyx()
-        inner_w = max_x - 2 * self.BOX_WIDTH
 
-        if inner_w < 20 or max_y < self.FOOTER_HEIGHT:
+        if max_x < 20 or max_y < self.FOOTER_HEIGHT:
             return
 
         self._footer.erase()
-        self._footer.bkgd(curses.color_pair(self.COLOR_FOOTER))
-        self._footer.box()
 
-        # ── Row 3: banner (left) ·· resource stats (right) ───────────────
+        # ── Row 0: command input ─────────────────────────────────────────
+        # Behaviour unchanged from the pre-Phase-1 layout: cursor still
+        # horizontal-scrolls the visible window into a long line.  Phase
+        # 3 flips this to cursor-position editing.
+        prompt_str = self.cmd_prompt[:max_x - 2]
+        cmd_area_w = max_x - len(prompt_str) - 1   # -1 for blink cursor
+
+        self._safe_addstr(self._footer, 0, 0, prompt_str)
+        if cmd_area_w >= 1:
+            raw_cmd     = self._cmd.current
+            display_cmd = ('*' * len(raw_cmd)) if self._cmd.is_masked() else raw_cmd
+            visible_cmd = display_cmd[self._cmd.cursor: self._cmd.cursor + cmd_area_w]
+            cmd_x       = len(prompt_str)
+            self._safe_addstr(self._footer, 0, cmd_x, visible_cmd)
+            self._safe_addstr(self._footer, 0, cmd_x + len(visible_cmd), '_',
+                              curses.A_BLINK | curses.A_BOLD)
+
+        # ── Row 1: status bar (reverse video) ────────────────────────────
+        # Fill the whole row with reverse-video spaces so the bg is
+        # uniform; overlay text segments with A_REVERSE.  Using the
+        # A_REVERSE attribute rather than a color pair keeps the bar
+        # palette-independent (matches whatever the user's terminal
+        # bg/fg is, just flipped).
+        self._safe_addstr(self._footer, 1, 0, ' ' * max_x, curses.A_REVERSE)
+
         banner  = self._banner
         res_str = self._psutil.value
-        rx      = max_x - self.BOX_WIDTH - len(res_str)
+        hint    = '  Alt+Fn: tab  PgUp/Dn: scroll'
 
-        max_banner = inner_w - len(res_str) - 2
-        self._safe_addstr(self._footer, 3, self.BOX_WIDTH,
-                          banner[:max_banner], curses.A_BOLD)
-        if rx > self.BOX_WIDTH:
-            self._safe_addstr(self._footer, 3, rx, res_str, curses.A_BOLD)
+        # Right-edge segments first so we know how much room is left.
+        right_x  = max_x
+        if len(hint) + 4 < max_x:
+            right_x -= len(hint)
+            self._safe_addstr(self._footer, 1, right_x, hint, curses.A_REVERSE)
+        if res_str and len(res_str) + 4 < right_x:
+            right_x -= (len(res_str) + 2)
+            self._safe_addstr(self._footer, 1, right_x, res_str,
+                              curses.A_REVERSE)
 
-        # ── Row 2: tab bar (left) ·· hint (right) ────────────────────────
-        hint       = '[Tab] switch'
-        prefix     = 'Tabs: '
-        hint_x     = max_x - self.BOX_WIDTH - len(hint) - 1
-        prefix_end = self.BOX_WIDTH + len(prefix)
-        show_hint  = hint_x > prefix_end + 4
+        # Banner (left).
+        banner_text = f' {banner} '
+        if len(banner_text) >= right_x:
+            banner_text = banner_text[:right_x - 1]
+        self._safe_addstr(self._footer, 1, 0, banner_text,
+                          curses.A_REVERSE | curses.A_BOLD)
 
-        if show_hint:
-            self._safe_addstr(self._footer, 2, hint_x, hint)
-
-        self._safe_addstr(self._footer, 2, self.BOX_WIDTH, prefix)
-        x            = prefix_end
-        tab_area_end = hint_x - 1 if show_hint else max_x - self.BOX_WIDTH
-
+        # Tab tags fill the middle.  Flat RHEL-style format:
+        # active = "[name]" with A_BOLD; inactive = " name ".
+        x = len(banner_text) + 1
         for tab_name, tab in self._tabs.items():
-            label = f' {tab_name} '
-            tag   = f'[{label}]' if tab['selected'] else f'|{label}|'
-            if x + len(tag) + 1 >= tab_area_end:
+            tag = f'[{tab_name}]' if tab['selected'] else f' {tab_name} '
+            if x + len(tag) + 1 >= right_x:
                 break
-            attr = (curses.A_REVERSE | curses.A_BOLD) if tab['selected'] else 0
-            self._safe_addstr(self._footer, 2, x, tag, attr)
+            attr = (curses.A_REVERSE | curses.A_BOLD) if tab['selected'] else curses.A_REVERSE
+            self._safe_addstr(self._footer, 1, x, tag, attr)
             x += len(tag) + 1
-
-        # ── Row 1: command input ──────────────────────────────────────────
-        prompt_max = max_x - 3   # left border (1) + right border (1) + cursor (1)
-        prompt_str = self.cmd_prompt[:prompt_max]
-        cmd_area_w = inner_w - len(prompt_str) - 1   # -1 for blink cursor
-
-        self._safe_addstr(self._footer, 1, self.BOX_WIDTH, prompt_str)
-        if cmd_area_w < 1:
-            return
-
-        raw_cmd     = self._cmd.current
-        display_cmd = ('*' * len(raw_cmd)) if self._cmd.is_masked() else raw_cmd
-        visible_cmd = display_cmd[self._cmd.cursor: self._cmd.cursor + cmd_area_w]
-        cmd_x       = self.BOX_WIDTH + len(prompt_str)
-
-        self._safe_addstr(self._footer, 1, cmd_x, visible_cmd)
-        self._safe_addstr(self._footer, 1, cmd_x + len(visible_cmd), '_',
-                          curses.A_BLINK | curses.A_BOLD)
 
     def _refreshtab(self) -> None:
         active = self._activetab
