@@ -118,6 +118,30 @@ class Renderer:
         """Current tab content rows — used by dispatcher for scroll."""
         return self._tab_h if self._tab_h > 0 else (MIN_LINES - FOOTER_HEIGHT)
 
+    @staticmethod
+    def attr_for_severity(severity: int) -> int:
+        """Map a SEVERITY_* constant to a curses attr.  Called by
+        Dispatcher._on_log to resolve severity at append time so the
+        buffer stores ready-to-paint attrs."""
+        if severity == SEVERITY_ERROR:
+            return curses.color_pair(COLOR_ERROR) | curses.A_BOLD
+        if severity == SEVERITY_WARNING:
+            return curses.color_pair(COLOR_WARNING) | curses.A_BOLD
+        if severity == SEVERITY_INFO:
+            return curses.color_pair(COLOR_INFO)
+        return 0
+
+    @staticmethod
+    def attr_for_color(color_index: Optional[int]) -> int:
+        """Resolve a COLOR_* index (1..7) into a curses attr.
+
+        Called by the producer side (v2 Tui.print proxy, Console
+        facade) so PrintEvents arrive at the dispatcher pre-resolved
+        — no SEVERITY_*/COLOR_* sentinel collision in the renderer."""
+        if color_index is None or color_index == 0:
+            return 0
+        return curses.color_pair(color_index)
+
     # ─── Setup / resize ──────────────────────────────────────────────────
     def _setup_colors(self) -> None:
         if not curses.has_colors():
@@ -236,16 +260,14 @@ class Renderer:
             row += 1
 
     def _attr_for(self, raw: int) -> int:
-        """Map a State-level attr (severity sentinel OR raw curses attr)
-        to a curses-usable attr.  Severity sentinels translate to a
-        color pair + bold for ERROR/WARNING."""
-        if raw == SEVERITY_ERROR:
-            return curses.color_pair(COLOR_ERROR) | curses.A_BOLD
-        if raw == SEVERITY_WARNING:
-            return curses.color_pair(COLOR_WARNING) | curses.A_BOLD
-        if raw == SEVERITY_INFO:
-            return curses.color_pair(COLOR_INFO)
-        return raw   # already-resolved curses attr (color_pair already applied)
+        """Pass-through.
+
+        Buffer entries store already-resolved curses attrs (the
+        dispatcher / producer resolves color_pair(...) before posting,
+        same pattern as the legacy Tui).  Kept as a hook in case a
+        future renderer needs to transform attrs at paint time."""
+        return raw
+
 
     # ─── Footer (cmdline + status bar) ───────────────────────────────────
     def _render_footer(self, state: State) -> None:
@@ -358,3 +380,11 @@ class Renderer:
             curses.endwin()
         except curses.error:
             pass
+
+
+# ── Module-level color helpers — re-exported from Renderer.attr_for_* ─────
+# Some callers may import these directly (e.g. logging_bridge or tests
+# that don't have a Renderer instance handy).  Both forms resolve to the
+# same staticmethods so behaviour is identical.
+attr_for_severity = Renderer.attr_for_severity
+attr_for_color    = Renderer.attr_for_color

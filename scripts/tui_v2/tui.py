@@ -152,8 +152,15 @@ class Tui:
     # here so v2 is a drop-in replacement without touching call sites.
 
     def print(self, message: str, attribute: Optional[int] = None) -> None:
-        """Legacy Console.print → PrintEvent."""
-        self.dispatcher.post(PrintEvent(message, attribute or 0))
+        """Legacy Console.print → PrintEvent.
+
+        `attribute` from callers is a COLOR_* index (1..7).  Resolve
+        it to a curses attr HERE (producer side) so PrintEvents
+        arrive at the dispatcher pre-resolved — buffer entries store
+        usable attrs and there's no SEVERITY_*/COLOR_* sentinel
+        collision in the renderer."""
+        attr = self._renderer.attr_for_color(attribute)
+        self.dispatcher.post(PrintEvent(message, attr))
 
     def INFO(self, message: str) -> None:
         self.dispatcher.post(LogEvent(SEVERITY_INFO, f'[INFO ] {message}'))

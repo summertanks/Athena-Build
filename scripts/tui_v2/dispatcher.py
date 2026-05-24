@@ -170,43 +170,38 @@ class Dispatcher:
     def _on_key(self, key: str) -> None:
         """Single keystroke dispatch.
 
-        Order matters:
-          1. KEY_RESIZE → mark dirty so renderer recomputes geometry.
-          2. PromptRequest active → routes the key to whoever's waiting.
-          3. Tab switch / scroll / history / cursor / completion.
-          4. Fall-through: edit the cmdline.
-        """
+        Editor keys (F-keys, PgUp/PgDn for scroll, Up/Down for history,
+        Left/Right for cursor, Backspace, Tab completion) work
+        REGARDLESS of whether a line/masked prompt is pending — same
+        as the legacy TUI, where the shell idle prompt and any nested
+        Prompt() both shared the editor.  Only PROMPT_PAUSE
+        (mode='key') consumes the next single keystroke whole."""
+
         if key == 'KEY_RESIZE':
             self.state.dirty = True
             return
 
-        # Active prompt diverts EVERY key to the prompt's mode handler.
-        if self._pending_prompt is not None:
-            self._key_for_prompt(key)
+        # PROMPT_PAUSE: any keystroke fulfills, NO editor processing.
+        if (self._pending_prompt is not None
+                and self._pending_prompt.mode == 'key'):
+            pp = self._pending_prompt
+            self._end_prompt()
+            pp.future.set_result(key)
             return
 
-        # ── No-prompt path: editor + navigation ──────────────────────────
         st = self.state
 
-        # Page Up/Down: scroll active tab by content_rows (display rows).
+        # ── Editor / navigation keys (always active) ─────────────────────
         if key == 'KEY_PPAGE':
-            st.active_tab().scroll_by(
-                self._renderer.content_rows(),
-                self._renderer.width(),
-                self._renderer.content_rows(),
-            )
+            cr = self._renderer.content_rows()
+            st.active_tab().scroll_by(cr, self._renderer.width(), cr)
             st.dirty = True
             return
         if key == 'KEY_NPAGE':
-            st.active_tab().scroll_by(
-                -self._renderer.content_rows(),
-                self._renderer.width(),
-                self._renderer.content_rows(),
-            )
+            cr = self._renderer.content_rows()
+            st.active_tab().scroll_by(-cr, self._renderer.width(), cr)
             st.dirty = True
             return
-
-        # Up/Down: history walk.
         if key == 'KEY_UP':
             if st.cmd.history_prev():
                 st.dirty = True
@@ -215,8 +210,6 @@ class Dispatcher:
             if st.cmd.history_next():
                 st.dirty = True
             return
-
-        # Left/Right: edit cursor.
         if key == 'KEY_LEFT':
             if st.cmd.move_left():
                 st.dirty = True
@@ -225,85 +218,41 @@ class Dispatcher:
             if st.cmd.move_right():
                 st.dirty = True
             return
-
-        # Backspace.
         if key in ('KEY_BACKSPACE', '\x7f', '\x08'):
             if st.cmd.backspace():
                 st.dirty = True
             return
-
-        # F-keys: switch to nth tab.
         if key.startswith('KEY_F(') and key.endswith(')'):
             try:
                 n = int(key[len('KEY_F('):-1])
             except ValueError:
                 return
-            st.activate_by_index(n - 1)   # F1 -> index 0
+            st.activate_by_index(n - 1)
             return
-
-        # Bare ESC: swallow (Alt+Fn on terminals that split sequences).
         if key == '\x1b':
             return
-
-        # Tab: command-name completion.
         if key == '\t':
             self._complete_command()
             return
 
-        # Enter: submit line if there's a shell waiting (handled via the
-        # PromptRequest path above when shell is the one waiting).  In
-        # the no-prompt fallback (no shell registered), Enter just
-        # clears the cmdline.
+        # Enter: submit to a pending line/masked prompt if there is one.
         if key == '\n':
-            st.cmd.reset()
-            st.dirty = True
+            if self._pending_prompt is not None:
+                pp = self._pending_prompt
+                answer = st.cmd.text
+                st.cmd.reset()
+                self._end_prompt()
+                pp.future.set_result(answer)
+            else:
+                st.cmd.reset()
+                st.dirty = True
             return
 
-        # Ignore other unrecognized multi-char sequences.
+        # Ignore unrecognised multi-char sequences.
         if len(key) > 1:
             return
 
         # Printable: insert at cursor.
-        st.cmd.insert(key)
-        st.dirty = True
-
-    def _key_for_prompt(self, key: str) -> None:
-        """Route a keystroke to whatever Prompt is currently active."""
-        assert self._pending_prompt is not None
-        pp = self._pending_prompt
-        st = self.state
-
-        if pp.mode == 'key':
-            # PROMPT_PAUSE — any key satisfies it.  Don't insert
-            # into the cmdline.
-            pp.future.set_result(key)
-            self._end_prompt()
-            return
-
-        # 'line' or 'masked' — edit cmdline; Enter submits.
-        if key == 'KEY_RESIZE':
-            st.dirty = True
-            return
-        if key == '\n':
-            answer = st.cmd.text
-            st.cmd.reset()
-            self._end_prompt()
-            pp.future.set_result(answer)
-            return
-        if key == 'KEY_LEFT':
-            if st.cmd.move_left():
-                st.dirty = True
-            return
-        if key == 'KEY_RIGHT':
-            if st.cmd.move_right():
-                st.dirty = True
-            return
-        if key in ('KEY_BACKSPACE', '\x7f', '\x08'):
-            if st.cmd.backspace():
-                st.dirty = True
-            return
-        if len(key) > 1 or key == '\x1b':
-            return
         st.cmd.insert(key)
         st.dirty = True
 
@@ -338,7 +287,13 @@ class Dispatcher:
         tab = self.state.tabs.get(e.tab) or self.state.tabs.get('log')
         if tab is None:
             return
-        tab.append([(e.text, e.severity)], self._renderer.width())
+        # Resolve severity → curses attr via the renderer's helper so
+        # the buffer stores a usable attr, not an ambiguous sentinel.
+        # Renderer-provided fn: kept off the hot draw path.
+        attr = e.severity
+        if hasattr(self._renderer, 'attr_for_severity'):
+            attr = self._renderer.attr_for_severity(e.severity)
+        tab.append([(e.text, attr)], self._renderer.width())
         self.state.dirty = True
 
     def _on_status(self, e: StatusEvent) -> None:
