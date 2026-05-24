@@ -12,7 +12,7 @@ Responsibilities:
   - Expose all of the above as interactive TUI commands
 
 Typical operator workflow:
-    cache build → dep parse → source download → container init → source build
+    cache build → dep parse → source sync → container init → source build
 
 Each step sets a flag in _progress_flags so later commands can verify prerequisites
 without re-running earlier work.
@@ -438,7 +438,7 @@ class BuildSession:
 
     def cmd_clean_source(self, *args):
         """Wipe downloaded source tarballs.  Resets download_ready so
-        the next `source download` re-fetches.  Source bytes are
+        the next `source sync` re-fetches.  Source bytes are
         re-downloadable from upstream; cleaning is safe."""
         if not self._wipe_dir_contents(
                 'source', self.config.dir_source,
@@ -719,7 +719,7 @@ class BuildSession:
 
         After resolution, validates the selection for Breaks/Conflicts, then
         maps every selected binary package back to its source package so that
-        source download and source build know what to fetch and build.  Both
+        source sync and source build know what to fetch and build.  Both
         trees' selected_pkgs are mapped to sources via parse_sources;
         downstream consumers iterate over the union (Phase 4 work).
 
@@ -1077,7 +1077,7 @@ class BuildSession:
         # (same source produces both .deb and .udeb), so the shared
         # source_hashtable already has the records we need.
         # udeb_dep_tree.selected_srcs is populated independently;
-        # downstream consumers (source download / source build) will
+        # downstream consumers (source sync / source build) will
         # iterate over the UNION of both trees' selected_srcs.
         if self.udeb_dep_tree is not None:
             console.print("Parsing Udeb Source Packages...", tui.COLOR_INFO)
@@ -1470,30 +1470,40 @@ class BuildSession:
 
     # -----------------------------------Command: source_download--------------------
 
-    def cmd_source_download(self):
-        """Download upstream source archives for all selected source packages.
+    def cmd_source_sync(self, *args):
+        """Download upstream source archives.
 
-        - Fetches .dsc, .orig.tar.*, and .debian.tar.* files from the configured
-        base mirror into dir_source.
+        Bulk mode (no args) — fetch .dsc, .orig.tar.*, .debian.tar.* for
+        every source in dep_tree.selected_srcs + udeb_dep_tree.selected_srcs.
+        Skips files whose SHA256 already matches; sets `download_ready`.
 
-        - Skips files that are already present and have correct checksums.
+        Per-pkg mode (`source sync <pkg> [<pkg>…] [force]`) — fetch
+        just the named source(s).  `force` deletes existing files first,
+        bypassing the SHA256-skip short-circuit (useful when a file is
+        corrupt but its size+sha somehow still match what's expected).
+        Doesn't touch `download_ready` — partial pulls aren't the
+        full-corpus gate the flag tracks.
 
-        - Does a size verification
-
-        Downloads from BOTH the deb tree AND the udeb
-        tree.  Without the udeb pass, sources that exist only in the udeb
-        closure (base-installer, debian-installer-utils, debootstrap,
-        depthcharge-tools-installer, …) never land in dir_source, and a
-        later `source build installer` fails with "cp: cannot stat
+        Downloads from BOTH the deb tree AND the udeb tree in bulk
+        mode.  Without the udeb pass, sources that exist only in the
+        udeb closure (base-installer, debian-installer-utils,
+        debootstrap, …) never land in dir_source, and a later
+        `source build installer` fails with "cp: cannot stat
         /source/<pkg>*: No such file or directory" inside the build
-        container.  Sources shared between trees (cdebconf, etc.) are
-        skipped in the second pass via the existing on-disk sha check;
-        size accounting double-counts them slightly — cosmetic only.
+        container.  Sources shared between trees are skipped in the
+        second pass via the on-disk sha check.
         """
         if not self.flags.dep_check_ready:
             console.print("Run 'dep parse' first")
             return
 
+        _force = 'force' in args
+        _named = [a for a in args if a != 'force']
+
+        if _named:
+            return self._sync_named_sources(_named, _force)
+
+        # Bulk path.
         self.flags.download_ready = False  # reset before starting
 
         _deb_size  = self.dep_tree.download_size
@@ -1525,6 +1535,48 @@ class BuildSession:
                 return
 
         self.flags.download_ready = True
+
+    def _sync_named_sources(self, named: 'list[str]', force: bool) -> None:
+        """Per-source download path for `source sync <pkg> [force]`.
+
+        Looks up each name in either dep_tree.selected_srcs or
+        udeb_dep_tree.selected_srcs; constructs a synthetic minimal
+        tree-shaped wrapper that exposes the two attributes
+        utils.download_source reads (`selected_srcs` dict, integer
+        `download_size`); runs the download.  Unknown names are
+        reported and skipped — partial success is the design choice.
+        """
+        class _SingleSrcTree:
+            def __init__(self, _name, _src):
+                self.selected_srcs = {_name: _src}
+                self.download_size = sum(
+                    int(_f.get('size', 0)) for _f in _src.files.values()
+                )
+
+        for _name in named:
+            _src = None
+            for _tree in (self.dep_tree, self.udeb_dep_tree):
+                if _tree is not None and _name in _tree.selected_srcs:
+                    _src = _tree.selected_srcs[_name]
+                    break
+            if _src is None:
+                console.print(
+                    f"source sync {_name}: not in dep_tree.selected_srcs "
+                    f"(run `dep parse` if you expect it to be there)",
+                    tui.COLOR_WARNING,
+                )
+                continue
+            if force:
+                for _f in _src.files:
+                    try:
+                        os.unlink(os.path.join(self.config.dir_source, _f))
+                    except OSError:
+                        pass
+            console.print(f"source sync {_name}: fetching "
+                          f"{len(_src.files)} file(s)…")
+            utils.download_source(
+                _SingleSrcTree(_name, _src), self.config.dir_source,
+            )
 
 
     # -----------------------------Command: self.container------------------------
@@ -2154,7 +2206,7 @@ class BuildSession:
 
         # Soft-warn section.  Doesn't gate the audit — these aren't broken
         # constraints, they're "shouldn't be in the pool" residue.  Mirrors
-        # the categorisation `repo cleanup` uses, without the deletion
+        # the categorisation `repo repair cleanup` uses, without the deletion
         # half.  Surfaces the silent-drift scenarios that DID bite us —
         # apt picks the highest version per name and the lower one becomes
         # a phantom, so dep-resolution looks fine right up until install
@@ -2174,7 +2226,7 @@ class BuildSession:
 
         Lists counts (and a short preview) of orphan-source and
         version-drift residue under repo/.  Doesn't delete — the
-        operator runs `repo cleanup` when they want to act.
+        operator runs `repo repair cleanup` when they want to act.
         """
         _orphan, _drift, _malformed, _total = self._scan_stale_files()
         _n_stale = len(_orphan) + len(_drift)
@@ -2206,7 +2258,7 @@ class BuildSession:
             )
             # Short preview — one line per source for orphans (collapses
             # the task-* family case), individual lines for drift.  Full
-            # detail lives in `repo cleanup` (dry-run).
+            # detail lives in `repo repair cleanup` (dry-run).
             _show = 5 if not verbose else max(len(_orphan), len(_drift))
             if _orphan:
                 from collections import defaultdict
@@ -2234,7 +2286,7 @@ class BuildSession:
                         f"pass `verbose` for full list)"
                     )
             console.print(
-                "  Run `repo cleanup` to review/remove (dry-run by "
+                "  Run `repo repair cleanup` to review/remove (dry-run by "
                 "default).",
                 tui.COLOR_INFO,
             )
@@ -2535,7 +2587,7 @@ class BuildSession:
                 f"(run `repo audit_nmu verbose` for full list)"
             )
         console.print(
-            "Fix: `repo strip` re-applies the strip to every "
+            "Fix: `repo repair strip` re-applies the strip to every "
             "non-conforming .deb in repo/."
         )
 
@@ -2713,14 +2765,9 @@ class BuildSession:
                               'dep constraints still carry an NMU/binNMU/'
                               'backport suffix (+bN, +debNuN, ~bpoN+N, '
                               'etc.)',
-            'strip':          'one-time backfill: strip NMU suffixes from '
-                              'every .deb/.udeb in repo/.  Future fresh '
-                              'builds get stripped automatically '
-                              'post-dpkg-buildpackage.',
-            'cleanup':        'delete obsolete .debs/.udebs from repo/ '
-                              '(orphan source / version drift).  Dry-run '
-                              'by default; pass `force` to actually '
-                              'delete.',
+            'repair':         'umbrella for repo-state fixups: `repo '
+                              'repair strip` (NMU suffix backfill), '
+                              '`repo repair cleanup` (drop obsoletes).',
             'index':          'generate apt-repo metadata in-place under '
                               'repo/dists/<codename>{,-debug}/',
         }
@@ -2732,13 +2779,36 @@ class BuildSession:
             return self.cmd_audit(*args)
         if action == 'audit_nmu':
             return self.cmd_audit_nmu(*args)
+        if action == 'repair':
+            return self.cmd_repo_repair(*args)
+        if action == 'index':
+            return self.cmd_index_repo(*args)
+        return self._group_help('repo', _table, action)
+
+    def cmd_repo_repair(self, action: str = '', *args):
+        """Umbrella for repo-state fixups.  Each sub-action mutates
+        repo/ to bring it into a clean state:
+
+          strip   — one-time NMU/binNMU/backport suffix backfill.  For
+                    every .deb/.udeb in repo/ whose Version or dep
+                    constraints carry an NMU layer, rewrite to pristine.
+                    Future fresh builds get stripped automatically
+                    post-`dpkg-buildpackage` so this is the corpus-fixup
+                    path for .debs that arrived via another route
+                    (manual ingest, pre-strip-policy builds).
+          cleanup — delete obsolete .debs/.udebs (orphan source / version
+                    drift).  Dry-run by default; pass `force` to delete.
+        """
+        _table = {
+            'strip':   'NMU-suffix backfill across repo/',
+            'cleanup': 'delete obsolete .debs/.udebs (dry-run by default; '
+                       'pass `force` to actually delete)',
+        }
         if action == 'strip':
             return self.cmd_strip_repo(*args)
         if action == 'cleanup':
             return self.cmd_package_cleanup(*args)
-        if action == 'index':
-            return self.cmd_index_repo(*args)
-        return self._group_help('repo', _table, action)
+        return self._group_help('repo repair', _table, action)
 
     def cmd_strip_repo(self, *args):
         """One-time backfill: strip NMU suffix from every .deb/.udeb
@@ -3056,7 +3126,7 @@ class BuildSession:
         if not _force:
             console.print(
                 "\nDRY-RUN — no files were deleted.  "
-                "Pass `repo cleanup force` to actually delete.",
+                "Pass `repo repair cleanup force` to actually delete.",
                 tui.COLOR_INFO,
             )
             return
@@ -3125,7 +3195,7 @@ class BuildSession:
              - dep-hash differs: GATE — print the gating fields, refuse the
                light path.  Operator must do a full cycle:
                    cache build force → dep parse force →
-                   source download force → source build <pkg>
+                   source sync force → source build <pkg>
              - tree-hash differs but dep-hash matches: LIGHT PATH:
                  a. Wipe the pkg's derived artifacts (fork tarball,
                     source/ copy, repo/ debs, build log sidecars).
@@ -3141,7 +3211,7 @@ class BuildSession:
 
         Why this exists: editing a fork file (e.g. fix a typo in
         debian/rules) used to require `cache build force` →
-        `dep parse force` → `source download force` →
+        `dep parse force` → `source sync force` →
         `source build <pkg>`, with each force flag manually remembered
         because the *_ready flags don't auto-invalidate.  This command
         does the right thing in one step for the common case (content
@@ -3216,7 +3286,7 @@ class BuildSession:
                     "  Full restart required:\n"
                     "    cache build force\n"
                     "    dep parse force\n"
-                    "    source download force\n"
+                    "    source sync force\n"
                     f"    source build {_pkg}",
                     tui.COLOR_INFO,
                 )
@@ -4664,7 +4734,7 @@ class BuildSession:
         decide whether to continue with the partial package set.
         """
         if not self.flags.download_ready:
-            console.print("Run 'source download' first")
+            console.print("Run 'source sync' first")
             return
 
         if not self.flags.build_container_ready:
@@ -5117,7 +5187,8 @@ class BuildSession:
 
     def cmd_source(self, action: str = '', *args):
         _table = {
-            'download': 'fetch source tarballs for selected sources',
+            'sync':     'fetch source tarballs: `source sync` (bulk) or '
+                        '`source sync <pkg> [force]` (per-pkg)',
             'build':    'build sources: source build [force] [pkg | live | installer | recommended | all | <pkg>…] [[profile,…]]',
             'rescan':   'report what source build would rebuild (source rescan [verbose])',
             'repair':   'restore .result=PASS for sources whose binaries exist in repo/ '
@@ -5128,8 +5199,8 @@ class BuildSession:
                         'binaries are missing from repo/main or whose versions '
                         'mismatch.  Tells you which sources still need building.',
         }
-        if action == 'download':
-            return self.cmd_source_download(*args)
+        if action == 'sync':
+            return self.cmd_source_sync(*args)
         if action == 'build':
             return self.cmd_source_build(*args)
         if action == 'rescan':
@@ -5217,7 +5288,7 @@ class BuildSession:
         explicitly cleans or passes `force`."""
         _table = {
             'cache':     'wipe cache/ (re-fetched on next `cache build`)',
-            'source':    'wipe source/ (re-downloaded on next `source download`)',
+            'source':    'wipe source/ (re-downloaded on next `source sync`)',
             'repo':      'wipe repo/ (rebuilt on next `source build`)',
             'buildroot': 'wipe buildroot/{live,installer} (sudo)',
             'image':     'wipe image/ (rebuilt on next `iso build`)',
@@ -5249,7 +5320,7 @@ class BuildSession:
         run their respective pipelines.
 
         Both pipelines share the early stages (cache → dep parse →
-        source download → container init → source build pkg) and diverge
+        source sync → container init → source build pkg) and diverge
         at the subset-specific source build + chroot build, then converge
         on `iso build *` to produce the bootable image.
         """
@@ -5275,7 +5346,7 @@ class BuildSession:
         _steps = [
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',       'dep parse'),
-            (self.cmd_source_download,   'download_ready',        'source download'),
+            (self.cmd_source_sync,       'download_ready',        'source sync'),
             (self.cmd_init_container,    'build_container_ready', 'container init'),
             (self.cmd_source_build,                                  # bare = pkg
                                           'source_build_ready',    'source build'),
@@ -5299,7 +5370,7 @@ class BuildSession:
         _steps = [
             (self.cmd_build_cache,       'cache_ready',                'cache build'),
             (self.cmd_parse_dependency,  'dep_check_ready',            'dep parse'),
-            (self.cmd_source_download,   'download_ready',             'source download'),
+            (self.cmd_source_sync,       'download_ready',             'source sync'),
             (self.cmd_init_container,    'build_container_ready',      'container init'),
             (self.cmd_source_build,                                       # bare = pkg
                                           'source_build_ready',         'source build'),
@@ -5431,8 +5502,8 @@ def main(banner: str) -> None:
     tui.register_command('clean',     session.cmd_clean,     '\tClean:      clean cache | source | repo | buildroot | image | download | container | all')
     tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
-    tui.register_command('source',    session.cmd_source,    '\tSources:    source download | source build [pkg|live|installer|recommended|all]')
-    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index | audit | audit_nmu | strip | cleanup | tunnel | reload')
+    tui.register_command('source',    session.cmd_source,    '\tSources:    source sync | source build [pkg|live|installer|recommended|all]')
+    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index | audit | audit_nmu | repair [strip|cleanup] | tunnel | reload')
     tui.register_command('container', session.cmd_container, '\tContainer:  container init')
     tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')

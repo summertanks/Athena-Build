@@ -82,7 +82,7 @@ The pipeline (eight stages, plus one optional side-channel):
 
 1. `cache build` — pulls `Packages` and `Sources` indices from each configured mirror, GPG-verifies the `InRelease` signature against `debian-archive-keyring`, and assembles an in-memory APT cache.
 2. `dep parse` — resolves the package list in `config/pkg.list` into a closed dependency graph (binary deps + matching source packages).
-3. `source download` — fetches `.dsc`, `.orig.tar.*`, and `.debian.tar.*` files for every selected source.
+3. `source sync` — fetches `.dsc`, `.orig.tar.*`, and `.debian.tar.*` files for every selected source.
 4. `container init` — builds a per-release Docker image carrying the build-deps for the source packages.
 5. `source build` — runs `dpkg-buildpackage` inside the container for each source, applies any patches under `patch/source/<pkg>/<ver>/`, drops the resulting `.deb` files (and `.udeb`s, when the source declares them) into `repo/`.  Default mode (= `source build pkg`) builds the **pkg.list closure only** — the user-choices layer minus live extras, installer udebs, and Recommends-only extras.  Layered subsets: `source build live` builds the live extras (live-boot, live-config, …); `source build installer` builds the udeb closure for the installer ramdisk + the installer-exclusive deb extras; `source build recommended` builds the depth-1 Recommends pulled in by `dep parse` for the future apt-repo.  A bracket-token like `source build live-boot-doc [nocheck]` overrides `DEB_BUILD_PROFILES` + `DEB_BUILD_OPTIONS` for that one build — useful when you want a `-doc` binary the default `nodoc` profile would skip.
 6. `chroot build` — installs the built `.deb`s into a chroot under `buildroot/` in topo-sorted batches, handling the libc bootstrap cycle, post-install patch overlays, and the canonical libdevmapper/dmsetup/systemd cycle (ARCH-12).  Runs `chroot verify` automatically as its tail end.  Bare `chroot build` is shorthand for `chroot build live` (today's default); `chroot build installer` is the d-i installer-chroot path — currently a stub (COMP-01a).
@@ -106,7 +106,7 @@ A Debian-derived host. Development happens on Debian bookworm; trixie should wor
 - **debian-archive-keyring** — used to GPG-verify mirror `InRelease` files. On a Debian host it's almost always there; on Ubuntu you may need to apt-install it (see `[Security]` in `config/build.conf` for the keyring path).
 - **Disk** — budget ~30 GB for a full bookworm-derived build. The bulk lives in `source/` (raw upstream tarballs), `build/` (per-package build trees inside the container), `repo/` (the produced `.deb`s), and `buildroot/` (the chroot the ISO is built from).
 - **RAM** — 8 GB is workable; 16 GB makes the source-build stage less painful, particularly once parallel builds land (COMP-03).
-- **Bandwidth** — first `cache build` + `source download` will pull a few GB. The rest is local.
+- **Bandwidth** — first `cache build` + `source sync` will pull a few GB. The rest is local.
 
 ### First run
 
@@ -122,7 +122,7 @@ The wrapper will tell you about any missing Python deps. Install them and re-run
 From there:
 
 - `print config` shows what `config/build.conf` resolved to — which mirrors are active, whether snapshot pinning is on, what `[Build]` codename will be baked into `/etc/os-release`. Run this first to confirm you're building what you think you're building.  (`print help` lists the other views.)
-- `autorun` runs stages 1–7 (cache → parse → download → container → source build (pkg) → source build live → chroot+verify). Phase 4 of COMP-01b split source build into the `pkg` and `live` arms; both must run before chroot build live. Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
+- `autorun` runs stages 1–7 (cache → parse → sync → container → source build (pkg) → source build live → chroot+verify). Phase 4 of COMP-01b split source build into the `pkg` and `live` arms; both must run before chroot build live. Expect ~30–60 minutes on a warm cache, longer on a first run because of the source download and the container build.
 - When `autorun` finishes cleanly, run `iso build live` to produce the final image. (If you want to drop extra files into `buildroot/` first — custom motd, extra config — this is the moment.)
 - If a stage fails, fix the cause and re-run that stage by name (`source build`, `chroot build`, etc.). `autorun` is a convenience, not a state machine — there is no resume.
 - TUI keys: arrows to scroll the active tab, `Tab` to cycle between tabs (console / log), `q`/`Q` to quit. Resize is handled automatically.
@@ -136,7 +136,7 @@ The final ISO appears under `image/` named `athena-<version>-amd64.iso`. A sidec
 The shipped pipeline already handles two distinct flavours of "package":
 
 1. **Install set** — what actually goes into the live ISO.  Comes from `config/pkg.list` plus the required/important closure plus their hard `Depends`.  These get built (or tunneled) by default `source build` and installed by `chroot build`.
-2. **Extras** — depth-1 *Recommends* of the install set.  They land in `selected_pkgs` (so `source download` fetches their tarballs) but are filtered out of the chroot install and out of the default `source build` run.  When you eventually publish the repo (CONF-01/02), they're what someone running `apt install <thing>` on a booted Athena system gets that *isn't* already on the disk.
+2. **Extras** — depth-1 *Recommends* of the install set.  They land in `selected_pkgs` (so `source sync` fetches their tarballs) but are filtered out of the chroot install and out of the default `source build` run.  When you eventually publish the repo (CONF-01/02), they're what someone running `apt install <thing>` on a booted Athena system gets that *isn't* already on the disk.
 
 You don't have to think about this on a normal `autorun` — the defaults do the right thing.  When you do want to poke at it, the relevant commands are:
 
