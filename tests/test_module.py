@@ -1236,7 +1236,7 @@ def test_buildsession_constructible_with_stub_tui():
                           'cmd_auto_run_live', 'cmd_auto_run_installer',
                           'cmd_print',
                           # Group dispatchers (noun-verb command surface).
-                          'cmd_cache', 'cmd_dep', 'cmd_patch',
+                          'cmd_cache', 'cmd_patch',
                           'cmd_source', 'cmd_repo', 'cmd_container',
                           'cmd_chroot', 'cmd_iso', 'cmd_key', 'cmd_clean'):
                 _fn = getattr(session, _name)
@@ -1259,7 +1259,10 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
     # action across all 9 groups.
     _matrix = [
         ('cmd_cache',     'build',    'cmd_build_cache'),
-        ('cmd_dep',       'parse',    'cmd_parse_dependency'),
+        ('cmd_cache',     'purge',    'cmd_cache_purge'),
+        ('cmd_cache',     'parse',    'cmd_parse_dependency'),
+        ('cmd_cache',     'select',   'cmd_cache_select'),
+        ('cmd_cache',     'info',     'cmd_cache_info'),
         ('cmd_patch',     'refresh',  'cmd_patch_refresh'),
         ('cmd_source',    'sync',     'cmd_source_sync'),
         ('cmd_source',    'build',    'cmd_source_build'),
@@ -12112,6 +12115,78 @@ def test_select_approx_closure_sums_first_provider_bfs():
     assert total == 300        # 3 × 100 KB
 
 
+def test_cmd_cache_info_prints_identity_and_relations():
+    """`cache info <pkg>` looks up the cache and prints identity +
+    relations; missing names report 'not found'."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    class _Pkg(dict):
+        def __init__(self):
+            super().__init__()
+            self.update({'Package': 'htop', 'Version': '3.2.2-1',
+                         'Architecture': 'amd64', 'Section': 'utils',
+                         'Priority': 'optional', 'Installed-Size': '512',
+                         'Source': 'htop',
+                         'Description': 'interactive process viewer\n more'})
+            self.depends = [('libc6', '2.36', '>='), ('libncursesw6', '', '')]
+            self.alt_depends = []
+            self.pre_depends = []
+            self.alt_pre_depends = []
+            self.recommends = []
+            self.suggests = []
+            self.provides = []
+            self.conflicts = []
+            self.breaks = []
+            self.replaces = []
+            self.depended_by = []
+
+    class _Cache:
+        def get_packages(self, name, version=None, constraint=''):
+            return [_Pkg()] if name == 'htop' else []
+
+    prints = []
+    class _RecConsole:
+        def print(self, msg, attr=None): prints.append(msg)
+        def INFO(self, m): pass
+        def WARNING(self, m): pass
+        def ERROR(self, m): pass
+
+    # Patch the module-level console facade build.py uses directly —
+    # deterministic regardless of the global tui_instance state left
+    # by prior tests in the suite.
+    saved_console = build.console
+    build.console = _RecConsole()
+    try:
+        sess = BuildSession.__new__(BuildSession)
+        sess.cache = _Cache()
+        sess.dep_tree = None
+        from types import SimpleNamespace
+        sess.flags = SimpleNamespace(cache_ready=True)
+
+        # Found package → identity + a Depends line.
+        sess.cmd_cache_info('htop')
+        blob = '\n'.join(prints)
+        assert 'htop' in blob and '3.2.2-1' in blob, repr(prints)
+        assert 'utils' in blob, repr(prints)              # Section
+        assert 'libc6 (>= 2.36)' in blob, repr(prints)    # constrained dep
+        assert 'libncursesw6' in blob, repr(prints)       # unconstrained dep
+
+        # Missing package → 'not found'.
+        prints.clear()
+        sess.cmd_cache_info('nosuchpkg')
+        assert any('not found' in p for p in prints)
+
+        # No arg → usage.
+        prints.clear()
+        sess.cmd_cache_info()
+        assert any('Usage' in p for p in prints)
+    finally:
+        build.console = saved_console
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FORK-01 Step 2 — fork mirror generation + cache integration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -15579,6 +15654,7 @@ def main() -> int:
         test_select_quit_without_save_does_not_use_dispatcher_prompt,
         test_select_quit_confirm_yes_saves_then_teardown,
         test_select_approx_closure_sums_first_provider_bfs,
+        test_cmd_cache_info_prints_identity_and_relations,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,
         # FORK-01 Step 2 — fork mirror generation + cache integration
