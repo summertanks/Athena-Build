@@ -11777,6 +11777,181 @@ def test_v2_logging_bridge_routes_by_stage():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# COMP-06 — package-set selector
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _select_controller(tmp_pkglist_body: str):
+    """Build a SelectPackages against a tmp pkg.list + a fake cache +
+    a recording fake Tui.  Returns (controller, fake_tui, path)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import select_packages
+
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, 'pkg.list')
+    with open(path, 'w') as f:
+        f.write(tmp_pkglist_body)
+
+    class _FakePkg(dict):
+        def __init__(self, size, desc):
+            super().__init__()
+            self['Installed-Size'] = str(size)
+            self['Description'] = desc
+            self.depends = []
+            self.pre_depends = []
+
+    class _FakeCache:
+        def get_packages(self, name, version=None, constraint=''):
+            # Every queried name resolves to a 100 KB stub.
+            return [_FakePkg(100, f'desc for {name}')]
+
+    class _FakeTui:
+        COLOR_HIGHLIGHT = 5
+        COLOR_INFO = 7
+        def __init__(self):
+            self.buffers = {}
+            self.added = []
+            self.removed = []
+            self.activated = []
+            self.key_handler = None
+            self.prints = []
+            self.cleared = False
+        def add_tab(self, name): self.added.append(name)
+        def remove_tab(self, name): self.removed.append(name)
+        def activate_tab(self, name): self.activated.append(name)
+        def set_tab_buffer(self, name, rows): self.buffers[name] = rows
+        def set_tab_key_handler(self, name, fn): self.key_handler = fn
+        def clear_tab_key_handler(self): self.cleared = True
+        def viewport_rows(self): return 20
+        def attr_reverse(self): return 1 << 18
+        def attr_color(self, idx): return idx << 8
+        def print(self, msg, attr=None): self.prints.append(msg)
+        def prompt(self, message, masked=False, keymode=False): return ''
+
+    from types import SimpleNamespace
+    cfg = SimpleNamespace(pkglist_path=path)
+    ctl = select_packages.SelectPackages(cfg, _FakeCache(), _FakeTui())
+    return ctl, ctl._tui, path
+
+
+def test_select_loads_groups_all_selected():
+    """Model loads every pkg.list entry as selected=True, groups in
+    declaration order."""
+    ctl, _t, _p = _select_controller(
+        '[base]\n## Description: core\nbash\ncoreutils\n\n[devel]\ngit\nvim\n')
+    assert list(ctl._groups.keys()) == ['base', 'devel']
+    assert [n for n, s in ctl._groups['base']] == ['bash', 'coreutils']
+    assert all(s for _n, s in ctl._groups['base'])
+    assert ctl._meta['base']['description'] == 'core'
+
+
+def test_select_toggle_and_save_round_trip():
+    """Toggling a package off drops it from the written pkg.list;
+    group order + descriptions preserved."""
+    import select_packages
+    ctl, _t, path = _select_controller(
+        '[base]\n## Description: core\nbash\ncoreutils\n\n[devel]\ngit\nvim\n')
+    # Toggle coreutils off.
+    ctl._entry('base', 'coreutils')[1] = False
+    select_packages.write_pkg_list(path, ctl._groups, ctl._meta)
+
+    with open(path) as f:
+        body = f.read()
+    assert '[base]' in body and '[devel]' in body
+    assert '## Description: core' in body
+    assert 'bash' in body
+    assert 'coreutils' not in body          # dropped
+    assert body.index('[base]') < body.index('[devel]')   # order preserved
+
+    # Re-parse → group structure intact, coreutils gone.
+    import utils
+    groups = utils.parse_pkg_list_groups(path)
+    assert groups['base'] == ['bash']
+    assert groups['devel'] == ['git', 'vim']
+
+
+def test_select_add_package_appends_to_group():
+    """Adding a name appends it (selected) to the group's entry list."""
+    ctl, _t, _p = _select_controller('[base]\nbash\n')
+    assert ctl._entry('base', 'htop') is None
+    ctl._groups['base'].append(['htop', True])
+    assert ctl._entry('base', 'htop') == ['htop', True]
+
+
+def test_select_flat_file_round_trips_without_header():
+    """A flat (legacy) pkg.list with no sections round-trips flat —
+    no spurious [base] header injected."""
+    import select_packages, utils
+    ctl, _t, path = _select_controller('bash\ncoreutils\nvim\n')
+    assert list(ctl._groups.keys()) == ['base']
+    select_packages.write_pkg_list(path, ctl._groups, ctl._meta)
+    with open(path) as f:
+        body = f.read()
+    assert '[base]' not in body          # stayed flat
+    assert utils.parse_pkg_list_groups(path) == {'base': ['bash', 'coreutils', 'vim']}
+
+
+def test_select_key_toggle_sets_unsaved_and_rerenders():
+    """Space on a package row toggles it + marks unsaved + re-renders
+    (a fresh buffer is pushed to the 'select' tab)."""
+    ctl, ft, _p = _select_controller('[base]\nbash\ncoreutils\n')
+    ctl.activate()
+    assert ft.added == ['select'] and ft.activated == ['select']
+    # Bound methods compare by __func__ (a fresh bound-method object is
+    # created on each attribute access, so `is` on the method fails).
+    assert ft.key_handler.__func__ is ctl.handle_key.__func__
+    # rows: [header base, bash, coreutils].  Cursor 0 = header; move to bash.
+    ctl.handle_key('KEY_DOWN')   # cursor → 1 (bash)
+    ft.buffers.clear()
+    consumed = ctl.handle_key(' ')
+    assert consumed is True
+    assert ctl._unsaved is True
+    assert ctl._entry('base', 'bash')[1] is False
+    assert 'select' in ft.buffers   # re-rendered
+
+    # F-keys fall through (not consumed) so tab-switch still works.
+    assert ctl.handle_key('KEY_F(2)') is False
+
+
+def test_select_approx_closure_sums_first_provider_bfs():
+    """_approx_closure walks Depends/Pre-Depends first-provider and
+    sums Installed-Size.  Build a 3-pkg chain a→b→c each 100 KB."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import select_packages
+
+    class _P(dict):
+        def __init__(self, size, deps):
+            super().__init__()
+            self['Installed-Size'] = str(size)
+            self['Description'] = ''
+            self.depends = [(d, '', '') for d in deps]
+            self.pre_depends = []
+
+    chain = {'a': _P(100, ['b']), 'b': _P(100, ['c']), 'c': _P(100, [])}
+
+    class _Cache:
+        def get_packages(self, name, version=None, constraint=''):
+            return [chain[name]] if name in chain else []
+
+    from types import SimpleNamespace
+    import tempfile
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, 'pkg.list')
+    with open(path, 'w') as f:
+        f.write('[base]\na\n')
+    cfg = SimpleNamespace(pkglist_path=path)
+
+    class _T:
+        COLOR_HIGHLIGHT = 5
+        COLOR_INFO = 7
+    ctl = select_packages.SelectPackages(cfg, _Cache(), _T())
+    total, count = ctl._approx_closure('a')
+    assert count == 3          # a, b, c
+    assert total == 300        # 3 × 100 KB
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FORK-01 Step 2 — fork mirror generation + cache integration
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -15232,6 +15407,13 @@ def main() -> int:
         test_v2_dispatcher_progressbar_widget_lifecycle,
         test_v2_dispatcher_adaptive_idle_no_widgets,
         test_v2_logging_bridge_routes_by_stage,
+        # COMP-06 — package-set selector
+        test_select_loads_groups_all_selected,
+        test_select_toggle_and_save_round_trip,
+        test_select_add_package_appends_to_group,
+        test_select_flat_file_round_trips_without_header,
+        test_select_key_toggle_sets_unsaved_and_rerenders,
+        test_select_approx_closure_sums_first_provider_bfs,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,
         # FORK-01 Step 2 — fork mirror generation + cache integration

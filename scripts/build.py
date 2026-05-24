@@ -5595,6 +5595,25 @@ class BuildSession:
             return self.cmd_patch_refresh(*args)
         return self._group_help('patch', _table, action)
 
+    def cmd_select(self, *args):
+        """COMP-06 — interactive package-set selector.
+
+        Opens a `select` tab where the operator toggles packages in
+        `config/pkg.list` and adds new ones from the cache, then saves.
+        Requires the cache (for metadata) — gate on cache_ready.
+        Interactive-only: needs the curses tab + key-interceptor API,
+        absent on the headless Cli backend."""
+        if not self.flags.cache_ready or self.cache is None:
+            console.print("Run 'cache build' first (selector needs package metadata)")
+            return
+        if not hasattr(tui.tui_instance, 'set_tab_key_handler'):
+            console.print("select: interactive selector needs the curses TUI "
+                          "(not available in --headless mode); edit "
+                          f"{self.config.pkglist_path} by hand")
+            return
+        from select_packages import SelectPackages
+        SelectPackages(self.config, self.cache, tui.tui_instance).activate()
+
     def cmd_source(self, action: str = '', *args):
         _table = {
             'sync':     'fetch source tarballs: `source sync` (bulk) or '
@@ -5916,6 +5935,7 @@ def main(banner: str) -> None:
     tui.register_command('cache',     session.cmd_cache,     'Cache:      cache <build|purge>')
     tui.register_command('clean',     session.cmd_clean,     'Clean:      clean <subcmd> — run `clean` for the list')
     tui.register_command('dep',       session.cmd_dep,       'Deps:       dep parse')
+    tui.register_command('select',    session.cmd_select,    'Select:     toggle packages in pkg.list (interactive)')
     tui.register_command('patch',     session.cmd_patch,     'Patches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|fork>')
     tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|audit|repair|tunnel>')
