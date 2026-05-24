@@ -13596,6 +13596,20 @@ def test_cmd_source_repair_writes_pass_when_binaries_present():
         with open(os.path.join(_repo, _deb_name), 'wb') as fh:
             fh.write(b'!<arch>\n')  # ar magic; content beyond is fake
 
+        # Plant a matching .patchhash baseline so _source_state
+        # classifies the source as 'repairable' (post 2026-05-23 P3
+        # tightening: 'repairable' now requires .patchhash matching
+        # current patch_set_hash as proof binaries reflect current
+        # patches — without it the state is 'needs_build' because
+        # we can't prove binaries are fresh).
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+        from utils import patch_set_hash as _patch_set_hash
+        _patch_dir = os.path.join(_tmp, 'patch', 'source', 'foo', '1.0')
+        _baseline = _patch_set_hash(_patch_dir, [])
+        with open(os.path.join(_buildlog, 'foo.patchhash'), 'w') as fh:
+            fh.write(_baseline + '\n')
+
         # Stub Source-like
         class _Src:
             pkgs = [_deb_name]
@@ -14028,6 +14042,91 @@ def test_destructive_helpers_warn_in_docstring():
         "carries no destructive-intent marker (⚠️/DESTRUCTIVE/DELETES). "
         "Future read-only callers will assume it's safe and recreate "
         "the 2026-05-19 over-counting bug.")
+
+
+def test_source_state_repairable_requires_patchhash_baseline():
+    """Regression for the audit/repair ping-pong reported 2026-05-23.
+
+    Before this fix: repair on stale_pass cleared both .result and
+    .patchhash; the next audit re-classified the source as
+    'repairable' (binaries valid + .result missing); a second repair
+    would write PASS over actually-stale binaries.  Cycle didn't
+    settle.
+
+    After fix: 'repairable' requires .patchhash matching current
+    patch_set_hash as proof binaries are current.  Without the
+    baseline, classify as 'needs_build' instead — operator must
+    rebuild, not repair.
+
+    Pins the three .patchhash branches for the binaries-valid +
+    .result-missing case."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+    from utils import patch_set_hash as _patch_set_hash
+
+    def _run(patchhash_content):
+        with tempfile.TemporaryDirectory() as _tmp:
+            _buildlog = os.path.join(_tmp, 'log', 'build')
+            _repo = os.path.join(_tmp, 'repo')
+            os.makedirs(_buildlog, exist_ok=True)
+            os.makedirs(_repo, exist_ok=True)
+            _deb = 'foo_1.0_amd64.deb'
+            with open(os.path.join(_repo, _deb), 'wb') as fh:
+                fh.write(b'!<arch>\n')
+            # .result deliberately NOT created (this is the "missing
+            # .result" axis we're testing).
+            if patchhash_content is not None:
+                with open(os.path.join(_buildlog, 'foo.patchhash'),
+                          'w') as fh:
+                    fh.write(patchhash_content + '\n')
+            class _Src:
+                pkgs = [_deb]
+                files = {}
+                version = '1.0'
+                patch_list = []
+            class _Container:
+                buildlog_path = _buildlog
+                @staticmethod
+                def is_ar_file(_): return True
+                @staticmethod
+                def verify_pkg_artifact(*_a, **_kw): return (True, 'ok')
+            class _Cfg:
+                dir_repo = _repo
+                dir_log = os.path.join(_tmp, 'log')
+                dir_source = os.path.join(_tmp, 'source')
+                dir_patch_source = os.path.join(_tmp, 'patch', 'source')
+                @staticmethod
+                def deb_dest_for_filename(_): return _repo
+            class _Tree:
+                selected_srcs = {'foo': _Src()}
+                src_pkg_files = {'foo': list(_Src.pkgs)}
+            _sess = _build_mod.BuildSession.__new__(
+                _build_mod.BuildSession)
+            _sess.config = _Cfg
+            _sess.dep_tree = _Tree
+            _sess.udeb_dep_tree = None
+            _sess.container = _Container
+            return _sess._source_state('foo', _Tree.selected_srcs['foo'])
+
+    # Branch A: .patchhash absent → can't prove binaries fresh →
+    # needs_build (NOT repairable).
+    assert _run(None) == 'needs_build', (
+        "missing .patchhash + missing .result + valid binaries must "
+        "classify as 'needs_build' (no proof of freshness), not "
+        "'repairable' — otherwise repair-after-stale_pass writes PASS "
+        "over actually-stale binaries"
+    )
+
+    # Branch B: .patchhash matches current → binaries provably built
+    # against current patches → 'repairable'.
+    _matching = _patch_set_hash('/nonexistent', [])
+    assert _run(_matching) == 'repairable'
+
+    # Branch C: .patchhash differs from current → binaries are stale
+    # → 'needs_build'.
+    assert _run('deadbeef' * 8) == 'needs_build'
 
 
 def test_cmd_source_audit_classifies_rebuilds_by_subset():
@@ -15081,6 +15180,7 @@ def main() -> int:
         test_content_integrity_absorbed_into_cmd_audit_per_cohort,
         test_deb_dir_for_recognises_main_udeb_label,
         test_repo_audit_closure_handles_conflicts_and_provides,
+        test_source_state_repairable_requires_patchhash_baseline,
         test_cmd_source_audit_classifies_rebuilds_by_subset,
         test_readonly_named_commands_have_no_destructive_calls,
         test_destructive_helpers_warn_in_docstring,
