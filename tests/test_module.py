@@ -12715,6 +12715,236 @@ def test_tui_refreshtab_wraps_long_line_into_multiple_display_rows():
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# tui_v2 — clean-slate event-dispatcher TUI (ARCH-14 P9 follow-up)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _v2_fake_renderer():
+    """Stub Renderer for Dispatcher tests — counts renders, records last
+    state snapshot.  Width/content_rows fixed at 80×20 so tests have
+    predictable wrap arithmetic."""
+    class _R:
+        def __init__(self):
+            self.renders = 0
+            self.last = None
+        def render(self, state):
+            self.renders += 1
+            self.last = state
+        def width(self): return 80
+        def content_rows(self): return 20
+    return _R()
+
+
+def test_v2_wrap_helpers_round_trip():
+    """tui_v2.wrap mirrors the legacy P7 helpers — same contract."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2 import wrap
+    assert wrap.wrap_line('hello', 80) == ['hello']
+    assert wrap.wrap_line('a' * 11, 10) == ['a' * 10, 'a']
+    assert wrap.wrap_line('', 80) == ['']
+    assert wrap.entry_display_rows('a' * 81, 80) == 2
+    buf = [('short', 0), ('a' * 100, 0), ('', 0)]
+    assert wrap.total_display_rows(buf, 80) == 1 + 2 + 1
+
+
+def test_v2_state_append_and_scroll():
+    """State.tabs[name].append handles scroll_offset in display-row units."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2.state import State
+
+    s = State()
+    assert 'console' in s.tabs and 'log' in s.tabs
+    assert s.active_tab_name() == 'console'
+
+    # At-bottom: scroll stays 0 after append.
+    s.tabs['console'].append([('a', 0), ('b', 0)], width=80)
+    assert s.tabs['console'].scroll_offset == 0
+
+    # Scrolled away: scroll_offset bumps by display rows (1 row each at w=80).
+    s.tabs['console'].scroll_offset = 5
+    s.tabs['console'].append([('c', 0), ('d', 0)], width=80)
+    assert s.tabs['console'].scroll_offset == 7
+
+    # Long line wraps to 3 rows at w=10; offset increments by 3.
+    s.tabs['log'].scroll_offset = 1
+    s.tabs['log'].append([('x' * 25, 0)], width=10)
+    assert s.tabs['log'].scroll_offset == 1 + 3
+
+
+def test_v2_cmdline_edit_and_history():
+    """CmdLine matches legacy _Commands semantics (cursor edit + history)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2.state import CmdLine
+
+    c = CmdLine()
+    for ch in 'hello':
+        c.insert(ch)
+    assert c.text == 'hello' and c.cursor == 5
+    c.move_left(); c.move_left()
+    c.insert('X')
+    assert c.text == 'helXlo' and c.cursor == 4
+    assert c.backspace() is True
+    assert c.text == 'hello' and c.cursor == 3
+
+    # History walk.
+    c.push_history('first')
+    c.push_history('second')
+    c.set_text('draft')
+    assert c.history_prev() is True and c.text == 'second'
+    assert c.history_prev() is True and c.text == 'first'
+    assert c.history_prev() is False   # at oldest
+    assert c.history_next() is True and c.text == 'second'
+    assert c.history_next() is True
+    assert c.text == 'draft', 'past-newest Down restores draft'
+
+
+def test_v2_dispatcher_key_events_edit_cmdline():
+    """KeyEvents in the no-prompt path edit the cmdline."""
+    import sys, threading, time
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2.dispatcher import Dispatcher
+    from tui_v2.events import KeyEvent, Shutdown
+
+    d = Dispatcher(_v2_fake_renderer())
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    time.sleep(0.02)
+    for ch in 'abc':
+        d.post(KeyEvent(ch))
+    d.post(KeyEvent('KEY_LEFT'))
+    d.post(KeyEvent('X'))
+    time.sleep(0.05)
+    assert d.state.cmd.text == 'abXc', d.state.cmd.text
+    d.post(Shutdown(0))
+    t.join(timeout=1)
+
+
+def test_v2_dispatcher_prompt_future_round_trip():
+    """request_prompt blocks caller, dispatcher fulfills via Enter."""
+    import sys, threading, time
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2.dispatcher import Dispatcher
+    from tui_v2.events import KeyEvent, Shutdown
+
+    d = Dispatcher(_v2_fake_renderer())
+    threading.Thread(target=d.run, daemon=True).start()
+    time.sleep(0.02)
+
+    result_holder = {}
+    def caller():
+        result_holder['ans'] = d.request_prompt('Enter: ')
+    threading.Thread(target=caller, daemon=True).start()
+    time.sleep(0.05)
+
+    # Now the dispatcher is in prompt mode; route keys to the prompt.
+    for ch in 'yes':
+        d.post(KeyEvent(ch))
+    d.post(KeyEvent('\n'))
+    time.sleep(0.1)
+    assert result_holder.get('ans') == 'yes', result_holder
+    d.post(Shutdown(0))
+
+
+def test_v2_dispatcher_tab_switch_by_index():
+    """F-key activates nth tab; out-of-range silently no-ops."""
+    import sys, threading, time
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2.dispatcher import Dispatcher
+    from tui_v2.events import KeyEvent, Shutdown
+
+    d = Dispatcher(_v2_fake_renderer())
+    threading.Thread(target=d.run, daemon=True).start()
+    time.sleep(0.02)
+    d.post(KeyEvent('KEY_F(3)'))   # cache (index 2)
+    time.sleep(0.05)
+    assert d.state.active_tab_name() == 'cache'
+    d.post(KeyEvent('KEY_F(99)'))  # out of range — no change
+    time.sleep(0.05)
+    assert d.state.active_tab_name() == 'cache'
+    d.post(Shutdown(0))
+
+
+def test_v2_dispatcher_progressbar_widget_lifecycle():
+    """ProgressBar add/remove via dispatcher events."""
+    import sys, threading, time
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2 import widgets
+    from tui_v2.dispatcher import Dispatcher
+    from tui_v2.events import Shutdown
+
+    d = Dispatcher(_v2_fake_renderer())
+    widgets.set_dispatcher(d)
+    threading.Thread(target=d.run, daemon=True).start()
+    time.sleep(0.02)
+
+    bar = widgets.ProgressBar('Test', maxvalue=100)
+    time.sleep(0.05)
+    assert bar in d.state.widgets
+    bar.step(50)
+    time.sleep(0.05)
+    assert bar.value == 50
+    bar.close()
+    time.sleep(0.05)
+    assert bar not in d.state.widgets
+    d.post(Shutdown(0))
+
+
+def test_v2_dispatcher_adaptive_idle_no_widgets():
+    """No widgets and no events -> dispatcher blocks on get(timeout=1s)
+    rather than busy-spinning.  We can't measure timeout directly, but
+    we can verify no events get processed during a 200ms idle window."""
+    import sys, threading, time
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2.dispatcher import Dispatcher
+    from tui_v2.events import Shutdown
+
+    r = _v2_fake_renderer()
+    d = Dispatcher(r)
+    threading.Thread(target=d.run, daemon=True).start()
+    time.sleep(0.02)
+    renders_before = r.renders
+    time.sleep(0.2)
+    # With IDLE_TIMEOUT=1.0 and no widgets, at most one extra render
+    # (the initial one) should have happened in 200ms.
+    assert r.renders - renders_before <= 1, (
+        f'expected <=1 render during 200ms idle; got {r.renders - renders_before}'
+    )
+    d.post(Shutdown(0))
+
+
+def test_v2_logging_bridge_routes_by_stage():
+    """LogTabHandler emits LogEvents tagged with the right tab."""
+    import sys, threading, time, logging as _logging
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui_v2.dispatcher import Dispatcher
+    from tui_v2.events import Shutdown
+    from tui_v2.logging_bridge import setup_logging
+
+    d = Dispatcher(_v2_fake_renderer())
+    threading.Thread(target=d.run, daemon=True).start()
+    time.sleep(0.02)
+    setup_logging(d)
+
+    _logging.getLogger('athena').info('plain athena')
+    _logging.getLogger('athena.cache').warning('cache stage')
+    _logging.getLogger('athena.iso').error('iso stage')
+    time.sleep(0.1)
+
+    log_buf   = [t for t, _ in d.state.tabs['log'].buffer]
+    cache_buf = [t for t, _ in d.state.tabs['cache'].buffer]
+    iso_buf   = [t for t, _ in d.state.tabs['iso'].buffer]
+    assert any('plain athena' in line for line in log_buf), log_buf
+    assert any('cache stage'  in line for line in cache_buf), cache_buf
+    assert any('iso stage'    in line for line in iso_buf), iso_buf
+
+    # Bare athena should NOT have leaked into cache/iso.
+    assert not any('plain athena' in line for line in cache_buf)
+    d.post(Shutdown(0))
+
+
 def test_tui_tab_entry_cursor_field_removed():
     """ARCH-14 P6: the deprecated `cursor` field is gone from
     _TabEntry, _create_tab, and all write sites.  Pin its absence so a
@@ -16253,6 +16483,16 @@ def main() -> int:
         test_tui_total_display_rows_sums_across_buffer,
         test_tui_append_lines_scroll_increments_by_display_rows,
         test_tui_refreshtab_wraps_long_line_into_multiple_display_rows,
+        # tui_v2 — clean-slate event-dispatcher TUI
+        test_v2_wrap_helpers_round_trip,
+        test_v2_state_append_and_scroll,
+        test_v2_cmdline_edit_and_history,
+        test_v2_dispatcher_key_events_edit_cmdline,
+        test_v2_dispatcher_prompt_future_round_trip,
+        test_v2_dispatcher_tab_switch_by_index,
+        test_v2_dispatcher_progressbar_widget_lifecycle,
+        test_v2_dispatcher_adaptive_idle_no_widgets,
+        test_v2_logging_bridge_routes_by_stage,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,
         # FORK-01 Step 2 — fork mirror generation + cache integration
