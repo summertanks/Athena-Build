@@ -1959,6 +1959,96 @@ class BuildSession:
             return None
         return frozenset(self._canonical_names(self.udeb_dep_tree))
 
+    def _preflight_audit_source(self) -> bool:
+        """Source-side audit gate for `chroot build live/installer`.
+
+        Walks `_source_state` over the merged deb+udeb dep tree.
+        Aborts (with operator y/n prompt) when any of these states
+        are non-empty for selected sources:
+
+          needs_build  — binaries missing or invalid (legitimate rebuild)
+          needs_sync   — source files missing or .verified absent
+          stale_pass   — .result=PASS but state drifted (patches changed
+                          since the build that wrote .result)
+          repairable   — binaries valid but .result missing
+                          (BUT: see below — repairable is treated as
+                          soft, not hard)
+
+        repairable is SOFT (operator should `source repair` but the
+        chroot build can still succeed — apt + dpkg don't read
+        .result; .result is build-pipeline metadata).  Hard fails
+        are needs_build / needs_sync / stale_pass which would either
+        miss .debs entirely or include stale ones.
+
+        Returns True to proceed, False to abort.  Cheap (~5s) — each
+        per-source classify is a few stat() calls.
+
+        If dep_tree isn't built (operator hit chroot build before
+        dep parse), gate is skipped with a hint — the source-build
+        flag guard above already catches that miss-ordering.
+        """
+        if not (self.dep_tree and self.dep_tree.selected_srcs):
+            return True
+        if self.container is None:
+            # _source_state needs container.is_ar_file
+            return True
+
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _n, _s in self.udeb_dep_tree.selected_srcs.items():
+                if _n not in _srcs:
+                    _srcs[_n] = _s
+
+        _hard = ('needs_build', 'needs_sync', 'stale_pass')
+        _soft = ('repairable',)
+        _by_state: 'dict[str, list[str]]' = {
+            _s: [] for _s in _hard + _soft
+        }
+        for _name, _src in _srcs.items():
+            _state = self._source_state(_name, _src)
+            if _state in _by_state:
+                _by_state[_state].append(_name)
+
+        _hard_count = sum(len(_by_state[_s]) for _s in _hard)
+        _soft_count = sum(len(_by_state[_s]) for _s in _soft)
+
+        if _hard_count == 0 and _soft_count == 0:
+            console.print(
+                f"Source audit OK: {len(_srcs)} sources synced, "
+                f"built, fresh."
+            )
+            return True
+
+        console.print("Source audit found build-state issues:")
+        for _state in _hard + _soft:
+            _names = _by_state[_state]
+            if not _names:
+                continue
+            _marker = '(hard)' if _state in _hard else '(soft)'
+            console.print(
+                f"  {len(_names):5d}  {_state}  {_marker}"
+            )
+        for _state in _hard + _soft:
+            _names = sorted(_by_state[_state])
+            if not _names:
+                continue
+            self._print_wrapped_names(f"    {_state}", _names)
+        console.print(
+            "  Fix: `source build` (rebuilds), `source repair` "
+            "(aligns .result), `source sync` (re-fetches)."
+        )
+
+        if _hard_count == 0:
+            # Only soft findings — proceed silently.  Audit reports
+            # the count above; no prompt needed.
+            return True
+        _resp = Prompt(
+            PROMPT_YESNO,
+            "Proceed with chroot build despite source audit "
+            "findings?  (hard: rebuild recommended)",
+        ).get_response()
+        return _resp.lower() in ('y', 'yes')
+
     def _preflight_audit_repo(self) -> bool:
         """Repo audit gate for `chroot build live/installer`.
 
@@ -3549,13 +3639,29 @@ class BuildSession:
         if not self._ensure_signing_key_verified():
             return
 
-        # Pre-flight closure audit — scoped to the live selection so
-        # alternatives in the flat repo (busybox vs busybox-static,
-        # grub-pc vs grub-efi) don't surface as false-positive conflicts.
-        # Fast path (cached Packages snapshot) when repo/ unchanged.
-        if not self._preflight_audit_repo():
-            console.print("Aborted by repo audit pre-flight")
-            return
+        # Pre-flight audit gates (P5 2026-05-23).  Two layers, both
+        # ABORT on red unless `no-gate` is in args:
+        #   1. source audit — build-state per source (binaries present,
+        #      .result fresh, patches not drifted)
+        #   2. repo audit — install-time risks (unresolved Depends,
+        #      conflict cohorts)
+        # Operator can bypass both with `chroot build live no-gate`
+        # for emergency / debugging — when the audits are noisy in a
+        # known-acceptable way but you want to push through.
+        _no_gate = 'no-gate' in args or '--no-gate' in args
+        if not _no_gate:
+            if not self._preflight_audit_source():
+                console.print("Aborted by source audit pre-flight")
+                return
+            if not self._preflight_audit_repo():
+                console.print("Aborted by repo audit pre-flight")
+                return
+        else:
+            console.print(
+                "chroot build live: pre-flight audits BYPASSED "
+                "(no-gate)",
+                tui.COLOR_WARNING,
+            )
 
         _debug = 'with_debug' in args
         if _debug:
@@ -3638,10 +3744,22 @@ class BuildSession:
         # Pre-flight closure audit — scoped to the installer (udeb)
         # selection.  Installer chroot uses dpkg --unpack (no apt),
         # so unmet deps don't fail until the installer runs on the
-        # target — catch them here.
-        if not self._preflight_audit_repo():
-            console.print("Aborted by repo audit pre-flight")
-            return
+        # target — catch them here.  Two-layer gate (P5 2026-05-23) —
+        # source audit first, then repo audit.  Bypass with `no-gate`.
+        _no_gate = 'no-gate' in args or '--no-gate' in args
+        if not _no_gate:
+            if not self._preflight_audit_source():
+                console.print("Aborted by source audit pre-flight")
+                return
+            if not self._preflight_audit_repo():
+                console.print("Aborted by repo audit pre-flight")
+                return
+        else:
+            console.print(
+                "chroot build installer: pre-flight audits BYPASSED "
+                "(no-gate)",
+                tui.COLOR_WARNING,
+            )
 
         self.flags.chroot_installer_ready = False  # reset before work
 

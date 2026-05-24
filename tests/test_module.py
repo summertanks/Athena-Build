@@ -14173,6 +14173,42 @@ def test_source_state_repairable_requires_patchhash_baseline():
     assert _run('deadbeef' * 8) == 'needs_build'
 
 
+def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
+    """P5 (2026-05-23): both chroot build live + installer must
+    pre-flight `source audit` AND `repo audit`, and both must honour
+    a `no-gate` arg to bypass the gates.  Pin the structural shape
+    of both methods."""
+    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # Both audit helpers must exist.
+    assert 'def _preflight_audit_source(' in _body, (
+        "missing _preflight_audit_source helper (P5)"
+    )
+    assert 'def _preflight_audit_repo(' in _body, (
+        "missing _preflight_audit_repo helper (was P3)"
+    )
+    # Both chroot build entry points must call both helpers AND check
+    # for the no-gate bypass.
+    for _entry in ('cmd_build_chroot_live', 'cmd_build_chroot_installer'):
+        _m = re.search(
+            rf'def {_entry}\(self.*?(?=\n    def \w)',
+            _body, re.DOTALL,
+        )
+        assert _m, f"{_entry} body not found"
+        _fn = _m.group(0)
+        assert "'no-gate' in args" in _fn or "--no-gate" in _fn, (
+            f"{_entry} missing no-gate bypass arg parsing"
+        )
+        assert 'self._preflight_audit_source()' in _fn, (
+            f"{_entry} doesn't call _preflight_audit_source"
+        )
+        assert 'self._preflight_audit_repo()' in _fn, (
+            f"{_entry} doesn't call _preflight_audit_repo"
+        )
+
+
 def test_cmd_source_fork_disable_writes_marker_and_invalidates_state():
     """source fork <pkg> disabled — writes `.disabled` marker at
     fork/source/<pkg>/ AND clears cache_ready + dep_check_ready so the
@@ -15326,6 +15362,7 @@ def main() -> int:
         test_repo_audit_closure_handles_conflicts_and_provides,
         test_print_wrapped_names_keeps_lines_under_wrap_width,
         test_source_state_repairable_requires_patchhash_baseline,
+        test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
         test_cmd_source_fork_enable_removes_marker,
         test_fork_mirror_discover_skips_disabled_trees,
