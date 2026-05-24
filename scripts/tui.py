@@ -18,6 +18,23 @@ Usage::
 Only one Tui instance may exist at a time.  Built-in commands: clear, demo,
 history, info, help, quit.  Register additional commands with
 ``tui.register_command(name, fn, tooltip)``.
+
+ARCH-14 key bindings:
+    F1..F<n>       activate the n-th tab (insertion order; 1-based).
+    Alt+F1..       same — for terminals that don't pass Fn through alone.
+    Left / Right   move the edit cursor on the command line.
+    Up / Down      walk command history (Down past newest restores draft).
+    PgUp / PgDn    scroll the active tab's buffer by one screenful.
+    Tab            command-name autocomplete.
+    Backspace      delete the char before the edit cursor.
+    Enter          submit the current line.
+
+Per-stage log routing (ARCH-14 P6):
+    logging.getLogger('athena')           → 'log' tab (catch-all).
+    logging.getLogger('athena.<stage>')   → '<stage>' tab if it exists
+                                            (e.g. 'athena.cache' → cache
+                                            tab); otherwise falls back to
+                                            'log' so no record is lost.
 """
 
 import curses
@@ -40,6 +57,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict
 import psutil
 
 
+# Module-level logger name — hoisted from below so the module-scoped
+# `_logger` (used by curses-error debug breadcrumbs in P6) can resolve
+# before the class definitions.
+LOGGER_NAME = 'athena'
+_logger = logging.getLogger(LOGGER_NAME)
+
+
 # ---------------------------------------------------------------------------
 # Shared TypedDict for tab entries
 # ---------------------------------------------------------------------------
@@ -48,7 +72,6 @@ class _TabEntry(TypedDict):
     win:      curses.window
     panel:    curses.panel.panel
     buffer:   List[Tuple[str, int]]   # (text_with_newline, curses_attr)
-    cursor:   int                     # DEPRECATED — pruned in ARCH-14 P6
     scroll_offset: int                # rows above the bottom (0 = at-bottom,
                                       # sticky; positive = user scrolled up)
     selected: bool
@@ -445,7 +468,7 @@ class Tui:
         win.scrollok(False)   # layout is fully manual — disable auto-scroll
         win.bkgd(' ', curses.color_pair(self.COLOR_NORMAL))
         return {'win': win, 'panel': pnl, 'buffer': [],
-                'cursor': 0, 'scroll_offset': 0, 'selected': False}
+                'scroll_offset': 0, 'selected': False}
 
     def _create_windows(self) -> None:
         """Create (first call) or resize-in-place (subsequent calls) all curses windows."""
@@ -483,29 +506,30 @@ class Tui:
             # resize/mvwin keeps the C-level window+panel objects intact.
 
             # Clamp tab scroll state to the new height before resizing.
-            # ARCH-14 P2: scroll_offset is the new render driver; cap
-            # it at len(buffer)-1 so it can't address past the head.
-            # `cursor` is kept in sync until P6 prunes it.
+            # ARCH-14 P6: cap at len(buffer) - content_rows (was -1).
+            # Past this point the top of the buffer is fully visible
+            # and further scrolling would just pad the visible window
+            # with blank space.
             new_h = tc['h']
             for tab in self._tabs.values():
-                tab['cursor'] = min(tab['cursor'], max(new_h, len(tab['buffer'])))
                 tab['scroll_offset'] = min(
                     tab['scroll_offset'],
-                    max(0, len(tab['buffer']) - 1),
+                    max(0, len(tab['buffer']) - new_h),
                 )
 
             try:
                 self._footer.resize(fc['h'], fc['w'])
                 self._footer.mvwin(fc['y'], fc['x'])
-            except curses.error:
-                pass
+            except curses.error as exc:
+                _logger.debug('TUI resize: footer resize/mvwin failed: %s', exc)
 
-            for tab in self._tabs.values():
+            for tab_name, tab in self._tabs.items():
                 try:
                     tab['win'].resize(tc['h'], tc['w'])
                     tab['win'].mvwin(tc['y'], tc['x'])
-                except curses.error:
-                    pass
+                except curses.error as exc:
+                    _logger.debug('TUI resize: tab %r resize/mvwin failed: %s',
+                                  tab_name, exc)
 
     # =====================================================================
     # Drawing
@@ -897,22 +921,22 @@ class Tui:
             curses.echo()
             curses.nocbreak()
             curses.curs_set(1)
-        except curses.error:
-            pass
+        except curses.error as exc:
+            _logger.debug('TUI shutdown: terminal mode reset failed: %s', exc)
         try:
             self._stdscr.keypad(False)
             self._stdscr.nodelay(False)
-        except curses.error:
-            pass
+        except curses.error as exc:
+            _logger.debug('TUI shutdown: stdscr keypad/nodelay reset failed: %s', exc)
         try:
             self._stdscr.erase()
             self._stdscr.refresh()
-        except curses.error:
-            pass
+        except curses.error as exc:
+            _logger.debug('TUI shutdown: stdscr erase/refresh failed: %s', exc)
         try:
             curses.endwin()
-        except curses.error:
-            pass
+        except curses.error as exc:
+            _logger.debug('TUI shutdown: endwin failed: %s', exc)
         Tui._instance = None
 
     def sig_shutdown(self, signum: int, frame: Optional[FrameType]) -> None:
@@ -922,12 +946,6 @@ class Tui:
     # =====================================================================
     # Event loop
     # =====================================================================
-
-    def _cmd_input_width(self) -> int:
-        """Characters available for command text in the footer input row."""
-        inner_w    = self._resolution.get('x', 80) - 2 * self.BOX_WIDTH
-        prompt_len = len(self.cmd_prompt[:inner_w - 1])   # inner_w = max_x - 2, so inner_w-1 = max_x-3
-        return max(1, inner_w - prompt_len - 1)   # -1 for blink cursor
 
     def _handle_key(self, c: str) -> None:
         """Dispatch a single key event from the event loop."""
@@ -1182,9 +1200,7 @@ class Tui:
         gone, snap back to bottom.
 
         Shared mutator for both _log (logger.* calls) and print
-        (Console.print).  Both call sites used to set
-        `tab['cursor'] = len(tab['buffer'])` post-append; cursor is
-        now a no-op write kept for backwards-compat (pruned in P6).
+        (Console.print).
         """
         if not lines:
             return
@@ -1197,11 +1213,19 @@ class Tui:
             del tab['buffer'][:_drop]
             if tab['scroll_offset'] > 0:
                 tab['scroll_offset'] = max(0, tab['scroll_offset'] - _drop)
-        # cursor kept in sync until P6 prunes it (callers that read it
-        # don't see different state vs the previous behaviour).
-        tab['cursor'] = len(tab['buffer'])
 
     def _log(self, severity: int, message: str) -> None:
+        """Route a [TS] [SEV] message to the default 'log' tab."""
+        self._log_to_tab('log', severity, message)
+
+    def _log_to_tab(self, tab_name: str, severity: int, message: str) -> None:
+        """Route a severity-tagged log line to a SPECIFIC tab.  Used by
+        ARCH-14 P6 per-stage routing (e.g. `_log_to_tab('cache', ...)`
+        from records emitted via `logging.getLogger('athena.cache')`).
+
+        Unknown tab name silently falls back to 'log' so a stray
+        sub-logger never loses its records.  Unknown severity is
+        dropped (matches the prior _log behaviour)."""
         if severity not in (self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO):
             return
 
@@ -1210,9 +1234,10 @@ class Tui:
         line = f'[{ts}] {tag} {message}'
 
         with self._log_lock:
-            if 'log' not in self._tabs:
+            target = tab_name if tab_name in self._tabs else 'log'
+            if target not in self._tabs:
                 return
-            self._append_lines(self._tabs['log'], [(line, attr)])
+            self._append_lines(self._tabs[target], [(line, attr)])
 
         self._dirty = True
 
@@ -1249,7 +1274,6 @@ class Tui:
                 return
             con = self._tabs['console']
             con['buffer'] = con['buffer'][:mark]
-            con['cursor'] = len(con['buffer'])
             # Clamp scroll_offset so it can't reference dropped lines.
             con['scroll_offset'] = min(
                 con['scroll_offset'], max(0, len(con['buffer']) - 1),
@@ -1292,11 +1316,9 @@ class Tui:
             if name == 'all':
                 for tab in self._tabs.values():
                     tab['buffer'] = []
-                    tab['cursor'] = 0
                     tab['scroll_offset'] = 0
             elif name in self._tabs:
                 self._tabs[name]['buffer'] = []
-                self._tabs[name]['cursor'] = 0
                 self._tabs[name]['scroll_offset'] = 0
             else:
                 self.print(f'Unknown tab: "{name}"')
@@ -1814,7 +1836,9 @@ console = Console()
 # separate concern (raw subprocess output capture, not Python records);
 # unifying those is left for a future ticket.
 
-LOGGER_NAME = 'athena'
+# LOGGER_NAME and _logger live at the top of this module — hoisted in
+# P6 so the `_logger.debug(...)` breadcrumbs in resize/teardown paths
+# can resolve before the class definitions execute.
 
 # Custom level between INFO (20) and WARNING (30).  Records at this level
 # carry "operator-facing display text" semantics — they belong on the
@@ -1824,12 +1848,20 @@ logging.addLevelName(DISPLAY, 'DISPLAY')
 
 
 class _LogTabHandler(logging.Handler):
-    """Routes records to the curses log tab via Tui.{INFO,WARNING,ERROR}.
+    """Routes records to a curses tab via Tui._log_to_tab.
 
-    Severity mapping:
-        levelno >= ERROR    → Tui.ERROR
-        levelno == WARNING  → Tui.WARNING
-        otherwise (INFO)    → Tui.INFO
+    ARCH-14 P6 per-stage routing:
+      - record.name == 'athena'           → 'log' tab (catch-all)
+      - record.name == 'athena.<stage>'   → '<stage>' tab IF it exists
+                                            (e.g. 'athena.cache' →
+                                            cache tab); otherwise the
+                                            bare-athena fallback fires.
+      - Unknown logger names              → 'log' tab.
+
+    Severity mapping (unchanged):
+        levelno >= ERROR    → SEVERITY_ERROR
+        levelno == WARNING  → SEVERITY_WARNING
+        otherwise (INFO)    → SEVERITY_INFO
 
     DISPLAY-level records are filtered out by setup_logging() so they
     only reach _ConsoleTabHandler.
@@ -1840,6 +1872,15 @@ class _LogTabHandler(logging.Handler):
         super().__init__(level)
         self._tui = tui
 
+    @staticmethod
+    def _tab_for_logger(name: str) -> str:
+        """Map a logger name to a target tab.  'athena.<stage>' → '<stage>';
+        anything else (including bare 'athena') → 'log'.  The caller
+        (_log_to_tab) handles missing-tab fallback."""
+        if name.startswith(LOGGER_NAME + '.'):
+            return name[len(LOGGER_NAME) + 1:].split('.', 1)[0]
+        return 'log'
+
     def emit(self, record: logging.LogRecord) -> None:
         try:
             t = self._tui if self._tui is not None else tui_instance
@@ -1847,11 +1888,12 @@ class _LogTabHandler(logging.Handler):
                 return  # no Tui yet — drop, same as Console facade did pre-Tui
             msg = self.format(record)
             if record.levelno >= logging.ERROR:
-                t.ERROR(msg)
+                sev = t.SEVERITY_ERROR
             elif record.levelno >= logging.WARNING:
-                t.WARNING(msg)
+                sev = t.SEVERITY_WARNING
             else:
-                t.INFO(msg)
+                sev = t.SEVERITY_INFO
+            t._log_to_tab(self._tab_for_logger(record.name), sev, msg)
         except Exception:
             self.handleError(record)
 
