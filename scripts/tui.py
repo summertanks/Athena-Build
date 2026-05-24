@@ -48,7 +48,9 @@ class _TabEntry(TypedDict):
     win:      curses.window
     panel:    curses.panel.panel
     buffer:   List[Tuple[str, int]]   # (text_with_newline, curses_attr)
-    cursor:   int                     # how many buffer lines are "visible"
+    cursor:   int                     # DEPRECATED — pruned in ARCH-14 P6
+    scroll_offset: int                # rows above the bottom (0 = at-bottom,
+                                      # sticky; positive = user scrolled up)
     selected: bool
 
 
@@ -78,6 +80,10 @@ class Tui:
     MIN_COLS      = 80
     MIN_LINES     = 24
     BANNER_MAX    = 50
+    # Per-tab buffer cap (ARCH-14 P2).  On overflow, oldest entries
+    # are dropped from the front.  Bounds the previously-unbounded
+    # buffer growth that could leak memory in long-running sessions.
+    MAX_BUFFER_LINES = 10000
 
     # ── Color pair indices ────────────────────────────────────────────────
     COLOR_NORMAL    = 1
@@ -338,7 +344,8 @@ class Tui:
         pnl = curses.panel.new_panel(win)
         win.scrollok(False)   # layout is fully manual — disable auto-scroll
         win.bkgd(' ', curses.color_pair(self.COLOR_NORMAL))
-        return {'win': win, 'panel': pnl, 'buffer': [], 'cursor': 0, 'selected': False}
+        return {'win': win, 'panel': pnl, 'buffer': [],
+                'cursor': 0, 'scroll_offset': 0, 'selected': False}
 
     def _create_windows(self) -> None:
         """Create (first call) or resize-in-place (subsequent calls) all curses windows."""
@@ -375,10 +382,17 @@ class Tui:
             # Destroying windows invalidates their panels in undefined GC order;
             # resize/mvwin keeps the C-level window+panel objects intact.
 
-            # Clamp tab cursors to the new height before resizing
+            # Clamp tab scroll state to the new height before resizing.
+            # ARCH-14 P2: scroll_offset is the new render driver; cap
+            # it at len(buffer)-1 so it can't address past the head.
+            # `cursor` is kept in sync until P6 prunes it.
             new_h = tc['h']
             for tab in self._tabs.values():
                 tab['cursor'] = min(tab['cursor'], max(new_h, len(tab['buffer'])))
+                tab['scroll_offset'] = min(
+                    tab['scroll_offset'],
+                    max(0, len(tab['buffer']) - 1),
+                )
 
             try:
                 self._footer.resize(fc['h'], fc['w'])
@@ -499,12 +513,16 @@ class Tui:
 
         window.erase()
 
-        # Compute visible buffer slice (sliding window ending at cursor)
-        cursor    = min(active['cursor'], len(buffer))
-        start_idx = max(0, cursor - content_rows)
+        # Compute visible buffer slice from scroll_offset (ARCH-14 P2).
+        # scroll_offset = number of rows above the bottom; 0 = sticky
+        # at-bottom.  end = the index AFTER the last visible row.
+        _so   = max(0, active.get('scroll_offset', 0))
+        _so   = min(_so, max(0, len(buffer) - 1))   # never scroll past head
+        end   = max(0, len(buffer) - _so)
+        start_idx = max(0, end - content_rows)
 
         row = 0
-        for idx in range(start_idx, cursor):
+        for idx in range(start_idx, end):
             text, attr = buffer[idx]
             self._safe_addstr(window, row, 0, text.rstrip('\n'), attr)
             row += 1
@@ -767,15 +785,20 @@ class Tui:
         active = self._activetab
 
         # ── Scroll tab content ────────────────────────────────────────────
+        # ARCH-14 P2: drive via scroll_offset (0 = at-bottom).  Up
+        # increases offset (older content scrolls into view); Down
+        # decreases (newer content / back toward bottom).
         if c == 'KEY_UP':
-            if active['cursor'] > self._tab_coords.get('h', 1):
-                active['cursor'] -= 1
+            _max_off = max(0, len(active['buffer']) - 1)
+            if active['scroll_offset'] < _max_off:
+                active['scroll_offset'] += 1
                 self._dirty = True
             return
 
         if c == 'KEY_DOWN':
-            active['cursor'] = min(len(active['buffer']), active['cursor'] + 1)
-            self._dirty = True
+            if active['scroll_offset'] > 0:
+                active['scroll_offset'] -= 1
+                self._dirty = True
             return
 
         # ── Scroll command line horizontally ──────────────────────────────
@@ -920,6 +943,45 @@ class Tui:
     # Logging
     # =====================================================================
 
+    def _append_lines(self, tab: _TabEntry,
+                       lines: List[Tuple[str, int]]) -> None:
+        """Append (text, attr) tuples to *tab*'s buffer, applying the
+        MAX_BUFFER_LINES cap and preserving scroll_offset semantics.
+
+        When `scroll_offset == 0` (user at-bottom): new lines naturally
+        become visible because _refreshtab anchors `end = len(buffer)`.
+
+        When `scroll_offset > 0` (user scrolled away): increment
+        scroll_offset by the number of new lines so the visible window
+        stays anchored at the same buffer indices the user was reading.
+
+        On overflow (post-append `len > MAX`): drop the oldest
+        (post-append - MAX) entries from the front; decrement
+        scroll_offset by the same amount so the anchor follows the
+        SHIFTED indices.  If scroll_offset would go negative (user was
+        viewing entries that just got dropped), clamp to 0 — they're
+        gone, snap back to bottom.
+
+        Shared mutator for both _log (logger.* calls) and print
+        (Console.print).  Both call sites used to set
+        `tab['cursor'] = len(tab['buffer'])` post-append; cursor is
+        now a no-op write kept for backwards-compat (pruned in P6).
+        """
+        if not lines:
+            return
+        _n = len(lines)
+        tab['buffer'].extend(lines)
+        if tab['scroll_offset'] > 0:
+            tab['scroll_offset'] += _n
+        if len(tab['buffer']) > self.MAX_BUFFER_LINES:
+            _drop = len(tab['buffer']) - self.MAX_BUFFER_LINES
+            del tab['buffer'][:_drop]
+            if tab['scroll_offset'] > 0:
+                tab['scroll_offset'] = max(0, tab['scroll_offset'] - _drop)
+        # cursor kept in sync until P6 prunes it (callers that read it
+        # don't see different state vs the previous behaviour).
+        tab['cursor'] = len(tab['buffer'])
+
     def _log(self, severity: int, message: str) -> None:
         if severity not in (self.SEVERITY_ERROR, self.SEVERITY_WARNING, self.SEVERITY_INFO):
             return
@@ -931,9 +993,7 @@ class Tui:
         with self._log_lock:
             if 'log' not in self._tabs:
                 return
-            log = self._tabs['log']
-            log['buffer'].append((line, attr))
-            log['cursor'] = len(log['buffer'])
+            self._append_lines(self._tabs['log'], [(line, attr)])
 
         self._dirty = True
 
@@ -952,9 +1012,8 @@ class Tui:
                 return
             attribute = curses.color_pair(attribute if attribute is not None else self.COLOR_NORMAL)
             con = self._tabs['console']
-            for line in message.split('\n'):
-                con['buffer'].append((line, attribute))
-            con['cursor'] = len(con['buffer'])
+            _lines = [(line, attribute) for line in message.split('\n')]
+            self._append_lines(con, _lines)
             self._dirty = True
 
     def console_mark(self) -> int:
@@ -972,6 +1031,10 @@ class Tui:
             con = self._tabs['console']
             con['buffer'] = con['buffer'][:mark]
             con['cursor'] = len(con['buffer'])
+            # Clamp scroll_offset so it can't reference dropped lines.
+            con['scroll_offset'] = min(
+                con['scroll_offset'], max(0, len(con['buffer']) - 1),
+            )
             self._dirty = True
 
     # =====================================================================
@@ -1011,9 +1074,11 @@ class Tui:
                 for tab in self._tabs.values():
                     tab['buffer'] = []
                     tab['cursor'] = 0
+                    tab['scroll_offset'] = 0
             elif name in self._tabs:
                 self._tabs[name]['buffer'] = []
                 self._tabs[name]['cursor'] = 0
+                self._tabs[name]['scroll_offset'] = 0
             else:
                 self.print(f'Unknown tab: "{name}"')
                 return

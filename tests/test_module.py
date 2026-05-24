@@ -11923,6 +11923,63 @@ def test_tui_status_bar_uses_reverse_video_attribute():
     )
 
 
+def test_tui_max_buffer_lines_capped():
+    """ARCH-14 P2: each tab's buffer caps at MAX_BUFFER_LINES.  Append
+    past the cap drops the oldest entries from the front."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    # Exercise _append_lines directly with a minimal fake tab — avoids
+    # spinning up a real curses session.  The helper is the single
+    # mutation point for both _log and print, so this covers both.
+    _fake_tab = {
+        'win': None, 'panel': None,
+        'buffer': [], 'cursor': 0, 'scroll_offset': 0, 'selected': False,
+    }
+    _bound = _tui.Tui._append_lines.__get__(
+        type('S', (), {'MAX_BUFFER_LINES': 100})(), _tui.Tui
+    )
+    _bound(_fake_tab, [(f'line {i}', 0) for i in range(150)])
+    assert len(_fake_tab['buffer']) == 100, (
+        f"buffer should be capped at 100, got {len(_fake_tab['buffer'])}"
+    )
+    # Newest 100 should be present; oldest 50 dropped from front.
+    assert _fake_tab['buffer'][0][0] == 'line 50', _fake_tab['buffer'][0]
+    assert _fake_tab['buffer'][-1][0] == 'line 149', _fake_tab['buffer'][-1]
+
+
+def test_tui_scroll_offset_increments_when_appending_while_scrolled():
+    """ARCH-14 P2: when user is scrolled away (scroll_offset > 0),
+    appending more lines must INCREASE scroll_offset by the number of
+    new lines — keeps the visible window anchored at the same buffer
+    indices the user was reading.  Auto-stick (scroll_offset == 0)
+    case: offset stays 0 so new content shows at bottom."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+
+    # Stuck-at-bottom case: scroll_offset stays 0.
+    _fake = {'win': None, 'panel': None, 'buffer': [], 'cursor': 0,
+             'scroll_offset': 0, 'selected': False}
+    _bound = _tui.Tui._append_lines.__get__(
+        type('S', (), {'MAX_BUFFER_LINES': 10000})(), _tui.Tui
+    )
+    _bound(_fake, [(f'line {i}', 0) for i in range(5)])
+    assert _fake['scroll_offset'] == 0, (
+        "scroll_offset must stay 0 (auto-stick) when at-bottom on append"
+    )
+
+    # Scrolled-away case: offset increments by # of new lines.
+    _fake2 = {'win': None, 'panel': None,
+              'buffer': [(f'old {i}', 0) for i in range(20)],
+              'cursor': 20, 'scroll_offset': 10, 'selected': False}
+    _bound(_fake2, [(f'new {i}', 0) for i in range(3)])
+    assert _fake2['scroll_offset'] == 13, (
+        f"scroll_offset should be 13 (10+3) after appending 3 lines "
+        f"while scrolled 10 above bottom; got {_fake2['scroll_offset']}"
+    )
+
+
 def test_tui_tab_content_region_height_equals_lines_minus_footer():
     """ARCH-14 P1: tab content region height = LINES - FOOTER_HEIGHT
     = N-2.  Pin via _calculateResolution: tab_coords['h'] computed
@@ -15409,6 +15466,9 @@ def main() -> int:
         test_tui_footer_height_is_two_rows,
         test_tui_status_bar_uses_reverse_video_attribute,
         test_tui_tab_content_region_height_equals_lines_minus_footer,
+        # ARCH-14 P2 — scrollback
+        test_tui_max_buffer_lines_capped,
+        test_tui_scroll_offset_increments_when_appending_while_scrolled,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,
         # FORK-01 Step 2 — fork mirror generation + cache integration
