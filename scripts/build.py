@@ -1868,8 +1868,8 @@ class BuildSession:
 
         Used by every reader that needs "what binaries will this source
         produce in the repo after a successful build?" — check_build,
-        cmd_source_audit, cmd_source_repair, cmd_source_verify,
-        cmd_source_audit, _do_tunnel.  Pulled here because the two
+        cmd_source_audit, cmd_source_repair, cmd_audit's content-
+        integrity section, _do_tunnel.  Pulled here because the two
         trees store per-tree maps (src_pkg_files); Source objects no
         longer carry a .pkgs attribute (it leaked across trees — see
         dependencytree.py:src_pkg_files docstring for full history).
@@ -2050,12 +2050,18 @@ class BuildSession:
         return _resp.lower() in ('y', 'yes')
 
     def cmd_audit(self, *args):
-        """Single repo audit covering all three install-correctness gates,
-        scoped to repo/main (the installable subdir).
+        """Single repo audit covering every install-correctness +
+        content-integrity + policy-residue gate in repo/.  P3 absorbed
+        the former `source verify` and `repo audit_nmu` commands —
+        this is now the one-stop pre-ship gate.
+
+        Five sections, in this order:
 
           DEP GATE (hard) — every pkg in repo/main MUST have its hard
-            Depends/Pre-Depends satisfiable in repo/main.  Resolution
-            honours Provides per Debian Policy §7.5.
+            Depends/Pre-Depends satisfiable in repo/main.  Per-cohort
+            (deb / udeb) when dep_tree is built; whole-repo fallback
+            otherwise.  Resolution honours Provides per Debian Policy
+            §7.5.
 
           LIVE CONFLICTS (hard) — within the live chroot install set
             (dep_tree.selected_pkgs − pool_extras − installer_exclusive),
@@ -2065,30 +2071,47 @@ class BuildSession:
           INSTALLER CONFLICTS (hard) — same shape, cohort is the d-i
             ramdisk udebs (udeb_dep_tree.selected_pkgs).
 
+          STALE FILES (soft) — orphan-source / version-drift residue
+            under repo/.  No deletion (that's `repo repair cleanup`).
+
+          CONTENT INTEGRITY (hard) — per-cohort: every .deb/.udeb's
+            internal Package/Version/Architecture must match the
+            filename, AND its Depends must resolve against the
+            corresponding repo state.  Was the standalone `source
+            verify`; absorbed here per the P3 dedup.  Slow (~30s);
+            skipped with `quick` flag.
+
+          NMU RESIDUE (hard) — every .deb in repo/ must be at the
+            pristine source version with stripped dep constraints
+            (no +bN / +debNuN / ~bpoN+N).  Was the standalone
+            `repo audit_nmu`; absorbed here.
+
         Conflicts outside a cohort (e.g. grub-pc in pool conflicting
         with grub-efi-amd64 in live) are NOT flagged — apt arbitrates.
 
-        Per-target drill-in mode: pass a target package name as the
-        first non-flag argument.  Shows full state for that target
-        (cache + dep_tree + repo/main + Provides + consumers).
+        Per-target drill-in: pass a target package name as the first
+        non-flag argument.  Shows full state for that target (cache +
+        dep_tree + repo/main + Provides + consumers).  Drill-in skips
+        the section walks.
 
         Gap classification: when the dep gate finds any unresolved
         target, each is classified as build_failed / missed_by_parse /
-        transitional / other (formerly the `audit_gap` command —
-        merged in here for a single audit interface).
+        transitional / other (formerly `audit_gap`).
 
         Usage:
-          package audit                    — full overview
-          package audit <target>           — drill into one target
-          package audit verbose            — full lists, all categories
-          package audit strict             — also list Recommends
-          package audit refresh            — force re-scan
+          repo audit                — full overview (all sections)
+          repo audit quick          — skip CONTENT INTEGRITY (~30s)
+          repo audit <target>       — drill into one target
+          repo audit verbose        — full lists, all categories
+          repo audit strict         — also list Recommends
+          repo audit refresh        — force re-scan of repo state
         """
         _verbose = 'verbose' in args
         _strict = 'strict' in args
         _refresh = 'refresh' in args
+        _quick = 'quick' in args
         # Anything other than known flags is treated as a drill-in target.
-        _flags = {'verbose', 'strict', 'refresh'}
+        _flags = {'verbose', 'strict', 'refresh', 'quick'}
         _drill_target = next(
             (a for a in args if a not in _flags), None,
         )
@@ -2220,6 +2243,199 @@ class BuildSession:
                 "\n=== STALE FILES ===\n  skipped — dep_tree not built; "
                 "run `dep parse` first"
             )
+
+        # ── CONTENT INTEGRITY (was `source verify`) ─────────────────
+        # Per-cohort deep walk: open each predicted .deb/.udeb with
+        # DebFile, verify internal Package/Version/Arch matches the
+        # filename + every hard Depends resolves against the cohort's
+        # RepoState.  Slow (~30-40s on ~900 sources) — skip via `quick`.
+        if _quick:
+            console.print(
+                "\n=== CONTENT INTEGRITY ===\n  skipped (`quick` flag)"
+            )
+        elif not self.flags.build_container_ready:
+            console.print(
+                "\n=== CONTENT INTEGRITY ===\n  skipped — container init "
+                "not run; `verify_pkg_artifact` lives on BuildContainer"
+            )
+        else:
+            self._report_content_integrity(_state, verbose=_verbose,
+                                            refresh=_refresh)
+
+        # ── NMU RESIDUE (was `repo audit_nmu`) ──────────────────────
+        # Sweeps `state.packages` for any .deb whose Version or dep
+        # constraint versions still carry +bN / +debNuN / ~bpoN+N
+        # suffixes.  Fresh builds get stripped post-`dpkg-buildpackage`
+        # by BuildContainer; anything reported here slipped past the
+        # normaliser (manually staged ingest, etc.).
+        self._report_nmu_residue(_state, verbose=_verbose)
+
+    def _report_content_integrity(self, deb_state, *, verbose: bool,
+                                    refresh: bool = False) -> None:
+        """Per-cohort content-integrity scan — absorbed from the former
+        `cmd_source_verify` (deleted in P3 2026-05-23).  Resolution
+        scope is the cohort's RepoState (deb→main, udeb→main-udeb)
+        rather than the cache — see `verify_pkg_artifact`'s docstring
+        for why (NMU-vs-pristine version skew).
+        """
+        _udeb_state = None
+        if (self.udeb_dep_tree is not None
+                and self.udeb_dep_tree.selected_srcs):
+            _udeb_state = repo_audit.scan_repo_state(
+                self.config, 'main-udeb', refresh=refresh,
+            )
+
+        # Caller has gated on build_container_ready before entry, so
+        # self.container is non-None.  The two trees are typed Optional
+        # on BuildSession; we only append cohorts where the tree exists
+        # and has work, so the loop's `_tree` is non-None too.
+        assert self.container is not None
+        for _label, _tree, _state, _ext in (
+            ('deb',  self.dep_tree,      deb_state,   '.deb'),
+            ('udeb', self.udeb_dep_tree, _udeb_state, '.udeb'),
+        ):
+            if _tree is None or not _tree.selected_srcs:
+                continue
+            if _state is None:
+                console.print(
+                    f"\n=== CONTENT INTEGRITY ({_label} cohort) ===\n"
+                    f"  skipped — repo state scan failed",
+                    tui.COLOR_ERROR,
+                )
+                continue
+            _ok = 0
+            _failed: 'list[tuple]' = []   # (src, binary, diag)
+            _skipped_tunneled = 0
+            _skipped_missing = 0
+            _no_pkgs = 0
+            _bar = ProgressBar(
+                label=f'Integrity {_label}',
+                maxvalue=max(1, len(_tree.selected_srcs)),
+                show_rate=False,
+            )
+            try:
+                for _name, _src in sorted(_tree.selected_srcs.items()):
+                    _bar.step(1)
+                    _expected = [
+                        _f for _f in (_tree.src_pkg_files.get(_name) or [])
+                        if _f.endswith(_ext)
+                    ]
+                    if not _expected:
+                        _no_pkgs += 1
+                        continue
+                    _result_file = os.path.join(
+                        self.container.buildlog_path, _name + '.result')
+                    try:
+                        with open(_result_file) as fh:
+                            if fh.readline().strip() == 'TUNNELED':
+                                _skipped_tunneled += 1
+                                continue
+                    except OSError:
+                        pass
+                    _any_missing = False
+                    _failing = None
+                    for _f in _expected:
+                        _path = os.path.join(
+                            self.config.deb_dest_for_filename(_f), _f,
+                        )
+                        if not os.path.isfile(_path):
+                            _any_missing = True
+                            break
+                        _ok_v, _reason = self.container.verify_pkg_artifact(
+                            _path, _f, repo_state=_state,
+                        )
+                        if not _ok_v:
+                            _failing = (_f, _reason)
+                            break
+                    if _any_missing:
+                        _skipped_missing += 1
+                        continue
+                    if _failing is None:
+                        _ok += 1
+                    else:
+                        _failed.append((_name,) + _failing)
+                        logger.info(
+                            f"repo audit integrity {_label} {_name}: "
+                            f"{_failing[0]}: {_failing[1]}"
+                        )
+            finally:
+                _bar.close()
+
+            console.print(
+                f"\n=== CONTENT INTEGRITY ({_label} cohort) ==="
+            )
+            console.print(
+                f"  {_ok:5d}  pass (internal control matches filename + "
+                f"deps resolve)"
+            )
+            console.print(
+                f"  {len(_failed):5d}  FAIL — present in repo/ but "
+                f"verify rejected"
+            )
+            if _skipped_tunneled:
+                console.print(
+                    f"  {_skipped_tunneled:5d}  skipped (TUNNELED)"
+                )
+            if _skipped_missing:
+                console.print(
+                    f"  {_skipped_missing:5d}  skipped (binaries missing "
+                    f"— `source build` / `source repair`)"
+                )
+            if _no_pkgs:
+                console.print(
+                    f"  {_no_pkgs:5d}  no {_ext} binaries declared"
+                )
+            if _failed:
+                from collections import Counter
+                _types: 'Counter[str]' = Counter()
+                for _, _, _diag in _failed:
+                    _prefix = (_diag.split(':', 1)[0]
+                               if ':' in _diag else _diag)
+                    _types[_prefix] += 1
+                console.print("")
+                console.print(f"  Failure types ({_label}):")
+                for _k, _v in _types.most_common():
+                    console.print(f"    {_v:5d}  {_k}")
+            if verbose and _failed:
+                console.print("")
+                console.print(
+                    f"  Failing sources ({_label}, {len(_failed)}):"
+                )
+                for _src_name, _f, _diag in _failed:
+                    console.print(f"    {_src_name}: {_f}: {_diag}")
+
+    def _report_nmu_residue(self, state, *, verbose: bool) -> None:
+        """NMU-suffix residue check — absorbed from the former
+        `cmd_audit_nmu` (deleted in P3 2026-05-23).  Catches any .deb
+        in repo/ that bypassed BuildContainer's post-build stripper."""
+        _findings = repo_audit.audit_nmu_residue(state)
+        console.print("\n=== NMU RESIDUE ===")
+        if not _findings:
+            console.print(
+                f"  clean ({len(state.packages)} pkgs scanned, "
+                f"no +bN / +debNuN / ~bpoN+N residue)"
+            )
+            return
+        from collections import Counter
+        _by_field = Counter(f[1] for f in _findings)
+        console.print(
+            f"  {len(_findings):5d} finding(s) across "
+            f"{len({f[0] for f in _findings})} pkg(s):"
+        )
+        for _field, _count in _by_field.most_common():
+            console.print(f"    {_count:5d}  {_field}")
+        _show = len(_findings) if verbose else min(20, len(_findings))
+        if _show:
+            console.print(f"  First {_show}:")
+            for _pkg, _field, _val, _why in _findings[:_show]:
+                console.print(
+                    f"    {_pkg:30s}  {_field:14s}  {_val}  — {_why}"
+                )
+        console.print(
+            "  Fix: `repo repair strip` re-applies the strip to every "
+            ".deb in repo/.",
+            tui.COLOR_INFO,
+        )
 
     def _report_stale_files_warning(self, *, verbose: bool) -> None:
         """Soft-warning STALE FILES section for package audit.
@@ -2537,60 +2753,6 @@ class BuildSession:
                 f"or audit hasn't surfaced it"
             )
 
-    def cmd_audit_nmu(self, *args):
-        """Walk repo/ for residual NMU/binNMU/backport suffixes.
-
-        After enabling post-build strip in BuildContainer, fresh builds
-        enter repo/ already normalised (Version + every dep constraint
-        at pristine source version).  This command verifies that:
-          - Every .deb/.udeb's own Version field is stripped
-          - Every version constraint in Depends/Pre-Depends/Recommends/
-            Suggests/Enhances/Provides/Conflicts/Breaks/Replaces is
-            stripped
-
-        Anything reported here means a .deb in repo/ slipped the
-        normaliser (manually staged, ingested without going through
-        BuildContainer.build, OR a regression in the post-build hook).
-
-        Usage: package audit_nmu [verbose] [refresh]
-        """
-        _verbose = 'verbose' in args
-        _refresh = 'refresh' in args
-        _state = repo_audit.scan_repo_state(self.config, refresh=_refresh)
-        if _state is None:
-            return
-        if not _state.packages:
-            console.print("repo/ has no .deb/.udeb files — nothing to audit")
-            return
-        _findings = repo_audit.audit_nmu_residue(_state)
-        if not _findings:
-            console.print(
-                f"NMU audit OK: {len(_state.packages)} pkgs scanned, "
-                f"no residue."
-            )
-            return
-        # Group by field for a quick top-line, then list.
-        from collections import Counter
-        _by_field = Counter(f[1] for f in _findings)
-        console.print(
-            f"NMU audit: {len(_findings)} residue(s) across "
-            f"{len(set(f[0] for f in _findings))} pkg(s).\n"
-            f"  Broken down by field: " +
-            ', '.join(f'{_k}={_v}' for _k, _v in _by_field.most_common())
-        )
-        _show = len(_findings) if _verbose else min(30, len(_findings))
-        for _pkg, _field, _raw, _why in _findings[:_show]:
-            console.print(f"  {_pkg}  {_field}: {_raw}")
-        if not _verbose and len(_findings) > _show:
-            console.print(
-                f"  … and {len(_findings) - _show} more "
-                f"(run `repo audit_nmu verbose` for full list)"
-            )
-        console.print(
-            "Fix: `repo repair strip` re-applies the strip to every "
-            "non-conforming .deb in repo/."
-        )
-
     def cmd_index_repo(self, *args):
         """Generate apt-repo metadata IN-PLACE under repo/dists/.
 
@@ -2758,13 +2920,11 @@ class BuildSession:
                               '(repo tunnel [pkg…])',
             'reload':         'rebuild a fork pkg after a local edit '
                               '(repo reload <pkg>...)',
-            'audit':          'dep + conflict audit (repo/main) + gap '
-                              'classification.  Pass a target name to '
-                              'drill in: `repo audit lsb-base`.',
-            'audit_nmu':      'walk repo/ for any .deb whose Version or '
-                              'dep constraints still carry an NMU/binNMU/'
-                              'backport suffix (+bN, +debNuN, ~bpoN+N, '
-                              'etc.)',
+            'audit':          'one-stop pre-ship gate: dep + conflict + '
+                              'stale-files + content integrity + NMU '
+                              'residue.  Pass `quick` to skip the slow '
+                              '(~30s) integrity scan.  Pass a target '
+                              'name to drill in: `repo audit lsb-base`.',
             'repair':         'umbrella for repo-state fixups: `repo '
                               'repair strip` (NMU suffix backfill), '
                               '`repo repair cleanup` (drop obsoletes).',
@@ -2777,8 +2937,6 @@ class BuildSession:
             return self.cmd_reload_fork(*args)
         if action == 'audit':
             return self.cmd_audit(*args)
-        if action == 'audit_nmu':
-            return self.cmd_audit_nmu(*args)
         if action == 'repair':
             return self.cmd_repo_repair(*args)
         if action == 'index':
@@ -4502,223 +4660,6 @@ class BuildSession:
                 for _n in sorted(_names):
                     console.print(f"  {_n}  ({_subset_for(_n)})")
 
-    def cmd_source_verify(self, *args):
-        """Opt-in deep audit: report .debs / .udebs whose internal Version
-        mismatches the predicted filename, or whose Depends no longer
-        resolve against the repo we ship.
-
-        Usage: source verify [verbose]
-
-        Read-only.  Doesn't touch .result, doesn't rebuild anything.
-        Use as a pre-ship sanity check: BEFORE making a release ISO,
-        run this to surface artifacts that exist in repo/ but would
-        fail to install on a clean Thor system (e.g. Depends pointing
-        at a sibling-binary version that's not actually in the repo).
-
-        Cohort split (matches `source audit`'s shape):
-
-          Deb cohort  — every .deb under dep_tree.selected_srcs.
-            Deps resolve against repo/dists/<codename>/main/binary-<arch>/
-            ONLY.  Udeb dirs are NOT consulted — a regular .deb depending
-            on a `.udeb` name would surface as unsatisfied here, which
-            is correct (apt on the installed system can't see udebs).
-
-          Udeb cohort — every .udeb under udeb_dep_tree.selected_srcs.
-            Deps resolve against
-            repo/dists/<codename>/main/debian-installer/binary-<arch>/
-            ONLY.  Deb dirs are NOT consulted — udebs live in the d-i
-            parallel namespace; debootstrap on /target never reads from
-            here.
-
-        Each cohort prints its own counters + failing-sources list.
-
-        Resolution scope is repo/ (post-strip pristine versions), NOT
-        the cache.  The cache reflects upstream's NMU-bumped versions —
-        `libfoo 1.0-1+b1` while our stripped .deb says
-        `Depends: libfoo (= 1.0-1)`.  Resolving against cache would
-        over-report 50+ false positives per build (every strict-equal
-        sibling reference where upstream had a binNMU).  apt at install
-        time only sees repo/, so repo is the only honest gate.
-
-        Performance: ~30-40s (one DebFile open + control parse per
-        binary).  source build / check_build use filename + ar-magic
-        only (~5s scan).
-
-        Reports (verbose):
-          - per-source list of failing binaries + first-failure
-            diagnostic from verify_pkg_artifact (version-mismatch:X!=Y,
-            unsatisfied-Depends:libfoo, etc).
-
-        Prereqs: cache + dep + container (same as source build's gates).
-        """
-        if not (self.flags.cache_ready and self.flags.dep_check_ready
-                and self.flags.build_container_ready):
-            console.print(
-                "source verify needs cache build + dep parse + container "
-                "init to have run first.",
-                tui.COLOR_ERROR,
-            )
-            return
-
-        _verbose = 'verbose' in args
-
-        # Per-cohort scan + verify.  Each cohort resolves Depends ONLY
-        # against its own namespace's repo state — deb→main, udeb→main-
-        # udeb.  Strict separation: a .deb's Depends entry that names
-        # a udeb (rare, but allowed by upstream Debian for some bridging
-        # cases) would fail here, which is the honest answer because
-        # apt on /target can't pull from the d-i pool.
-        import repo_audit
-        _cohorts: 'list[tuple[str, object, object, str]]' = []
-        _deb_state = repo_audit.scan_repo_state(self.config, 'main')
-        if self.dep_tree is not None and self.dep_tree.selected_srcs:
-            _cohorts.append(
-                ('deb', self.dep_tree, _deb_state, '.deb'),
-            )
-        if (self.udeb_dep_tree is not None
-                and self.udeb_dep_tree.selected_srcs):
-            _udeb_state = repo_audit.scan_repo_state(self.config, 'main-udeb')
-            _cohorts.append(
-                ('udeb', self.udeb_dep_tree, _udeb_state, '.udeb'),
-            )
-
-        if not _cohorts:
-            console.print(
-                "source verify: no selected sources to verify; "
-                "run `dep parse` first.",
-                tui.COLOR_ERROR,
-            )
-            return
-
-        _any_failures = False
-        for _label, _tree, _state, _ext in _cohorts:
-            if _state is None:
-                console.print(
-                    f"source verify ({_label} cohort): repo state scan "
-                    f"failed — cannot resolve Depends.",
-                    tui.COLOR_ERROR,
-                )
-                continue
-
-            _ok = 0
-            _failed: 'list[tuple]' = []   # [(src, first_failing_bin, diag)]
-            _skipped_tunneled = 0
-            _skipped_missing = 0
-            _no_pkgs = 0
-
-            _bar = ProgressBar(
-                label=f'Verify {_label}',
-                maxvalue=max(1, len(_tree.selected_srcs)),
-                show_rate=False,
-            )
-            try:
-                for _name, _src in sorted(_tree.selected_srcs.items()):
-                    _bar.step(1)
-                    # Filter THIS cohort's predicted files only — we
-                    # never look at the other tree's binaries here.
-                    _expected = [
-                        _f for _f in (_tree.src_pkg_files.get(_name) or [])
-                        if _f.endswith(_ext)
-                    ]
-                    if not _expected:
-                        _no_pkgs += 1
-                        continue
-                    # Skip TUNNELED — verify doesn't apply to third-
-                    # party pulls.  TUNNELED is per-source, not per-
-                    # cohort; counts in whichever cohort iterates it.
-                    _result_file = os.path.join(
-                        self.container.buildlog_path, _name + '.result')
-                    try:
-                        with open(_result_file) as fh:
-                            if fh.readline().strip() == 'TUNNELED':
-                                _skipped_tunneled += 1
-                                continue
-                    except OSError:
-                        pass
-                    _any_missing = False
-                    _failing = None
-                    for _f in _expected:
-                        _path = os.path.join(
-                            self.config.deb_dest_for_filename(_f), _f,
-                        )
-                        if not os.path.isfile(_path):
-                            _any_missing = True
-                            break
-                        _verify_ok, _reason = self.container.verify_pkg_artifact(
-                            _path, _f, repo_state=_state,
-                        )
-                        if not _verify_ok:
-                            _failing = (_f, _reason)
-                            break
-                    if _any_missing:
-                        _skipped_missing += 1
-                        continue
-                    if _failing is None:
-                        _ok += 1
-                    else:
-                        _failed.append((_name,) + _failing)
-                        logger.info(
-                            f"source verify {_label} {_name}: "
-                            f"{_failing[0]}: {_failing[1]}"
-                        )
-            finally:
-                _bar.close()
-
-            console.print("")
-            console.print(
-                f"=== Source verify ({_label} cohort, deep audit) ==="
-            )
-            console.print(
-                f"  {_ok:5d}  pass deep verify "
-                f"(binaries internally consistent)"
-            )
-            console.print(
-                f"  {len(_failed):5d}  FAIL — present in repo/ but verify "
-                f"rejected"
-            )
-            if _skipped_tunneled:
-                console.print(
-                    f"  {_skipped_tunneled:5d}  skipped "
-                    f"(TUNNELED — third-party pull)"
-                )
-            if _skipped_missing:
-                console.print(
-                    f"  {_skipped_missing:5d}  skipped "
-                    f"(binaries missing — repair/rebuild concern)"
-                )
-            if _no_pkgs:
-                console.print(
-                    f"  {_no_pkgs:5d}  no {_ext} binaries declared "
-                    f"(side-artifact-only source in this cohort)"
-                )
-
-            if _failed:
-                _any_failures = True
-                from collections import Counter
-                _types: 'Counter[str]' = Counter()
-                for _, _, _diag in _failed:
-                    _prefix = _diag.split(':', 1)[0] if ':' in _diag else _diag
-                    _types[_prefix] += 1
-                console.print("")
-                console.print(f"Failure types ({_label}):")
-                for _k, _v in _types.most_common():
-                    console.print(f"  {_v:5d}  {_k}")
-
-            if _verbose and _failed:
-                console.print("")
-                console.print(
-                    f"Failing sources ({_label}, {len(_failed)}):"
-                )
-                for _src_name, _f, _diag in _failed:
-                    console.print(f"  {_src_name}: {_f}: {_diag}")
-
-        if not _any_failures:
-            console.print("")
-            console.print(
-                "All cohorts pass deep verify.",
-                tui.COLOR_HIGHLIGHT,
-            )
-
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
@@ -5242,8 +5183,6 @@ class BuildSession:
                         'Writes PASS where binaries are valid but .result '
                         'is missing; clears stale PASS where binaries '
                         'are gone or patches changed.',
-            'verify':   'opt-in deep audit: report .debs whose internal Version mismatches the '
-                        'filename or whose Depends no longer resolve in cache (source verify [verbose])',
         }
         if action == 'sync':
             return self.cmd_source_sync(*args)
@@ -5253,8 +5192,6 @@ class BuildSession:
             return self.cmd_source_audit(*args)
         if action == 'repair':
             return self.cmd_source_repair(*args)
-        if action == 'verify':
-            return self.cmd_source_verify(*args)
         return self._group_help('source', _table, action)
 
     def cmd_container(self, action: str = '', *args):
@@ -5547,7 +5484,7 @@ def main(banner: str) -> None:
     tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    '\tSources:    source sync | source build [pkg|live|installer|recommended|all]')
-    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index | audit | audit_nmu | repair [strip|cleanup] | tunnel | reload')
+    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index | audit [quick] | repair [strip|cleanup] | tunnel | reload')
     tui.register_command('container', session.cmd_container, '\tContainer:  container init')
     tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')
