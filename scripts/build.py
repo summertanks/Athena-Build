@@ -5848,6 +5848,13 @@ def main(banner: str) -> None:
     if _headless:
         sys.argv.remove('--headless')
 
+    # ARCH-14 P9 (clean-slate dispatcher): detect --tui-v2 / ATHENA_TUI_V2.
+    # When set, use the new tui_v2 backend; otherwise the legacy curses TUI.
+    # No effect on --headless (CLI mode).  Strip the flag the same way.
+    _use_v2 = ('--tui-v2' in sys.argv) or (os.environ.get('ATHENA_TUI_V2') == '1')
+    if '--tui-v2' in sys.argv:
+        sys.argv.remove('--tui-v2')
+
     try:
         print("Initialising apt_pkg...")
         apt_pkg.init_system()
@@ -5882,6 +5889,16 @@ def main(banner: str) -> None:
             signal.signal(signal.SIGINT, tui_inst.sig_shutdown)
         except Exception as e:
             print(f"FATAL: CLI initialisation failed: {e}")
+            sys.exit(1)
+    elif _use_v2:
+        print("Initialising TUI v2 (clean-slate dispatcher)...")
+        try:
+            from tui_v2.tui import Tui as TuiV2
+            tui_inst = TuiV2(banner)
+            tui_inst.run()
+            signal.signal(signal.SIGINT, tui_inst.sig_shutdown)
+        except Exception as e:
+            print(f"FATAL: TUI v2 initialisation failed: {e}")
             sys.exit(1)
     else:
         print("Initialising TUI...")
