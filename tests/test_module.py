@@ -12309,6 +12309,141 @@ def test_tui_add_tab_creates_window_and_appears_in_status_bar():
     )
 
 
+def test_tui_tab_completes_unique_prefix():
+    """ARCH-14 P5: Tab on a unique prefix replaces `current` with the
+    full command name followed by a trailing space (hints "arg next")
+    and parks the cursor at the end."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+
+    _cmd = _bare_commands_instance()
+    _cmd._reg = {
+        'history': (None, ''),
+        'help':    (None, ''),
+        'quit':    (None, ''),
+    }
+    _cmd.current = 'hi'
+    _cmd._cursor = 2
+
+    class _FakeTui:
+        def __init__(self):
+            self._cmd = _cmd
+            self.printed = []
+            self._dirty = False
+        def print(self, msg, attr=0):
+            self.printed.append((msg, attr))
+        COLOR_INFO = 7
+
+    _ft = _FakeTui()
+    _bound = _tui.Tui._complete_command.__get__(_ft, _tui.Tui)
+    _bound()
+
+    assert _cmd.current == 'history ', (
+        f"unique prefix `hi` must complete to `history ` (with trailing "
+        f"space); got {_cmd.current!r}"
+    )
+    assert _cmd._cursor == len('history ')
+    assert _ft.printed == [], (
+        'unique-prefix completion must NOT print to console'
+    )
+    assert _ft._dirty is True
+
+
+def test_tui_tab_lists_ambiguous_prefixes_on_console():
+    """ARCH-14 P5: Tab on an ambiguous prefix prints all matches to
+    the console tab and leaves `current` unchanged so the user can
+    keep typing to narrow."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+
+    _cmd = _bare_commands_instance()
+    _cmd._reg = {
+        'help':    (None, ''),
+        'history': (None, ''),
+        'quit':    (None, ''),
+    }
+    _cmd.current = 'h'
+    _cmd._cursor = 1
+
+    class _FakeTui:
+        def __init__(self):
+            self._cmd = _cmd
+            self.printed = []
+            self._dirty = False
+        def print(self, msg, attr=0):
+            self.printed.append((msg, attr))
+        COLOR_INFO = 7
+
+    _ft = _FakeTui()
+    _bound = _tui.Tui._complete_command.__get__(_ft, _tui.Tui)
+    _bound()
+
+    assert _cmd.current == 'h', (
+        'ambiguous-prefix completion must NOT mutate current'
+    )
+    assert _cmd._cursor == 1
+    assert len(_ft.printed) == 1
+    msg, _attr = _ft.printed[0]
+    assert 'help' in msg and 'history' in msg, (
+        f'matches list must include all candidates; got {msg!r}'
+    )
+    assert 'quit' not in msg, (
+        'non-matching commands must be omitted from the candidates list'
+    )
+
+
+def test_tui_tab_with_empty_line_is_noop():
+    """ARCH-14 P5: Tab on an empty `current` is a silent no-op — every
+    registered name matches the empty prefix, so listing them would be
+    noise (use `help` instead).  Wait — actually with prefix='', every
+    name matches, and the >1-match branch fires, dumping the full list
+    to console.  Test the actual behaviour: with empty line + multiple
+    commands, the >1 branch fires; with empty line + 1 command, that
+    sole command completes.  With ' ' already typed (past cmd-name),
+    Tab is unconditionally a no-op."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+
+    # Case 1: current contains a space → Tab is a no-op regardless.
+    _cmd = _bare_commands_instance()
+    _cmd._reg = {'help': (None, ''), 'history': (None, '')}
+    _cmd.current = 'help '
+    _cmd._cursor = 5
+
+    class _FakeTui:
+        def __init__(self):
+            self._cmd = _cmd
+            self.printed = []
+            self._dirty = False
+        def print(self, msg, attr=0):
+            self.printed.append((msg, attr))
+        COLOR_INFO = 7
+
+    _ft = _FakeTui()
+    _bound = _tui.Tui._complete_command.__get__(_ft, _tui.Tui)
+    _bound()
+    assert _cmd.current == 'help ', (
+        'Tab past the command-name position must not mutate current'
+    )
+    assert _ft.printed == []
+    assert _ft._dirty is False
+
+    # Case 2: registry empty → silent no-op.
+    _cmd2 = _bare_commands_instance()
+    _cmd2._reg = {}
+    _cmd2.current = 'anything'
+    _cmd2._cursor = 8
+    _ft2 = _FakeTui()
+    _ft2._cmd = _cmd2
+    _bound2 = _tui.Tui._complete_command.__get__(_ft2, _tui.Tui)
+    _bound2()
+    assert _cmd2.current == 'anything'
+    assert _ft2.printed == []
+
+
 def test_tui_tab_content_region_height_equals_lines_minus_footer():
     """ARCH-14 P1: tab content region height = LINES - FOOTER_HEIGHT
     = N-2.  Pin via _calculateResolution: tab_coords['h'] computed
@@ -15809,6 +15944,10 @@ def main() -> int:
         test_tui_alt_f1_activates_first_tab,
         test_tui_tab_key_no_longer_cycles_tabs,
         test_tui_add_tab_creates_window_and_appears_in_status_bar,
+        # ARCH-14 P5 — Tab-key command completion
+        test_tui_tab_completes_unique_prefix,
+        test_tui_tab_lists_ambiguous_prefixes_on_console,
+        test_tui_tab_with_empty_line_is_noop,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,
         # FORK-01 Step 2 — fork mirror generation + cache integration
