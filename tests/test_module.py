@@ -12129,6 +12129,186 @@ def test_tui_pageup_scrolls_tab_by_content_rows():
     assert "scroll_offset" in _body
 
 
+def test_tui_default_tabs_include_per_stage_tabs():
+    """ARCH-14 P4: the six default tabs (console, log, cache, build,
+    chroot, iso) are created on TUI init.  Pin the constant to lock in
+    insertion order — that order drives the F1..F6 mapping."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    assert _tui.Tui._DEFAULT_TABS == (
+        'console', 'log', 'cache', 'build', 'chroot', 'iso',
+    ), (
+        f"_DEFAULT_TABS must include the six per-stage tabs in this "
+        f"order (drives F1..F6 binding); got {_tui.Tui._DEFAULT_TABS!r}"
+    )
+    # Both call sites in tui.py use the constant (not a hard-coded
+    # tuple) so the assertion above is load-bearing.
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    assert "('console', 'log')" not in _src, (
+        "hard-coded ('console', 'log') tuple resurrected — must use "
+        "self._DEFAULT_TABS so adding/removing default tabs is one edit"
+    )
+
+
+def test_tui_f1_directly_activates_first_tab():
+    """ARCH-14 P4: KEY_F(1) → activate the first tab in insertion
+    order.  Test via _activate_tab_by_index directly with a fake
+    `_tabs` so we don't need a real curses session."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    from collections import OrderedDict
+
+    class _FakeTui:
+        def __init__(self):
+            self._tabs = OrderedDict([
+                ('console', {'selected': True}),
+                ('log',     {'selected': False}),
+                ('cache',   {'selected': False}),
+            ])
+            self.activated = []
+        def _activate(self, name):
+            self.activated.append(name)
+            for v in self._tabs.values():
+                v['selected'] = False
+            self._tabs[name]['selected'] = True
+        def ERROR(self, msg): pass
+
+    _ft = _FakeTui()
+    _bound = _tui.Tui._activate_tab_by_index.__get__(_ft, _tui.Tui)
+
+    # F1 → first tab (index 0).
+    _bound(0)
+    assert _ft.activated == ['console'], _ft.activated
+    assert _ft._tabs['console']['selected'] is True
+
+    # F3 → third tab.
+    _bound(2)
+    assert _ft.activated == ['console', 'cache']
+    assert _ft._tabs['cache']['selected'] is True
+    assert _ft._tabs['console']['selected'] is False
+
+    # F12 → out of range, silent no-op (no crash, no _activate call).
+    _bound(11)
+    assert _ft.activated == ['console', 'cache'], (
+        'out-of-range F-key index must be silently ignored'
+    )
+
+    # _handle_key must wire KEY_F(...) strings to this helper.
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
+                      _src, re.DOTALL).group(0)
+    assert "startswith('KEY_F(')" in _body, (
+        '_handle_key must detect KEY_F(n) strings emitted by curses'
+    )
+    assert '_activate_tab_by_index' in _body, (
+        '_handle_key must dispatch Fn keys to _activate_tab_by_index'
+    )
+
+
+def test_tui_alt_f1_activates_first_tab():
+    """ARCH-14 P4: terminals that send Alt+Fn as ESC + KEY_F(n) emit
+    two keystrokes; the bare ESC must be swallowed (not inserted into
+    the cmdline) so the following KEY_F(n) fires the tab switch
+    cleanly on the next loop iteration."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
+                      _src, re.DOTALL).group(0)
+    # ESC handler returns BEFORE the printable-char insert path; the
+    # plain `if c == '\\x1b': return` pattern is what allows ESC+Fn to
+    # collapse to a clean tab switch on the next keystroke.
+    assert "c == '\\x1b'" in _body, (
+        'bare ESC must be explicitly swallowed (else it falls through '
+        'to insert_at_cursor and becomes an edit) — required for '
+        'Alt+Fn handling on terminals that split the sequence'
+    )
+
+
+def test_tui_tab_key_no_longer_cycles_tabs():
+    """ARCH-14 P4: the Tab key (`\\t`) no longer cycles through tabs
+    (that role moves to F1..Fn).  Tab key is reserved for P5
+    completion — until then it's a no-op."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
+                      _src, re.DOTALL).group(0)
+    # Must NOT call _enable_next_tab from the `\t` branch.
+    # The simplest pin: the body's `c == '\\t'` handler line and the
+    # 5 lines after it (the handler body) must not mention
+    # _enable_next_tab.
+    _tab_branch_m = re.search(r"if c == '\\t':(.*?)(?=\n        if |\n        # |\Z)",
+                              _body, re.DOTALL)
+    assert _tab_branch_m, r"no `if c == '\t':` branch found in _handle_key"
+    _tab_branch = _tab_branch_m.group(1)
+    assert '_enable_next_tab' not in _tab_branch, (
+        'Tab key must no longer call _enable_next_tab (P4 retires '
+        'tab-cycling on Tab; use F-keys instead, completion comes in P5)'
+    )
+
+
+def test_tui_add_tab_creates_window_and_appears_in_status_bar():
+    """ARCH-14 P4: Tui.add_tab(name) adds a new tab at runtime.
+    Idempotent (re-adding an existing name is a no-op, not an error).
+    The new tab is visible to the status-bar renderer because
+    _refreshfooter iterates self._tabs.items()."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    from collections import OrderedDict
+
+    class _FakeTui:
+        _DEFAULT_TABS = _tui.Tui._DEFAULT_TABS
+        def __init__(self):
+            self._tabs = OrderedDict([
+                ('console', {'selected': True}),
+            ])
+            self._is_setup = True
+            self._too_small = False
+            self._dirty = False
+            self._tab_coords = {'h': 20, 'w': 80, 'y': 0, 'x': 0}
+            self.created = []
+            self.errors = []
+        def _create_tab(self, coords):
+            self.created.append(coords)
+            return {'win': None, 'panel': None, 'buffer': [],
+                    'cursor': 0, 'scroll_offset': 0, 'selected': False}
+        def ERROR(self, msg):
+            self.errors.append(msg)
+
+    _ft = _FakeTui()
+    _bound = _tui.Tui.add_tab.__get__(_ft, _tui.Tui)
+
+    _bound('extra')
+    assert 'extra' in _ft._tabs
+    assert _ft.created == [_ft._tab_coords]
+    assert _ft._dirty is True
+
+    # Idempotent — re-adding the same name is silent.
+    _ft._dirty = False
+    _ft.created.clear()
+    _bound('extra')
+    assert _ft.created == [], 'duplicate add_tab must not re-create the window'
+    assert _ft.errors == [], 'duplicate add_tab must NOT error (just no-op)'
+
+    # Empty name rejected with an error message.
+    _bound('')
+    assert _ft.errors, 'add_tab("") must surface an error'
+
+    # The status-bar renderer iterates over self._tabs.items, so the
+    # new tab automatically appears in the tag strip.
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _body = re.search(r'def _refreshfooter\(self.*?(?=\n    def )',
+                      _src, re.DOTALL).group(0)
+    assert 'self._tabs.items()' in _body, (
+        'status-bar renderer must iterate self._tabs.items() so '
+        'add_tab tabs show up without further wiring'
+    )
+
+
 def test_tui_tab_content_region_height_equals_lines_minus_footer():
     """ARCH-14 P1: tab content region height = LINES - FOOTER_HEIGHT
     = N-2.  Pin via _calculateResolution: tab_coords['h'] computed
@@ -15618,6 +15798,17 @@ def main() -> int:
         # ARCH-14 P2 — scrollback
         test_tui_max_buffer_lines_capped,
         test_tui_scroll_offset_increments_when_appending_while_scrolled,
+        # ARCH-14 P3 — editable cmdline + history
+        test_tui_left_arrow_moves_edit_cursor_not_scroll,
+        test_tui_backspace_deletes_at_cursor,
+        test_tui_up_arrow_walks_history,
+        test_tui_pageup_scrolls_tab_by_content_rows,
+        # ARCH-14 P4 — tab switching + per-stage tabs
+        test_tui_default_tabs_include_per_stage_tabs,
+        test_tui_f1_directly_activates_first_tab,
+        test_tui_alt_f1_activates_first_tab,
+        test_tui_tab_key_no_longer_cycles_tabs,
+        test_tui_add_tab_creates_window_and_appears_in_status_bar,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,
         # FORK-01 Step 2 — fork mirror generation + cache integration

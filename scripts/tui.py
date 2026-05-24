@@ -85,6 +85,16 @@ class Tui:
     # buffer growth that could leak memory in long-running sessions.
     MAX_BUFFER_LINES = 10000
 
+    # ARCH-14 P4: per-stage default tabs.  `console` is the interactive
+    # tab (Console.print + widgets land here).  `log` is the catch-all
+    # for `logging.getLogger('athena')` records not bound to a stage.
+    # The four stage tabs start empty; pipeline commands route their
+    # output via `logging.getLogger('athena.<stage>')` (wired in P6).
+    # Tab order here determines F1..F6 mapping.
+    _DEFAULT_TABS: Tuple[str, ...] = (
+        'console', 'log', 'cache', 'build', 'chroot', 'iso',
+    )
+
     # ── Color pair indices ────────────────────────────────────────────────
     COLOR_NORMAL    = 1
     COLOR_REVERSE   = 2
@@ -368,7 +378,7 @@ class Tui:
         try:
             if not self._is_setup:
                 raise RuntimeError('failed to initialise screen')
-            missing = [n for n in ('console', 'log') if n not in self._tabs]
+            missing = [n for n in self._DEFAULT_TABS if n not in self._tabs]
             if missing or self._footer is None:
                 raise RuntimeError(f'mandatory windows missing: {", ".join(missing) or "footer"}')
             self._activate('console')
@@ -464,7 +474,7 @@ class Tui:
             # ── First build: create windows and panels from scratch ───────────
             assert not self._tabs, 'tabs exist without a footer — inconsistent state'
             self._footer = curses.newwin(fc['h'], fc['w'], fc['y'], fc['x'])
-            for name in ('console', 'log'):
+            for name in self._DEFAULT_TABS:
                 self._tabs[name] = self._create_tab(tc)
             self._tabs['console']['selected'] = True
         else:
@@ -790,6 +800,43 @@ class Tui:
             next_tab = keys[(idx + 1) % len(keys)]
         self._activate(next_tab)
 
+    def _activate_tab_by_index(self, idx: int) -> None:
+        """Activate the `idx`-th tab in insertion order (ARCH-14 P4
+        Fn-key mapping).  Out-of-range indices are silently ignored —
+        F-keys past the tab count are no-ops, not errors."""
+        keys = list(self._tabs)
+        if 0 <= idx < len(keys):
+            self._activate(keys[idx])
+
+    def add_tab(self, name: str) -> None:
+        """Add a new tab at runtime (ARCH-14 P4 public API).
+
+        The new tab appears at the end of the insertion order, so its
+        Fn-key binding is `F<len(self._tabs)>`.  Idempotent — calling
+        twice with the same name is a no-op (silent, not an error,
+        because reload paths may re-register tabs they already own).
+
+        Headless `Cli` mirror intentionally does NOT implement this —
+        a future caller that needs runtime tabs should branch via
+        `hasattr(tui_instance, 'add_tab')`.  Today there are no such
+        callers (the six default tabs cover the pipeline).
+        """
+        name = name.strip()
+        if not name:
+            self.ERROR('add_tab: empty tab name rejected')
+            return
+        if name in self._tabs:
+            return   # idempotent
+        if not self._is_setup or self._too_small:
+            # No window context yet — defer creation; _create_windows
+            # currently only seeds _DEFAULT_TABS, so dynamic tabs added
+            # before setup would be lost.  Document the constraint and
+            # bail.
+            self.ERROR(f'add_tab({name!r}) called before TUI setup — ignored')
+            return
+        self._tabs[name] = self._create_tab(self._tab_coords)
+        self._dirty = True
+
     # =====================================================================
     # Setup / teardown
     # =====================================================================
@@ -944,14 +991,36 @@ class Tui:
                 self._dirty = True
             return
 
-        # ── Tab key: cycle through tabs ───────────────────────────────────
-        # ARCH-14 P4 frees Tab for autocomplete; until P4 lands, keep
-        # tab-cycling here so operators don't lose the tab-switch path.
-        if c == '\t':
-            self._enable_next_tab()   # calls _activate() → _redraw() directly
+        # ── Fn / Alt+Fn: switch to nth tab (ARCH-14 P4) ───────────────────
+        # `keypad(True)` makes curses translate Fn-key escape sequences
+        # to `'KEY_F(<n>)'` strings.  On terminals that send Alt+Fn as
+        # ESC + Fn (two keystrokes), the bare ESC arrives first and is
+        # dropped below; the Fn key fires on the next loop.  On
+        # terminals that send a single combined sequence (e.g. xterm
+        # `\x1b[1;3P` for Alt+F1), the multi-char string passes the
+        # `KEY_F(` substring check via the trailing-letter branch.
+        if c.startswith('KEY_F(') and c.endswith(')'):
+            try:
+                n = int(c[len('KEY_F('):-1])
+            except ValueError:
+                return
+            self._activate_tab_by_index(n - 1)   # F1 → tab 0
             return
 
-        # Ignore unrecognised multi-char key sequences (e.g. KEY_F1)
+        # ── Bare ESC: swallow (don't insert into cmdline) ─────────────────
+        # When Alt+Fn arrives as ESC + KEY_F(n), the leading ESC is a
+        # standalone keystroke.  Drop it so it doesn't become an edit.
+        if c == '\x1b':
+            return
+
+        # ── Tab key: reserved for P5 completion (P4: no-op) ───────────────
+        # ARCH-14 P4 retires the old tab-cycle binding (use F1..F6
+        # instead).  P5 will wire Tab to command-name autocomplete; for
+        # now drop the keystroke so it doesn't land in the cmdline.
+        if c == '\t':
+            return
+
+        # Ignore unrecognised multi-char key sequences.
         if len(c) > 1:
             return
 
@@ -1216,6 +1285,15 @@ class Tui:
         self.print(f'  Working dir : {os.getcwd()}')
         self.print(f'  Resources   : {self._psutil.value or "(updating...)"}')
         self.print(f'  Terminal    : {self._resolution.get("y","?")}×{self._resolution.get("x","?")}')
+        # ARCH-14 P4: surface the new key bindings so operators can
+        # discover them without reading the source.
+        self.print('  Bindings    :')
+        self.print('    F1..F<n>   switch tab (1-based, insertion order)')
+        self.print('    Alt+F1..   same as F1.. (for terminals that don\'t pass Fn alone)')
+        self.print('    ← / →      move edit cursor on the command line')
+        self.print('    ↑ / ↓      walk command history')
+        self.print('    PgUp/PgDn  scroll the active tab\'s buffer')
+        self.print('    Tab        (reserved — completion in P5)')
 
     def help(self) -> None:
         """Print all registered commands and their descriptions."""
