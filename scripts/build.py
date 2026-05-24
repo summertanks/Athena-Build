@@ -99,6 +99,12 @@ class BuildFlags:
         # would not be caught.
         self.iso_live_ready: bool = False
         self.iso_installer_ready: bool = False
+        # Set on a successful `iso build disk`.  The disk image reuses the
+        # verified live chroot (same gate as iso_live_ready) but is a
+        # distinct end-state artifact (qcow2, not ISO), so it carries its
+        # own flag — lets `autorun disk` gate the final step and `print
+        # state` surface the disk target.
+        self.iso_disk_ready: bool = False
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""
@@ -106,7 +112,7 @@ class BuildFlags:
                   'build_container_ready', 'source_build_ready',
                   'signing_key_verified',
                   'chroot_ready', 'chroot_verified', 'chroot_installer_ready',
-                  'iso_live_ready', 'iso_installer_ready']
+                  'iso_live_ready', 'iso_installer_ready', 'iso_disk_ready']
         return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
 
 
@@ -618,6 +624,7 @@ class BuildSession:
             return
         self.flags.iso_live_ready = False
         self.flags.iso_installer_ready = False
+        self.flags.iso_disk_ready = False
 
     def cmd_clean_download(self, *args):
         """Wipe tunneled .deb downloads.  These are re-fetched on
@@ -4275,6 +4282,8 @@ class BuildSession:
                 console.print("Run `chroot build` first")
             return
 
+        self.flags.iso_disk_ready = False  # reset before work; set True only on success
+
         # Cache sudo password — same pattern as cmd_build_iso_live.
         _password = Prompt(
             PROMPT_PASSWORD, "Enter sudo password",
@@ -4291,6 +4300,29 @@ class BuildSession:
             return
 
         try:
+            # Force mode re-verifies the on-disk chroot before building —
+            # same contract as `iso build live force`.  Without this, force
+            # would master an UNVERIFIED chroot into a bootable image (the
+            # gate above is bypassed but nothing re-checks the 8 invariants).
+            if _force:
+                console.print("Force mode: re-verifying chroot before disk image...")
+                _passed, _failed = self._verify_chroot(
+                    _password, self.config.dir_chroot)
+                if _failed > 0:
+                    console.print(
+                        f"ERROR: chroot verification failed "
+                        f"({_failed} of {_passed + _failed} checks) — "
+                        f"refusing to build disk image"
+                    )
+                    logger.error(
+                        f"build_iso_disk force: verify failed "
+                        f"{_failed}/{_passed + _failed}"
+                    )
+                    return
+                # Truthful: we just ran the 8 checks, so refresh the flag
+                # for subsequent (non-force) calls — mirrors iso build live.
+                self.flags.chroot_verified = True
+
             _version  = self.config.build_version.strip('"').strip("'")
             _distro   = self.config.build_distribution.strip('"').strip("'")
             _arch     = self.config.arch
@@ -4314,6 +4346,7 @@ class BuildSession:
                 )
                 logger.error("cmd_build_iso_disk: build_disk_image returned False")
                 return
+            self.flags.iso_disk_ready = True
         finally:
             _password = '*' * len(_password)  # noqa: F841
 
@@ -5844,11 +5877,14 @@ class BuildSession:
         _table = {
             'live':      'cache→parse→download→container→source build (+live)→chroot build live→iso build live',
             'installer': 'cache→parse→download→container→source build (+installer)→chroot build installer→iso build installer',
+            'disk':      'cache→parse→download→container→source build (+live)→chroot build live→iso build disk (qcow2)',
         }
         if action in ('', 'live'):
             return self.cmd_auto_run_live(*args)
         if action == 'installer':
             return self.cmd_auto_run_installer(*args)
+        if action == 'disk':
+            return self.cmd_auto_run_disk(*args)
         return self._group_help('autorun', _table, action)
 
     def cmd_auto_run_live(self):
@@ -5899,6 +5935,29 @@ class BuildSession:
                                           'iso_installer_ready',        'iso build installer'),
         ]
         self._run_autorun_steps('autorun installer', _steps)
+
+    def cmd_auto_run_disk(self):
+        """Run the full pipeline through to a pre-installed bootable qcow2
+        disk image (COMP-09).
+
+        Shares every early stage with cmd_auto_run_live and reuses the same
+        verified LIVE chroot — the disk image is mastered from buildroot/live,
+        not a distinct chroot.  Only the terminal step differs: iso build disk
+        instead of iso build live.  Gates the final step on iso_disk_ready.
+        """
+        _steps = [
+            (self.cmd_build_cache,       'cache_ready',           'cache build'),
+            (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
+            (self.cmd_source_sync,       'download_ready',        'source sync'),
+            (self.cmd_init_container,    'build_container_ready', 'container init'),
+            (self.cmd_source_build,                                  # bare = pkg
+                                          'source_build_ready',    'source build'),
+            (lambda: self.cmd_source_build('live'),                  # live extras
+                                          'source_build_ready',    'source build live'),
+            (self.cmd_build_chroot_live, 'chroot_verified',       'chroot build'),
+            (self.cmd_build_iso_disk,    'iso_disk_ready',        'iso build disk'),
+        ]
+        self._run_autorun_steps('autorun disk', _steps)
 
     def _run_autorun_steps(self, label: str, _steps: list) -> None:
         """Common driver shared by cmd_auto_run_{live,installer}.

@@ -239,6 +239,8 @@ def _print_state(session, *_extras) -> None:
             '8-check verifier (passes ⇒ live ISO ok)'),
         ('iso_live_ready',   'iso_build_live        ',
             'hybrid BIOS/EFI live ISO built'),
+        ('iso_disk_ready',   'iso_build_disk        ',
+            'pre-installed bootable qcow2 disk image'),
     ]
     for attr, label, desc in _live:
         _row(attr, label, desc)
@@ -416,6 +418,20 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
                           tui.COLOR_HIGHLIGHT)
     else:
         tui.console.print(f"  ISO installer  : {_installer_iso_path}  (installer chroot must build first)")
+
+    # Disk image reuses the verified live chroot (same gate as ISO live).
+    _distro     = cfg.build_distribution.strip('"').strip("'")
+    _disk_name  = f"{_distro.lower()}-{_version}-{cfg.arch}.qcow2"
+    _disk_path  = os.path.join(cfg.dir_image, _disk_name)
+    if session.flags.iso_disk_ready:
+        tui.console.print(f"  Disk image     : {_disk_path}  (built)",
+                          tui.COLOR_HIGHLIGHT)
+    elif session.flags.chroot_verified:
+        tui.console.print(f"  Disk image     : {_disk_path}", tui.COLOR_INFO)
+        tui.console.print("                   Ready — run `iso build disk` to produce it.",
+                          tui.COLOR_HIGHLIGHT)
+    else:
+        tui.console.print(f"  Disk image     : {_disk_path}  (chroot must verify first)")
 
 
 def _print_summary(session, *_extras) -> None:

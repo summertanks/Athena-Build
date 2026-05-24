@@ -1234,6 +1234,7 @@ def test_buildsession_constructible_with_stub_tui():
                           'cmd_build_iso_live', 'cmd_build_iso_installer',
                           'cmd_verify_chroot', 'cmd_auto_run',
                           'cmd_auto_run_live', 'cmd_auto_run_installer',
+                          'cmd_auto_run_disk',
                           'cmd_print',
                           # Group dispatchers (noun-verb command surface).
                           'cmd_cache', 'cmd_patch',
@@ -4360,6 +4361,10 @@ def test_build_flags_carries_chroot_installer_ready_default_false():
     assert f.chroot_installer_ready is False
     # __str__ summary includes it (so `print state` surfaces it)
     assert 'chroot_installer' in str(f)
+    # iso_disk_ready (COMP-09 disk end-state) — same default-False contract.
+    assert hasattr(f, 'iso_disk_ready')
+    assert f.iso_disk_ready is False
+    assert 'iso_disk' in str(f)
 
 
 def test_cmd_iso_build_requires_subaction():
@@ -4644,9 +4649,9 @@ def test_cmd_clean_source_resets_download_ready():
 
 
 def test_cmd_clean_image_resets_iso_flags():
-    """cmd_clean_image wipes dir_image and resets BOTH iso_live_ready
-    and iso_installer_ready (single dir holds outputs from both
-    pipelines)."""
+    """cmd_clean_image wipes dir_image and resets iso_live_ready,
+    iso_installer_ready AND iso_disk_ready (single dir holds outputs
+    from all three pipelines)."""
     import sys, tempfile
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession, BuildFlags
@@ -4654,6 +4659,7 @@ def test_cmd_clean_image_resets_iso_flags():
     _sess.flags = BuildFlags()
     _sess.flags.iso_live_ready = True
     _sess.flags.iso_installer_ready = True
+    _sess.flags.iso_disk_ready = True
     with tempfile.TemporaryDirectory() as _tmp:
         class _Cfg:
             dir_image = _tmp
@@ -4661,6 +4667,7 @@ def test_cmd_clean_image_resets_iso_flags():
         _sess.cmd_clean_image('force')
     assert _sess.flags.iso_live_ready is False
     assert _sess.flags.iso_installer_ready is False
+    assert _sess.flags.iso_disk_ready is False
 
 
 def test_cmd_clean_repo_resets_source_build_ready_and_drops_counts():
@@ -6578,6 +6585,7 @@ class _PrintSessionStub:
             chroot_installer_ready  = False
             iso_live_ready          = False
             iso_installer_ready     = False
+            iso_disk_ready          = False
         self.flags = _Flags()
 
 
@@ -6632,6 +6640,7 @@ def _build_autorun_session_stub(*, all_done: bool, source_build_done: bool):
     class _Cfg:
         arch = 'amd64'
         build_version = '0.1'
+        build_distribution = 'Athena'
         dir_image = '/tmp/image'
 
     class _Flags:
@@ -6649,6 +6658,7 @@ def _build_autorun_session_stub(*, all_done: bool, source_build_done: bool):
         chroot_installer_ready  = all_done
         iso_live_ready          = all_done
         iso_installer_ready     = all_done
+        iso_disk_ready          = all_done
 
     class _Pkg:
         def __init__(self, name): self._name = name
@@ -6776,9 +6786,9 @@ def test_print_state_renders_unticked_when_flags_unset():
     assert '[✓]' not in output, (
         f"Expected no ticked rows when every flag is False, got:\n{output}"
     )
-    # All eleven rows should be present as unticked.
-    assert output.count('[·]') == 11, (
-        "Expected 11 unticked rows (one per BuildFlag), got "
+    # All twelve rows should be present as unticked.
+    assert output.count('[·]') == 12, (
+        "Expected 12 unticked rows (one per BuildFlag), got "
         f"{output.count('[·]')}:\n{output}"
     )
 
@@ -10051,9 +10061,34 @@ def test_autorun_installer_chains_iso_build_after_chroot():
     )
 
 
+def test_autorun_disk_reuses_live_chroot_then_builds_disk():
+    """`autorun disk` shares the live early stages (it masters the disk
+    image from the verified LIVE chroot), then ends with `iso build disk`
+    gated on iso_disk_ready — not `iso build live`."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    src = inspect.getsource(BuildSession.cmd_auto_run_disk)
+    _i_live   = src.find("'source build live'")
+    _i_chroot = src.find("'chroot build'")
+    _i_iso    = src.find("'iso build disk'")
+    assert _i_live > 0,   "_steps missing 'source build live' (live extras)"
+    assert _i_chroot > 0, "_steps missing 'chroot build' (live chroot)"
+    assert _i_iso > 0,    "_steps missing 'iso build disk' terminal stage"
+    assert _i_live < _i_chroot < _i_iso, (
+        f"stage order wrong: live @ {_i_live}, chroot @ {_i_chroot}, "
+        f"iso disk @ {_i_iso}"
+    )
+    assert "cmd_build_iso_disk" in src, "autorun disk must call cmd_build_iso_disk"
+    assert "'iso_disk_ready'" in src, "autorun disk must gate on iso_disk_ready"
+    # Must NOT terminate on the live ISO — that would be the wrong artifact.
+    assert "cmd_build_iso_live" not in src, (
+        "autorun disk must end on the disk image, not the live ISO")
+
+
 def test_buildflags_carry_iso_ready_state():
-    """iso_live_ready and iso_installer_ready start False so
-    a never-built ISO doesn't appear ready, and they're listed in
+    """iso_live_ready, iso_installer_ready and iso_disk_ready start False
+    so a never-built artifact doesn't appear ready, and they're listed in
     __str__ so the status line surfaces them."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -10061,14 +10096,17 @@ def test_buildflags_carry_iso_ready_state():
     _flags = BuildFlags()
     assert _flags.iso_live_ready is False
     assert _flags.iso_installer_ready is False
+    assert _flags.iso_disk_ready is False
     _s = str(_flags)
     assert 'iso_live' in _s, _s
     assert 'iso_installer' in _s, _s
+    assert 'iso_disk' in _s, _s
 
 
 def test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each():
     """cmd_auto_run is now a dispatcher: bare → live (preserves UX);
-    'live' → live; 'installer' → installer; anything else → help."""
+    'live' → live; 'installer' → installer; 'disk' → disk; anything
+    else → help."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
@@ -10077,6 +10115,7 @@ def test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each():
     _sess = BuildSession.__new__(BuildSession)
     _sess.cmd_auto_run_live      = lambda *a, **kw: _calls.append(('live', a))
     _sess.cmd_auto_run_installer = lambda *a, **kw: _calls.append(('installer', a))
+    _sess.cmd_auto_run_disk      = lambda *a, **kw: _calls.append(('disk', a))
 
     # Bare → live
     _sess.cmd_auto_run()
@@ -10089,11 +10128,15 @@ def test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each():
     _calls.clear()
     _sess.cmd_auto_run('installer')
     assert _calls == [('installer', ())], _calls
-    # Unknown action → neither handler invoked (falls through to _group_help)
+    # Explicit 'disk'
+    _calls.clear()
+    _sess.cmd_auto_run('disk')
+    assert _calls == [('disk', ())], _calls
+    # Unknown action → no handler invoked (falls through to _group_help)
     _calls.clear()
     _sess.cmd_auto_run('wat')
     assert _calls == [], (
-        f"unknown autorun action must not invoke either handler, got {_calls}")
+        f"unknown autorun action must not invoke any handler, got {_calls}")
 
 
 def test_autorun_live_runs_source_build_then_source_build_live():
@@ -15582,6 +15625,7 @@ def main() -> int:
         test_autorun_installer_runs_source_build_then_source_build_installer,
         test_autorun_live_chains_iso_build_after_chroot,
         test_autorun_installer_chains_iso_build_after_chroot,
+        test_autorun_disk_reuses_live_chroot_then_builds_disk,
         test_buildflags_carry_iso_ready_state,
         test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each,
         test_autorun_live_runs_source_build_then_source_build_live,
