@@ -25,7 +25,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import psutil
 
-from . import facade, widgets
 from .dispatcher import Dispatcher
 from .events import (
     ClearTab, ConsoleTrim, LogEvent, PrintEvent, Shutdown, StatusEvent,
@@ -84,14 +83,12 @@ class Tui:
         self.dispatcher.state.banner = self._banner
         self.dispatcher.set_command_names_source(lambda: list(self._cmd_registry))
 
-        # Bind the singleton facades to this dispatcher.
-        facade.set_dispatcher(self.dispatcher)
-        widgets.set_dispatcher(self.dispatcher)
-
-        # Register as the legacy tui_instance so Console / Prompt /
-        # ProgressBar fall-back paths in tui.py find us.
-        import tui as _legacy_tui
-        _legacy_tui.tui_instance = self
+        # Register as the singleton tui_instance — exposed at the
+        # package level via tui/__init__.py.  Console / Prompt /
+        # ProgressBar / Spinner facades resolve through this at call
+        # time so no per-facade wiring is needed.
+        import tui as _pkg
+        _pkg.tui_instance = self
 
         setup_logging(self.dispatcher)
 
