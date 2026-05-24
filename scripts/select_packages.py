@@ -435,8 +435,13 @@ class SelectPackages:
 
     def _commit_add(self, name: str) -> None:
         group = self._add_group or next(iter(self._groups), 'base')
+        # Reject names absent from the cache — there's no source to
+        # build them, so adding would only fail the build later.
         if self._cache and not self._cache.get_packages(name):
-            self._tui.print(f'  select: "{name}" not in cache — added anyway')
+            self._tui.print(f'  select: "{name}" not in cache — not added '
+                            '(no source to build it)')
+            self._render()
+            return
         if self._entry(group, name) is None:
             self._groups.setdefault(group, []).append([name, True])
             self._unsaved = True

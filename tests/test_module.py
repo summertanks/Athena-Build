@@ -11892,6 +11892,62 @@ def test_select_add_package_inline_input_appends_to_group():
     assert ctl._unsaved is True
 
 
+def test_select_add_rejects_package_not_in_cache():
+    """A name absent from the cache is NOT added — without source it
+    would only fail the build later."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import select_packages
+    from types import SimpleNamespace
+
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, 'pkg.list')
+    with open(path, 'w') as f:
+        f.write('[base]\nbash\n')
+
+    class _Pkg(dict):
+        def __init__(self):
+            super().__init__()
+            self['Installed-Size'] = '100'
+            self['Description'] = ''
+            self.depends = []
+            self.pre_depends = []
+
+    class _Cache:
+        KNOWN = {'bash', 'htop'}
+        def get_packages(self, name, version=None, constraint=''):
+            return [_Pkg()] if name in self.KNOWN else []
+
+    class _T:
+        COLOR_HIGHLIGHT = 5
+        COLOR_INFO = 7
+        def __init__(self): self.prints = []
+        def add_tab(self, n): pass
+        def activate_tab(self, n): pass
+        def set_tab_buffer(self, n, r): pass
+        def set_tab_key_handler(self, n, fn): pass
+        def viewport_rows(self): return 20
+        def attr_reverse(self): return 1 << 18
+        def attr_color(self, i): return i << 8
+        def print(self, msg, attr=None): self.prints.append(msg)
+
+    cfg = SimpleNamespace(pkglist_path=path)
+    ft = _T()
+    ctl = select_packages.SelectPackages(cfg, _Cache(), ft)
+
+    # Known name → added.
+    ctl._commit_add('htop')
+    assert ctl._entry('base', 'htop') == ['htop', True]
+    assert ctl._unsaved is True
+
+    # Unknown name → rejected, not added, warning printed.
+    ctl._unsaved = False
+    ctl._commit_add('sdfg')
+    assert ctl._entry('base', 'sdfg') is None
+    assert ctl._unsaved is False
+    assert any('not in cache' in p for p in ft.prints)
+
+
 def test_select_quit_without_save_does_not_use_dispatcher_prompt():
     """Regression: quitting with unsaved edits must NOT call
     request_prompt (which cancels the shell's pending prompt and kills
@@ -15516,6 +15572,7 @@ def main() -> int:
         test_select_loads_groups_all_selected,
         test_select_toggle_and_save_round_trip,
         test_select_add_package_inline_input_appends_to_group,
+        test_select_add_rejects_package_not_in_cache,
         test_select_save_preserves_comments_and_appends_new,
         test_select_flat_file_round_trips_without_header,
         test_select_key_toggle_sets_unsaved_and_rerenders,
