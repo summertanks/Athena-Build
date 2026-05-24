@@ -1,0 +1,75 @@
+// Athena-Build pipeline state machine.
+// Source of truth for docs/diagrams/build-fsm.png.
+// Regenerate: dot -Tpng docs/diagrams/build-fsm.dot -o docs/diagrams/build-fsm.png
+//
+// States are the BuildFlags milestones (scripts/build.py:BuildFlags).
+// Solid edges = forward pipeline (command + gate). Red dashed edges =
+// reset/invalidation by non-pipeline commands. Green nodes = ISO/disk
+// end-states. Black bars = UML fork/join (parallel branch + reconverge).
+
+digraph AthenaBuildFSM {
+    rankdir=TB;
+    bgcolor="white";
+    labelloc="t";
+    label=<<b>Athena-Build &mdash; pipeline state machine</b>>;
+    fontname="Helvetica"; fontsize=15;
+    node [fontname="Helvetica", fontsize=11];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // ---- start pseudo-state ----
+    start [shape=circle, width=0.22, label="", style=filled, fillcolor=black];
+
+    // ---- pipeline states ----
+    node [shape=box, style="rounded,filled", fillcolor="#E8F0FE", color="#4A6FA5"];
+    Clean              [label="Clean\n(no flags set)"];
+    CacheReady         [label="CacheReady\ncache_ready"];
+    DepReady           [label="DepReady\ndep_check_ready"];
+    ContainerReady     [label="ContainerReady\nbuild_container_ready"];
+    DownloadReady      [label="DownloadReady\ndownload_ready"];
+    SourceBuilt        [label="SourceBuilt\nsource_build_ready"];
+    LiveChrootBuilt    [label="LiveChrootBuilt\nchroot_ready"];
+    LiveChrootVerified [label="LiveChrootVerified\nchroot_verified"];
+    InstallerChroot    [label="InstallerChroot\nchroot_installer_ready"];
+
+    // ---- end-states (ISO / disk artifacts) ----
+    node [shape=box, style="rounded,filled", fillcolor="#D9F2D9", color="#2E7D32", penwidth=2];
+    LiveISO      [label="Live ISO\niso_live_ready"];
+    InstallerISO [label="Installer ISO\niso_installer_ready"];
+    DiskImage    [label="Disk image (qcow2)\niso_disk_ready"];
+
+    // ---- UML fork / join bars ----
+    cache_fork [shape=box, width=2.2, height=0.07, style=filled, fillcolor=black, label=""];
+    src_join   [shape=box, width=2.2, height=0.07, style=filled, fillcolor=black, label=""];
+
+    // ---- forward pipeline edges ----
+    start -> Clean;
+    Clean -> CacheReady [label="cache build"];
+    CacheReady -> cache_fork [arrowhead=none];
+    cache_fork -> DepReady       [label="cache parse"];
+    cache_fork -> ContainerReady [label="container init"];
+    DepReady -> DownloadReady [label="source sync"];
+    DownloadReady  -> src_join [arrowhead=none];
+    ContainerReady -> src_join [arrowhead=none];
+    src_join -> SourceBuilt [label="source build\n(+ live/installer extras)"];
+    SourceBuilt -> LiveChrootBuilt [label="chroot build live\n[signs key]"];
+    SourceBuilt -> InstallerChroot [label="chroot build installer"];
+    LiveChrootBuilt -> LiveChrootVerified [label="chroot verify\n(8 checks)"];
+    LiveChrootVerified -> LiveISO    [label="iso build live"];
+    LiveChrootVerified -> DiskImage  [label="iso build disk"];
+    InstallerChroot   -> InstallerISO [label="iso build installer\n[signs key]"];
+
+    // ---- reset / invalidation edges (non-pipeline commands) ----
+    edge [color="#C62828", fontcolor="#C62828", style=dashed, constraint=false];
+    CacheReady     -> Clean        [label="cache purge / fork change"];
+    DepReady       -> Clean        [label="cache purge"];
+    ContainerReady -> CacheReady   [label="container purge"];
+    DownloadReady  -> DepReady     [label="clean source"];
+    SourceBuilt    -> DownloadReady [label="clean repo"];
+    LiveChrootVerified -> SourceBuilt [label="clean buildroot"];
+    InstallerChroot    -> SourceBuilt [label="clean buildroot"];
+    LiveISO      -> LiveChrootVerified [label="clean image"];
+    DiskImage    -> LiveChrootVerified [label="clean image"];
+    InstallerISO -> InstallerChroot    [label="clean image"];
+
+    // note: `clean all` resets every flag -> Clean from any state (not drawn).
+}
