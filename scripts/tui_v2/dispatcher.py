@@ -49,6 +49,11 @@ class Dispatcher:
     # quit flag set from outside, or a producer that crashed without
     # posting).  1.0s is generous; tuning lower buys nothing.
     IDLE_TIMEOUT: float = 1.0
+    # When widgets are alive but they don't expose `next_frame_at`
+    # (e.g. legacy ProgressBar imported from scripts/tui.py), cap the
+    # idle wait at this value so the bar still animates at a usable
+    # rate.  10 Hz is the visible-perception sweet spot.
+    WIDGET_IDLE_TIMEOUT: float = 0.1
 
     def __init__(self, renderer: Renderer, state: Optional[State] = None) -> None:
         self.state = state if state is not None else State()
@@ -113,11 +118,23 @@ class Dispatcher:
         return self.state.exit_code
 
     def _compute_timeout(self) -> float:
-        """Min of animation deadline (if any) and IDLE_TIMEOUT."""
+        """Pick the next dispatcher wake-up.
+
+        Priority:
+          1. A widget's `next_frame_at()` returned a deadline → wake
+             at that time (e.g. Spinner's 10 fps animation).
+          2. No deadlines but widgets are alive → cap at
+             WIDGET_IDLE_TIMEOUT (legacy ProgressBar / Spinner from
+             scripts/tui.py don't expose next_frame_at; this keeps
+             them animating at ~10 Hz without per-step event posts).
+          3. No widgets at all → block up to IDLE_TIMEOUT.
+        """
         d = self.state.next_animation_deadline(time.monotonic())
-        if d is None:
-            return self.IDLE_TIMEOUT
-        return min(d, self.IDLE_TIMEOUT)
+        if d is not None:
+            return min(d, self.IDLE_TIMEOUT)
+        if self.state.widgets:
+            return self.WIDGET_IDLE_TIMEOUT
+        return self.IDLE_TIMEOUT
 
     def _safe_render(self) -> None:
         if not self.state.dirty:
