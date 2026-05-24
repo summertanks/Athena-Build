@@ -5047,10 +5047,28 @@ def _logger_test_with_stub_tui():
 
     captured = []
     class _StubTui:
+        # Mirror Tui's severity constants so _LogTabHandler.emit can pick
+        # the right ones when routing via _log_to_tab.  ARCH-14 P6 made
+        # the handler dispatch through _log_to_tab instead of the bare
+        # ERROR/WARNING/INFO methods; the stub still exposes both surfaces
+        # so this fixture covers the new routing AND the historical
+        # contract.
+        SEVERITY_INFO    = 0
+        SEVERITY_WARNING = 1
+        SEVERITY_ERROR   = 2
         def print(self, m, attr=None): captured.append(('print', m, attr))
         def ERROR(self, m): captured.append(('error', m))
         def WARNING(self, m): captured.append(('warning', m))
         def INFO(self, m): captured.append(('info', m))
+        def _log_to_tab(self, tab, sev, m):
+            # Translate (tab_name, severity) back into the old single-tab
+            # capture shape so existing assertions continue to work.
+            if sev == self.SEVERITY_ERROR:
+                self.ERROR(m)
+            elif sev == self.SEVERITY_WARNING:
+                self.WARNING(m)
+            else:
+                self.INFO(m)
 
     saved = _tui.tui_instance
     _tui.tui_instance = _StubTui()
@@ -11934,7 +11952,7 @@ def test_tui_max_buffer_lines_capped():
     # mutation point for both _log and print, so this covers both.
     _fake_tab = {
         'win': None, 'panel': None,
-        'buffer': [], 'cursor': 0, 'scroll_offset': 0, 'selected': False,
+        'buffer': [], 'scroll_offset': 0, 'selected': False,
     }
     _bound = _tui.Tui._append_lines.__get__(
         type('S', (), {'MAX_BUFFER_LINES': 100})(), _tui.Tui
@@ -11959,7 +11977,7 @@ def test_tui_scroll_offset_increments_when_appending_while_scrolled():
     import tui as _tui
 
     # Stuck-at-bottom case: scroll_offset stays 0.
-    _fake = {'win': None, 'panel': None, 'buffer': [], 'cursor': 0,
+    _fake = {'win': None, 'panel': None, 'buffer': [],
              'scroll_offset': 0, 'selected': False}
     _bound = _tui.Tui._append_lines.__get__(
         type('S', (), {'MAX_BUFFER_LINES': 10000})(), _tui.Tui
@@ -11972,7 +11990,7 @@ def test_tui_scroll_offset_increments_when_appending_while_scrolled():
     # Scrolled-away case: offset increments by # of new lines.
     _fake2 = {'win': None, 'panel': None,
               'buffer': [(f'old {i}', 0) for i in range(20)],
-              'cursor': 20, 'scroll_offset': 10, 'selected': False}
+              'scroll_offset': 10, 'selected': False}
     _bound(_fake2, [(f'new {i}', 0) for i in range(3)])
     assert _fake2['scroll_offset'] == 13, (
         f"scroll_offset should be 13 (10+3) after appending 3 lines "
@@ -12274,7 +12292,7 @@ def test_tui_add_tab_creates_window_and_appears_in_status_bar():
         def _create_tab(self, coords):
             self.created.append(coords)
             return {'win': None, 'panel': None, 'buffer': [],
-                    'cursor': 0, 'scroll_offset': 0, 'selected': False}
+                    'scroll_offset': 0, 'selected': False}
         def ERROR(self, msg):
             self.errors.append(msg)
 
@@ -12442,6 +12460,127 @@ def test_tui_tab_with_empty_line_is_noop():
     _bound2()
     assert _cmd2.current == 'anything'
     assert _ft2.printed == []
+
+
+def test_log_tab_handler_routes_by_logger_name():
+    """ARCH-14 P6: `_LogTabHandler._tab_for_logger` maps
+    'athena.<stage>' → '<stage>' and bare 'athena' → 'log'.  Pin the
+    mapping so per-stage routing keeps working."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    f = _tui._LogTabHandler._tab_for_logger
+    assert f('athena')           == 'log',    'bare athena → log'
+    assert f('athena.cache')     == 'cache',  'stage suffix becomes tab name'
+    assert f('athena.build')     == 'build'
+    assert f('athena.chroot')    == 'chroot'
+    assert f('athena.iso')       == 'iso'
+    # Multi-level — pick only the first segment after `athena.`.
+    assert f('athena.cache.sub') == 'cache', (
+        'nested loggers must collapse to the top-level stage tab'
+    )
+    # Foreign logger names → log fallback.
+    assert f('urllib3')          == 'log',    'unknown logger → log fallback'
+    assert f('asyncio')          == 'log'
+
+
+def test_log_tab_handler_falls_back_to_log_for_unknown_stage_tab():
+    """ARCH-14 P6: Tui._log_to_tab routes unknown tab names to 'log'
+    so a stray sub-logger never silently loses records."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    import datetime
+
+    _calls = []
+
+    class _FakeTui:
+        SEVERITY_INFO    = 0
+        SEVERITY_WARNING = 1
+        SEVERITY_ERROR   = 2
+        MAX_BUFFER_LINES = 10000
+        _log_map = {
+            0: ('[INFO ]', 0),
+            1: ('[WARN ]', 0),
+            2: ('[ERROR]', 0),
+        }
+        def __init__(self):
+            import threading
+            self._log_lock = threading.Lock()
+            self._tabs = {
+                'log':   {'buffer': [], 'scroll_offset': 0},
+                'cache': {'buffer': [], 'scroll_offset': 0},
+            }
+            self._dirty = False
+        def _append_lines(self, tab, lines):
+            tab['buffer'].extend(lines)
+            _calls.append((id(tab), lines))
+
+    _ft = _FakeTui()
+    _bound = _tui.Tui._log_to_tab.__get__(_ft, _tui.Tui)
+
+    # Known tab → routed there.
+    _bound('cache', 0, 'hello cache')
+    assert len(_ft._tabs['cache']['buffer']) == 1
+    assert _ft._tabs['log']['buffer'] == []
+
+    # Unknown tab → falls back to 'log'.
+    _bound('iso', 0, 'iso tab not present in fake')   # falls back
+    assert len(_ft._tabs['log']['buffer']) == 1, (
+        "unknown tab must fall back to 'log' — fake has no 'iso' tab "
+        "so the record should land in 'log'"
+    )
+
+    # Unknown severity is silently dropped (matches prior _log behaviour).
+    _ft._tabs['log']['buffer'].clear()
+    _bound('log', 99, 'bogus severity')
+    assert _ft._tabs['log']['buffer'] == [], (
+        'unknown severity must drop the record, not crash'
+    )
+
+
+def test_tui_resize_clamps_scroll_offset_to_content_rows():
+    """ARCH-14 P6: on resize, scroll_offset is capped at
+    `max(0, len(buffer) - content_rows)` — past that point the top of
+    the buffer is already fully visible and further scrolling would
+    just pad with blank space."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _m = re.search(
+        r'def _create_windows\(self.*?(?=\n    def )',
+        _src, re.DOTALL,
+    )
+    assert _m, '_create_windows not found'
+    _body = _m.group(0)
+    # Pin the clamp expression — `new_h` is the content-rows variable
+    # at this point in _create_windows.
+    assert 'len(tab[\'buffer\']) - new_h' in _body, (
+        'resize must clamp scroll_offset at len(buffer) - content_rows '
+        '(was -1 in P2; tightened in P6)'
+    )
+
+
+def test_tui_tab_entry_cursor_field_removed():
+    """ARCH-14 P6: the deprecated `cursor` field is gone from
+    _TabEntry, _create_tab, and all write sites.  Pin its absence so a
+    regression in any of those paths surfaces immediately."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    # _TabEntry definition no longer mentions cursor.
+    import re
+    _tabentry_m = re.search(r'class _TabEntry\(TypedDict\):(.*?)(?=\nclass |\n# -)',
+                            _src, re.DOTALL)
+    assert _tabentry_m, '_TabEntry not found'
+    assert 'cursor' not in _tabentry_m.group(1), (
+        '_TabEntry must no longer declare a `cursor` field'
+    )
+    # No tab-dict literal with 'cursor': in either tui.py.
+    assert "'cursor':" not in _src, (
+        "no remaining 'cursor': writes in tui.py (P6 prune)"
+    )
+    # _cmd_input_width method is also gone (made dead by P3 cmdline render).
+    assert '_cmd_input_width' not in _src, (
+        '_cmd_input_width was dead post-P3; must be removed in P6'
+    )
 
 
 def test_tui_tab_content_region_height_equals_lines_minus_footer():
@@ -15948,6 +16087,11 @@ def main() -> int:
         test_tui_tab_completes_unique_prefix,
         test_tui_tab_lists_ambiguous_prefixes_on_console,
         test_tui_tab_with_empty_line_is_noop,
+        # ARCH-14 P6 — per-stage logger routing + cleanup
+        test_log_tab_handler_routes_by_logger_name,
+        test_log_tab_handler_falls_back_to_log_for_unknown_stage_tab,
+        test_tui_resize_clamps_scroll_offset_to_content_rows,
+        test_tui_tab_entry_cursor_field_removed,
         # FORK-01 Step 1 (was missing from registry)
         test_buildconfig_creates_fork_source_dir,
         # FORK-01 Step 2 — fork mirror generation + cache integration
