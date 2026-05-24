@@ -9,7 +9,7 @@
 - **Reviewer:** Claude (read-only audit, with subsequent maintenance reconciling actual state vs ticket status)
 - **Tree size:** ~31,800 LOC (scripts/ + tests/) — 18 scripts modules, single-file test suite (~12k LOC, ~440 tests)
 - **Pipeline state:** end-to-end working — `cache build → dep parse →
-  source download → container init → source build → chroot build
+  source sync → container init → source build → chroot build
   (+verify) → iso build live → iso build installer`.  Installer ISO
   reaches `finish-install` cleanly on VMware BIOS + EFI as of
   2026-05-14 (commit `68266a2`); real-hardware validation still
