@@ -14044,6 +14044,48 @@ def test_destructive_helpers_warn_in_docstring():
         "the 2026-05-19 over-counting bug.")
 
 
+def test_print_wrapped_names_keeps_lines_under_wrap_width():
+    """The compact failure formatter wraps `label: a, b, c, …` so the
+    output stays readable when there are many names (e.g. 50+ stale
+    sources).  Pins:
+      - first line carries the label
+      - no line exceeds the configured wrap width
+      - every input name appears exactly once in the output
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build as _build_mod
+    # Patch build.console.print (the module-level reference build.py
+    # bound at import time) — patching tui.console.print won't catch
+    # calls since build holds a separate reference.
+    _captured: 'list[str]' = []
+    _orig = _build_mod.console.print
+    _build_mod.console.print = lambda *args, **kw: _captured.append(
+        ' '.join(str(a) for a in args)
+    )
+    try:
+        _names = [f'pkg-{i:02d}' for i in range(20)]
+        _build_mod.BuildSession._print_wrapped_names(
+            '  stale_pass (20)', _names, wrap=50,
+        )
+    finally:
+        _build_mod.console.print = _orig
+
+    _lines = [_l for _l in _captured if _l.strip()]
+    assert _lines, f"no output produced, got: {_captured!r}"
+    assert _lines[0].lstrip().startswith('stale_pass (20):'), _lines[0]
+    _joined = ' '.join(_lines)
+    for _n in _names:
+        assert _joined.count(_n) == 1, (
+            f"name {_n} appeared {_joined.count(_n)} times "
+            f"(expected exactly 1)"
+        )
+    for _line in _lines:
+        assert len(_line) <= 50, (
+            f"line exceeds wrap=50: {len(_line)} chars: {_line!r}"
+        )
+
+
 def test_source_state_repairable_requires_patchhash_baseline():
     """Regression for the audit/repair ping-pong reported 2026-05-23.
 
@@ -15180,6 +15222,7 @@ def main() -> int:
         test_content_integrity_absorbed_into_cmd_audit_per_cohort,
         test_deb_dir_for_recognises_main_udeb_label,
         test_repo_audit_closure_handles_conflicts_and_provides,
+        test_print_wrapped_names_keeps_lines_under_wrap_width,
         test_source_state_repairable_requires_patchhash_baseline,
         test_cmd_source_audit_classifies_rebuilds_by_subset,
         test_readonly_named_commands_have_no_destructive_calls,
