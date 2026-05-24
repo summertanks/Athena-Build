@@ -265,7 +265,14 @@ class Tui:
             try:
                 line = self.dispatcher.request_prompt('$ ', mode='line').strip()
             except Exception:
-                return
+                # request_prompt raises if its Future was cancelled.  On
+                # shutdown that's terminal — exit the loop.  Otherwise a
+                # concurrent prompt displaced ours; re-request rather than
+                # killing the shell (which would silently ignore every
+                # subsequent command).
+                if self.dispatcher.state.quit:
+                    return
+                continue
             if not line:
                 continue
             self.dispatcher.post(PrintEvent(f'${line}',
