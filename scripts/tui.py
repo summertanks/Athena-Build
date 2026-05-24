@@ -150,16 +150,31 @@ class Tui:
                 self._var = v
 
     class _Commands:
-        """Command registry and current input-line state."""
+        """Command registry and current input-line state.
+
+        ARCH-14 P3 semantics:
+          - `_cursor` is the EDIT POSITION within `current` (0 = at
+            start, len(current) = at end).  Previously it was a
+            horizontal-scroll offset; the flip is what makes
+            cursor-position editing possible.
+          - `_history_idx` is the position within `_history` when
+            walking back via Up/Down (None = editing a fresh line; an
+            int means "current is mirroring _history[_history_idx]
+            and the line being edited is preserved at _history_draft").
+        """
 
         def __init__(self, tui: 'Tui') -> None:
             assert isinstance(tui, Tui)
             self._tui       = tui
             self.current:  str  = ''
             self._history: List[str] = []
+            self._history_idx: Optional[int] = None
+            self._history_draft: str = ''   # the in-progress line stashed
+                                            # when the user started walking
+                                            # history; restored on Down→end
             self._reg:     Dict[str, Tuple[Callable[..., Any], str]] = {}
             self._masked:  bool = False
-            self._cursor:  int  = 0
+            self._cursor:  int  = 0   # edit position (P3)
 
         # -- registration --------------------------------------------------
 
@@ -180,21 +195,59 @@ class Tui:
         def hints(self) -> List[Tuple[str, str]]:
             return [(n, v[1]) for n, v in self._reg.items()]
 
-        # -- cursor --------------------------------------------------------
+        def list_names(self) -> List[str]:
+            """Registered command names in insertion order — used by
+            P5 (Tab completion)."""
+            return list(self._reg.keys())
 
-        def inc_cursor(self) -> None:
-            self._cursor += 1
-
-        def dec_cursor(self) -> None:
-            if self._cursor > 0:
-                self._cursor -= 1
-
-        def reset_cursor(self) -> None:
-            self._cursor = 0
+        # -- cursor (edit position) ----------------------------------------
 
         @property
         def cursor(self) -> int:
             return self._cursor
+
+        def reset_cursor(self) -> None:
+            self._cursor = 0
+
+        def move_cursor_left(self) -> bool:
+            """Move edit position one char left.  Returns True if it
+            moved (caller can decide whether to mark dirty)."""
+            if self._cursor > 0:
+                self._cursor -= 1
+                return True
+            return False
+
+        def move_cursor_right(self) -> bool:
+            """Move edit position one char right (bounded at
+            len(current))."""
+            if self._cursor < len(self.current):
+                self._cursor += 1
+                return True
+            return False
+
+        def insert_at_cursor(self, ch: str) -> None:
+            """Insert ch at the edit position; advance cursor past it.
+            Multi-char inserts treated as a single block."""
+            self.current = (self.current[:self._cursor]
+                            + ch
+                            + self.current[self._cursor:])
+            self._cursor += len(ch)
+
+        def delete_before_cursor(self) -> bool:
+            """Backspace at edit position.  Returns True if a char was
+            deleted."""
+            if self._cursor <= 0:
+                return False
+            self.current = (self.current[:self._cursor - 1]
+                            + self.current[self._cursor:])
+            self._cursor -= 1
+            return True
+
+        def set_current(self, text: str) -> None:
+            """Replace `current` and move cursor to end (used by
+            history navigation and tab completion)."""
+            self.current = text
+            self._cursor = len(text)
 
         # -- mask mode -----------------------------------------------------
 
@@ -210,10 +263,47 @@ class Tui:
             cmd = cmd.strip()
             if cmd:
                 self._history.append(cmd)
+            # Submitting a line resets history navigation state.
+            self._history_idx = None
+            self._history_draft = ''
 
         @property
         def history(self) -> List[str]:
             return list(self._history)
+
+        def history_prev(self) -> bool:
+            """Walk one step toward older history (Up arrow).  On
+            first Up: stash the in-progress line at `_history_draft`
+            and load most-recent.  Returns True if `current` changed.
+            Returns False when already at the oldest entry."""
+            if not self._history:
+                return False
+            if self._history_idx is None:
+                self._history_draft = self.current
+                self._history_idx = len(self._history) - 1
+                self.set_current(self._history[self._history_idx])
+                return True
+            if self._history_idx > 0:
+                self._history_idx -= 1
+                self.set_current(self._history[self._history_idx])
+                return True
+            return False
+
+        def history_next(self) -> bool:
+            """Walk one step toward newer history (Down arrow).  Once
+            past the most-recent entry, restore the stashed in-progress
+            line (`_history_draft`) and exit history mode."""
+            if self._history_idx is None:
+                return False
+            if self._history_idx < len(self._history) - 1:
+                self._history_idx += 1
+                self.set_current(self._history[self._history_idx])
+                return True
+            # Past the newest: exit history mode, restore draft.
+            self._history_idx = None
+            self.set_current(self._history_draft)
+            self._history_draft = ''
+            return True
 
     # =====================================================================
     # Construction
@@ -436,22 +526,46 @@ class Tui:
 
         self._footer.erase()
 
-        # ── Row 0: command input ─────────────────────────────────────────
-        # Behaviour unchanged from the pre-Phase-1 layout: cursor still
-        # horizontal-scrolls the visible window into a long line.  Phase
-        # 3 flips this to cursor-position editing.
+        # ── Row 0: command input (ARCH-14 P3 — editable cursor) ─────────
+        # `self._cmd.cursor` is the EDIT POSITION (0..len(current)).
+        # Render the line with the char at cursor inverted (A_REVERSE)
+        # so the operator can see where edits will land.  When the
+        # cursor is at end-of-line, render a trailing reverse-video
+        # space as the caret.  Long lines that overflow `cmd_area_w`
+        # pan into view so the cursor is always visible.
         prompt_str = self.cmd_prompt[:max_x - 2]
-        cmd_area_w = max_x - len(prompt_str) - 1   # -1 for blink cursor
-
+        cmd_area_w = max_x - len(prompt_str) - 1   # -1 for caret
+        cmd_x      = len(prompt_str)
         self._safe_addstr(self._footer, 0, 0, prompt_str)
-        if cmd_area_w >= 1:
-            raw_cmd     = self._cmd.current
-            display_cmd = ('*' * len(raw_cmd)) if self._cmd.is_masked() else raw_cmd
-            visible_cmd = display_cmd[self._cmd.cursor: self._cmd.cursor + cmd_area_w]
-            cmd_x       = len(prompt_str)
-            self._safe_addstr(self._footer, 0, cmd_x, visible_cmd)
-            self._safe_addstr(self._footer, 0, cmd_x + len(visible_cmd), '_',
-                              curses.A_BLINK | curses.A_BOLD)
+        if cmd_area_w < 1:
+            return
+
+        raw_cmd     = self._cmd.current
+        display_cmd = ('*' * len(raw_cmd)) if self._cmd.is_masked() else raw_cmd
+        cur         = self._cmd.cursor
+
+        # Pan window so the cursor is always visible.  Anchor: keep
+        # the cursor at most `cmd_area_w - 1` chars from the start of
+        # the visible window.
+        pan = 0
+        if cur > cmd_area_w - 1:
+            pan = cur - (cmd_area_w - 1)
+        visible_start = pan
+        visible_end   = pan + cmd_area_w
+        visible       = display_cmd[visible_start:visible_end]
+        local_cur     = cur - pan   # cursor position within `visible`
+
+        # Render the visible substring; overlay the caret last so it
+        # wins on the cursor column.
+        self._safe_addstr(self._footer, 0, cmd_x, visible)
+        if local_cur < len(visible):
+            # Cursor sits ON an existing char — invert that one cell.
+            self._safe_addstr(self._footer, 0, cmd_x + local_cur,
+                              visible[local_cur], curses.A_REVERSE)
+        else:
+            # Cursor at end — render an inverted space as caret.
+            self._safe_addstr(self._footer, 0, cmd_x + local_cur, ' ',
+                              curses.A_REVERSE)
 
         # ── Row 1: status bar (reverse video) ────────────────────────────
         # Fill the whole row with reverse-video spaces so the bg is
@@ -784,47 +898,55 @@ class Tui:
 
         active = self._activetab
 
-        # ── Scroll tab content ────────────────────────────────────────────
-        # ARCH-14 P2: drive via scroll_offset (0 = at-bottom).  Up
-        # increases offset (older content scrolls into view); Down
-        # decreases (newer content / back toward bottom).
-        if c == 'KEY_UP':
+        # ── Page Up / Down: scroll tab content (ARCH-14 P3) ──────────────
+        # Replaces Up/Down's prior scroll role.  Scroll by the tab's
+        # content-row height for "screenful" jumps.
+        if c == 'KEY_PPAGE':
             _max_off = max(0, len(active['buffer']) - 1)
-            if active['scroll_offset'] < _max_off:
-                active['scroll_offset'] += 1
+            _jump = max(1, self._tab_coords.get('h', 1))
+            active['scroll_offset'] = min(_max_off,
+                                          active['scroll_offset'] + _jump)
+            self._dirty = True
+            return
+
+        if c == 'KEY_NPAGE':
+            _jump = max(1, self._tab_coords.get('h', 1))
+            active['scroll_offset'] = max(0,
+                                          active['scroll_offset'] - _jump)
+            self._dirty = True
+            return
+
+        # ── Up / Down: walk command history (ARCH-14 P3) ─────────────────
+        if c == 'KEY_UP':
+            if self._cmd.history_prev():
                 self._dirty = True
             return
 
         if c == 'KEY_DOWN':
-            if active['scroll_offset'] > 0:
-                active['scroll_offset'] -= 1
+            if self._cmd.history_next():
                 self._dirty = True
             return
 
-        # ── Scroll command line horizontally ──────────────────────────────
+        # ── Left / Right: move edit cursor (ARCH-14 P3) ──────────────────
         if c == 'KEY_RIGHT':
-            w = self._cmd_input_width()
-            if (len(self._cmd.current) > w and
-                    self._cmd.cursor < len(self._cmd.current) - w):
-                self._cmd.inc_cursor()
+            if self._cmd.move_cursor_right():
                 self._dirty = True
             return
 
         if c == 'KEY_LEFT':
-            self._cmd.dec_cursor()
-            self._dirty = True
+            if self._cmd.move_cursor_left():
+                self._dirty = True
             return
 
-        # ── Backspace ─────────────────────────────────────────────────────
+        # ── Backspace: delete at edit cursor (ARCH-14 P3) ────────────────
         if c in ('KEY_BACKSPACE', '\x7f', '\x08'):
-            if self._cmd.current:
-                self._cmd.current = self._cmd.current[:-1]
-                if self._cmd.cursor > 0:
-                    self._cmd.dec_cursor()
+            if self._cmd.delete_before_cursor():
                 self._dirty = True
             return
 
         # ── Tab key: cycle through tabs ───────────────────────────────────
+        # ARCH-14 P4 frees Tab for autocomplete; until P4 lands, keep
+        # tab-cycling here so operators don't lose the tab-switch path.
         if c == '\t':
             self._enable_next_tab()   # calls _activate() → _redraw() directly
             return
@@ -859,15 +981,11 @@ class Tui:
                 else:
                     with cond:
                         cond.notify()
-            self._cmd.current = ''
-            self._cmd.reset_cursor()
+            self._cmd.set_current('')
             self._dirty = True
         else:
-            self._cmd.current += c
-            w = self._cmd_input_width()
-            if (len(self._cmd.current) > w and
-                    self._cmd.cursor < len(self._cmd.current) - w):
-                self._cmd.inc_cursor()
+            # ARCH-14 P3: insert at edit cursor (was append-to-end).
+            self._cmd.insert_at_cursor(c)
             self._dirty = True
 
     def _run(self, started: threading.Event) -> None:
