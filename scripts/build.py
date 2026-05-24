@@ -5909,18 +5909,22 @@ def main(banner: str) -> None:
 
     session = BuildSession(config, tui_inst)
 
-    tui.register_command('cache',     session.cmd_cache,     '\tCache:      cache build')
-    tui.register_command('clean',     session.cmd_clean,     '\tClean:      clean cache | source | repo | buildroot | image | download | container | all')
-    tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
-    tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
-    tui.register_command('source',    session.cmd_source,    '\tSources:    source sync | source build [pkg|live|installer|recommended|all] | source fork <pkg> [enabled|disabled]')
-    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index | audit [quick] | repair [strip|cleanup] | tunnel')
-    tui.register_command('container', session.cmd_container, '\tContainer:  container init')
-    tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
-    tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')
-    tui.register_command('key',       session.cmd_key,       '\tSigning:    key generate | key verify')
-    tui.register_command('autorun',   session.cmd_auto_run,  '\tAutorun:    autorun [live] | autorun installer')
-    tui.register_command('print',     session.cmd_print,     '\tPrint build state — try: print help')
+    # Tips are constrained: 4 (indent) + 14 (name pad in `help`) +
+    # tip ≤ 80 cols.  Tips that need to enumerate many sub-actions
+    # use `<subcmd>` and direct the operator at `<cmd>` (bare) which
+    # prints the full per-action table via _group_help.
+    tui.register_command('cache',     session.cmd_cache,     'Cache:      cache <build|purge>')
+    tui.register_command('clean',     session.cmd_clean,     'Clean:      clean <subcmd> — run `clean` for the list')
+    tui.register_command('dep',       session.cmd_dep,       'Deps:       dep parse')
+    tui.register_command('patch',     session.cmd_patch,     'Patches:    patch refresh')
+    tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|fork>')
+    tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|audit|repair|tunnel>')
+    tui.register_command('container', session.cmd_container, 'Container:  container <init|purge>')
+    tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     chroot build [live|installer] | chroot verify')
+    tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
+    tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
+    tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
+    tui.register_command('print',     session.cmd_print,     'Print:      print build state — try `print help`')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Athena Build System...", tui.COLOR_HIGHLIGHT)
