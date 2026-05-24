@@ -11980,6 +11980,155 @@ def test_tui_scroll_offset_increments_when_appending_while_scrolled():
     )
 
 
+def _bare_commands_instance():
+    """Construct a _Commands without invoking its constructor — bypasses
+    the isinstance(tui, Tui) gate so tests don't need a curses session.
+    Populates the fields the P3 methods touch."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    _c = object.__new__(_tui.Tui._Commands)
+    _c._tui = None
+    _c.current = ''
+    _c._history = []
+    _c._history_idx = None
+    _c._history_draft = ''
+    _c._reg = {}
+    _c._masked = False
+    _c._cursor = 0
+    return _c
+
+
+def test_tui_left_arrow_moves_edit_cursor_not_scroll():
+    """ARCH-14 P3: KEY_LEFT/RIGHT now move the edit cursor within
+    `current` (no longer horizontal-scroll the visible window).  Pin
+    the semantics through _Commands' new helpers and confirm
+    _handle_key wires the keys to them (not to scroll_offset)."""
+    _c = _bare_commands_instance()
+    _c.current = 'hello'
+    _c._cursor = 5   # at end-of-line
+
+    # Walk cursor leftward, end → start.
+    for expected in (4, 3, 2, 1, 0):
+        assert _c.move_cursor_left() is True
+        assert _c._cursor == expected
+    # At start: further left is a no-op (returns False).
+    assert _c.move_cursor_left() is False
+    assert _c._cursor == 0
+
+    # Right brings it back, bounded at len(current).
+    for expected in (1, 2, 3, 4, 5):
+        assert _c.move_cursor_right() is True
+        assert _c._cursor == expected
+    assert _c.move_cursor_right() is False
+    assert _c._cursor == 5
+
+    # _handle_key must route KEY_LEFT/RIGHT to the cursor helpers, not
+    # to scroll_offset (that's KEY_PPAGE/NPAGE's job post-P3).
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _m = re.search(r'def _handle_key\(self.*?(?=\n    def )', _src, re.DOTALL)
+    assert _m, '_handle_key not found'
+    _body = _m.group(0)
+    assert "c == 'KEY_LEFT'" in _body and 'move_cursor_left' in _body, (
+        'KEY_LEFT must call move_cursor_left() (P3 cursor semantics)'
+    )
+    assert "c == 'KEY_RIGHT'" in _body and 'move_cursor_right' in _body, (
+        'KEY_RIGHT must call move_cursor_right() (P3 cursor semantics)'
+    )
+
+
+def test_tui_backspace_deletes_at_cursor():
+    """ARCH-14 P3: Backspace deletes the char *before* the edit cursor
+    (was: strip the last char of the line).  Confirms insert + delete
+    leave `current` and `_cursor` consistent."""
+    _c = _bare_commands_instance()
+    _c.insert_at_cursor('h')
+    _c.insert_at_cursor('e')
+    _c.insert_at_cursor('l')
+    _c.insert_at_cursor('l')
+    _c.insert_at_cursor('o')
+    assert _c.current == 'hello' and _c._cursor == 5
+
+    # Walk back two, insert 'XX' — should produce 'helXXlo' with cursor
+    # right after the inserted block.
+    _c.move_cursor_left(); _c.move_cursor_left()
+    _c.insert_at_cursor('XX')
+    assert _c.current == 'helXXlo', _c.current
+    assert _c._cursor == 5, _c._cursor   # 3 (after 'hel') + 2 ('XX')
+
+    # Backspace deletes 'X' (the char just before cursor) → 'helXlo'.
+    assert _c.delete_before_cursor() is True
+    assert _c.current == 'helXlo', _c.current
+    assert _c._cursor == 4
+
+    # Backspace at start is a no-op.
+    _c._cursor = 0
+    assert _c.delete_before_cursor() is False
+    assert _c.current == 'helXlo'
+
+
+def test_tui_up_arrow_walks_history():
+    """ARCH-14 P3: KEY_UP/DOWN now walk command history (was: scroll
+    tab).  First Up stashes the in-progress draft; Down past newest
+    restores it."""
+    _c = _bare_commands_instance()
+    _c.add_history('first')
+    _c.add_history('second')
+    _c.add_history('third')
+
+    # Type a draft, then Up — draft should be stashed.
+    _c.set_current('draft-in-progress')
+    assert _c.history_prev() is True
+    assert _c.current == 'third'
+    assert _c._history_draft == 'draft-in-progress'
+
+    # Walk to oldest, then one more Up is a no-op (returns False).
+    assert _c.history_prev() is True and _c.current == 'second'
+    assert _c.history_prev() is True and _c.current == 'first'
+    assert _c.history_prev() is False and _c.current == 'first'
+
+    # Walk back down to newest, then one more Down restores draft.
+    assert _c.history_next() is True and _c.current == 'second'
+    assert _c.history_next() is True and _c.current == 'third'
+    assert _c.history_next() is True
+    assert _c.current == 'draft-in-progress', (
+        'past-newest Down must restore the stashed draft'
+    )
+    assert _c._history_idx is None
+
+    # _handle_key must wire KEY_UP/DOWN to history walk.
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
+                      _src, re.DOTALL).group(0)
+    assert "c == 'KEY_UP'" in _body and 'history_prev' in _body
+    assert "c == 'KEY_DOWN'" in _body and 'history_next' in _body
+
+
+def test_tui_pageup_scrolls_tab_by_content_rows():
+    """ARCH-14 P3: KEY_PPAGE/NPAGE replace Up/Down as the scroll
+    keys, jumping by a screenful (the tab's content-row height).  Pin
+    via source inspection: _handle_key handler for KEY_PPAGE/NPAGE
+    must read `_tab_coords` height and mutate `scroll_offset`."""
+    _src = open(os.path.join(_ROOT, 'scripts', 'tui.py')).read()
+    import re
+    _body = re.search(r'def _handle_key\(self.*?(?=\n    def )',
+                      _src, re.DOTALL).group(0)
+    assert "c == 'KEY_PPAGE'" in _body, (
+        'KEY_PPAGE handler must exist (P3 scroll-back key)'
+    )
+    assert "c == 'KEY_NPAGE'" in _body, (
+        'KEY_NPAGE handler must exist (P3 scroll-forward key)'
+    )
+    # Must jump by tab content height, not 1 line at a time.
+    assert '_tab_coords' in _body and "'h'" in _body, (
+        'PageUp/Down must read the tab content height from _tab_coords'
+    )
+    # Must mutate scroll_offset (not e.g. cursor).
+    assert "scroll_offset" in _body
+
+
 def test_tui_tab_content_region_height_equals_lines_minus_footer():
     """ARCH-14 P1: tab content region height = LINES - FOOTER_HEIGHT
     = N-2.  Pin via _calculateResolution: tab_coords['h'] computed
