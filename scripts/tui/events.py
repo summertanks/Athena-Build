@@ -139,6 +139,26 @@ class ConsoleTrim:
 
 
 @dataclass(frozen=True)
+class TabRemove:
+    """Remove a tab by name (COMP-06 selector teardown).  If the
+    removed tab was active, the dispatcher activates the first
+    remaining tab.  Default tabs can be removed too — caller's
+    responsibility not to orphan the UI."""
+    name: str
+
+
+@dataclass(frozen=True)
+class SetTabBuffer:
+    """Replace a tab's buffer wholesale with `rows` (list of
+    (text, attr) tuples).  Used by interactive controllers (the
+    package selector) that render their own view rather than
+    appending log lines.  scroll_offset is reset to 0 so the
+    controller-supplied rows render top-aligned."""
+    name: str
+    rows: list
+
+
+@dataclass(frozen=True)
 class Shutdown:
     """Stop the dispatcher loop with `code` as the exit status.  After
     Shutdown is handled the loop exits; producers posting further events
@@ -152,5 +172,5 @@ ALL_EVENT_TYPES: List[type] = [
     KeyEvent, PrintEvent, LogEvent, StatusEvent,
     WidgetAdd, WidgetRemove, WidgetTick,
     PromptRequest, TabActivate, TabAdd, ClearTab,
-    ConsoleMark, ConsoleTrim, Shutdown,
+    ConsoleMark, ConsoleTrim, TabRemove, SetTabBuffer, Shutdown,
 ]

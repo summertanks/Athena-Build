@@ -195,6 +195,52 @@ class Tui:
         mode = ('key' if keymode else ('masked' if masked else 'line'))
         return self.dispatcher.request_prompt(message, mode)
 
+    # ─── Interactive-tab API (COMP-06 package selector) ──────────────────
+    def add_tab(self, name: str) -> None:
+        """Create a tab at runtime (idempotent)."""
+        from .events import TabAdd
+        self.dispatcher.post(TabAdd(name))
+
+    def remove_tab(self, name: str) -> None:
+        """Remove a tab; if it was active, the dispatcher activates the
+        first remaining tab."""
+        from .events import TabRemove
+        self.dispatcher.post(TabRemove(name))
+
+    def activate_tab(self, name: str) -> None:
+        """Switch the active tab by name."""
+        from .events import TabActivate
+        self.dispatcher.post(TabActivate(name))
+
+    def set_tab_buffer(self, name: str, rows: list) -> None:
+        """Replace a tab's buffer with `rows` (list of (text, attr)).
+        Used by interactive controllers that render their own view."""
+        from .events import SetTabBuffer
+        self.dispatcher.post(SetTabBuffer(name, rows))
+
+    def set_tab_key_handler(self, name: str, fn) -> None:
+        """Register an interceptor that owns keystrokes while `name`
+        is active.  fn(key) -> bool: True = consumed, False = fall
+        through (so F-keys still switch tabs)."""
+        self.dispatcher.set_key_interceptor(name, fn)
+
+    def clear_tab_key_handler(self) -> None:
+        self.dispatcher.clear_key_interceptor()
+
+    def viewport_rows(self) -> int:
+        """Tab content-row count — for sizing an interactive view."""
+        return self.dispatcher.viewport_rows()
+
+    def attr_reverse(self) -> int:
+        """curses.A_REVERSE — exposed so controllers can highlight the
+        cursor row without importing curses directly."""
+        import curses
+        return curses.A_REVERSE
+
+    def attr_color(self, color_index: int) -> int:
+        """Resolve a COLOR_* index to a curses attr (for controllers)."""
+        return self._renderer.attr_for_color(color_index)
+
     # ─── Internal: dispatcher thread wrapper ─────────────────────────────
     def _run_dispatcher(self) -> None:
         try:

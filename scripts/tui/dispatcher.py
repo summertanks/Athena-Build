@@ -22,8 +22,8 @@ from typing import Callable, Optional, Protocol
 from . import wrap
 from .events import (
     ClearTab, ConsoleMark, ConsoleTrim, KeyEvent, LogEvent, PrintEvent,
-    PromptRequest, Shutdown, StatusEvent, TabActivate, TabAdd, WidgetAdd,
-    WidgetRemove, WidgetTick,
+    PromptRequest, SetTabBuffer, Shutdown, StatusEvent, TabActivate, TabAdd,
+    TabRemove, WidgetAdd, WidgetRemove, WidgetTick,
 )
 from .state import State
 
@@ -60,6 +60,15 @@ class Dispatcher:
         self._renderer = renderer
         self._events: 'queue.Queue[object]' = queue.Queue()
         self._pending_prompt: Optional[PromptRequest] = None
+        # ── Per-tab key interceptor (COMP-06 package selector) ───────────
+        # When an interactive controller (e.g. SelectPackages) owns a
+        # tab, it registers a key handler here.  The interceptor gets
+        # first crack at every keystroke — but ONLY while its tab is the
+        # active one.  It returns True to swallow the key, False to let
+        # it fall through to normal dispatch (so F-keys still switch
+        # tabs and the operator can always leave).
+        self._interceptor_tab: Optional[str] = None
+        self._key_interceptor: Optional[Callable[[str], bool]] = None
 
     # ─── Producer API (thread-safe; called from any thread) ──────────────
     def post(self, event: object) -> None:
@@ -77,6 +86,24 @@ class Dispatcher:
         fut: Future = Future()
         self.post(PromptRequest(message, mode, fut))
         return fut.result()
+
+    def set_key_interceptor(self, tab_name: str,
+                            fn: Callable[[str], bool]) -> None:
+        """Register a key handler that owns keystrokes while `tab_name`
+        is active.  `fn(key) -> bool`: True = consumed, False = fall
+        through.  Called from any thread (the controller sets it from
+        the dispatcher thread in practice)."""
+        self._interceptor_tab = tab_name
+        self._key_interceptor = fn
+
+    def clear_key_interceptor(self) -> None:
+        self._interceptor_tab = None
+        self._key_interceptor = None
+
+    def viewport_rows(self) -> int:
+        """Tab content-row count — used by interactive controllers to
+        size their visible window."""
+        return self._renderer.content_rows()
 
     def console_mark(self) -> int:
         """Snapshot the console buffer length.  Round-trips through
@@ -162,6 +189,8 @@ class Dispatcher:
         elif isinstance(e, ClearTab):         self._on_clear(e)
         elif isinstance(e, ConsoleMark):      self._on_console_mark(e)
         elif isinstance(e, ConsoleTrim):      self._on_console_trim(e)
+        elif isinstance(e, TabRemove):        self._on_tab_remove(e)
+        elif isinstance(e, SetTabBuffer):     self._on_set_tab_buffer(e)
         elif isinstance(e, Shutdown):         self._on_shutdown(e)
         # Unknown event types silently ignored — producers may post events
         # the dispatcher doesn't yet handle without crashing the loop.
@@ -180,6 +209,20 @@ class Dispatcher:
         if key == 'KEY_RESIZE':
             self.state.dirty = True
             return
+
+        # ── Per-tab key interceptor (COMP-06 selector) ───────────────────
+        # Consulted FIRST, but only while its owner tab is active.
+        # Returns True to swallow; False falls through to normal
+        # dispatch (so F-keys still switch tabs, letting the operator
+        # leave the interactive tab).
+        if (self._key_interceptor is not None
+                and self.state.active_tab_name() == self._interceptor_tab):
+            try:
+                if self._key_interceptor(key):
+                    return
+            except Exception:
+                # A misbehaving interceptor must not kill the loop.
+                pass
 
         # PROMPT_PAUSE: any keystroke fulfills, NO editor processing.
         if (self._pending_prompt is not None
@@ -319,6 +362,24 @@ class Dispatcher:
         if con is not None:
             con.trim_to(e.mark, self._renderer.width())
             self.state.dirty = True
+
+    def _on_tab_remove(self, e: TabRemove) -> None:
+        if e.name not in self.state.tabs:
+            return
+        was_active = self.state.tabs[e.name].selected
+        del self.state.tabs[e.name]
+        if was_active and self.state.tabs:
+            first = next(iter(self.state.tabs))
+            self.state.activate(first)
+        self.state.dirty = True
+
+    def _on_set_tab_buffer(self, e: SetTabBuffer) -> None:
+        tab = self.state.tabs.get(e.name)
+        if tab is None:
+            return
+        tab.buffer = list(e.rows)
+        tab.scroll_offset = 0
+        self.state.dirty = True
 
     def _on_shutdown(self, e: Shutdown) -> None:
         self.state.quit = True
