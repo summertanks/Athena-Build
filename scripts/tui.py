@@ -1013,11 +1013,20 @@ class Tui:
         if c == '\x1b':
             return
 
-        # ── Tab key: reserved for P5 completion (P4: no-op) ───────────────
-        # ARCH-14 P4 retires the old tab-cycle binding (use F1..F6
-        # instead).  P5 will wire Tab to command-name autocomplete; for
-        # now drop the keystroke so it doesn't land in the cmdline.
+        # ── Tab key: command-name autocomplete (ARCH-14 P5) ───────────────
+        # Completion model is intentionally minimal:
+        #   - tokenise at first space; only complete the command name
+        #     (arg completion deferred to a future ticket).
+        #   - 0 matches → silent no-op.
+        #   - 1 match   → replace `current` with `<match> ` (trailing
+        #                 space hints "args next") and move cursor to end.
+        #   - >1 match  → print the candidates to the console tab
+        #                 (don't mutate `current` so the user can keep
+        #                 typing more letters to narrow).
+        # Restricted to the command-name position: if there's already a
+        # space in `current`, Tab is a no-op (caller is past the name).
         if c == '\t':
+            self._complete_command()
             return
 
         # Ignore unrecognised multi-char key sequences.
@@ -1056,6 +1065,29 @@ class Tui:
             # ARCH-14 P3: insert at edit cursor (was append-to-end).
             self._cmd.insert_at_cursor(c)
             self._dirty = True
+
+    def _complete_command(self) -> None:
+        """ARCH-14 P5 Tab-key handler — command-name autocomplete.
+
+        Only fires when the cursor is in the command-name position
+        (no space yet in `current`).  See dispatch comment in
+        _handle_key for the 0/1/many match rules."""
+        line = self._cmd.current
+        # Past the command-name position — Tab is reserved for arg
+        # completion (not implemented yet).
+        if ' ' in line:
+            return
+        prefix = line
+        matches = [n for n in self._cmd.list_names() if n.startswith(prefix)]
+        if not matches:
+            return
+        if len(matches) == 1:
+            self._cmd.set_current(matches[0] + ' ')
+            self._dirty = True
+            return
+        # >1: print candidates to console tab; leave `current` alone.
+        self.print('  ' + '  '.join(matches), curses.color_pair(self.COLOR_INFO))
+        self._dirty = True
 
     def _run(self, started: threading.Event) -> None:
         self._quit = False
