@@ -2939,8 +2939,6 @@ class BuildSession:
         _table = {
             'tunnel':         'pull prebuilt .debs from Debian repo '
                               '(repo tunnel [pkg…])',
-            'reload':         'rebuild a fork pkg after a local edit '
-                              '(repo reload <pkg>...)',
             'audit':          'one-stop pre-ship gate: dep + conflict + '
                               'stale-files + content integrity + NMU '
                               'residue.  Pass `quick` to skip the slow '
@@ -2954,8 +2952,6 @@ class BuildSession:
         }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
-        if action == 'reload':
-            return self.cmd_reload_fork(*args)
         if action == 'audit':
             return self.cmd_audit(*args)
         if action == 'repair':
@@ -4734,6 +4730,243 @@ class BuildSession:
         if _line.strip():
             console.print(_line)
 
+    def cmd_source_fork(self, *args):
+        """Manage fork packages — create a new fork from upstream source,
+        reload an existing fork after edits, or toggle enabled/disabled.
+
+        Usage:
+          source fork <pkg>              — create fork (if absent) OR
+                                            reload (if present)
+          source fork <pkg> enabled      — enable (remove .disabled marker)
+          source fork <pkg> disabled     — disable (add .disabled marker)
+
+        Creation (no fork tree exists yet):
+          - Looks up the source in cache.source_hashtable (requires
+            `cache build`).
+          - Downloads .dsc + tarballs into source/ if not already there.
+          - Extracts via `dpkg-source -x` into fork/source/<pkg>/.
+            The extracted tree carries the upstream debian/ — operator
+            edits in place.
+          - Invalidates cache_ready + dep_check_ready so the next
+            `cache build` + `dep parse` pick the fork up.
+
+        Reload (fork tree already exists):
+          - Delegates to the former `repo reload` logic — light-touch
+            rebuild when tree-hash changed but dep-affecting fields
+            didn't; refuses (with actionable diagnostic) when dep
+            fields changed.
+
+        Enable / disable:
+          - Toggles a `.disabled` marker file at fork/source/<pkg>/.
+            fork_mirror skips disabled trees during cache ingest.
+          - Both operations invalidate cache + dep_tree so the change
+            takes effect on the next `cache build` + `dep parse`.
+
+        Replaces the standalone `repo reload <pkg>...` command (P4
+        2026-05-23).
+        """
+        if not args:
+            console.print(
+                "Usage: source fork <pkg> [enabled|disabled]",
+                tui.COLOR_INFO,
+            )
+            return
+        _pkg = args[0]
+        _action = args[1] if len(args) > 1 else None
+
+        if _action not in (None, 'enabled', 'disabled'):
+            console.print(
+                f"source fork: unknown action {_action!r} — "
+                "expected 'enabled' or 'disabled'",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        _pkg_dir = os.path.join(self.config.dir_fork_source, _pkg)
+
+        if _action == 'enabled':
+            return self._fork_set_enabled(_pkg, _pkg_dir, enable=True)
+        if _action == 'disabled':
+            return self._fork_set_enabled(_pkg, _pkg_dir, enable=False)
+
+        # No action arg — create or reload based on presence.
+        if os.path.isdir(_pkg_dir):
+            console.print(
+                f"source fork {_pkg}: fork tree present — reloading "
+                f"after edit",
+                tui.COLOR_INFO,
+            )
+            return self.cmd_reload_fork(_pkg)
+        return self._fork_create(_pkg, _pkg_dir)
+
+    def _fork_set_enabled(self, pkg: str, pkg_dir: str, *,
+                           enable: bool) -> None:
+        """Toggle the .disabled marker on a fork tree.  Both directions
+        invalidate cache + dep state so the change is picked up.
+        """
+        if not os.path.isdir(pkg_dir):
+            console.print(
+                f"source fork {pkg} {'enabled' if enable else 'disabled'}: "
+                f"no fork tree at {pkg_dir} — create it first with "
+                f"`source fork {pkg}`",
+                tui.COLOR_ERROR,
+            )
+            return
+        _marker = os.path.join(pkg_dir, '.disabled')
+        if enable:
+            try:
+                os.remove(_marker)
+                console.print(
+                    f"source fork {pkg}: enabled "
+                    f"(.disabled marker removed)"
+                )
+            except FileNotFoundError:
+                console.print(
+                    f"source fork {pkg}: already enabled (no .disabled "
+                    f"marker present) — no change"
+                )
+                return
+            except OSError as e:
+                console.print(
+                    f"source fork {pkg} enable: cannot remove {_marker}: "
+                    f"{e}",
+                    tui.COLOR_ERROR,
+                )
+                return
+        else:
+            if os.path.exists(_marker):
+                console.print(
+                    f"source fork {pkg}: already disabled (.disabled "
+                    f"marker present) — no change"
+                )
+                return
+            try:
+                with open(_marker, 'w') as fh:
+                    fh.write('Disabled via `source fork '
+                             f'{pkg} disabled` — remove this file or '
+                             'run `source fork {pkg} enabled` to '
+                             're-include in cache builds.\n')
+                console.print(
+                    f"source fork {pkg}: disabled "
+                    f"(.disabled marker written)"
+                )
+            except OSError as e:
+                console.print(
+                    f"source fork {pkg} disable: cannot write {_marker}: "
+                    f"{e}",
+                    tui.COLOR_ERROR,
+                )
+                return
+        # Invalidate so next cache build picks up the change.
+        self._invalidate_for_fork_change()
+
+    def _fork_create(self, pkg: str, pkg_dir: str) -> None:
+        """Create a new fork tree by downloading + extracting upstream
+        source.  Requires cache_ready (need source_hashtable to look
+        up the source's files + mirror).
+        """
+        if not self.flags.cache_ready:
+            console.print(
+                f"source fork {pkg}: requires `cache build` first "
+                f"(need cache.source_hashtable to look up the source)",
+                tui.COLOR_ERROR,
+            )
+            return
+        assert self.cache is not None
+        _sources = self.cache.source_hashtable.get(pkg, [])
+        if not _sources:
+            console.print(
+                f"source fork {pkg}: source not in cache — check spelling, "
+                f"or `dep parse` may need to run first to populate "
+                f"selected_srcs",
+                tui.COLOR_ERROR,
+            )
+            return
+        # Highest version wins (cache may have multiple — security
+        # update + main + updates).  Source.version is a debian Version
+        # object that orders correctly via max().
+        _src = max(_sources, key=lambda s: s.version)
+
+        # Download files if not already present.  Uses the same
+        # synthetic-tree wrapper as `source sync <pkg>`.
+        class _SingleSrcTree:
+            def __init__(_self, _name, _s):
+                _self.selected_srcs = {_name: _s}
+                _self.download_size = sum(
+                    int(_f.get('size', 0)) for _f in _s.files.values()
+                )
+        console.print(
+            f"source fork {pkg}: fetching {len(_src.files)} source "
+            f"file(s) (version {_src.version})…"
+        )
+        utils.download_source(
+            _SingleSrcTree(pkg, _src), self.config.dir_source,
+        )
+
+        # Find the .dsc — dpkg-source -x needs it.
+        _dsc = None
+        for _fname in _src.files:
+            if _fname.endswith('.dsc'):
+                _dsc = os.path.join(self.config.dir_source, _fname)
+                break
+        if _dsc is None or not os.path.isfile(_dsc):
+            console.print(
+                f"source fork {pkg}: no .dsc among downloaded files",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        # Extract.  dpkg-source -x refuses if the target dir exists.
+        # We already gated on `os.path.isdir(pkg_dir)` False in caller.
+        console.print(
+            f"source fork {pkg}: dpkg-source -x {os.path.basename(_dsc)} "
+            f"{pkg_dir}"
+        )
+        try:
+            _r = subprocess.run(
+                ['dpkg-source', '-x', _dsc, pkg_dir],
+                capture_output=True, text=True, timeout=300,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            console.print(
+                f"source fork {pkg}: dpkg-source failed: {e}",
+                tui.COLOR_ERROR,
+            )
+            return
+        if _r.returncode != 0:
+            console.print(
+                f"source fork {pkg}: dpkg-source -x exit "
+                f"{_r.returncode}: {_r.stderr.strip()[:300]}",
+                tui.COLOR_ERROR,
+            )
+            return
+        console.print(
+            f"source fork {pkg}: fork tree created at {pkg_dir} "
+            f"(enabled by default)",
+            tui.COLOR_HIGHLIGHT,
+        )
+        console.print(
+            f"  Next steps:\n"
+            f"    1. Edit fork/source/{pkg}/ as needed\n"
+            f"    2. `cache build force` + `dep parse force` to "
+            f"pick up the fork\n"
+            f"    3. `source build {pkg}` to build",
+            tui.COLOR_INFO,
+        )
+        self._invalidate_for_fork_change()
+
+    def _invalidate_for_fork_change(self) -> None:
+        """Reset cache_ready + dep_check_ready so the next pipeline run
+        re-ingests the fork tree change."""
+        if self.flags.cache_ready or self.flags.dep_check_ready:
+            self.flags.cache_ready = False
+            self.flags.dep_check_ready = False
+            console.print(
+                "  cache + dep state invalidated — run `cache build` "
+                "+ `dep parse` to propagate the fork change",
+                tui.COLOR_INFO,
+            )
+
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
@@ -5257,6 +5490,9 @@ class BuildSession:
                         'Writes PASS where binaries are valid but .result '
                         'is missing; clears stale PASS where binaries '
                         'are gone or patches changed.',
+            'fork':     'manage fork packages: `source fork <pkg>` '
+                        'creates or reloads; `source fork <pkg> '
+                        'enabled|disabled` toggles the .disabled marker',
         }
         if action == 'sync':
             return self.cmd_source_sync(*args)
@@ -5266,6 +5502,8 @@ class BuildSession:
             return self.cmd_source_audit(*args)
         if action == 'repair':
             return self.cmd_source_repair(*args)
+        if action == 'fork':
+            return self.cmd_source_fork(*args)
         return self._group_help('source', _table, action)
 
     def cmd_container(self, action: str = '', *args):
@@ -5557,8 +5795,8 @@ def main(banner: str) -> None:
     tui.register_command('clean',     session.cmd_clean,     '\tClean:      clean cache | source | repo | buildroot | image | download | container | all')
     tui.register_command('dep',       session.cmd_dep,       '\tDeps:       dep parse')
     tui.register_command('patch',     session.cmd_patch,     '\tPatches:    patch refresh')
-    tui.register_command('source',    session.cmd_source,    '\tSources:    source sync | source build [pkg|live|installer|recommended|all]')
-    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index | audit [quick] | repair [strip|cleanup] | tunnel | reload')
+    tui.register_command('source',    session.cmd_source,    '\tSources:    source sync | source build [pkg|live|installer|recommended|all] | source fork <pkg> [enabled|disabled]')
+    tui.register_command('repo',      session.cmd_repo,      '\tRepo:       repo index | audit [quick] | repair [strip|cleanup] | tunnel')
     tui.register_command('container', session.cmd_container, '\tContainer:  container init')
     tui.register_command('chroot',    session.cmd_chroot,    '\tChroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       '\tISO:        iso build live | iso build installer')

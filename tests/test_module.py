@@ -1264,7 +1264,9 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_source',    'sync',     'cmd_source_sync'),
         ('cmd_source',    'build',    'cmd_source_build'),
         ('cmd_repo',      'tunnel',   'cmd_tunnel_package'),
-        ('cmd_repo',      'reload',   'cmd_reload_fork'),
+        # 'reload' removed from cmd_repo in P4 (2026-05-23) — fork
+        # operations live under cmd_source now.
+        ('cmd_source',    'fork',     'cmd_source_fork'),
         ('cmd_repo',      'audit',    'cmd_audit'),
         ('cmd_repo',      'repair',   'cmd_repo_repair'),
         ('cmd_repo',      'index',    'cmd_index_repo'),
@@ -14171,6 +14173,106 @@ def test_source_state_repairable_requires_patchhash_baseline():
     assert _run('deadbeef' * 8) == 'needs_build'
 
 
+def test_cmd_source_fork_disable_writes_marker_and_invalidates_state():
+    """source fork <pkg> disabled — writes `.disabled` marker at
+    fork/source/<pkg>/ AND clears cache_ready + dep_check_ready so the
+    next pipeline run honours the change.  Pin the file + flag effects."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+    with tempfile.TemporaryDirectory() as _tmp:
+        _fork_src = os.path.join(_tmp, 'fork', 'source')
+        _pkg_dir = os.path.join(_fork_src, 'foo')
+        os.makedirs(os.path.join(_pkg_dir, 'debian'), exist_ok=True)
+        with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+            fh.write('Source: foo\nPackage: foo\n')
+
+        class _Cfg:
+            dir_fork_source = _fork_src
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.flags = _Flags
+        _sess.cmd_source_fork('foo', 'disabled')
+
+        _marker = os.path.join(_pkg_dir, '.disabled')
+        assert os.path.isfile(_marker), (
+            "`source fork foo disabled` must write .disabled marker"
+        )
+        assert _sess.flags.cache_ready is False, (
+            "disable must invalidate cache_ready"
+        )
+        assert _sess.flags.dep_check_ready is False, (
+            "disable must invalidate dep_check_ready"
+        )
+
+
+def test_cmd_source_fork_enable_removes_marker():
+    """source fork <pkg> enabled — removes a previously-written
+    `.disabled` marker.  Idempotent: re-enable on already-enabled
+    fork is a no-op (no error)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+    with tempfile.TemporaryDirectory() as _tmp:
+        _fork_src = os.path.join(_tmp, 'fork', 'source')
+        _pkg_dir = os.path.join(_fork_src, 'foo')
+        os.makedirs(os.path.join(_pkg_dir, 'debian'), exist_ok=True)
+        with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as fh:
+            fh.write('Source: foo\nPackage: foo\n')
+        _marker = os.path.join(_pkg_dir, '.disabled')
+        with open(_marker, 'w') as fh:
+            fh.write('disabled\n')
+
+        class _Cfg:
+            dir_fork_source = _fork_src
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.flags = _Flags
+        _sess.cmd_source_fork('foo', 'enabled')
+
+        assert not os.path.exists(_marker), (
+            "`source fork foo enabled` must remove .disabled marker"
+        )
+        # Re-enable: idempotent, no error.
+        _sess.cmd_source_fork('foo', 'enabled')
+        assert not os.path.exists(_marker)
+
+
+def test_fork_mirror_discover_skips_disabled_trees():
+    """fork_mirror._discover_fork_source_trees must SKIP fork dirs
+    that have a `.disabled` marker file.  This is how `source fork
+    <pkg> disabled` removes a fork from cache ingest without deleting
+    the tree."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _fork_src:
+        # Plant two valid fork trees; disable one.
+        for _name in ('alpha', 'beta'):
+            _dir = os.path.join(_fork_src, _name)
+            os.makedirs(os.path.join(_dir, 'debian'), exist_ok=True)
+            with open(os.path.join(_dir, 'debian', 'control'), 'w') as fh:
+                fh.write(f'Source: {_name}\nPackage: {_name}\n')
+        with open(os.path.join(_fork_src, 'alpha', '.disabled'), 'w') as fh:
+            fh.write('disabled\n')
+
+        _found = fork_mirror._discover_fork_source_trees(_fork_src)
+        _names = sorted(os.path.basename(p) for p in _found)
+        assert _names == ['beta'], (
+            f"disabled fork must be skipped; got {_names}"
+        )
+
+
 def test_cmd_source_audit_classifies_rebuilds_by_subset():
     """source audit must group rebuild candidates by which `source build
     <mode>` covers them (pkg / installer / live / pool / recommended).
@@ -15224,6 +15326,9 @@ def main() -> int:
         test_repo_audit_closure_handles_conflicts_and_provides,
         test_print_wrapped_names_keeps_lines_under_wrap_width,
         test_source_state_repairable_requires_patchhash_baseline,
+        test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
+        test_cmd_source_fork_enable_removes_marker,
+        test_fork_mirror_discover_skips_disabled_trees,
         test_cmd_source_audit_classifies_rebuilds_by_subset,
         test_readonly_named_commands_have_no_destructive_calls,
         test_destructive_helpers_warn_in_docstring,

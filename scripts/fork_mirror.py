@@ -161,8 +161,18 @@ def register_fork_mirror(mirrors: List['utils.Mirror'],
 
 def _discover_fork_source_trees(dir_fork_source: str) -> List[str]:
     """Return absolute paths to each fork/source/<pkg>/ that has a valid
-    debian/control file.  Skips 'repo' (helper output dir) and silently
-    ignores entries that aren't directories or lack debian/control.
+    debian/control file.
+
+    Skip rules:
+      - `repo/` is the helper output dir; not a fork.
+      - non-directory entries (stray files).
+      - missing `debian/control` (not a Debian source tree).
+      - presence of a `.disabled` marker file at the fork-pkg root.
+        Operator uses `source fork <pkg> disabled` to hide a fork from
+        cache ingest without deleting it; `source fork <pkg> enabled`
+        removes the marker.  Disabled forks still take disk space and
+        keep their git history (when ignored under VCS); they just
+        don't show up in apt's view of the build universe.
     """
     _found: List[str] = []
     try:
@@ -176,6 +186,12 @@ def _discover_fork_source_trees(dir_fork_source: str) -> List[str]:
             continue
         _pkg_dir = os.path.join(dir_fork_source, _name)
         if not os.path.isdir(_pkg_dir):
+            continue
+        if os.path.exists(os.path.join(_pkg_dir, '.disabled')):
+            logger.info(
+                f"fork_mirror: {_name} is disabled (.disabled marker) — "
+                f"skipping"
+            )
             continue
         _control = os.path.join(_pkg_dir, 'debian', 'control')
         if not os.path.isfile(_control):
