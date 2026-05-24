@@ -4188,41 +4188,39 @@ class BuildSession:
     # never mutates .result / .patchhash / source files.
     # ─────────────────────────────────────────────────────────────────
 
-    def _is_patch_state_stale(self, pkg: str, src) -> bool:
-        """Pure-read predicate: would `_refresh_patches`'s invalidation
-        pass DELETE this source's .result file?  Mirrors the logic in
-        `_refresh_patches` (lines ~1240 onwards) but without the
-        destructive os.remove calls.
+    def _patchhash_status(self, pkg: str, src) -> str:
+        """Pure-read patch-baseline status for one source.  Returns:
 
-        Stale iff .result exists AND the on-disk patch SET differs
-        from the .patchhash baseline.  No baseline → assumed fresh
-        (migration path: the baseline gets written on the next
-        `_refresh_patches`).
+          'matches'  — .patchhash exists AND equals patch_set_hash of
+                       the current on-disk patch set.  Strongest signal:
+                       binaries produced under this baseline are
+                       provably current.
+
+          'differs'  — .patchhash exists AND disagrees.  Means the
+                       patch set on disk has changed since the build
+                       that wrote .patchhash.  Binaries are stale
+                       w.r.t. the current patch set.
+
+          'absent'   — no .patchhash file (pre-baseline-policy build,
+                       or operator wiped log/build/).  We can't prove
+                       binaries are fresh OR stale — caller decides
+                       how to treat this.
         """
         _buildlog = os.path.join(self.config.dir_log, 'build')
-        _result_file = os.path.join(_buildlog, pkg + '.result')
-        if not os.path.exists(_result_file):
-            return False
+        _hash_file = os.path.join(_buildlog, pkg + '.patchhash')
+        try:
+            with open(_hash_file, 'r') as fh:
+                _stored = fh.read().strip()
+        except OSError:
+            return 'absent'
+        if not _stored:
+            return 'absent'
         _patch_dir = os.path.join(
             self.config.dir_patch_source, pkg,
             utils.version_no_epoch(src.version),
         )
-        _hash_file = os.path.join(_buildlog, pkg + '.patchhash')
-        try:
-            with open(_hash_file, 'r') as fh:
-                _stored_hash = fh.read().strip() or None
-        except OSError:
-            _stored_hash = None
-        # Patch removal case: no patches now but baseline existed for
-        # a non-empty set → hash differs → stale.
-        _current_hash = utils.patch_set_hash(
-            _patch_dir, src.patch_list or [],
-        )
-        if _stored_hash is None:
-            # No baseline yet — first encounter post-upgrade.  Existing
-            # .result is presumed to match the current set.
-            return False
-        return _stored_hash != _current_hash
+        _current = utils.patch_set_hash(_patch_dir, src.patch_list or [])
+        return 'matches' if _stored == _current else 'differs'
 
     _SOURCE_STATES = (
         'ok',             # binaries present + valid, .result=PASS,
@@ -4245,21 +4243,44 @@ class BuildSession:
         """Classify one source's current state.  Returns one of
         `_SOURCE_STATES`.  Pure-read.
 
-        Resolution order matters — earlier conditions short-circuit:
+        Two axes of evidence feed the classification:
+
+          A. .result content — PASS / FAIL / TUNNELED / missing.
+          B. .patchhash status — matches / differs / absent.
+
+        And one filesystem check: do predicted binaries exist + open
+        as valid ar archives?
+
+        Resolution table (binaries valid case):
+
+          | .result | .patchhash | state       |
+          |---------|------------|-------------|
+          | PASS    | matches    | ok          |
+          | PASS    | differs    | stale_pass  ← patches drifted
+          | PASS    | absent     | ok           (migration; presume current)
+          | missing | matches    | repairable  ← write PASS
+          | missing | differs    | needs_build ← binaries stale, must rebuild
+          | missing | absent     | needs_build ← no proof of freshness
+          | FAIL    | any        | fail         (operator marker; no-op)
+          | TUNNELED| any        | tunneled
+
+        Why 'needs_build' rather than 'repairable' when .patchhash is
+        absent: without a baseline we can't prove the on-disk binaries
+        match the current patch set.  Conservatively assume they're
+        stale; require a rebuild.  This makes the audit/repair cycle
+        SETTLE in one round when repair clears stale_pass (which
+        deletes both .result and .patchhash) — the next audit reports
+        'needs_build' and the operator knows to rebuild, not repair
+        again.
+
+        Resolution order (short-circuits):
           1. no predicted binaries → 'no_pkgs'
-          2. .result=TUNNELED → 'tunneled' (pulled, not built)
-          3. .result=FAIL → 'fail' (explicit marker; repair leaves alone
-             — operator built and saw it fail; don't overwrite the
-             diagnosis just because binaries happen to exist now)
-          4. any source file missing on disk OR .verified sidecar
-             absent → 'needs_sync'
-          5. any predicted binary missing or not-ar → 'stale_pass'
-             (if .result=PASS) else 'needs_build'
-          6. .result MISSING but binaries valid → 'repairable'
-             (.result EXISTS with non-PASS / non-FAIL content also
-             classifies here — atypical content treated as missing)
-          7. .result=PASS but patches have changed → 'stale_pass'
-          8. otherwise → 'ok'
+          2. .result=TUNNELED → 'tunneled'
+          3. .result=FAIL → 'fail'
+          4. any source file missing on disk OR .verified absent → 'needs_sync'
+          5. any predicted binary missing/not-ar → 'stale_pass' (if PASS)
+             else 'needs_build'
+          6. classify via the table above
         """
         _expected = self._predicted_files_for_source(pkg)
         if not _expected:
@@ -4312,20 +4333,18 @@ class BuildSession:
         if not _all_present:
             return 'stale_pass' if _result_first_line == 'PASS' else 'needs_build'
 
-        # (6) binaries valid; .result classification.
-        if not _result_exists:
-            return 'repairable'
-        if _result_first_line != 'PASS':
-            # Non-PASS / non-FAIL / non-TUNNELED content — atypical.
-            # Treat as missing to let repair restore.
-            return 'repairable'
+        # (6) binaries valid; classify via .result × .patchhash table.
+        _patchhash = self._patchhash_status(pkg, src)
+        if _result_first_line == 'PASS':
+            # PASS row.  Matches OR absent (migration) → ok.  Differs
+            # → stale_pass.
+            return 'stale_pass' if _patchhash == 'differs' else 'ok'
 
-        # (7) patches changed since last build.
-        if self._is_patch_state_stale(pkg, src):
-            return 'stale_pass'
-
-        # (8) clean.
-        return 'ok'
+        # .result missing (or atypical content).  Without .patchhash
+        # matching, we can't prove binaries are current — must rebuild.
+        if _patchhash == 'matches':
+            return 'repairable'
+        return 'needs_build'
 
 
     def cmd_source_repair(self, *args):
