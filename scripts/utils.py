@@ -1300,6 +1300,16 @@ class BuildConfig:
                 'Repo', 'SigningKeyUid',
                 fallback='Athena Build <athena@local>'
             ).strip()
+            # CONF-02: optional network apt source for the INSTALLED system.
+            # When set, build_chroot writes /etc/apt/sources.list.d/athena.list
+            # with [signed-by=athena-archive-keyring.gpg] pointing here, so a
+            # booted Asgard system pulls signed updates from the published
+            # Athena repo.  Empty (default) = no network source written; the
+            # target relies on the /cdrom/pool source added at install time.
+            # The URL is operator-supplied once the repo is published (COMP-02).
+            self.apt_source_url = config_parser.get(
+                'Repo', 'AptSourceURL', fallback=''
+            ).strip()
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]

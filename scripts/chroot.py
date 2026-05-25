@@ -1285,6 +1285,10 @@ class _ChrootMixin:
         # Skipped silently when no signing key has been generated yet.
         self._install_signing_keyring()
 
+        # CONF-02: optional network apt source pinned to that keyring.
+        # No-op unless [Repo] AptSourceURL is configured.
+        self._write_athena_apt_source()
+
         tui.console.print("System configuration files written")
 
     def _install_signing_keyring(self):
@@ -1347,6 +1351,37 @@ class _ChrootMixin:
         tui.console.print(
             "Installed Athena signing keyring at "
             "/usr/share/keyrings/athena-archive-keyring.gpg",
+            tui.COLOR_INFO,
+        )
+
+    def _write_athena_apt_source(self):
+        """CONF-02: when ``[Repo] AptSourceURL`` is set, write a network
+        apt source for the installed system at
+        ``/etc/apt/sources.list.d/athena.list``, pinned to the project
+        signing keyring via ``[signed-by=...]``::
+
+            deb [signed-by=/usr/share/keyrings/athena-archive-keyring.gpg] \\
+                <url> <codename> main
+
+        Empty URL (the default) is a no-op — the target then relies solely
+        on the ``/cdrom/pool`` source apt-cdrom-added at install time.  The
+        keyring named by ``signed-by`` is installed by
+        ``_install_signing_keyring`` (run just before this); the operator is
+        expected to have generated a signing key before setting the URL,
+        otherwise apt would reject the unsigned-by-a-missing-key source.
+        """
+        _url = self._config.apt_source_url
+        if not _url:
+            return
+        _codename = self._config.build_codename
+        self._write_chroot_file(
+            '/etc/apt/sources.list.d/athena.list',
+            f'deb [signed-by=/usr/share/keyrings/athena-archive-keyring.gpg] '
+            f'{_url} {_codename} main\n'
+        )
+        tui.console.print(
+            f"Wrote /etc/apt/sources.list.d/athena.list -> {_url} "
+            f"{_codename} main (signed-by athena keyring)",
             tui.COLOR_INFO,
         )
 
