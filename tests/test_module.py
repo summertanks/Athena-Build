@@ -10650,6 +10650,53 @@ def test_install_signing_keyring_warns_on_cp_failure():
         assert mock_run.call_count == 2
 
 
+# ─── CONF-02: network apt source (sources.list.d/athena.list) ────────────────
+
+def _stub_chroot_mixin_for_apt_source(*, apt_source_url, build_codename='thor'):
+    """_ChrootMixin wired only enough to exercise _write_athena_apt_source:
+    a _config carrying apt_source_url + build_codename, and a recording
+    stub in place of _write_chroot_file."""
+    import chroot
+    class _Cfg:
+        pass
+    cfg = _Cfg()
+    cfg.apt_source_url = apt_source_url
+    cfg.build_codename = build_codename
+    inst = chroot._ChrootMixin.__new__(chroot._ChrootMixin)
+    inst._config = cfg
+    inst._dir_chroot = '/tmp/fake-chroot'
+    inst._password = 'test-password-not-real'
+    _writes = []
+    inst._write_chroot_file = lambda path, content: _writes.append((path, content))
+    return inst, _writes
+
+
+def test_write_athena_apt_source_noop_when_url_empty():
+    """Empty [Repo] AptSourceURL → no file written (target relies on the
+    /cdrom/pool source added at install time)."""
+    inst, writes = _stub_chroot_mixin_for_apt_source(apt_source_url='')
+    inst._write_athena_apt_source()
+    assert writes == [], f"empty URL must write nothing, got {writes}"
+
+
+def test_write_athena_apt_source_writes_signed_by_when_url_set():
+    """A configured URL → /etc/apt/sources.list.d/athena.list with a
+    [signed-by=...athena-archive-keyring.gpg] pin, the URL, the release
+    codename, and the main component."""
+    inst, writes = _stub_chroot_mixin_for_apt_source(
+        apt_source_url='https://repo.example.org/athena',
+        build_codename='thor',
+    )
+    inst._write_athena_apt_source()
+    assert len(writes) == 1, f"expected one write, got {writes}"
+    _path, _content = writes[0]
+    assert _path == '/etc/apt/sources.list.d/athena.list', _path
+    assert _content.startswith('deb [signed-by='), _content
+    assert '/usr/share/keyrings/athena-archive-keyring.gpg]' in _content, _content
+    assert 'https://repo.example.org/athena thor main' in _content, _content
+    assert _content.endswith('\n'), "apt source line must be newline-terminated"
+
+
 # ─── UX-05 Path B: headless CLI backend (scripts/cli.py) ────────────────────
 
 def _fresh_cli():
@@ -15660,6 +15707,8 @@ def main() -> int:
         test_install_signing_keyring_skips_when_no_key_generated,
         test_install_signing_keyring_invokes_cp_when_key_present,
         test_install_signing_keyring_warns_on_cp_failure,
+        test_write_athena_apt_source_noop_when_url_empty,
+        test_write_athena_apt_source_writes_signed_by_when_url_set,
         # UX-05 Path B: headless CLI backend
         test_cli_print_writes_to_stdout,
         test_cli_severity_methods_write_to_stderr_with_tags,
