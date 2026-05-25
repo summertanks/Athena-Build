@@ -4387,10 +4387,9 @@ def test_cmd_iso_build_requires_subaction():
 
 # ─── COMP-02: repo index minimal/full + publish git minimal ──────────────────
 
-def test_repo_index_and_publish_dispatch():
+def test_repo_index_dispatch():
     """`repo index full` (and bare `repo index`) → cmd_index_repo;
-    `repo index minimal` → cmd_index_repo_minimal; `repo publish git
-    minimal` → cmd_repo_publish('git','minimal'); unknown index sub →
+    `repo index minimal` → cmd_index_repo_minimal; unknown index sub →
     help (no handler invoked)."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -4400,7 +4399,6 @@ def test_repo_index_and_publish_dispatch():
     _calls = []
     _sess.cmd_index_repo         = lambda *a, **kw: _calls.append(('full', a))
     _sess.cmd_index_repo_minimal = lambda *a, **kw: _calls.append(('minimal', a))
-    _sess.cmd_repo_publish       = lambda *a, **kw: _calls.append(('publish', a))
 
     _sess.cmd_repo('index', 'full')
     assert _calls == [('full', ())], _calls
@@ -4410,9 +4408,6 @@ def test_repo_index_and_publish_dispatch():
     _calls.clear()
     _sess.cmd_repo('index', 'minimal')
     assert _calls == [('minimal', ())], _calls
-    _calls.clear()
-    _sess.cmd_repo('publish', 'git', 'minimal')
-    assert _calls == [('publish', ('git', 'minimal'))], _calls
     _calls.clear()
     _sess.cmd_repo('index', 'wat')          # unknown sub → help, no handler
     assert _calls == [], f"unknown index sub must not invoke a handler: {_calls}"
@@ -4438,57 +4433,25 @@ def test_deb_excluded_from_minimal():
     assert ex('linux-source-6.1_6.1.170-3_all.deb')
 
 
-def test_cmd_repo_publish_guards():
-    """publish refuses — with a message, before any git op — when the URL
-    is unset, when the indexed tree is missing, and when a staged file
-    exceeds GitHub's 100 MB push limit."""
-    import sys, tempfile
+def test_generate_apt_repo_tolerates_empty_udeb_component():
+    """A debs-only (minimal) pool has no udebs; generate_apt_repo must not
+    treat the empty udeb Packages as fatal.  The udeb step passes
+    allow_empty=True, while _scan_packages_to defaults allow_empty=False
+    so the main deb index stays strict."""
+    import sys, inspect
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-
-    def _mk(cfg):
-        s = BuildSession.__new__(BuildSession)
-        s.config = cfg
-        return s
-
-    # (a) URL unset → hint, no git
-    with tempfile.TemporaryDirectory() as _tmp:
-        class _Cfg:
-            dir_publish = _tmp
-            publish_git_url = ''
-            publish_git_branch = 'gh-pages'
-        out = _capture_console_print(
-            lambda: _mk(_Cfg()).cmd_repo_publish('git', 'minimal'))
-        assert 'PublishGitURL' in out, out
-
-    # (b) URL set but publish/ not indexed → hint, no git
-    with tempfile.TemporaryDirectory() as _tmp:
-        class _Cfg:
-            dir_publish = _tmp
-            publish_git_url = 'https://example.invalid/repo.git'
-            publish_git_branch = 'gh-pages'
-        out = _capture_console_print(
-            lambda: _mk(_Cfg()).cmd_repo_publish('git', 'minimal'))
-        assert 'repo index minimal' in out, out
-
-    # (c) oversized file → refuse before git (sparse file: no real disk use)
-    with tempfile.TemporaryDirectory() as _tmp:
-        os.makedirs(os.path.join(_tmp, 'pool'))
-        os.makedirs(os.path.join(_tmp, 'dists'))
-        with open(os.path.join(_tmp, 'pool', 'huge_1_amd64.deb'), 'wb') as fh:
-            fh.truncate(101 * 1024 * 1024)
-        class _Cfg:
-            dir_publish = _tmp
-            publish_git_url = 'https://example.invalid/repo.git'
-            publish_git_branch = 'gh-pages'
-        out = _capture_console_print(
-            lambda: _mk(_Cfg()).cmd_repo_publish('git', 'minimal'))
-        assert '100 MB' in out, out
+    import apt_repo
+    _gen = inspect.getsource(apt_repo.generate_apt_repo)
+    assert 'allow_empty=True' in _gen, (
+        "udeb scan in generate_apt_repo must allow empty output")
+    _sig = inspect.signature(apt_repo._scan_packages_to)
+    assert _sig.parameters['allow_empty'].default is False, (
+        "main deb scan must stay strict (allow_empty defaults False)")
 
 
-def test_buildconfig_publish_defaults_and_dir():
-    """New [Repo] publish knobs default off, and dir_publish is created
-    under working_dir."""
+def test_buildconfig_publish_dir_and_apt_source_default():
+    """dir_publish is created under working_dir, and [Repo] AptSourceURL
+    defaults to empty."""
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block="""
@@ -4499,10 +4462,123 @@ def test_buildconfig_publish_defaults_and_dir():
     """))
         cfg = _build_config_from(tmp, cfg_path)
         assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
-        assert cfg.publish_git_url == ''
-        assert cfg.publish_git_branch == 'gh-pages'
+        assert cfg.apt_source_url == ''
+        assert cfg.publish_ssh_target == ''
+        assert cfg.publish_ssh_key == ''
         assert cfg.dir_publish == os.path.join(tmp, 'publish')
         assert os.path.isdir(cfg.dir_publish)
+
+
+def test_repo_publish_dispatch():
+    """`repo publish ssh full` / `repo publish ssh minimal` forward to
+    cmd_repo_publish('ssh', <scope>)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_repo_publish = lambda *a, **kw: _calls.append(a)
+    _sess.cmd_repo('publish', 'ssh', 'full')
+    assert _calls == [('ssh', 'full')], _calls
+    _calls.clear()
+    _sess.cmd_repo('publish', 'ssh', 'minimal')
+    assert _calls == [('ssh', 'minimal')], _calls
+
+
+def test_cmd_repo_publish_ssh_guards():
+    """publish refuses (with a message, no rsync) when PublishSshTarget is
+    unset, and when the requested source tree hasn't been indexed."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    def _mk(cfg):
+        s = BuildSession.__new__(BuildSession)
+        s.config = cfg
+        return s
+
+    # bad usage (wrong target kind) → usage line, returns before any config
+    _bad = BuildSession.__new__(BuildSession)
+    out = _capture_console_print(lambda: _bad.cmd_repo_publish('http', 'full'))
+    assert 'Usage' in out, out
+    # target unset
+    with tempfile.TemporaryDirectory() as _tmp:
+        class _Cfg:
+            publish_ssh_target = ''
+            publish_ssh_key = ''
+            dir_publish = _tmp
+            dir_repo = _tmp
+        out = _capture_console_print(
+            lambda: _mk(_Cfg()).cmd_repo_publish('ssh', 'full'))
+        assert 'PublishSshTarget' in out, out
+    # target set but full source (repo/dists) missing
+    with tempfile.TemporaryDirectory() as _tmp:
+        class _Cfg:
+            publish_ssh_target = 'user@host:/srv/athena'
+            publish_ssh_key = ''
+            dir_publish = _tmp
+            dir_repo = _tmp          # no dists/ subdir → missing
+        out = _capture_console_print(
+            lambda: _mk(_Cfg()).cmd_repo_publish('ssh', 'full'))
+        assert 'repo index full' in out, out
+
+
+def test_cmd_repo_publish_ssh_rsync_argv_and_progress():
+    """`repo publish ssh full` rsyncs repo/dists with -aH --delete
+    --info=progress2 over ssh, and parses rsync's % into the bar."""
+    import sys, tempfile, types, io
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        os.makedirs(os.path.join(_tmp, 'dists'))
+        class _Cfg:
+            publish_ssh_target = 'user@host:/srv/athena'
+            publish_ssh_key = '/home/me/.ssh/id_ed25519'
+            dir_publish = _tmp
+            dir_repo = _tmp
+            build_codename = 'thor'
+            apt_source_url = 'http://host/athena/'
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+
+        _popen = []
+
+        class _FakeProc:
+            def __init__(self):
+                self.stdout = io.StringIO(
+                    "    1,000,000  40%  9.5MB/s  0:00:10\r"
+                    "    2,500,000 100%  9.5MB/s  0:00:00 (xfr#3)\n")
+                self.returncode = 0
+
+            def wait(self):
+                return 0
+
+        def _fake_popen(argv, **kw):
+            _popen.append(list(argv))
+            return _FakeProc()
+
+        _saved = build.subprocess.Popen
+        build.subprocess.Popen = _fake_popen
+        try:
+            _capture_console_print(
+                lambda: _sess.cmd_repo_publish('ssh', 'full'))
+        finally:
+            build.subprocess.Popen = _saved
+
+        assert _popen, "rsync was not invoked"
+        _argv = _popen[0]
+        assert _argv[0] == 'rsync'
+        for _flag in ('-aH', '--delete', '--info=progress2'):
+            assert _flag in _argv, f"{_flag} missing from {_argv}"
+        # -e carries the ssh command with the key
+        _e = _argv.index('-e')
+        assert _argv[_e + 1] == 'ssh -i /home/me/.ssh/id_ed25519', _argv[_e + 1]
+        # full scope syncs repo/dists/ → target/dists/
+        assert _argv[-2] == os.path.join(_tmp, 'dists') + '/', _argv[-2]
+        assert _argv[-1] == 'user@host:/srv/athena/dists/', _argv[-1]
 
 
 def test_cmd_iso_build_live_forwards_to_cmd_build_iso_live():
@@ -15524,10 +15600,13 @@ def main() -> int:
         test_cache_purge_empty_dir_is_noop,
         # — iso build live | iso build installer split
         test_cmd_iso_build_requires_subaction,
-        test_repo_index_and_publish_dispatch,
+        test_repo_index_dispatch,
         test_deb_excluded_from_minimal,
-        test_cmd_repo_publish_guards,
-        test_buildconfig_publish_defaults_and_dir,
+        test_generate_apt_repo_tolerates_empty_udeb_component,
+        test_buildconfig_publish_dir_and_apt_source_default,
+        test_repo_publish_dispatch,
+        test_cmd_repo_publish_ssh_guards,
+        test_cmd_repo_publish_ssh_rsync_argv_and_progress,
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
         test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
         test_cmd_iso_build_unknown_subaction_calls_neither_handler,

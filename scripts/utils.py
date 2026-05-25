@@ -1311,16 +1311,15 @@ class BuildConfig:
             self.apt_source_url = config_parser.get(
                 'Repo', 'AptSourceURL', fallback=''
             ).strip()
-            # COMP-02: target for `repo publish git minimal` — a SEPARATE git
-            # repo (e.g. a GitHub repo on the same account) whose default
-            # branch is served as static HTTPS (GitHub Pages → github.io).
-            # Empty = publish refuses with a hint.  Branch defaults to the
-            # Pages convention.
-            self.publish_git_url = config_parser.get(
-                'Repo', 'PublishGitURL', fallback=''
+            # COMP-02: rsync-over-SSH publish target for `repo publish ssh`.
+            # user@host:/path to a dir served over HTTP(S) by a web server on
+            # that VM.  Empty = publish refuses with a hint.  Optional key
+            # path overrides ssh-agent/default-key selection.
+            self.publish_ssh_target = config_parser.get(
+                'Repo', 'PublishSshTarget', fallback=''
             ).strip()
-            self.publish_git_branch = config_parser.get(
-                'Repo', 'PublishGitBranch', fallback='gh-pages'
+            self.publish_ssh_key = config_parser.get(
+                'Repo', 'PublishSshKey', fallback=''
             ).strip()
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')

@@ -136,10 +136,13 @@ def generate_apt_repo(
         return False
 
     # Step 3: udeb Packages index (Section: debian-installer records).
-    # dpkg-scanpackages -t udeb filters to .udeb files only.
+    # dpkg-scanpackages -t udeb filters to .udeb files only.  allow_empty:
+    # a debs-only pool (the `repo index minimal` runtime subset) has no
+    # udebs, and an empty debian-installer component is valid — only the
+    # main deb index (Step 2) must be non-empty.
     if not _scan_packages_to(
             staging, 'pool', os.path.join(_udeb_dir, 'Packages'),
-            password, udeb=True):
+            password, udeb=True, allow_empty=True):
         return False
 
     # Step 4: source Sources index.  dpkg-scansources walks pool/ for
@@ -376,7 +379,7 @@ def generate_repo_indexes(
 
 def _scan_packages_to(
     staging: str, pool_subdir: str, output_path: str,
-    password: str, udeb: bool,
+    password: str, udeb: bool, allow_empty: bool = False,
 ) -> bool:
     """sudo dpkg-scanpackages -m [-t udeb] <pool_subdir> > <output> + compress.
 
@@ -411,9 +414,19 @@ def _scan_packages_to(
             f"stderr={_r.stderr.strip()}"
         )
         return False
-    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+    if not os.path.exists(output_path):
         tui.console.print(
-            f"ERROR: Packages output {output_path} is missing or empty"
+            f"ERROR: Packages output {output_path} is missing"
+        )
+        logger.error(f"_scan_packages_to {_label}: missing output at {output_path}")
+        return False
+    # An empty index is valid for an optional component (e.g. a debs-only
+    # minimal pool has no udebs) — allow_empty lets the caller accept it.
+    # The main binary index keeps allow_empty=False, so an empty deb scan
+    # still fails loud.
+    if os.path.getsize(output_path) == 0 and not allow_empty:
+        tui.console.print(
+            f"ERROR: Packages output {output_path} is empty"
         )
         logger.error(f"_scan_packages_to {_label}: empty output at {output_path}")
         return False
