@@ -32,9 +32,9 @@ import tui
 import datetime
 import os
 import glob
+import re
 import shutil
 import subprocess
-import tempfile
 import time
 import sys
 from typing import Optional
@@ -3160,120 +3160,121 @@ class BuildSession:
                               tui.COLOR_WARNING)
 
     def cmd_repo_publish(self, *args):
-        """COMP-02: publish the indexed repo to a remote.  Today only
-        `repo publish git minimal` — push the publish/ tree (built by
-        `repo index minimal`) to [Repo] PublishGitURL on
-        [Repo] PublishGitBranch.
+        """COMP-02: publish the indexed repo to a VM over rsync+SSH.
 
-        Clones the publish repo into a temp dir, replaces its dists/ +
-        pool/ with publish/'s, commits, and pushes.  Refuses to push if
-        any file exceeds GitHub's 100 MB hard limit.  Never force-pushes —
-        a rejected (non-fast-forward) push surfaces as an actionable error.
+        Usage: repo publish ssh [full|minimal]   (default: full)
+
+          full    — rsync the whole repo/ tree (all suites incl. debug;
+                    run `repo index full` first).  The VM has no GitHub-
+                    style size cap, so the complete pool is fine.
+          minimal — rsync the runtime subset staged in publish/ (run
+                    `repo index minimal` first).
+
+        rsync is incremental (only changed/new debs transfer on a re-
+        publish) and `--delete` keeps the target a true mirror.  The VM
+        serves the synced dir over HTTP(S); point [Repo] AptSourceURL at
+        that URL so the installed system consumes it.  Auth is plain SSH
+        (ssh-agent / default key, or [Repo] PublishSshKey).
         """
-        _target = args[0] if len(args) > 0 else ''
-        _scope = args[1] if len(args) > 1 else ''
-        if _target != 'git' or _scope != 'minimal':
-            console.print("Usage: repo publish git minimal")
+        _kind = args[0] if len(args) > 0 else ''
+        _scope = args[1] if len(args) > 1 else 'full'
+        if _kind != 'ssh' or _scope not in ('full', 'minimal'):
+            console.print("Usage: repo publish ssh [full|minimal]")
             return
 
-        _url = self.config.publish_git_url
-        _branch = self.config.publish_git_branch or 'gh-pages'
-        if not _url:
+        _dest = self.config.publish_ssh_target
+        if not _dest:
             console.print(
-                "repo publish: [Repo] PublishGitURL is unset — set it to the "
-                "separate publish repo's git URL in config/build.conf first"
+                "repo publish: [Repo] PublishSshTarget is unset — set it to "
+                "user@host:/path (served over HTTP by the VM) in "
+                "config/build.conf first"
             )
             return
 
-        _pool = os.path.join(self.config.dir_publish, 'pool')
-        _dists = os.path.join(self.config.dir_publish, 'dists')
-        if not (os.path.isdir(_pool) and os.path.isdir(_dists)):
-            console.print(
-                "repo publish: publish/{pool,dists} missing — run "
-                "`repo index minimal` first"
-            )
-            return
+        if _scope == 'minimal':
+            _root = self.config.dir_publish
+            _pairs = [(os.path.join(_root, 'dists'), 'dists'),
+                      (os.path.join(_root, 'pool'),  'pool')]
+            _hint = '`repo index minimal`'
+        else:
+            _root = self.config.dir_repo
+            _pairs = [(os.path.join(_root, 'dists'), 'dists')]
+            _hint = '`repo index full`'
 
-        # Hard guard: GitHub rejects any file > 100 MB on push.
-        _oversized = []
-        for _src in (_pool, _dists):
-            for _dp, _dirs, _files in os.walk(_src):
-                for _f in _files:
-                    _p = os.path.join(_dp, _f)
-                    if os.path.isfile(_p) and os.path.getsize(_p) > 100 * 2 ** 20:
-                        _oversized.append(
-                            os.path.relpath(_p, self.config.dir_publish))
-        if _oversized:
-            console.print(
-                "repo publish: refusing — these exceed GitHub's 100 MB push "
-                "limit (re-run `repo index minimal`; they should be filtered):",
-                tui.COLOR_ERROR,
-            )
-            for _rel in _oversized:
-                console.print(f"    {_rel}")
-            return
-
-        _tmp = tempfile.mkdtemp(prefix='athena-publish-')
-
-        def _git(*cmd_args, check=True):
-            _p = subprocess.run(['git', '-C', _tmp, *cmd_args],
-                                capture_output=True, text=True)
-            if check and _p.returncode != 0:
-                raise RuntimeError(
-                    f"git {' '.join(cmd_args)}: {_p.stderr.strip()}")
-            return _p
-
-        try:
-            # Init + fetch the branch if it exists already; else start fresh.
-            # Shallow — we replace content wholesale, history depth is moot.
-            _git('init', '-q')
-            _git('remote', 'add', 'origin', _url)
-            _fetch = _git('fetch', '--depth=1', 'origin', _branch, check=False)
-            if _fetch.returncode == 0:
-                _git('checkout', '-q', '-B', _branch, 'FETCH_HEAD')
-            else:
-                _git('checkout', '-q', '-b', _branch)
-
-            for _name in ('dists', 'pool'):
-                _dst = os.path.join(_tmp, _name)
-                if os.path.isdir(_dst):
-                    shutil.rmtree(_dst)
-                shutil.copytree(os.path.join(self.config.dir_publish, _name), _dst)
-            # GitHub Pages: .nojekyll stops Jekyll mangling the tree.
-            open(os.path.join(_tmp, '.nojekyll'), 'w').close()
-
-            _git('add', '-A')
-            if _git('diff', '--cached', '--quiet', check=False).returncode == 0:
-                console.print("repo publish: nothing changed since last publish")
-                return
-            _codename = self.config.build_codename.strip('"').strip("'")
-            _msg = (
-                f"publish minimal repo: {_codename} {self.config.build_version} "
-                f"({datetime.datetime.now().isoformat(timespec='seconds')})"
-            )
-            _git('commit', '-q', '-m', _msg)
-            _push = _git('push', 'origin', f'HEAD:{_branch}', check=False)
-            if _push.returncode != 0:
+        for _src, _ in _pairs:
+            if not os.path.isdir(_src):
                 console.print(
-                    f"repo publish: push to {_url} ({_branch}) failed:\n"
-                    f"  {_push.stderr.strip()}",
+                    f"repo publish: {_src} missing — run {_hint} first")
+                return
+
+        _ssh = ['ssh']
+        if self.config.publish_ssh_key:
+            _ssh += ['-i', self.config.publish_ssh_key]
+
+        for _src, _remote in _pairs:
+            _rc = self._rsync_streamed(
+                f'rsync {_remote} → {_dest}', _src, f'{_dest}/{_remote}/', _ssh)
+            if _rc != 0:
+                console.print(
+                    f"repo publish: rsync of {_remote} to {_dest} failed "
+                    f"(rc={_rc}) — see log",
                     tui.COLOR_ERROR,
                 )
-                logger.error(f"cmd_repo_publish: push: {_push.stderr.strip()}")
                 return
+
+        console.print(
+            f"repo publish: synced {_scope} repo to {_dest}",
+            tui.COLOR_HIGHLIGHT,
+        )
+        _codename = self.config.build_codename.strip('"').strip("'")
+        if self.config.apt_source_url:
             console.print(
-                f"repo publish: pushed minimal repo to {_url} ({_branch})",
-                tui.COLOR_HIGHLIGHT,
-            )
-            if self.config.apt_source_url:
-                console.print(
-                    f"  apt source: {self.config.apt_source_url} "
-                    f"{_codename} main")
-        except RuntimeError as e:
-            console.print(f"repo publish: {e}", tui.COLOR_ERROR)
-            logger.error(f"cmd_repo_publish: {e}")
+                f"  apt source: {self.config.apt_source_url} {_codename} main")
+        else:
+            console.print(
+                "  set [Repo] AptSourceURL to the HTTP(S) URL this VM serves "
+                "so the installed system points at it")
+
+    def _rsync_streamed(self, label, src, dest, ssh_cmd):
+        """rsync -aH --delete with --info=progress2, mirroring rsync's
+        single overall % into a ProgressBar so the operator sees movement
+        during a multi-GB sync.  rsync writes progress to stdout using \\r
+        in-place updates, so we read raw and split on \\r/\\n.  stderr is
+        merged into stdout to avoid a pipe-buffer deadlock; non-progress
+        lines are kept for the error log.  Returns the rsync return code."""
+        _bar = ProgressBar(label, itr_label='', maxvalue=100,
+                           show_rate=False, label_width=34)
+        _argv = ['rsync', '-aH', '--delete', '--info=progress2',
+                 '-e', ' '.join(ssh_cmd), f'{src}/', dest]
+        _proc = subprocess.Popen(
+            _argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        _tail: 'list[str]' = []
+        try:
+            _stream = _proc.stdout
+            _seg = ''
+            while _stream is not None:
+                _ch = _stream.read(1)
+                if not _ch:
+                    break
+                if _ch in '\r\n':
+                    _line, _seg = _seg.strip(), ''
+                    if not _line:
+                        continue
+                    _m = re.search(r'(\d+)%', _line)
+                    if _m:
+                        _bar.step(int(_m.group(1)) - _bar.value)
+                    else:
+                        _tail.append(_line)
+                else:
+                    _seg += _ch
+            _proc.wait()
         finally:
-            shutil.rmtree(_tmp, ignore_errors=True)
+            _bar.close()
+        if _proc.returncode != 0:
+            logger.error(
+                f"_rsync_streamed {label}: rc={_proc.returncode}; "
+                f"tail={' | '.join(_tail[-10:])}")
+        return _proc.returncode
 
     def cmd_repo(self, action: str = '', *args):
         """Dispatcher for `repo <action>` commands.
@@ -3300,8 +3301,10 @@ class BuildSession:
             'index minimal':  'build + index + sign the runtime subset '
                               '(main debs, no -dbg/-dbgsym/-source/udeb) '
                               'into publish/',
-            'publish git minimal': 'push publish/ to [Repo] PublishGitURL '
-                                   '(run `repo index minimal` first)',
+            'publish ssh full':    'rsync the full repo/ to [Repo] '
+                                   'PublishSshTarget (run `repo index full` first)',
+            'publish ssh minimal': 'rsync the minimal publish/ to '
+                                   'PublishSshTarget (run `repo index minimal` first)',
         }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
