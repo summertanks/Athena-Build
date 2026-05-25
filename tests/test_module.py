@@ -3297,6 +3297,59 @@ def test_installer_chroot_overlay_map_is_data_not_code():
             f"overlay src must be relative to installer_dir, got {_src!r}")
 
 
+def test_installer_ships_forked_choose_mirror():
+    """choose-mirror is in installer.list (our Athena-only fork drives the
+    mirror step), and the fork's masterlist lists only the Athena repo."""
+    with open(os.path.join(_ROOT, 'config', 'installer.list')) as fh:
+        assert any(_l.strip() == 'choose-mirror' for _l in fh), \
+            "choose-mirror missing from installer.list"
+    with open(os.path.join(_ROOT, 'fork', 'source', 'choose-mirror',
+                           'Mirrors.masterlist')) as fh:
+        _body = fh.read()
+    assert 'Site: 140.245.198.222' in _body and '/asgard/' in _body, _body
+    _entries = '\n'.join(_l for _l in _body.splitlines()
+                         if not _l.strip().startswith('#'))
+    assert 'debian.org' not in _entries, _entries
+
+
+def test_athena_installer_data_drops_mirror_protocol_stub():
+    """The mirror/protocol stub is gone — real choose-mirror provides it."""
+    _base = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data')
+    assert not os.path.exists(
+        os.path.join(_base, 'data', 'athena-stubs.templates')), \
+        "athena-stubs.templates should be removed"
+    with open(os.path.join(_base, 'debian', 'install')) as fh:
+        assert 'athena-stubs.templates' not in fh.read(), \
+            "debian/install still references the removed stub"
+
+
+def test_preseed_pins_http_mirror_not_suppressed():
+    """preseed pins http for the mirror step and does NOT suppress it."""
+    with open(os.path.join(_ROOT, 'installer', 'preseed', 'preseed.cfg')) as fh:
+        _body = fh.read()
+    assert 'mirror/protocol string http' in _body, _body
+    assert 'apt-setup/use_mirror boolean false' not in _body, \
+        "the mirror step must stay visible (no use_mirror=false)"
+
+
+def test_finish_install_cdrom_disable_overlay():
+    """The cdrom-disable finish-install hook is overlaid + executable, and
+    only comments cdrom: entries when a network source exists."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _OVERLAY_MAP
+    assert ('finish-install/06athena-disable-cdrom',
+            'usr/lib/finish-install.d/06athena-disable-cdrom') in _OVERLAY_MAP, \
+        _OVERLAY_MAP
+    _hook = os.path.join(_ROOT, 'installer', 'finish-install',
+                         '06athena-disable-cdrom')
+    assert os.access(_hook, os.X_OK), "hook must be executable (cp -p preserves mode)"
+    with open(_hook) as fh:
+        _s = fh.read()
+    assert 'cdrom:' in _s and 'sed' in _s, _s
+    assert '(https?|ftp)' in _s, "must guard on a real network source existing"
+
+
 def test_installer_chroot_resolve_udeb_files_skips_virtual_aliases():
     """_resolve_udeb_files must skip entries where the dict key differs
     from pkg['Package'] — those are virtual-package aliases (same
@@ -3401,33 +3454,6 @@ def test_athena_installer_data_ships_runtime_dirs():
     assert 'tmp' in _entries, _entries
     assert 'var/tmp' in _entries, _entries
     assert 'root' in _entries, _entries
-
-
-def test_athena_installer_data_ships_mirror_protocol_stub():
-    """FORK-01 Step 3: the mirror/protocol stub template (which
-    bootstrap-base.postinst queries unguarded — caught 2026-05-11) now
-    ships from athena-installer-data's data/ tree via debian/install.
-    Pin the content + install path so an accidental edit fails here
-    before it ships a broken installer."""
-    _data = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
-                         'data', 'athena-stubs.templates')
-    assert os.path.isfile(_data), f"missing {_data}"
-    with open(_data) as fh:
-        _content = fh.read()
-    assert 'Template: mirror/protocol' in _content, _content
-    assert 'Type: string' in _content, _content
-    assert 'Default: file' in _content, _content
-
-    # debian/install must wire data/athena-stubs.templates to
-    # /var/lib/dpkg/info/ (the path rootskel's S20templates run-part
-    # walks at boot via debconf-loadtemplate).
-    _install = os.path.join(_ROOT, 'fork', 'source', 'athena-installer-data',
-                            'debian', 'install')
-    assert os.path.isfile(_install), f"missing {_install}"
-    with open(_install) as fh:
-        _install_body = fh.read()
-    assert 'data/athena-stubs.templates' in _install_body, _install_body
-    assert 'var/lib/dpkg/info' in _install_body, _install_body
 
 
 def _fake_sudo_write_run(cmd, *_a, **_k):
@@ -15724,6 +15750,10 @@ def main() -> int:
         test_validate_selection_still_fires_on_non_pool_conflicts,
         test_base_installer_athena_keyring_patch_exists_and_is_dep3_clean,
         test_installer_chroot_overlay_map_is_data_not_code,
+        test_installer_ships_forked_choose_mirror,
+        test_athena_installer_data_drops_mirror_protocol_stub,
+        test_preseed_pins_http_mirror_not_suppressed,
+        test_finish_install_cdrom_disable_overlay,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
         test_installer_chroot_resolve_udeb_files_logs_missing_silently,
@@ -15734,7 +15764,6 @@ def main() -> int:
         test_buildcontainer_injects_athena_codename_env,
         # COMP-02 phase B — stock d-i image-build conformance helpers
         test_installer_chroot_sudo_write_does_not_leak_password_to_tee,
-        test_athena_installer_data_ships_mirror_protocol_stub,
         test_installer_chroot_run_depmod_skips_when_no_modules_dir,
         test_installer_chroot_run_depmod_indexes_each_kernel_present,
         test_strip_debian_residue_hooks_removes_known_files,

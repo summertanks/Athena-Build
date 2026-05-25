@@ -1,3 +1,13 @@
+athena-installer-data (1.3.0) thor; urgency=low
+
+  * Drop the mirror/protocol stub template: we now ship a forked
+    choose-mirror (fork/source/choose-mirror, Athena-only mirror list) which
+    provides mirror/* for real, so the stub that kept bootstrap-base's
+    `db_get mirror/protocol` from tripping set -e is no longer needed.
+    See docs/plans/comp-01-choose-mirror-fork.md.
+
+ -- Harkirat S Virk <harkiratsvirk@gmail.com>  Sun, 25 May 2026 00:00:00 +0000
+
 athena-installer-data (1.2.0) thor; urgency=low
 
   * COMP-01f Phase 1 (revised) — fix the override mechanism.

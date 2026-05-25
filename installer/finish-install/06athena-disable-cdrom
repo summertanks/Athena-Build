@@ -1,0 +1,17 @@
+#!/bin/sh
+# Athena (COMP-01): disable the install-disc apt source on the target so the
+# booted system doesn't block on "please insert the disc" when apt runs
+# (apt-setup/disable-cdrom-entries is a no-op in our build).
+#
+# Runs from finish-install.d (after pkgsel, with /target mounted).  Guarded:
+# only comments the cdrom entries when the target ALSO has a real network
+# source (apt-setup wrote the Athena mirror via our forked choose-mirror) —
+# so we never strand a freshly-installed system with zero apt sources.
+set -e
+
+SOURCES=/target/etc/apt/sources.list
+if [ -f "$SOURCES" ] && grep -rqsE '^[[:space:]]*deb[[:space:]]+(https?|ftp)://' \
+        /target/etc/apt/sources.list /target/etc/apt/sources.list.d/ 2>/dev/null; then
+    sed -i -E 's|^([[:space:]]*deb(-src)?[[:space:]]+cdrom:)|# \1|' "$SOURCES"
+    logger -t athena-finish-install "disabled cdrom: entries in $SOURCES"
+fi
