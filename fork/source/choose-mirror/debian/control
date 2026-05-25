@@ -11,8 +11,11 @@ Package: choose-mirror
 Package-Type: udeb
 Architecture: all
 Depends: ${misc:Depends}, configured-network, choose-mirror-bin
-XB-Installer-Menu-Item: 2300
-Description: Choose mirror to install from (menu item)
+Description: Choose mirror to install from
+ Athena fork: the XB-Installer-Menu-Item (2300) is dropped on purpose so this
+ does NOT run as an early standalone main-menu step (before base install).
+ apt-setup's 50mirror invokes choose-mirror during the package-manager step,
+ after the base system is installed — the standard CD-install flow.
 
 Package: choose-mirror-bin
 Package-Type: udeb

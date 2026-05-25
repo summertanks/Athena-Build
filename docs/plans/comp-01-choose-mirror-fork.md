@@ -82,12 +82,27 @@ template it (`@APT_SOURCE_HOST@` / `@APT_SOURCE_PATH@`) and substitute from
 2. `fork/source/athena-installer-data`: drop the `mirror/protocol` stub
    template (real `choose-mirror` now provides `mirror/*`).
 3. `installer/preseed/preseed.cfg`: `mirror/protocol=http`, suite/codename
-   `thor`; do **not** set `apt-setup/use_mirror=false` (the step should
-   appear). Possibly preseed the country so the picker auto-selects.
-4. Confirm the build pool carries `choose-mirror`'s Build-Depends:
-   `debhelper`, `libdebconfclient0-dev`, `wget`, `po-debconf`,
-   `libdebian-installer4-dev`, `locales`, `iso-codes`, `isoquery`. If any
-   aren't in our snapshot/pool, the fork build fails build-dep — add them.
+   `thor`, and **`apt-setup/use_mirror=true`** (see Build-1 findings — without
+   it `50mirror` exits and writes no mirror).
+4. `fork/source/choose-mirror/debian/control`: **drop `XB-Installer-Menu-Item`**
+   so choose-mirror is not an early standalone step; `apt-setup`'s `50mirror`
+   invokes it at the package-manager step (after base) — see Build-1 findings.
+
+## Build-1 findings (2026-05-25)
+
+First build + install (verified on the VM's `/var/log/installer/`):
+
+- **Ordering bug:** choose-mirror ran as an early main-menu step (item
+  2300) and asked country/mirror *before* base install — not the stock CD
+  flow. Fix: drop `XB-Installer-Menu-Item` (above); `50mirror` then drives it
+  after base.
+- **No mirror written:** choose-mirror set every `mirror/*` value correctly
+  (`hostname=140.245.198.222`, `directory=/asgard/`, `protocol=http`,
+  `suite/codename=thor`), but **`apt-setup/use_mirror=false`**, so
+  `50mirror` hit `if [ "$RET" = false ]; then exit 1` and discarded its
+  output → cdrom-only. Fix: preseed `apt-setup/use_mirror=true`.
+- choose-mirror validated our mirror fine (`wget …/dists/thor/Release` OK),
+  and the cdrom `InRelease` verified against our key — signing chain works.
 
 ## Issue B — installed system blocks on the CD (separate, still needed)
 
