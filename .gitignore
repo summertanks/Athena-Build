@@ -24,6 +24,11 @@ __pycache__/
 /source/
 /tmp/
 
+# Secrets — private keys must never be committed (e.g. the rsync/SSH
+# publish key referenced by [Repo] PublishSshKey).
+config/*.key
+*.pem
+
 # IDE
 .idea/
 .vscode/
