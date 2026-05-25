@@ -1,3 +1,14 @@
+choose-mirror (2.123+deb12u1+athena2) thor; urgency=medium
+
+  * Drop XB-Installer-Menu-Item (2300) so choose-mirror no longer runs as an
+    early standalone main-menu step (it was asking country/mirror BEFORE base
+    install).  apt-setup's 50mirror invokes it during the package-manager
+    step instead — the standard CD-install flow (mirror after base, before
+    pkgsel).  Paired with preseeding apt-setup/use_mirror=true so 50mirror
+    actually writes the mirror.  See docs/plans/comp-01-choose-mirror-fork.md.
+
+ -- Harkirat S Virk <harkiratsvirk@gmail.com>  Sun, 25 May 2026 12:00:00 +0000
+
 choose-mirror (2.123+deb12u1+athena1) thor; urgency=medium
 
   * Athena fork (COMP-01): replace Mirrors.masterlist with an Athena-only

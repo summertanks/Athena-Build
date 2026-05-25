@@ -3327,13 +3327,27 @@ def test_athena_installer_data_drops_mirror_protocol_stub():
             "debian/install still references the removed stub"
 
 
-def test_preseed_pins_http_mirror_not_suppressed():
-    """preseed pins http for the mirror step and does NOT suppress it."""
+def test_preseed_pins_http_mirror_and_enables_use_mirror():
+    """preseed pins http + forces apt-setup/use_mirror=true (else 50mirror
+    exits and writes no mirror), and never sets use_mirror=false."""
     with open(os.path.join(_ROOT, 'installer', 'preseed', 'preseed.cfg')) as fh:
         _body = fh.read()
     assert 'mirror/protocol string http' in _body, _body
-    assert 'apt-setup/use_mirror boolean false' not in _body, \
-        "the mirror step must stay visible (no use_mirror=false)"
+    assert 'apt-setup/use_mirror boolean true' in _body, _body
+    assert 'apt-setup/use_mirror boolean false' not in _body, _body
+
+
+def test_choose_mirror_fork_drops_menu_item():
+    """The forked choose-mirror drops XB-Installer-Menu-Item so it doesn't
+    run as an early standalone step — apt-setup's 50mirror invokes it after
+    base install (the stock CD flow)."""
+    import re
+    with open(os.path.join(_ROOT, 'fork', 'source', 'choose-mirror',
+                           'debian', 'control')) as fh:
+        _body = fh.read()
+    assert not any(re.match(r'^(XB-)?Installer-Menu-Item:', _l)
+                   for _l in _body.splitlines()), \
+        "choose-mirror must not declare a menu-item field (would run early)"
 
 
 def test_finish_install_cdrom_disable_overlay():
@@ -15756,7 +15770,8 @@ def main() -> int:
         test_installer_chroot_overlay_map_is_data_not_code,
         test_installer_ships_forked_choose_mirror,
         test_athena_installer_data_drops_mirror_protocol_stub,
-        test_preseed_pins_http_mirror_not_suppressed,
+        test_preseed_pins_http_mirror_and_enables_use_mirror,
+        test_choose_mirror_fork_drops_menu_item,
         test_finish_install_cdrom_disable_overlay,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
