@@ -5,9 +5,9 @@
 > stable ID (`AREA-NN`); cite the ID when committing or referencing work.
 > Update the **Status** column inline rather than renumbering.
 
-- **Review date:** 2026-05-07 (initial), maintenance pass 2026-05-14 (`master` @ `37cabc9`), consolidation audit 2026-05-21 (`master` @ `a1e193c`)
+- **Review date:** 2026-05-07 (initial), maintenance pass 2026-05-14 (`master` @ `37cabc9`), consolidation audit 2026-05-21 (`master` @ `a1e193c`), maintenance pass 2026-05-25 (`master` @ `564cf19`)
 - **Reviewer:** Claude (read-only audit, with subsequent maintenance reconciling actual state vs ticket status)
-- **Tree size:** ~31,800 LOC (scripts/ + tests/) — 18 scripts modules, single-file test suite (~12k LOC, ~440 tests)
+- **Tree size:** ~40,100 LOC (scripts/ + tests/) — 21 scripts modules + an 11-file `tui/` package, single-file test suite (~15.9k LOC, 473 tests)
 - **Pipeline state:** end-to-end working — `cache build → dep parse →
   source sync → container init → source build → chroot build
   (+verify) → iso build live → iso build installer`.  Installer ISO
