@@ -1,0 +1,19 @@
+# Athena-only mirror list — replaces Debian's Mirrors.masterlist.
+#
+# The installer's mirror-selection step (choose-mirror) offers ONLY this
+# entry, so the operator gets a standard mirror step that lists our repo
+# and never Debian.  choose-mirror validates the chosen mirror by fetching
+#   http://<Site><Archive-http>/dists/<suite>/Release
+# i.e. http://140.245.198.222/asgard/dists/thor/Release  (which exists).
+#
+# CAVEATS (see docs/plans/comp-01-choose-mirror-fork.md):
+#   * host/path are hardcoded here, duplicating [Repo] AptSourceURL.
+#     Follow-up: template these (@APT_SOURCE_HOST@/@APT_SOURCE_PATH@) and
+#     substitute from AptSourceURL at fork-build time (one source of truth).
+#   * the one-entry / country-grouping UX (and whether check-masterlist +
+#     ./mirrorlist accept a country-less entry) needs build-time iteration.
+
+Site: 140.245.198.222
+Type: Push-Primary
+Archive-architecture: amd64
+Archive-http: /asgard/
