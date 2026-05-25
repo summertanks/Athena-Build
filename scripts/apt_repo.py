@@ -46,6 +46,34 @@ def _sudo(cmd_args, password: str) -> subprocess.CompletedProcess:
     )
 
 
+def deb_excluded_from_minimal(filename: str) -> bool:
+    """True if a .deb should be left OUT of the `minimal` (runtime) repo.
+
+    Minimal = what a booted system apt-installs.  Exclude packages a
+    running system never needs: debug symbols (`*-dbg`, `*-dbgsym`) and
+    source-shipping debs (`*-source`, e.g. linux-source, gcc-12-source).
+    These are also where every >100 MB file lives, so dropping them keeps
+    the published tree under GitHub's 100 MB-per-file hard push limit.
+
+    Decided by the package name (the `_`-delimited head of the filename),
+    so `linux-image-6.1.0-47-amd64-dbg_..._amd64.deb` is excluded but a
+    hypothetical `libfoo-dev_..._amd64.deb` is not.
+
+    Source-shipping debs come in two name shapes: `<pkg>-source`
+    (gcc-12-source, bluez-source) and the kernel's `linux-source-<ver>`
+    (the version is baked into the package name, so the `-source` suffix
+    test misses it).  We handle the kernel form by exact prefix rather
+    than an `-source-` substring, which would wrongly catch legitimate
+    runtime packages like `fonts-source-code-pro`.
+    """
+    _name = filename.split('_', 1)[0]
+    if _name.endswith(('-dbg', '-dbgsym', '-source')):
+        return True
+    if _name.startswith('linux-source-'):
+        return True
+    return False
+
+
 def generate_apt_repo(
     staging: str, suite: str, codename: str, version: str, password: str,
 ) -> bool:

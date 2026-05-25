@@ -1273,7 +1273,9 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_source',    'fork',     'cmd_source_fork'),
         ('cmd_repo',      'audit',    'cmd_audit'),
         ('cmd_repo',      'repair',   'cmd_repo_repair'),
-        ('cmd_repo',      'index',    'cmd_index_repo'),
+        # cmd_repo 'index' is now multi-token ('index full' / 'index
+        # minimal'), and 'publish' takes 'git minimal' — covered by their
+        # own routing tests below, not this verb-only matrix.
         ('cmd_container', 'init',     'cmd_init_container'),
         ('cmd_container', 'purge',    'cmd_container_purge'),
         # cmd_chroot 'build' is now multi-token ('build live' / 'build
@@ -4381,6 +4383,126 @@ def test_cmd_iso_build_requires_subaction():
     _sess.cmd_iso('build')
     assert _called == [], (
         f"bare `iso build` must not invoke any handler, got {_called}")
+
+
+# ─── COMP-02: repo index minimal/full + publish git minimal ──────────────────
+
+def test_repo_index_and_publish_dispatch():
+    """`repo index full` (and bare `repo index`) → cmd_index_repo;
+    `repo index minimal` → cmd_index_repo_minimal; `repo publish git
+    minimal` → cmd_repo_publish('git','minimal'); unknown index sub →
+    help (no handler invoked)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_index_repo         = lambda *a, **kw: _calls.append(('full', a))
+    _sess.cmd_index_repo_minimal = lambda *a, **kw: _calls.append(('minimal', a))
+    _sess.cmd_repo_publish       = lambda *a, **kw: _calls.append(('publish', a))
+
+    _sess.cmd_repo('index', 'full')
+    assert _calls == [('full', ())], _calls
+    _calls.clear()
+    _sess.cmd_repo('index')                 # bare → full (back-compat)
+    assert _calls == [('full', ())], _calls
+    _calls.clear()
+    _sess.cmd_repo('index', 'minimal')
+    assert _calls == [('minimal', ())], _calls
+    _calls.clear()
+    _sess.cmd_repo('publish', 'git', 'minimal')
+    assert _calls == [('publish', ('git', 'minimal'))], _calls
+    _calls.clear()
+    _sess.cmd_repo('index', 'wat')          # unknown sub → help, no handler
+    assert _calls == [], f"unknown index sub must not invoke a handler: {_calls}"
+
+
+def test_deb_excluded_from_minimal():
+    """The minimal (runtime) filter drops debug + source debs by package
+    name, keeps ordinary runtime debs."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from apt_repo import deb_excluded_from_minimal as ex
+    assert ex('linux-image-6.1.0-47-amd64-dbg_6.1.170-3_amd64.deb')
+    assert ex('libc6-dbgsym_2.36-9_amd64.deb')
+    assert ex('linux-source-6.1_6.1.170-3_all.deb')
+    assert ex('gcc-12-source_12.2.0-14_all.deb')
+    assert not ex('bash_5.2-15_amd64.deb')
+    assert not ex('libssl3_3.0.14-1_amd64.deb')
+    assert not ex('firefox-esr_140.10.2esr-1_amd64.deb')
+    assert not ex('libfoo-dev_1.2-3_amd64.deb')   # -dev is not debug/source
+    # over-match traps: a font pkg with 'source' in the name must be KEPT,
+    # and the kernel's linux-source-<ver> (version-suffixed) must be DROPPED
+    assert not ex('fonts-source-code-pro_2.030-1_all.deb')
+    assert ex('linux-source-6.1_6.1.170-3_all.deb')
+
+
+def test_cmd_repo_publish_guards():
+    """publish refuses — with a message, before any git op — when the URL
+    is unset, when the indexed tree is missing, and when a staged file
+    exceeds GitHub's 100 MB push limit."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    def _mk(cfg):
+        s = BuildSession.__new__(BuildSession)
+        s.config = cfg
+        return s
+
+    # (a) URL unset → hint, no git
+    with tempfile.TemporaryDirectory() as _tmp:
+        class _Cfg:
+            dir_publish = _tmp
+            publish_git_url = ''
+            publish_git_branch = 'gh-pages'
+        out = _capture_console_print(
+            lambda: _mk(_Cfg()).cmd_repo_publish('git', 'minimal'))
+        assert 'PublishGitURL' in out, out
+
+    # (b) URL set but publish/ not indexed → hint, no git
+    with tempfile.TemporaryDirectory() as _tmp:
+        class _Cfg:
+            dir_publish = _tmp
+            publish_git_url = 'https://example.invalid/repo.git'
+            publish_git_branch = 'gh-pages'
+        out = _capture_console_print(
+            lambda: _mk(_Cfg()).cmd_repo_publish('git', 'minimal'))
+        assert 'repo index minimal' in out, out
+
+    # (c) oversized file → refuse before git (sparse file: no real disk use)
+    with tempfile.TemporaryDirectory() as _tmp:
+        os.makedirs(os.path.join(_tmp, 'pool'))
+        os.makedirs(os.path.join(_tmp, 'dists'))
+        with open(os.path.join(_tmp, 'pool', 'huge_1_amd64.deb'), 'wb') as fh:
+            fh.truncate(101 * 1024 * 1024)
+        class _Cfg:
+            dir_publish = _tmp
+            publish_git_url = 'https://example.invalid/repo.git'
+            publish_git_branch = 'gh-pages'
+        out = _capture_console_print(
+            lambda: _mk(_Cfg()).cmd_repo_publish('git', 'minimal'))
+        assert '100 MB' in out, out
+
+
+def test_buildconfig_publish_defaults_and_dir():
+    """New [Repo] publish knobs default off, and dir_publish is created
+    under working_dir."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block="""
+    [Mirror.main]
+    BASEID = debian
+    Suffix =
+    Component = main
+    """))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        assert cfg.publish_git_url == ''
+        assert cfg.publish_git_branch == 'gh-pages'
+        assert cfg.dir_publish == os.path.join(tmp, 'publish')
+        assert os.path.isdir(cfg.dir_publish)
 
 
 def test_cmd_iso_build_live_forwards_to_cmd_build_iso_live():
@@ -15402,6 +15524,10 @@ def main() -> int:
         test_cache_purge_empty_dir_is_noop,
         # — iso build live | iso build installer split
         test_cmd_iso_build_requires_subaction,
+        test_repo_index_and_publish_dispatch,
+        test_deb_excluded_from_minimal,
+        test_cmd_repo_publish_guards,
+        test_buildconfig_publish_defaults_and_dir,
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
         test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
         test_cmd_iso_build_unknown_subaction_calls_neither_handler,
