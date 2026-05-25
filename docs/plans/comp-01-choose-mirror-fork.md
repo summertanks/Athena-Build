@@ -106,11 +106,29 @@ reach the repo.)
 
 ## Risks
 
-- **Untestable in dev** — d-i mirror internals only shine through on a real
-  install; expect 1-2 iterations on the masterlist shape.
-- **Build-deps** (`iso-codes`, `isoquery`, `libdebian-installer4-dev`) must
-  be in the pool, or the fork won't build.
+- **Masterlist country grouping.** `./mirrorlist httplist` cross-references
+  each entry's `Country:` against `debian/iso_3166.tab` (built from
+  `iso-codes` via `isoquery`) to generate the country-grouped picker. The
+  Athena entry now carries a real code (`Country: US United States`) so the
+  lookup matches and the picker isn't empty; the displayed country is
+  cosmetic (one mirror) and can be revisited. Still confirm the one-entry UX
+  renders sanely on a real build.
+- **Untestable in dev** — d-i mirror internals only show on a real install;
+  expect 1-2 iterations on the masterlist shape + the `mirror/suite` keys.
 - **IP hardcoding** until the AptSourceURL-substitution follow-up lands.
+
+### NOT risks (verified)
+
+- **Build-deps** `iso-codes` / `isoquery` / `libdebian-installer4-dev` are
+  installed into the build container **from the snapshot** (standard
+  bookworm-main packages), not satisfied from our `repo/` pool — so they
+  don't gate the build the way an earlier draft implied.
+- **Runtime deps already in the closure:** `libdebian-installer4-udeb`
+  (installer.list) for `choose-mirror-bin`'s `-ldebian-installer`, and
+  `configured-network` (provided by `netcfg`, installer.list) for
+  `choose-mirror`.
+- **`check-masterlist`** is a no-op (only warns inside a git checkout; the
+  fork tree has none) and the build is `ONLINE=n` (no network sync).
 
 ## Status
 
