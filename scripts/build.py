@@ -3159,6 +3159,103 @@ class BuildSession:
                 console.print(f"    {_sz // 2 ** 20:5d} MB  {_rel}",
                               tui.COLOR_WARNING)
 
+    def cmd_audit_external(self, *args):
+        """COMP-02: audit the EXTERNALLY-published repo at [Repo]
+        AptSourceURL — what apt clients actually fetch.  Read-only, HTTP.
+
+        Checks, in order (stops at the first hard failure):
+          1. dists/<codename>/InRelease is reachable.
+          2. Its inline signature verifies against our signing key
+             (signing.signing_pubkey_path) — same trust chain apt uses.
+          3. Every index in the now-trusted SHA256 block is present and
+             its size + SHA256 match.  (No pool .deb downloads.)
+
+        Requires AptSourceURL set and a generated signing key.
+        """
+        del args
+        import tempfile
+        import signing
+        from debian.deb822 import Release
+
+        _base = self.config.apt_source_url.rstrip('/')
+        if not _base:
+            console.print(
+                "repo audit external: [Repo] AptSourceURL is unset — set it "
+                "to the published repo URL first")
+            return
+        _cn = self.config.build_codename.strip('"').strip("'")
+        _keyring = signing.signing_pubkey_path(self.config)
+        if not os.path.exists(_keyring):
+            console.print(
+                f"repo audit external: signing pubkey {_keyring} missing — "
+                f"run `key generate` first")
+            return
+
+        console.print(f"repo audit external: {_base} (suite {_cn})")
+        # TemporaryDirectory auto-cleans on exit — keeps this read-only-named
+        # command free of explicit delete primitives (per the read-only guard).
+        with tempfile.TemporaryDirectory(prefix='athena-audit-ext-') as _tmp:
+            _gnupg = os.path.join(_tmp, 'gnupg')
+            os.makedirs(_gnupg)
+            os.chmod(_gnupg, 0o700)   # gpg refuses a homedir looser than 0700
+
+            # 1. reachable
+            _inrel_url = f'{_base}/dists/{_cn}/InRelease'
+            _inrel = os.path.join(_tmp, 'InRelease')
+            _size, _detail = utils.download_file(_inrel_url, _inrel)
+            if _size <= 0:
+                console.print(
+                    f"  [x] unreachable: {_inrel_url} "
+                    f"({_detail or 'no response'})", tui.COLOR_ERROR)
+                return
+            console.print(f"  [✓] reachable: {_inrel_url}")
+
+            # 2. signature verifies against our key
+            _ok, _vdetail = utils.verify_inrelease(_inrel, _keyring, _gnupg)
+            if not _ok:
+                console.print(
+                    f"  [x] signature did NOT verify against "
+                    f"{os.path.basename(_keyring)}: {_vdetail}", tui.COLOR_ERROR)
+                return
+            console.print(f"  [✓] signed: {_vdetail}")
+
+            # 3. every index present + size/SHA256 match the signed Release.
+            # Each index downloads to a unique temp name (no in-place reuse,
+            # so no os.remove needed here).
+            with open(_inrel) as _fh:
+                _rel = Release(_fh)
+            _entries = _rel.get('SHA256', [])
+            if not _entries:
+                console.print(
+                    "  [x] no SHA256 block in InRelease", tui.COLOR_ERROR)
+                return
+            _bad = 0
+            for _i, _e in enumerate(_entries):
+                _name, _exp_sha, _exp_size = (
+                    _e['name'], _e['sha256'], int(_e['size']))
+                _idx = os.path.join(_tmp, f'idx-{_i}')
+                _sz, _ = utils.download_file(f'{_base}/dists/{_cn}/{_name}', _idx)
+                if _sz <= 0:
+                    console.print(f"  [x] MISSING  {_name}", tui.COLOR_ERROR)
+                    _bad += 1
+                    continue
+                if (utils.get_sha256(_idx) != _exp_sha
+                        or os.path.getsize(_idx) != _exp_size):
+                    console.print(
+                        f"  [x] MISMATCH {_name}", tui.COLOR_ERROR)
+                    _bad += 1
+                else:
+                    console.print(f"  [✓] {_name}")
+
+            if _bad:
+                console.print(
+                    f"repo audit external: FAIL — {_bad} of {len(_entries)} "
+                    f"index file(s) missing or mismatched", tui.COLOR_ERROR)
+            else:
+                console.print(
+                    f"repo audit external: OK — signed + all {len(_entries)} "
+                    f"index files consistent", tui.COLOR_HIGHLIGHT)
+
     def cmd_repo_publish(self, *args):
         """COMP-02: publish the indexed repo to a VM over rsync+SSH.
 
@@ -3170,11 +3267,20 @@ class BuildSession:
           minimal — rsync the runtime subset staged in publish/ (run
                     `repo index minimal` first).
 
+        The remote repo lives at <PublishSshTarget base>/<dist-id>/, where
+        dist-id is the distribution id (config.build_base_id) — derived, not
+        hardcoded, so a rebrand follows automatically.  PublishSshTarget is
+        `user@host` (repo under the remote home) or `user@host:/some/base`
+        (repo under that dir).
+
         rsync is incremental (only changed/new debs transfer on a re-
-        publish) and `--delete` keeps the target a true mirror.  The VM
-        serves the synced dir over HTTP(S); point [Repo] AptSourceURL at
-        that URL so the installed system consumes it.  Auth is plain SSH
-        (ssh-agent / default key, or [Repo] PublishSshKey).
+        publish) and `--delete` keeps the target a true mirror.  We do NOT
+        create the remote dir (no --mkpath): the <dist-id> dir must already
+        exist on the VM — publish checks via ssh and bails with a mkdir hint
+        if it's missing.  The VM serves the synced dir over HTTP(S); point
+        [Repo] AptSourceURL at that URL.  Auth is plain SSH (ssh-agent /
+        default key, or [Repo] PublishSshKey); the host fingerprint must
+        already be in known_hosts (publish is non-interactive).
         """
         _kind = args[0] if len(args) > 0 else ''
         _scope = args[1] if len(args) > 1 else 'full'
@@ -3182,12 +3288,11 @@ class BuildSession:
             console.print("Usage: repo publish ssh [full|minimal]")
             return
 
-        _dest = self.config.publish_ssh_target
-        if not _dest:
+        _target = self.config.publish_ssh_target
+        if not _target:
             console.print(
                 "repo publish: [Repo] PublishSshTarget is unset — set it to "
-                "user@host:/path (served over HTTP by the VM) in "
-                "config/build.conf first"
+                "user@host (or user@host:/base) in config/build.conf first"
             )
             return
 
@@ -3207,33 +3312,71 @@ class BuildSession:
                     f"repo publish: {_src} missing — run {_hint} first")
                 return
 
+        # Remote repo root = <base>/<dist-id>, derived from the distribution
+        # id (build_base_id) rather than hardcoded.  PublishSshTarget is
+        # user@host[:base]; an empty base means the remote home dir.
+        _dist_id = self.config.build_base_id
+        if ':' in _target:
+            _userhost, _basepath = _target.split(':', 1)
+        else:
+            _userhost, _basepath = _target, ''
+        _root_path = (_basepath.rstrip('/') + '/' + _dist_id
+                      if _basepath else _dist_id)
+        _remote_root = f'{_userhost}:{_root_path}'
+
         _ssh = ['ssh']
         if self.config.publish_ssh_key:
             _ssh += ['-i', self.config.publish_ssh_key]
 
+        # We don't --mkpath, so the <dist-id> dir must already exist on the
+        # VM.  Check via ssh and bail with an actionable hint if it's not.
+        _chk = subprocess.run(
+            _ssh + [_userhost, 'test', '-d', _root_path],
+            capture_output=True, text=True)
+        if _chk.returncode != 0:
+            console.print(
+                f"repo publish: remote dir '{_root_path}' not found on "
+                f"{_userhost} — create it first:\n"
+                f"  ssh {_userhost} mkdir -p {_root_path}",
+                tui.COLOR_ERROR,
+            )
+            return
+
         for _src, _remote in _pairs:
             _rc = self._rsync_streamed(
-                f'rsync {_remote} → {_dest}', _src, f'{_dest}/{_remote}/', _ssh)
+                f'rsync {_remote} → {_remote_root}', _src,
+                f'{_remote_root}/{_remote}/', _ssh)
             if _rc != 0:
                 console.print(
-                    f"repo publish: rsync of {_remote} to {_dest} failed "
-                    f"(rc={_rc}) — see log",
+                    f"repo publish: rsync of {_remote} to {_remote_root} "
+                    f"failed (rc={_rc}) — see log",
                     tui.COLOR_ERROR,
                 )
                 return
 
         console.print(
-            f"repo publish: synced {_scope} repo to {_dest}",
+            f"repo publish: synced {_scope} repo to {_remote_root}",
             tui.COLOR_HIGHLIGHT,
         )
         _codename = self.config.build_codename.strip('"').strip("'")
         if self.config.apt_source_url:
             console.print(
-                f"  apt source: {self.config.apt_source_url} {_codename} main")
+                f"  apt source: {self.config.apt_source_url} {_codename} main",
+                tui.COLOR_INFO,
+            )
         else:
+            # No AptSourceURL configured — suggest one from the host +
+            # dist-id (assumes the web docroot is the parent of the <dist-id>
+            # dir, so it serves at /<dist-id>/; adjust to the real served URL).
+            _host = _userhost.rsplit('@', 1)[-1]
+            _suggested = f'http://{_host}/{_dist_id}/'
             console.print(
-                "  set [Repo] AptSourceURL to the HTTP(S) URL this VM serves "
-                "so the installed system points at it")
+                f"  AptSourceURL is unset.  Once the VM serves '{_root_path}' "
+                f"over HTTP, set [Repo] AptSourceURL (e.g. {_suggested}) — the "
+                f"installed system would then use:",
+                tui.COLOR_INFO,
+            )
+            console.print(f"      deb {_suggested} {_codename} main")
 
     def _rsync_streamed(self, label, src, dest, ssh_cmd):
         """rsync -aH --delete with --info=progress2, mirroring rsync's
@@ -3293,6 +3436,9 @@ class BuildSession:
                               'residue.  Pass `quick` to skip the slow '
                               '(~30s) integrity scan.  Pass a target '
                               'name to drill in: `repo audit lsb-base`.',
+            'audit external': 'audit the published repo at AptSourceURL — '
+                              'reachable + InRelease signed by our key + '
+                              'index size/SHA256 consistent (no pool dl)',
             'repair':         'umbrella for repo-state fixups: `repo '
                               'repair strip` (NMU suffix backfill), '
                               '`repo repair cleanup` (drop obsoletes).',
@@ -3309,6 +3455,10 @@ class BuildSession:
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
         if action == 'audit':
+            # `repo audit external` audits the published mirror; everything
+            # else is the local repo gate (with optional drill-in target).
+            if args and args[0] == 'external':
+                return self.cmd_audit_external(*args[1:])
             return self.cmd_audit(*args)
         if action == 'repair':
             return self.cmd_repo_repair(*args)

@@ -4540,11 +4540,13 @@ def test_cmd_repo_publish_ssh_rsync_argv_and_progress():
             dir_publish = _tmp
             dir_repo = _tmp
             build_codename = 'thor'
+            build_base_id = 'asgard'      # dist id → remote repo folder
             apt_source_url = 'http://host/athena/'
         _sess = BuildSession.__new__(BuildSession)
         _sess.config = _Cfg()
 
         _popen = []
+        _runs = []
 
         class _FakeProc:
             def __init__(self):
@@ -4560,14 +4562,25 @@ def test_cmd_repo_publish_ssh_rsync_argv_and_progress():
             _popen.append(list(argv))
             return _FakeProc()
 
-        _saved = build.subprocess.Popen
+        def _fake_run(argv, **kw):          # the `ssh ... test -d` existence check
+            _runs.append(list(argv))
+            return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+        _saved_popen = build.subprocess.Popen
+        _saved_run = build.subprocess.run
         build.subprocess.Popen = _fake_popen
+        build.subprocess.run = _fake_run
         try:
             _capture_console_print(
                 lambda: _sess.cmd_repo_publish('ssh', 'full'))
         finally:
-            build.subprocess.Popen = _saved
+            build.subprocess.Popen = _saved_popen
+            build.subprocess.run = _saved_run
 
+        # The dist-id dir is checked over ssh before any rsync.
+        assert _runs and _runs[0] == [
+            'ssh', '-i', '/home/me/.ssh/id_ed25519',
+            'user@host', 'test', '-d', '/srv/athena/asgard'], _runs
         assert _popen, "rsync was not invoked"
         _argv = _popen[0]
         assert _argv[0] == 'rsync'
@@ -4576,9 +4589,46 @@ def test_cmd_repo_publish_ssh_rsync_argv_and_progress():
         # -e carries the ssh command with the key
         _e = _argv.index('-e')
         assert _argv[_e + 1] == 'ssh -i /home/me/.ssh/id_ed25519', _argv[_e + 1]
-        # full scope syncs repo/dists/ → target/dists/
+        # full scope syncs repo/dists/ → <base>/<dist-id>/dists/ (derived)
         assert _argv[-2] == os.path.join(_tmp, 'dists') + '/', _argv[-2]
-        assert _argv[-1] == 'user@host:/srv/athena/dists/', _argv[-1]
+        assert _argv[-1] == 'user@host:/srv/athena/asgard/dists/', _argv[-1]
+
+
+def test_repo_audit_external_dispatch():
+    """`repo audit external` → cmd_audit_external; `repo audit <pkg>` still
+    routes to cmd_audit (drill-in), and bare `repo audit` too."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_audit          = lambda *a, **kw: _calls.append(('audit', a))
+    _sess.cmd_audit_external = lambda *a, **kw: _calls.append(('external', a))
+
+    _sess.cmd_repo('audit', 'external')
+    assert _calls == [('external', ())], _calls
+    _calls.clear()
+    _sess.cmd_repo('audit', 'lsb-base')      # drill-in target, NOT external
+    assert _calls == [('audit', ('lsb-base',))], _calls
+    _calls.clear()
+    _sess.cmd_repo('audit')                  # full local audit
+    assert _calls == [('audit', ())], _calls
+
+
+def test_cmd_audit_external_requires_apt_source_url():
+    """audit external bails (no network) when AptSourceURL is unset."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Cfg:
+        apt_source_url = ''
+    _sess.config = _Cfg()
+    out = _capture_console_print(lambda: _sess.cmd_audit_external())
+    assert 'AptSourceURL' in out, out
 
 
 def test_cmd_iso_build_live_forwards_to_cmd_build_iso_live():
@@ -13291,9 +13341,11 @@ def test_cmd_audit_registered_under_repo_dispatcher():
     with open(_bc) as fh:
         _body = fh.read()
     import re
+    # `repo audit` routes to cmd_audit (an `external` sub-route may sit in
+    # between, dispatching `repo audit external` to cmd_audit_external).
     assert re.search(
-        r"if action == 'audit':\s*\n\s+return self\.cmd_audit",
-        _body), "audit not dispatched in cmd_repo"
+        r"if action == 'audit':.*?return self\.cmd_audit\(\*args\)",
+        _body, re.DOTALL), "audit not dispatched in cmd_repo"
     assert "'audit'" in _body, (
         "audit must be advertised in cmd_repo's help table")
 
@@ -15607,6 +15659,8 @@ def main() -> int:
         test_repo_publish_dispatch,
         test_cmd_repo_publish_ssh_guards,
         test_cmd_repo_publish_ssh_rsync_argv_and_progress,
+        test_repo_audit_external_dispatch,
+        test_cmd_audit_external_requires_apt_source_url,
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
         test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
         test_cmd_iso_build_unknown_subaction_calls_neither_handler,
