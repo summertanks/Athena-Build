@@ -1,0 +1,6 @@
+---
+include:
+  - https://salsa.debian.org/installer-team/branch2repo/raw/main/trigger_b2r.yml
+
+variables:
+  SALSA_CI_DISABLE_BLHC: 1

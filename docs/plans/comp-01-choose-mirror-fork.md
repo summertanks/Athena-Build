@@ -1,0 +1,120 @@
+# COMP-01 sub-phase — fork `choose-mirror` to an Athena-only mirror list
+
+## Goal
+
+The installer's network-mirror step should appear as part of the standard
+d-i flow, **listing only the Athena mirror** (never Debian). When the
+operator selects it, `apt-setup`'s `50mirror` writes the Athena repo as the
+installed system's network apt source.
+
+## Why a fork (not a workaround)
+
+- `apt-setup`'s `50mirror` generator hard-requires `choose-mirror`
+  (`search-path choose-mirror || exit`). We stubbed `choose-mirror` out in
+  the rebranding because it ships Debian's `Mirrors.masterlist`. So with no
+  `choose-mirror`, the mirror step can't appear at all — which is why
+  `apt-setup/use_mirror=false` (the earlier workaround) made it vanish.
+- Shipping *stock* `choose-mirror` would re-introduce Debian's mirror list.
+- So: fork `choose-mirror`, replace its masterlist with an Athena-only
+  entry. The standard step appears showing our mirror; no Debian data ships.
+
+Rejected alternative (operator chose against it): ship stock `choose-mirror`
++ force `mirror/country=manual` preseeded to our host. Simpler, but the
+Debian masterlist data rides along on the ramdisk.
+
+## Source baseline
+
+- Bookworm `choose-mirror **2.123+deb12u1**` (matches our snapshot line),
+  pulled from snapshot.debian.org and seeded into
+  `fork/source/choose-mirror/` (full source tree, like the `base-files`
+  same-name fork).
+- Builds two udebs: `choose-mirror` (udeb, all — templates/data;
+  `XB-Installer-Menu-Item: 2300`) and `choose-mirror-bin` (udeb, any — the C
+  selector). `apt-setup`'s `search-path choose-mirror` finds the binary.
+- Build flow (Makefile): `./mirrorlist httplist Mirrors.masterlist` →
+  generates the http/https/ftp template Choices; `debian/rules` runs
+  `make clean check-masterlist`.
+- **No collision** with upstream: we don't pull stock `choose-mirror` (it's
+  not in `installer.list` and nothing `Depends:` on it — `50mirror`'s
+  `search-path` is a runtime check). Only our fork ships.
+
+## The masterlist (the load-bearing change)
+
+Replace `fork/source/choose-mirror/Mirrors.masterlist` with a single Athena
+entry. First cut:
+
+```
+Site: 140.245.198.222
+Type: Push-Primary
+Archive-architecture: amd64
+Archive-http: /asgard/
+```
+
+`choose-mirror` validates a chosen mirror by fetching
+`http://<Site><Archive-http>/dists/<suite>/Release` — i.e.
+`http://140.245.198.222/asgard/dists/thor/Release`, which exists. It then
+sets `mirror/http/hostname=140.245.198.222`, `mirror/http/directory=/asgard`,
+`mirror/suite=thor`.
+
+**Open detail (needs build-time iteration):** the country grouping. d-i's
+mirror flow is country → mirror-in-country. A `Country:` line groups the
+entry under a country; an entry *without* `Country:` (like upstream's
+`deb.debian.org`) surfaces as a top-level choice. The exact UX with a
+one-entry list (and whether `check-masterlist` / `mirrorlist` accept a
+country-less or fake-country entry) must be confirmed on a real build.
+
+**Decoupling the IP (follow-up):** the masterlist currently hardcodes
+`140.245.198.222` + `/asgard`, duplicating `[Repo] AptSourceURL`. Preferred:
+template it (`@APT_SOURCE_HOST@` / `@APT_SOURCE_PATH@`) and substitute from
+`AptSourceURL` at fork-build time (the same build-time substitution
+`athena-installer-data` uses for codename), so there's one source of truth.
+
+## Wiring (alongside the fork)
+
+1. `config/installer.list`: add `choose-mirror`.
+2. `fork/source/athena-installer-data`: drop the `mirror/protocol` stub
+   template (real `choose-mirror` now provides `mirror/*`).
+3. `installer/preseed/preseed.cfg`: `mirror/protocol=http`, suite/codename
+   `thor`; do **not** set `apt-setup/use_mirror=false` (the step should
+   appear). Possibly preseed the country so the picker auto-selects.
+4. Confirm the build pool carries `choose-mirror`'s Build-Depends:
+   `debhelper`, `libdebconfclient0-dev`, `wget`, `po-debconf`,
+   `libdebian-installer4-dev`, `locales`, `iso-codes`, `isoquery`. If any
+   aren't in our snapshot/pool, the fork build fails build-dep — add them.
+
+## Issue B — installed system blocks on the CD (separate, still needed)
+
+`apt-setup` leaves a `deb cdrom:` / `deb-src cdrom:` entry in
+`/target/etc/apt/sources.list`; post-eject `apt update` blocks on "insert the
+disc" (`apt-setup/disable-cdrom-entries` is a no-op for us). Even with the
+mirror configured, the cdrom entry lingers. Fix: a `finish-install.d` hook
+(runs after pkgsel) comments out the `deb(-src)? cdrom:` lines.
+(Verified on the installed VM at the time of writing: `sources.list` held the
+two cdrom entries; `athena.list` + keyring were already correct; the VM could
+reach the repo.)
+
+## Build / test (cannot be validated from the dev box)
+
+1. `cache build` → `cache parse` → `source build installer` (builds the
+   forked `choose-mirror*` udebs).
+2. `chroot build installer` → `iso build installer`.
+3. Boot the ISO in QEMU; confirm the mirror step appears listing only the
+   Athena mirror; complete an install; on the target verify
+   `/etc/apt/sources.list` has the Athena `deb` line (and no live `cdrom:`
+   entry) and `apt update` works without a disc.
+4. Iterate the masterlist country/UX details from step 3 feedback.
+
+## Risks
+
+- **Untestable in dev** — d-i mirror internals only shine through on a real
+  install; expect 1-2 iterations on the masterlist shape.
+- **Build-deps** (`iso-codes`, `isoquery`, `libdebian-installer4-dev`) must
+  be in the pool, or the fork won't build.
+- **IP hardcoding** until the AptSourceURL-substitution follow-up lands.
+
+## Status
+
+Scaffolded: `fork/source/choose-mirror/` seeded from bookworm
+`2.123+deb12u1` with the Athena-only masterlist + a fork changelog entry.
+Wiring (installer.list / stub removal / preseed), the cdrom-disable hook,
+and the build-time iteration are the remaining steps.
