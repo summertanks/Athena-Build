@@ -51,6 +51,13 @@ partman-basicfilesystems
 apt-setup-udeb
 user-setup-udeb
 grub-installer
+# choose-mirror drives the network-mirror step.  apt-setup's 50mirror
+# hard-requires it (`search-path choose-mirror`), so without it the mirror
+# step can't appear at all.  We ship our FORK (fork/source/choose-mirror)
+# whose Mirrors.masterlist lists ONLY the Athena repo — the standard mirror
+# step appears showing our mirror, never Debian.  See
+# docs/plans/comp-01-choose-mirror-fork.md.
+choose-mirror
 
 # ─── Disc-eject helper ─────────────────────────────────────────────
 # eject-udeb provides /bin/eject inside the installer ramdisk so

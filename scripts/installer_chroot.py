@@ -37,6 +37,11 @@ _OVERLAY_MAP = [
     # absent (operator removes it for a non-debug ISO).
     ('debug/syslog-to-serial.sh',
      'lib/debian-installer-startup.d/S99-syslog-to-serial'),
+    # COMP-01: disable the install-disc apt source on the target post-install
+    # (so apt doesn't block on "insert the disc").  Conditional on a network
+    # source existing — see the script.  cp -p preserves its +x bit.
+    ('finish-install/06athena-disable-cdrom',
+     'usr/lib/finish-install.d/06athena-disable-cdrom'),
 ]
 
 
