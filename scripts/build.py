@@ -34,6 +34,7 @@ import os
 import glob
 import shutil
 import subprocess
+import tempfile
 import time
 import sys
 from typing import Optional
@@ -3024,6 +3025,256 @@ class BuildSession:
             f"{_total_bytes // (2 ** 20)} MB across dists/"
         )
 
+    def cmd_index_repo_minimal(self, *args):
+        """COMP-02: build + index + sign the MINIMAL (runtime) apt repo
+        under config.dir_publish, ready for `repo publish git minimal`.
+
+        Minimal = the main-component binary .debs a booted system would
+        apt-install, MINUS debug/source debs
+        (apt_repo.deb_excluded_from_minimal).  No udebs (installer-only,
+        they live in a separate dir), no source index, no debug suite.
+        Produces a self-contained flat-pool tree:
+
+          publish/pool/<name>_<ver>_<arch>.deb
+          publish/dists/<codename>/Release, InRelease, Release.gpg
+          publish/dists/<codename>/main/binary-<arch>/Packages{,.gz,.xz}
+
+        Regenerates publish/{pool,dists} from scratch each run; preserves
+        any other publish/ entries (e.g. a stray git checkout).
+        """
+        del args
+        import signing
+        import apt_repo
+
+        _codename = self.config.build_codename.strip('"').strip("'")
+        _src_dir = self.config.dir_repo_main   # dists/<codename>/main/binary-<arch>/
+        if not os.path.isdir(_src_dir):
+            console.print(
+                f"repo index minimal: no built debs at {_src_dir} — run "
+                f"`source build` (+ `repo index full`) first"
+            )
+            return
+
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _r = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
+                            capture_output=True, text=True)
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("cmd_index_repo_minimal: sudo -v failed")
+            _password = '*' * len(_password)
+            return
+
+        try:
+            _pool = os.path.join(self.config.dir_publish, 'pool')
+            _dists = os.path.join(self.config.dir_publish, 'dists')
+            for _d in (_pool, _dists):
+                if os.path.isdir(_d):
+                    shutil.rmtree(_d)
+            os.makedirs(_pool, exist_ok=True)
+
+            _copied = 0
+            _skipped = 0
+            for _f in sorted(os.listdir(_src_dir)):
+                if not _f.endswith('.deb'):
+                    continue
+                if apt_repo.deb_excluded_from_minimal(_f):
+                    _skipped += 1
+                    continue
+                shutil.copy2(os.path.join(_src_dir, _f),
+                             os.path.join(_pool, _f))
+                _copied += 1
+
+            if _copied == 0:
+                console.print(
+                    f"repo index minimal: no runtime debs in {_src_dir} "
+                    f"({_skipped} debug/source excluded) — nothing to index"
+                )
+                return
+            console.print(
+                f"repo index minimal: staged {_copied} deb(s) to publish/pool "
+                f"({_skipped} debug/source excluded)"
+            )
+
+            if not apt_repo.generate_apt_repo(
+                    staging=self.config.dir_publish,
+                    suite=_codename, codename=_codename,
+                    version=self.config.build_version, password=_password):
+                console.print("ERROR: apt-repo index generation failed — see log")
+                logger.error("cmd_index_repo_minimal: generate_apt_repo False")
+                return
+
+            if not apt_repo.sign_release_files(
+                    staging=self.config.dir_publish, suite=_codename,
+                    signing_homedir=signing.signing_home(self.config),
+                    password=_password):
+                console.print(
+                    "ERROR: Release signing failed — run `key generate` "
+                    "first?  See log"
+                )
+                logger.error("cmd_index_repo_minimal: sign_release_files False")
+                return
+
+            # generate_apt_repo writes some files via sudo (root-owned);
+            # chown the tree back so the publish git ops + next rebuild
+            # (which rmtree's pool/dists) run as the invoking user.
+            subprocess.run(
+                ['sudo', '-S', 'chown', '-R',
+                 f'{os.getuid()}:{os.getgid()}', self.config.dir_publish],
+                input=_password + '\n', capture_output=True, text=True,
+            )
+            self._print_publish_size_summary()
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
+
+    def _print_publish_size_summary(self) -> None:
+        """Summarise publish/ + warn about GitHub's 100 MB per-file push
+        limit (skips any .git/ checkout)."""
+        _root = self.config.dir_publish
+        _total = 0
+        _n = 0
+        _oversized: 'list[tuple[str, int]]' = []
+        for _dp, _dirs, _files in os.walk(_root):
+            if '.git' in _dp.split(os.sep):
+                continue
+            for _f in _files:
+                _p = os.path.join(_dp, _f)
+                if not os.path.isfile(_p):
+                    continue
+                _sz = os.path.getsize(_p)
+                _total += _sz
+                _n += 1
+                if _sz > 100 * 2 ** 20:
+                    _oversized.append((os.path.relpath(_p, _root), _sz))
+        console.print(
+            f"publish/: {_n} file(s), {_total // 2 ** 20} MB total",
+            tui.COLOR_HIGHLIGHT,
+        )
+        if _oversized:
+            console.print(
+                "  WARNING: over GitHub's 100 MB push limit — `repo publish "
+                "git minimal` will refuse these:",
+                tui.COLOR_WARNING,
+            )
+            for _rel, _sz in _oversized:
+                console.print(f"    {_sz // 2 ** 20:5d} MB  {_rel}",
+                              tui.COLOR_WARNING)
+
+    def cmd_repo_publish(self, *args):
+        """COMP-02: publish the indexed repo to a remote.  Today only
+        `repo publish git minimal` — push the publish/ tree (built by
+        `repo index minimal`) to [Repo] PublishGitURL on
+        [Repo] PublishGitBranch.
+
+        Clones the publish repo into a temp dir, replaces its dists/ +
+        pool/ with publish/'s, commits, and pushes.  Refuses to push if
+        any file exceeds GitHub's 100 MB hard limit.  Never force-pushes —
+        a rejected (non-fast-forward) push surfaces as an actionable error.
+        """
+        _target = args[0] if len(args) > 0 else ''
+        _scope = args[1] if len(args) > 1 else ''
+        if _target != 'git' or _scope != 'minimal':
+            console.print("Usage: repo publish git minimal")
+            return
+
+        _url = self.config.publish_git_url
+        _branch = self.config.publish_git_branch or 'gh-pages'
+        if not _url:
+            console.print(
+                "repo publish: [Repo] PublishGitURL is unset — set it to the "
+                "separate publish repo's git URL in config/build.conf first"
+            )
+            return
+
+        _pool = os.path.join(self.config.dir_publish, 'pool')
+        _dists = os.path.join(self.config.dir_publish, 'dists')
+        if not (os.path.isdir(_pool) and os.path.isdir(_dists)):
+            console.print(
+                "repo publish: publish/{pool,dists} missing — run "
+                "`repo index minimal` first"
+            )
+            return
+
+        # Hard guard: GitHub rejects any file > 100 MB on push.
+        _oversized = []
+        for _src in (_pool, _dists):
+            for _dp, _dirs, _files in os.walk(_src):
+                for _f in _files:
+                    _p = os.path.join(_dp, _f)
+                    if os.path.isfile(_p) and os.path.getsize(_p) > 100 * 2 ** 20:
+                        _oversized.append(
+                            os.path.relpath(_p, self.config.dir_publish))
+        if _oversized:
+            console.print(
+                "repo publish: refusing — these exceed GitHub's 100 MB push "
+                "limit (re-run `repo index minimal`; they should be filtered):",
+                tui.COLOR_ERROR,
+            )
+            for _rel in _oversized:
+                console.print(f"    {_rel}")
+            return
+
+        _tmp = tempfile.mkdtemp(prefix='athena-publish-')
+
+        def _git(*cmd_args, check=True):
+            _p = subprocess.run(['git', '-C', _tmp, *cmd_args],
+                                capture_output=True, text=True)
+            if check and _p.returncode != 0:
+                raise RuntimeError(
+                    f"git {' '.join(cmd_args)}: {_p.stderr.strip()}")
+            return _p
+
+        try:
+            # Init + fetch the branch if it exists already; else start fresh.
+            # Shallow — we replace content wholesale, history depth is moot.
+            _git('init', '-q')
+            _git('remote', 'add', 'origin', _url)
+            _fetch = _git('fetch', '--depth=1', 'origin', _branch, check=False)
+            if _fetch.returncode == 0:
+                _git('checkout', '-q', '-B', _branch, 'FETCH_HEAD')
+            else:
+                _git('checkout', '-q', '-b', _branch)
+
+            for _name in ('dists', 'pool'):
+                _dst = os.path.join(_tmp, _name)
+                if os.path.isdir(_dst):
+                    shutil.rmtree(_dst)
+                shutil.copytree(os.path.join(self.config.dir_publish, _name), _dst)
+            # GitHub Pages: .nojekyll stops Jekyll mangling the tree.
+            open(os.path.join(_tmp, '.nojekyll'), 'w').close()
+
+            _git('add', '-A')
+            if _git('diff', '--cached', '--quiet', check=False).returncode == 0:
+                console.print("repo publish: nothing changed since last publish")
+                return
+            _codename = self.config.build_codename.strip('"').strip("'")
+            _msg = (
+                f"publish minimal repo: {_codename} {self.config.build_version} "
+                f"({datetime.datetime.now().isoformat(timespec='seconds')})"
+            )
+            _git('commit', '-q', '-m', _msg)
+            _push = _git('push', 'origin', f'HEAD:{_branch}', check=False)
+            if _push.returncode != 0:
+                console.print(
+                    f"repo publish: push to {_url} ({_branch}) failed:\n"
+                    f"  {_push.stderr.strip()}",
+                    tui.COLOR_ERROR,
+                )
+                logger.error(f"cmd_repo_publish: push: {_push.stderr.strip()}")
+                return
+            console.print(
+                f"repo publish: pushed minimal repo to {_url} ({_branch})",
+                tui.COLOR_HIGHLIGHT,
+            )
+            if self.config.apt_source_url:
+                console.print(
+                    f"  apt source: {self.config.apt_source_url} "
+                    f"{_codename} main")
+        except RuntimeError as e:
+            console.print(f"repo publish: {e}", tui.COLOR_ERROR)
+            logger.error(f"cmd_repo_publish: {e}")
+        finally:
+            shutil.rmtree(_tmp, ignore_errors=True)
+
     def cmd_repo(self, action: str = '', *args):
         """Dispatcher for `repo <action>` commands.
 
@@ -3044,8 +3295,13 @@ class BuildSession:
             'repair':         'umbrella for repo-state fixups: `repo '
                               'repair strip` (NMU suffix backfill), '
                               '`repo repair cleanup` (drop obsoletes).',
-            'index':          'generate apt-repo metadata in-place under '
-                              'repo/dists/<codename>{,-debug}/',
+            'index full':     'index ALL suites in-place under '
+                              'repo/dists/<codename>{,-debug}/ (default)',
+            'index minimal':  'build + index + sign the runtime subset '
+                              '(main debs, no -dbg/-dbgsym/-source/udeb) '
+                              'into publish/',
+            'publish git minimal': 'push publish/ to [Repo] PublishGitURL '
+                                   '(run `repo index minimal` first)',
         }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
@@ -3054,7 +3310,16 @@ class BuildSession:
         if action == 'repair':
             return self.cmd_repo_repair(*args)
         if action == 'index':
-            return self.cmd_index_repo(*args)
+            # Multi-token: `repo index full` (default) / `repo index minimal`.
+            _sub = args[0] if args else 'full'
+            _rest = args[1:]
+            if _sub == 'minimal':
+                return self.cmd_index_repo_minimal(*_rest)
+            if _sub == 'full':
+                return self.cmd_index_repo(*_rest)
+            return self._group_help('repo', _table, f'index {_sub}')
+        if action == 'publish':
+            return self.cmd_repo_publish(*args)
         return self._group_help('repo', _table, action)
 
     def cmd_repo_repair(self, action: str = '', *args):
@@ -6082,7 +6347,7 @@ def main(banner: str) -> None:
     tui.register_command('clean',     session.cmd_clean,     'Clean:      clean <subcmd> — run `clean` for the list')
     tui.register_command('patch',     session.cmd_patch,     'Patches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|fork>')
-    tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|audit|repair|tunnel>')
+    tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|publish|audit|repair|tunnel>')
     tui.register_command('container', session.cmd_container, 'Container:  container <init|purge>')
     tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
