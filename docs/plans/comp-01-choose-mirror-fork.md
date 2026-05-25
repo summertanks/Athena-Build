@@ -56,6 +56,13 @@ Archive-http: /asgard/
 sets `mirror/http/hostname=140.245.198.222`, `mirror/http/directory=/asgard`,
 `mirror/suite=thor`.
 
+**The masterlist must be pure RFC822 stanzas — no `#` comments.**
+`./mirrorlist`'s parser matches every `key: value` line (`([^:]*):\s+(.*)`),
+so a comment containing `": "` before the first `Site:` writes to an empty
+record and crashes the build (`Modification of non-creatable array value …
+subscript -1`). Rationale lives in `README.Athena`, not the masterlist.
+(Found on the first build, 2026-05-25.) A regression test pins this.
+
 **Open detail (needs build-time iteration):** the country grouping. d-i's
 mirror flow is country → mirror-in-country. A `Country:` line groups the
 entry under a country; an entry *without* `Country:` (like upstream's

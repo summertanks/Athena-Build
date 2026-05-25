@@ -1,0 +1,26 @@
+Athena fork of choose-mirror
+============================
+
+This is a same-name fork of Debian's choose-mirror (seeded from bookworm
+2.123+deb12u1).  The ONLY functional change is `Mirrors.masterlist`, which
+we replace with a single Athena entry so the installer's mirror-selection
+step lists only the Athena repo and ships no Debian mirror data.
+
+  Site: 140.245.198.222
+  Country: US United States      # real ISO 3166 code so ./mirrorlist matches
+  Archive-architecture: amd64    # debian/iso_3166.tab; the displayed country
+  Archive-http: /asgard/         # is cosmetic (one mirror)
+
+choose-mirror validates the chosen mirror by fetching
+<Site><Archive-http>/dists/<suite>/Release  ->
+http://140.245.198.222/asgard/dists/thor/Release.
+
+IMPORTANT: Mirrors.masterlist must contain ONLY RFC822 stanzas — NO `#`
+comment lines.  The `./mirrorlist` parser matches every `key: value` line
+(regex `([^:]*):\s+(.*)`), so a comment containing ": " before the first
+`Site:` writes to an empty record and crashes the build with
+"Modification of non-creatable array value attempted, subscript -1".
+
+Host/path are hardcoded for now (duplicating [Repo] AptSourceURL); the
+follow-up is to substitute them from AptSourceURL at fork-build time.
+See docs/plans/comp-01-choose-mirror-fork.md.

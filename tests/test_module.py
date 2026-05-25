@@ -3307,9 +3307,13 @@ def test_installer_ships_forked_choose_mirror():
                            'Mirrors.masterlist')) as fh:
         _body = fh.read()
     assert 'Site: 140.245.198.222' in _body and '/asgard/' in _body, _body
-    _entries = '\n'.join(_l for _l in _body.splitlines()
-                         if not _l.strip().startswith('#'))
-    assert 'debian.org' not in _entries, _entries
+    assert 'debian.org' not in _body, _body
+    # ./mirrorlist's parser matches every `key: value` line, so a `#` comment
+    # containing ": " before the first Site: crashes the build (subscript -1).
+    # The masterlist must be pure RFC822 stanzas — no comment lines.
+    assert not any(_l.lstrip().startswith('#')
+                   for _l in _body.splitlines()), \
+        "Mirrors.masterlist must have no '#' comments (breaks ./mirrorlist)"
 
 
 def test_athena_installer_data_drops_mirror_protocol_stub():
