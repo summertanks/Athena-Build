@@ -56,7 +56,7 @@ import signal
 
 
 import logging
-from tui import Tui, console, Prompt, PROMPT_YESNO, PROMPT_PASSWORD, Spinner, ProgressBar, Exit
+from tui import Tui, console, Prompt, PROMPT_YESNO, PROMPT_INPUT, PROMPT_PASSWORD, Spinner, ProgressBar, Exit
 from tui import setup_file_logging
 
 logger = logging.getLogger('athena')
@@ -221,6 +221,11 @@ class BuildSession:
                 "over existing files, or run `clean cache` to wipe first",
                 tui.COLOR_INFO,
             )
+            return
+        # cache build depends on the snapshot pin — on a fresh system (no
+        # base/current in config/snapshot.state) prompt the operator to select
+        # both before proceeding (UPD-01).
+        if not self._ensure_snapshot_pins():
             return
         console.print("Building Cache...", tui.COLOR_INFO)
         self.flags.cache_ready = False  # reset in case we're re-running
@@ -3274,8 +3279,12 @@ class BuildSession:
         (repo under that dir).
 
         rsync is incremental (only changed/new debs transfer on a re-
-        publish) and `--delete` keeps the target a true mirror.  We do NOT
-        create the remote dir (no --mkpath): the <dist-id> dir must already
+        publish) and ADDITIVE — NO `--delete` — so the remote is an
+        append-only archive (UPD-01): a version once published is never
+        removed, even when the local single-snapshot tree no longer holds it
+        (that's how the remote spans base_snapshot..current while local stays
+        one-version).  We do NOT create the remote dir (no --mkpath): the
+        <dist-id> dir must already
         exist on the VM — publish checks via ssh and bails with a mkdir hint
         if it's missing.  The VM serves the synced dir over HTTP(S); point
         [Repo] AptSourceURL at that URL.  Auth is plain SSH (ssh-agent /
@@ -3378,17 +3387,26 @@ class BuildSession:
             )
             console.print(f"      deb {_suggested} {_codename} main")
 
-    def _rsync_streamed(self, label, src, dest, ssh_cmd):
-        """rsync -aH --delete with --info=progress2, mirroring rsync's
-        single overall % into a ProgressBar so the operator sees movement
-        during a multi-GB sync.  rsync writes progress to stdout using \\r
-        in-place updates, so we read raw and split on \\r/\\n.  stderr is
-        merged into stdout to avoid a pipe-buffer deadlock; non-progress
-        lines are kept for the error log.  Returns the rsync return code."""
+    def _rsync_streamed(self, label, src, dest, ssh_cmd, delete=False):
+        """rsync -aH (ADDITIVE by default) with --info=progress2, mirroring
+        rsync's single overall % into a ProgressBar so the operator sees
+        movement during a multi-GB sync.  rsync writes progress to stdout
+        using \\r in-place updates, so we read raw and split on \\r/\\n.
+        stderr is merged into stdout to avoid a pipe-buffer deadlock;
+        non-progress lines are kept for the error log.  Returns the rsync
+        return code.
+
+        delete=False (default) → NO `--delete`: the remote ACCUMULATES files,
+        never removing a published version absent from the local tree (the
+        UPD-01 append-only guarantee).  delete=True is reserved for an
+        explicit, deliberate mirror-reset — never the normal publish path."""
         _bar = ProgressBar(label, itr_label='', maxvalue=100,
                            show_rate=False, label_width=34)
-        _argv = ['rsync', '-aH', '--delete', '--info=progress2',
-                 '-e', ' '.join(ssh_cmd), f'{src}/', dest]
+        _argv = ['rsync', '-aH']
+        if delete:
+            _argv.append('--delete')
+        _argv += ['--info=progress2',
+                  '-e', ' '.join(ssh_cmd), f'{src}/', dest]
         _proc = subprocess.Popen(
             _argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         _tail: 'list[str]' = []
@@ -3451,9 +3469,14 @@ class BuildSession:
                                    'PublishSshTarget (run `repo index full` first)',
             'publish ssh minimal': 'rsync the minimal publish/ to '
                                    'PublishSshTarget (run `repo index minimal` first)',
+            'refresh':        'UPD-01: one update cycle — pull ledger, '
+                              '(advance snapshot), rebuild changed, merge-index, '
+                              'publish additively, prune (repo refresh [<ts>|latest])',
         }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
+        if action == 'refresh':
+            return self.cmd_repo_refresh(*args)
         if action == 'audit':
             # `repo audit external` audits the published mirror; everything
             # else is the local repo gate (with optional drill-in target).
@@ -3474,6 +3497,454 @@ class BuildSession:
         if action == 'publish':
             return self.cmd_repo_publish(*args)
         return self._group_help('repo', _table, action)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # UPD-01 — snapshot management + the refresh orchestrator
+    # ─────────────────────────────────────────────────────────────────────
+
+    def cmd_snapshot(self, action: str = '', *args):
+        """Manage the upstream snapshot pins (base + current) and inspect the
+        update workload.  Pins persist in config/snapshot.state (durable —
+        survives `clean cache`) and take precedence over [Snapshot] Timestamp.
+
+        Usage:
+          snapshot                          — status overview (base/current/latest)
+          snapshot list                     — the base → current → latest timeline
+          snapshot workload [<ts>|latest]   — sources changed current → target
+          snapshot select base|current <ts|latest>  — set a pin (cautioned)
+          snapshot advance <ts|latest>      — shorthand for `select current …`
+          snapshot base [show|<ts>]         — show/set the base-archive pin
+
+        Pins are explicit YYYYMMDDTHHMMSSZ timestamps or `latest` — no implicit
+        "next".  `base` is FORWARD-ONLY (it marks what's archivable on the
+        remote; moving it back would un-archive).  Changing a pin affects what
+        the next build/publish ships — production-impacting, so setters
+        confirm first."""
+        _table = {
+            'list':     'the base → current → latest timeline',
+            'workload': 'sources changed current → target: snapshot workload [<ts>|latest]',
+            'select':   'set a pin (cautioned): snapshot select base|current <ts|latest>',
+            'advance':  'shorthand for `select current`: snapshot advance <ts|latest>',
+            'base':     'show/set the base-archive pin: snapshot base [show|<ts>]',
+            'status':   'status overview (also the bare `snapshot`)',
+        }
+        if action in ('', 'status'):
+            return self._cmd_snapshot_overview()
+        if action == 'list':
+            return self._cmd_snapshot_list()
+        if action == 'workload':
+            return self._cmd_snapshot_workload(*args)
+        if action == 'select':
+            return self._cmd_snapshot_select(*args)
+        if action == 'advance':
+            return self._cmd_snapshot_select('current', *args)
+        if action == 'base':
+            return self._cmd_snapshot_base(*args)
+        return self._group_help('snapshot', _table, action)
+
+    def _snapshot_current(self):
+        """Effective current pin (state.current > [Snapshot] Timestamp)."""
+        try:
+            return utils.resolve_snapshot_timestamp(self.config)
+        except Exception as e:
+            logger.warning(f"_snapshot_current: {e}")
+            return None
+
+    def _snapshot_base_ts(self):
+        """Base pin from config/snapshot.state; defaults to current when unset
+        (base == current initially)."""
+        _b = utils.read_snapshot_state(self.config).get('base', '')
+        return _b or self._snapshot_current()
+
+    def _snapshot_latest(self):
+        """Latest upstream timestamp, or None on query failure."""
+        try:
+            return utils._query_snapshot_latest(
+                self.config.snapshot_timestamp_api,
+                self.config.snapshot_archive_keys)
+        except Exception as e:
+            logger.warning(f"_snapshot_latest: {e}")
+            return None
+
+    def _prompt_for_timestamp(self, label: str, default: str,
+                              allow_latest: bool) -> str:
+        """Prompt for a snapshot timestamp (or `latest` when allowed), applying
+        `default` on empty input and resolving `latest`.  Returns the resolved
+        YYYYMMDDTHHMMSSZ string, or '' if the operator gives up (3 tries)."""
+        for _ in range(3):
+            _ans = Prompt(
+                PROMPT_INPUT,
+                f"Select {label} [default {default}]:").get_response().strip()
+            if not _ans:
+                _ans = default
+            if _ans == 'latest':
+                if not allow_latest:
+                    console.print("  'latest' not allowed here — enter a "
+                                  "concrete timestamp", tui.COLOR_WARNING)
+                    continue
+                _resolved = self._snapshot_latest()
+                if not _resolved:
+                    console.print("  could not resolve 'latest' — enter a "
+                                  "concrete timestamp", tui.COLOR_WARNING)
+                    continue
+                return _resolved
+            if re.match(r'^\d{8}T\d{6}Z$', _ans):
+                return _ans
+            console.print(f"  '{_ans}' is not a YYYYMMDDTHHMMSSZ timestamp",
+                          tui.COLOR_WARNING)
+        return ''
+
+    def _ensure_snapshot_pins(self) -> bool:
+        """Before cache build: ensure a durable CURRENT pin (and BASE) exist in
+        config/snapshot.state.  On a fresh system (the state file is gitignored,
+        so a new checkout has none) PROMPT the operator to select both — cache
+        build depends on the snapshot.  Returns True to proceed, False to abort.
+
+        No-op when snapshots are disabled or a current pin already exists
+        (base defaults to current when unset)."""
+        if not self.config.snapshot_enabled:
+            return True
+        if utils.read_snapshot_state(self.config).get('current'):
+            return True
+
+        console.print(
+            "No snapshot pin defined (config/snapshot.state is empty).  cache "
+            "build needs a CURRENT pin (the build snapshot) and a BASE pin (the "
+            "archive floor) — select both now.", tui.COLOR_WARNING)
+        _cfg_ts = str(self.config.snapshot_timestamp_config).strip()
+        _default_cur = (_cfg_ts if re.match(r'^\d{8}T\d{6}Z$', _cfg_ts)
+                        else 'latest')
+        _current = self._prompt_for_timestamp(
+            "current snapshot (YYYYMMDDTHHMMSSZ or 'latest')",
+            _default_cur, allow_latest=True)
+        if not _current:
+            console.print("cache build aborted — no current snapshot selected.",
+                          tui.COLOR_ERROR)
+            return False
+        _base = self._prompt_for_timestamp(
+            f"base snapshot / archive floor (default = current {_current})",
+            _current, allow_latest=False)
+        if not _base:
+            console.print("cache build aborted — no base snapshot selected.",
+                          tui.COLOR_ERROR)
+            return False
+        if _base > _current:
+            console.print(
+                f"base ({_base}) is AFTER current ({_current}) — clamping base "
+                f"to current.", tui.COLOR_WARNING)
+            _base = _current
+        utils.write_snapshot_state(self.config, base=_base, current=_current)
+        console.print(
+            f"snapshot pins set — base={_base}, current={_current} "
+            f"(config/snapshot.state)", tui.COLOR_HIGHLIGHT)
+        return True
+
+    def _cmd_snapshot_overview(self):
+        """READ-ONLY status: base / current / latest + the current source."""
+        if not self.config.snapshot_enabled:
+            console.print(
+                "  snapshot pinning is DISABLED ([Snapshot] Enabled=false)")
+            return
+        _cur = self._snapshot_current()
+        _base = self._snapshot_base_ts()
+        _src = ('config/snapshot.state'
+                if utils.read_snapshot_state(self.config).get('current')
+                else f'[Snapshot] Timestamp={self.config.snapshot_timestamp_config}')
+        console.print("Snapshot status:")
+        console.print(f"  base    (archive floor) : {_base or '(unset)'}")
+        console.print(f"  current (build pin)     : {_cur or '(unresolved)'}")
+        console.print(f"  current source          : {_src}")
+        _latest = self._snapshot_latest()
+        console.print(f"  latest upstream         : {_latest or '(query failed)'}")
+        if _cur and _latest and _latest > _cur:
+            console.print(
+                "  → latest is AHEAD of current — `snapshot workload latest` to "
+                "see the delta, `repo refresh latest` to roll forward")
+
+    def _cmd_snapshot_list(self):
+        """READ-ONLY: the base → current → latest timeline."""
+        if not self.config.snapshot_enabled:
+            console.print("  snapshot pinning is DISABLED")
+            return
+        _base = self._snapshot_base_ts()
+        _cur = self._snapshot_current()
+        _latest = self._snapshot_latest()
+
+        def _row(_label, _ts):
+            _h = f"  ({utils.format_snapshot_timestamp(_ts)})" if _ts else ""
+            console.print(f"  [{_label:^8}] {_ts or '(n/a)'}{_h}")
+
+        console.print("Snapshot timeline (base → current → latest):")
+        _row('base', _base)
+        _row('current', _cur)
+        _row('latest', _latest)
+        if _base and _cur and _base == _cur:
+            console.print("  (base == current — nothing archivable yet)")
+        if _cur and _latest and _cur < _latest:
+            console.print(
+                "  snapshot.debian.org has many intermediate timestamps; pick an "
+                "explicit one with `snapshot select current <ts>` or use `latest`")
+
+    def _cmd_snapshot_select(self, which: str = '', *rest):
+        """Set the base or current snapshot pin (durable, config/snapshot.state).
+        Cautioned — pins drive what the next build/publish ships.  base is
+        forward-only."""
+        _target = rest[0] if rest else ''
+        if which not in ('base', 'current') or not _target:
+            console.print("Usage: snapshot select base|current <ts|latest>")
+            return
+        if _target == 'latest':
+            if which == 'base':
+                console.print(
+                    "snapshot select base: a concrete timestamp is required "
+                    "(not `latest`)", tui.COLOR_ERROR)
+                return
+            _resolved = self._snapshot_latest()
+            if not _resolved:
+                console.print("snapshot select: could not resolve `latest`",
+                              tui.COLOR_ERROR)
+                return
+            _target = _resolved
+        if not re.match(r'^\d{8}T\d{6}Z$', _target):
+            console.print(
+                f"snapshot select: '{_target}' is not a YYYYMMDDTHHMMSSZ "
+                f"timestamp or `latest`", tui.COLOR_ERROR)
+            return
+        _old = self._snapshot_base_ts() if which == 'base' else self._snapshot_current()
+        if which == 'base' and _old and _target < _old:
+            console.print(
+                f"snapshot select base: REFUSED — base is forward-only "
+                f"({_target} < current base {_old}).  Moving it back would "
+                f"un-archive already-archivable versions.", tui.COLOR_ERROR)
+            return
+        console.print(f"snapshot select {which}: {_old or '(unset)'} → {_target}",
+                      tui.COLOR_WARNING)
+        console.print(
+            "  PRODUCTION IMPACT: changes what the next build/publish ships "
+            "(current) or what becomes archivable (base).")
+        if Prompt(PROMPT_YESNO,
+                  f"Set {which} pin to {_target}?").get_response().lower() \
+                not in ('y', 'yes'):
+            console.print("  aborted — pin unchanged")
+            return
+        if which == 'base':
+            utils.write_snapshot_state(self.config, base=_target)
+        else:
+            utils.write_snapshot_state(self.config, current=_target)
+        console.print(
+            f"snapshot select: {which} pin set to {_target} "
+            f"(config/snapshot.state)")
+        if which == 'current':
+            console.print(
+                "  run `cache build` + `cache parse` to resolve the dep tree at "
+                "the new pin (or `repo refresh` for the full cycle)")
+
+    def _cmd_snapshot_base(self, *args):
+        """Show or set the base-archive pin (forward-only; config/snapshot.state).
+
+        Usage: snapshot base [show|<ts>]   (no arg / `show` → show; <ts> → set)
+
+        Archive STORAGE is deferred — the pin only records which versions are
+        archivable; nothing is deleted."""
+        _arg = args[0] if args else ''
+        if _arg and _arg != 'show':
+            return self._cmd_snapshot_select('base', _arg)
+        _base = self._snapshot_base_ts()
+        console.print(f"snapshot base pin: {_base or '(unset)'}")
+        _ledger = repo_audit.fetch_remote_ledger(self.config)
+        if _ledger:
+            _multi = {p: vs for p, vs in _ledger.items() if len(set(vs)) > 1}
+            _tot = sum(len(set(vs)) for vs in _ledger.values())
+            console.print(
+                f"  remote retention: {len(_ledger)} package(s), {_tot} "
+                f"version(s); {len(_multi)} with >1 retained")
+            console.print(
+                "  (versions from snapshots older than base are archivable; "
+                "archive STORAGE is deferred — nothing is deleted)")
+
+    def _cmd_snapshot_workload(self, *args):
+        """READ-ONLY: sources that change from the CURRENT pin to the TARGET
+        (latest, or an explicit <ts>) — what `repo refresh` would rebuild
+        advancing current → target."""
+        if not self.flags.dep_check_ready:
+            console.print(
+                "snapshot workload: run `cache build` + `cache parse` first",
+                tui.COLOR_ERROR)
+            return
+        _cur = self._snapshot_current()
+        _target = args[0] if args else 'latest'
+        if _target == 'latest':
+            _target = self._snapshot_latest()
+            if not _target:
+                console.print("snapshot workload: could not resolve `latest`",
+                              tui.COLOR_ERROR)
+                return
+        if not re.match(r'^\d{8}T\d{6}Z$', _target):
+            console.print(
+                f"snapshot workload: '{_target}' is not a YYYYMMDDTHHMMSSZ "
+                f"timestamp or `latest`", tui.COLOR_ERROR)
+            return
+        console.print(f"snapshot workload: current {_cur} → target {_target}")
+        if _cur and _target == _cur:
+            console.print("  current == target — nothing would change.")
+            return
+        console.print(f"  fetching target Sources index ({_target})…")
+        _names, _err = self._workload_current_to_target(_target)
+        if _err:
+            console.print(f"snapshot workload: {_err}", tui.COLOR_ERROR)
+            return
+        console.print(f"  {len(_names)} source(s) change current → target:")
+        for _n in _names:
+            console.print(f"    {_n}")
+        _off = self._preflight_stamp_invariant(_names)
+        if _off:
+            console.print(
+                f"  Guard A: {len(_off)} preflight issue(s) would BLOCK a "
+                f"refresh:", tui.COLOR_ERROR)
+            for _f, _why in _off[:20]:
+                console.print(f"    {_f}: {_why}")
+
+    def cmd_repo_refresh(self, *args):
+        """UPD-01 §5: one update cycle — pull the remote ledger, (advance the
+        snapshot), rebuild only the changed sources (stamped +asg<R>u<N>),
+        merge-index against the remote, publish ADDITIVELY, then prune local
+        back to single-snapshot.
+
+        Usage: repo refresh [<ts>|latest]   (omit target → use the current pin)
+
+        Sequences existing idempotent sub-commands; stops on the first failure.
+        Safe to re-run: the publish is additive and the prune runs LAST, so a
+        partial cycle never deletes a version that isn't on the remote yet."""
+        if not self.flags.build_container_ready:
+            console.print(
+                "repo refresh: needs `cache build` + `cache parse` + "
+                "`container init` first.", tui.COLOR_ERROR)
+            return
+
+        # 1. remote ledger — source of truth for N + change-detection
+        console.print("repo refresh [1/8]: fetching remote ledger…")
+        _ledger = repo_audit.fetch_remote_ledger(self.config)
+        if _ledger is None:
+            console.print(
+                "repo refresh: remote ledger unreachable — aborting (cannot "
+                "derive +asg N safely without it).", tui.COLOR_ERROR)
+            return
+
+        # 2-3. advance snapshot + re-resolve (only if a target was given)
+        if args:
+            _tgt = args[0]
+            if _tgt == 'latest':
+                _tgt = self._snapshot_latest()
+                if not _tgt:
+                    console.print("repo refresh: could not resolve `latest`",
+                                  tui.COLOR_ERROR)
+                    return
+            if not re.match(r'^\d{8}T\d{6}Z$', _tgt):
+                console.print(
+                    f"repo refresh: '{_tgt}' is not a YYYYMMDDTHHMMSSZ "
+                    f"timestamp or `latest`", tui.COLOR_ERROR)
+                return
+            _resp = Prompt(
+                PROMPT_YESNO,
+                f"Advance current snapshot to {_tgt} and rebuild changed sources?",
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                return
+            console.print(f"repo refresh [2/8]: advancing current → {_tgt}")
+            # Durable current pin (config/snapshot.state) — own YESNO above, so
+            # set it directly rather than via the (separately-prompting) select.
+            utils.write_snapshot_state(self.config, current=_tgt)
+            console.print("repo refresh [3/8]: cache build + parse at new pin…")
+            self.cmd_cache('build')
+            self.cmd_cache('parse')
+        else:
+            console.print("repo refresh [2-3/8]: using current pin (no advance)")
+        if not self.flags.dep_check_ready:
+            console.print("repo refresh: dep tree not parsed — run `cache parse`",
+                          tui.COLOR_ERROR)
+            return
+
+        # 4. workload (the changed-set closure)
+        _workload = sorted(self._workload_since_published(_ledger))
+        console.print(
+            f"repo refresh [4/8]: {len(_workload)} source(s) advanced vs published")
+        if not _workload:
+            console.print(
+                "repo refresh: nothing to rebuild — already up to date.")
+            return
+
+        # 5. Guard A preflight (abort BEFORE building on a bad invariant)
+        _off = self._preflight_stamp_invariant(_workload)
+        if _off:
+            console.print(
+                f"repo refresh [5/8]: Guard A preflight FAILED "
+                f"({len(_off)} issue(s)) — aborting before build:",
+                tui.COLOR_ERROR)
+            for _f, _why in _off[:20]:
+                console.print(f"    {_f}: {_why}")
+            return
+        console.print("repo refresh [5/8]: Guard A preflight OK")
+
+        # 6. incremental build — load the ledger on the container so DELTAS
+        #    get stamped +asg<R>u<N> with an N derived from it.
+        console.print(f"repo refresh [6/8]: building {len(_workload)} source(s)…")
+        if self.container is not None:
+            self.container.asg_ledger = _ledger
+        try:
+            self.cmd_source_build('force', *_workload)
+        finally:
+            if self.container is not None:
+                self.container.asg_ledger = None
+
+        # 7. Guard C(i): convergence — Guard B already hard-fails per source
+        _counts = getattr(self, 'last_source_build_counts', None) or {}
+        if _counts.get('failed', 0) > 0:
+            console.print(
+                f"repo refresh [7/8]: {_counts['failed']} build/convergence "
+                f"failure(s) — aborting before publish (fix, then re-run).",
+                tui.COLOR_ERROR)
+            return
+        console.print("repo refresh [7/8]: all builds converged")
+
+        # 8. merge-index (multi-version, signed locally) → additive publish →
+        #    Guard C(ii) publish-before-prune.
+        console.print("repo refresh [8/8]: merge-index + additive publish…")
+        if not self._refresh_merge_index():
+            console.print("repo refresh: merge-index failed — NOT publishing.",
+                          tui.COLOR_ERROR)
+            return
+        self.cmd_repo_publish('ssh', 'full')
+        console.print(
+            "repo refresh: publish-before-prune — pruning local to "
+            "single-snapshot…")
+        self.cmd_package_cleanup('force')
+        console.print("repo refresh: done.", tui.COLOR_HIGHLIGHT)
+
+    def _refresh_merge_index(self) -> bool:
+        """Build the suite index as the UNION of the local single-snapshot pool
+        and the remote ledger (apt_repo.merge_remote_index), signed locally.
+        Returns True on success."""
+        import signing
+        import apt_repo
+        _codename = self.config.build_codename.strip('"').strip("'")
+        _version = self.config.build_version.strip('"').strip("'")
+        _remote_pkgs = os.path.join(
+            self.config.dir_cache, 'published-ledger', 'Packages')
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _r = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
+                            capture_output=True, text=True)
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            return False
+        try:
+            return apt_repo.merge_remote_index(
+                repo_root=self.config.dir_repo,
+                suite=_codename, codename=_codename, arch=self.config.arch,
+                version=_version, remote_packages_path=_remote_pkgs,
+                password=_password,
+                signing_homedir=signing.signing_home(self.config))
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
 
     def cmd_repo_repair(self, action: str = '', *args):
         """Umbrella for repo-state fixups.  Each sub-action mutates
@@ -3637,8 +4108,22 @@ class BuildSession:
         # epoch stripped — comparing Version fields raw false-positives
         # every epoch-bumped binary).
         _expected_files: 'set[str]' = set()
+        _expected_keys: 'set[tuple[str, str, str]]' = set()
         _selected_pkg_names: 'set[str]' = set()
         _selected_srcs: 'set[str]' = set()
+
+        def _file_key(_fn):
+            # (name, pristine-base, arch) for a name_ver_arch.(u)deb file —
+            # base via utils.pristine_base so a +asg<R>u<N> stamp groups with
+            # its pristine prediction.  None if not in name_ver_arch shape.
+            if not (_fn.endswith('.deb') or _fn.endswith('.udeb')):
+                return None
+            _stem = _fn.rsplit('.', 1)[0]
+            _parts = _stem.split('_')
+            if len(_parts) != 3:
+                return None
+            return (_parts[0], utils.pristine_base(_parts[1]), _parts[2])
+
         for _tree in (self.dep_tree, self.udeb_dep_tree):
             if _tree is None:
                 continue
@@ -3647,6 +4132,9 @@ class BuildSession:
                 _expected_files.update(_files)
                 for _fn in _files:
                     _selected_pkg_names.add(_fn.split('_', 1)[0])
+                    _k = _file_key(_fn)
+                    if _k is not None:
+                        _expected_keys.add(_k)
 
         _orphan: 'list[tuple[str, str, str, int]]' = []
         _drift:  'list[tuple[str, str, str, int]]' = []
@@ -3660,31 +4148,55 @@ class BuildSession:
         # fields we need, but a single subprocess + fast in-process
         # parse instead of N×(fork+exec+tar-extract).  On a 5k-pkg
         # repo this is an order of magnitude faster.
+        #
+        # UPD-01: group every on-disk artifact by (subdir, name, base, arch).
+        # Within a group matching an EXPECTED base, keep only the HIGHEST
+        # version (single-snapshot local) — a lower version (e.g. the pristine
+        # predecessor of a freshly +asg<R>u<N>-stamped delta) is drift.  This
+        # is the local prune that returns repo/ to one-version-per-package
+        # after a refresh; the superseded version is already on the (additive)
+        # remote, so deleting it locally is safe (publish-before-prune).
+        from collections import defaultdict
+        _by_key: 'dict[tuple, list]' = defaultdict(list)
         for _sub in utils._REPO_SUBDIRS:
             for _filename, _ctrl in repo_audit.iter_packages_all_versions(
                     self.config, subdir=_sub):
                 _total += 1
-                if _filename in _expected_files:
-                    continue
                 _pkg = (_ctrl.get('Package') or '').strip()
                 _src_field = (_ctrl.get('Source') or '').strip()
                 # Source field is "name" or "name (version)" — drop the
-                # version qualifier; fall back to Package name when
-                # the control omits Source (single-binary sources).
+                # version qualifier; fall back to Package name when the
+                # control omits Source (single-binary sources).
                 _src_name = (_src_field.split(' ', 1)[0].strip()
                              if _src_field else _pkg)
-                _file_pkg = _filename.split('_', 1)[0]
-                # Size comes from the index field; falls back to
-                # statting the on-disk file if missing (shouldn't
-                # happen — dpkg-scanpackages always emits Size).
                 try:
                     _size = int(_ctrl.get('Size') or 0)
                 except (TypeError, ValueError):
                     _size = 0
+                _ver = (_ctrl.get('Version') or '').strip()
+                _by_key[(_sub, _file_key(_filename))].append(
+                    (_filename, _ver, _src_name, _size))
+
+        for (_sub, _key), _entries in _by_key.items():
+            # Highest version in this (subdir, name, base, arch) group.
+            _hi_fn, _hi_ver = None, None
+            for _fn, _ver, _src_name, _size in _entries:
+                if _hi_ver is None or apt_pkg.version_compare(
+                        utils.version_no_epoch(_ver),
+                        utils.version_no_epoch(_hi_ver)) > 0:
+                    _hi_fn, _hi_ver = _fn, _ver
+            _is_expected = _key is not None and _key in _expected_keys
+            for _fn, _ver, _src_name, _size in _entries:
+                if _is_expected:
+                    if _fn == _hi_fn:
+                        continue                        # current version — KEEP
+                    _drift.append((_sub, _fn, _src_name, _size))   # superseded
+                    continue
+                _file_pkg = _fn.split('_', 1)[0]
                 if _src_name not in _selected_srcs:
-                    _orphan.append((_sub, _filename, _src_name, _size))
+                    _orphan.append((_sub, _fn, _src_name, _size))
                 elif _file_pkg in _selected_pkg_names:
-                    _drift.append((_sub, _filename, _src_name, _size))
+                    _drift.append((_sub, _fn, _src_name, _size))
                 # else: pkg name not predicted but source IS selected —
                 # production sibling (lib*-i386, lib*-l10n, etc.) that
                 # ships in /cdrom/pool but isn't an install target.  KEEP.
@@ -4368,7 +4880,13 @@ class BuildSession:
             # ship multiple suites (e.g. athena-stable / athena-testing),
             # the suite would come from a separate config field.
             _suite    = _codename
-            _iso_basename = f"athena-installer-{_version}-amd64.iso"
+            # Tag the filename with the snapshot pin so an installer ISO from
+            # the base snapshot is distinguishable from one built after
+            # stepping the snapshot (UPD-01).  Empty when snapshots off.
+            _snap = utils.snapshot_iso_tag(self.config)
+            _iso_basename = (
+                f"athena-installer-{_version}-{_snap}-amd64.iso" if _snap
+                else f"athena-installer-{_version}-amd64.iso")
             console.print(
                 f"Building installer ISO {_iso_basename}..."
             )
@@ -4534,6 +5052,7 @@ class BuildSession:
                 suite=_suite,
                 codename=_codename,
                 version=_version,
+                snapshot=_snap,
                 base_include_pkgs=_base_include,
                 deb_whitelist=_pool_whitelist,
                 signing_homedir=signing.signing_home(self.config),
@@ -4908,8 +5427,12 @@ class BuildSession:
         # the optional-None unwrap mypy wants.
         assert self.container is not None
         for _f in _expected:
-            _path = os.path.join(self.config.deb_dest_for_filename(_f), _f)
-            if not os.path.isfile(_path):
+            # UPD-01: accept the predicted pristine name OR a +asg<R>u<N>
+            # stamped variant (find_matching_artifact) — same reconciliation
+            # check_build uses, so a stamped delta isn't seen as "missing".
+            _dst_dir = self.config.deb_dest_for_filename(_f)
+            _path = utils.find_matching_artifact(_dst_dir, _f)
+            if _path is None:
                 _all_present = False
                 break
             if not self.container.is_ar_file(_path):
@@ -5056,10 +5579,93 @@ class BuildSession:
                 for _n in _cleared:
                     console.print(f"  {_n}")
 
+    def _workload_since_published(self, ledger: dict) -> 'set[str]':
+        """Selected source names whose pristine BASE advanced beyond what the
+        remote (the `ledger`) has published — the genuine rebuild workload for
+        the current snapshot (UPD-01 §4).
+
+        `ledger` is {package: [published version, ...]} from
+        repo_audit.fetch_remote_ledger.  A source is in the workload if any of
+        its predicted binaries has a base greater than the highest base
+        published for that binary (apt_pkg.version_compare), or unpublished.
+        The closure is inherent: the dep-tree resolved consistently at the
+        target snapshot, so rebuilding every base-advanced source yields a
+        consistent pool (no separate synthesized-stanza solve needed)."""
+        _published = repo_audit.published_base_versions(ledger)
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _n, _s in self.udeb_dep_tree.selected_srcs.items():
+                _srcs.setdefault(_n, _s)
+        _out: 'set[str]' = set()
+        for _name in _srcs:
+            for _f in self._predicted_files_for_source(_name):
+                if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+                    continue
+                _parts = _f.rsplit('.', 1)[0].split('_')
+                if len(_parts) != 3:
+                    continue
+                _bin, _ver, _ = _parts
+                _base = utils.pristine_base(_ver)
+                _pub = _published.get(_bin)
+                if _pub is None or apt_pkg.version_compare(_base, _pub) > 0:
+                    _out.add(_name)
+                    break
+        return _out
+
+    def _workload_current_to_target(self, target_ts: str):
+        """Sources whose upstream version at `target_ts` is NEWER than the
+        current pin's selected version — what you'd rebuild advancing
+        current → target (UPD-01 `snapshot workload`).  Metadata-only (fetches
+        the target Sources index; no build).  Returns (sorted_names, None) on
+        success or (None, error_message) on fetch failure."""
+        _target = repo_audit.fetch_source_versions_at(self.config, target_ts)
+        if _target is None:
+            return None, (f"could not fetch the target snapshot ({target_ts}) "
+                          f"Sources index — check network / the timestamp")
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _n, _s in self.udeb_dep_tree.selected_srcs.items():
+                _srcs.setdefault(_n, _s)
+        _out: 'list[str]' = []
+        for _name, _src in _srcs.items():
+            _tgt = _target.get(_name)
+            if _tgt is None:
+                continue
+            _cur_b = utils.pristine_base(utils.version_no_epoch(str(_src.version)))
+            _tgt_b = utils.pristine_base(utils.version_no_epoch(_tgt))
+            if apt_pkg.version_compare(_tgt_b, _cur_b) > 0:
+                _out.append(_name)
+        return sorted(_out), None
+
+    def _preflight_stamp_invariant(self, names) -> 'list[tuple[str, str]]':
+        """Guard A (preemptive, zero builds): for each source's predicted
+        pristine files, verify a hypothetical +asg<R>u1 stamp round-trips via
+        match_pristine_base.  Returns (filename, reason) offenders; empty = OK.
+        Catches malformed/epoch version shapes and matcher/stamper drift BEFORE
+        any build, so a doomed run aborts up front instead of looping."""
+        try:
+            _release = int(str(self.config.build_version).strip('"').strip("'"))
+        except (TypeError, ValueError):
+            return [('<config>', "[Build] VERSION is not an integer: "
+                     f"{self.config.build_version!r}")]
+        _offenders: 'list[tuple[str, str]]' = []
+        for _name in names:
+            for _f in self._predicted_files_for_source(_name):
+                if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+                    continue
+                _stamped = utils.asg_filename(_f, _release, 1)
+                if _stamped == _f or not utils.match_pristine_base(_f, _stamped):
+                    _offenders.append((_f, "asg stamp does not round-trip"))
+        return _offenders
+
     def cmd_source_audit(self, *args):
         """READ-ONLY: report the build-state of every selected source.
 
-        Usage: source audit [verbose] [summary]
+        Usage: source audit [verbose] [summary] [--since-published]
+
+        `--since-published` intersects the rebuild queue with the genuine
+        upstream advances vs the remote ledger (UPD-01 §4) — "what changed
+        since the published archive", the `repo refresh` workload view.
 
         Audits dep_tree + udeb_dep_tree (merged).  Classifies each
         source into one of `_SOURCE_STATES` via `_source_state` —
@@ -5167,6 +5773,25 @@ class BuildSession:
         _by_subset: 'dict[str, list[str]]' = _dd(list)
         for _n in _rebuild_candidates:
             _by_subset[_subset_for(_n)].append(_n)
+
+        # ── --since-published: genuine upstream advances vs the remote ──
+        if '--since-published' in args:
+            _ledger = repo_audit.fetch_remote_ledger(self.config)
+            if _ledger is None:
+                console.print(
+                    "source audit --since-published: remote ledger "
+                    "unreachable (check [Repo] AptSourceURL / network)",
+                    tui.COLOR_ERROR)
+                return
+            _workload = self._workload_since_published(_ledger)
+            _advanced = sorted(set(_rebuild_candidates) & _workload)
+            console.print(
+                f"Source audit (since published): {len(_advanced)} of "
+                f"{len(_rebuild_candidates)} rebuild candidate(s) are genuine "
+                f"upstream advances vs the published archive.")
+            for _n in _advanced:
+                console.print(f"    {_n}  [{_subset_for(_n)}]")
+            return
 
         if _summary:
             console.print(
@@ -5803,9 +6428,21 @@ class BuildSession:
                 options_override=_profile_override,
             )
 
-            if _build_result:
+            if _build_result and self.container.check_build(
+                    _src_pkg, _expected_files):
                 logger.info(f"Building Package {_src_pkg.package} [PASS]")
                 _built = _built + 1
+            elif _build_result:
+                # Guard B (UPD-01): the build reported PASS but check_build
+                # still can't find/match the predicted artifacts — that's
+                # non-convergence (the CONF-13 cross-run rebuild-loop shape).
+                # Fail loudly NOW with a diagnostic instead of silently
+                # rebuilding the same source every subsequent run.
+                logger.error(
+                    f"Building Package {_src_pkg.package} [FAIL] — built but "
+                    f"check_build still false (predicted artifact missing or "
+                    f"unmatched): expected {_expected_files}")
+                _failed = _failed + 1
             else:
                 logger.error(f"Building Package {_src_pkg.package} [FAIL]")
                 _failed = _failed + 1
@@ -6500,7 +7137,8 @@ def main(banner: str) -> None:
     tui.register_command('clean',     session.cmd_clean,     'Clean:      clean <subcmd> — run `clean` for the list')
     tui.register_command('patch',     session.cmd_patch,     'Patches:    patch refresh')
     tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|fork>')
-    tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|publish|audit|repair|tunnel>')
+    tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|publish|audit|repair|tunnel|refresh>')
+    tui.register_command('snapshot',  session.cmd_snapshot,  'Snapshot:   snapshot <list|advance|workload|base>')
     tui.register_command('container', session.cmd_container, 'Container:  container <init|purge>')
     tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')

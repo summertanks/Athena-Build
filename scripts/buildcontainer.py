@@ -586,10 +586,12 @@ class BuildContainer:
                 #    Returns post-move absolute paths — fed to strip so
                 #    we don't rescan the whole repo (STA-19).
                 _emitted = self._segregate_built_artifacts(src_pkg)
-                # 2. Strip NMU/binNMU/backport suffix from the emitted
-                #    .debs (now in their subdirs).  Per-file decision;
-                #    only re-packs when residue exists.
-                self._strip_nmu_from_built_artifacts(src_pkg, _emitted)
+                # 2. Normalise the emitted .debs (now in their subdirs):
+                #    strip NMU → pristine, then stamp +asg<R>u<N> when this
+                #    is a delta build AND a remote ledger is loaded (UPD-01).
+                #    was_patched feeds the delta decision.
+                _was_patched = (src_patch_path != self.patch_empty)
+                self._normalize_built_artifacts(src_pkg, _emitted, _was_patched)
 
             return _build_result
 
@@ -746,48 +748,102 @@ class BuildContainer:
                         f"{container.short_id}: {e}"
                     )
 
-    def _strip_nmu_from_built_artifacts(self, src_pkg,
-                                          built_files: 'list[str]') -> None:
-        """Run utils.strip_nmu_from_deb on every just-emitted artifact.
+    def _normalize_built_artifacts(self, src_pkg,
+                                   built_files: 'list[str]',
+                                   was_patched: bool = False) -> None:
+        """Normalise every just-emitted artifact: strip upstream NMU layers
+        to pristine, then (when this build is a DELTA and a remote ledger is
+        available) stamp our +asg<R>u<N> update marker.
 
-        `built_files` is the list of post-segregate absolute paths
-        returned by _segregate_built_artifacts — the files this source
-        build just produced.  We trust that list (we own the move that
-        created it) so no per-file Source-field check is needed.
+        `built_files` is the list of post-segregate absolute paths returned by
+        _segregate_built_artifacts — the files this source build just
+        produced (STA-19: we trust that list, no full-repo rescan).
 
-        Pre-STA-19 (fixed 2026-05-22): this method walked all of
-        repo/main + doc + dbgsym + tests, opened every .deb with
-        DebFile, and parsed each one's control to filter by Source:
-        field.  On a ~4500-pkg repo that was 4500 fork+exec+tar-extract
-        cycles per source build — a 2-3 minute wall-time stall (CPU +
-        I/O saturation) on every successful build, even tiny ones like
-        athena-installer-data which emit a single udeb.
+        DELTA decision (UPD-01): a build is a delta if the strip rewrote any
+        artifact (upstream carried an NMU layer), OR a fork patch was applied
+        (`was_patched`), OR the selected source version is itself an NMU
+        delta.  Only deltas get stamped — a plain pristine upstream build (and
+        the initial full build at the pinned snapshot) ships pristine.
 
-        Failures are logged but don't propagate — strip is best-effort
-        normalisation; a stripped failure leaves the .deb at upstream-
-        layered version, surfaced later by `repo audit_nmu`.
+        Stamping requires the remote ledger (self.asg_ledger: {pkg: [versions]})
+        so N is monotonic against what's ALREADY published — local is
+        single-snapshot and can't be the source of truth.  When no ledger is
+        set (a plain `source build`, not a `repo refresh`), we strip only and
+        do NOT stamp.  N is derived once per source (max over its emitted
+        bases + 1) so all sibling binaries share it.
+
+        Failures are logged but don't propagate — best-effort normalisation;
+        a missed strip surfaces later via `repo audit_nmu`.
         """
         if not built_files:
             return
-        _n_rewritten = 0
+        # --- 1. strip NMU → pristine (track delta + post-strip paths) ---
+        _any_stripped = False
+        _current_paths: 'list[str]' = []
         for _path in built_files:
             _f = os.path.basename(_path)
             try:
                 _r = utils.strip_nmu_from_deb(_path)
                 if _r['status'] == 'rewritten':
-                    _n_rewritten += 1
+                    _any_stripped = True
                     if _r['new_path'] != _path:
                         logger.info(
                             f"strip_nmu: {_f} → "
-                            f"{os.path.basename(_r['new_path'])}"
-                        )
+                            f"{os.path.basename(_r['new_path'])}")
+                _current_paths.append(_r.get('new_path', _path))
             except Exception as e:
                 logger.warning(f"strip_nmu: {_f} failed: {e}")
-        if _n_rewritten:
+                _current_paths.append(_path)
+
+        # --- 2. decide delta; stamp +asg<R>u<N> if delta AND ledger present ---
+        _ledger = getattr(self, 'asg_ledger', None)
+        _src_is_delta = (
+            utils.strip_nmu_suffix(str(src_pkg.version)) != str(src_pkg.version))
+        _was_delta = _any_stripped or was_patched or _src_is_delta
+        if not (_was_delta and _ledger is not None):
+            return
+
+        try:
+            _release = int(str(self.config.build_version).strip('"').strip("'"))
+        except (TypeError, ValueError):
+            logger.warning(
+                f"asg-stamp: [Build] VERSION is not an integer "
+                f"({self.config.build_version!r}) — skipping stamp for "
+                f"{src_pkg.package}")
+            return
+
+        # One N for the whole source: max over each emitted binary's base.
+        _n = 0
+        _stampable: 'list[str]' = []
+        for _path in _current_paths:
+            _b = os.path.basename(_path)
+            _name, _ext = os.path.splitext(_b)
+            _parts = _name.split('_')
+            if len(_parts) != 3:
+                continue
+            _pkg, _ver, _arch = _parts
+            _base = utils.pristine_base(_ver)
+            _published = _ledger.get(_pkg, [])
+            _n = max(_n, utils.highest_asg_update(_published, _base, _release))
+            _stampable.append(_path)
+        _n += 1
+
+        _n_stamped = 0
+        for _path in _stampable:
+            _f = os.path.basename(_path)
+            try:
+                _r = utils.restamp_asg_deb(_path, _release, _n)
+                if _r['status'] == 'rewritten':
+                    _n_stamped += 1
+                    logger.info(
+                        f"asg-stamp: {_f} → "
+                        f"{os.path.basename(_r['new_path'])}")
+            except Exception as e:
+                logger.warning(f"asg-stamp: {_f} failed: {e}")
+        if _n_stamped:
             logger.info(
-                f"strip_nmu: normalised {_n_rewritten} artifact(s) "
-                f"from source {src_pkg.package}"
-            )
+                f"asg-stamp: marked {_n_stamped} artifact(s) from source "
+                f"{src_pkg.package} as +asg{_release}u{_n}")
 
     def _segregate_built_artifacts(self, src_pkg) -> 'list[str]':
         """After dpkg-buildpackage's `cp *.deb /repo/`, the binaries
@@ -804,7 +860,7 @@ class BuildContainer:
         Operates ONLY on the just-emitted files (those at repo/ root) —
         existing subdir contents are left alone.  Returns the list of
         post-move absolute paths so the caller
-        (_strip_nmu_from_built_artifacts) can iterate only the
+        (_normalize_built_artifacts) can iterate only the
         just-emitted files (STA-19 fix — was rescanning the whole
         repo + opening every .deb with DebFile to identify them).
         Returns empty list on no-files-at-root (tunneled build).
@@ -834,9 +890,19 @@ class BuildContainer:
             _dst = os.path.join(_dst_dir, _f)
             try:
                 if os.path.exists(_dst):
-                    # Collision: a prior build produced the same
-                    # filename.  Newer rebuild wins.
-                    os.remove(_dst)
+                    # UPD-01 append-only invariant: an automatic build path
+                    # must NEVER os.remove a file already living in a
+                    # published dir (all_deb_dirs()).  With +asg<R>u<N> a
+                    # rebuilt delta emits a NEW filename, so an exact-name
+                    # collision means a byte-identical rebuild — keep the
+                    # existing artifact, drop the freshly-built dup (which
+                    # sits at the repo/ root, a prunable intermediate).
+                    logger.warning(
+                        f"segregate: {_f} already present in {_dst_dir} — "
+                        f"keeping existing (append-only), dropping rebuilt dup"
+                    )
+                    os.remove(_src)
+                    continue
                 os.rename(_src, _dst)
                 _moved_paths.append(_dst)
             except OSError as e:
@@ -903,10 +969,14 @@ class BuildContainer:
             _sub = utils.classify_repo_subdir(_file)
             if _sub != 'main':
                 continue
-            _filename = os.path.join(
-                self.config.deb_dest_for_filename(_file), _file,
-            )
-            if not os.path.isfile(_filename):
+            # UPD-01: accept the predicted pristine name OR a +asg<R>u<N>
+            # stamped variant of it (find_matching_artifact).  The old
+            # exact-only os.path.isfile match was the CONF-13 rebuild-loop
+            # cause: a stamped/ABI-variant on-disk file never matched, so the
+            # source was rebuilt every run.
+            _dst_dir = self.config.deb_dest_for_filename(_file)
+            _filename = utils.find_matching_artifact(_dst_dir, _file)
+            if _filename is None:
                 return False
             if not self.is_ar_file(_filename):
                 return False

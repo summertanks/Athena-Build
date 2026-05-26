@@ -196,7 +196,7 @@ _BASE_CONF_BODY = """
     NAME = "Test"
     DISTRIBUTION = "Testdistro"
     CODENAME = "test"
-    VERSION = "0.1"
+    VERSION = "1"
     CHANNEL = "stable"
     MaxParallelBuilds = 1
     CONTAINER_RELEASE = bookworm
@@ -4569,8 +4569,9 @@ def test_cmd_repo_publish_ssh_guards():
 
 
 def test_cmd_repo_publish_ssh_rsync_argv_and_progress():
-    """`repo publish ssh full` rsyncs repo/dists with -aH --delete
-    --info=progress2 over ssh, and parses rsync's % into the bar."""
+    """`repo publish ssh full` rsyncs repo/dists with -aH --info=progress2
+    over ssh (ADDITIVE — NO --delete, the UPD-01 append-only guarantee), and
+    parses rsync's % into the bar."""
     import sys, tempfile, types, io
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
@@ -4628,8 +4629,11 @@ def test_cmd_repo_publish_ssh_rsync_argv_and_progress():
         assert _popen, "rsync was not invoked"
         _argv = _popen[0]
         assert _argv[0] == 'rsync'
-        for _flag in ('-aH', '--delete', '--info=progress2'):
+        for _flag in ('-aH', '--info=progress2'):
             assert _flag in _argv, f"{_flag} missing from {_argv}"
+        # ADDITIVE publish: --delete must NOT be present (append-only remote)
+        assert '--delete' not in _argv, (
+            f"publish must be additive — --delete present in {_argv}")
         # -e carries the ssh command with the key
         _e = _argv.index('-e')
         assert _argv[_e + 1] == 'ssh -i /home/me/.ssh/id_ed25519', _argv[_e + 1]
@@ -5932,34 +5936,31 @@ def test_strip_nmu_from_deb_idempotent():
 
 
 def test_buildcontainer_calls_strip_post_build():
-    """BuildContainer.build must invoke strip_nmu post-dpkg-buildpackage
-    on every successfully-built source.  Pin via code inspection."""
+    """BuildContainer.build must normalise artifacts (strip NMU + UPD-01 asg
+    stamp) post-dpkg-buildpackage on every successfully-built source, over
+    the just-emitted file list (STA-19).  Pin via code inspection."""
     _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
     with open(_bc) as fh:
         _body = fh.read()
     import re
-    # Pin: helper method exists
+    # Pin: normalise helper exists (renamed from _strip_nmu_from_built_artifacts)
     assert re.search(
-        r'def _strip_nmu_from_built_artifacts\(self', _body), (
-        "BuildContainer needs a _strip_nmu_from_built_artifacts method "
-        "that runs strip_nmu_from_deb on each just-built artifact")
-    # Pin: build() calls it on the success path, threading the file
-    # list returned by _segregate_built_artifacts (STA-19 — was rescanning
-    # the whole repo before, now only touches the just-emitted files).
+        r'def _normalize_built_artifacts\(self', _body), (
+        "BuildContainer needs a _normalize_built_artifacts method that strips "
+        "NMU then conditionally applies the +asg<R>u<N> stamp")
     _m = re.search(
         r'def build\(self, src_pkg.*?(?=\n    def )',
         _body, re.DOTALL)
     assert _m, "BuildContainer.build not found"
     _build_body = _m.group(0)
-    assert 'self._strip_nmu_from_built_artifacts(src_pkg, _emitted)' in _build_body, (
-        "BuildContainer.build must call _strip_nmu_from_built_artifacts "
-        "with the file list returned by _segregate_built_artifacts — "
-        "REGRESSION to pre-STA-19 if the second arg is missing (would "
-        "re-introduce the 2-3 minute post-build stall)")
+    assert ('self._normalize_built_artifacts(src_pkg, _emitted, _was_patched)'
+            in _build_body), (
+        "BuildContainer.build must call _normalize_built_artifacts with the "
+        "emitted-files list AND was_patched — REGRESSION to pre-STA-19 if the "
+        "file list is dropped (re-introduces the post-build full-repo stall)")
     assert '_emitted = self._segregate_built_artifacts(src_pkg)' in _build_body, (
-        "_segregate_built_artifacts must return its moved-files list "
-        "so strip_nmu can iterate only those — REGRESSION to pre-STA-19 "
-        "if assignment is dropped")
+        "_segregate_built_artifacts must return its moved-files list so "
+        "normalise iterates only those — REGRESSION to pre-STA-19 if dropped")
 
 
 def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
@@ -6355,16 +6356,15 @@ def test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source():
     )
     assert _m_scan is not None, "_scan_stale_files helper not found"
     _scan = _m_scan.group(0)
-    # Predicted-filename fast path lives in the helper.  Either the
-    # pre-CONF-01 idiom (`_f`) or the Stage-E variant (`_filename`)
-    # — both indicate "skip per-deb work for known-good files".
-    assert (
-        'if _f in _expected_files' in _scan
-        or 'if _filename in _expected_files' in _scan
-    ), (
-        "fast-path filename match missing from _scan_stale_files — "
-        "would needlessly parse every index entry's control fields"
-    )
+    # UPD-01: files are grouped by (subdir, name, pristine-base, arch) and the
+    # HIGHEST version per EXPECTED base is kept (single-snapshot local) — so a
+    # +asg<R>u<N>-stamped current artifact isn't mis-flagged as drift, while a
+    # superseded lower version (e.g. the pristine predecessor) IS drift.
+    assert '_expected_keys' in _scan and '_file_key' in _scan, (
+        "_scan_stale_files must group by pristine-base key (UPD-01) so a "
+        "stamped current artifact reconciles with its pristine prediction")
+    assert 'apt_pkg.version_compare' in _scan, (
+        "_scan_stale_files must compare versions to keep the highest per group")
     # Production-sibling preservation lives in the helper.
     assert 'production sibling' in _scan.lower(), (
         "_scan_stale_files must document/preserve production-sibling "
@@ -15629,6 +15629,926 @@ def test_cache_build_fork_supersede_drops_upstream_silently():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 step 1 — +asg<R>u<N> version-suffix primitives
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_nmu_regex_does_not_eat_asg_suffix():
+    """_NMU_SUFFIX_RE must NOT strip our +asg<R>u<N> marker — otherwise the
+    post-build strip pass would erase the stamp before we apply it."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_suffix
+    assert strip_nmu_suffix('3.0.15-1+asg1u1') == '3.0.15-1+asg1u1'
+    assert strip_nmu_suffix('3.0.15-1+asg12u7') == '3.0.15-1+asg12u7'
+    # An NMU layer UNDER nothing-of-ours still strips:
+    assert strip_nmu_suffix('3.0.15-1+deb12u2') == '3.0.15-1'
+
+
+def test_pristine_base_strips_both_layers():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import pristine_base
+    assert pristine_base('3.0.15-1') == '3.0.15-1'
+    assert pristine_base('3.0.15-1+asg1u2') == '3.0.15-1'
+    assert pristine_base('3.0.15-1+deb12u2') == '3.0.15-1'
+    assert pristine_base('1:2.38.1-5+asg1u1') == '1:2.38.1-5'   # epoch kept
+    # Both layers cannot legitimately co-occur (we strip NMU before stamping),
+    # but the grouping key must still resolve to the base if they did:
+    assert pristine_base('3.0.15-1+deb12u2') == pristine_base('3.0.15-1+asg9u9')
+
+
+def test_asg_suffix_sorts_above_pristine_and_across_release():
+    """dpkg version ordering: our suffix beats pristine; release integer R
+    dominates the update counter N (asg2u1 > asg1u9) — the whole reason for
+    the distro-derived form over the codename-derived +thorN."""
+    import subprocess
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import apply_asg_suffix, parse_asg_suffix
+    try:
+        subprocess.run(['dpkg', '--version'], check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_asg_suffix_sorts (no dpkg)")
+        return
+
+    def _cmp(a, op, b):
+        return subprocess.run(
+            ['dpkg', '--compare-versions', a, op, b]).returncode == 0
+
+    assert _cmp(apply_asg_suffix('3.0.15-1', 1, 1), 'gt', '3.0.15-1')
+    assert _cmp(apply_asg_suffix('3.0.15-1', 1, 2), 'gt',
+                apply_asg_suffix('3.0.15-1', 1, 1))
+    # Release integer dominates: asg2u1 > asg1u9 (the +thorN bug fix)
+    assert _cmp(apply_asg_suffix('3.0.15-1', 2, 1), 'gt',
+                apply_asg_suffix('3.0.15-1', 1, 9))
+    # round-trips through the parser
+    assert parse_asg_suffix(apply_asg_suffix('3.0.15-1', 2, 7)) == (2, 7)
+    assert parse_asg_suffix('3.0.15-1') is None
+
+
+def test_asg_filename_maps_pristine_to_stamped():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import asg_filename
+    assert (asg_filename('openssl_3.0.15-1_amd64.deb', 1, 1)
+            == 'openssl_3.0.15-1+asg1u1_amd64.deb')
+    assert (asg_filename('libssl3_3.0.15-1_amd64.udeb', 3, 2)
+            == 'libssl3_3.0.15-1+asg3u2_amd64.udeb')
+    # malformed / non-deb → no-op
+    assert asg_filename('not-a-package', 1, 1) == 'not-a-package'
+    assert asg_filename('a_b_c_d_amd64.deb', 1, 1) == 'a_b_c_d_amd64.deb'
+
+
+def test_match_pristine_base_reconciles_stamped_artifact():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import match_pristine_base
+    pred = 'openssl_3.0.15-1_amd64.deb'
+    assert match_pristine_base(pred, pred)                              # exact
+    assert match_pristine_base(pred, 'openssl_3.0.15-1+asg1u1_amd64.deb')
+    assert match_pristine_base(pred, 'openssl_3.0.15-1+asg7u3_amd64.deb')
+    # different name / arch / ext / base → no match
+    assert not match_pristine_base(pred, 'openssh_3.0.15-1+asg1u1_amd64.deb')
+    assert not match_pristine_base(pred, 'openssl_3.0.15-1+asg1u1_i386.deb')
+    assert not match_pristine_base(pred, 'openssl_3.0.16-1+asg1u1_amd64.deb')
+    assert not match_pristine_base(pred, 'openssl_3.0.15-1_amd64.udeb')
+
+
+def test_restamp_asg_deb_bumps_version_and_intra_source_deps():
+    """Build a .deb at a pristine base with a collapsed intra-source sibling
+    pin `(= base)`, restamp to +asg<R>u<N>, and verify: filename, internal
+    Version, and the sibling pin all carry the suffix — while a foreign
+    `>=` dep stays pristine.  Epoch preserved."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import restamp_asg_deb
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_restamp_asg_deb (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'lib'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: openssl\n'
+                'Version: 1:3.0.15-1\n'                       # epoch + pristine
+                'Architecture: amd64\n'
+                'Maintainer: T <t@l>\n'
+                # sibling pin (collapsed idiom) at THIS binary's version:
+                'Depends: libssl3 (= 1:3.0.15-1), libc6 (>= 2.36)\n'
+                'Description: restamp test\n'
+            )
+        with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as fh:
+            fh.write('x\n')
+        _orig = os.path.join(_tmp, 'openssl_3.0.15-1_amd64.deb')   # filename: no epoch
+        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _orig],
+                       check=True, capture_output=True)
+
+        _r = restamp_asg_deb(_orig, 1, 1)
+        assert _r['status'] == 'rewritten', _r
+        assert os.path.basename(_r['new_path']) == 'openssl_3.0.15-1+asg1u1_amd64.deb'
+        assert _r['version'] == '1:3.0.15-1+asg1u1', _r
+        _ver = subprocess.run(['dpkg-deb', '-f', _r['new_path'], 'Version'],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        assert _ver == '1:3.0.15-1+asg1u1', f"epoch/suffix wrong: {_ver!r}"
+        _deps = subprocess.run(['dpkg-deb', '-f', _r['new_path'], 'Depends'],
+                               check=True, capture_output=True, text=True).stdout.strip()
+        assert 'libssl3 (= 1:3.0.15-1+asg1u1)' in _deps, (
+            f"sibling pin not bumped: {_deps!r}")
+        assert 'libc6 (>= 2.36)' in _deps, (
+            f"foreign dep should stay pristine: {_deps!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 step 2 — append-only enforcement (additive publish + segregate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_publish_rsync_is_additive_no_delete():
+    """The publish rsync must be ADDITIVE: _rsync_streamed defaults to no
+    --delete, adds it only under `if delete:`, and cmd_repo_publish never
+    requests delete=True.  A --delete publish would erase remote versions
+    absent from the local single-snapshot tree — destroying the append-only
+    archive."""
+    import re as _re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    assert _re.search(
+        r'def _rsync_streamed\(self, label, src, dest, ssh_cmd, delete=False\)',
+        _body), "_rsync_streamed must default delete=False (additive)"
+    _m = _re.search(r'def _rsync_streamed\(.*?return _proc\.returncode',
+                    _body, _re.DOTALL)
+    assert _m, "_rsync_streamed body not found"
+    _fn = _m.group(0)
+    assert 'if delete:' in _fn and "_argv.append('--delete')" in _fn, (
+        "--delete must be conditional on the delete flag")
+    assert "'rsync', '-aH', '--delete'" not in _fn, (
+        "rsync base argv still hard-codes --delete")
+    _pm = _re.search(r'def cmd_repo_publish\(self.*?(?=\n    def )',
+                     _body, _re.DOTALL)
+    assert _pm and 'delete=True' not in _pm.group(0), (
+        "cmd_repo_publish must not request a destructive --delete publish")
+
+
+def test_segregate_never_deletes_existing_published_deb():
+    """An exact-name collision in a published dir KEEPs the existing artifact
+    (append-only) and drops the freshly-built dup at repo/ root — never
+    overwrites the published file."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _dest_dir = os.path.join(_tmp, 'dists', 'test', 'main', 'binary-amd64')
+        os.makedirs(_dest_dir)
+        _fn = 'openssl_3.0.15-1+asg1u1_amd64.deb'
+        with open(os.path.join(_dest_dir, _fn), 'w') as fh:
+            fh.write('PUBLISHED-ORIGINAL')           # already-published artifact
+        with open(os.path.join(_tmp, _fn), 'w') as fh:
+            fh.write('REBUILT-DUP')                  # fresh dup at repo/ root
+
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+
+        class _FakeConfig:
+            def deb_dest_for_filename(self, _f):
+                return _dest_dir
+
+        class _Src:
+            package = 'openssl'
+
+        _bc.config = _FakeConfig()
+        _moved = _bc._segregate_built_artifacts(_Src())
+
+        with open(os.path.join(_dest_dir, _fn)) as fh:
+            assert fh.read() == 'PUBLISHED-ORIGINAL', (
+                "published deb was overwritten — append-only violated!")
+        assert not os.path.exists(os.path.join(_tmp, _fn)), (
+            "rebuilt dup should be dropped from repo/ root")
+        assert os.path.join(_dest_dir, _fn) not in _moved, (
+            "a kept-existing collision must not be reported as freshly moved")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 step 3 — build-side stamping + check_build matching + Guard B
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_highest_asg_update_reads_remote_ledger():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import highest_asg_update
+    pub = ['3.0.15-1', '3.0.15-1+asg1u1', '3.0.15-1+asg1u2',
+           '3.0.16-1+asg1u1', '3.0.15-1+asg2u1']
+    assert highest_asg_update(pub, '3.0.15-1', 1) == 2   # u1,u2 at R=1
+    assert highest_asg_update(pub, '3.0.15-1', 2) == 1   # only asg2u1 at R=2
+    assert highest_asg_update(pub, '3.0.16-1', 1) == 1
+    assert highest_asg_update([], '3.0.15-1', 1) == 0
+    assert highest_asg_update(['3.0.15-1'], '3.0.15-1', 1) == 0   # pristine only
+
+
+def test_check_build_matches_asg_variant_of_prediction():
+    """check_build must accept a +asg<R>u<N> stamped artifact for a pristine
+    prediction — otherwise the source rebuilds every run (CONF-13 loop)."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _dest = os.path.join(_tmp, 'dists', 'test', 'main', 'binary-amd64')
+        os.makedirs(_dest)
+        _log = os.path.join(_tmp, 'log')
+        os.makedirs(_log)
+        # on-disk artifact carries the asg stamp; prediction is pristine
+        _build_minimal_deb(os.path.join(_dest, 'openssl_3.0.15-1+asg1u1_amd64.deb'),
+                           'openssl', '3.0.15-1+asg1u1', 'amd64')
+        with open(os.path.join(_log, 'openssl.result'), 'w') as fh:
+            fh.write('PASS\n')
+
+        _bc = _make_buildcontainer_stub(repo=_tmp, buildlog=_log)
+
+        class _FakeConfig:
+            def deb_dest_for_filename(self, _f):
+                return _dest
+
+        class _Src:
+            package = 'openssl'
+
+        _bc.config = _FakeConfig()
+        assert _bc.check_build(_Src(), ['openssl_3.0.15-1_amd64.deb']) is True, (
+            "check_build should match the stamped variant of the prediction")
+        # a prediction with no on-disk match → False
+        assert _bc.check_build(_Src(), ['openssh_9.2-1_amd64.deb']) is False
+
+
+def test_normalize_built_artifacts_stamps_delta_when_ledger_present():
+    """A delta build (here forced via was_patched) with a remote ledger loaded
+    gets +asg<R>u<N> stamped; N derives from the ledger."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _p = os.path.join(_tmp, 'openssl_3.0.15-1_amd64.deb')
+        _build_minimal_deb(_p, 'openssl', '3.0.15-1', 'amd64')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        # ledger already has the pristine published → next update is u1
+        _bc.asg_ledger = {'openssl': ['3.0.15-1']}
+
+        class _FakeConfig:
+            build_version = '1'
+
+        class _Src:
+            package = 'openssl'
+            version = '3.0.15-1'
+
+        _bc.config = _FakeConfig()
+        _bc._normalize_built_artifacts(_Src(), [_p], was_patched=True)
+        assert not os.path.exists(_p), "pristine file should be renamed"
+        _stamped = os.path.join(_tmp, 'openssl_3.0.15-1+asg1u1_amd64.deb')
+        assert os.path.exists(_stamped), "delta build was not asg-stamped"
+        import subprocess
+        _ver = subprocess.run(['dpkg-deb', '-f', _stamped, 'Version'],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        assert _ver == '3.0.15-1+asg1u1', _ver
+
+
+def test_normalize_built_artifacts_no_stamp_without_ledger():
+    """No remote ledger (a plain `source build`, not a refresh) → strip only,
+    NO asg stamp, even for a delta build."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _p = os.path.join(_tmp, 'openssl_3.0.15-1_amd64.deb')
+        _build_minimal_deb(_p, 'openssl', '3.0.15-1', 'amd64')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        # no asg_ledger attribute set → getattr returns None → no stamping
+
+        class _FakeConfig:
+            build_version = '1'
+
+        class _Src:
+            package = 'openssl'
+            version = '3.0.15-1'
+
+        _bc.config = _FakeConfig()
+        _bc._normalize_built_artifacts(_Src(), [_p], was_patched=True)
+        assert os.path.exists(_p), "without a ledger the file must stay pristine"
+
+
+def test_postbuild_convergence_hard_fails_when_check_build_still_false():
+    """Guard B: cmd_source_build must re-check check_build after a PASS and
+    hard-fail (not silently rebuild next run) on non-convergence."""
+    import re as _re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    _m = _re.search(r'def cmd_source_build\(self.*?(?=\n    def )',
+                    _body, _re.DOTALL)
+    assert _m, "cmd_source_build not found"
+    _b = _m.group(0)
+    assert 'if _build_result and self.container.check_build(' in _b, (
+        "Guard B: a PASS must be re-validated through check_build")
+    assert 'elif _build_result:' in _b and 'check_build still false' in _b, (
+        "Guard B: a built-but-unconverged source must hard-fail with a diagnostic")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 step 4 — remote ledger + version-aware local cleanup
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_parse_packages_to_ledger_multiversion_epoch_stripped():
+    """The ledger lists EVERY version per package (multi-version) with the
+    epoch stripped so it matches the filename-derived bases the build uses."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    with tempfile.TemporaryDirectory() as _tmp:
+        _pk = os.path.join(_tmp, 'Packages')
+        with open(_pk, 'w') as fh:
+            fh.write(
+                'Package: openssl\nVersion: 1:3.0.15-1\n'
+                'Filename: pool/openssl_3.0.15-1_amd64.deb\n\n'
+                'Package: openssl\nVersion: 1:3.0.15-1+asg1u1\n'
+                'Filename: pool/openssl_3.0.15-1+asg1u1_amd64.deb\n\n'
+                'Package: libc6\nVersion: 2.36-9\n'
+                'Filename: pool/libc6_2.36-9_amd64.deb\n\n')
+        _ledger = repo_audit.parse_packages_to_ledger(_pk)
+        assert sorted(_ledger['openssl']) == ['3.0.15-1', '3.0.15-1+asg1u1'], _ledger
+        assert _ledger['libc6'] == ['2.36-9']
+        # epoch stripped → matches build-side filename bases
+        assert all(':' not in _v for _vs in _ledger.values() for _v in _vs)
+
+
+def test_published_base_versions():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    ledger = {
+        'openssl': ['3.0.15-1', '3.0.15-1+asg1u1', '3.0.16-1'],
+        'libc6': ['2.36-9'],
+    }
+    _bases = repo_audit.published_base_versions(ledger)
+    assert _bases['openssl'] == '3.0.16-1'    # highest base
+    assert _bases['libc6'] == '2.36-9'
+
+
+def test_group_by_pristine_base():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    _g = repo_audit.group_by_pristine_base(
+        ['3.0.15-1', '3.0.15-1+asg1u1', '3.0.15-1+asg1u2', '3.0.16-1'])
+    assert sorted(_g['3.0.15-1']) == ['3.0.15-1', '3.0.15-1+asg1u1', '3.0.15-1+asg1u2']
+    assert _g['3.0.16-1'] == ['3.0.16-1']
+
+
+def test_local_cleanup_keeps_highest_prunes_superseded_and_flags_orphan():
+    """UPD-01 single-snapshot prune (behavioral): when a pristine artifact and
+    its freshly +asg-stamped successor coexist, the STAMPED (highest) one is
+    kept and the pristine predecessor is drift; a non-selected source is
+    orphan.  This is what `repo refresh`'s post-publish prune relies on."""
+    import shutil as _sh
+    if not (_sh.which('dpkg-deb') and _sh.which('dpkg-scanpackages')):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build, repo_audit
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        # Disable security so BuildConfig.__init__ doesn't early-return on a
+        # missing keyring (it would leave dir_repo_main unset); a [Mirror.*]
+        # section is required.
+        _mirror = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+        _body = (_BASE_CONF_BODY.format(mirror_block=_mirror).rstrip()
+                 + "\n    [Security]\n    Disabled = true\n")
+        _cfg_path = _write_test_config(_tmp, _body)
+        cfg = _build_config_from(_tmp, _cfg_path)
+        assert not getattr(cfg, 'error_str', ''), cfg.error_str
+        _main = cfg.deb_dir_for('main')
+        os.makedirs(_main, exist_ok=True)
+        _build_minimal_deb(os.path.join(_main, 'openssl_3.0.15-1_amd64.deb'),
+                           'openssl', '3.0.15-1')
+        _build_minimal_deb(os.path.join(_main, 'openssl_3.0.15-1+asg1u1_amd64.deb'),
+                           'openssl', '3.0.15-1+asg1u1')
+        _build_minimal_deb(os.path.join(_main, 'ghost_1.0_amd64.deb'),
+                           'ghost', '1.0')
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = cfg
+
+        class _Tree:
+            selected_srcs = {'openssl': object()}
+            src_pkg_files = {'openssl': ['openssl_3.0.15-1_amd64.deb']}
+
+        _sess.dep_tree = _Tree()
+        _sess.udeb_dep_tree = None
+        repo_audit.invalidate_cache(cfg.dir_repo)
+
+        _orphan, _drift, _malformed, _total = _sess._scan_stale_files()
+        _drift_names = {fn for _s, fn, _src, _sz in _drift}
+        _orphan_names = {fn for _s, fn, _src, _sz in _orphan}
+        assert 'openssl_3.0.15-1_amd64.deb' in _drift_names, (
+            f"pristine predecessor should be drift: {_drift_names}")
+        assert 'openssl_3.0.15-1+asg1u1_amd64.deb' not in _drift_names, (
+            "stamped current must be kept (highest), not drift")
+        assert 'openssl_3.0.15-1+asg1u1_amd64.deb' not in _orphan_names
+        assert 'ghost_1.0_amd64.deb' in _orphan_names, (
+            f"non-selected source should be orphan: {_orphan_names}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 step 5 — merge_remote_index (multi-version, signed locally)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_merge_remote_index_preserves_old_versions_multiversion():
+    """merge_packages_indexes unions remote + local, PRESERVING every remote
+    version (append-only) and adding the new local version."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):   # apt_pkg present wherever dpkg tooling is
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    import apt_pkg
+    remote = (
+        'Package: openssl\nVersion: 3.0.15-1\nArchitecture: amd64\nSize: 100\n'
+        'Filename: dists/thor/main/binary-amd64/openssl_3.0.15-1_amd64.deb\n\n'
+        'Package: openssl\nVersion: 3.0.15-1+asg1u1\nArchitecture: amd64\nSize: 101\n'
+        'Filename: dists/thor/main/binary-amd64/openssl_3.0.15-1+asg1u1_amd64.deb\n')
+    local = (
+        'Package: openssl\nVersion: 3.0.15-1+asg1u2\nArchitecture: amd64\nSize: 102\n'
+        'Filename: dists/thor/main/binary-amd64/openssl_3.0.15-1+asg1u2_amd64.deb\n\n'
+        'Package: libc6\nVersion: 2.36-9\nArchitecture: amd64\nSize: 200\n'
+        'Filename: dists/thor/main/binary-amd64/libc6_2.36-9_amd64.deb\n')
+    _merged = apt_repo.merge_packages_indexes(remote, local)
+    with tempfile.NamedTemporaryFile('w', delete=False) as fh:
+        fh.write(_merged)
+        _p = fh.name
+    try:
+        _seen = set()
+        with open(_p) as rf:
+            for _sec in apt_pkg.TagFile(rf):
+                _seen.add((_sec.get('Package'), _sec.get('Version')))
+    finally:
+        os.remove(_p)
+    assert ('openssl', '3.0.15-1') in _seen          # remote pristine kept
+    assert ('openssl', '3.0.15-1+asg1u1') in _seen   # remote delta kept
+    assert ('openssl', '3.0.15-1+asg1u2') in _seen   # new local version added
+    assert ('libc6', '2.36-9') in _seen
+    assert len(_seen) == 4
+
+
+def test_merge_packages_indexes_dedup_local_wins():
+    """A (Package, Version) present in BOTH appears once; the local stanza
+    wins (freshly built this snapshot)."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    import apt_pkg
+    remote = ('Package: foo\nVersion: 1.0\nArchitecture: amd64\nSize: 1\n'
+              'Filename: pool/foo_1.0_amd64.deb\n')
+    local = ('Package: foo\nVersion: 1.0\nArchitecture: amd64\nSize: 999\n'
+             'Filename: pool/foo_1.0_amd64.deb\n')
+    _merged = apt_repo.merge_packages_indexes(remote, local)
+    with tempfile.NamedTemporaryFile('w', delete=False) as fh:
+        fh.write(_merged)
+        _p = fh.name
+    try:
+        with open(_p) as rf:
+            _secs = [(s.get('Package'), s.get('Version'), s.get('Size'))
+                     for s in apt_pkg.TagFile(rf)]
+    finally:
+        os.remove(_p)
+    assert len(_secs) == 1, _secs                    # deduped
+    assert _secs[0] == ('foo', '1.0', '999')         # local won
+
+
+def test_merge_remote_index_signs_locally_and_merges():
+    """merge_remote_index must merge remote+local stanzas, scan the local
+    pool, and sign locally (key never leaves the host)."""
+    import re
+    _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
+    with open(_ar) as fh:
+        _body = fh.read()
+    _m = re.search(r'def merge_remote_index\(.*?(?=\ndef )', _body, re.DOTALL)
+    assert _m, "merge_remote_index not found"
+    _fn = _m.group(0)
+    assert 'merge_packages_indexes(' in _fn, "must merge remote+local stanzas"
+    assert '_scan_packages_to(' in _fn, "must scan the local pool"
+    assert 'sign_release_files(' in _fn, "must sign locally"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 step 6 — workload (change-detection) + Guard A preflight
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_workload_since_published_picks_only_advanced_bases():
+    """_workload_since_published returns sources whose pristine base advanced
+    beyond the published ledger (or unpublished) — the genuine refresh
+    workload."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Tree:
+        selected_srcs = {'openssl': object(), 'libc6': object()}
+
+    _sess.dep_tree = _Tree()
+    _sess.udeb_dep_tree = None
+    _pred = {
+        'openssl': ['openssl_3.0.16-1_amd64.deb'],   # advanced
+        'libc6': ['libc6_2.36-9_amd64.deb'],         # unchanged
+    }
+    _sess._predicted_files_for_source = lambda n: _pred.get(n, [])
+
+    _ledger = {'openssl': ['3.0.15-1'], 'libc6': ['2.36-9']}
+    assert _sess._workload_since_published(_ledger) == {'openssl'}
+    # nothing published → everything is workload
+    assert _sess._workload_since_published({}) == {'openssl', 'libc6'}
+
+
+def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
+    """Guard A: a clean prediction round-trips (no offenders); a non-integer
+    [Build] VERSION is flagged BEFORE any build."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _sess._predicted_files_for_source = lambda n: (
+        ['openssl_3.0.16-1_amd64.deb'] if n == 'openssl' else [])
+
+    class _Cfg:
+        build_version = '1'
+
+    _sess.config = _Cfg()
+    assert _sess._preflight_stamp_invariant(['openssl']) == [], (
+        "a valid prediction must round-trip through the asg stamp")
+
+    class _CfgBad:
+        build_version = '0.1'
+
+    _sess.config = _CfgBad()
+    _off = _sess._preflight_stamp_invariant(['openssl'])
+    assert _off and _off[0][0] == '<config>', (
+        "non-integer VERSION must be flagged before building")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 steps 7-8 — snapshot command family + repo refresh orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_snapshot_and_refresh_commands_wired():
+    """`snapshot` is registered and dispatches its sub-actions; bare snapshot →
+    overview; advance → select current; `repo refresh` routes to
+    cmd_repo_refresh."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    assert 'def cmd_snapshot(' in _body
+    for _sub in ('_cmd_snapshot_overview', '_cmd_snapshot_list',
+                 '_cmd_snapshot_select', '_cmd_snapshot_workload',
+                 '_cmd_snapshot_base'):
+        assert f'def {_sub}(' in _body, f"{_sub} missing"
+    # bare `snapshot` → overview
+    assert re.search(r"if action in \('', 'status'\):\s*\n\s+"
+                     r"return self\._cmd_snapshot_overview", _body)
+    # advance is shorthand for `select current`
+    assert re.search(r"if action == 'advance':\s*\n\s+"
+                     r"return self\._cmd_snapshot_select\('current'", _body)
+    assert "register_command('snapshot'" in _body, "snapshot not registered"
+    assert re.search(
+        r"if action == 'refresh':\s*\n\s+return self\.cmd_repo_refresh",
+        _body), "repo refresh not routed to cmd_repo_refresh"
+
+
+def test_snapshot_state_roundtrip_and_resolve_precedence():
+    """The durable pins live in config/snapshot.state (NOT cache), and
+    resolve_snapshot_timestamp prefers state.current over [Snapshot] Timestamp
+    — so the pin survives `clean cache` and the operator override wins."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache = _tmp
+            snapshot_enabled = True
+            snapshot_timestamp_config = '20260514T083402Z'   # explicit default
+
+        _cfg = _Cfg()
+        # no state yet → falls back to the config default
+        assert utils.read_snapshot_state(_cfg) == {}
+        utils._SNAPSHOT_TS_CACHE.clear()
+        # set a durable current override
+        utils.write_snapshot_state(_cfg, current='20260601T000000Z')
+        assert utils.read_snapshot_state(_cfg)['current'] == '20260601T000000Z'
+        # state.current wins over the explicit [Snapshot] Timestamp
+        assert utils.resolve_snapshot_timestamp(_cfg) == '20260601T000000Z'
+        # base set independently; both retained
+        utils.write_snapshot_state(_cfg, base='20260514T083402Z')
+        _st = utils.read_snapshot_state(_cfg)
+        assert _st['base'] == '20260514T083402Z'
+        assert _st['current'] == '20260601T000000Z'
+        # the state file is under config/, not cache/
+        assert os.path.exists(os.path.join(_cfg_dir, 'snapshot.state'))
+
+
+def test_snapshot_base_show_and_forward_only():
+    """`snapshot base show` (and bare) display the pin from config/snapshot.state;
+    a lower timestamp is REFUSED (base is forward-only) before any prompt/write."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    from build import BuildSession
+
+    def _cap(fn):
+        # Patch build.console directly (robust to suite-wide tui.console
+        # rebinding by other tests).
+        _lines = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            fn()
+        finally:
+            build.console.print = _orig
+        return '\n'.join(_lines)
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache = _tmp
+            apt_source_url = ''          # → fetch_remote_ledger returns None
+            build_codename = 'thor'
+            arch = 'amd64'
+            snapshot_enabled = True
+            snapshot_timestamp_config = '20260514T083402Z'
+
+        _sess.config = _Cfg()
+        utils._SNAPSHOT_TS_CACHE.clear()
+        utils.write_snapshot_state(_sess.config, base='20260601T000000Z')
+
+        # `show` displays the pin (not parsed as a timestamp)
+        _out = _cap(lambda: _sess._cmd_snapshot_base('show'))
+        assert 'snapshot base pin: 20260601T000000Z' in _out, _out
+        # an EARLIER timestamp is refused (forward-only), before prompt/write
+        _out = _cap(lambda: _sess._cmd_snapshot_base('20260101T000000Z'))
+        assert 'REFUSED' in _out and 'forward-only' in _out, _out
+        assert utils.read_snapshot_state(_sess.config)['base'] == '20260601T000000Z', (
+            "a refused (backward) base set must not change the pin")
+
+
+def test_ensure_snapshot_pins_prompts_and_writes_when_unset():
+    """A fresh system (no config/snapshot.state) prompts for current + base on
+    cache build; accepting the defaults writes both pins."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache = _tmp
+            snapshot_enabled = True
+            snapshot_timestamp_config = '20260514T083402Z'
+
+        _sess.config = _Cfg()
+        utils._SNAPSHOT_TS_CACHE.clear()
+
+        _answers = iter(['', ''])      # accept default current, default base
+
+        class _FakePrompt:
+            def __init__(self, _t, _m, options=None):
+                pass
+
+            def get_response(self):
+                return next(_answers)
+
+        _sp, _sc = build.Prompt, build.console.print
+        build.Prompt = _FakePrompt
+        build.console.print = lambda *a, **k: None
+        try:
+            assert _sess._ensure_snapshot_pins() is True
+        finally:
+            build.Prompt, build.console.print = _sp, _sc
+        _st = utils.read_snapshot_state(_sess.config)
+        assert _st['current'] == '20260514T083402Z', _st     # default applied
+        assert _st['base'] == '20260514T083402Z', _st
+        # already pinned → no prompt, returns True (would StopIteration if it asked)
+        assert _sess._ensure_snapshot_pins() is True
+
+
+def test_ensure_snapshot_pins_aborts_when_no_selection():
+    """If the operator never supplies a valid timestamp, cache build aborts
+    (returns False) rather than silently building at an undefined snapshot."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache = _tmp
+            snapshot_enabled = True
+            snapshot_timestamp_config = 'latest'     # default resolves via query
+
+        _sess.config = _Cfg()
+        _sess._snapshot_latest = lambda: None        # 'latest' won't resolve
+        utils._SNAPSHOT_TS_CACHE.clear()
+
+        class _FakePrompt:
+            def __init__(self, _t, _m, options=None):
+                pass
+
+            def get_response(self):
+                return ''                            # always default → 'latest'
+
+        _sp, _sc = build.Prompt, build.console.print
+        build.Prompt = _FakePrompt
+        build.console.print = lambda *a, **k: None
+        try:
+            assert _sess._ensure_snapshot_pins() is False
+        finally:
+            build.Prompt, build.console.print = _sp, _sc
+        assert utils.read_snapshot_state(_sess.config) == {}, "no pins written"
+
+
+def test_cache_build_gates_on_snapshot_pins():
+    """cmd_build_cache must call _ensure_snapshot_pins (and abort if it returns
+    False) before building."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    _m = re.search(r'def cmd_build_cache\(self.*?(?=\n    def )', _body, re.DOTALL)
+    assert _m, "cmd_build_cache not found"
+    assert re.search(r'if not self\._ensure_snapshot_pins\(\):\s*\n\s+return',
+                     _m.group(0)), "cache build must gate on _ensure_snapshot_pins"
+
+
+def test_repo_refresh_ordering_invariants():
+    """The orchestrator must honour the UPD-01 ordering: ledger BEFORE advance,
+    Guard A preflight BEFORE build, merge-index BEFORE publish, and publish
+    BEFORE prune (publish-before-prune) — plus an abort when nothing changed."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    _m = re.search(r'def cmd_repo_refresh\(self.*?(?=\n    def )',
+                   _body, re.DOTALL)
+    assert _m, "cmd_repo_refresh not found"
+    _b = _m.group(0)
+    assert _b.index('fetch_remote_ledger') < _b.index('write_snapshot_state'), (
+        "ledger must be fetched before advancing the snapshot")
+    assert _b.index('_preflight_stamp_invariant') < _b.index('cmd_source_build'), (
+        "Guard A preflight must run before building")
+    assert _b.index('_refresh_merge_index') < _b.index('cmd_repo_publish'), (
+        "merge-index must run before publish")
+    assert _b.index('cmd_repo_publish') < _b.index('cmd_package_cleanup'), (
+        "publish-before-prune: prune must run AFTER the additive publish")
+    assert 'nothing to rebuild' in _b, "must abort when the workload is empty"
+
+
+def test_repo_refresh_aborts_when_ledger_unreachable():
+    """If the remote ledger can't be fetched, refresh aborts (can't derive N
+    safely) — pinned via the code path."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    _m = re.search(r'def cmd_repo_refresh\(self.*?(?=\n    def )',
+                   _body, re.DOTALL)
+    _b = _m.group(0)
+    assert 'if _ledger is None:' in _b and 'aborting' in _b, (
+        "refresh must abort when fetch_remote_ledger returns None")
+
+
+def test_workload_current_to_target_diffs_against_target_snapshot():
+    """`snapshot workload`'s core: a source is in the workload iff its version
+    AT THE TARGET snapshot is newer than the current pin's version."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    import repo_audit
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Src:
+        def __init__(self, v):
+            self.version = v
+
+    class _Tree:
+        selected_srcs = {'openssl': _Src('3.0.15-1'), 'libc6': _Src('2.36-9')}
+
+    _sess.dep_tree = _Tree()
+    _sess.udeb_dep_tree = None
+    _sess.config = object()
+    _saved = repo_audit.fetch_source_versions_at
+    try:
+        repo_audit.fetch_source_versions_at = lambda _c, _ts: {
+            'openssl': '3.0.16-1',     # advanced at target
+            'libc6': '2.36-9',         # unchanged
+        }
+        _names, _err = _sess._workload_current_to_target('20260601T000000Z')
+        assert _err is None and _names == ['openssl'], (_names, _err)
+        # fetch failure → (None, error)
+        repo_audit.fetch_source_versions_at = lambda _c, _ts: None
+        _names, _err = _sess._workload_current_to_target('20260601T000000Z')
+        assert _names is None and _err
+    finally:
+        repo_audit.fetch_source_versions_at = _saved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 — snapshot tag in the ISO identity (distinguish base vs stepped)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_snapshot_iso_tag_reflects_resolved_pin():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    _saved = utils.resolve_snapshot_timestamp
+    try:
+        utils.resolve_snapshot_timestamp = lambda _c: '20260514T083402Z'
+        assert utils.snapshot_iso_tag(object()) == '20260514T083402Z'
+        utils.resolve_snapshot_timestamp = lambda _c: None       # snapshots off
+        assert utils.snapshot_iso_tag(object()) == ''
+        def _boom(_c):
+            raise RuntimeError('resolve failed')
+        utils.resolve_snapshot_timestamp = _boom                 # never raises
+        assert utils.snapshot_iso_tag(object()) == ''
+    finally:
+        utils.resolve_snapshot_timestamp = _saved
+
+
+def test_stage_disk_info_writes_snapshot_marker_and_substitutes():
+    """_stage_disk_info writes a .disk/snapshot marker and substitutes
+    ${snapshot} (without touching the cdrom-detect-parsed .disk/info format);
+    with no snapshot, no marker is written."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import iso_installer
+    with tempfile.TemporaryDirectory() as _tmp:
+        _inst = os.path.join(_tmp, 'installer')
+        os.makedirs(os.path.join(_inst, 'disk'))
+        with open(os.path.join(_inst, 'disk', 'info'), 'w') as fh:
+            fh.write('Asgard ${version} "${codename}" snap=${snapshot}\n')
+        _stage = os.path.join(_tmp, 'staging')
+        os.makedirs(_stage)
+        assert iso_installer._stage_disk_info(
+            _stage, _inst, 'thor', '1', '20260514T083402Z')
+        with open(os.path.join(_stage, '.disk', 'snapshot')) as fh:
+            assert fh.read().strip() == '20260514T083402Z'
+        with open(os.path.join(_stage, '.disk', 'info')) as fh:
+            assert 'snap=20260514T083402Z' in fh.read()
+
+    # No snapshot → no marker, ${snapshot} collapses to empty.
+    with tempfile.TemporaryDirectory() as _tmp:
+        _inst = os.path.join(_tmp, 'installer')
+        os.makedirs(os.path.join(_inst, 'disk'))
+        with open(os.path.join(_inst, 'disk', 'info'), 'w') as fh:
+            fh.write('Asgard ${version} "${codename}"\n')
+        _stage = os.path.join(_tmp, 'staging')
+        os.makedirs(_stage)
+        assert iso_installer._stage_disk_info(_stage, _inst, 'thor', '1')
+        assert not os.path.exists(os.path.join(_stage, '.disk', 'snapshot'))
+
+
+def test_iso_filenames_carry_snapshot_tag():
+    """Both the live (iso.py) and installer (build.py) ISO filenames embed the
+    snapshot tag so base vs stepped builds are distinguishable on disk."""
+    import re
+    _iso = os.path.join(_ROOT, 'scripts', 'iso.py')
+    with open(_iso) as fh:
+        _ib = fh.read()
+    assert 'utils.snapshot_iso_tag(cfg)' in _ib
+    assert 'athena-{_version}-{_snap}-amd64.iso' in _ib
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _bb = fh.read()
+    assert 'utils.snapshot_iso_tag(self.config)' in _bb
+    assert 'athena-installer-{_version}-{_snap}-amd64.iso' in _bb
+    # snapshot threaded into the installer ISO build
+    assert re.search(r'snapshot=_snap', _bb), "snapshot not passed to build_installer_iso"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -16154,6 +17074,48 @@ def main() -> int:
         test_signing_generate_key_returns_false_when_export_step_fails,
         test_cache_build_populates_upstream_collisions_via_real_path,
         test_cache_build_fork_supersede_drops_upstream_silently,
+        # UPD-01 step 1: +asg<R>u<N> version-suffix primitives
+        test_nmu_regex_does_not_eat_asg_suffix,
+        test_pristine_base_strips_both_layers,
+        test_asg_suffix_sorts_above_pristine_and_across_release,
+        test_asg_filename_maps_pristine_to_stamped,
+        test_match_pristine_base_reconciles_stamped_artifact,
+        test_restamp_asg_deb_bumps_version_and_intra_source_deps,
+        # UPD-01 step 2: append-only enforcement
+        test_publish_rsync_is_additive_no_delete,
+        test_segregate_never_deletes_existing_published_deb,
+        # UPD-01 step 3: build-side stamping + check_build matching + Guard B
+        test_highest_asg_update_reads_remote_ledger,
+        test_check_build_matches_asg_variant_of_prediction,
+        test_normalize_built_artifacts_stamps_delta_when_ledger_present,
+        test_normalize_built_artifacts_no_stamp_without_ledger,
+        test_postbuild_convergence_hard_fails_when_check_build_still_false,
+        # UPD-01 step 4: remote ledger + version-aware local cleanup
+        test_parse_packages_to_ledger_multiversion_epoch_stripped,
+        test_published_base_versions,
+        test_group_by_pristine_base,
+        test_local_cleanup_keeps_highest_prunes_superseded_and_flags_orphan,
+        # UPD-01 step 5: merge_remote_index
+        test_merge_remote_index_preserves_old_versions_multiversion,
+        test_merge_packages_indexes_dedup_local_wins,
+        test_merge_remote_index_signs_locally_and_merges,
+        # UPD-01 step 6: workload + Guard A preflight
+        test_workload_since_published_picks_only_advanced_bases,
+        test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
+        # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator
+        test_snapshot_and_refresh_commands_wired,
+        test_snapshot_state_roundtrip_and_resolve_precedence,
+        test_snapshot_base_show_and_forward_only,
+        test_ensure_snapshot_pins_prompts_and_writes_when_unset,
+        test_ensure_snapshot_pins_aborts_when_no_selection,
+        test_cache_build_gates_on_snapshot_pins,
+        test_repo_refresh_ordering_invariants,
+        test_repo_refresh_aborts_when_ledger_unreachable,
+        test_workload_current_to_target_diffs_against_target_snapshot,
+        # UPD-01: snapshot tag in ISO identity
+        test_snapshot_iso_tag_reflects_resolved_pin,
+        test_stage_disk_info_writes_snapshot_marker_and_substitutes,
+        test_iso_filenames_carry_snapshot_tag,
     ]
     failures = 0
     for t in tests:
