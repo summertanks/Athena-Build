@@ -3031,105 +3031,56 @@ class BuildSession:
         )
 
     def cmd_index_repo_minimal(self, *args):
-        """COMP-02: build + index + sign the MINIMAL (runtime) apt repo
-        under config.dir_publish, ready for `repo publish git minimal`.
+        """UPD-02: STAGE the minimal (runtime) subset into publish/ in the SAME
+        nested layout as the full repo — so full and minimal are structurally
+        identical and the one shared remote-scan index (`repo publish`) handles
+        both with no clobber.
 
-        Minimal = the main-component binary .debs a booted system would
-        apt-install, MINUS debug/source debs
-        (apt_repo.deb_excluded_from_minimal).  No udebs (installer-only,
-        they live in a separate dir), no source index, no debug suite.
-        Produces a self-contained flat-pool tree:
+        Minimal = the main-component binary .debs a booted system apt-installs,
+        MINUS debug/source (apt_repo.deb_excluded_from_minimal); no udebs,
+        source, or debug suite.  NO index/sign here — `repo publish` rebuilds
+        the index ON THE REMOTE (dpkg-scanpackages on the VM).
 
-          publish/pool/<name>_<ver>_<arch>.deb
-          publish/dists/<codename>/Release, InRelease, Release.gpg
-          publish/dists/<codename>/main/binary-<arch>/Packages{,.gz,.xz}
+          publish/dists/<codename>/main/binary-<arch>/<subset>.deb
 
-        Regenerates publish/{pool,dists} from scratch each run; preserves
-        any other publish/ entries (e.g. a stray git checkout).
+        Returns True on success.  Called standalone or by `repo publish ssh
+        minimal`.
         """
         del args
-        import signing
         import apt_repo
-
-        _codename = self.config.build_codename.strip('"').strip("'")
-        _src_dir = self.config.dir_repo_main   # dists/<codename>/main/binary-<arch>/
+        _src_dir = self.config.dir_repo_main   # dists/<cn>/main/binary-<arch>/
         if not os.path.isdir(_src_dir):
             console.print(
                 f"repo index minimal: no built debs at {_src_dir} — run "
-                f"`source build` (+ `repo index full`) first"
-            )
-            return
+                f"`source build` first")
+            return False
+        _rel = os.path.relpath(_src_dir, self.config.dir_repo)
+        _dst_dir = os.path.join(self.config.dir_publish, _rel)
+        _dists = os.path.join(self.config.dir_publish, 'dists')
+        if os.path.isdir(_dists):
+            shutil.rmtree(_dists)
+        os.makedirs(_dst_dir, exist_ok=True)
 
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-        _r = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
-                            capture_output=True, text=True)
-        if _r.returncode != 0:
-            console.print("ERROR: incorrect sudo password")
-            logger.error("cmd_index_repo_minimal: sudo -v failed")
-            _password = '*' * len(_password)
-            return
-
-        try:
-            _pool = os.path.join(self.config.dir_publish, 'pool')
-            _dists = os.path.join(self.config.dir_publish, 'dists')
-            for _d in (_pool, _dists):
-                if os.path.isdir(_d):
-                    shutil.rmtree(_d)
-            os.makedirs(_pool, exist_ok=True)
-
-            _copied = 0
-            _skipped = 0
-            for _f in sorted(os.listdir(_src_dir)):
-                if not _f.endswith('.deb'):
-                    continue
-                if apt_repo.deb_excluded_from_minimal(_f):
-                    _skipped += 1
-                    continue
-                shutil.copy2(os.path.join(_src_dir, _f),
-                             os.path.join(_pool, _f))
-                _copied += 1
-
-            if _copied == 0:
-                console.print(
-                    f"repo index minimal: no runtime debs in {_src_dir} "
-                    f"({_skipped} debug/source excluded) — nothing to index"
-                )
-                return
+        _copied = _skipped = 0
+        for _f in sorted(os.listdir(_src_dir)):
+            if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+                continue
+            if apt_repo.deb_excluded_from_minimal(_f):
+                _skipped += 1
+                continue
+            shutil.copy2(os.path.join(_src_dir, _f),
+                         os.path.join(_dst_dir, _f))
+            _copied += 1
+        if _copied == 0:
             console.print(
-                f"repo index minimal: staged {_copied} deb(s) to publish/pool "
-                f"({_skipped} debug/source excluded)"
-            )
-
-            if not apt_repo.generate_apt_repo(
-                    staging=self.config.dir_publish,
-                    suite=_codename, codename=_codename,
-                    version=self.config.build_version, password=_password):
-                console.print("ERROR: apt-repo index generation failed — see log")
-                logger.error("cmd_index_repo_minimal: generate_apt_repo False")
-                return
-
-            if not apt_repo.sign_release_files(
-                    staging=self.config.dir_publish, suite=_codename,
-                    signing_homedir=signing.signing_home(self.config),
-                    password=_password):
-                console.print(
-                    "ERROR: Release signing failed — run `key generate` "
-                    "first?  See log"
-                )
-                logger.error("cmd_index_repo_minimal: sign_release_files False")
-                return
-
-            # generate_apt_repo writes some files via sudo (root-owned);
-            # chown the tree back so the publish git ops + next rebuild
-            # (which rmtree's pool/dists) run as the invoking user.
-            subprocess.run(
-                ['sudo', '-S', 'chown', '-R',
-                 f'{os.getuid()}:{os.getgid()}', self.config.dir_publish],
-                input=_password + '\n', capture_output=True, text=True,
-            )
-            self._print_publish_size_summary()
-        finally:
-            _password = '*' * len(_password)  # noqa: F841
+                f"repo index minimal: no runtime debs in {_src_dir} "
+                f"({_skipped} debug/source excluded)")
+            return False
+        console.print(
+            f"repo index minimal: staged {_copied} runtime deb(s) → "
+            f"publish/{_rel} ({_skipped} debug/source excluded; "
+            f"index built on the remote at publish time)")
+        return True
 
     def _print_publish_size_summary(self) -> None:
         """Summarise publish/ + warn about GitHub's 100 MB per-file push
@@ -3175,8 +3126,13 @@ class BuildSession:
           3. Every index in the now-trusted SHA256 block is present and
              its size + SHA256 match.  (No pool .deb downloads.)
 
+        `repo audit external ssh` instead RECONCILES the local signed manifest
+        against the remote Packages and reports discrepancies (UPD-01).
+
         Requires AptSourceURL set and a generated signing key.
         """
+        if args and args[0] == 'ssh':
+            return self._audit_external_vs_manifest()
         del args
         import tempfile
         import signing
@@ -3261,69 +3217,106 @@ class BuildSession:
                     f"repo audit external: OK — signed + all {len(_entries)} "
                     f"index files consistent", tui.COLOR_HIGHLIGHT)
 
+    def _audit_external_vs_manifest(self):
+        """READ-ONLY: reconcile the local signed manifest against the remote
+        Packages, reporting (pkg=version) entries present in one but not the
+        other (UPD-01 `repo audit external ssh`)."""
+        _local = repo_audit.published_ledger(self.config)
+        _remote = repo_audit.fetch_remote_ledger(self.config)
+        if _remote is None:
+            console.print(
+                "repo audit external ssh: remote unreachable (check [Repo] "
+                "AptSourceURL / network).", tui.COLOR_ERROR)
+            return
+        _only_local, _only_remote = repo_audit.manifest_vs_remote_discrepancies(
+            _local, _remote)
+        if not _only_local and not _only_remote:
+            console.print(
+                "repo audit external ssh: OK — local manifest matches the "
+                "remote.", tui.COLOR_HIGHLIGHT)
+            return
+        console.print(
+            f"repo audit external ssh: DISCREPANCY — {len(_only_local)} "
+            f"version(s) in the local manifest NOT on the remote; "
+            f"{len(_only_remote)} on the remote NOT in the manifest.",
+            tui.COLOR_WARNING)
+        for _pv in sorted(_only_local)[:30]:
+            console.print(f"    manifest-only: {_pv}")
+        for _pv in sorted(_only_remote)[:30]:
+            console.print(f"    remote-only:   {_pv}")
+
     def cmd_repo_publish(self, *args):
-        """COMP-02: publish the indexed repo to a VM over rsync+SSH.
+        """UPD-02: publish the repo, then rebuild the index ON THE REMOTE.
 
         Usage: repo publish ssh [full|minimal]   (default: full)
 
-          full    — rsync the whole repo/ tree (all suites incl. debug;
-                    run `repo index full` first).  The VM has no GitHub-
-                    style size cap, so the complete pool is fine.
-          minimal — rsync the runtime subset staged in publish/ (run
-                    `repo index minimal` first).
+          full    — push the whole local pool's .debs.
+          minimal — push only the runtime subset (staged nested via
+                    cmd_index_repo_minimal; no debug/source/udeb).
 
-        The remote repo lives at <PublishSshTarget base>/<dist-id>/, where
-        dist-id is the distribution id (config.build_base_id) — derived, not
-        hardcoded, so a rebrand follows automatically.  PublishSshTarget is
-        `user@host` (repo under the remote home) or `user@host:/some/base`
-        (repo under that dir).
+        Flow (external repo ENABLED): rsync only the .debs up — ADDITIVE +
+        `--ignore-existing` (immutable per filename, so a re-publish never
+        re-uploads an existing .deb) — then run `dpkg-scanpackages` ON THE VM
+        to rebuild the index from what's ACTUALLY there (sign LOCALLY), upload
+        the regenerated metadata, and refresh the local manifest.  Because the
+        index is rebuilt from the remote, full and minimal never clobber each
+        other — the published `Packages` is always the union present on the
+        remote.  full then prunes local + records published = current.
 
-        rsync is incremental (only changed/new debs transfer on a re-
-        publish) and ADDITIVE — NO `--delete` — so the remote is an
-        append-only archive (UPD-01): a version once published is never
-        removed, even when the local single-snapshot tree no longer holds it
-        (that's how the remote spans base_snapshot..current while local stays
-        one-version).  We do NOT create the remote dir (no --mkpath): the
-        <dist-id> dir must already
-        exist on the VM — publish checks via ssh and bails with a mkdir hint
-        if it's missing.  The VM serves the synced dir over HTTP(S); point
-        [Repo] AptSourceURL at that URL.  Auth is plain SSH (ssh-agent /
-        default key, or [Repo] PublishSshKey); the host fingerprint must
-        already be in known_hosts (publish is non-interactive).
+        External repo DISABLED (`repo external disable`): full only — index
+        locally into the signed manifest (the +asg bump authority), no rsync.
+        The <dist-id> dir must exist on the VM (which needs `dpkg-dev`); the
+        host fingerprint must be in known_hosts (publish is non-interactive).
         """
         _kind = args[0] if len(args) > 0 else ''
         _scope = args[1] if len(args) > 1 else 'full'
         if _kind != 'ssh' or _scope not in ('full', 'minimal'):
             console.print("Usage: repo publish ssh [full|minimal]")
             return
+        _external = self._external_enabled()
+        _codename = self.config.build_codename.strip('"').strip("'")
+
+        # ── External DISABLED → local-only (full): index into the manifest. ──
+        if not _external:
+            if _scope != 'full':
+                console.print(
+                    "repo publish: external disabled — only `full` is supported "
+                    "local-only (the manifest mirrors the complete local pool).",
+                    tui.COLOR_WARNING)
+                return
+            if not self._refresh_merge_index():
+                console.print("repo publish: local index/merge failed.",
+                              tui.COLOR_ERROR)
+                return
+            console.print("repo publish: external DISABLED — local manifest "
+                          "refreshed, nothing rsynced.", tui.COLOR_INFO)
+            if self.flags.dep_check_ready:
+                self.cmd_package_cleanup('force')
+            utils.write_snapshot_state(
+                self.config, published=self._snapshot_current())
+            return
+
+        # ── External ENABLED. Stage the deb source tree + suites to index. ──
+        if _scope == 'minimal':
+            if not self.cmd_index_repo_minimal():
+                return
+            _deb_dists = os.path.join(self.config.dir_publish, 'dists')
+            _suites_spec = {_codename: ['main']}
+        else:
+            _deb_dists = os.path.join(self.config.dir_repo, 'dists')
+            _suites_spec = {_codename: ['main', 'doc', 'tests'],
+                            f'{_codename}-debug': ['main']}
+        if not os.path.isdir(_deb_dists):
+            console.print(f"repo publish: {_deb_dists} missing — build first.",
+                          tui.COLOR_ERROR)
+            return
 
         _target = self.config.publish_ssh_target
         if not _target:
             console.print(
-                "repo publish: [Repo] PublishSshTarget is unset — set it to "
-                "user@host (or user@host:/base) in config/build.conf first"
-            )
+                "repo publish: [Repo] PublishSshTarget is unset — set it, or "
+                "`repo external disable` for local-only.", tui.COLOR_ERROR)
             return
-
-        if _scope == 'minimal':
-            _root = self.config.dir_publish
-            _pairs = [(os.path.join(_root, 'dists'), 'dists'),
-                      (os.path.join(_root, 'pool'),  'pool')]
-            _hint = '`repo index minimal`'
-        else:
-            _root = self.config.dir_repo
-            _pairs = [(os.path.join(_root, 'dists'), 'dists')]
-            _hint = '`repo index full`'
-
-        for _src, _ in _pairs:
-            if not os.path.isdir(_src):
-                console.print(
-                    f"repo publish: {_src} missing — run {_hint} first")
-                return
-
-        # Remote repo root = <base>/<dist-id>, derived from the distribution
-        # id (build_base_id) rather than hardcoded.  PublishSshTarget is
-        # user@host[:base]; an empty base means the remote home dir.
         _dist_id = self.config.build_base_id
         if ':' in _target:
             _userhost, _basepath = _target.split(':', 1)
@@ -3332,62 +3325,88 @@ class BuildSession:
         _root_path = (_basepath.rstrip('/') + '/' + _dist_id
                       if _basepath else _dist_id)
         _remote_root = f'{_userhost}:{_root_path}'
-
         _ssh = ['ssh']
         if self.config.publish_ssh_key:
             _ssh += ['-i', self.config.publish_ssh_key]
-
-        # We don't --mkpath, so the <dist-id> dir must already exist on the
-        # VM.  Check via ssh and bail with an actionable hint if it's not.
-        _chk = subprocess.run(
-            _ssh + [_userhost, 'test', '-d', _root_path],
-            capture_output=True, text=True)
-        if _chk.returncode != 0:
+        if subprocess.run(_ssh + [_userhost, 'test', '-d', _root_path],
+                          capture_output=True, text=True).returncode != 0:
             console.print(
                 f"repo publish: remote dir '{_root_path}' not found on "
-                f"{_userhost} — create it first:\n"
-                f"  ssh {_userhost} mkdir -p {_root_path}",
-                tui.COLOR_ERROR,
-            )
+                f"{_userhost} — `ssh {_userhost} mkdir -p {_root_path}`.",
+                tui.COLOR_ERROR)
             return
 
-        for _src, _remote in _pairs:
-            _rc = self._rsync_streamed(
-                f'rsync {_remote} → {_remote_root}', _src,
-                f'{_remote_root}/{_remote}/', _ssh)
-            if _rc != 0:
-                console.print(
-                    f"repo publish: rsync of {_remote} to {_remote_root} "
-                    f"failed (rc={_rc}) — see log",
-                    tui.COLOR_ERROR,
-                )
-                return
+        # 1. Push only the .debs (immutable → --ignore-existing, deb-only).
+        _debfilter = ['--include=*/', '--include=*.deb', '--include=*.udeb',
+                      '--exclude=*']
+        if self._rsync_streamed(
+                f'rsync debs → {_remote_root}', _deb_dists,
+                f'{_remote_root}/dists/', _ssh,
+                ignore_existing=True, filters=_debfilter) != 0:
+            console.print("repo publish: .deb upload failed — see log.",
+                          tui.COLOR_ERROR)
+            return
 
+        # 2. Rebuild the index ON THE REMOTE (scan there, sign locally).
+        import signing
+        import apt_repo
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        if subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
+                          capture_output=True, text=True).returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            return
+        _staging = os.path.join(self.config.dir_temp, 'remote-reindex')
+        if os.path.isdir(_staging):
+            shutil.rmtree(_staging)
+        os.makedirs(_staging, exist_ok=True)
+        try:
+            _main_pkgs = apt_repo.remote_reindex_and_sign(
+                staging=_staging, ssh_cmd=_ssh, userhost=_userhost,
+                remote_root=_root_path, suites_spec=_suites_spec,
+                codename_for_suite={_s: _s for _s in _suites_spec},
+                primary_suite=_codename, arch=self.config.arch,
+                version=self.config.build_version.strip('"').strip("'"),
+                password=_password,
+                signing_homedir=signing.signing_home(self.config))
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
+        if _main_pkgs is None:
+            console.print("repo publish: remote re-index failed — see log "
+                          "(is dpkg-dev installed on the VM?).", tui.COLOR_ERROR)
+            return
+
+        # 3. Upload the freshly-generated metadata (staging holds metadata only).
+        if self._rsync_streamed(
+                f'rsync index → {_remote_root}',
+                os.path.join(_staging, 'dists'),
+                f'{_remote_root}/dists/', _ssh) != 0:
+            console.print("repo publish: metadata upload failed — see log.",
+                          tui.COLOR_ERROR)
+            return
+
+        # 4. Refresh the local manifest = the remote-scanned main Packages.
+        repo_audit.write_published_manifest(self.config, _main_pkgs)
         console.print(
-            f"repo publish: synced {_scope} repo to {_remote_root}",
-            tui.COLOR_HIGHLIGHT,
-        )
-        _codename = self.config.build_codename.strip('"').strip("'")
+            f"repo publish: synced {_scope} + re-indexed on remote "
+            f"({_remote_root})", tui.COLOR_HIGHLIGHT)
         if self.config.apt_source_url:
             console.print(
                 f"  apt source: {self.config.apt_source_url} {_codename} main",
-                tui.COLOR_INFO,
-            )
-        else:
-            # No AptSourceURL configured — suggest one from the host +
-            # dist-id (assumes the web docroot is the parent of the <dist-id>
-            # dir, so it serves at /<dist-id>/; adjust to the real served URL).
-            _host = _userhost.rsplit('@', 1)[-1]
-            _suggested = f'http://{_host}/{_dist_id}/'
-            console.print(
-                f"  AptSourceURL is unset.  Once the VM serves '{_root_path}' "
-                f"over HTTP, set [Repo] AptSourceURL (e.g. {_suggested}) — the "
-                f"installed system would then use:",
-                tui.COLOR_INFO,
-            )
-            console.print(f"      deb {_suggested} {_codename} main")
+                tui.COLOR_INFO)
 
-    def _rsync_streamed(self, label, src, dest, ssh_cmd, delete=False):
+        # 5. full: publish-before-prune + record published = current.
+        if _scope == 'full':
+            console.print("repo publish: pruning local to single-snapshot…")
+            if self.flags.dep_check_ready:
+                self.cmd_package_cleanup('force')
+            utils.write_snapshot_state(
+                self.config, published=self._snapshot_current())
+            console.print(
+                f"repo publish: published is now {self._snapshot_current()}.",
+                tui.COLOR_HIGHLIGHT)
+
+    def _rsync_streamed(self, label, src, dest, ssh_cmd, delete=False,
+                        ignore_existing=False, filters=None):
         """rsync -aH (ADDITIVE by default) with --info=progress2, mirroring
         rsync's single overall % into a ProgressBar so the operator sees
         movement during a multi-GB sync.  rsync writes progress to stdout
@@ -3399,12 +3418,20 @@ class BuildSession:
         delete=False (default) → NO `--delete`: the remote ACCUMULATES files,
         never removing a published version absent from the local tree (the
         UPD-01 append-only guarantee).  delete=True is reserved for an
-        explicit, deliberate mirror-reset — never the normal publish path."""
+        explicit, deliberate mirror-reset — never the normal publish path.
+
+        ignore_existing=True (UPD-02) → `--ignore-existing`: skip files already
+        present on the remote by NAME (not mtime) — for the immutable .deb pool
+        pass, so a re-publish never re-uploads unchanged .debs.  `filters` are
+        extra rsync `--include`/`--exclude` args (e.g. a deb-only filter)."""
         _bar = ProgressBar(label, itr_label='', maxvalue=100,
                            show_rate=False, label_width=34)
         _argv = ['rsync', '-aH']
         if delete:
             _argv.append('--delete')
+        if ignore_existing:
+            _argv.append('--ignore-existing')
+        _argv += list(filters or [])
         _argv += ['--info=progress2',
                   '-e', ' '.join(ssh_cmd), f'{src}/', dest]
         _proc = subprocess.Popen(
@@ -3469,9 +3496,12 @@ class BuildSession:
                                    'PublishSshTarget (run `repo index full` first)',
             'publish ssh minimal': 'rsync the minimal publish/ to '
                                    'PublishSshTarget (run `repo index minimal` first)',
-            'refresh':        'UPD-01: one update cycle — pull ledger, '
-                              '(advance snapshot), rebuild changed, merge-index, '
-                              'publish additively, prune (repo refresh [<ts>|latest])',
+            'refresh':        'UPD-01: realise the selected current pin — rebuild '
+                              'the published→current source delta, +asg-stamp, '
+                              'merge-index, publish additively, prune (no target; '
+                              'pick the destination via `snapshot select` first)',
+            'external':       'enable/disable/status the external published repo '
+                              '(repo external <status|enable|disable>)',
         }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
@@ -3496,7 +3526,74 @@ class BuildSession:
             return self._group_help('repo', _table, f'index {_sub}')
         if action == 'publish':
             return self.cmd_repo_publish(*args)
+        if action == 'external':
+            return self.cmd_repo_external(*args)
         return self._group_help('repo', _table, action)
+
+    def cmd_repo_external(self, action: str = '', *args):
+        """Enable/disable/inspect the EXTERNAL published repo (UPD-01).
+
+        Usage: repo external <status|enable|disable>
+
+        disable → LOCAL-ONLY: `repo publish` updates only the local signed
+        manifest (no rsync); +asg bumps derive from it.  For testing without a
+        VM.  Local stays single-snapshot, so advancing several snapshots while
+        disabled then re-enabling can jump bump numbers (you're warned).
+        enable → onto an EMPTY remote: rebaseline current = base (fresh first
+        publish); onto a NON-empty remote: requires published == current."""
+        del args
+        _table = {
+            'status':  'show external on/off + base/published/current',
+            'enable':  'turn the external repo ON (rebaseline if remote empty)',
+            'disable': 'LOCAL-ONLY mode (local manifest is the authority)',
+        }
+        if action == 'status':
+            _on = self._external_enabled()
+            console.print(
+                f"external repo: {'ENABLED' if _on else 'DISABLED (local-only)'}")
+            console.print(
+                f"  base / published / current: {self._snapshot_base_ts()} / "
+                f"{self._snapshot_published()} / {self._snapshot_current()}")
+            return
+        if action == 'disable':
+            utils.write_snapshot_state(self.config, external=False)
+            console.print(
+                "external repo: DISABLED — local-only.  `repo publish` now "
+                "updates only the local manifest; +asg bumps derive from it.  "
+                "Local stays single-snapshot.", tui.COLOR_WARNING)
+            return
+        if action == 'enable':
+            _remote = repo_audit.fetch_remote_ledger(self.config)
+            if _remote is None:
+                console.print(
+                    "repo external enable: remote unreachable (check [Repo] "
+                    "AptSourceURL / network) — not enabling.", tui.COLOR_ERROR)
+                return
+            if not _remote:
+                # boundary-D: empty remote → rebaseline as a first run.
+                _base = self._snapshot_base_ts()
+                utils.write_snapshot_state(self.config, external=True,
+                                           current=_base, published=_base)
+                self.flags.cache_ready = False
+                self.flags.dep_check_ready = False
+                console.print(
+                    f"external repo: ENABLED — remote is empty, rebaselined "
+                    f"current = base = {_base} (treat as a first publish).  Run "
+                    f"`cache build` + `cache parse`, a full build, then `repo "
+                    f"publish ssh full`.", tui.COLOR_WARNING)
+                return
+            _pub = self._snapshot_published()
+            _cur = self._snapshot_current()
+            if _cur and _pub and apt_pkg.version_compare(_cur, _pub) != 0:
+                console.print(
+                    f"repo external enable: REFUSED — current ({_cur}) != "
+                    f"published ({_pub}); publish the pending delta first so "
+                    f"local and remote don't diverge.", tui.COLOR_ERROR)
+                return
+            utils.write_snapshot_state(self.config, external=True)
+            console.print("external repo: ENABLED.", tui.COLOR_HIGHLIGHT)
+            return
+        return self._group_help('repo external', _table, action)
 
     # ─────────────────────────────────────────────────────────────────────
     # UPD-01 — snapshot management + the refresh orchestrator
@@ -3509,9 +3606,12 @@ class BuildSession:
 
         Usage:
           snapshot                          — status overview (base/current/latest)
-          snapshot list                     — the base → current → latest timeline
+          snapshot list                     — base, current, and the snapshots
+                                              between current and latest
           snapshot workload [<ts>|latest]   — sources changed current → target
-          snapshot select base|current <ts|latest>  — set a pin (cautioned)
+          snapshot select                   — interactive picker: choose the next
+                                              current from the in-between snapshots
+          snapshot select base|current <ts|latest>  — set a pin explicitly
           snapshot advance <ts|latest>      — shorthand for `select current …`
           snapshot base [show|<ts>]         — show/set the base-archive pin
 
@@ -3521,9 +3621,10 @@ class BuildSession:
         the next build/publish ships — production-impacting, so setters
         confirm first."""
         _table = {
-            'list':     'the base → current → latest timeline',
+            'list':     'base, current + the snapshots between current and latest',
             'workload': 'sources changed current → target: snapshot workload [<ts>|latest]',
-            'select':   'set a pin (cautioned): snapshot select base|current <ts|latest>',
+            'select':   'pick the next current interactively (no args), or set a '
+                        'pin: snapshot select base|current <ts|latest>',
             'advance':  'shorthand for `select current`: snapshot advance <ts|latest>',
             'base':     'show/set the base-archive pin: snapshot base [show|<ts>]',
             'status':   'status overview (also the bare `snapshot`)',
@@ -3555,6 +3656,22 @@ class BuildSession:
         (base == current initially)."""
         _b = utils.read_snapshot_state(self.config).get('base', '')
         return _b or self._snapshot_current()
+
+    def _snapshot_published(self):
+        """The snapshot the REMOTE (or local manifest, external-off) currently
+        reflects (config/snapshot.state 'published'); defaults to base when
+        unset.  This is the floor `repo refresh` diffs FROM — so each refresh
+        rebuilds only what changed between the last publish and current."""
+        _p = utils.read_snapshot_state(self.config).get('published', '')
+        return _p or self._snapshot_base_ts()
+
+    def _external_enabled(self) -> bool:
+        """Runtime external-repo flag: config/snapshot.state 'external' overrides
+        the [Repo] ExternalEnabled default."""
+        _st = utils.read_snapshot_state(self.config)
+        if 'external' in _st:
+            return bool(_st['external'])
+        return bool(getattr(self.config, 'external_enabled', True))
 
     def _snapshot_latest(self):
         """Latest upstream timestamp, or None on query failure."""
@@ -3650,48 +3767,74 @@ class BuildSession:
         _src = ('config/snapshot.state'
                 if utils.read_snapshot_state(self.config).get('current')
                 else f'[Snapshot] Timestamp={self.config.snapshot_timestamp_config}')
+        _pub = self._snapshot_published()
         console.print("Snapshot status:")
-        console.print(f"  base    (archive floor) : {_base or '(unset)'}")
-        console.print(f"  current (build pin)     : {_cur or '(unresolved)'}")
-        console.print(f"  current source          : {_src}")
+        console.print(f"  base      (archive floor) : {_base or '(unset)'}")
+        console.print(f"  published (on the remote) : {_pub or '(unset)'}")
+        console.print(f"  current   (build pin)     : {_cur or '(unresolved)'}")
+        console.print(f"  current source            : {_src}")
         _latest = self._snapshot_latest()
-        console.print(f"  latest upstream         : {_latest or '(query failed)'}")
+        console.print(f"  latest upstream           : {_latest or '(query failed)'}")
+        if _cur and _pub and apt_pkg.version_compare(_cur, _pub) > 0:
+            console.print(
+                f"  → current is AHEAD of published — `repo refresh` to build "
+                f"+ publish the {_cur} delta")
         if _cur and _latest and _latest > _cur:
             console.print(
                 "  → latest is AHEAD of current — `snapshot workload latest` to "
                 "see the delta, `repo refresh latest` to roll forward")
 
     def _cmd_snapshot_list(self):
-        """READ-ONLY: the base → current → latest timeline."""
+        """READ-ONLY: base, current, and every snapshot BETWEEN current and
+        latest (numbered) — the ones you can advance current to."""
         if not self.config.snapshot_enabled:
             console.print("  snapshot pinning is DISABLED")
             return
         _base = self._snapshot_base_ts()
         _cur = self._snapshot_current()
         _latest = self._snapshot_latest()
-
-        def _row(_label, _ts):
-            _h = f"  ({utils.format_snapshot_timestamp(_ts)})" if _ts else ""
-            console.print(f"  [{_label:^8}] {_ts or '(n/a)'}{_h}")
-
-        console.print("Snapshot timeline (base → current → latest):")
-        _row('base', _base)
-        _row('current', _cur)
-        _row('latest', _latest)
-        if _base and _cur and _base == _cur:
-            console.print("  (base == current — nothing archivable yet)")
-        if _cur and _latest and _cur < _latest:
+        _pub = self._snapshot_published()
+        console.print("Snapshot timeline:")
+        console.print(f"  [  base   ] {_base or '(unset)'}"
+                      + (f"  ({utils.format_snapshot_timestamp(_base)})"
+                         if _base else ''))
+        console.print(f"  [published] {_pub or '(unset)'}"
+                      + (f"  ({utils.format_snapshot_timestamp(_pub)})"
+                         if _pub else ''))
+        console.print(f"  [ current ] {_cur or '(unresolved)'}"
+                      + (f"  ({utils.format_snapshot_timestamp(_cur)})"
+                         if _cur else ''))
+        if not (_cur and _latest):
+            console.print(f"  [ latest ] {_latest or '(query failed)'}")
+            return
+        _cands = utils.list_snapshots_between(self.config, _cur, _latest)
+        if not _cands:
+            console.print(f"  [ latest ] {_latest}  (current is already latest — "
+                          f"nothing to advance to)")
+            return
+        console.print(f"  available to advance to — {len(_cands)} snapshot(s) "
+                      f"between current and latest:")
+        for _i, _ts in enumerate(_cands, 1):
+            _mark = '  ← latest' if _ts == _latest else ''
             console.print(
-                "  snapshot.debian.org has many intermediate timestamps; pick an "
-                "explicit one with `snapshot select current <ts>` or use `latest`")
+                f"    {_i:3d}  {_ts}  "
+                f"({utils.format_snapshot_timestamp(_ts)}){_mark}")
+        console.print(
+            "  → `snapshot select` opens an interactive picker to set one of "
+            "these as the new current")
 
     def _cmd_snapshot_select(self, which: str = '', *rest):
-        """Set the base or current snapshot pin (durable, config/snapshot.state).
-        Cautioned — pins drive what the next build/publish ships.  base is
+        """Set a snapshot pin.  No args → interactive picker (choose the next
+        current from the snapshots between current and latest, like
+        `cache select`).  Explicit: `snapshot select base|current <ts|latest>`.
+        Durable (config/snapshot.state); cautioned; base AND current are
         forward-only."""
+        if not which:
+            return self._snapshot_select_interactive()
         _target = rest[0] if rest else ''
         if which not in ('base', 'current') or not _target:
-            console.print("Usage: snapshot select base|current <ts|latest>")
+            console.print("Usage: snapshot select [base|current <ts|latest>]  "
+                          "(no args → interactive picker)")
             return
         if _target == 'latest':
             if which == 'base':
@@ -3699,45 +3842,111 @@ class BuildSession:
                     "snapshot select base: a concrete timestamp is required "
                     "(not `latest`)", tui.COLOR_ERROR)
                 return
-            _resolved = self._snapshot_latest()
-            if not _resolved:
+            _target = self._snapshot_latest()
+            if not _target:
                 console.print("snapshot select: could not resolve `latest`",
                               tui.COLOR_ERROR)
                 return
-            _target = _resolved
-        if not re.match(r'^\d{8}T\d{6}Z$', _target):
+        self._set_snapshot_pin(which, _target)
+
+    def _set_snapshot_pin(self, which: str, target: str) -> bool:
+        """Validate (forward-only) + caution + write a base/current pin.
+        Returns True if the pin was set."""
+        if not re.match(r'^\d{8}T\d{6}Z$', target):
+            console.print(f"snapshot select: '{target}' is not a "
+                          f"YYYYMMDDTHHMMSSZ timestamp", tui.COLOR_ERROR)
+            return False
+        _old = (self._snapshot_base_ts() if which == 'base'
+                else self._snapshot_current())
+        if _old and target < _old:
+            _why = ("base is forward-only; moving it back would un-archive "
+                    "already-archivable versions"
+                    if which == 'base'
+                    else "current can only move forward")
             console.print(
-                f"snapshot select: '{_target}' is not a YYYYMMDDTHHMMSSZ "
-                f"timestamp or `latest`", tui.COLOR_ERROR)
-            return
-        _old = self._snapshot_base_ts() if which == 'base' else self._snapshot_current()
-        if which == 'base' and _old and _target < _old:
-            console.print(
-                f"snapshot select base: REFUSED — base is forward-only "
-                f"({_target} < current base {_old}).  Moving it back would "
-                f"un-archive already-archivable versions.", tui.COLOR_ERROR)
-            return
-        console.print(f"snapshot select {which}: {_old or '(unset)'} → {_target}",
+                f"snapshot select {which}: REFUSED — {_why} "
+                f"({target} < {_old}).", tui.COLOR_ERROR)
+            return False
+        console.print(f"snapshot select {which}: {_old or '(unset)'} → {target}",
                       tui.COLOR_WARNING)
         console.print(
             "  PRODUCTION IMPACT: changes what the next build/publish ships "
             "(current) or what becomes archivable (base).")
+        if which == 'current':
+            _pub = self._snapshot_published()
+            if _old and _pub and apt_pkg.version_compare(_old, _pub) > 0:
+                console.print(
+                    f"  WARNING: current ({_old}) is AHEAD of published ({_pub}) "
+                    f"— that delta is UNPUBLISHED.  Advancing to {target} leaves "
+                    f"it unpublished (bump numbers stay correct via the manifest, "
+                    f"but the intermediate versions won't be published).",
+                    tui.COLOR_WARNING)
         if Prompt(PROMPT_YESNO,
-                  f"Set {which} pin to {_target}?").get_response().lower() \
+                  f"Set {which} pin to {target}?").get_response().lower() \
                 not in ('y', 'yes'):
             console.print("  aborted — pin unchanged")
-            return
-        if which == 'base':
-            utils.write_snapshot_state(self.config, base=_target)
-        else:
-            utils.write_snapshot_state(self.config, current=_target)
+            return False
+        utils.write_snapshot_state(self.config, **{which: target})
         console.print(
-            f"snapshot select: {which} pin set to {_target} "
+            f"snapshot select: {which} pin set to {target} "
             f"(config/snapshot.state)")
         if which == 'current':
+            # The resolved pin changed → the in-memory cache is now stale; force
+            # the operator to re-resolve at the new pin before building.
+            self.flags.cache_ready = False
+            self.flags.dep_check_ready = False
             console.print(
-                "  run `cache build` + `cache parse` to resolve the dep tree at "
-                "the new pin (or `repo refresh` for the full cycle)")
+                "  cache invalidated — run `cache build` + `cache parse` to "
+                "resolve the dep tree at the new pin, then `repo refresh`")
+        return True
+
+    def _snapshot_select_interactive(self):
+        """Modal picker (like `cache select`): list the snapshots between
+        current and latest and set the chosen one as the new current.  Only a
+        snapshot ABOVE current and up to latest can be picked."""
+        if not self.config.snapshot_enabled:
+            console.print("snapshot select: snapshot pinning is disabled")
+            return
+        _cur = self._snapshot_current()
+        if not _cur:
+            console.print("snapshot select: current pin unresolved — set one "
+                          "with `snapshot select current <ts>`", tui.COLOR_ERROR)
+            return
+        _latest = self._snapshot_latest()
+        if not _latest:
+            console.print("snapshot select: could not query available snapshots",
+                          tui.COLOR_ERROR)
+            return
+        _cands = utils.list_snapshots_between(self.config, _cur, _latest)
+        if not _cands:
+            console.print(f"snapshot select: current {_cur} is already at/after "
+                          f"latest {_latest} — nothing to advance to.")
+            return
+        console.print(
+            f"Advance current ({_cur}) → one of {len(_cands)} snapshot(s) up to "
+            f"latest ({_latest}):")
+        for _i, _ts in enumerate(_cands, 1):
+            _mark = '  ← latest' if _ts == _latest else ''
+            console.print(
+                f"  {_i:3d}  {_ts}  "
+                f"({utils.format_snapshot_timestamp(_ts)}){_mark}")
+        _ans = Prompt(
+            PROMPT_INPUT,
+            f"Pick a number (1-{len(_cands)}) to set as the new current, or "
+            f"Enter to cancel:").get_response().strip()
+        if not _ans:
+            console.print("  cancelled")
+            return
+        try:
+            _idx = int(_ans)
+        except ValueError:
+            console.print(f"  '{_ans}' is not a number", tui.COLOR_ERROR)
+            return
+        if not (1 <= _idx <= len(_cands)):
+            console.print(f"  {_idx} out of range (1-{len(_cands)})",
+                          tui.COLOR_ERROR)
+            return
+        self._set_snapshot_pin('current', _cands[_idx - 1])
 
     def _cmd_snapshot_base(self, *args):
         """Show or set the base-archive pin (forward-only; config/snapshot.state).
@@ -3805,131 +4014,57 @@ class BuildSession:
                 console.print(f"    {_f}: {_why}")
 
     def cmd_repo_refresh(self, *args):
-        """UPD-01 §5: one update cycle — pull the remote ledger, (advance the
-        snapshot), rebuild only the changed sources (stamped +asg<R>u<N>),
-        merge-index against the remote, publish ADDITIVELY, then prune local
-        back to single-snapshot.
+        """UPD-01: thin convenience for the day-2 update cycle — runs
+        `source sync` → `source build all` → `repo publish ssh full`.
 
-        Usage: repo refresh [<ts>|latest]   (omit target → use the current pin)
-
-        Sequences existing idempotent sub-commands; stops on the first failure.
-        Safe to re-run: the publish is additive and the prune runs LAST, so a
-        partial cycle never deletes a version that isn't on the remote yet."""
-        if not self.flags.build_container_ready:
-            console.print(
-                "repo refresh: needs `cache build` + `cache parse` + "
-                "`container init` first.", tui.COLOR_ERROR)
-            return
-
-        # 1. remote ledger — source of truth for N + change-detection
-        console.print("repo refresh [1/8]: fetching remote ledger…")
-        _ledger = repo_audit.fetch_remote_ledger(self.config)
-        if _ledger is None:
-            console.print(
-                "repo refresh: remote ledger unreachable — aborting (cannot "
-                "derive +asg N safely without it).", tui.COLOR_ERROR)
-            return
-
-        # 2-3. advance snapshot + re-resolve (only if a target was given)
+        Pick the destination first with `snapshot select` (or `snapshot select
+        current <ts>`), then `cache build` + `cache parse`, then `repo refresh`.
+        Each step is update-aware AND runnable on its own — refresh just chains
+        them: `source build all` auto-detects the published→current delta and
+        stamps +asg<R>u<N>; `repo publish ssh full` merges with the prior
+        manifest, rsyncs additively (when external is enabled), prunes, and
+        records published = current.  No target — the destination is the
+        current pin."""
         if args:
-            _tgt = args[0]
-            if _tgt == 'latest':
-                _tgt = self._snapshot_latest()
-                if not _tgt:
-                    console.print("repo refresh: could not resolve `latest`",
-                                  tui.COLOR_ERROR)
-                    return
-            if not re.match(r'^\d{8}T\d{6}Z$', _tgt):
-                console.print(
-                    f"repo refresh: '{_tgt}' is not a YYYYMMDDTHHMMSSZ "
-                    f"timestamp or `latest`", tui.COLOR_ERROR)
-                return
-            _resp = Prompt(
-                PROMPT_YESNO,
-                f"Advance current snapshot to {_tgt} and rebuild changed sources?",
-            ).get_response()
-            if _resp.lower() not in ('y', 'yes'):
-                return
-            console.print(f"repo refresh [2/8]: advancing current → {_tgt}")
-            # Durable current pin (config/snapshot.state) — own YESNO above, so
-            # set it directly rather than via the (separately-prompting) select.
-            utils.write_snapshot_state(self.config, current=_tgt)
-            console.print("repo refresh [3/8]: cache build + parse at new pin…")
-            self.cmd_cache('build')
-            self.cmd_cache('parse')
-        else:
-            console.print("repo refresh [2-3/8]: using current pin (no advance)")
+            console.print(
+                "repo refresh takes no target — set the destination with "
+                "`snapshot select current <ts>`, then `cache build` + `cache "
+                "parse`, then `repo refresh`.", tui.COLOR_WARNING)
+            return
         if not self.flags.dep_check_ready:
-            console.print("repo refresh: dep tree not parsed — run `cache parse`",
-                          tui.COLOR_ERROR)
-            return
-
-        # 4. workload (the changed-set closure)
-        _workload = sorted(self._workload_since_published(_ledger))
-        console.print(
-            f"repo refresh [4/8]: {len(_workload)} source(s) advanced vs published")
-        if not _workload:
             console.print(
-                "repo refresh: nothing to rebuild — already up to date.")
-            return
-
-        # 5. Guard A preflight (abort BEFORE building on a bad invariant)
-        _off = self._preflight_stamp_invariant(_workload)
-        if _off:
-            console.print(
-                f"repo refresh [5/8]: Guard A preflight FAILED "
-                f"({len(_off)} issue(s)) — aborting before build:",
-                tui.COLOR_ERROR)
-            for _f, _why in _off[:20]:
-                console.print(f"    {_f}: {_why}")
-            return
-        console.print("repo refresh [5/8]: Guard A preflight OK")
-
-        # 6. incremental build — load the ledger on the container so DELTAS
-        #    get stamped +asg<R>u<N> with an N derived from it.
-        console.print(f"repo refresh [6/8]: building {len(_workload)} source(s)…")
-        if self.container is not None:
-            self.container.asg_ledger = _ledger
-        try:
-            self.cmd_source_build('force', *_workload)
-        finally:
-            if self.container is not None:
-                self.container.asg_ledger = None
-
-        # 7. Guard C(i): convergence — Guard B already hard-fails per source
-        _counts = getattr(self, 'last_source_build_counts', None) or {}
-        if _counts.get('failed', 0) > 0:
-            console.print(
-                f"repo refresh [7/8]: {_counts['failed']} build/convergence "
-                f"failure(s) — aborting before publish (fix, then re-run).",
+                "repo refresh: run `cache build` + `cache parse` first — at the "
+                "selected current pin (`snapshot select` invalidates the cache).",
                 tui.COLOR_ERROR)
             return
-        console.print("repo refresh [7/8]: all builds converged")
-
-        # 8. merge-index (multi-version, signed locally) → additive publish →
-        #    Guard C(ii) publish-before-prune.
-        console.print("repo refresh [8/8]: merge-index + additive publish…")
-        if not self._refresh_merge_index():
-            console.print("repo refresh: merge-index failed — NOT publishing.",
-                          tui.COLOR_ERROR)
+        _cur = self._snapshot_current()
+        _pub = self._snapshot_published()
+        if _cur and _pub and apt_pkg.version_compare(_cur, _pub) <= 0:
+            console.print(
+                f"repo refresh: current ({_cur}) is not ahead of published "
+                f"({_pub}) — nothing to refresh.  Pick a newer destination with "
+                f"`snapshot select`.", tui.COLOR_INFO)
             return
-        self.cmd_repo_publish('ssh', 'full')
         console.print(
-            "repo refresh: publish-before-prune — pruning local to "
-            "single-snapshot…")
-        self.cmd_package_cleanup('force')
-        console.print("repo refresh: done.", tui.COLOR_HIGHLIGHT)
+            "repo refresh: source sync → source build all → repo publish ssh "
+            "full", tui.COLOR_HIGHLIGHT)
+        self.cmd_source_sync()
+        self.cmd_source_build('all')          # auto-detects update mode + stamps
+        self.cmd_repo_publish('ssh', 'full')  # merge + publish + prune + record
 
     def _refresh_merge_index(self) -> bool:
         """Build the suite index as the UNION of the local single-snapshot pool
-        and the remote ledger (apt_repo.merge_remote_index), signed locally.
+        and the PRIOR PUBLISHED manifest (apt_repo.merge_remote_index), signed
+        locally, then refresh the local signed manifest to the merged result.
+        Works offline (the manifest, not the remote, is the merge base).
         Returns True on success."""
         import signing
         import apt_repo
         _codename = self.config.build_codename.strip('"').strip("'")
         _version = self.config.build_version.strip('"').strip("'")
-        _remote_pkgs = os.path.join(
-            self.config.dir_cache, 'published-ledger', 'Packages')
+        # The prior published state = the local signed manifest (empty on the
+        # first publish → merge yields just the local pool).
+        _prior = repo_audit.local_manifest_path(self.config)
         _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
         _r = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
                             capture_output=True, text=True)
@@ -3937,14 +4072,25 @@ class BuildSession:
             console.print("ERROR: incorrect sudo password")
             return False
         try:
-            return apt_repo.merge_remote_index(
-                repo_root=self.config.dir_repo,
-                suite=_codename, codename=_codename, arch=self.config.arch,
-                version=_version, remote_packages_path=_remote_pkgs,
-                password=_password,
-                signing_homedir=signing.signing_home(self.config))
+            if not apt_repo.merge_remote_index(
+                    repo_root=self.config.dir_repo,
+                    suite=_codename, codename=_codename, arch=self.config.arch,
+                    version=_version, remote_packages_path=_prior,
+                    password=_password,
+                    signing_homedir=signing.signing_home(self.config)):
+                return False
         finally:
             _password = '*' * len(_password)  # noqa: F841
+        # Refresh the local signed manifest = the merged multi-version index.
+        _merged = os.path.join(self.config.dir_repo_main, 'Packages')
+        try:
+            with open(_merged) as _fh:
+                repo_audit.write_published_manifest(self.config, _fh.read())
+        except OSError as e:
+            console.print(f"repo: could not refresh manifest from {_merged}: {e}",
+                          tui.COLOR_ERROR)
+            return False
+        return True
 
     def cmd_repo_repair(self, action: str = '', *args):
         """Umbrella for repo-state fixups.  Each sub-action mutates
@@ -5579,6 +5725,18 @@ class BuildSession:
                 for _n in _cleared:
                     console.print(f"  {_n}")
 
+    @staticmethod
+    def _is_fork_source(src) -> bool:
+        """True if `src` came from our LOCAL fork mirror (cache stamps it with
+        `_mirror.id == 'fork'`; see scripts/fork_mirror.py).  Forks are not part
+        of any upstream snapshot's Sources index, so the snapshot-to-snapshot
+        change-detection must skip them — they only change when WE edit a fork
+        (a rebase + `package reload`), never when the snapshot advances.  Without
+        this they'd hit the "absent from upstream Sources" branch and be flagged
+        as changed on every update build, then rebuild to an identical filename
+        and get dropped as a dup by `_segregate_built_artifacts`."""
+        return getattr(getattr(src, '_mirror', None), 'id', '') == 'fork'
+
     def _workload_since_published(self, ledger: dict) -> 'set[str]':
         """Selected source names whose pristine BASE advanced beyond what the
         remote (the `ledger`) has published — the genuine rebuild workload for
@@ -5613,11 +5771,18 @@ class BuildSession:
         return _out
 
     def _workload_current_to_target(self, target_ts: str):
-        """Sources whose upstream version at `target_ts` is NEWER than the
-        current pin's selected version — what you'd rebuild advancing
-        current → target (UPD-01 `snapshot workload`).  Metadata-only (fetches
-        the target Sources index; no build).  Returns (sorted_names, None) on
-        success or (None, error_message) on fetch failure."""
+        """Sources whose upstream SOURCE version at `target_ts` is NEWER than
+        the current pin's selected source version — what you'd rebuild
+        advancing current → target (UPD-01 `snapshot workload` / `repo refresh`).
+
+        Detection is by FULL source version (epoch-stripped, NMU-INTACT), NOT
+        the pristine base: the Sources index IS the source-change ledger, so a
+        security/point-release upload (e.g. 3.0.15-1 → 3.0.15-1+deb12u2) — a
+        REAL source change — is caught, while a binNMU (+bN, binary-only, never
+        present in Sources) is correctly ignored.  (We still STRIP +debNuN and
+        publish as +asg<R>u<N>; that's the version we ship, not the change
+        signal.)  Metadata-only (fetches the target Sources index; no build).
+        Returns (sorted_names, None) on success or (None, error) on fetch fail."""
         _target = repo_audit.fetch_source_versions_at(self.config, target_ts)
         if _target is None:
             return None, (f"could not fetch the target snapshot ({target_ts}) "
@@ -5628,14 +5793,86 @@ class BuildSession:
                 _srcs.setdefault(_n, _s)
         _out: 'list[str]' = []
         for _name, _src in _srcs.items():
+            if self._is_fork_source(_src):
+                continue   # forks are LOCAL, not driven by the upstream snapshot
             _tgt = _target.get(_name)
             if _tgt is None:
                 continue
-            _cur_b = utils.pristine_base(utils.version_no_epoch(str(_src.version)))
-            _tgt_b = utils.pristine_base(utils.version_no_epoch(_tgt))
-            if apt_pkg.version_compare(_tgt_b, _cur_b) > 0:
+            _cur_v = utils.version_no_epoch(str(_src.version))
+            _tgt_v = utils.version_no_epoch(_tgt)
+            if apt_pkg.version_compare(_tgt_v, _cur_v) > 0:
                 _out.append(_name)
         return sorted(_out), None
+
+    def _workload_since_snapshot(self, from_ts: str):
+        """Sources whose CURRENT-pin source version is NEWER than at `from_ts`
+        — i.e. what changed between the published snapshot and current.  This
+        is the `repo refresh` rebuild set (floor = published, destination =
+        current).  Full source-version compare (catches +debNuN; ignores
+        binNMU).  A source absent from `from_ts` (new since) also counts.
+        Returns (sorted_names, None) or (None, error)."""
+        _from = repo_audit.fetch_source_versions_at(self.config, from_ts)
+        if _from is None:
+            return None, (f"could not fetch the published snapshot ({from_ts}) "
+                          f"Sources index — check network / the timestamp")
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _n, _s in self.udeb_dep_tree.selected_srcs.items():
+                _srcs.setdefault(_n, _s)
+        _out: 'list[str]' = []
+        for _name, _src in _srcs.items():
+            if self._is_fork_source(_src):
+                continue   # forks are LOCAL, not driven by the upstream snapshot
+            _fv = _from.get(_name)
+            _cur_v = utils.version_no_epoch(str(_src.version))
+            if _fv is None or apt_pkg.version_compare(
+                    _cur_v, utils.version_no_epoch(_fv)) > 0:
+                _out.append(_name)
+        return sorted(_out), None
+
+    def _update_build_pending(self) -> bool:
+        """True when `source build` should run in UPDATE mode: a published base
+        exists (local manifest non-empty) and current is ahead of published."""
+        if not self.flags.dep_check_ready:
+            return False
+        if not repo_audit.published_ledger(self.config):
+            return False
+        _pub = self._snapshot_published()
+        _cur = self._snapshot_current()
+        return bool(_cur and _pub and apt_pkg.version_compare(_cur, _pub) > 0)
+
+    def _do_update_build(self):
+        """Rebuild the published→current source delta, stamped +asg<R>u<N>
+        (the +asg N derives from the local published-manifest ledger).  Invoked
+        automatically by `source build` in update mode."""
+        _published = self._snapshot_published()
+        _current = self._snapshot_current()
+        console.print(
+            f"source build: UPDATE mode — published {_published} → current "
+            f"{_current}; rebuilding only the changed source delta, "
+            f"+asg-stamped (subset/all ignored in update mode).",
+            tui.COLOR_HIGHLIGHT)
+        _workload, _err = self._workload_since_snapshot(_published)
+        if _err:
+            console.print(f"source build (update): {_err}", tui.COLOR_ERROR)
+            return
+        if not _workload:
+            console.print("source build: no source changed published → current "
+                          "— nothing to build.")
+            return
+        console.print(f"  {len(_workload)} changed source(s): "
+                      f"{', '.join(_workload)}")
+        _ledger = repo_audit.published_ledger(self.config)
+        if self.container is not None:
+            self.container.asg_ledger = _ledger
+        try:
+            # Named + force → re-enters the normal build path (no update
+            # re-detection, since _names is now non-empty); the loaded ledger
+            # makes the deltas stamp +asg<R>u<N>.
+            self.cmd_source_build('force', *_workload)
+        finally:
+            if self.container is not None:
+                self.container.asg_ledger = None
 
     def _preflight_stamp_invariant(self, names) -> 'list[tuple[str, str]]':
         """Guard A (preemptive, zero builds): for each source's predicted
@@ -6233,6 +6470,16 @@ class BuildSession:
         if _err:
             console.print(_err)
             return
+
+        # UPD-01 (gotcha G): a subset/all/bare invocation AUTO-DETECTS update
+        # mode — when a published base exists and current is ahead of it,
+        # rebuild the published→current SOURCE delta (stamped +asg<R>u<N>)
+        # instead of a plain subset build.  Explicit package names or a
+        # [profile] override opt out (manual builds).  The operator runs the
+        # same `source build [all|live|installer]`; we tell them which we ran.
+        if (not _names and _profile_override is None
+                and self._update_build_pending()):
+            return self._do_update_build()
 
         # Profile override implies force, because the .result cache from a
         # prior build under different profiles would otherwise short-circuit

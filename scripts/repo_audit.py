@@ -530,6 +530,90 @@ def parse_packages_to_ledger(packages_path: str) -> 'dict[str, list[str]]':
     return _ledger
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Local signed published-manifest (UPD-01) — a Packages-format mirror of what's
+# published, the AUTHORITY for +asg bump numbers and offline merge-index.  When
+# external is enabled it mirrors the remote; when disabled it's the only record.
+# Durable (config/), gitignored, signed with the project key for integrity.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def local_manifest_path(config) -> str:
+    return os.path.join(config.dir_config, 'published.manifest')
+
+
+def write_published_manifest(config, packages_text: str) -> None:
+    """Write the published-manifest + a detached GPG signature (best-effort
+    with the project signing key; unsigned + warned if no key)."""
+    _path = local_manifest_path(config)
+    try:
+        os.makedirs(os.path.dirname(_path), exist_ok=True)
+        with open(_path, 'w') as _fh:
+            _fh.write(packages_text)
+    except OSError as e:
+        logger.error(f"write_published_manifest: {e}")
+        return
+    try:
+        import signing
+        _home = signing.signing_home(config)
+        if _home and os.path.isdir(_home):
+            _sig = _path + '.sig'
+            if os.path.exists(_sig):
+                os.remove(_sig)
+            subprocess.run(
+                ['gpg', '--homedir', _home, '--batch', '--yes',
+                 '--detach-sign', '--armor', '-o', _sig, _path],
+                check=True, capture_output=True)
+    except Exception as e:
+        logger.warning(f"write_published_manifest: signing skipped ({e})")
+
+
+def read_published_manifest(config) -> str:
+    """Return the manifest text (verifying its signature when present); '' if
+    absent or if a present signature FAILS to verify (refuse a tampered file)."""
+    _path = local_manifest_path(config)
+    if not os.path.isfile(_path):
+        return ''
+    _sig = _path + '.sig'
+    if os.path.exists(_sig):
+        try:
+            import signing
+            _home = signing.signing_home(config)
+            _r = subprocess.run(
+                ['gpg', '--homedir', _home, '--batch', '--verify', _sig, _path],
+                capture_output=True)
+            if _r.returncode != 0:
+                logger.error(
+                    f"read_published_manifest: SIGNATURE VERIFY FAILED for "
+                    f"{_path} — refusing to use it")
+                return ''
+        except Exception as e:
+            logger.warning(f"read_published_manifest: verify skipped ({e})")
+    try:
+        with open(_path) as _fh:
+            return _fh.read()
+    except OSError as e:
+        logger.error(f"read_published_manifest: {e}")
+        return ''
+
+
+def published_ledger(config) -> 'dict[str, list[str]]':
+    """The authoritative {package: [version,...]} ledger for +asg bump
+    derivation + merge-index — from the LOCAL signed manifest (works offline).
+    Empty dict when nothing has been published yet."""
+    _text = read_published_manifest(config)
+    if not _text.strip():
+        return {}
+    import tempfile
+    with tempfile.NamedTemporaryFile('w', suffix='.Packages',
+                                     delete=False) as _fh:
+        _fh.write(_text)
+        _tp = _fh.name
+    try:
+        return parse_packages_to_ledger(_tp)
+    finally:
+        os.remove(_tp)
+
+
 def fetch_remote_ledger(config) -> 'Optional[dict]':
     """Download the published Packages index from the remote (the archive of
     record) and parse it into a {package: [version, ...]} ledger.
@@ -640,6 +724,15 @@ def published_base_versions(ledger: 'dict[str, list[str]]') -> 'dict[str, str]':
         if _hi is not None:
             _out[_pkg] = _hi
     return _out
+
+
+def manifest_vs_remote_discrepancies(local_ledger: dict, remote_ledger: dict):
+    """Compare two {package: [version,...]} ledgers (local signed manifest vs
+    remote Packages); return (only_local, only_remote) as sets of 'pkg=version'
+    — the integrity reconciliation behind `repo audit external ssh`."""
+    _l = {f"{_p}={_v}" for _p, _vs in local_ledger.items() for _v in _vs}
+    _r = {f"{_p}={_v}" for _p, _vs in remote_ledger.items() for _v in _vs}
+    return (_l - _r, _r - _l)
 
 
 def group_by_pristine_base(versions) -> 'dict[str, list[str]]':

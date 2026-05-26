@@ -511,6 +511,106 @@ def merge_remote_index(
     return True
 
 
+def _remote_has_debs(ssh_cmd: 'list[str]', userhost: str,
+                     remote_root: str, rel: str) -> bool:
+    """True if the remote subdir `<remote_root>/<rel>` holds any .deb/.udeb."""
+    _shell = (f"cd {remote_root} && ls {rel}/*.deb {rel}/*.udeb "
+              f"2>/dev/null | head -1")
+    _r = subprocess.run(ssh_cmd + [userhost, _shell],
+                        capture_output=True, text=True)
+    return _r.returncode == 0 and bool(_r.stdout.strip())
+
+
+def _remote_scan_packages(ssh_cmd: 'list[str]', userhost: str,
+                          remote_root: str, rel: str,
+                          udeb: bool) -> 'Optional[str]':
+    """Run dpkg-scanpackages ON THE REMOTE over `<remote_root>/<rel>` and
+    return the Packages text (Filenames relative to remote_root).  Needs
+    dpkg-dev on the VM.  None on failure."""
+    _scan = 'dpkg-scanpackages -m' + (' -t udeb' if udeb else '')
+    _shell = f"cd {remote_root} && {_scan} {rel} /dev/null 2>/dev/null"
+    _r = subprocess.run(ssh_cmd + [userhost, _shell],
+                        capture_output=True, text=True)
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: remote dpkg-scanpackages {rel}: {_r.stderr.strip()[:200]} "
+            f"(is dpkg-dev installed on the VM?)")
+        logger.error(f"_remote_scan_packages {rel}: rc={_r.returncode}")
+        return None
+    return _r.stdout
+
+
+def remote_reindex_and_sign(
+    staging: str, ssh_cmd: 'list[str]', userhost: str, remote_root: str,
+    suites_spec: 'dict[str, list[str]]', codename_for_suite: dict,
+    primary_suite: str, arch: str, version: str, password: str,
+    signing_homedir: 'Optional[str]' = None,
+    description_for_suite: 'Optional[dict]' = None,
+) -> 'Optional[str]':
+    """Regenerate the apt index from what's ACTUALLY on the remote (UPD-02):
+    `dpkg-scanpackages` runs ON THE VM (via ssh) over each remote pool subdir;
+    the metadata is assembled in a LOCAL `staging` mirror and signed LOCALLY
+    (key never leaves the box).  The caller then rsyncs `staging/dists` up.
+
+    Only the SCAN is remote (needs dpkg-dev on the VM); compress / per-subdir
+    Release / top Release (apt-ftparchive over the local staging tree, which
+    hashes the Packages files, not the .debs) / signing all stay local.
+
+    Returns the PRIMARY suite's main/binary-<arch> Packages text (for the local
+    manifest), or None on failure.  Subdirs with no .debs on the remote are
+    skipped (e.g. doc/tests/debug/udeb after a minimal publish)."""
+    if description_for_suite is None:
+        description_for_suite = {}
+    _main_packages = ''
+    for _suite, _components in suites_spec.items():
+        _codename = codename_for_suite.get(_suite, _suite)
+        _desc = description_for_suite.get(_suite, f'Athena repo — {_suite}')
+        _populated: 'list[str]' = []
+        for _comp in _components:
+            for _udeb, _sub in (
+                    (False, f'{_comp}/binary-{arch}'),
+                    (True,  f'{_comp}/debian-installer/binary-{arch}')):
+                _rel = f'dists/{_suite}/{_sub}'
+                if not _remote_has_debs(ssh_cmd, userhost, remote_root, _rel):
+                    continue
+                _text = _remote_scan_packages(
+                    ssh_cmd, userhost, remote_root, _rel, udeb=_udeb)
+                if _text is None:
+                    return None
+                _abs = os.path.join(staging, _rel)
+                os.makedirs(_abs, exist_ok=True)
+                _out = os.path.join(_abs, 'Packages')
+                with open(_out, 'w') as _fh:
+                    _fh.write(_text)
+                if not _compress_index(_out, password):
+                    return None
+                if not _write_subdir_release(
+                        _abs, _suite, _codename, _comp, arch, password):
+                    return None
+                if not _udeb and _comp not in _populated:
+                    _populated.append(_comp)
+                if (not _udeb and _comp == 'main'
+                        and _suite == primary_suite):
+                    _main_packages = _text
+        if not _populated:
+            continue
+        _top = os.path.join(staging, 'dists', _suite, 'Release')
+        os.makedirs(os.path.dirname(_top), exist_ok=True)
+        if not _generate_top_release(
+                staging, _suite, _codename, version, _top, password,
+                components=_populated, description=_desc):
+            return None
+        if signing_homedir is not None:
+            if not sign_release_files(staging, _suite, signing_homedir,
+                                      password):
+                return None
+        tui.console.print(
+            f"  → dists/{_suite}/ re-indexed from remote + signed "
+            f"(components: {', '.join(_populated)})", tui.COLOR_HIGHLIGHT)
+    return _main_packages
+
+
+
 def _scan_packages_to(
     staging: str, pool_subdir: str, output_path: str,
     password: str, udeb: bool, allow_empty: bool = False,
