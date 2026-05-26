@@ -29,6 +29,11 @@ __pycache__/
 config/*.key
 *.pem
 
+# Per-checkout snapshot pins (base + current) — operational state set via
+# `snapshot select`, not shared.  A fresh checkout has none and is prompted
+# to select both on the first `cache build` (UPD-01).
+config/snapshot.state
+
 # IDE
 .idea/
 .vscode/

@@ -65,6 +65,7 @@ def build_installer_iso(
     suite: str = 'athena',
     codename: str = 'athena',
     version: str = '0.1',
+    snapshot: str = '',
     base_include_pkgs: Optional[list] = None,
     deb_whitelist=None,
     signing_homedir: Optional[str] = None,
@@ -122,7 +123,8 @@ def build_installer_iso(
     if not _stage_grub_cfg(_staging, installer_dir):
         return False
 
-    if not _stage_disk_info(_staging, installer_dir, codename, version):
+    if not _stage_disk_info(_staging, installer_dir, codename, version,
+                            snapshot):
         return False
 
     # FORK-01 Step 5b (2026-05-17): the synthetic athena-tasksel-data
@@ -489,9 +491,13 @@ def _stage_grub_cfg(staging: str, installer_dir: str) -> bool:
 
 def _stage_disk_info(
     staging: str, installer_dir: str, codename: str, version: str,
+    snapshot: str = '',
 ) -> bool:
     """Copy installer/disk/* → staging/.disk/* (excluding *.md READMEs)
-    with `${codename}` and `${version}` placeholder substitution.
+    with `${codename}`, `${version}` and `${snapshot}` placeholder
+    substitution, and (when `snapshot` is set) write a `.disk/snapshot`
+    marker so the media records which upstream snapshot it was built from
+    (UPD-01 — distinguishes a base-snapshot disc from a stepped one).
 
     These files are d-i's "is this an installer disc?" marker convention:
     cdrom-detect parses the quoted codename out of /cdrom/.disk/info and
@@ -526,7 +532,18 @@ def _stage_disk_info(
         tui.console.print(f"ERROR: mkdir {_dst_dir}: {e}")
         logger.error(f"_stage_disk_info mkdir: {e}")
         return False
-    _vars = {'codename': codename, 'version': version}
+    _vars = {'codename': codename, 'version': version, 'snapshot': snapshot}
+    # Record the snapshot on the media as its own marker (doesn't touch the
+    # cdrom-detect-parsed .disk/info format).
+    if snapshot:
+        try:
+            with open(os.path.join(_dst_dir, 'snapshot'), 'w',
+                      encoding='utf-8') as fh:
+                fh.write(snapshot + '\n')
+        except OSError as e:
+            tui.console.print(f"ERROR: write .disk/snapshot: {e}")
+            logger.error(f"_stage_disk_info snapshot marker: {e}")
+            return False
     _shipped = 0
     for _entry in sorted(os.listdir(_src_dir)):
         if _entry.endswith('.md'):

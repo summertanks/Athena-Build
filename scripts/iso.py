@@ -15,6 +15,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 import tui
+import utils
 
 if TYPE_CHECKING:
     from utils import BuildConfig
@@ -250,7 +251,11 @@ class _IsoMixin:
         # container so the ISO embeds bookworm's GRUB toolchain instead
         # of the host's.  Eliminates the "host runs trixie → ISO
         # bootloader self-reports 2.12-9+deb13u1" leakage path.
-        _iso_name   = f"athena-{_version}-amd64.iso"
+        # Tag the filename with the snapshot pin so ISOs built from different
+        # snapshots are distinguishable (UPD-01).  Empty when snapshots off.
+        _snap = utils.snapshot_iso_tag(cfg)
+        _iso_name = (f"athena-{_version}-{_snap}-amd64.iso" if _snap
+                     else f"athena-{_version}-amd64.iso")
         _iso_path   = os.path.join(self._dir_image, _iso_name)
 
         if container is None:

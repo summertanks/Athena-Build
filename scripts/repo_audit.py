@@ -498,6 +498,160 @@ def iter_packages_all_versions(config, subdir: str = 'main',
         return
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 — remote ledger (the published archive of record)
+#
+# Local repo/ is single-snapshot; the REMOTE accumulates every version ever
+# published (base_snapshot..current_snapshot).  These helpers read the remote
+# Packages index into a {package: [version, ...]} "ledger" that drives:
+#   - N-derivation for +asg<R>u<N> (utils.highest_asg_update)
+#   - change-detection (published_base_versions)
+#   - the multi-version remote audit + archivable-below-base reporting
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_packages_to_ledger(packages_path: str) -> 'dict[str, list[str]]':
+    """Parse a dpkg Packages file into {package: [version, ...]}.
+
+    Versions are stored epoch-stripped (utils.version_no_epoch) to match the
+    filename-derived bases the build-side N-derivation uses.  Multi-version
+    aware — every stanza contributes a version."""
+    _ledger: 'dict[str, list[str]]' = {}
+    try:
+        with open(packages_path) as _fh:
+            _tf = apt_pkg.TagFile(_fh)
+            for _sec in _tf:
+                _name = (_sec.get('Package') or '').strip()
+                _ver = (_sec.get('Version') or '').strip()
+                if _name and _ver:
+                    _ledger.setdefault(_name, []).append(
+                        utils.version_no_epoch(_ver))
+    except OSError as e:
+        logger.error(f"parse_packages_to_ledger: {packages_path}: {e}")
+    return _ledger
+
+
+def fetch_remote_ledger(config) -> 'Optional[dict]':
+    """Download the published Packages index from the remote (the archive of
+    record) and parse it into a {package: [version, ...]} ledger.
+
+    Source of truth for +asg<R>u<N> N-derivation and change-detection — local
+    repo/ is single-snapshot and cannot supply the published history.
+
+    Returns the ledger dict on success (possibly empty if the remote has no
+    Packages yet), or None on failure (no AptSourceURL, unreachable, decode
+    error) — callers (repo refresh) MUST abort on None rather than stamp with
+    a stale/empty ledger (which would mint colliding N).  Caches the fetched
+    Packages under cache/published-ledger/ for reuse / offline inspection."""
+    _url_base = (getattr(config, 'apt_source_url', '') or '').rstrip('/')
+    if not _url_base:
+        logger.warning("fetch_remote_ledger: [Repo] AptSourceURL unset")
+        return None
+    _codename = str(config.build_codename).strip('"').strip("'")
+    _pkgs_url = (f"{_url_base}/dists/{_codename}/main/binary-"
+                 f"{config.arch}/Packages.gz")
+    _cache_dir = os.path.join(config.dir_cache, 'published-ledger')
+    try:
+        os.makedirs(_cache_dir, exist_ok=True)
+    except OSError:
+        pass
+    _local = os.path.join(_cache_dir, 'Packages')
+    try:
+        import requests
+        import gzip
+        _resp = requests.get(_pkgs_url, timeout=30)
+        if _resp.status_code == 404:
+            # Remote reachable but no Packages yet (fresh archive) → empty.
+            logger.info(f"fetch_remote_ledger: {_pkgs_url} 404 — empty ledger")
+            with open(_local, 'w') as _fh:
+                _fh.write('')
+            return {}
+        _resp.raise_for_status()
+        _text = gzip.decompress(_resp.content).decode('utf-8', errors='replace')
+        with open(_local, 'w') as _fh:
+            _fh.write(_text)
+    except Exception as e:
+        logger.error(
+            f"fetch_remote_ledger({_pkgs_url}): {type(e).__name__}: {e}")
+        return None
+    return parse_packages_to_ledger(_local)
+
+
+def fetch_source_versions_at(config, target_ts: str) -> 'Optional[dict]':
+    """Download each mirror's Sources index at `target_ts` and return
+    {source_name: highest_version} — the upstream source versions AT that
+    snapshot.  Metadata-only (no build); powers `snapshot workload`'s
+    current→target diff.  Returns None on any fetch failure (caller aborts)."""
+    import gzip
+    import lzma
+    import tempfile
+    import requests
+    _out: 'dict[str, str]' = {}
+    for _m in config.mirrors:
+        _snap = _m.with_snapshot(target_ts, baseurl=config.snapshot_baseurl)
+        _base = _snap.dist_url.rstrip('/')
+        _got = False
+        for _ext, _decomp in (('.xz', lzma.decompress), ('.gz', gzip.decompress)):
+            _url = f"{_base}/{_snap.sources_path}{_ext}"
+            try:
+                _r = requests.get(_url, timeout=60)
+                if _r.status_code != 200:
+                    continue
+                _text = _decomp(_r.content).decode('utf-8', errors='replace')
+            except Exception as e:
+                logger.warning(f"fetch_source_versions_at {_url}: {e}")
+                continue
+            with tempfile.NamedTemporaryFile(
+                    'w', suffix='.Sources', delete=False) as _fh:
+                _fh.write(_text)
+                _tp = _fh.name
+            try:
+                with open(_tp) as _rf:
+                    for _sec in apt_pkg.TagFile(_rf):
+                        _name = (_sec.get('Package') or '').strip()
+                        _ver = (_sec.get('Version') or '').strip()
+                        if not _name or not _ver:
+                            continue
+                        _prev = _out.get(_name)
+                        if _prev is None or apt_pkg.version_compare(_ver, _prev) > 0:
+                            _out[_name] = _ver
+            finally:
+                os.remove(_tp)
+            _got = True
+            break
+        if not _got:
+            logger.error(
+                f"fetch_source_versions_at: no Sources for mirror {_m.id} "
+                f"at {target_ts}")
+            return None
+    return _out
+
+
+def published_base_versions(ledger: 'dict[str, list[str]]') -> 'dict[str, str]':
+    """For each package in the ledger, the highest pristine BASE version
+    currently published.  Drives change-detection: a source whose new base
+    compares greater than this needs a rebuild."""
+    _out: 'dict[str, str]' = {}
+    for _pkg, _vers in ledger.items():
+        _hi = None
+        for _v in _vers:
+            _b = utils.pristine_base(_v)
+            if _hi is None or apt_pkg.version_compare(_b, _hi) > 0:
+                _hi = _b
+        if _hi is not None:
+            _out[_pkg] = _hi
+    return _out
+
+
+def group_by_pristine_base(versions) -> 'dict[str, list[str]]':
+    """Group an iterable of version strings by their pristine base — used for
+    'N versions retained per package' reports and archivable-below-base
+    listing."""
+    _out: 'dict[str, list[str]]' = {}
+    for _v in versions:
+        _out.setdefault(utils.pristine_base(_v), []).append(_v)
+    return _out
+
+
 def _build_provides_index(packages: dict) -> dict:
     """{virtual_name: [(provider_pkg, opt_version)]} from Provides
     fields.  Uses python-debian's PkgRelation parser — handles the

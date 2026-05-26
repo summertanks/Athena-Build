@@ -377,6 +377,140 @@ def generate_repo_indexes(
     return True
 
 
+def merge_packages_indexes(remote_text: str, local_text: str) -> str:
+    """Union two Packages indexes into ONE multi-version index, deduped by
+    (Package, Version).
+
+    Local stanzas (this snapshot's freshly built pool) take precedence on a
+    (Package, Version) collision; every remote-only version is PRESERVED
+    (append-only — clients keep their rollback targets).  This is the UPD-01
+    §5 step-8 core: the remote stays multi-version even though local repo/
+    holds one version per package and references .debs the remote also has.
+    Stanzas are re-emitted via apt_pkg, which is sufficient for a valid index
+    (apt re-parses it; the signed Release hashes whatever bytes we write)."""
+    import apt_pkg
+    import tempfile as _tf
+    _seen: 'set[tuple[str, str]]' = set()
+    _stanzas: 'list[str]' = []
+    for _text in (local_text, remote_text):       # local first → local wins
+        if not _text or not _text.strip():
+            continue
+        with _tf.NamedTemporaryFile(
+                'w', suffix='.Packages', delete=False) as _fh:
+            _fh.write(_text if _text.endswith('\n') else _text + '\n')
+            _path = _fh.name
+        try:
+            with open(_path) as _rf:
+                for _sec in apt_pkg.TagFile(_rf):
+                    _pkg = (_sec.get('Package') or '').strip()
+                    _ver = (_sec.get('Version') or '').strip()
+                    if not _pkg or not _ver or (_pkg, _ver) in _seen:
+                        continue
+                    _seen.add((_pkg, _ver))
+                    _stanzas.append(str(_sec).rstrip('\n'))
+        finally:
+            os.remove(_path)
+    return ('\n\n'.join(_stanzas) + '\n') if _stanzas else ''
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path) as _fh:
+            return _fh.read()
+    except OSError:
+        return ''
+
+
+def _write_text_sudo(path: str, text: str, password: str) -> bool:
+    """Write `text` to `path` (which may be sudo-owned under repo/) via a
+    user-owned temp file + `sudo cp`."""
+    import tempfile as _tf
+    with _tf.NamedTemporaryFile('w', delete=False) as _fh:
+        _fh.write(text)
+        _tmp = _fh.name
+    try:
+        _r = _sudo(['cp', _tmp, path], password)
+    finally:
+        os.remove(_tmp)
+    if _r.returncode != 0:
+        tui.console.print(f"ERROR: write {path}: {_r.stderr.strip()[:200]}")
+        logger.error(f"_write_text_sudo {path}: rc={_r.returncode}")
+        return False
+    return True
+
+
+def merge_remote_index(
+    repo_root: str, suite: str, codename: str, arch: str, version: str,
+    remote_packages_path: str, password: str,
+    signing_homedir: Optional[str] = None,
+) -> bool:
+    """Build the suite index as the UNION of the local (single-snapshot) pool
+    and the remote published Packages (the append-only archive of record),
+    signed LOCALLY (the key never leaves this host).  UPD-01 §5 step 8.
+
+    `remote_packages_path` is the Packages file fetched from the remote
+    (repo_audit.fetch_remote_ledger caches it); '' / missing → local-only
+    (first publish to an empty remote).  Only `main` is merged here — the
+    binary pool clients `apt upgrade` from; the installer udeb pool is scanned
+    local-only (it ships on the ISO, not via client apt)."""
+    _comp = 'main'
+    _binary_rel = f'dists/{suite}/{_comp}/binary-{arch}'
+    _binary_abs = os.path.join(repo_root, _binary_rel)
+    if not os.path.isdir(_binary_abs):
+        tui.console.print(f"merge_remote_index: {_binary_rel} missing")
+        return False
+    _pkgs = os.path.join(_binary_abs, 'Packages')
+
+    # 1. scan the local single-snapshot pool
+    if not _scan_packages_to(repo_root, _binary_rel, _pkgs, password,
+                             udeb=False):
+        return False
+
+    # 2. merge remote-only versions in (append-only multi-version)
+    _remote_text = (_read_text(remote_packages_path)
+                    if remote_packages_path and os.path.exists(
+                        remote_packages_path) else '')
+    if _remote_text.strip():
+        _merged = merge_packages_indexes(_remote_text, _read_text(_pkgs))
+        if not _write_text_sudo(_pkgs, _merged, password):
+            return False
+        if not _compress_index(_pkgs, password):
+            return False
+        tui.console.print(
+            f"  → merged remote+local index: {_count_records(_pkgs)} records")
+
+    # 3. per-subdir Release for main binary
+    if not _write_subdir_release(
+            _binary_abs, suite, codename, _comp, arch, password):
+        return False
+
+    # installer udeb pool — local scan only (not a client apt-upgrade surface)
+    _udeb_rel = f'dists/{suite}/{_comp}/debian-installer/binary-{arch}'
+    _udeb_abs = os.path.join(repo_root, _udeb_rel)
+    if os.path.isdir(_udeb_abs):
+        if not _scan_packages_to(
+                repo_root, _udeb_rel, os.path.join(_udeb_abs, 'Packages'),
+                password, udeb=True, allow_empty=True):
+            return False
+        if not _write_subdir_release(
+                _udeb_abs, suite, codename, _comp, arch, password):
+            return False
+
+    # 4. top-level Release + sign locally
+    _top = os.path.join(repo_root, 'dists', suite, 'Release')
+    if not _generate_top_release(
+            repo_root, suite, codename, version, _top, password,
+            components=[_comp], description=f'Athena repo — {suite}'):
+        return False
+    if signing_homedir is not None:
+        if not sign_release_files(repo_root, suite, signing_homedir, password):
+            return False
+    tui.console.print(
+        f"  → dists/{suite}/ merged-indexed + signed (multi-version main)",
+        tui.COLOR_HIGHLIGHT)
+    return True
+
+
 def _scan_packages_to(
     staging: str, pool_subdir: str, output_path: str,
     password: str, udeb: bool, allow_empty: bool = False,

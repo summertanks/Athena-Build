@@ -216,6 +216,146 @@ def strip_nmu_suffix(version: str) -> str:
     return _NMU_SUFFIX_RE.sub('', version)
 
 
+# ---------------------------------------------------------------------------
+# Athena update-version suffix:  +asg<R>u<N>
+#
+# Mirrors Debian's `debNuN` shape but is distribution- not codename-derived,
+# so it stays monotonic across codename changes (thor→loki): the release
+# number R (from [Build] VERSION) orders the suffix, NEVER the codename
+# (`+thorN` was rejected because `loki1 < thor1` would silently break
+# release-upgrades).  `asg` is the FIXED Asgard build-origin tag — the
+# parallel to Debian's `deb` — not derived from the configurable
+# distribution name, so the suffix shape is stable regardless of config.
+#
+#   pristine upstream, built untouched :  3.0.15-1
+#   our delta (security/update/patch)  :  3.0.15-1+asg1u1, +asg1u2, …
+#
+# Sorts above pristine and is monotonic across releases (asg2u1 > asg1u9),
+# verified with `dpkg --compare-versions`.
+# ---------------------------------------------------------------------------
+ASG_SUFFIX_RE = re.compile(r'\+asg(\d+)u(\d+)$')
+
+
+def parse_asg_suffix(version: str) -> 'Optional[tuple[int, int]]':
+    """Return (release, n) parsed from a trailing +asg<R>u<N>, else None."""
+    _m = ASG_SUFFIX_RE.search(version)
+    if not _m:
+        return None
+    return int(_m.group(1)), int(_m.group(2))
+
+
+def pristine_base(version: str) -> str:
+    """Strip BOTH our +asg<R>u<N> marker and any upstream NMU layer,
+    yielding the pristine source base version — the grouping key for N.
+
+        pristine_base('3.0.15-1')             → '3.0.15-1'
+        pristine_base('3.0.15-1+asg1u2')      → '3.0.15-1'
+        pristine_base('3.0.15-1+deb12u2')     → '3.0.15-1'
+        pristine_base('1:2.38.1-5+asg1u1')    → '1:2.38.1-5'  (epoch kept)
+    """
+    return strip_nmu_suffix(ASG_SUFFIX_RE.sub('', version))
+
+
+def apply_asg_suffix(base: str, release: int, n: int) -> str:
+    """Stamp a pristine base version with our update marker → base+asg<R>u<N>.
+    Epoch (if any) is preserved — the suffix only appends to the end."""
+    return f'{base}+asg{release}u{n}'
+
+
+def asg_filename(filename: str, release: int, n: int) -> str:
+    """Map a pristine repo filename to its +asg<R>u<N> stamped form
+    (name_base_arch.ext → name_base+asgRuN_arch.ext).  No-op on a filename
+    not in name_version_arch shape."""
+    if not (filename.endswith('.deb') or filename.endswith('.udeb')):
+        return filename
+    _name, _ext = os.path.splitext(filename)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        return filename
+    _pkg, _ver, _arch = _parts
+    return f'{_pkg}_{apply_asg_suffix(_ver, release, n)}_{_arch}{_ext}'
+
+
+def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
+    """True when an on-disk artifact is the dep-tree's predicted (pristine)
+    filename, optionally carrying a trailing +asg<R>u<N> on its version
+    segment.  Reconciles the pristine filename the predictor computes
+    (normalize_repo_filename) with a stamped on-disk .deb so the post-build
+    existence checks (check_build / _source_state) don't loop forever the way
+    the CONF-13 exact-filename match did.
+
+    Requires identical package name, architecture, and extension; the on-disk
+    version must equal the predicted version OR predicted+asg<R>u<N>.
+    """
+    if predicted_fn == ondisk_fn:
+        return True
+    if not (predicted_fn.endswith(('.deb', '.udeb'))
+            and ondisk_fn.endswith(('.deb', '.udeb'))):
+        return False
+    _pn, _pext = os.path.splitext(predicted_fn)
+    _on, _oext = os.path.splitext(ondisk_fn)
+    if _pext != _oext:
+        return False
+    _pp = _pn.split('_')
+    _op = _on.split('_')
+    if len(_pp) != 3 or len(_op) != 3:
+        return False
+    if _pp[0] != _op[0] or _pp[2] != _op[2]:          # name, arch must match
+        return False
+    if _op[1] == _pp[1]:                               # exact (pristine) match
+        return True
+    if parse_asg_suffix(_op[1]) is None:               # on-disk has no asg layer
+        return False
+    return ASG_SUFFIX_RE.sub('', _op[1]) == _pp[1]     # base equals prediction
+
+
+def find_matching_artifact(dst_dir: str,
+                           predicted_filename: str) -> 'Optional[str]':
+    """Return the on-disk path of `predicted_filename` in `dst_dir`, or of an
+    +asg<R>u<N>-stamped variant of it (match_pristine_base), else None.
+
+    Reconciles the dep-tree's pristine filename prediction with a possibly
+    stamped artifact so the post-build existence checks (check_build /
+    _source_state) don't loop the way the CONF-13 exact-filename match did.
+    The exact-name fast path avoids a listdir in the common pristine case;
+    only a missing exact file triggers the (single-version, single-snapshot
+    local) directory scan."""
+    _exact = os.path.join(dst_dir, predicted_filename)
+    if os.path.isfile(_exact):
+        return _exact
+    try:
+        for _cand in os.listdir(dst_dir):
+            if (_cand.endswith(('.deb', '.udeb'))
+                    and match_pristine_base(predicted_filename, _cand)
+                    and os.path.isfile(os.path.join(dst_dir, _cand))):
+                return os.path.join(dst_dir, _cand)
+    except OSError:
+        pass
+    return None
+
+
+def highest_asg_update(published_versions, base: str, release: int) -> int:
+    """Highest N among already-published versions of the form
+    `base+asg<release>u<N>`.  `published_versions` is an iterable of version
+    strings published for THIS package (from the remote ledger).  Returns 0
+    when none match — so the next update is N+1 (first → +asg<release>u1).
+
+    Keyed on the pristine base + release: a different base, or a different
+    release R, does not count (R dominates ordering, so N resets per release).
+    """
+    _hi = 0
+    for _v in published_versions:
+        if pristine_base(_v) != base:
+            continue
+        _parsed = parse_asg_suffix(_v)
+        if _parsed is None:
+            continue
+        _r, _n = _parsed
+        if _r == release and _n > _hi:
+            _hi = _n
+    return _hi
+
+
 def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
     """Return (new_text, strip_count) — strips NMU suffix from the
     Version field AND every version constraint in dep-related fields
@@ -508,6 +648,97 @@ def strip_nmu_from_deb(deb_path: str) -> dict:
     return _result
 
 
+def _restamp_control_text(content: str, old_version: str,
+                          new_version: str) -> str:
+    """Rewrite the Version field old→new, and bump same-source sibling pins
+    `(= old_version)` → `(= new_version)` within dep-relation fields.  Only
+    `(=)` constraints whose version equals THIS binary's own version are
+    touched (the collapsed >>/<< sibling idiom); other constraints are left."""
+    content = re.sub(
+        r'^Version: \S+\s*$', lambda _m: f'Version: {new_version}',
+        content, count=1, flags=re.MULTILINE,
+    )
+    _pin_re = re.compile(r'\(\s*=\s*' + re.escape(old_version) + r'\s*\)')
+    _new_lines: 'list[str]' = []
+    _in_target = False
+    for _line in content.splitlines(keepends=True):
+        if _line and _line[0] not in (' ', '\t'):
+            _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
+            _in_target = bool(_m) and _m.group(1) in _NMU_STRIP_FIELDS
+        if _in_target:
+            _new_lines.append(_pin_re.sub(lambda _m: f'(= {new_version})', _line))
+        else:
+            _new_lines.append(_line)
+    return ''.join(_new_lines)
+
+
+def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
+    """Apply our +asg<R>u<N> update marker to a .deb/.udeb in place.
+
+    Runs AFTER strip_nmu_from_deb (the artifact is at its pristine base
+    version).  Single dpkg-deb -R / -b cycle; updates:
+      - the filename version segment   → base+asg<R>u<N>
+      - DEBIAN/control Version field    → [epoch:]base+asg<R>u<N>
+      - intra-source sibling pins that strip_nmu_from_control_text collapsed
+        to `(= <this binary's version>)`  → `(= <…+asg<R>u<N>>)`
+
+    No changelog entry is created (that would walk the kernel ABI counter —
+    the CONF-13 cascade); this is a pure binary relabel.  Returns
+    {'status': 'rewritten'|'malformed'|'skipped', 'new_path', 'version'}.
+    """
+    import subprocess
+    import tempfile
+    from debian.debfile import DebFile
+
+    _result = {'status': 'skipped', 'new_path': deb_path, 'version': None}
+    _base = os.path.basename(deb_path)
+    if not (_base.endswith('.deb') or _base.endswith('.udeb')):
+        return _result
+    _name, _ext = os.path.splitext(_base)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        _result['status'] = 'malformed'
+        return _result
+    _pkg, _file_ver, _arch = _parts
+
+    try:
+        with DebFile(deb_path) as _deb:
+            _ctrl_bytes = _deb.control.get_content('control')
+    except Exception:
+        _result['status'] = 'malformed'
+        return _result
+    if _ctrl_bytes is None:
+        _result['status'] = 'malformed'
+        return _result
+    _ctrl_text = _ctrl_bytes.decode('utf-8', errors='replace')
+
+    _old_ctrl_ver = _extract_version(_ctrl_text)
+    if not _old_ctrl_ver:
+        _result['status'] = 'malformed'
+        return _result
+    _new_ctrl_ver = apply_asg_suffix(_old_ctrl_ver, release, n)
+    _new_file_ver = apply_asg_suffix(_file_ver, release, n)
+    _new_ctrl_text = _restamp_control_text(
+        _ctrl_text, _old_ctrl_ver, _new_ctrl_ver)
+    _new_base = f'{_pkg}_{_new_file_ver}_{_arch}{_ext}'
+    _new_path = os.path.join(os.path.dirname(deb_path), _new_base)
+
+    with tempfile.TemporaryDirectory(prefix='asg-stamp-') as _work:
+        subprocess.run(['dpkg-deb', '-R', deb_path, _work],
+                       check=True, capture_output=True)
+        _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl_disk, 'w') as _fh:
+            _fh.write(_new_ctrl_text)
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _new_path],
+            check=True, capture_output=True,
+        )
+
+    if _new_path != deb_path:
+        os.remove(deb_path)
+    _result.update({'status': 'rewritten', 'new_path': _new_path,
+                    'version': _new_ctrl_ver})
+    return _result
 
 
 def version_no_epoch(version) -> str:
@@ -1015,6 +1246,62 @@ def format_snapshot_timestamp(ts: str) -> str:
     return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]} UTC"
 
 
+def snapshot_iso_tag(config: 'BuildConfig') -> str:
+    """The effective snapshot timestamp as a filesystem-safe tag for ISO
+    filenames and the .disk/snapshot marker — e.g. '20260514T083402Z'.
+
+    Lets an operator tell ISOs built from different snapshots apart (UPD-01:
+    build base → step the snapshot → build again; the two ISOs must be
+    distinguishable).  Returns '' when snapshots are disabled (no pin to tag).
+    Reads the already-resolved pin (cheap when the cache file exists); never
+    raises — ISO naming must not fail on a snapshot-resolution hiccup."""
+    try:
+        _ts = resolve_snapshot_timestamp(config)
+    except Exception:
+        _ts = None
+    return _ts or ''
+
+
+def snapshot_state_path(config: 'BuildConfig') -> str:
+    """Path to the durable snapshot-pin state (config/snapshot.state).
+
+    Lives under config/ (NOT cache/) so `clean cache` can't wipe the
+    operator-set base + current pins — these have production impact."""
+    return os.path.join(config.dir_config, 'snapshot.state')
+
+
+def read_snapshot_state(config: 'BuildConfig') -> dict:
+    """Read config/snapshot.state → {'base': ts, 'current': ts}; {} if absent
+    or malformed.  The operator-set pins (via `snapshot select/advance/base`)
+    live here and take precedence over [Snapshot] Timestamp."""
+    import json
+    try:
+        with open(snapshot_state_path(config)) as fh:
+            _d = json.load(fh)
+        return _d if isinstance(_d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_snapshot_state(config: 'BuildConfig',
+                         base: 'Optional[str]' = None,
+                         current: 'Optional[str]' = None) -> None:
+    """Merge base/current into config/snapshot.state and clear the resolve
+    memo so the new pin takes effect immediately within this run."""
+    import json
+    _state = read_snapshot_state(config)
+    if base is not None:
+        _state['base'] = base
+    if current is not None:
+        _state['current'] = current
+    _path = snapshot_state_path(config)
+    os.makedirs(os.path.dirname(_path), exist_ok=True)
+    with open(_path, 'w') as fh:
+        json.dump(_state, fh, indent=2)
+        fh.write('\n')
+    _SNAPSHOT_TS_CACHE.clear()
+
+
 def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
     """Resolve the effective snapshot timestamp for this build.
 
@@ -1023,6 +1310,8 @@ def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
 
     Resolution rules:
       - snapshot_enabled is False           → None
+      - config/snapshot.state 'current' set → use it (operator override,
+        durable; takes precedence over [Snapshot] Timestamp)
       - snapshot_timestamp_config = 'latest':
           * if cache/snapshot.timestamp exists and looks valid, use it
             (reproducible across runs; delete the file to advance)
@@ -1036,6 +1325,13 @@ def resolve_snapshot_timestamp(config: 'BuildConfig') -> Optional[str]:
     """
     if not config.snapshot_enabled:
         return None
+
+    # Operator-set durable current pin (config/snapshot.state) wins over
+    # [Snapshot] Timestamp — this is how `snapshot select/advance` move the
+    # pin without editing build.conf, and it survives `clean cache`.
+    _state_current = read_snapshot_state(config).get('current', '')
+    if _state_current and _SNAPSHOT_TS_RE.match(_state_current):
+        return _state_current
 
     state_file = os.path.join(config.dir_cache, 'snapshot.timestamp')
     cfg_ts     = config.snapshot_timestamp_config

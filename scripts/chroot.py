@@ -1185,7 +1185,8 @@ class _ChrootMixin:
         self._write_chroot_file('/etc/os-release', (
             f'# {_name} Linux — (c) 2025-26 Harkirat S Virk\n'
             f'NAME="{_name}"\n'
-            f'VERSION="{cfg.build_version}"\n'
+            f'VERSION="{cfg.build_version} ({_codename})"\n'
+            f'VERSION_ID="{cfg.build_version}"\n'
             f'ID={_id}\n'
             f'ID_LIKE=debian\n'
             f'VERSION_CODENAME={_codename}\n'
