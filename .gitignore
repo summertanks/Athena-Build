@@ -34,6 +34,11 @@ config/*.key
 # to select both on the first `cache build` (UPD-01).
 config/snapshot.state
 
+# Per-checkout signed published-manifest (mirror of what's published; the
+# +asg bump authority).  Regenerated on publish; not shared (UPD-01).
+config/published.manifest
+config/published.manifest.sig
+
 # IDE
 .idea/
 .vscode/

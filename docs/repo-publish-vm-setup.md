@@ -17,9 +17,13 @@ repo/ or publish/   ──rsync+ssh──▶  ~/asgard/{dists,pool}  ──http�
   (repo index …)     repo publish     (served by nginx)      AptSourceURL
 ```
 
-- **`repo index …`** builds the signed metadata.
-- **`repo publish ssh …`** rsyncs the tree to the VM (incremental; `--delete`
-  keeps it a true mirror).
+- **`repo publish ssh …`** rsyncs the `.deb`s to the VM **additively**
+  (no `--delete`; `--ignore-existing` — pool `.deb`s are immutable per
+  filename, so a re-publish never re-uploads an existing one), then **rebuilds
+  the index ON THE VM** with `dpkg-scanpackages` (so `Packages` always reflects
+  what's actually there — `full` and `minimal` never clobber each other) and
+  **signs locally** (the signing key never leaves the build box).  No separate
+  `repo index` step is needed.
 - **nginx** on the VM serves the synced directory over HTTP.
 - The installed system reads it via **`AptSourceURL`** (written into
   `/etc/apt/sources.list.d/athena.list`).
@@ -63,10 +67,14 @@ exist. It checks over SSH and bails with a hint if missing:
 mkdir -p ~/asgard
 ```
 
-### Install + configure nginx
+### Install + configure nginx (and `dpkg-dev`)
+
+`dpkg-dev` provides `dpkg-scanpackages`, which `repo publish` runs ON THE VM to
+rebuild the index from the actual pool contents (UPD-02). Without it, publish
+fails at the re-index step with a clear hint.
 
 ```bash
-sudo apt-get update && sudo apt-get install -y nginx
+sudo apt-get update && sudo apt-get install -y nginx dpkg-dev
 
 # nginx (www-data) must be able to traverse the home dir; the repo's own
 # files are already world-readable from `rsync -a`.
@@ -111,27 +119,32 @@ If that's `200 OK` but it's unreachable from outside, it's the firewall.
   sudo netfilter-persistent save        # persist across reboot (iptables-persistent)
   ```
 
-## 3. Build the repo metadata
+## 3. Publish (indexing happens on the VM)
+
+No separate `repo index` step — `repo publish` pushes the `.deb`s and then
+rebuilds + signs the index:
 
 ```
-repo index full       # all suites in place under repo/dists/ (incl. debug)
+repo publish ssh full       # push the whole pool's .debs → VM
 # or
-repo index minimal    # runtime subset into publish/ (main debs, no
-                       # -dbg/-dbgsym/-source/udeb; signed)
+repo publish ssh minimal    # push only the runtime subset (no -dbg/-dbgsym/
+                            #   -source/udeb), same nested layout as full
 ```
 
-## 4. Publish
+Each publish: rsyncs only the `.deb`s up (additive, `--ignore-existing` — so a
+re-publish transfers just genuinely-new `.deb`s, never re-uploading immutable
+ones), runs `dpkg-scanpackages` on the VM to rebuild `Packages` from what's
+actually present, signs `Release`/`InRelease` **locally**, uploads the small
+metadata, and refreshes the local signed manifest.  Because the index is
+rebuilt from the remote, `full` then `minimal` (or either order) leaves the
+published `Packages` as the **union** on the remote — no clobber.
 
-```
-repo publish ssh full       # rsync repo/dists  → VM   (complete pool)
-# or
-repo publish ssh minimal    # rsync publish/{dists,pool} → VM (runtime subset)
-```
+**Local-only testing (no VM):** `repo external disable` → `repo publish ssh
+full` indexes into the local signed manifest and skips rsync.  `repo external
+enable` returns to publishing (onto an empty remote it rebaselines
+`current = base`).
 
-rsync shows a progress bar (parsed from `rsync --info=progress2`).
-Re-publishing only transfers changed/new files.
-
-## 5. Point the installed system at it
+## 4. Point the installed system at it
 
 Once `http://140.245.198.222/asgard/` serves the repo, set in `build.conf`:
 
@@ -150,7 +163,7 @@ deb [signed-by=/usr/share/keyrings/athena-archive-keyring.gpg] \
 (The keyring is installed into the chroot by CONF-02; `Release`/`InRelease`
 are signed by `[Repo] SigningKeyUid`.)
 
-## 6. Verify end to end
+## 5. Verify end to end
 
 The built-in check (reads `AptSourceURL`) — confirms the published repo is
 reachable, its `InRelease` is signed by our key, and every index's
@@ -181,7 +194,8 @@ apt-cache policy <some-package-in-the-pool>
 | `remote dir 'asgard' not found …` | The `<dist-id>` dir doesn't exist on the VM. `ssh … mkdir -p asgard`. |
 | `curl` 200 on the VM (`localhost`) but not externally | Firewall — open port 80 in both the OCI Security List **and** the instance iptables (step 2). |
 | nginx `403 Forbidden` | `www-data` can't traverse `/home/ubuntu`. `chmod o+x /home/ubuntu`. |
-| apt: `does not have a Release file` / signature errors | The repo wasn't indexed/signed (`repo index …`), or the keyring isn't in the chroot, or `AptSourceURL` points at the wrong path. |
+| apt: `does not have a Release file` / signature errors | The publish's re-index/sign step failed, the keyring isn't in the chroot, or `AptSourceURL` points at the wrong path. |
+| publish fails at "remote re-index" / `dpkg-scanpackages: command not found` | `dpkg-dev` isn't installed on the VM — `sudo apt-get install -y dpkg-dev` (step 2). |
 | `Permission denied (publickey)` | Wrong/again-too-open key, or key not on the VM's `authorized_keys`. Key must be `chmod 600`. |
 
 ### Alternative: serve from `/var/www` instead of the home dir

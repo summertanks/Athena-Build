@@ -4530,116 +4530,77 @@ def test_repo_publish_dispatch():
     assert _calls == [('ssh', 'minimal')], _calls
 
 
-def test_cmd_repo_publish_ssh_guards():
-    """publish refuses (with a message, no rsync) when PublishSshTarget is
-    unset, and when the requested source tree hasn't been indexed."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-
-    def _mk(cfg):
-        s = BuildSession.__new__(BuildSession)
-        s.config = cfg
-        return s
-
-    # bad usage (wrong target kind) → usage line, returns before any config
-    _bad = BuildSession.__new__(BuildSession)
-    out = _capture_console_print(lambda: _bad.cmd_repo_publish('http', 'full'))
-    assert 'Usage' in out, out
-    # target unset
-    with tempfile.TemporaryDirectory() as _tmp:
-        class _Cfg:
-            publish_ssh_target = ''
-            publish_ssh_key = ''
-            dir_publish = _tmp
-            dir_repo = _tmp
-        out = _capture_console_print(
-            lambda: _mk(_Cfg()).cmd_repo_publish('ssh', 'full'))
-        assert 'PublishSshTarget' in out, out
-    # target set but full source (repo/dists) missing
-    with tempfile.TemporaryDirectory() as _tmp:
-        class _Cfg:
-            publish_ssh_target = 'user@host:/srv/athena'
-            publish_ssh_key = ''
-            dir_publish = _tmp
-            dir_repo = _tmp          # no dists/ subdir → missing
-        out = _capture_console_print(
-            lambda: _mk(_Cfg()).cmd_repo_publish('ssh', 'full'))
-        assert 'repo index full' in out, out
-
-
-def test_cmd_repo_publish_ssh_rsync_argv_and_progress():
-    """`repo publish ssh full` rsyncs repo/dists with -aH --info=progress2
-    over ssh (ADDITIVE — NO --delete, the UPD-01 append-only guarantee), and
-    parses rsync's % into the bar."""
-    import sys, tempfile, types, io
+def test_rsync_streamed_argv_ignore_existing_and_filters():
+    """_rsync_streamed: -aH + --info=progress2, ADDITIVE (no --delete); with
+    ignore_existing=True it adds --ignore-existing + the given filters; a plain
+    call adds neither.  (The immutable-.deb pool pass uses the former; the
+    metadata pass uses the latter.)"""
+    import sys, io
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
     from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _popen = []
 
-    with tempfile.TemporaryDirectory() as _tmp:
-        os.makedirs(os.path.join(_tmp, 'dists'))
-        class _Cfg:
-            publish_ssh_target = 'user@host:/srv/athena'
-            publish_ssh_key = '/home/me/.ssh/id_ed25519'
-            dir_publish = _tmp
-            dir_repo = _tmp
-            build_codename = 'thor'
-            build_base_id = 'asgard'      # dist id → remote repo folder
-            apt_source_url = 'http://host/athena/'
-        _sess = BuildSession.__new__(BuildSession)
-        _sess.config = _Cfg()
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = io.StringIO("100%\n")
+            self.returncode = 0
 
-        _popen = []
-        _runs = []
+        def wait(self):
+            return 0
 
-        class _FakeProc:
-            def __init__(self):
-                self.stdout = io.StringIO(
-                    "    1,000,000  40%  9.5MB/s  0:00:10\r"
-                    "    2,500,000 100%  9.5MB/s  0:00:00 (xfr#3)\n")
-                self.returncode = 0
+    def _fake_popen(argv, **kw):
+        _popen.append(list(argv))
+        return _FakeProc()
 
-            def wait(self):
-                return 0
-
-        def _fake_popen(argv, **kw):
-            _popen.append(list(argv))
-            return _FakeProc()
-
-        def _fake_run(argv, **kw):          # the `ssh ... test -d` existence check
-            _runs.append(list(argv))
-            return types.SimpleNamespace(returncode=0, stdout='', stderr='')
-
-        _saved_popen = build.subprocess.Popen
-        _saved_run = build.subprocess.run
-        build.subprocess.Popen = _fake_popen
-        build.subprocess.run = _fake_run
-        try:
-            _capture_console_print(
-                lambda: _sess.cmd_repo_publish('ssh', 'full'))
-        finally:
-            build.subprocess.Popen = _saved_popen
-            build.subprocess.run = _saved_run
-
-        # The dist-id dir is checked over ssh before any rsync.
-        assert _runs and _runs[0] == [
-            'ssh', '-i', '/home/me/.ssh/id_ed25519',
-            'user@host', 'test', '-d', '/srv/athena/asgard'], _runs
-        assert _popen, "rsync was not invoked"
+    _saved = build.subprocess.Popen
+    build.subprocess.Popen = _fake_popen
+    try:
+        _capture_console_print(lambda: _sess._rsync_streamed(
+            'debs', '/src', 'host:/dst', ['ssh', '-i', 'k'],
+            ignore_existing=True,
+            filters=['--include=*/', '--include=*.deb', '--exclude=*']))
         _argv = _popen[0]
-        assert _argv[0] == 'rsync'
-        for _flag in ('-aH', '--info=progress2'):
-            assert _flag in _argv, f"{_flag} missing from {_argv}"
-        # ADDITIVE publish: --delete must NOT be present (append-only remote)
-        assert '--delete' not in _argv, (
-            f"publish must be additive — --delete present in {_argv}")
-        # -e carries the ssh command with the key
+        assert _argv[0] == 'rsync' and '-aH' in _argv and '--info=progress2' in _argv
+        assert '--delete' not in _argv, _argv
+        assert '--ignore-existing' in _argv, _argv
+        assert '--include=*.deb' in _argv and '--exclude=*' in _argv, _argv
         _e = _argv.index('-e')
-        assert _argv[_e + 1] == 'ssh -i /home/me/.ssh/id_ed25519', _argv[_e + 1]
-        # full scope syncs repo/dists/ → <base>/<dist-id>/dists/ (derived)
-        assert _argv[-2] == os.path.join(_tmp, 'dists') + '/', _argv[-2]
-        assert _argv[-1] == 'user@host:/srv/athena/asgard/dists/', _argv[-1]
+        assert _argv[_e + 1] == 'ssh -i k'
+        assert _argv[-2] == '/src/' and _argv[-1] == 'host:/dst'
+        # plain call: no --ignore-existing / no filters
+        _popen.clear()
+        _capture_console_print(lambda: _sess._rsync_streamed(
+            'meta', '/s', 'h:/d', ['ssh']))
+        assert '--ignore-existing' not in _popen[0]
+        assert not any(a.startswith('--include') for a in _popen[0])
+    finally:
+        build.subprocess.Popen = _saved
+
+
+def test_publish_full_remote_scan_flow_wiring():
+    """`repo publish` (external on): push only .debs immutably
+    (--ignore-existing + deb filter) → rebuild the index ON THE REMOTE
+    (remote_reindex_and_sign) → upload metadata → refresh manifest → prune +
+    record published.  External off → local merge, no rsync."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    _m = re.search(r'def cmd_repo_publish\(self.*?(?=\n    def )', _body, re.DOTALL)
+    _b = _m.group(0)
+    assert '_external_enabled()' in _b, "must gate on the external flag"
+    assert 'ignore_existing=True' in _b and 'filters=_debfilter' in _b, (
+        "the .deb pool pass must be immutable (--ignore-existing + deb filter)")
+    assert 'remote_reindex_and_sign(' in _b, "must rebuild the index on the remote"
+    assert 'write_published_manifest(' in _b, "must refresh the local manifest"
+    assert '_refresh_merge_index()' in _b, "external-off path indexes locally"
+    assert 'cmd_package_cleanup' in _b and \
+        'published=self._snapshot_current()' in _b, "full prunes + records published"
+    # ordering: deb push BEFORE remote re-index BEFORE metadata push
+    assert (_b.index('ignore_existing=True') < _b.index('remote_reindex_and_sign(')
+            < _b.index('rsync index')), "deb push → remote reindex → metadata push"
 
 
 def test_repo_audit_external_dispatch():
@@ -15773,7 +15734,7 @@ def test_publish_rsync_is_additive_no_delete():
     with open(_bp) as fh:
         _body = fh.read()
     assert _re.search(
-        r'def _rsync_streamed\(self, label, src, dest, ssh_cmd, delete=False\)',
+        r'def _rsync_streamed\(self, label, src, dest, ssh_cmd, delete=False',
         _body), "_rsync_streamed must default delete=False (additive)"
     _m = _re.search(r'def _rsync_streamed\(.*?return _proc\.returncode',
                     _body, _re.DOTALL)
@@ -16306,6 +16267,119 @@ def test_snapshot_base_show_and_forward_only():
             "a refused (backward) base set must not change the pin")
 
 
+def test_list_snapshots_between_filters_range_and_unions_keys():
+    """list_snapshots_between unions all archive keys' timestamps and keeps
+    only those strictly after `after` and up to (inclusive) `upto`."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {'result': {
+                'debian': ['20260514T000000Z', '20260518T000000Z',
+                           '20260526T000000Z', '20260601T000000Z'],
+                'debian-security': ['20260515T000000Z', '20260526T000000Z'],
+            }}
+
+    class _Cfg:
+        snapshot_timestamp_api = 'http://x'
+        snapshot_archive_keys = ['debian', 'debian-security']
+
+    _saved = utils.requests.get
+    utils.requests.get = lambda *a, **k: _Resp()
+    try:
+        _got = utils.list_snapshots_between(
+            _Cfg(), '20260514T000000Z', '20260526T000000Z')
+    finally:
+        utils.requests.get = _saved
+    # strictly > 0514 and <= 0526, union of both keys, sorted, deduped
+    assert _got == ['20260515T000000Z', '20260518T000000Z',
+                    '20260526T000000Z'], _got
+
+
+def test_snapshot_select_interactive_sets_chosen_current():
+    """The interactive picker lists the in-between snapshots and sets the
+    chosen one as the new current (forward-only, cautioned)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    from build import BuildSession, BuildFlags
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.flags = BuildFlags()     # _set_snapshot_pin invalidates cache flags
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            snapshot_enabled = True
+
+        _sess.config = _Cfg()
+        _sess._snapshot_current = lambda: '20260514T083402Z'
+        _sess._snapshot_latest = lambda: '20260526T134919Z'
+        utils._SNAPSHOT_TS_CACHE.clear()
+
+        _answers = iter(['1', 'y'])     # pick #1, then confirm the caution
+
+        class _FakePrompt:
+            def __init__(self, _t, _m, options=None):
+                pass
+
+            def get_response(self):
+                return next(_answers)
+
+        _sl = utils.list_snapshots_between
+        utils.list_snapshots_between = lambda _c, _a, _u: [
+            '20260518T000000Z', '20260526T134919Z']
+        _sp, _sc = build.Prompt, build.console.print
+        build.Prompt = _FakePrompt
+        build.console.print = lambda *a, **k: None
+        try:
+            _sess._snapshot_select_interactive()
+        finally:
+            utils.list_snapshots_between = _sl
+            build.Prompt, build.console.print = _sp, _sc
+        assert utils.read_snapshot_state(_sess.config)['current'] == \
+            '20260518T000000Z', "picker must set the chosen ts as current"
+
+
+def test_snapshot_select_current_is_forward_only():
+    """`snapshot select current <older>` is REFUSED — current only moves
+    forward (must be above the present current)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    from build import BuildSession
+
+    def _cap(fn):
+        _lines = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            fn()
+        finally:
+            build.console.print = _orig
+        return '\n'.join(_lines)
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            dir_config = _cfg_dir
+
+        _sess.config = _Cfg()
+        _sess._snapshot_current = lambda: '20260514T083402Z'
+        _out = _cap(lambda: _sess._set_snapshot_pin('current', '20260101T000000Z'))
+        assert 'REFUSED' in _out and 'forward' in _out, _out
+        assert utils.read_snapshot_state(_sess.config) == {}, "no pin written"
+
+
 def test_ensure_snapshot_pins_prompts_and_writes_when_unset():
     """A fresh system (no config/snapshot.state) prompts for current + base on
     cache build; accepting the defaults writes both pins."""
@@ -16402,10 +16476,10 @@ def test_cache_build_gates_on_snapshot_pins():
                      _m.group(0)), "cache build must gate on _ensure_snapshot_pins"
 
 
-def test_repo_refresh_ordering_invariants():
-    """The orchestrator must honour the UPD-01 ordering: ledger BEFORE advance,
-    Guard A preflight BEFORE build, merge-index BEFORE publish, and publish
-    BEFORE prune (publish-before-prune) — plus an abort when nothing changed."""
+def test_repo_refresh_is_thin_wrapper():
+    """After decomposition, repo refresh just chains the (update-aware) steps —
+    source sync → source build all → repo publish ssh full — takes no target,
+    and short-circuits when current is not ahead of published."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
@@ -16414,29 +16488,52 @@ def test_repo_refresh_ordering_invariants():
                    _body, re.DOTALL)
     assert _m, "cmd_repo_refresh not found"
     _b = _m.group(0)
-    assert _b.index('fetch_remote_ledger') < _b.index('write_snapshot_state'), (
-        "ledger must be fetched before advancing the snapshot")
-    assert _b.index('_preflight_stamp_invariant') < _b.index('cmd_source_build'), (
-        "Guard A preflight must run before building")
-    assert _b.index('_refresh_merge_index') < _b.index('cmd_repo_publish'), (
-        "merge-index must run before publish")
-    assert _b.index('cmd_repo_publish') < _b.index('cmd_package_cleanup'), (
-        "publish-before-prune: prune must run AFTER the additive publish")
-    assert 'nothing to rebuild' in _b, "must abort when the workload is empty"
+    assert 'takes no target' in _b, "repo refresh must reject a target arg"
+    assert 'cmd_source_sync(' in _b, "must run source sync"
+    assert "cmd_source_build('all')" in _b, "must run source build all"
+    assert "cmd_repo_publish('ssh', 'full')" in _b, "must run repo publish ssh full"
+    assert _b.index('cmd_source_build(') < _b.index('cmd_repo_publish('), (
+        "build must precede publish")
+    assert '_snapshot_published(' in _b, "must short-circuit on current<=published"
 
 
-def test_repo_refresh_aborts_when_ledger_unreachable():
-    """If the remote ledger can't be fetched, refresh aborts (can't derive N
-    safely) — pinned via the code path."""
+def test_publish_full_folds_index_merge_prune_and_gates_rsync():
+    """`repo publish ssh full` builds the merged index + manifest, gates the
+    rsync on the external flag, prunes, and records published = current."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
         _body = fh.read()
-    _m = re.search(r'def cmd_repo_refresh\(self.*?(?=\n    def )',
-                   _body, re.DOTALL)
+    _m = re.search(r'def cmd_repo_publish\(self.*?(?=\n    def )', _body, re.DOTALL)
     _b = _m.group(0)
-    assert 'if _ledger is None:' in _b and 'aborting' in _b, (
-        "refresh must abort when fetch_remote_ledger returns None")
+    assert '_refresh_merge_index()' in _b, "full publish must build the merged index"
+    assert '_external_enabled()' in _b, "rsync must be gated on the external flag"
+    assert 'cmd_package_cleanup' in _b, "publish must prune (publish-before-prune)"
+    assert 'published=self._snapshot_current()' in _b, (
+        "publish must record published = current")
+    assert _b.index('_refresh_merge_index()') < _b.index('cmd_package_cleanup'), (
+        "merge/index before prune")
+
+
+def test_source_build_autodetects_update_mode():
+    """source build self-detects update mode (gotcha G): a subset/bare call
+    routes to _do_update_build when a delta is pending; _do_update_build uses
+    the published→current diff + the manifest ledger + force."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    _m = re.search(r'def cmd_source_build\(self.*?(?=\n    def )', _body, re.DOTALL)
+    _b = _m.group(0)
+    assert '_update_build_pending()' in _b and '_do_update_build()' in _b, (
+        "source build must auto-detect + route to update mode")
+    assert 'not _names' in _b, "explicit package names opt out of update mode"
+    _u = re.search(r'def _do_update_build\(self.*?(?=\n    def )', _body, re.DOTALL)
+    _ub = _u.group(0)
+    assert '_workload_since_snapshot(' in _ub, "update build diffs published→current"
+    assert 'published_ledger(' in _ub and 'asg_ledger' in _ub, (
+        "update build loads the manifest ledger for +asg stamping")
+    assert "cmd_source_build('force'" in _ub, "update build force-builds the delta"
 
 
 def test_workload_current_to_target_diffs_against_target_snapshot():
@@ -16475,6 +16572,162 @@ def test_workload_current_to_target_diffs_against_target_snapshot():
         assert _names is None and _err
     finally:
         repo_audit.fetch_source_versions_at = _saved
+
+
+def test_workload_detects_debNuN_source_change_ignores_unchanged():
+    """Detection is by FULL source version: a +debNuN security/point-release
+    SOURCE upload (3.0.15-1 → 3.0.15-1+deb12u2) is caught; a source whose
+    version is unchanged (the binNMU case — +bN never appears in Sources) is
+    ignored."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    import repo_audit
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Src:
+        def __init__(self, v):
+            self.version = v
+
+    class _Tree:
+        selected_srcs = {'openssl': _Src('3.0.15-1'), 'bind9': _Src('1.2-1')}
+
+    _sess.dep_tree = _Tree()
+    _sess.udeb_dep_tree = None
+    _sess.config = object()
+    _saved = repo_audit.fetch_source_versions_at
+    try:
+        repo_audit.fetch_source_versions_at = lambda _c, _ts: {
+            'openssl': '3.0.15-1+deb12u2',   # security SOURCE upload → rebuild
+            'bind9': '1.2-1',                # source unchanged (binNMU only) → skip
+        }
+        _names, _err = _sess._workload_current_to_target('20260601T000000Z')
+        assert _err is None and _names == ['openssl'], (_names, _err)
+    finally:
+        repo_audit.fetch_source_versions_at = _saved
+
+
+def test_workload_since_snapshot_diffs_published_to_current():
+    """`repo refresh`'s rebuild set: a source whose CURRENT version is newer
+    than at the PUBLISHED snapshot (or absent there) is rebuilt."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    import repo_audit
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Src:
+        def __init__(self, v):
+            self.version = v
+
+    class _Tree:
+        # versions at the CURRENT pin
+        selected_srcs = {
+            'openssl': _Src('3.0.15-1+deb12u2'),   # advanced since published
+            'libc6': _Src('2.36-9'),               # unchanged since published
+            'newpkg': _Src('1.0-1'),               # absent at published → new
+        }
+
+    _sess.dep_tree = _Tree()
+    _sess.udeb_dep_tree = None
+    _sess.config = object()
+    _saved = repo_audit.fetch_source_versions_at
+    try:
+        # versions AT THE PUBLISHED snapshot
+        repo_audit.fetch_source_versions_at = lambda _c, _ts: {
+            'openssl': '3.0.15-1',          # older at published → rebuild
+            'libc6': '2.36-9',              # same → skip
+        }
+        _names, _err = _sess._workload_since_snapshot('20260514T083402Z')
+        assert _err is None
+        assert _names == ['newpkg', 'openssl'], _names   # advanced + new
+    finally:
+        repo_audit.fetch_source_versions_at = _saved
+
+
+def test_workload_excludes_forks_from_snapshot_diff():
+    """Forks are LOCAL (cache stamps `_mirror.id == 'fork'`) and never appear in
+    any upstream snapshot's Sources, so they must NOT be flagged as changed by
+    the snapshot-to-snapshot diff — otherwise every update build rebuilds them
+    to an identical filename, which `_segregate_built_artifacts` then drops as a
+    dup.  Regression for the 'our forks featured in the drift' bug."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    import repo_audit
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Mirror:
+        def __init__(self, _id):
+            self.id = _id
+
+    class _Src:
+        def __init__(self, v, _mirror=None):
+            self.version = v
+            self._mirror = _mirror
+
+    class _Tree:
+        # current pin versions; the forks carry `_mirror.id == 'fork'`
+        selected_srcs = {
+            'openssl': _Src('3.0.16-1'),
+            'athena-branding': _Src('1.2.0', _Mirror('fork')),
+            'base-files': _Src('12.4+deb12u14+athena2', _Mirror('fork')),
+        }
+
+    _sess.dep_tree = _Tree()
+    _sess.udeb_dep_tree = None
+    _sess.config = object()
+    _saved = repo_audit.fetch_source_versions_at
+    try:
+        # Forks are absent from upstream Sources (as they always are) — they must
+        # be skipped, not flagged via the absent ("new since") branch.
+        # current_to_target: a source is flagged when its version AT TARGET is
+        # newer than the current pin.
+        repo_audit.fetch_source_versions_at = lambda _c, _ts: {'openssl': '3.0.17-1'}
+        _names, _err = _sess._workload_current_to_target('20260601T000000Z')
+        assert _err is None and _names == ['openssl'], (_names, _err)
+        # since_snapshot: flagged when the current pin is newer than at published.
+        repo_audit.fetch_source_versions_at = lambda _c, _ts: {'openssl': '3.0.15-1'}
+        _names, _err = _sess._workload_since_snapshot('20260514T083402Z')
+        assert _err is None and _names == ['openssl'], (_names, _err)
+    finally:
+        repo_audit.fetch_source_versions_at = _saved
+
+
+def test_snapshot_published_defaults_to_base_then_tracks():
+    """`published` defaults to base when unset, and is read back once set."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    import utils
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            snapshot_enabled = True
+            snapshot_timestamp_config = '20260514T083402Z'
+
+        _sess.config = _Cfg()
+        utils._SNAPSHOT_TS_CACHE.clear()
+        utils.write_snapshot_state(_sess.config, base='20260514T083402Z',
+                                   current='20260514T083402Z')
+        # published unset → defaults to base
+        assert _sess._snapshot_published() == '20260514T083402Z'
+        # after a refresh records it, it tracks the new value
+        utils.write_snapshot_state(_sess.config, published='20260520T000000Z')
+        assert _sess._snapshot_published() == '20260520T000000Z'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16546,6 +16799,235 @@ def test_iso_filenames_carry_snapshot_tag():
     assert 'athena-installer-{_version}-{_snap}-amd64.iso' in _bb
     # snapshot threaded into the installer ISO build
     assert re.search(r'snapshot=_snap', _bb), "snapshot not passed to build_installer_iso"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-01 decomposition — local manifest, external on/off, update-mode plumbing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_published_manifest_roundtrip_and_ledger():
+    """write/read the local signed manifest (unsigned when no key); the ledger
+    parses it into {package: [version,...]}."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfgdir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfgdir)
+
+        class _Cfg:
+            dir_config = _cfgdir
+
+        _cfg = _Cfg()
+        assert repo_audit.published_ledger(_cfg) == {}        # nothing yet
+        _pk = (
+            'Package: openssl\nVersion: 3.0.15-1+asg1u1\n'
+            'Filename: dists/thor/main/binary-amd64/openssl_3.0.15-1+asg1u1_amd64.deb\n\n'
+            'Package: libc6\nVersion: 2.36-9\n'
+            'Filename: dists/thor/main/binary-amd64/libc6_2.36-9_amd64.deb\n')
+        repo_audit.write_published_manifest(_cfg, _pk)
+        assert os.path.exists(repo_audit.local_manifest_path(_cfg))
+        assert 'openssl' in repo_audit.read_published_manifest(_cfg)
+        _led = repo_audit.published_ledger(_cfg)
+        assert _led['openssl'] == ['3.0.15-1+asg1u1']
+        assert _led['libc6'] == ['2.36-9']
+
+
+def test_manifest_vs_remote_discrepancies():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    _local = {'openssl': ['3.0.15-1', '3.0.15-1+asg1u1'], 'libc6': ['2.36-9']}
+    _remote = {'openssl': ['3.0.15-1'], 'curl': ['8.0-1']}
+    _ol, _orr = repo_audit.manifest_vs_remote_discrepancies(_local, _remote)
+    assert _ol == {'openssl=3.0.15-1+asg1u1', 'libc6=2.36-9'}, _ol
+    assert _orr == {'curl=8.0-1'}, _orr
+
+
+def test_repo_external_disable_and_enable_empty_rebaselines():
+    """`repo external disable` flips to local-only; `repo external enable` onto
+    an EMPTY remote rebaselines current = base = published (boundary-D)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    import repo_audit
+    from build import BuildSession, BuildFlags
+
+    def _cap(fn):
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: None
+        try:
+            fn()
+        finally:
+            build.console.print = _orig
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfgdir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfgdir)
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.flags = BuildFlags()
+
+        class _Cfg:
+            dir_config = _cfgdir
+            external_enabled = True
+
+        _sess.config = _Cfg()
+        utils._SNAPSHOT_TS_CACHE.clear()
+        assert _sess._external_enabled() is True             # config default
+        _cap(lambda: _sess.cmd_repo_external('disable'))
+        assert _sess._external_enabled() is False
+        # enable onto an empty remote → rebaseline current=base
+        utils.write_snapshot_state(_sess.config, base='20260514T083402Z')
+        _saved = repo_audit.fetch_remote_ledger
+        repo_audit.fetch_remote_ledger = lambda _c: {}       # reachable, empty
+        try:
+            _cap(lambda: _sess.cmd_repo_external('enable'))
+        finally:
+            repo_audit.fetch_remote_ledger = _saved
+        _st = utils.read_snapshot_state(_sess.config)
+        assert _st['external'] is True
+        assert _st['current'] == '20260514T083402Z', _st      # rebaselined
+        assert _st['published'] == '20260514T083402Z', _st
+
+
+def test_update_build_pending_logic():
+    """_update_build_pending: True only when a base is published AND current is
+    ahead of published."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    import repo_audit
+    from build import BuildSession, BuildFlags
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.flags = BuildFlags()
+    _sess.flags.dep_check_ready = True
+    _sess.config = object()
+    _sess._snapshot_current = lambda: '20260520T000000Z'
+    _sess._snapshot_published = lambda: '20260514T083402Z'
+    _saved = repo_audit.published_ledger
+    try:
+        repo_audit.published_ledger = lambda _c: {'openssl': ['3.0.15-1']}
+        assert _sess._update_build_pending() is True
+        repo_audit.published_ledger = lambda _c: {}          # nothing published
+        assert _sess._update_build_pending() is False
+        repo_audit.published_ledger = lambda _c: {'x': ['1']}
+        _sess._snapshot_published = lambda: '20260520T000000Z'   # == current
+        assert _sess._update_build_pending() is False
+    finally:
+        repo_audit.published_ledger = _saved
+
+
+def test_external_and_audit_ssh_and_published_ledger_wired():
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _bb = fh.read()
+    assert "if action == 'external':" in _bb and 'def cmd_repo_external(' in _bb
+    assert re.search(r"if args and args\[0\] == 'ssh':", _bb) and \
+        'def _audit_external_vs_manifest(' in _bb
+    _ra = os.path.join(_ROOT, 'scripts', 'repo_audit.py')
+    with open(_ra) as fh:
+        _rb = fh.read()
+    for _fn in ('def published_ledger(', 'def write_published_manifest(',
+                'def read_published_manifest(', 'def local_manifest_path('):
+        assert _fn in _rb, f"{_fn} missing from repo_audit"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPD-02 — index on the remote (dpkg-scanpackages on the VM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_remote_scan_packages_builds_ssh_argv():
+    """_remote_scan_packages runs `cd <root> && dpkg-scanpackages -m <rel>` on
+    the VM via ssh (with `-t udeb` for udebs) and returns stdout."""
+    import types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    _calls = []
+
+    def _fake_run(argv, **kw):
+        _calls.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout='Package: x\n',
+                                     stderr='')
+
+    _saved = apt_repo.subprocess.run
+    apt_repo.subprocess.run = _fake_run
+    try:
+        _txt = apt_repo._remote_scan_packages(
+            ['ssh', '-i', 'k'], 'u@h', '/srv/asgard',
+            'dists/thor/main/binary-amd64', udeb=False)
+        assert _txt == 'Package: x\n'
+        _argv = _calls[0]
+        assert _argv[:4] == ['ssh', '-i', 'k', 'u@h'], _argv
+        _shell = _argv[4]
+        assert 'cd /srv/asgard' in _shell
+        assert ('dpkg-scanpackages -m dists/thor/main/binary-amd64 /dev/null'
+                in _shell), _shell
+        # udeb variant adds -t udeb
+        _calls.clear()
+        apt_repo._remote_scan_packages(
+            ['ssh'], 'u@h', '/srv/asgard',
+            'dists/thor/main/debian-installer/binary-amd64', udeb=True)
+        assert '-t udeb' in _calls[0][-1], _calls[0]
+    finally:
+        apt_repo.subprocess.run = _saved
+
+
+def test_remote_reindex_wiring():
+    """remote_reindex_and_sign scans REMOTELY but builds Release + signs
+    LOCALLY (key never leaves the box)."""
+    _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
+    with open(_ar) as fh:
+        _b = fh.read()
+    import re
+    _m = re.search(r'def remote_reindex_and_sign\(.*?(?=\ndef )', _b, re.DOTALL)
+    assert _m, "remote_reindex_and_sign not found"
+    _fn = _m.group(0)
+    assert '_remote_scan_packages(' in _fn, "scan must run on the remote"
+    for _local in ('_compress_index(', '_write_subdir_release(',
+                   '_generate_top_release(', 'sign_release_files('):
+        assert _local in _fn, f"{_local} (local) missing — signing must stay local"
+
+
+def test_index_minimal_stages_nested_subset():
+    """cmd_index_repo_minimal stages the runtime subset in the SAME nested
+    binary-<arch>/ layout as full (no flat pool/), excluding debug/source."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _mirror = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+        _body = (_BASE_CONF_BODY.format(mirror_block=_mirror).rstrip()
+                 + "\n    [Security]\n    Disabled = true\n")
+        _cfg_path = _write_test_config(_tmp, _body)
+        cfg = _build_config_from(_tmp, _cfg_path)
+        _main = cfg.deb_dir_for('main')
+        os.makedirs(_main, exist_ok=True)
+        _build_minimal_deb(os.path.join(_main, 'openssl_3.0.15-1_amd64.deb'),
+                           'openssl', '3.0.15-1')
+        _build_minimal_deb(
+            os.path.join(_main, 'openssl-dbgsym_3.0.15-1_amd64.deb'),
+            'openssl-dbgsym', '3.0.15-1')
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = cfg
+        assert _capture_console_print(
+            lambda: _sess.cmd_index_repo_minimal()) is not None
+        _rel = os.path.relpath(_main, cfg.dir_repo)
+        _dst = os.path.join(cfg.dir_publish, _rel)
+        # nested layout, runtime deb present, dbgsym excluded, NO flat pool/
+        assert os.path.exists(os.path.join(_dst, 'openssl_3.0.15-1_amd64.deb'))
+        assert not os.path.exists(
+            os.path.join(_dst, 'openssl-dbgsym_3.0.15-1_amd64.deb'))
+        assert not os.path.isdir(os.path.join(cfg.dir_publish, 'pool')), (
+            "minimal must NOT use a flat pool/ — unified nested layout")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16621,8 +17103,8 @@ def main() -> int:
         test_generate_apt_repo_tolerates_empty_udeb_component,
         test_buildconfig_publish_dir_and_apt_source_default,
         test_repo_publish_dispatch,
-        test_cmd_repo_publish_ssh_guards,
-        test_cmd_repo_publish_ssh_rsync_argv_and_progress,
+        test_rsync_streamed_argv_ignore_existing_and_filters,
+        test_publish_full_remote_scan_flow_wiring,
         test_repo_audit_external_dispatch,
         test_cmd_audit_external_requires_apt_source_url,
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
@@ -17106,16 +17588,34 @@ def main() -> int:
         test_snapshot_and_refresh_commands_wired,
         test_snapshot_state_roundtrip_and_resolve_precedence,
         test_snapshot_base_show_and_forward_only,
+        test_list_snapshots_between_filters_range_and_unions_keys,
+        test_snapshot_select_interactive_sets_chosen_current,
+        test_snapshot_select_current_is_forward_only,
         test_ensure_snapshot_pins_prompts_and_writes_when_unset,
         test_ensure_snapshot_pins_aborts_when_no_selection,
         test_cache_build_gates_on_snapshot_pins,
-        test_repo_refresh_ordering_invariants,
-        test_repo_refresh_aborts_when_ledger_unreachable,
+        test_repo_refresh_is_thin_wrapper,
+        test_publish_full_folds_index_merge_prune_and_gates_rsync,
+        test_source_build_autodetects_update_mode,
         test_workload_current_to_target_diffs_against_target_snapshot,
+        test_workload_detects_debNuN_source_change_ignores_unchanged,
+        test_workload_since_snapshot_diffs_published_to_current,
+        test_workload_excludes_forks_from_snapshot_diff,
+        test_snapshot_published_defaults_to_base_then_tracks,
         # UPD-01: snapshot tag in ISO identity
         test_snapshot_iso_tag_reflects_resolved_pin,
         test_stage_disk_info_writes_snapshot_marker_and_substitutes,
         test_iso_filenames_carry_snapshot_tag,
+        # UPD-01 decomposition: manifest, external on/off, update-mode plumbing
+        test_published_manifest_roundtrip_and_ledger,
+        test_manifest_vs_remote_discrepancies,
+        test_repo_external_disable_and_enable_empty_rebaselines,
+        test_update_build_pending_logic,
+        test_external_and_audit_ssh_and_published_ledger_wired,
+        # UPD-02: index on the remote
+        test_remote_scan_packages_builds_ssh_argv,
+        test_remote_reindex_wiring,
+        test_index_minimal_stages_nested_subset,
     ]
     failures = 0
     for t in tests:

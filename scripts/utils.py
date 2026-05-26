@@ -1200,6 +1200,31 @@ def _query_snapshot_latest(api_url: str, archive_keys: 'List[str]') -> str:
     return chosen
 
 
+def list_snapshots_between(config: 'BuildConfig', after_ts: str,
+                           upto_ts: str) -> 'List[str]':
+    """All distinct snapshot timestamps strictly AFTER `after_ts` and up to
+    (inclusive) `upto_ts`, unioned across every archive key, sorted ascending.
+
+    One GET of [Snapshot] TimestampApi returns the full per-archive lists
+    (same endpoint `_query_snapshot_latest` uses).  Powers `snapshot list` /
+    `snapshot select`'s "advance current → one of these" picker.  Returns []
+    on query failure or when there are no snapshots in range."""
+    try:
+        resp = requests.get(config.snapshot_timestamp_api, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()['result']
+    except Exception as e:
+        logger.warning(f"list_snapshots_between: query failed: {e}")
+        return []
+    _seen: set = set()
+    for _k in config.snapshot_archive_keys:
+        for _ts in result.get(_k, []) or []:
+            if (_SNAPSHOT_TS_RE.match(_ts)
+                    and after_ts < _ts <= upto_ts):
+                _seen.add(_ts)
+    return sorted(_seen)
+
+
 def _validate_snapshot_timestamp(
         ts: str, mirrors: 'List[Mirror]',
         snapshot_baseurl: str = 'https://snapshot.debian.org/archive',
@@ -1285,15 +1310,27 @@ def read_snapshot_state(config: 'BuildConfig') -> dict:
 
 def write_snapshot_state(config: 'BuildConfig',
                          base: 'Optional[str]' = None,
-                         current: 'Optional[str]' = None) -> None:
-    """Merge base/current into config/snapshot.state and clear the resolve
-    memo so the new pin takes effect immediately within this run."""
+                         current: 'Optional[str]' = None,
+                         published: 'Optional[str]' = None,
+                         external: 'Optional[bool]' = None) -> None:
+    """Merge base/current/published/external into config/snapshot.state and
+    clear the resolve memo so the new pin takes effect immediately within
+    this run.
+
+    Pins: `base` = archive floor (forward-only), `current` = the snapshot the
+    operator selected to build at, `published` = the snapshot the remote (or
+    the local manifest, when external is off) currently reflects.  `external`
+    = runtime override of [Repo] ExternalEnabled."""
     import json
     _state = read_snapshot_state(config)
     if base is not None:
         _state['base'] = base
     if current is not None:
         _state['current'] = current
+    if published is not None:
+        _state['published'] = published
+    if external is not None:
+        _state['external'] = bool(external)
     _path = snapshot_state_path(config)
     os.makedirs(os.path.dirname(_path), exist_ok=True)
     with open(_path, 'w') as fh:
@@ -1617,6 +1654,11 @@ class BuildConfig:
             self.publish_ssh_key = config_parser.get(
                 'Repo', 'PublishSshKey', fallback=''
             ).strip()
+            # UPD-01: default for whether a remote published repo exists.  The
+            # runtime value can be overridden in config/snapshot.state
+            # ('external') via `repo external enable|disable`.
+            self.external_enabled = config_parser.getboolean(
+                'Repo', 'ExternalEnabled', fallback=True)
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]
