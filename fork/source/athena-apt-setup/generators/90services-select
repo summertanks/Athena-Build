@@ -1,0 +1,49 @@
+#!/bin/sh
+set -e
+
+# Athena: the three apt services (security, updates, backports) are OFF
+# by default.  Athena ships a single self-contained repo and publishes
+# security/updates into the `main` suite, so there are no separate
+# -security / -updates / -backports suites to point at.  The question
+# is left in place (asked at medium priority) so an operator can
+# re-enable any service via `preseed apt-setup/services-select` once a
+# corresponding suite exists — the seen-guard below leaves a preseeded
+# value untouched.  The actual emitter is generators/91services, which
+# is a dormant no-op while this selection is empty.
+#
+# This replaces upstream's suite-validity pruning (stable/testing/
+# unstable special-casing): irrelevant when the default is "none".
+
+. /usr/share/debconf/confmodule
+
+# Default to NO services unless the operator preseeded a selection
+# (seen=true).  Overrides the upstream template default of
+# "security, updates, backports" without clobbering a preseed.
+db_fget apt-setup/services-select seen
+if [ "$RET" != true ]; then
+	db_set apt-setup/services-select ""
+fi
+
+db_get apt-setup/security_host
+db_subst apt-setup/services-select SEC_HOST "$RET"
+
+db_input medium apt-setup/services-select || true
+if ! db_go; then
+	exit 10 # back up
+fi
+
+# No need to set up proxy here if no services were selected
+db_get apt-setup/services-select
+[ "$RET" ] || exit 0
+
+# Proxy configuration is common to all services
+case $protocol in
+    http|https)
+	if db_get mirror/$protocol/proxy && [ -n "$RET" ]; then
+		proxy="$RET"
+		if ! grep -iq "Acquire::$protocol::Proxy" $ROOT/etc/apt/apt.conf.new; then
+			echo "Acquire::$protocol::Proxy \"$proxy\";" >> $ROOT/etc/apt/apt.conf.new
+		fi
+	fi
+	;;
+esac

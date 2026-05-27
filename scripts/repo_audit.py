@@ -541,59 +541,69 @@ def local_manifest_path(config) -> str:
     return os.path.join(config.dir_config, 'published.manifest')
 
 
-def write_published_manifest(config, packages_text: str) -> None:
-    """Write the published-manifest + a detached GPG signature (best-effort
-    with the project signing key; unsigned + warned if no key)."""
-    _path = local_manifest_path(config)
+def _write_signed_manifest(path: str, packages_text: str, config) -> None:
+    """Write a Packages-format manifest + a detached GPG signature (best-effort
+    with the project signing key; unsigned + warned if no key).  Shared by the
+    published-manifest and the local build ledger."""
     try:
-        os.makedirs(os.path.dirname(_path), exist_ok=True)
-        with open(_path, 'w') as _fh:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as _fh:
             _fh.write(packages_text)
     except OSError as e:
-        logger.error(f"write_published_manifest: {e}")
+        logger.error(f"_write_signed_manifest: {path}: {e}")
         return
     try:
         import signing
         _home = signing.signing_home(config)
         if _home and os.path.isdir(_home):
-            _sig = _path + '.sig'
+            _sig = path + '.sig'
             if os.path.exists(_sig):
                 os.remove(_sig)
             subprocess.run(
                 ['gpg', '--homedir', _home, '--batch', '--yes',
-                 '--detach-sign', '--armor', '-o', _sig, _path],
+                 '--detach-sign', '--armor', '-o', _sig, path],
                 check=True, capture_output=True)
     except Exception as e:
-        logger.warning(f"write_published_manifest: signing skipped ({e})")
+        logger.warning(f"_write_signed_manifest: signing skipped ({e})")
 
 
-def read_published_manifest(config) -> str:
+def _read_signed_manifest(path: str, config) -> str:
     """Return the manifest text (verifying its signature when present); '' if
     absent or if a present signature FAILS to verify (refuse a tampered file)."""
-    _path = local_manifest_path(config)
-    if not os.path.isfile(_path):
+    if not os.path.isfile(path):
         return ''
-    _sig = _path + '.sig'
+    _sig = path + '.sig'
     if os.path.exists(_sig):
         try:
             import signing
             _home = signing.signing_home(config)
             _r = subprocess.run(
-                ['gpg', '--homedir', _home, '--batch', '--verify', _sig, _path],
+                ['gpg', '--homedir', _home, '--batch', '--verify', _sig, path],
                 capture_output=True)
             if _r.returncode != 0:
                 logger.error(
-                    f"read_published_manifest: SIGNATURE VERIFY FAILED for "
-                    f"{_path} — refusing to use it")
+                    f"_read_signed_manifest: SIGNATURE VERIFY FAILED for "
+                    f"{path} — refusing to use it")
                 return ''
         except Exception as e:
-            logger.warning(f"read_published_manifest: verify skipped ({e})")
+            logger.warning(f"_read_signed_manifest: verify skipped ({e})")
     try:
-        with open(_path) as _fh:
+        with open(path) as _fh:
             return _fh.read()
     except OSError as e:
-        logger.error(f"read_published_manifest: {e}")
+        logger.error(f"_read_signed_manifest: {path}: {e}")
         return ''
+
+
+def write_published_manifest(config, packages_text: str) -> None:
+    """Write the published-manifest + detached signature."""
+    _write_signed_manifest(local_manifest_path(config), packages_text, config)
+
+
+def read_published_manifest(config) -> str:
+    """Return the published-manifest text (signature-verified); '' if absent or
+    tampered."""
+    return _read_signed_manifest(local_manifest_path(config), config)
 
 
 def published_ledger(config) -> 'dict[str, list[str]]':

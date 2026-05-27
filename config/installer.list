@@ -44,11 +44,11 @@ partman-efi
 partman-basicfilesystems
 
 # ─── Install workflow steps ────────────────────────────────────────
-# base-installer is in required → already pulled.  apt-setup-udeb
-# writes the target's /etc/apt/sources.list at install time; user-setup-
-# udeb creates the first user account; grub-installer runs grub-install
-# on the target.
-apt-setup-udeb
+# base-installer is in required → already pulled.  athena-setup-udeb
+# (our apt-setup fork) writes the target's /etc/apt/sources.list at
+# install time; user-setup-udeb creates the first user account;
+# grub-installer runs grub-install on the target.
+athena-setup-udeb
 user-setup-udeb
 grub-installer
 # choose-mirror drives the network-mirror step.  apt-setup's 50mirror

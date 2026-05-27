@@ -356,6 +356,14 @@ def highest_asg_update(published_versions, base: str, release: int) -> int:
     return _hi
 
 
+def asg_next_n(published_versions, base: str, release: int) -> int:
+    """The next +asg<release>u<N> number for a binary at pristine `base` —
+    one past the highest already published for THAT file (PER-FILE, from the
+    ledger), so a binary updated more often than its siblings carries a higher
+    N.  First update for a base/release → 1."""
+    return highest_asg_update(published_versions, base, release) + 1
+
+
 def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
     """Return (new_text, strip_count) — strips NMU suffix from the
     Version field AND every version constraint in dep-related fields

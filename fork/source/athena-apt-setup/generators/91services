@@ -1,0 +1,110 @@
+#!/bin/sh
+# 91services — Athena merged apt service-suite generator.
+#
+# Consolidates upstream apt-setup's 91security + 92updates + 93backports
+# into one parameterised emitter.  DORMANT by default: 90services-select
+# leaves apt-setup/services-select empty, so the loop below has nothing
+# to emit and this is a no-op.  Re-enable individual services via
+# `preseed apt-setup/services-select` (any of: security updates backports).
+#
+# Per service it appends a `deb`/`deb-src` pair for the matching suite
+# and verifies reachability.  Coordinates:
+#   - updates / backports : the main mirror chosen by 50mirror
+#   - security            : apt-setup/security_host (a separate archive
+#                           host in Debian's layout) — retarget via the
+#                           template default / preseed for Athena infra.
+set -e
+
+. /usr/share/debconf/confmodule
+
+file="$1"
+
+db_get apt-setup/services-select
+selected="$RET"
+[ "$selected" ] || exit 0          # nothing enabled — the Athena default
+
+# --- resolve the main mirror once (network mirror, else cdrom) --------
+if db_get mirror/codename && [ "$RET" ]; then
+	codename="$RET"
+	db_get mirror/protocol;            protocol="$RET"
+	db_get mirror/"$protocol"/hostname;  main_host="$RET"
+	db_get mirror/"$protocol"/directory; main_dir="/${RET#/}"
+else
+	db_get cdrom/codename; codename="$RET"
+	protocol=""; main_host=""; main_dir=""
+fi
+
+# components chosen by 50mirror (main [contrib] [non-free] …)
+components=$(cat /tmp/apt-setup.components 2>/dev/null || echo main)
+
+# deb-src prefix, shared by all services
+deb_src="deb-src"
+if db_get apt-setup/enable-source-repositories && [ "$RET" = false ]; then
+	deb_src="# deb-src"
+fi
+
+# skip the reachability probe when the network was declined in netcfg
+no_network=
+if db_get netcfg/dhcp_options && \
+   [ "$RET" = "Do not configure the network at this time" ]; then
+	no_network=1
+fi
+
+# emit_suite <proto> <host> <dir> <suite>
+# appends deb + deb-src for one suite and verifies it (unless offline).
+# returns 0 ok, 9 unreachable-but-continue, 10 user-requested-backup.
+emit_suite() {
+	_proto="$1"; _host="$2"; _dir="$3"; _suite="$4"
+
+	if [ -z "$_proto" ] || [ -z "$_host" ]; then
+		# No mirror coordinates.  Athena always selects a repo, so this
+		# is unexpected; upstream emitted commented deb.debian.org
+		# examples here — dropped to keep a Debian host out of the
+		# target's sources.list.
+		echo "# No network mirror selected; add a '$_suite' line for" >> "$file"
+		echo "# your mirror of choice if you want this service." >> "$file"
+		return 0
+	fi
+
+	echo "deb $_proto://${_host}${_dir} $_suite $components" >> "$file"
+
+	_rc=0
+	if [ -z "$no_network" ]; then
+		export ASV_TIMEOUT="-o Acquire::$_proto::Timeout=30"
+		if ! apt-setup-verify --from "$PROGRESS_FROM" --to "$PROGRESS_TO" "$file"; then
+			db_subst apt-setup/service-failed HOST "$_host"
+			db_input critical apt-setup/service-failed || true
+			db_go || return 10
+			_rc=9
+		fi
+	fi
+
+	echo "$deb_src $_proto://${_host}${_dir} $_suite $components" >> "$file"
+	return $_rc
+}
+
+CODE=0
+for _svc in $(echo "$selected" | sed 's/,/ /g'); do
+	case "$_svc" in
+	    security)
+		# Debian publishes security from a SEPARATE archive host+path.
+		# security_host default lives in the templates (retarget for
+		# Athena); suite is <codename>-security (bullseye+ shape).
+		db_get apt-setup/security_host; _sec_host="$RET"
+		[ -n "$_sec_host" ] && {
+			emit_suite "http" "$_sec_host" "/debian-security" \
+				"${codename}-security" || CODE=$?
+		}
+		;;
+	    updates)
+		emit_suite "$protocol" "$main_host" "$main_dir" \
+			"${codename}-updates" || CODE=$?
+		;;
+	    backports)
+		emit_suite "$protocol" "$main_host" "$main_dir" \
+			"${codename}-backports" || CODE=$?
+		;;
+	esac
+done
+
+exit $CODE

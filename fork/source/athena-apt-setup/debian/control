@@ -1,0 +1,38 @@
+Source: athena-apt-setup
+Section: debian-installer
+Priority: optional
+Maintainer: Athena Linux <athena@local>
+XSBC-Original-Maintainer: Debian Install System Team <debian-boot@lists.debian.org>
+Build-Depends: debhelper-compat (= 13), po-debconf
+
+Package: athena-setup-udeb
+Package-Type: udeb
+Architecture: any
+Priority: standard
+XB-Installer-Menu-Item: 7000
+Depends: athena-mirror-setup, installed-base, di-utils, ${misc:Depends}
+Conflicts: apt-setup-udeb
+Replaces: apt-setup-udeb
+Provides: apt-setup-udeb (= 1:0.182)
+Description: Configure apt (@DISTRIBUTION@ fork)
+ @DISTRIBUTION@'s fork of upstream Debian apt-setup-udeb.  Provides +
+ Conflicts + Replaces apt-setup-udeb so the installer ramdisk resolves
+ to this fork and the upstream udeb cannot coexist.
+
+Package: athena-mirror-setup
+Package-Type: udeb
+Architecture: all
+Depends: choose-mirror-bin, base-installer (>= 1.195), ${misc:Depends}
+Conflicts: apt-mirror-setup
+Replaces: apt-mirror-setup
+Provides: apt-mirror-setup (= 1:0.182)
+Description: set up a mirror in sources.list (@DISTRIBUTION@ fork)
+
+Package: athena-cdrom-setup
+Package-Type: udeb
+Architecture: all
+Depends: cdrom-detect, ${misc:Depends}
+Conflicts: apt-cdrom-setup
+Replaces: apt-cdrom-setup
+Provides: apt-cdrom-setup (= 1:0.182), apt-mirror-setup (= 1:0.182), athena-mirror-setup (= 1:0.182)
+Description: set up a CD in sources.list (@DISTRIBUTION@ fork)

@@ -12787,6 +12787,28 @@ def test_fork_mirror_generate_emits_complete_layout():
             f"no .dsc in source/repo/: {repo_files}"
 
 
+def test_fork_mirror_strips_epoch_from_constructed_filenames():
+    """Epoch'd fork versions (athena-apt-setup is 1:0.182+athena1) must NOT
+    leak the epoch into constructed/expected filenames — dpkg omits the
+    epoch from .dsc/.deb/.udeb names.  The Version: field keeps the epoch;
+    only the Filename drops it.  Regression for the athena-apt-setup
+    Sources-omission bug (the first epoch-carrying fork): _list_files_for_pkg
+    and the Filename builder matched `<pkg>_1:0.182...` against the real
+    epoch-less file and silently dropped the source from fork/Sources."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    assert fork_mirror._filename_version('1:0.182+athena1') == '0.182+athena1'
+    assert fork_mirror._filename_version('0.79+athena1') == '0.79+athena1'
+    _bin = {'Package': 'athena-setup-udeb', 'Architecture': 'all',
+            'Package-Type': 'udeb', 'Description': 'x'}
+    _text = fork_mirror._format_packages_stanza(
+        _bin, 'athena-apt-setup', '1:0.182+athena1', 'M <m@local>', 'amd64')
+    assert 'Filename: athena-setup-udeb_0.182+athena1_all.udeb' in _text
+    assert 'Version: 1:0.182+athena1' in _text
+
+
 def test_fork_mirror_packages_udeb_routing_and_placeholder_hashes():
     """udeb stanza lands in Packages-udeb (not Packages); Filename uses
     bare basename matching dpkg-buildpackage output; Size/SHA256 are
@@ -15801,6 +15823,19 @@ def test_highest_asg_update_reads_remote_ledger():
     assert highest_asg_update(['3.0.15-1'], '3.0.15-1', 1) == 0   # pristine only
 
 
+def test_asg_next_n_is_per_file_and_cumulative():
+    """asg_next_n = highest published +1, derived PER FILE (per the binary's
+    own ledger entry) so a file updated more often carries a higher N; resets
+    per release R."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import asg_next_n
+    assert asg_next_n([], '3.0.15-1', 1) == 1                       # first → u1
+    assert asg_next_n(['3.0.15-1+asg1u1'], '3.0.15-1', 1) == 2      # u1 → u2
+    assert asg_next_n(['3.0.15-1+asg1u1', '3.0.15-1+asg1u2'],
+                      '3.0.15-1', 1) == 3                           # cumulative
+    assert asg_next_n(['3.0.15-1+asg1u1'], '3.0.15-1', 2) == 1      # R differs
+
+
 def test_check_build_matches_asg_variant_of_prediction():
     """check_build must accept a +asg<R>u<N> stamped artifact for a pristine
     prediction — otherwise the source rebuilds every run (CONF-13 loop)."""
@@ -16127,6 +16162,59 @@ def test_workload_since_published_picks_only_advanced_bases():
     assert _sess._workload_since_published(_ledger) == {'openssl'}
     # nothing published → everything is workload
     assert _sess._workload_since_published({}) == {'openssl', 'libc6'}
+
+
+def test_needs_bump_build_per_file_exact_un():
+    """_needs_bump_build: a same-base re-spin (source version strips smaller)
+    is a bump-target only while its EXACT current-generation +asg<R>u<N> file
+    is absent — per file, and not satisfied by a stale older +asg.  A clean
+    new-base source is never a target."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            build_version = '1'
+            def deb_dest_for_filename(self, f):
+                return _tmp
+        _sess.config = _Cfg()
+
+        class _Src:
+            def __init__(self, v):
+                self.version = v
+
+        def _plant(fn):
+            open(os.path.join(_tmp, fn), 'w').close()
+
+        # (1) clean new base (strip is a no-op) → never a bump-target
+        _sess._predicted_files_for_source = lambda n: ['foo_1.3-1_amd64.deb']
+        assert _sess._needs_bump_build('foo', _Src('1.3-1'), {}, 1) is False
+
+        # (2) security re-spin, expected u1 absent → target
+        _sess._predicted_files_for_source = lambda n: ['foo_1.2-3_amd64.deb']
+        _delta = _Src('1.2-3+deb1u1')        # strips to 1.2-3 (same base)
+        assert _sess._needs_bump_build('foo', _delta, {}, 1) is True
+        # plant the EXACT u1 → no longer a target (idempotent)
+        _plant('foo_1.2-3+asg1u1_amd64.deb')
+        assert _sess._needs_bump_build('foo', _delta, {}, 1) is False
+
+        # (3) cumulative + exact-uN: ledger already at u1 → need u2; the
+        # on-disk u1 must NOT satisfy the u2 check (exact os.path.isfile, not
+        # find_matching_artifact).
+        _ledger = {'foo': ['1.2-3+asg1u1']}
+        assert _sess._needs_bump_build('foo', _delta, _ledger, 1) is True
+        _plant('foo_1.2-3+asg1u2_amd64.deb')
+        assert _sess._needs_bump_build('foo', _delta, _ledger, 1) is False
+
+        # (4) per-file divergence: foo→u2 present, foo-data→u5 missing → target
+        _sess._predicted_files_for_source = lambda n: [
+            'foo_1.2-3_amd64.deb', 'foo-data_1.2-3_amd64.deb']
+        _led2 = {'foo': ['1.2-3+asg1u1'], 'foo-data': ['1.2-3+asg1u4']}
+        assert _sess._needs_bump_build('foo', _delta, _led2, 1) is True
+        _plant('foo-data_1.2-3+asg1u5_amd64.deb')   # each at its OWN next N
+        assert _sess._needs_bump_build('foo', _delta, _led2, 1) is False
 
 
 def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
@@ -16518,7 +16606,9 @@ def test_publish_full_folds_index_merge_prune_and_gates_rsync():
 def test_source_build_autodetects_update_mode():
     """source build self-detects update mode (gotcha G): a subset/bare call
     routes to _do_update_build when a delta is pending; _do_update_build uses
-    the published→current diff + the manifest ledger + force."""
+    the published→current diff + the manifest ledger, and rebuilds WITHOUT
+    blanket force — the loaded ledger makes cmd_source_build's loop bump-aware
+    (already-built skipped; same-base re-spins rebuilt as bump-targets)."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
@@ -16528,12 +16618,18 @@ def test_source_build_autodetects_update_mode():
     assert '_update_build_pending()' in _b and '_do_update_build()' in _b, (
         "source build must auto-detect + route to update mode")
     assert 'not _names' in _b, "explicit package names opt out of update mode"
+    assert '_needs_bump_build(' in _b, (
+        "the build loop must be bump-aware (rebuild same-base re-spins)")
     _u = re.search(r'def _do_update_build\(self.*?(?=\n    def )', _body, re.DOTALL)
     _ub = _u.group(0)
     assert '_workload_since_snapshot(' in _ub, "update build diffs published→current"
     assert 'published_ledger(' in _ub and 'asg_ledger' in _ub, (
         "update build loads the manifest ledger for +asg stamping")
-    assert "cmd_source_build('force'" in _ub, "update build force-builds the delta"
+    assert "cmd_source_build('force'" not in _ub, (
+        "update build must NOT blanket-force — it relies on bump-aware skipping")
+    assert '_source_state(' in _ub and 'needs_build' in _ub, (
+        "update build must ALSO build non-delta sources that need building "
+        "(forks etc.), so `source build all` builds everything the audit lists")
 
 
 def test_workload_current_to_target_diffs_against_target_snapshot():
@@ -17470,6 +17566,7 @@ def main() -> int:
         test_fork_mirror_discover_skips_dirs_missing_debian_control,
         test_fork_mirror_generate_empty_tree_returns_false,
         test_fork_mirror_generate_emits_complete_layout,
+        test_fork_mirror_strips_epoch_from_constructed_filenames,
         test_fork_mirror_packages_udeb_routing_and_placeholder_hashes,
         test_fork_mirror_sources_uses_real_hashes_and_directory,
         test_fork_mirror_register_prepends_at_index_zero,
@@ -17568,6 +17665,7 @@ def main() -> int:
         test_segregate_never_deletes_existing_published_deb,
         # UPD-01 step 3: build-side stamping + check_build matching + Guard B
         test_highest_asg_update_reads_remote_ledger,
+        test_asg_next_n_is_per_file_and_cumulative,
         test_check_build_matches_asg_variant_of_prediction,
         test_normalize_built_artifacts_stamps_delta_when_ledger_present,
         test_normalize_built_artifacts_no_stamp_without_ledger,
@@ -17583,6 +17681,7 @@ def main() -> int:
         test_merge_remote_index_signs_locally_and_merges,
         # UPD-01 step 6: workload + Guard A preflight
         test_workload_since_published_picks_only_advanced_bases,
+        test_needs_bump_build_per_file_exact_un,
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator
         test_snapshot_and_refresh_commands_wired,
