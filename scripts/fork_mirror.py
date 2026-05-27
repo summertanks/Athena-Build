@@ -455,7 +455,7 @@ def _generate_source_packages(pkg_dirs: List[str],
             logger.warning(f"fork_mirror: {_pkg_name} changelog unreadable: {e}")
             continue
 
-        _dsc = os.path.join(dst_dir, f'{_pkg_name}_{_ver}.dsc')
+        _dsc = os.path.join(dst_dir, f'{_pkg_name}_{_filename_version(_ver)}.dsc')
         _changelog = os.path.join(_pkg_dir, 'debian', 'changelog')
 
         if (os.path.isfile(_dsc) and
@@ -509,9 +509,20 @@ def _read_pkg_version(pkg_dir: str) -> str:
     return str(_ch.version)
 
 
+def _filename_version(ver: str) -> str:
+    """Version as it appears in dpkg-produced FILENAMES — i.e. with the
+    epoch (`N:` prefix) stripped.  dpkg never puts the epoch in a
+    `.dsc`/`.deb`/`.udeb` filename, so any code that constructs or
+    matches those filenames from a changelog version (which DOES carry
+    the epoch) must strip it first.  The `Version:` index field keeps
+    the epoch — only filenames drop it.  (First exercised by the
+    athena-apt-setup fork, whose upstream carries epoch `1:`.)"""
+    return ver.split(':', 1)[1] if ':' in ver else ver
+
+
 def _list_files_for_pkg(dst_dir: str, pkg_name: str, ver: str) -> List[str]:
     """Return list of files dpkg-source produced (filtered by `<pkg>_<ver>` prefix)."""
-    _prefix = f'{pkg_name}_{ver}'
+    _prefix = f'{pkg_name}_{_filename_version(ver)}'
     _found: List[str] = []
     try:
         for _name in sorted(os.listdir(dst_dir)):
@@ -605,7 +616,7 @@ def _format_packages_stanza(binary: Deb822, source_name: str,
     if _arch != 'all':
         _arch = build_arch
     _ext      = 'udeb' if binary.get('Package-Type', '') == 'udeb' else 'deb'
-    _filename = f'{_pkg_name}_{ver}_{_arch}.{_ext}'
+    _filename = f'{_pkg_name}_{_filename_version(ver)}_{_arch}.{_ext}'
 
     _fields: List[str] = []
     _fields.append(f'Package: {_pkg_name}')

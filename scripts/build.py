@@ -5841,35 +5841,137 @@ class BuildSession:
         _cur = self._snapshot_current()
         return bool(_cur and _pub and apt_pkg.version_compare(_cur, _pub) > 0)
 
+    def _needs_bump_build(self, name: str, src, ledger: dict,
+                          release: int) -> bool:
+        """True when a workload source is a same-base re-spin (security/NMU)
+        whose THIS-generation +asg<R>u<N> artifact is not yet on disk — the one
+        case the un-forced skip-gate wrongly skips, because the rebuilt
+        pristine filename collides with the prior build's.  PER-FILE: a target
+        if ANY predicted main binary's exact uN is missing.
+
+        NOT a target when the source isn't a delta (a clean new-base upload
+        ships pristine and the un-forced gate builds it normally), nor when
+        every main binary already carries this generation's exact uN
+        (idempotent: a re-run skips).
+
+        N is per-file (`utils.asg_next_n` against the local signed manifest), so
+        the EXACT expected uN is checked with os.path.isfile — NOT
+        find_matching_artifact, which would accept a stale older +asg and wrongly
+        skip a needed re-bump.  The same-base test mirrors buildcontainer's
+        `_src_is_delta` so this decision and the post-build stamp agree.
+        """
+        if utils.strip_nmu_suffix(str(src.version)) == str(src.version):
+            return False                      # clean new base — not a re-spin
+        for _f in self._predicted_files_for_source(name):
+            if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+                continue
+            if utils.classify_repo_subdir(_f) != 'main':
+                continue
+            _parts = os.path.splitext(_f)[0].split('_')
+            if len(_parts) != 3:
+                continue
+            _bin, _ver, _arch = _parts
+            _n = utils.asg_next_n(
+                ledger.get(_bin, []), utils.pristine_base(_ver), release)
+            _expected = utils.asg_filename(_f, release, _n)
+            _dst = self.config.deb_dest_for_filename(_f)
+            if not os.path.isfile(os.path.join(_dst, _expected)):
+                return True                   # this file's current-gen bump missing
+        return False
+
     def _do_update_build(self):
-        """Rebuild the published→current source delta, stamped +asg<R>u<N>
-        (the +asg N derives from the local published-manifest ledger).  Invoked
-        automatically by `source build` in update mode."""
+        """Rebuild the published→current source delta (+asg<R>u<N>-stamped,
+        per-file N from the published manifest) AND build any OTHER selected
+        source that needs building — forks etc. that aren't part of the upstream
+        snapshot delta — so update-mode `source build` builds everything the
+        audit lists, not just the delta.
+
+        NO blanket force: the un-forced skip gate skips packages already built
+        for this generation; same-base security/NMU re-spins (whose rebuilt
+        pristine filename collides with the prior build, so the filename gate
+        can't see the change) are rebuilt as bump-targets; genuinely-missing
+        binaries (needs_build, e.g. a fresh fork) build normally.  Resumable +
+        idempotent."""
         _published = self._snapshot_published()
         _current = self._snapshot_current()
         console.print(
             f"source build: UPDATE mode — published {_published} → current "
-            f"{_current}; rebuilding only the changed source delta, "
-            f"+asg-stamped (subset/all ignored in update mode).",
+            f"{_current}; rebuilding the changed source delta (+asg-stamped, "
+            f"per-file N) plus any other source needing a build.",
             tui.COLOR_HIGHLIGHT)
         _workload, _err = self._workload_since_snapshot(_published)
         if _err:
             console.print(f"source build (update): {_err}", tui.COLOR_ERROR)
             return
-        if not _workload:
-            console.print("source build: no source changed published → current "
-                          "— nothing to build.")
-            return
-        console.print(f"  {len(_workload)} changed source(s): "
-                      f"{', '.join(_workload)}")
+        # N authority = the PUBLISHED manifest only.  N is a published-generation
+        # counter (advances on `repo publish`, not per build): the next-to-mint is
+        # one past the highest PUBLISHED uN; local rebuilds of the still-pending
+        # update keep the same N.  (A build-ledger union was tried + reverted —
+        # recording locally-built uN made asg_next_n overshoot by 1, turning every
+        # same-base delta into a perpetual bump-target.)
         _ledger = repo_audit.published_ledger(self.config)
         if self.container is not None:
             self.container.asg_ledger = _ledger
         try:
-            # Named + force → re-enters the normal build path (no update
-            # re-detection, since _names is now non-empty); the loaded ledger
-            # makes the deltas stamp +asg<R>u<N>.
-            self.cmd_source_build('force', *_workload)
+            _release = None
+            try:
+                _release = int(
+                    str(self.config.build_version).strip('"').strip("'"))
+            except (TypeError, ValueError):
+                pass
+            _srcs = dict(self.dep_tree.selected_srcs)
+            if self.udeb_dep_tree is not None:
+                for _n, _s in self.udeb_dep_tree.selected_srcs.items():
+                    _srcs.setdefault(_n, _s)
+            _wset = set(_workload)
+
+            # (1) the snapshot delta: respins rebuilt+stamped, current ones
+            # skipped.  Mirrors the loop's exact skip rule (skip iff check_build
+            # AND not a bump-target) so the report matches what will build.
+            _delta_to_build = []
+            for _n in _workload:
+                _s = _srcs.get(_n)
+                if _s is None:
+                    _delta_to_build.append(_n)
+                    continue
+                _is_bump = (
+                    _release is not None and self.container is not None
+                    and self._needs_bump_build(_n, _s, _ledger, _release))
+                _expected = self._predicted_files_for_source(_n)
+                if _is_bump or not (
+                        self.container is not None
+                        and self.container.check_build(_s, _expected)):
+                    _delta_to_build.append(_n)
+
+            # (2) any OTHER selected source that needs building (forks, or any
+            # source with missing/invalid binaries) — NOT in the upstream delta.
+            # These build pristine (not deltas → not +asg-stamped).
+            _extra = []
+            if self.container is not None:
+                _extra = [
+                    _n for _n, _s in sorted(_srcs.items())
+                    if _n not in _wset
+                    and self._source_state(_n, _s) in ('needs_build', 'stale_pass')
+                ]
+
+            console.print(
+                f"  {len(_workload)} changed source(s): "
+                f"{len(_workload) - len(_delta_to_build)} already up-to-date, "
+                f"{len(_delta_to_build)} to (re)build"
+                + (f": {', '.join(_delta_to_build)}" if _delta_to_build else ""))
+            if _extra:
+                console.print(
+                    f"  + {len(_extra)} other source(s) needing a build "
+                    f"(not in the delta — e.g. forks): {', '.join(_extra)}")
+
+            if not _delta_to_build and not _extra:
+                console.print("source build: everything already up-to-date for "
+                              "this generation — nothing to build.")
+                return
+            # Pass the full delta workload (the loop skips the up-to-date and
+            # rebuilds bump-targets) plus the extra needs_build sources.  Ledger
+            # loaded → delta respins get +asg-stamped; forks build pristine.
+            self.cmd_source_build(*(list(_workload) + _extra))
         finally:
             if self.container is not None:
                 self.container.asg_ledger = None
@@ -6624,6 +6726,22 @@ class BuildSession:
             show_rate=False,
         )
 
+        # UPD-01 bump-aware build: when a ledger is loaded (only
+        # `_do_update_build` does so), un-forced builds additionally rebuild a
+        # same-base security/NMU re-spin whose THIS-generation +asg<R>u<N>
+        # artifact is missing — the one case the filename-based skip gate can't
+        # see (the rebuilt pristine name collides with the prior build).  N is
+        # per-file; the post-build stamp (buildcontainer) applies it.
+        _bump_active = (self.container is not None
+                        and getattr(self.container, 'asg_ledger', None) is not None)
+        _bump_release = None
+        if _bump_active:
+            try:
+                _bump_release = int(
+                    str(self.config.build_version).strip('"').strip("'"))
+            except (TypeError, ValueError):
+                _bump_active = False   # can't derive N → stamper skips too
+
         for _index, _src_pkg in enumerate(packages, start=1):
             progress_bar.label(_src_pkg.package)
             _ = _index   # surfaced via {value} on the bar
@@ -6662,8 +6780,19 @@ class BuildSession:
                 progress_bar.step(1)
                 continue
 
-            # Skip packages with a valid existing build result unless force is set.
-            if not _force and self.container.check_build(_src_pkg, _expected_files):
+            # Bump-target: same-base re-spin whose current-generation +asg uN
+            # is missing.  Forces THIS package's rebuild even un-forced, so the
+            # stamp can mint the new uN (the filename-based skip would wrongly
+            # skip it).  Idempotent: once uN exists it's no longer a target.
+            _bump_target = (
+                _bump_active and self._needs_bump_build(
+                    _src_pkg.package, _src_pkg,
+                    self.container.asg_ledger, _bump_release))
+
+            # Skip packages with a valid existing build result unless force is
+            # set — but never skip a bump-target.
+            if (not _force and not _bump_target
+                    and self.container.check_build(_src_pkg, _expected_files)):
                 logger.info(f"Package {_src_pkg.package} already built [SKIPPED]")
                 _skipped = _skipped + 1
                 progress_bar.step(1)
@@ -6679,6 +6808,17 @@ class BuildSession:
                     _src_pkg, _expected_files):
                 logger.info(f"Building Package {_src_pkg.package} [PASS]")
                 _built = _built + 1
+                # Loop guard: a bump-target must come out stamped (its uN now
+                # present).  If it's still missing, the predicate and the
+                # post-build stamper disagreed — warn so it's visible rather
+                # than silently re-targeting every run.
+                if _bump_target and self._needs_bump_build(
+                        _src_pkg.package, _src_pkg,
+                        self.container.asg_ledger, _bump_release):
+                    logger.warning(
+                        f"asg-bump: {_src_pkg.package} built but its +asg uN "
+                        f"artifact is still absent — bump predicate/stamper "
+                        f"mismatch; shipped unstamped this generation")
             elif _build_result:
                 # Guard B (UPD-01): the build reported PASS but check_build
                 # still can't find/match the predicted artifacts — that's

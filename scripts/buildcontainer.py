@@ -765,12 +765,14 @@ class BuildContainer:
         delta.  Only deltas get stamped — a plain pristine upstream build (and
         the initial full build at the pinned snapshot) ships pristine.
 
-        Stamping requires the remote ledger (self.asg_ledger: {pkg: [versions]})
-        so N is monotonic against what's ALREADY published — local is
-        single-snapshot and can't be the source of truth.  When no ledger is
-        set (a plain `source build`, not a `repo refresh`), we strip only and
-        do NOT stamp.  N is derived once per source (max over its emitted
-        bases + 1) so all sibling binaries share it.
+        Stamping requires the ledger (self.asg_ledger: {pkg: [versions]}, the
+        LOCAL signed published manifest) so N is monotonic against what's
+        ALREADY published — local repo/ is single-snapshot and can't be the
+        source of truth.  When no ledger is set (a plain `source build`, not a
+        `repo refresh`), we strip only and do NOT stamp.  N is derived PER
+        BINARY FILE (each file's own highest published N + 1) — a file updated
+        more often than its siblings carries a higher N (e.g. foo at u5 while
+        foo-data is at u1).
 
         Failures are logged but don't propagate — best-effort normalisation;
         a missed strip surfaces later via `repo audit_nmu`.
@@ -812,9 +814,10 @@ class BuildContainer:
                 f"{src_pkg.package}")
             return
 
-        # One N for the whole source: max over each emitted binary's base.
-        _n = 0
-        _stampable: 'list[str]' = []
+        # Per-file N: each binary gets its own +asg<R>u<N> from its OWN
+        # published history (NOT a shared per-source max), so a file updated
+        # more often than its siblings carries a higher N.
+        _n_stamped = 0
         for _path in _current_paths:
             _b = os.path.basename(_path)
             _name, _ext = os.path.splitext(_b)
@@ -823,27 +826,20 @@ class BuildContainer:
                 continue
             _pkg, _ver, _arch = _parts
             _base = utils.pristine_base(_ver)
-            _published = _ledger.get(_pkg, [])
-            _n = max(_n, utils.highest_asg_update(_published, _base, _release))
-            _stampable.append(_path)
-        _n += 1
-
-        _n_stamped = 0
-        for _path in _stampable:
-            _f = os.path.basename(_path)
+            _n = utils.asg_next_n(_ledger.get(_pkg, []), _base, _release)
             try:
                 _r = utils.restamp_asg_deb(_path, _release, _n)
                 if _r['status'] == 'rewritten':
                     _n_stamped += 1
                     logger.info(
-                        f"asg-stamp: {_f} → "
-                        f"{os.path.basename(_r['new_path'])}")
+                        f"asg-stamp: {_b} → "
+                        f"{os.path.basename(_r['new_path'])} (+asg{_release}u{_n})")
             except Exception as e:
-                logger.warning(f"asg-stamp: {_f} failed: {e}")
+                logger.warning(f"asg-stamp: {_b} failed: {e}")
         if _n_stamped:
             logger.info(
                 f"asg-stamp: marked {_n_stamped} artifact(s) from source "
-                f"{src_pkg.package} as +asg{_release}u{_n}")
+                f"{src_pkg.package} (+asg{_release}, per-file N)")
 
     def _segregate_built_artifacts(self, src_pkg) -> 'list[str]':
         """After dpkg-buildpackage's `cp *.deb /repo/`, the binaries

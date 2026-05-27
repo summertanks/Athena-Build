@@ -9,7 +9,7 @@ Package: athena-pkgsel
 Package-Type: udeb
 Architecture: all
 XB-Installer-Menu-Item: 7000
-Depends: ${misc:Depends}, apt-setup-udeb, di-utils (>= 1.56)
+Depends: ${misc:Depends}, athena-setup-udeb, di-utils (>= 1.56)
 Conflicts: pkgsel
 Replaces: pkgsel
 # Versioned Provides — defensive against any d-i tool that might
