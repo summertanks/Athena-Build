@@ -1,0 +1,46 @@
+#!/bin/sh
+# Athena: when the operator SKIPS the network-mirror step, the target is left
+# with only the cdrom apt source (which 06athena-disable-cdrom would then NOT
+# disable, since it guards on a network source existing).  Write a default
+# network source so the installed system always has a reachable, network apt
+# source.
+#
+# Only fires when apt-setup left NO network source (i.e. the mirror was
+# skipped).  When a mirror WAS selected, 50mirror already wrote it to
+# sources.list and this hook no-ops — so the operator's selection wins, and
+# this scales to multiple selected mirrors.
+#
+# The default coordinates come from the SAME debconf keys choose-mirror uses
+# (mirror/http/hostname + directory, defaulted to the Athena mirror in
+# choose-mirror's templates; mirror/codename preseeded to our suite) — one
+# source of truth, no separate hardcoded URL.  Plain `deb` (no signed-by): the
+# install-time hook already trusts our key globally via
+# /target/etc/apt/trusted.gpg.d/athena-archive-keyring.gpg.
+#
+# Runs from finish-install.d (after pkgsel, /target mounted), numbered 05 so it
+# precedes 06athena-disable-cdrom — which then sees this network source and
+# disables the cdrom: entries.
+set -e
+
+. /usr/share/debconf/confmodule
+
+if grep -rqsE '^[[:space:]]*deb[[:space:]]+(https?|ftp)://' \
+        /target/etc/apt/sources.list /target/etc/apt/sources.list.d/ 2>/dev/null; then
+    # A mirror was selected; its source is already written.  Nothing to do.
+    exit 0
+fi
+
+db_get mirror/http/hostname  || true; host="$RET"
+db_get mirror/http/directory || true; dir="/${RET#/}"
+db_get mirror/codename       || true; suite="$RET"
+
+if [ -z "$host" ] || [ -z "$suite" ]; then
+    logger -t athena-finish-install \
+        "no mirror selected and no default mirror coords; skipping athena.list"
+    exit 0
+fi
+
+echo "deb http://${host}${dir} ${suite} main" \
+    > /target/etc/apt/sources.list.d/athena.list
+logger -t athena-finish-install \
+    "no mirror selected; wrote default athena.list -> http://${host}${dir} ${suite} main"

@@ -30,18 +30,16 @@ _Description: Debian archive mirror country:
 Template: mirror/http/mirror
 Type: select
 Choices: ${mirrors}
-Default: deb.debian.org
+Default: 140.245.198.222
 # :sl1:
 _Description: Debian archive mirror:
  Please select a Debian archive mirror. You should use a mirror in
  your country or region if you do not know which mirror has the best
  Internet connection to you.
- .
- Usually, deb.debian.org is a good choice.
 
 Template: mirror/http/hostname
 Type: string
-Default: deb.debian.org
+Default: 140.245.198.222
 # :sl1:
 _Description: Debian archive mirror hostname:
  Please enter the hostname of the mirror from which Debian will be downloaded.
@@ -51,7 +49,7 @@ _Description: Debian archive mirror hostname:
 
 Template: mirror/http/directory
 Type: string
-Default: /debian/
+Default: /asgard/
 # :sl2:
 _Description: Debian archive mirror directory:
  Please enter the directory in which the mirror of the Debian archive is

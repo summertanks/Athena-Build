@@ -201,7 +201,7 @@ class State:
     tabs: Dict[str, TabState] = field(default_factory=dict)
     cmd: CmdLine = field(default_factory=CmdLine)
     widgets: List[object] = field(default_factory=list)
-    cmd_prompt: str = '$ '
+    cmd_prompt: str = '> '
     banner: str = 'Athena Build'
     status_text: str = ''
     dirty: bool = True

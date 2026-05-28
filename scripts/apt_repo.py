@@ -573,19 +573,26 @@ def remote_reindex_and_sign(
                 _rel = f'dists/{_suite}/{_sub}'
                 if not _remote_has_debs(ssh_cmd, userhost, remote_root, _rel):
                     continue
-                _text = _remote_scan_packages(
-                    ssh_cmd, userhost, remote_root, _rel, udeb=_udeb)
-                if _text is None:
-                    return None
-                _abs = os.path.join(staging, _rel)
-                os.makedirs(_abs, exist_ok=True)
-                _out = os.path.join(_abs, 'Packages')
-                with open(_out, 'w') as _fh:
-                    _fh.write(_text)
-                if not _compress_index(_out, password):
-                    return None
-                if not _write_subdir_release(
-                        _abs, _suite, _codename, _comp, arch, password):
+                # The remote dpkg-scanpackages over a big pool (+ local
+                # compress/Release) is the publish's main dead time — spin it.
+                _spin = tui.Spinner(f"indexing {_rel} (remote scan + sign)")
+                try:
+                    _text = _remote_scan_packages(
+                        ssh_cmd, userhost, remote_root, _rel, udeb=_udeb)
+                    _ok = _text is not None
+                    if _ok:
+                        _abs = os.path.join(staging, _rel)
+                        os.makedirs(_abs, exist_ok=True)
+                        _out = os.path.join(_abs, 'Packages')
+                        with open(_out, 'w') as _fh:
+                            _fh.write(_text)
+                        _ok = (_compress_index(_out, password)
+                               and _write_subdir_release(
+                                   _abs, _suite, _codename, _comp, arch,
+                                   password))
+                finally:
+                    _spin.done()
+                if not _ok:
                     return None
                 if not _udeb and _comp not in _populated:
                     _populated.append(_comp)
@@ -594,16 +601,20 @@ def remote_reindex_and_sign(
                     _main_packages = _text
         if not _populated:
             continue
-        _top = os.path.join(staging, 'dists', _suite, 'Release')
-        os.makedirs(os.path.dirname(_top), exist_ok=True)
-        if not _generate_top_release(
+        _spin = tui.Spinner(f"finalizing dists/{_suite}/ (Release + signature)")
+        try:
+            _top = os.path.join(staging, 'dists', _suite, 'Release')
+            os.makedirs(os.path.dirname(_top), exist_ok=True)
+            _ok = _generate_top_release(
                 staging, _suite, _codename, version, _top, password,
-                components=_populated, description=_desc):
+                components=_populated, description=_desc)
+            if _ok and signing_homedir is not None:
+                _ok = sign_release_files(staging, _suite, signing_homedir,
+                                         password)
+        finally:
+            _spin.done()
+        if not _ok:
             return None
-        if signing_homedir is not None:
-            if not sign_release_files(staging, _suite, signing_homedir,
-                                      password):
-                return None
         tui.console.print(
             f"  → dists/{_suite}/ re-indexed from remote + signed "
             f"(components: {', '.join(_populated)})", tui.COLOR_HIGHLIGHT)

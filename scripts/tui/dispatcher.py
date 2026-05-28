@@ -199,11 +199,16 @@ class Dispatcher:
     def _on_key(self, key: str) -> None:
         """Single keystroke dispatch.
 
-        Editor keys (F-keys, PgUp/PgDn for scroll, Up/Down for history,
-        Left/Right for cursor, Backspace, Tab completion) work
-        REGARDLESS of whether a line/masked prompt is pending — same
-        as the legacy TUI, where the shell idle prompt and any nested
-        Prompt() both shared the editor.  Only PROMPT_PAUSE
+        Navigation keys (F-keys to switch tabs, PgUp/PgDn to scroll, ESC)
+        work ALWAYS — including while a command runs — so the operator can
+        read output and move around during a long build.
+
+        Command-line editing keys (Up/Down history, Left/Right cursor,
+        Backspace, Tab completion, printable insert, Enter) only work while a
+        line/masked prompt is ACCEPTING input (`_pending_prompt` set).  Between
+        prompts — i.e. while a command is running — the command line is inert:
+        keystrokes are ignored, so the busy state (set in `_end_prompt`) is
+        unambiguous and stray typing isn't captured.  Only PROMPT_PAUSE
         (mode='key') consumes the next single keystroke whole."""
 
         if key == 'KEY_RESIZE':
@@ -234,7 +239,9 @@ class Dispatcher:
 
         st = self.state
 
-        # ── Editor / navigation keys (always active) ─────────────────────
+        # ── Navigation — ALWAYS active, even while a command runs ─────────
+        # Scroll the output, switch tabs, leave a selector — so the operator
+        # can read output and move around during a long build.
         if key == 'KEY_PPAGE':
             cr = self._renderer.content_rows()
             st.active_tab().scroll_by(cr, self._renderer.width(), cr)
@@ -245,6 +252,24 @@ class Dispatcher:
             st.active_tab().scroll_by(-cr, self._renderer.width(), cr)
             st.dirty = True
             return
+        if key.startswith('KEY_F(') and key.endswith(')'):
+            try:
+                n = int(key[len('KEY_F('):-1])
+            except ValueError:
+                return
+            st.activate_by_index(n - 1)
+            return
+        if key == '\x1b':
+            return
+
+        # ── Command-line editing — ONLY while a prompt is accepting input ──
+        # Between request_prompt calls (a command is running, _pending_prompt
+        # is None) the command line is INERT: keystrokes are ignored so the
+        # busy state is unambiguous and stray typing isn't captured.  The
+        # busy indicator is set in _end_prompt; navigation above stays live.
+        if self._pending_prompt is None:
+            return
+
         if key == 'KEY_UP':
             if st.cmd.history_prev():
                 st.dirty = True
@@ -265,30 +290,17 @@ class Dispatcher:
             if st.cmd.backspace():
                 st.dirty = True
             return
-        if key.startswith('KEY_F(') and key.endswith(')'):
-            try:
-                n = int(key[len('KEY_F('):-1])
-            except ValueError:
-                return
-            st.activate_by_index(n - 1)
-            return
-        if key == '\x1b':
-            return
         if key == '\t':
             self._complete_command()
             return
 
-        # Enter: submit to a pending line/masked prompt if there is one.
+        # Enter: submit to the pending line/masked prompt.
         if key == '\n':
-            if self._pending_prompt is not None:
-                pp = self._pending_prompt
-                answer = st.cmd.text
-                st.cmd.reset()
-                self._end_prompt()
-                pp.future.set_result(answer)
-            else:
-                st.cmd.reset()
-                st.dirty = True
+            pp = self._pending_prompt
+            answer = st.cmd.text
+            st.cmd.reset()
+            self._end_prompt()
+            pp.future.set_result(answer)
             return
 
         # Ignore unrecognised multi-char sequences.
@@ -313,8 +325,14 @@ class Dispatcher:
         self.state.dirty = True
 
     def _end_prompt(self) -> None:
+        # A prompt was just answered — no input is accepted again until the
+        # next request_prompt (i.e. until the running command finishes and the
+        # shell loops back).  Show a BUSY indicator (not the idle '> ' prompt)
+        # so the operator can tell a command is running, not waiting for input.
+        # _on_key gates line-editing on _pending_prompt, so keys are ignored
+        # in this state (scroll / tab-switch stay live).
         self._pending_prompt = None
-        self.state.cmd_prompt = '$ '
+        self.state.cmd_prompt = '… running (please wait) '
         self.state.cmd.masked = False
         self.state.dirty = True
 

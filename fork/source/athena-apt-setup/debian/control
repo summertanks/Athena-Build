@@ -34,5 +34,5 @@ Architecture: all
 Depends: cdrom-detect, ${misc:Depends}
 Conflicts: apt-cdrom-setup
 Replaces: apt-cdrom-setup
-Provides: apt-cdrom-setup (= 1:0.182), apt-mirror-setup (= 1:0.182), athena-mirror-setup (= 1:0.182)
+Provides: apt-cdrom-setup (= 1:0.182)
 Description: set up a CD in sources.list (@DISTRIBUTION@ fork)

@@ -74,6 +74,7 @@ def build_installer_iso(
     group_meta: Optional['dict[str, dict[str, str]]'] = None,
     expected_kernel_pkg: Optional[str] = None,
     dir_repo_main_udeb: Optional[str] = None,   # CONF-01 Stage D
+    exclude_names: Optional[set] = None,        # fork-superseded upstream bins
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -147,7 +148,8 @@ def build_installer_iso(
     _pool_sources = [dir_repo]
     if dir_repo_main_udeb is not None:
         _pool_sources.append(dir_repo_main_udeb)
-    if not _stage_pool(_pool_sources, _staging, password, deb_whitelist):
+    if not _stage_pool(_pool_sources, _staging, password, deb_whitelist,
+                       exclude_names):
         return False
 
     # Per-group package manifests still useful for operator inspection
@@ -704,7 +706,7 @@ def _debian_version_cmp(a: str, b: str) -> int:
 
 
 def _select_pool_files(
-    source_dirs: 'list[str]', deb_whitelist,
+    source_dirs: 'list[str]', deb_whitelist, exclude_names=None,
 ) -> 'tuple[list[tuple[str, str]], int]':
     """Decide which files across `source_dirs` ship on the installer ISO.
 
@@ -762,11 +764,20 @@ def _select_pool_files(
     if deb_whitelist is None:
         return _all, 0
 
+    # Binaries a SHIPPED fork supersedes (Conflicts/Replaces) — drop them so an
+    # upstream udeb (e.g. apt-setup-udeb superseded by athena-setup-udeb) can't
+    # ride along on the ISO and run its generators (the security.debian.org bug).
+    # d-i's anna/udpkg ignore Conflicts, so exclusion must be physical.
+    _exclude = exclude_names or set()
     _udebs: 'list[tuple[str, str]]' = []
     _by_name: 'dict[str, tuple[str, tuple[str, str]]]' = {}   # name → (ver, (src_dir, fname))
     _skipped = 0
     for _src_dir, _name in _all:
         if _name.endswith('.udeb'):
+            _upkg, _ = _parse_deb_filename(_name)
+            if _upkg and _upkg in _exclude:
+                _skipped += 1
+                continue
             _udebs.append((_src_dir, _name))
             continue
         if not _name.endswith('.deb'):
@@ -774,6 +785,9 @@ def _select_pool_files(
             continue
         _pkg, _ver = _parse_deb_filename(_name)
         if not _pkg or _pkg.endswith('-dbgsym'):
+            _skipped += 1
+            continue
+        if _pkg in _exclude:
             _skipped += 1
             continue
         if _pkg not in deb_whitelist:
@@ -793,7 +807,7 @@ def _select_pool_files(
 
 def _stage_pool(
     source_dirs: 'list[str]', staging: str, password: str,
-    deb_whitelist=None,
+    deb_whitelist=None, exclude_names=None,
 ) -> bool:
     """Copy a filtered subset of source_dirs → staging/pool/ (FLAT).
 
@@ -820,7 +834,8 @@ def _stage_pool(
     sudo for root-owned files in repo/.
     """
     _dst = os.path.join(staging, 'pool')
-    _kept, _skipped = _select_pool_files(source_dirs, deb_whitelist)
+    _kept, _skipped = _select_pool_files(source_dirs, deb_whitelist,
+                                         exclude_names)
     if not _kept:
         tui.console.print(
             f"ERROR: pool selection produced 0 files from {source_dirs} "

@@ -37,6 +37,12 @@ _OVERLAY_MAP = [
     # absent (operator removes it for a non-debug ISO).
     ('debug/syslog-to-serial.sh',
      'lib/debian-installer-startup.d/S99-syslog-to-serial'),
+    # When the operator skips the network mirror, write a default Athena apt
+    # source so the installed system isn't left with only the (about-to-be-
+    # disabled) cdrom source.  Numbered 05 to precede 06 below.  No-ops when a
+    # mirror was selected.  cp -p preserves its +x bit.
+    ('finish-install/05athena-default-source',
+     'usr/lib/finish-install.d/05athena-default-source'),
     # COMP-01: disable the install-disc apt source on the target post-install
     # (so apt doesn't block on "insert the disc").  Conditional on a network
     # source existing — see the script.  cp -p preserves its +x bit.
@@ -91,6 +97,9 @@ def build_installer_chroot(
     )
 
     if not _dpkg_unpack(dir_chroot_installer, _udeb_files, password):
+        return False
+
+    if not _assert_apt_setup_generators(dir_chroot_installer):
         return False
 
     if not _strip_debian_residue_hooks(dir_chroot_installer, password):
@@ -257,12 +266,20 @@ def _resolve_udeb_files(udeb_tree, dir_udebs: str) -> List[str]:
             )
             continue
         _filename = utils.normalize_repo_filename(_filename)
-        _filepath = os.path.join(_main, _filename)
-        if os.path.exists(_filepath):
-            _files.append(_filepath)
+        # The index Filename is the PRISTINE name, but the on-disk .udeb may
+        # carry a +asg<R>u<N> stamp (UPD-01 update layer).  find_matching_artifact
+        # accepts the pristine name OR its stamped variant — the same
+        # reconciliation check_build / _source_state use.  Without it, every
+        # stamped udeb (e.g. busybox-udeb after a security delta) resolves as
+        # "missing" and is dropped from the initrd → kernel panic "no init found"
+        # (no /bin/sh, since busybox is gone).
+        _match = utils.find_matching_artifact(_main, _filename)
+        if _match:
+            _files.append(_match)
             continue
         logger.warning(
-            f"_resolve_udeb_files: missing {_name} — expected {_filepath}"
+            f"_resolve_udeb_files: missing {_name} — expected "
+            f"{os.path.join(_main, _filename)} (or a +asg-stamped variant)"
         )
     return _files
 
@@ -339,6 +356,50 @@ def _dpkg_unpack(
         f"stderr — proceeding"
     )
     return True
+
+
+def _assert_apt_setup_generators(dir_chroot_installer: str) -> bool:
+    """Fail the build if either apt-source generator is missing.
+
+    apt-setup runs its generators (/usr/lib/apt-setup/generators/) in
+    numeric order; the installer needs BOTH source generators present:
+
+      40cdrom (athena-cdrom-setup) — writes the `deb cdrom:` source.
+        Runs before 50mirror, so the install stays self-contained when
+        the operator declines the network mirror.  Missing → no-mirror
+        path has no apt source → "Configure apt" fails, tasksel empty,
+        grub-efi won't install.
+
+      50mirror (athena-mirror-setup) — drives the network-mirror step
+        (choose-mirror) and writes the mirror source.  Missing → no
+        mirror prompt at all and no mirror in the target's sources.list.
+
+    Both can vanish silently from the udeb closure via a bad Provides
+    (2026-05-27: athena-cdrom-setup wrongly Provides apt-mirror-setup, so
+    seeding it satisfied athena-setup-udeb's `Depends: athena-mirror-setup`
+    and the real 50mirror was never pulled).  A with-mirror OR no-mirror
+    smoke test alone hides one or the other, so assert both here.
+    """
+    _gendir = os.path.join(
+        dir_chroot_installer, 'usr/lib/apt-setup/generators')
+    _required = {
+        '40cdrom': "athena-cdrom-setup (cdrom apt-source; no-mirror path)",
+        '50mirror': "athena-mirror-setup (network-mirror step)",
+    }
+    _ok = True
+    for _gen, _owner in _required.items():
+        if not os.path.exists(os.path.join(_gendir, _gen)):
+            tui.console.print(
+                f"ERROR: apt-setup generator '{_gen}' is missing from the "
+                f"installer chroot — expected from {_owner}. Check the udeb "
+                f"closure (config/installer.list seeds + fork Provides)."
+            )
+            logger.error(
+                f"_assert_apt_setup_generators: {_gen} absent — {_owner} "
+                f"not in the udeb closure"
+            )
+            _ok = False
+    return _ok
 
 
 def _strip_debian_residue_hooks(

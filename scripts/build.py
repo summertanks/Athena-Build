@@ -2438,17 +2438,22 @@ class BuildSession:
                     _any_missing = False
                     _failing = None
                     for _f in _expected:
-                        _path = os.path.join(
-                            self.config.deb_dest_for_filename(_f), _f,
-                        )
-                        if not os.path.isfile(_path):
+                        # The predicted filename `_f` is the PRISTINE name; the
+                        # on-disk artifact may carry a +asg<R>u<N> stamp.
+                        # find_matching_artifact accepts either, and we verify
+                        # the ACTUAL file under its ACTUAL name so the internal
+                        # control-version-vs-filename check matches.
+                        _path = utils.find_matching_artifact(
+                            self.config.deb_dest_for_filename(_f), _f)
+                        if _path is None:
                             _any_missing = True
                             break
+                        _actual = os.path.basename(_path)
                         _ok_v, _reason = self.container.verify_pkg_artifact(
-                            _path, _f, repo_state=_state,
+                            _path, _actual, repo_state=_state,
                         )
                         if not _ok_v:
-                            _failing = (_f, _reason)
+                            _failing = (_actual, _reason)
                             break
                     if _any_missing:
                         _skipped_missing += 1
@@ -3328,8 +3333,14 @@ class BuildSession:
         _ssh = ['ssh']
         if self.config.publish_ssh_key:
             _ssh += ['-i', self.config.publish_ssh_key]
-        if subprocess.run(_ssh + [_userhost, 'test', '-d', _root_path],
-                          capture_output=True, text=True).returncode != 0:
+        _spin = Spinner(f"checking remote {_userhost}:{_root_path}")
+        try:
+            _rc = subprocess.run(
+                _ssh + [_userhost, 'test', '-d', _root_path],
+                capture_output=True, text=True).returncode
+        finally:
+            _spin.done()
+        if _rc != 0:
             console.print(
                 f"repo publish: remote dir '{_root_path}' not found on "
                 f"{_userhost} — `ssh {_userhost} mkdir -p {_root_path}`.",
@@ -4212,6 +4223,34 @@ class BuildSession:
             f"Run `repo audit_nmu` to confirm zero residue."
         )
 
+    def _superseded_binary_names(self) -> 'set[str]':
+        """Binary names a SELECTED package supersedes via Conflicts/Replaces
+        (e.g. athena-setup-udeb Conflicts apt-setup-udeb), EXCLUDING names that
+        are themselves selected (so genuine pool mutual-exclusions like
+        grub-pc/grub-efi-amd64 are kept — both are selected pool extras).
+
+        d-i's anna/udpkg IGNORE Conflicts, so a rename fork's superseded
+        upstream binary (apt-setup-udeb) would otherwise ship + run alongside
+        the fork — the security.debian.org install bug.  Used to drop such
+        binaries from the cleanup AND to exclude them from the installer pool.
+        """
+        _selected_names: 'set[str]' = set()
+        _superseded: 'set[str]' = set()
+        for _tree in (self.dep_tree, self.udeb_dep_tree):
+            if _tree is None:
+                continue
+            for _name, _pkgobj in (
+                    getattr(_tree, 'selected_pkgs', None) or {}).items():
+                _selected_names.add(_name)
+                for _field in ('Conflicts', 'Replaces'):
+                    _val = _pkgobj.get(_field) or ''
+                    for _dep in _val.split(','):
+                        _nm = (_dep.strip().split('(', 1)[0]
+                               .split(':', 1)[0].strip())
+                        if _nm:
+                            _superseded.add(_nm)
+        return _superseded - _selected_names
+
     def _scan_stale_files(self) -> 'tuple[list, list, list, int]':
         """Walk repo/{main,doc,dbgsym,tests} for .deb/.udeb files that
         shouldn't be there given the current selected_srcs + src_pkg_files.
@@ -4257,6 +4296,9 @@ class BuildSession:
         _expected_keys: 'set[tuple[str, str, str]]' = set()
         _selected_pkg_names: 'set[str]' = set()
         _selected_srcs: 'set[str]' = set()
+        # Upstream binaries a selected fork supersedes (Conflicts/Replaces) —
+        # removable even when their source lingers as "selected".
+        _superseded = self._superseded_binary_names()
 
         def _file_key(_fn):
             # (name, pristine-base, arch) for a name_ver_arch.(u)deb file —
@@ -4305,8 +4347,13 @@ class BuildSession:
         from collections import defaultdict
         _by_key: 'dict[tuple, list]' = defaultdict(list)
         for _sub in utils._REPO_SUBDIRS:
+            # refresh=True: re-scan repo/ fresh so the keep/delete decision
+            # reflects the CURRENT on-disk artifacts (not a stale cached
+            # Packages snapshot) — deleting on stale data is dangerous, and a
+            # stale snapshot is exactly what hid the orphaned upstream apt-setup
+            # udebs after the rename fork.
             for _filename, _ctrl in repo_audit.iter_packages_all_versions(
-                    self.config, subdir=_sub):
+                    self.config, subdir=_sub, refresh=True):
                 _total += 1
                 _pkg = (_ctrl.get('Package') or '').strip()
                 _src_field = (_ctrl.get('Source') or '').strip()
@@ -4339,7 +4386,13 @@ class BuildSession:
                     _drift.append((_sub, _fn, _src_name, _size))   # superseded
                     continue
                 _file_pkg = _fn.split('_', 1)[0]
-                if _src_name not in _selected_srcs:
+                if _file_pkg in _superseded:
+                    # Upstream binary a selected fork Conflicts/Replaces
+                    # (e.g. apt-setup-udeb vs athena-setup-udeb).  Must go —
+                    # anna ignores Conflicts so it'd ship + run alongside the
+                    # fork.  Removable even though its source may be selected.
+                    _orphan.append((_sub, _fn, _src_name, _size))
+                elif _src_name not in _selected_srcs:
                     _orphan.append((_sub, _fn, _src_name, _size))
                 elif _file_pkg in _selected_pkg_names:
                     _drift.append((_sub, _fn, _src_name, _size))
@@ -4395,7 +4448,13 @@ class BuildSession:
         _force = 'force' in args
         _verbose = 'verbose' in args
 
-        _orphan, _drift, _malformed, _total_files = self._scan_stale_files()
+        # _scan_stale_files re-scans repo/ fresh (dpkg-scanpackages per subdir) —
+        # several seconds on a big repo with no other output; spin it.
+        _spin = Spinner("Scanning repo/ for obsolete artifacts")
+        try:
+            _orphan, _drift, _malformed, _total_files = self._scan_stale_files()
+        finally:
+            _spin.done()
 
         # ------ Report ------
         _n_obsolete = len(_orphan) + len(_drift)
@@ -5206,6 +5265,10 @@ class BuildSession:
                 pkg_groups=self.dep_tree.pkg_group_pkg_names,
                 group_meta=self.dep_tree.pkg_group_meta,
                 expected_kernel_pkg=_expected_kernel,
+                # Drop upstream binaries a shipped fork supersedes (e.g.
+                # apt-setup-udeb vs athena-setup-udeb) from the pool — anna
+                # ignores Conflicts, so leaving them ships + runs both.
+                exclude_names=self._superseded_binary_names(),
             )
             if not _ok:
                 console.print(

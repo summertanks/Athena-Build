@@ -895,10 +895,17 @@ class _ChrootMixin:
                 self._dependencytree.selected_pkgs[pkg]['Filename']
             )
             _filename = self.normalize_repo_filename(_filename)
-            _filepath = os.path.join(_main, _filename)
-            if not os.path.exists(_filepath):
+            # The index Filename is the PRISTINE name; the on-disk .deb may
+            # carry a +asg<R>u<N> stamp (UPD-01 update layer).
+            # find_matching_artifact accepts the pristine name OR its stamped
+            # variant — without it, every stamped .deb (openssl, glibc, … from a
+            # security delta) is "not found" and dropped from the chroot.
+            _filepath = utils.find_matching_artifact(_main, _filename)
+            if not _filepath:
                 tui.console.print(f"WARNING: .deb not found, skipping: {_filename}")
-                logger.warning(f"_get_deb_files: missing {_filepath}")
+                logger.warning(
+                    f"_get_deb_files: missing {os.path.join(_main, _filename)} "
+                    f"(or a +asg-stamped variant)")
                 continue
             file_list.append(_filepath)
         return file_list

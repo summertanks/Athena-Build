@@ -263,7 +263,7 @@ class Tui:
     def _shell(self) -> None:
         while not self.dispatcher.state.quit:
             try:
-                line = self.dispatcher.request_prompt('$ ', mode='line').strip()
+                line = self.dispatcher.request_prompt('> ', mode='line').strip()
             except Exception:
                 # request_prompt raises if its Future was cancelled.  On
                 # shutdown that's terminal — exit the loop.  Otherwise a
@@ -275,7 +275,7 @@ class Tui:
                 continue
             if not line:
                 continue
-            self.dispatcher.post(PrintEvent(f'${line}',
+            self.dispatcher.post(PrintEvent(f'> {line}',
                                              COLOR_HIGHLIGHT))
             self.dispatcher.state.cmd.push_history(line)
             parts = line.split()
