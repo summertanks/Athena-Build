@@ -36,6 +36,6 @@ def start_input_pump(stdscr, dispatcher: Any) -> threading.Thread:
             if dispatcher.state.quit:
                 return
 
-    t = threading.Thread(target=_pump, daemon=True, name='tui_v2-input')
+    t = threading.Thread(target=_pump, daemon=True, name='tui-input')
     t.start()
     return t

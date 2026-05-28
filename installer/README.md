@@ -17,7 +17,6 @@ This is the only place the engine "knows about" `installer/` paths.
 |----------------------------------------------|--------------------------------------------------------------|------------|-----------|
 | `installer/preseed/preseed.cfg`              | chroot:`/preseed.cfg`                                        | chroot-build | shipped empty (operator answers all) |
 | `installer/cdebconf/cdebconf.conf`           | chroot:`/etc/cdebconf.conf`                                  | chroot-build | absent (cdebconf-udeb's default `driver newt` wins) |
-| `installer/branding/debconf-overrides.dat`   | chroot:`/var/cache/debconf-overrides.dat` (applied by hook)  | chroot-build | shipped empty (no Athena rebrand yet) |
 | `installer/debug/syslog-to-serial.sh`        | chroot:`/lib/debian-installer-startup.d/S99-syslog-to-serial` | chroot-build | shipped — tails d-i syslog to /dev/ttyS0 for QEMU serial capture; delete file for non-debug ISO |
 | `installer/boot/grub.cfg`                    | iso-stage:`/boot/grub/grub.cfg`                              | iso-build  | shipped — single "Install Athena" menu entry |
 | `installer/disk/info`                        | iso-stage:`/.disk/info`                                      | iso-build  | shipped — disc identifier for cdrom-detect |

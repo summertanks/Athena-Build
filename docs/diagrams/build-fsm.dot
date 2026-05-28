@@ -2,16 +2,18 @@
 // Source of truth for docs/diagrams/build-fsm.png.
 // Regenerate: dot -Tpng docs/diagrams/build-fsm.dot -o docs/diagrams/build-fsm.png
 //
-// States are the BuildFlags milestones (scripts/build.py:BuildFlags).
-// Solid edges = forward pipeline (command + gate). Red dashed edges =
-// reset/invalidation by non-pipeline commands. Green nodes = ISO/disk
-// end-states. Black bars = UML fork/join (parallel branch + reconverge).
+// States are the BuildFlags milestones (scripts/build.py:BuildFlags — 12 flags).
+// Solid blue edges = forward pipeline (command + gate). Red dashed edges =
+// reset/invalidation by non-pipeline commands. Green nodes = end-state
+// artifacts (ISO / disk / published network repo). Black bars = UML
+// fork/join (parallel branch + reconverge). Yellow rounded box =
+// pre-flight signing-key gate.
 
 digraph AthenaBuildFSM {
     rankdir=TB;
     bgcolor="white";
     labelloc="t";
-    label=<<b>Athena-Build &mdash; pipeline state machine</b>>;
+    label=<<b>Athena-Build &mdash; pipeline state machine</b><br/><font point-size="10">12 BuildFlags milestones; 3 autorun pipelines (live / installer / disk); publish + snapshot side channels</font>>;
     fontname="Helvetica"; fontsize=15;
     node [fontname="Helvetica", fontsize=11];
     edge [fontname="Helvetica", fontsize=9];
@@ -19,7 +21,7 @@ digraph AthenaBuildFSM {
     // ---- start pseudo-state ----
     start [shape=circle, width=0.22, label="", style=filled, fillcolor=black];
 
-    // ---- pipeline states ----
+    // ---- pipeline states (blue) ----
     node [shape=box, style="rounded,filled", fillcolor="#E8F0FE", color="#4A6FA5"];
     Clean              [label="Clean\n(no flags set)"];
     CacheReady         [label="CacheReady\ncache_ready"];
@@ -31,34 +33,52 @@ digraph AthenaBuildFSM {
     LiveChrootVerified [label="LiveChrootVerified\nchroot_verified"];
     InstallerChroot    [label="InstallerChroot\nchroot_installer_ready"];
 
-    // ---- end-states (ISO / disk artifacts) ----
+    // ---- signing-key gate (yellow, pre-flight) ----
+    node [shape=box, style="rounded,filled", fillcolor="#FFF6D6", color="#B08900"];
+    SigningKeyVerified [label="SigningKey\nverified\nflag: signing_key_verified"];
+
+    // ---- end-states (ISO / disk / published repo, green) ----
     node [shape=box, style="rounded,filled", fillcolor="#D9F2D9", color="#2E7D32", penwidth=2];
-    LiveISO      [label="Live ISO\niso_live_ready"];
-    InstallerISO [label="Installer ISO\niso_installer_ready"];
-    DiskImage    [label="Disk image (qcow2)\niso_disk_ready"];
+    LiveISO       [label="Live ISO\niso_live_ready"];
+    InstallerISO  [label="Installer ISO\niso_installer_ready"];
+    DiskImage     [label="Disk image (qcow2)\niso_disk_ready"];
+    NetworkRepo   [label="Published network repo\n(remote dists/&lt;suite&gt;/)\n+InRelease signed"];
 
     // ---- UML fork / join bars ----
     cache_fork [shape=box, width=2.2, height=0.07, style=filled, fillcolor=black, label=""];
     src_join   [shape=box, width=2.2, height=0.07, style=filled, fillcolor=black, label=""];
 
-    // ---- forward pipeline edges ----
+    // ---- forward pipeline edges (blue, default style) ----
     start -> Clean;
-    Clean -> CacheReady [label="cache build"];
+    Clean -> CacheReady [label="cache build\n[snapshot pin]"];
     CacheReady -> cache_fork [arrowhead=none];
-    cache_fork -> DepReady       [label="cache parse"];
+    cache_fork -> DepReady       [label="cache parse\n(7 passes:\nrequired/important/\npkg.list groups/\nlive/installer-deb/\nudeb/pool)"];
     cache_fork -> ContainerReady [label="container init"];
     DepReady -> DownloadReady [label="source sync"];
     DownloadReady  -> src_join [arrowhead=none];
     ContainerReady -> src_join [arrowhead=none];
-    src_join -> SourceBuilt [label="source build\n(+ live/installer extras)"];
-    SourceBuilt -> LiveChrootBuilt [label="chroot build live\n[signs key]"];
-    SourceBuilt -> InstallerChroot [label="chroot build installer"];
-    LiveChrootBuilt -> LiveChrootVerified [label="chroot verify\n(8 checks)"];
-    LiveChrootVerified -> LiveISO    [label="iso build live"];
-    LiveChrootVerified -> DiskImage  [label="iso build disk"];
-    InstallerChroot   -> InstallerISO [label="iso build installer\n[signs key]"];
+    src_join -> SourceBuilt [label="source build\n(pkg + live + installer)\n[NMU strip + asg stamp]"];
 
-    // ---- reset / invalidation edges (non-pipeline commands) ----
+    // Signing key gate — pre-flight before either chroot build path
+    SourceBuilt -> SigningKeyVerified [label="key generate / verify\n(or auto-prompt)"];
+    SigningKeyVerified -> LiveChrootBuilt [label="chroot build live\n[audit gate]"];
+    SigningKeyVerified -> InstallerChroot [label="chroot build installer\n[audit gate]"];
+
+    LiveChrootBuilt -> LiveChrootVerified [label="chroot verify\n(8 checks: dpkg audit/\nfull-config/kernel/initrd/\nbash/systemd/live-boot/\nos-release)"];
+
+    // Terminal artefact branches
+    LiveChrootVerified -> LiveISO    [label="iso build live"];
+    LiveChrootVerified -> DiskImage  [label="iso build disk\n[size_gb]"];
+    InstallerChroot   -> InstallerISO [label="iso build installer\n[stage pool + sign]"];
+
+    // Publish branch — runs from SourceBuilt via index + publish.
+    // The local repo/dists/ is generated by `repo index`; remote network
+    // repo lands via `repo publish ssh|git|local`.  Network repo carries
+    // multi-component layout (main + contrib + non-free + non-free-firmware
+    // when populated); cdrom ISOs stay flat main-only.
+    SourceBuilt -> NetworkRepo [label="repo index\nrepo publish\n[+asg uN derivation\nfrom signed manifest]"];
+
+    // ---- reset / invalidation edges (red dashed, non-pipeline commands) ----
     edge [color="#C62828", fontcolor="#C62828", style=dashed, constraint=false];
     CacheReady     -> Clean        [label="cache purge / fork change"];
     DepReady       -> Clean        [label="cache purge"];
@@ -71,5 +91,12 @@ digraph AthenaBuildFSM {
     DiskImage    -> LiveChrootVerified [label="clean image"];
     InstallerISO -> InstallerChroot    [label="clean image"];
 
+    // Snapshot management (orange-dashed, lateral side channel)
+    edge [color="#E65100", fontcolor="#E65100", style=dashed];
+    CacheReady -> CacheReady [label="snapshot advance / select / base\n(forces re-resolve;\ncache parse must follow)"];
+
     // note: `clean all` resets every flag -> Clean from any state (not drawn).
+    // note: `repo external enable/disable` toggles whether NetworkRepo is the
+    // append-only authority for +asg uN (true) or whether the local signed
+    // manifest is (false).  Not drawn — runtime toggle, not a state.
 }

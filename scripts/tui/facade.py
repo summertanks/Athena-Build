@@ -93,15 +93,6 @@ class Console:
     def trim_to(self, mark: int) -> None:
         self.console_trim_to(mark)
 
-    # ── Buffer clear ────────────────────────────────────────────────────
-    def clear(self, name: str = 'console') -> None:
-        """Clear a tab buffer.  Cli has no buffer concept; silently
-        no-ops there."""
-        b = _instance()
-        if b is not None and hasattr(b, 'clear'):
-            b.clear(name)
-
-
 # Module-level Console instance — matches legacy `tui.console`
 console = Console()
 

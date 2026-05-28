@@ -28,7 +28,7 @@ import psutil
 from .dispatcher import Dispatcher
 from .events import (
     ClearTab, ConsoleTrim, LogEvent, PrintEvent, Shutdown, StatusEvent,
-    WidgetAdd, WidgetRemove, WidgetTick,
+    WidgetAdd, WidgetRemove,
 )
 from .logging_bridge import LOGGER_NAME, setup_logging
 from .render import (
@@ -62,7 +62,7 @@ class Tui:
 
     def __init__(self, banner: str) -> None:
         if Tui._instance is not None:
-            raise RuntimeError('Only one Tui_v2 instance allowed')
+            raise RuntimeError('Only one Tui instance allowed')
         Tui._instance = self
         self._banner = banner[:50]
         self._cmd_registry: Dict[str, Tuple[Callable[..., Any], str]] = {}
@@ -111,17 +111,17 @@ class Tui:
 
         # Status monitor (psutil sampling).
         threading.Thread(target=self._status_pump, daemon=True,
-                          name='tui_v2-status').start()
+                          name='tui-status').start()
         # Shell loop — blocking request_prompt + dispatch.
         threading.Thread(target=self._shell, daemon=True,
-                          name='tui_v2-shell').start()
+                          name='tui-shell').start()
         # Input pump — blocking getkey -> KeyEvent.
         start_input_pump(self._stdscr, self.dispatcher)
 
         # Dispatcher loop runs on this thread (so curses redraws happen
         # here — same thread as initscr, required by curses).
         self._dispatcher_thread = threading.Thread(
-            target=self._run_dispatcher, daemon=False, name='tui_v2-dispatch')
+            target=self._run_dispatcher, daemon=False, name='tui-dispatch')
         self._dispatcher_thread.start()
 
     def wait(self) -> None:
@@ -307,11 +307,3 @@ class Tui:
     def _cmd_history(self) -> None:
         for entry in self.dispatcher.state.cmd.history[-50:]:
             self.dispatcher.post(PrintEvent(f'  {entry}'))
-
-
-# ── Public re-exports for parity with legacy tui module ──────────────────
-from .facade import (
-    PROMPT_YESNO, PROMPT_INPUT, PROMPT_OPTIONS, PROMPT_PASSWORD, PROMPT_PAUSE,
-    Console, Prompt, console,
-)
-from .widgets import ProgressBar, Spinner
