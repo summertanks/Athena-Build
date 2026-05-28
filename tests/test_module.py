@@ -1098,6 +1098,128 @@ def test_buildconfig_build_options_falls_back_to_profiles_when_omitted():
         assert cfg.build_options == frozenset({'nodoc', 'nocheck'})
 
 
+def test_arch16_per_pkg_build_options_override_global():
+    """ARCH-16: a `[Source.<pkg>]` section's BuildOptions / BuildProfiles
+    override the global `[Source]` values for that one source, and the
+    accessors fall back to global for any source not listed."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    # Append two [Source.<pkg>] blocks: firefox-esr overrides BuildOptions
+    # only (BuildProfiles falls through); libfoo overrides BuildProfiles
+    # only (BuildOptions falls through).
+    body = _BASE_CONF_BODY.replace(
+        'BuildProfiles = nodoc, nocheck',
+        'BuildOptions = nodoc, nocheck\n    BuildProfiles = nodoc, nocheck\n\n'
+        '[Source.firefox-esr]\n'
+        '    BuildOptions = nodoc, nocheck, parallel=1\n\n'
+        '[Source.libfoo]\n'
+        '    BuildProfiles = nostrip',
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_arch16_per_pkg_build_options_override_global ({cfg.error_str})")
+            return
+        # firefox-esr: options overridden, profiles fall through
+        assert cfg.build_options_for('firefox-esr') == frozenset(
+            {'nodoc', 'nocheck', 'parallel=1'}), cfg.build_options_for('firefox-esr')
+        assert cfg.build_profiles_for('firefox-esr') == cfg.build_profiles
+        # libfoo: profiles overridden, options fall through
+        assert cfg.build_options_for('libfoo') == cfg.build_options
+        assert cfg.build_profiles_for('libfoo') == frozenset({'nostrip'})
+        # unknown pkg: both fall through to global
+        assert cfg.build_options_for('zzz') == cfg.build_options
+        assert cfg.build_profiles_for('zzz') == cfg.build_profiles
+
+
+def test_arch16_buildcontainer_consults_per_pkg_overrides():
+    """ARCH-16: BuildContainer.build's profile/option resolution honours
+    `config.build_{options,profiles}_for(src_pkg.package)` between the
+    explicit override kwarg and the global default.  Source-grep pin so a
+    future refactor can't silently regress to `self.build_options` etc."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    # The build() method must call the accessors with src_pkg.package.
+    assert 'config.build_profiles_for(src_pkg.package)' in _src, (
+        "ARCH-16: BuildContainer.build must use config.build_profiles_for "
+        "(per-pkg override + global fallback) when profiles_override is None")
+    assert 'config.build_options_for(src_pkg.package)' in _src, (
+        "ARCH-16: BuildContainer.build must use config.build_options_for "
+        "(per-pkg override + global fallback) when options_override is None")
+
+
+def test_arch17_top_offender_modules_fully_annotated():
+    """ARCH-17: every function in the 5 top-offender modules (per the
+    2026-05-21 consolidation audit) must carry both return-type and
+    argument-type annotations.
+
+    Modules: iso_installer / utils / fork_mirror / installer_chroot /
+    repo_audit.  Pure annotation coverage gate; no behaviour assertion
+    here — mypy + ruff own correctness.  This test guards against
+    *regression* of the coverage (someone adding a new function without
+    annotations) and makes future-mypy strict mode tractable.
+    """
+    import ast
+    _modules = (
+        'scripts/iso_installer.py',
+        'scripts/utils.py',
+        'scripts/fork_mirror.py',
+        'scripts/installer_chroot.py',
+        'scripts/repo_audit.py',
+    )
+    _unannotated = []
+    for _rel in _modules:
+        _path = os.path.join(_ROOT, _rel)
+        with open(_path) as _fh:
+            _tree = ast.parse(_fh.read())
+        for _node in ast.walk(_tree):
+            if not isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            _ok_ret = _node.returns is not None
+            _ok_args = all(
+                _a.annotation is not None
+                for _a in _node.args.args
+                if _a.arg not in ('self', 'cls'))
+            if not (_ok_ret and _ok_args):
+                _which = []
+                if not _ok_ret:
+                    _which.append('return')
+                if not _ok_args:
+                    _which.append('args')
+                _unannotated.append(
+                    f"{_rel}:L{_node.lineno} {_node.name} ({'+'.join(_which)})"
+                )
+    assert not _unannotated, (
+        "ARCH-17: every function in the top-offender modules must be "
+        "annotated.  Unannotated:\n  " + "\n  ".join(_unannotated))
+
+
+def test_arch16_empty_per_pkg_section_name_rejected():
+    """ARCH-16: an operator typo like `[Source.]` (empty package name)
+    must error at config load with a clear hint, not silently store
+    overrides under the empty string."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'BuildProfiles = nodoc, nocheck',
+        'BuildProfiles = nodoc, nocheck\n\n[Source.]\n    BuildOptions = nostrip',
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert not cfg.is_valid, "empty [Source.] name must fail config load"
+        assert 'empty package name' in cfg.error_str, cfg.error_str
+
+
 def test_production_build_conf_has_noautodbgsym_in_build_options():
     """Pin `noautodbgsym` in config/build.conf's [Source] BuildOptions.
     Without it, dh_strip emits a `pkg-dbgsym_*.deb` companion for every
@@ -17985,6 +18107,12 @@ def main() -> int:
         test_docker_server_guard_refuses_unsafe_targets,
         test_buildconfig_build_options_and_profiles_are_separate,
         test_buildconfig_build_options_falls_back_to_profiles_when_omitted,
+        # ARCH-16: per-package BuildOptions / BuildProfiles overrides
+        test_arch16_per_pkg_build_options_override_global,
+        test_arch16_buildcontainer_consults_per_pkg_overrides,
+        test_arch16_empty_per_pkg_section_name_rejected,
+        # ARCH-17: type-annotation coverage gate
+        test_arch17_top_offender_modules_fully_annotated,
         test_check_dep3_header_clean_patch_returns_empty,
         test_check_dep3_header_missing_origin_returns_field,
         test_check_dep3_header_subject_satisfies_description,

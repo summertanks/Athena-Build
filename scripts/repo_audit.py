@@ -29,13 +29,18 @@ import logging
 import os
 import re
 import subprocess
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional, Tuple, TYPE_CHECKING
 
 import apt_pkg
 from debian.deb822 import PkgRelation
 
 import utils
 from utils import _NMU_STRIP_FIELDS, strip_nmu_suffix
+
+if TYPE_CHECKING:
+    # Forward-references for type hints — utils.BuildConfig is the actual
+    # type passed for `config` throughout this module.
+    from utils import BuildConfig
 
 logger = logging.getLogger('athena')
 
@@ -190,7 +195,7 @@ def _scan_packages_with_progress(
     )
 
 
-def scan_repo_state(config, subdir: str = 'main',
+def scan_repo_state(config: 'BuildConfig', subdir: str = 'main',
                      refresh: bool = False) -> Optional[RepoState]:
     """Generate + parse a Packages snapshot of one repo/ subdir.
 
@@ -341,8 +346,10 @@ def scan_repo_state(config, subdir: str = 'main',
     return _state
 
 
-def iter_packages_all_versions(config, subdir: str = 'main',
-                                refresh: bool = False):
+def iter_packages_all_versions(
+    config: 'BuildConfig', subdir: str = 'main',
+    refresh: bool = False,
+) -> 'Iterator[Tuple[str, dict]]':
     """Yield every (filename, control_dict) pair across ALL versions of
     every package in `subdir`.
 
@@ -435,11 +442,12 @@ def parse_packages_to_ledger(packages_path: str) -> 'dict[str, list[str]]':
 # Durable (config/), gitignored, signed with the project key for integrity.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def local_manifest_path(config) -> str:
+def local_manifest_path(config: 'BuildConfig') -> str:
     return os.path.join(config.dir_config, 'published.manifest')
 
 
-def _write_signed_manifest(path: str, packages_text: str, config) -> bool:
+def _write_signed_manifest(path: str, packages_text: str,
+                           config: 'BuildConfig') -> bool:
     """Write a Packages-format manifest + detached GPG signature.
 
     Returns True iff BOTH the manifest text AND a valid detached signature
@@ -465,7 +473,7 @@ def _write_signed_manifest(path: str, packages_text: str, config) -> bool:
         logger.error(f"_write_signed_manifest: {path}: {e}")
         return False
 
-    def _scrub_manifest():
+    def _scrub_manifest() -> None:
         # Remove the unsigned manifest + any stale .sig so the next read
         # treats it as absent rather than authoritative.
         for _f in (path, path + '.sig'):
@@ -497,7 +505,7 @@ def _write_signed_manifest(path: str, packages_text: str, config) -> bool:
         return False
 
 
-def _read_signed_manifest(path: str, config) -> str:
+def _read_signed_manifest(path: str, config: 'BuildConfig') -> str:
     """Return the manifest text (signature-verified); '' if absent, if a
     present signature FAILS to verify, or if signing setup itself fails.
 
@@ -542,7 +550,8 @@ def _read_signed_manifest(path: str, config) -> str:
         return ''
 
 
-def write_published_manifest(config, packages_text: str) -> bool:
+def write_published_manifest(config: 'BuildConfig',
+                             packages_text: str) -> bool:
     """Write the published-manifest + detached signature.  Returns True iff
     BOTH text and signature landed on disk; False on any failure (manifest
     is removed in that case — see _write_signed_manifest)."""
@@ -550,13 +559,13 @@ def write_published_manifest(config, packages_text: str) -> bool:
         local_manifest_path(config), packages_text, config)
 
 
-def read_published_manifest(config) -> str:
+def read_published_manifest(config: 'BuildConfig') -> str:
     """Return the published-manifest text (signature-verified); '' if absent or
     tampered."""
     return _read_signed_manifest(local_manifest_path(config), config)
 
 
-def published_ledger(config) -> 'dict[str, list[str]]':
+def published_ledger(config: 'BuildConfig') -> 'dict[str, list[str]]':
     """The authoritative {package: [version,...]} ledger for +asg bump
     derivation + merge-index — from the LOCAL signed manifest (works offline).
     Empty dict when nothing has been published yet."""
@@ -574,7 +583,7 @@ def published_ledger(config) -> 'dict[str, list[str]]':
         os.remove(_tp)
 
 
-def fetch_remote_ledger(config) -> 'Optional[dict]':
+def fetch_remote_ledger(config: 'BuildConfig') -> 'Optional[dict]':
     """Download the published Packages index from the remote (the archive of
     record) and parse it into a {package: [version, ...]} ledger.
 
@@ -620,7 +629,8 @@ def fetch_remote_ledger(config) -> 'Optional[dict]':
     return parse_packages_to_ledger(_local)
 
 
-def fetch_source_versions_at(config, target_ts: str) -> 'Optional[dict]':
+def fetch_source_versions_at(config: 'BuildConfig',
+                             target_ts: str) -> 'Optional[dict]':
     """Download each mirror's Sources index at `target_ts` and return
     {source_name: highest_version} — the upstream source versions AT that
     snapshot.  Metadata-only (no build); powers `snapshot workload`'s
@@ -686,7 +696,9 @@ def published_base_versions(ledger: 'dict[str, list[str]]') -> 'dict[str, str]':
     return _out
 
 
-def manifest_vs_remote_discrepancies(local_ledger: dict, remote_ledger: dict):
+def manifest_vs_remote_discrepancies(
+    local_ledger: dict, remote_ledger: dict,
+) -> 'Tuple[set, set]':
     """Compare two {package: [version,...]} ledgers (local signed manifest vs
     remote Packages); return (only_local, only_remote) as sets of 'pkg=version'
     — the integrity reconciliation behind `repo audit external ssh`."""
@@ -695,7 +707,7 @@ def manifest_vs_remote_discrepancies(local_ledger: dict, remote_ledger: dict):
     return (_l - _r, _r - _l)
 
 
-def group_by_pristine_base(versions) -> 'dict[str, list[str]]':
+def group_by_pristine_base(versions: 'list[str]') -> 'dict[str, list[str]]':
     """Group an iterable of version strings by their pristine base — used for
     'N versions retained per package' reports and archivable-below-base
     listing."""

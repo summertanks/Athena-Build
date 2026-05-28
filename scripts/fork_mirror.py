@@ -51,7 +51,7 @@ _DPKG_SOURCE_TIMEOUT = 120  # seconds; native pkg tarball is fast (<1s typical)
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_fork_mirror(buildconfig) -> bool:
+def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
     """Walk fork/source/, generate source pkgs + index files for fork/.
 
     Returns True if at least one fork pkg was discovered and its metadata
@@ -132,7 +132,7 @@ def generate_fork_mirror(buildconfig) -> bool:
 
 
 def register_fork_mirror(mirrors: List['utils.Mirror'],
-                         buildconfig) -> List['utils.Mirror']:
+                         buildconfig: 'utils.BuildConfig') -> List['utils.Mirror']:
     """Return mirrors with the fork Mirror PREPENDED at index 0.
 
     Cache parses mirrors in declaration order; fork-first means the
@@ -312,7 +312,7 @@ def _binary_names_from_control(pkg_dir: str) -> List[str]:
 
 
 def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
-                           buildconfig) -> None:
+                           buildconfig: 'utils.BuildConfig') -> None:
     """Delete every artifact derived from a fork pkg whose tree changed.
 
     Targets:
@@ -367,7 +367,8 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
         )
 
 
-def _check_and_invalidate_fork_pkg(pkg_dir: str, buildconfig) -> bool:
+def _check_and_invalidate_fork_pkg(pkg_dir: str,
+                                   buildconfig: 'utils.BuildConfig') -> bool:
     """Compare current tree hash against persisted .tree-hash; on
     mismatch (including first-run-no-hash), wipe downstream artifacts
     so they regenerate cleanly.
@@ -404,7 +405,8 @@ def _check_and_invalidate_fork_pkg(pkg_dir: str, buildconfig) -> bool:
     return True
 
 
-def _persist_tree_hash(pkg_dir: str, buildconfig) -> None:
+def _persist_tree_hash(pkg_dir: str,
+                       buildconfig: 'utils.BuildConfig') -> None:
     """Write current tree-hash AND dep-hash AFTER successful regen.
     Both sidecars are kept in lockstep so `repo reload`'s
     light-vs-gate decision has consistent baselines.  Idempotent."""

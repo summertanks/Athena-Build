@@ -16,10 +16,13 @@ project_installer_from_source.md.
 import logging
 import os
 import subprocess
-from typing import List
+from typing import List, TYPE_CHECKING
 
 import tui
 import utils
+
+if TYPE_CHECKING:
+    import dependencytree   # forward-reference target for type hints
 
 logger = logging.getLogger('athena')
 
@@ -61,7 +64,7 @@ _OVERLAY_MAP = [
 
 
 def build_installer_chroot(
-    udeb_tree,
+    udeb_tree: 'dependencytree.DependencyTree',
     dir_udebs: str,
     dir_chroot_installer: str,
     installer_dir: str,
@@ -244,7 +247,8 @@ def _bootstrap_dpkg(dir_chroot_installer: str, password: str) -> bool:
     return True
 
 
-def _resolve_udeb_files(udeb_tree, dir_udebs: str) -> List[str]:
+def _resolve_udeb_files(udeb_tree: 'dependencytree.DependencyTree',
+                        dir_udebs: str) -> List[str]:
     """Map udeb_tree.selected_pkgs canonical names → absolute .udeb
     paths.
 
