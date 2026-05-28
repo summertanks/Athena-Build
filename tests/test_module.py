@@ -6472,6 +6472,48 @@ def test_build_py_threads_container_into_iso_callsites():
     )
 
 
+def test_audit_nmu_residue_skips_tunneled_sources():
+    """Tunneled packages (pristine Debian binary passthrough) MUST keep their
+    upstream ~debNuN / +debNuN suffix — rewriting would invalidate any embedded
+    signature (Microsoft Secure Boot on shim-signed et al.).  audit_nmu_residue
+    must skip them when given a tunnel_sources set, otherwise the auditor
+    flags them and the suggested `repo repair strip` corrupts the signature.
+    Caught 2026-05-28."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    _state = repo_audit.RepoState(
+        packages={
+            'shim-signed': {
+                'Source': 'shim-signed (1.44~1+deb12u1)',
+                'Version': '1.44~1+deb12u1+15.8-1~deb12u1',
+            },
+            # Pkg with no Source field — defaults to its own name, source
+            # name = 'intel-microcode' which is also tunneled.
+            'intel-microcode': {
+                'Version': '3.20251111.1~deb12u1',
+            },
+            # NON-tunneled binary that genuinely has residue → must be flagged.
+            'libfoo': {
+                'Source': 'foo',
+                'Version': '1.0-2+deb12u1',
+            },
+        },
+        provides_index={}, packages_file='', repo_mtime=0,
+    )
+    _tun = {'shim-signed', 'shim-helpers-amd64-signed', 'intel-microcode'}
+    _findings = repo_audit.audit_nmu_residue(_state, tunnel_sources=_tun)
+    _pkgs = {f[0] for f in _findings}
+    # The tunneled ones must NOT appear.
+    assert 'shim-signed' not in _pkgs, _findings
+    assert 'intel-microcode' not in _pkgs, _findings
+    # The genuinely-non-tunneled one IS flagged.
+    assert 'libfoo' in _pkgs, _findings
+    # Without the tunnel set, all three get flagged (baseline).
+    _findings_all = repo_audit.audit_nmu_residue(_state)
+    assert {'shim-signed', 'intel-microcode', 'libfoo'} == \
+        {f[0] for f in _findings_all}, _findings_all
+
+
 def test_cmd_audit_nmu_residue_absorbed_into_cmd_audit():
     """P3 (2026-05-23): `repo audit_nmu` no longer exists as a
     standalone verb.  Its logic — audit_nmu_residue + reporting —
@@ -17748,6 +17790,7 @@ def main() -> int:
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
         test_buildcontainer_calls_strip_post_build,
+        test_audit_nmu_residue_skips_tunneled_sources,
         test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
         test_cmd_package_cleanup_registered_in_repo_dispatcher,

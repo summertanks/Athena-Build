@@ -780,7 +780,8 @@ def _build_provides_index(packages: dict) -> dict:
 
 
 def audit_nmu_residue(state: RepoState,
-                       progress_cb: Optional[Callable[[], None]] = None
+                       progress_cb: Optional[Callable[[], None]] = None,
+                       tunnel_sources: Optional['set[str]'] = None,
                        ) -> 'list[tuple]':
     """Walk every pkg in state; report any field whose value still
     carries an NMU/binNMU/backport suffix.
@@ -795,9 +796,20 @@ def audit_nmu_residue(state: RepoState,
     Anything reported here means apt sees a non-normalised version
     constraint — install-time risk if the target ships at a stripped
     version.
+
+    `tunnel_sources`: set of SOURCE names (matches `[Source] Tunneled` in
+    build.conf).  Any binary whose `Source:` field is in this set is
+    SKIPPED — tunneled packages are pristine Debian binary passthrough
+    and MUST keep their upstream ~debNuN / +debNuN suffix (the .deb's
+    on-disk filename has to match its internal control Version, and for
+    Microsoft-signed binaries like shim-signed any rewrite would
+    invalidate the signature).  Caught 2026-05-28 when audit_nmu flagged
+    shim-signed / shim-signed-common / shim-helpers-amd64-signed as
+    "residue" and `repo repair strip` would have corrupted them.
     """
     from debian.deb822 import PkgRelation
     _findings: 'list[tuple]' = []
+    _tun = tunnel_sources or set()
 
     _constraint_re = re.compile(
         r'\(\s*(?:<=|>=|<<|>>|=)\s*([^)]+?)\s*\)'
@@ -806,6 +818,13 @@ def audit_nmu_residue(state: RepoState,
     for _pkg, _entry in state.packages.items():
         if progress_cb is not None:
             progress_cb()
+        # Tunneled packages: source name (Source field, or pkg name when
+        # absent — stripped of any "(version)" trailer).
+        if _tun:
+            _src_field = (_entry.get('Source') or _pkg).strip()
+            _src_name = _src_field.split(' ', 1)[0]
+            if _src_name in _tun:
+                continue
         _ver = _entry.get('Version', '')
         if _ver and strip_nmu_suffix(_ver) != _ver:
             _findings.append((_pkg, 'Version', _ver, 'pkg own Version'))
