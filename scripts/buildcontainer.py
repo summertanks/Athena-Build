@@ -66,6 +66,10 @@ class BuildContainer:
         self.patch_empty = config.dir_patch_empty
         self.build_profiles = config.build_profiles
         self.build_options  = config.build_options
+        # SEC-05: when true, build() runs a `apt-get install --simulate`
+        # preview against build-deps in a transient container and prompts
+        # the operator to proceed.  Off by default.
+        self.audit_build_deps = config.audit_build_deps
 
         # Apply snapshot pinning to mirrors so the container's apt fetches
         # build-deps from the same archive snapshot the cache was built from.
@@ -297,9 +301,8 @@ class BuildContainer:
         would skip.
         """
 
-        _plain_deps = []
-        _or_cmds = []
-        _apt_retry = '-o Acquire::Retries=5 '
+        _plain_deps: 'list[str]' = []
+        _or_groups: 'list[list[str]]' = []
         # ARCH-16: per-pkg override precedence —
         #   per-invocation `[bracket]` token  (profiles_override / options_override)
         #     ↓ falls back to ↓
@@ -319,8 +322,18 @@ class BuildContainer:
             if len(_grp) == 1:
                 _plain_deps.append(_grp[0][0])
             else:
-                _chain = f' || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {_apt_retry}'.join(alt[0] for alt in _grp)
-                _or_cmds.append(f'{{ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {_apt_retry}{_chain}; }}')
+                _or_groups.append([alt[0] for alt in _grp])
+
+        # SEC-05: opt-in build-dep audit gate.  Runs an apt-get install
+        # --simulate preview in a transient container before the real
+        # install, shows the resolved set + versions, prompts y/n.
+        # Caller gets back False on operator-decline so the build pipeline
+        # skips this source.  No-op when [Security] AuditBuildDeps = false
+        # (default).
+        if self.audit_build_deps:
+            if not self._audit_build_deps_gate(
+                    src_pkg, _plain_deps, _or_groups):
+                return False
         _filename_prefix = src_pkg.package
         _dsc_file = ''
 
@@ -396,8 +409,8 @@ class BuildContainer:
             'done < debian/patches-applied/series; '
             'fi; '
         )
-        _dep_install = (f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_apt_retry}install {" ".join(_plain_deps)}; ' if _plain_deps else '') + \
-                       ('; '.join(_or_cmds) + '; ' if _or_cmds else '')
+        _dep_install = self._render_install_cmd(
+            _plain_deps, _or_groups, simulate=False)
 
         # Token substitution: replace @DISTRIBUTION@, @BASE_ID@,
         # @CODENAME@ in fork content with values from BuildConfig.
@@ -625,6 +638,138 @@ class BuildContainer:
                         f"Failed to remove container {container.short_id} "
                         f"for {src_pkg.package}: {e}"
                     )
+
+    @staticmethod
+    def _render_install_cmd(plain_deps: 'list[str]',
+                            or_groups: 'list[list[str]]', *,
+                            simulate: bool) -> str:
+        """Render the apt install shell command(s) for a build's build-deps.
+
+        Single source of truth for both the real install (build() main
+        container script) and the SEC-05 simulate preview.  `simulate=True`
+        inserts `--simulate` into every apt-get install invocation; the
+        rendered command shape (plain deps + OR-group fallback chains) is
+        otherwise identical.
+        """
+        _retry = '-o Acquire::Retries=5 '
+        _flag = '--simulate ' if simulate else ''
+        _plain = ''
+        if plain_deps:
+            _plain = (
+                f'sudo DEBIAN_FRONTEND=noninteractive apt -y {_flag}{_retry}'
+                f'install {" ".join(plain_deps)}; '
+            )
+        _ors: 'list[str]' = []
+        for _grp in or_groups:
+            _chain = (
+                f' || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y '
+                f'{_flag}{_retry}').join(_grp)
+            _ors.append(
+                f'{{ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y '
+                f'{_flag}{_retry}{_chain}; }}'
+            )
+        return _plain + ('; '.join(_ors) + '; ' if _ors else '')
+
+    def _audit_build_deps_gate(
+        self, src_pkg: Source,
+        plain_deps: 'list[str]',
+        or_groups: 'list[list[str]]',
+    ) -> bool:
+        """SEC-05 gate: run `apt-get install --simulate` in a transient
+        container, print the captured output, prompt operator y/n.
+
+        Returns True to proceed with the real build, False to skip this
+        source (operator declined OR preview infrastructure failed —
+        either way we don't run the real install with un-audited deps).
+
+        When there are no build-deps to install, returns True without
+        showing a prompt (nothing to audit).
+        """
+        if not plain_deps and not or_groups:
+            return True
+
+        _preview_text = self._capture_apt_simulate(
+            src_pkg, plain_deps, or_groups)
+        if _preview_text is None:
+            tui.console.print(
+                f"SEC-05: build-dep preview FAILED for {src_pkg.package} "
+                f"— skipping build per audit-gate policy.  Set "
+                f"[Security] AuditBuildDeps = false to bypass.",
+                tui.COLOR_ERROR)
+            return False
+
+        tui.console.print(
+            f"\n=== SEC-05 build-dep preview: {src_pkg.package} ==="
+            f"\n  ({len(plain_deps)} plain dep(s), {len(or_groups)} "
+            f"OR-group(s) — apt -y --simulate output below)\n"
+            f"{_preview_text}"
+            f"=== end preview ===\n")
+
+        from tui import Prompt as _Prompt, PROMPT_YESNO as _YN
+        _resp = _Prompt(
+            _YN,
+            f"Proceed with build of {src_pkg.package}?  "
+            f"(operator-gated per [Security] AuditBuildDeps)"
+        ).get_response()
+        if _resp.lower() not in ('y', 'yes'):
+            tui.console.print(
+                f"SEC-05: operator declined — skipping {src_pkg.package}.",
+                tui.COLOR_WARNING)
+            logger.warning(
+                f"SEC-05: build of {src_pkg.package} skipped by operator")
+            return False
+        return True
+
+    def _capture_apt_simulate(
+        self, src_pkg: Source,
+        plain_deps: 'list[str]',
+        or_groups: 'list[list[str]]',
+    ) -> 'Optional[str]':
+        """Helper for the SEC-05 gate.  Runs a transient container that
+        writes the snapshot-pinned sources.list, runs `apt-get update`,
+        then `apt-get install -y --simulate <deps>`.  Captures container
+        stdout/stderr and returns the combined text.  Returns None if the
+        preview container fails to start or the simulate exits non-zero
+        with no useful output (caller treats None as a hard skip).
+        """
+        _write_sources = self._write_snapshot_sources_cmd()
+        _simulate_cmd = self._render_install_cmd(
+            plain_deps, or_groups, simulate=True)
+        cmd_str = (
+            f'set -e; '
+            f'{_write_sources}'
+            f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; '
+            f'{_simulate_cmd}'
+        )
+        container = None
+        try:
+            assert self.client is not None
+            container = self.client.containers.run(
+                self._image_tag, command=["/bin/bash", "-c", cmd_str],
+                detach=True, auto_remove=False,
+            )
+            _buf: bytes = b''
+            for _line in container.logs(stream=True):
+                _buf += _line
+            _exit = container.wait()['StatusCode']
+            _text = _buf.decode('utf-8', errors='replace')
+            if _exit != 0:
+                logger.warning(
+                    f"SEC-05 preview {src_pkg.package}: container exited "
+                    f"{_exit}; tail: {_text[-400:]}")
+                # Surface the partial output anyway — operator may still
+                # want to see what apt resolved before the failure.
+            return _text
+        except docker.errors.APIError as e:
+            logger.error(
+                f"SEC-05 preview {src_pkg.package}: docker error: {e}")
+            return None
+        finally:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except docker.errors.APIError:
+                    pass
 
     def run_grub_mkrescue(self, staging_dir: str, output_iso: str,
                             password: str) -> 'tuple[bool, str, str]':

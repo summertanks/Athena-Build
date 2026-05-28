@@ -1749,6 +1749,16 @@ class BuildConfig:
             self.security_disabled = config_parser.getboolean(
                 'Security', 'Disabled', fallback=False
             )
+            # SEC-05: opt-in build-dep audit gate.  When true, every
+            # BuildContainer.build() runs `apt-get install --simulate` in a
+            # transient container BEFORE the real install, captures the
+            # resolved package set + versions, prints it to the operator,
+            # and prompts y/n to proceed.  Useful for hostile-mirror
+            # auditing where the operator wants to see what's about to land
+            # in the build sandbox.  Default false (no behaviour change).
+            self.audit_build_deps = config_parser.getboolean(
+                'Security', 'AuditBuildDeps', fallback=False
+            )
             if not self.security_disabled:
                 if not os.path.isfile(self.security_keyring):
                     self.error_str = (

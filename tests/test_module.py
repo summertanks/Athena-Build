@@ -1154,6 +1154,154 @@ def test_arch16_buildcontainer_consults_per_pkg_overrides():
         "(per-pkg override + global fallback) when options_override is None")
 
 
+def test_sec05_audit_build_deps_default_false():
+    """SEC-05: `[Security] AuditBuildDeps` defaults to False — no
+    behaviour change for existing operators on un-modified configs."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_sec05_audit_build_deps_default_false ({cfg.error_str})")
+            return
+        assert cfg.audit_build_deps is False
+
+
+def test_sec05_audit_build_deps_parses_true():
+    """SEC-05: `[Security] AuditBuildDeps = true` is honoured."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    # _BASE_CONF_BODY has no [Security] section; append one.
+    body = _BASE_CONF_BODY + (
+        '\n    [Security]\n'
+        '    Disabled = true\n'
+        '    AuditBuildDeps = true\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        if not cfg.is_valid:
+            print(f"SKIP test_sec05_audit_build_deps_parses_true ({cfg.error_str})")
+            return
+        assert cfg.audit_build_deps is True
+
+
+def test_sec05_render_install_cmd_injects_simulate_flag():
+    """SEC-05: the shared install-cmd renderer (single source of truth
+    for both the real install in build() and the SEC-05 preview)
+    correctly threads `--simulate` into every apt-get install invocation
+    when simulate=True, and omits it when simulate=False."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from buildcontainer import BuildContainer
+    _real = BuildContainer._render_install_cmd(
+        ['libfoo-dev', 'libbar-dev'], [['gawk', 'mawk']], simulate=False)
+    _sim = BuildContainer._render_install_cmd(
+        ['libfoo-dev', 'libbar-dev'], [['gawk', 'mawk']], simulate=True)
+    assert '--simulate' not in _real
+    assert _real.count('apt -y -o') >= 1, "plain-dep install present"
+    assert _real.count('apt-get install -y -o') >= 2, "OR-group fallback chain"
+    # --simulate is injected per apt-get install invocation:
+    # 1 plain install + 2 OR-alt invocations = 3 occurrences
+    assert _sim.count('--simulate') == 3, _sim
+    # Empty deps = empty string
+    assert BuildContainer._render_install_cmd([], [], simulate=False) == ''
+    assert BuildContainer._render_install_cmd([], [], simulate=True) == ''
+
+
+def test_sec05_build_gates_on_audit_when_enabled_in_source():
+    """SEC-05: build() consults self.audit_build_deps BEFORE rendering
+    the install cmd, calls _audit_build_deps_gate(src_pkg, plain, ors),
+    and returns False without proceeding when the gate returns False.
+    Source-grep so a future refactor can't silently regress."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    # The gate must be invoked from build() BEFORE the real install
+    # command is rendered for the container shell.
+    assert 'self._audit_build_deps_gate(' in _src, (
+        "SEC-05: BuildContainer.build() must invoke _audit_build_deps_gate")
+    # On gate decline, build() must return False (no container.run).
+    _build_start = _src.index('def build(')
+    _build_end = _src.index('def ', _build_start + 1)
+    _build_body = _src[_build_start:_build_end]
+    assert 'if not self._audit_build_deps_gate(' in _build_body, (
+        "SEC-05: gate must be guarded by an `if not ...` so a False return "
+        "from the gate skips the build")
+    assert 'return False' in _build_body, (
+        "SEC-05: build() must `return False` on operator decline (no "
+        "container.run, no .result side-effect)")
+    # And the gate must be after dep enumeration so plain_deps + or_groups
+    # are available — i.e. it must reference both lists.
+    _gate_call_idx = _build_body.index('self._audit_build_deps_gate(')
+    _enum_idx = _build_body.index('for _grp in src_pkg.build_depends(')
+    assert _enum_idx < _gate_call_idx, (
+        "SEC-05: gate must run AFTER build-dep enumeration so deps are "
+        "available to preview")
+
+
+def test_sec05_gate_short_circuits_when_no_deps():
+    """SEC-05: a source with zero build-deps must not prompt the operator
+    (nothing to audit).  Returns True without invoking the preview."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import MagicMock
+    import buildcontainer
+    _bc = MagicMock()
+    _bc.audit_build_deps = True
+    _result = buildcontainer.BuildContainer._audit_build_deps_gate(
+        _bc, MagicMock(package='nothing'), [], [])
+    assert _result is True
+    # No preview should have been generated — gate short-circuits.
+    _bc._capture_apt_simulate.assert_not_called()
+
+
+def test_sec05_gate_returns_false_when_operator_declines():
+    """SEC-05: the gate must return False when the operator answers 'n'
+    to the YESNO prompt — caller (build()) returns False and skips."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import MagicMock, patch
+    import buildcontainer
+    _bc = MagicMock(spec=buildcontainer.BuildContainer)
+    _bc.audit_build_deps = True
+    _bc._capture_apt_simulate.return_value = (
+        'NOTE: This is only a simulation!\n'
+        'Inst libfoo (1.0-1 Debian:bookworm [amd64])\n')
+
+    # Stub Prompt -> 'n' via the import-name `tui.Prompt` (the gate uses
+    # `from tui import Prompt`).
+    class _StubPrompt:
+        def __init__(self, *_a, **_kw): pass
+        def get_response(self): return 'n'
+
+    with patch.object(buildcontainer.tui, 'Prompt', _StubPrompt):
+        _result = buildcontainer.BuildContainer._audit_build_deps_gate(
+            _bc, MagicMock(package='libfoo'), ['libfoo-dev'], [])
+    assert _result is False
+
+
+def test_sec05_gate_returns_false_when_preview_infrastructure_fails():
+    """SEC-05: if the simulate preview can't even start (Docker error,
+    None return), the gate must fail closed — return False so the build
+    is skipped rather than silently proceeding with un-audited deps."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import MagicMock
+    import buildcontainer
+    _bc = MagicMock(spec=buildcontainer.BuildContainer)
+    _bc.audit_build_deps = True
+    _bc._capture_apt_simulate.return_value = None
+    _result = buildcontainer.BuildContainer._audit_build_deps_gate(
+        _bc, MagicMock(package='libfoo'), ['libfoo-dev'], [])
+    assert _result is False
+
+
 def test_arch17_top_offender_modules_fully_annotated():
     """ARCH-17: every function in the 5 top-offender modules (per the
     2026-05-21 consolidation audit) must carry both return-type and
@@ -18113,6 +18261,14 @@ def main() -> int:
         test_arch16_empty_per_pkg_section_name_rejected,
         # ARCH-17: type-annotation coverage gate
         test_arch17_top_offender_modules_fully_annotated,
+        # SEC-05: opt-in build-dep audit gate
+        test_sec05_audit_build_deps_default_false,
+        test_sec05_audit_build_deps_parses_true,
+        test_sec05_render_install_cmd_injects_simulate_flag,
+        test_sec05_build_gates_on_audit_when_enabled_in_source,
+        test_sec05_gate_short_circuits_when_no_deps,
+        test_sec05_gate_returns_false_when_operator_declines,
+        test_sec05_gate_returns_false_when_preview_infrastructure_fails,
         test_check_dep3_header_clean_patch_returns_empty,
         test_check_dep3_header_missing_origin_returns_field,
         test_check_dep3_header_subject_satisfies_description,
