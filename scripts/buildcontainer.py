@@ -300,12 +300,18 @@ class BuildContainer:
         _plain_deps = []
         _or_cmds = []
         _apt_retry = '-o Acquire::Retries=5 '
+        # ARCH-16: per-pkg override precedence —
+        #   per-invocation `[bracket]` token  (profiles_override / options_override)
+        #     ↓ falls back to ↓
+        #   `[Source.<pkg>]` block in build.conf  (config.build_*_for(pkg))
+        #     ↓ falls back to ↓
+        #   global `[Source]` block in build.conf  (config.build_*)
         _active_profiles = (frozenset(profiles_override)
                             if profiles_override is not None
-                            else self.build_profiles)
+                            else self.config.build_profiles_for(src_pkg.package))
         _active_options = (frozenset(options_override)
                            if options_override is not None
-                           else self.build_options)
+                           else self.config.build_options_for(src_pkg.package))
 
         for _grp in src_pkg.build_depends(self.arch, _active_profiles, cache=self.cache):
             if not _grp:

@@ -25,9 +25,12 @@ import re
 import shutil
 import string
 import subprocess
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import tui
+
+if TYPE_CHECKING:
+    import buildcontainer   # forward-reference target for type hints
 
 # apt-repo metadata generators — lifted from this module to scripts/apt_repo.py
 # in CONF-01 Stage A (2026-05-22).  See docs/plans/conf-01-repo-layout-migration.md.
@@ -61,13 +64,13 @@ def build_installer_iso(
     installer_dir: str,
     password: str,
     iso_basename: str,
-    container,
+    container: 'buildcontainer.BuildContainer',
     suite: str = 'thor',
     codename: str = 'thor',
     version: str = '0.1',
     snapshot: str = '',
     base_include_pkgs: Optional[list] = None,
-    deb_whitelist=None,
+    deb_whitelist: 'Optional[set[str]]' = None,
     signing_homedir: Optional[str] = None,
     signing_pubkey_path: Optional[str] = None,
     pkg_groups: Optional['dict[str, set]'] = None,
@@ -202,7 +205,7 @@ def build_installer_iso(
 # ---------------------------------------------------------------------------
 
 
-def _sudo(cmd_args, password: str) -> subprocess.CompletedProcess:
+def _sudo(cmd_args: 'list[str]', password: str) -> subprocess.CompletedProcess:
     """Run `sudo -S <cmd>` with the cached password.  Captured output."""
     return subprocess.run(
         ['sudo', '-S'] + cmd_args,
@@ -710,7 +713,9 @@ def _debian_version_cmp(a: str, b: str) -> int:
 
 
 def _select_pool_files(
-    source_dirs: 'list[str]', deb_whitelist, exclude_names=None,
+    source_dirs: 'list[str]',
+    deb_whitelist: 'Optional[set[str]]',
+    exclude_names: 'Optional[set[str]]' = None,
 ) -> 'tuple[list[tuple[str, str]], int]':
     """Decide which files across `source_dirs` ship on the installer ISO.
 
@@ -811,7 +816,8 @@ def _select_pool_files(
 
 def _stage_pool(
     source_dirs: 'list[str]', staging: str, password: str,
-    deb_whitelist=None, exclude_names=None,
+    deb_whitelist: 'Optional[set[str]]' = None,
+    exclude_names: 'Optional[set[str]]' = None,
 ) -> bool:
     """Copy a filtered subset of source_dirs → staging/pool/ (FLAT).
 
@@ -905,7 +911,8 @@ def _stage_pool(
 
 
 def _run_grub_mkrescue(staging: str, iso_path: str,
-                         container, password: str) -> bool:
+                         container: 'buildcontainer.BuildContainer',
+                         password: str) -> bool:
     """Produce the hybrid BIOS+EFI bootable ISO from the staging tree.
 
     COMP-14 fix path (b) — runs grub-mkrescue inside the build

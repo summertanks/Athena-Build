@@ -10,7 +10,12 @@ import argparse
 import requests
 import tui
 from tui import Prompt, Spinner, ProgressBar
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Forward-reference target for type hints — dependencytree imports utils
+    # so the runtime import would cycle.
+    import dependencytree
 
 logger = logging.getLogger('athena')
 
@@ -334,7 +339,8 @@ def find_matching_artifact(dst_dir: str,
     return None
 
 
-def highest_asg_update(published_versions, base: str, release: int) -> int:
+def highest_asg_update(published_versions: 'List[str]',
+                       base: str, release: int) -> int:
     """Highest N among already-published versions of the form
     `base+asg<release>u<N>`.  `published_versions` is an iterable of version
     strings published for THIS package (from the remote ledger).  Returns 0
@@ -356,7 +362,8 @@ def highest_asg_update(published_versions, base: str, release: int) -> int:
     return _hi
 
 
-def asg_next_n(published_versions, base: str, release: int) -> int:
+def asg_next_n(published_versions: 'List[str]',
+               base: str, release: int) -> int:
     """The next +asg<release>u<N> number for a binary at pristine `base` —
     one past the highest already published for THAT file (PER-FILE, from the
     ledger), so a binary updated more often than its siblings carries a higher
@@ -376,7 +383,7 @@ def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
     _content = content
 
     # Strip from the Version: field.
-    def _sub_version(_m):
+    def _sub_version(_m: 're.Match') -> str:
         nonlocal _total
         _old = _m.group(1)
         _new = strip_nmu_suffix(_old)
@@ -395,7 +402,7 @@ def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
         r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)'
     )
 
-    def _sub_constraint(_m):
+    def _sub_constraint(_m: 're.Match') -> str:
         nonlocal _total
         _op, _ver = _m.group(1), _m.group(2)
         _new_ver = strip_nmu_suffix(_ver)
@@ -749,7 +756,7 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
     return _result
 
 
-def version_no_epoch(version) -> str:
+def version_no_epoch(version: object) -> str:
     """Return a Debian Version's string form with the epoch stripped.
 
     Debian versions have the grammar `[epoch:]upstream[-revision]`.
@@ -914,7 +921,8 @@ class Mirror:
             return 'Packages-udeb'
         return f'{self.component}/debian-installer/binary-{self.arch}/Packages'
 
-    def with_snapshot(self, ts, baseurl: str = 'https://snapshot.debian.org/archive') -> 'Mirror':
+    def with_snapshot(self, ts: 'Optional[str]',
+                      baseurl: str = 'https://snapshot.debian.org/archive') -> 'Mirror':
         """Return a copy of this Mirror rewritten to the snapshot service.
 
         The default targets snapshot.debian.org's layout
@@ -1504,7 +1512,7 @@ class BuildConfig:
 
     _config_valid: bool
     
-    def __init__(self):
+    def __init__(self) -> None:
 
         # Set when config is validated
         self._config_valid: bool = False
@@ -1690,6 +1698,44 @@ class BuildConfig:
                 )
             else:
                 self.build_options = self.build_profiles
+
+            # ARCH-16: per-package overrides via [Source.<pkg>] sections.
+            # Walk all sections of the form [Source.<pkg-name>] and capture
+            # any BuildOptions / BuildProfiles keys.  Either key may be
+            # absent; absent → fall back to the global value at lookup time
+            # (see build_options_for / build_profiles_for accessors).
+            # Mirrors the [Mirror.<id>] discovery pattern above.
+            #
+            # Example operator usage:
+            #   [Source.firefox-esr]
+            #   BuildOptions = nodoc, nocheck, parallel=1
+            #
+            # Surfaced 2026-05-15 when firefox-esr needed `parallel=1` to
+            # keep cc1plus under the 16 GB OOM threshold; previously the
+            # only escape was a per-source debian/rules patch.
+            self.build_options_per_pkg: 'dict[str, frozenset[str]]' = {}
+            self.build_profiles_per_pkg: 'dict[str, frozenset[str]]' = {}
+            for _section in config_parser.sections():
+                if not _section.startswith('Source.'):
+                    continue
+                _pkg = _section.split('.', 1)[1].strip()
+                if not _pkg:
+                    self.error_str = (
+                        f"empty package name in [{_section}] — use "
+                        f"[Source.<pkg>] (e.g. [Source.firefox-esr])"
+                    )
+                    return
+                _po = config_parser.get(
+                    _section, 'BuildOptions', fallback='').strip()
+                if _po:
+                    self.build_options_per_pkg[_pkg] = frozenset(
+                        p.strip() for p in _po.split(',') if p.strip())
+                _pp = config_parser.get(
+                    _section, 'BuildProfiles', fallback='').strip()
+                if _pp:
+                    self.build_profiles_per_pkg[_pkg] = frozenset(
+                        p.strip() for p in _pp.split(',') if p.strip())
+
             self.max_parallel_builds = config_parser.getint('Build', 'MaxParallelBuilds', fallback=4)
 
             # Mirror InRelease GPG verification.  Default: enabled,
@@ -2006,6 +2052,25 @@ class BuildConfig:
             self.dir_repo_tests,
         ]
     
+    def build_options_for(self, pkg_name: str) -> 'frozenset[str]':
+        """Return the effective DEB_BUILD_OPTIONS set for a source pkg.
+
+        Precedence (most-specific first):
+          1. `[Source.<pkg>] BuildOptions = …` if present in build.conf
+          2. global `[Source] BuildOptions = …`
+
+        ARCH-16: a per-invocation override (the `[nocheck]` bracket-token on
+        `source build foo [nocheck]`) is layered ON TOP of this at the call
+        site (buildcontainer.build's `options_override` kwarg) — that path
+        is not visible here.
+        """
+        return self.build_options_per_pkg.get(pkg_name, self.build_options)
+
+    def build_profiles_for(self, pkg_name: str) -> 'frozenset[str]':
+        """Return the effective DEB_BUILD_PROFILES set for a source pkg.
+        Same precedence as build_options_for — see that docstring."""
+        return self.build_profiles_per_pkg.get(pkg_name, self.build_profiles)
+
     def error(self) -> str:
         """
         Returns:
@@ -2126,7 +2191,8 @@ def download_file(url: str, filename: str) -> tuple:
         return -1, _detail
 
 
-def download_source(dependency_tree, dir_download):
+def download_source(dependency_tree: 'dependencytree.DependencyTree',
+                    dir_download: str) -> int:
     from urllib.parse import urljoin, urlsplit, unquote
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
     import shutil as _shutil
@@ -2520,7 +2586,7 @@ def readfile(filename: str) -> str:
         raise OSError(f'Cannot read file {filename}: {e}') from e
 
 
-def create_folders(folder_structure: str):
+def create_folders(folder_structure: str) -> None:
     if not os.path.isabs(folder_structure):
         raise ValueError(f'create_folders requires an absolute path, got: {folder_structure!r}')
 
