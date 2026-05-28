@@ -28,6 +28,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from typing import Optional
 
 import tui
@@ -836,6 +837,19 @@ def _generate_top_release(
     then chokes with "Invalid operation installer".  Caught in
     production 2026-05-11.  Pass argv directly to subprocess.run with
     cwd= and stdout=file_handle for redirection.
+
+    Self-reference race avoidance: apt-ftparchive's `release` mode walks
+    the suite dir and hashes every file it finds INCLUDING its own output
+    target if it lives under the walked path.  Streaming straight to
+    dists/<suite>/Release made apt-ftparchive hash its own partial output
+    (~200-byte header it had written before reaching that file during the
+    walk) and emit a stale `Release` entry in the SHA256 block —
+    InRelease then advertised a hash that no consumer could verify
+    (`repo audit external` MISMATCH Release, 2026-05-28).  Workaround:
+    write to a temp file OUTSIDE the walked subtree (`staging/.release-
+    tmp-<...>`), then mv into place after apt-ftparchive completes.  The
+    walk never sees a Release file at the target path, so the SHA256
+    block doesn't reference it.
     """
     if components is None:
         components = ['main']
@@ -853,8 +867,32 @@ def _generate_top_release(
         ['sudo', '-S', 'apt-ftparchive'] + _opts +
         ['release', f'dists/{suite}']
     )
+    # Pre-emptively remove any existing Release at the target so it isn't
+    # picked up by apt-ftparchive's walk either (a stale full-size Release
+    # from a previous run would hash differently than the temp we'll mv in).
+    if os.path.lexists(output_path):
+        _rm = subprocess.run(
+            ['sudo', '-S', 'rm', '-f', output_path],
+            input=(password + '\n').encode('utf-8'),
+            capture_output=True, text=True,
+        )
+        if _rm.returncode != 0:
+            tui.console.print(
+                f"ERROR: rm stale {output_path}: {_rm.stderr.strip()[:200]}")
+            logger.error(
+                f"_generate_top_release rm stale: rc={_rm.returncode}, "
+                f"stderr={_rm.stderr.strip()}")
+            return False
     try:
-        with open(output_path, 'wb') as fh:
+        _tmp_fd, _tmp_path = tempfile.mkstemp(
+            dir=staging, prefix='.release-tmp-')
+    except OSError as e:
+        tui.console.print(f"ERROR: mkstemp under {staging}: {e}")
+        logger.error(f"_generate_top_release mkstemp: {e}")
+        return False
+    _moved = False
+    try:
+        with os.fdopen(_tmp_fd, 'wb') as fh:
             _r = subprocess.run(
                 _argv,
                 input=(password + '\n').encode('utf-8'),
@@ -862,26 +900,55 @@ def _generate_top_release(
                 stderr=subprocess.PIPE,
                 cwd=staging,
             )
-    except OSError as e:
-        tui.console.print(f"ERROR: open {output_path} for write: {e}")
-        logger.error(f"_generate_top_release open: {e}")
-        return False
-    _stderr = (_r.stderr or b'').decode('utf-8', errors='replace').strip()
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: apt-ftparchive release failed (rc={_r.returncode}): "
-            f"{_stderr[:200]}"
+        _stderr = (_r.stderr or b'').decode('utf-8', errors='replace').strip()
+        if _r.returncode != 0:
+            tui.console.print(
+                f"ERROR: apt-ftparchive release failed (rc={_r.returncode}): "
+                f"{_stderr[:200]}"
+            )
+            logger.error(
+                f"_generate_top_release: rc={_r.returncode}, stderr={_stderr}"
+            )
+            return False
+        if os.path.getsize(_tmp_path) == 0:
+            tui.console.print(
+                f"ERROR: top-level Release at {output_path} is missing or empty"
+            )
+            logger.error("_generate_top_release: empty temp output")
+            return False
+        # mv the temp into place.  output_path may not exist (clean run) or
+        # may have just been wiped above; either way, sudo mv handles
+        # root-owned target parents safely.
+        _mv = subprocess.run(
+            ['sudo', '-S', 'mv', _tmp_path, output_path],
+            input=(password + '\n').encode('utf-8'),
+            capture_output=True, text=True,
         )
-        logger.error(
-            f"_generate_top_release: rc={_r.returncode}, stderr={_stderr}"
-        )
-        return False
-    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        tui.console.print(
-            f"ERROR: top-level Release at {output_path} is missing or empty"
-        )
-        logger.error(f"_generate_top_release: empty output at {output_path}")
-        return False
+        if _mv.returncode != 0:
+            tui.console.print(
+                f"ERROR: mv temp Release → {output_path}: "
+                f"{_mv.stderr.strip()[:200]}"
+            )
+            logger.error(
+                f"_generate_top_release mv: rc={_mv.returncode}, "
+                f"stderr={_mv.stderr.strip()}"
+            )
+            return False
+        _moved = True
+    finally:
+        if not _moved and os.path.exists(_tmp_path):
+            try:
+                os.remove(_tmp_path)
+            except OSError:
+                # temp may be root-owned if the subprocess wrote with sudo —
+                # try once with sudo, swallow further errors (file is gone or
+                # we lack perms; user can clean up staging/.release-tmp-* by
+                # hand if it really persists).
+                subprocess.run(
+                    ['sudo', '-S', 'rm', '-f', _tmp_path],
+                    input=(password + '\n').encode('utf-8'),
+                    capture_output=True,
+                )
     return True
 
 

@@ -16566,6 +16566,42 @@ def test_merge_packages_indexes_dedup_local_wins():
     assert _secs[0] == ('foo', '1.0', '999')         # local won
 
 
+def test_generate_top_release_avoids_self_reference_via_tempfile():
+    """apt-ftparchive's `release` mode walks the suite dir and hashes every
+    file it sees — including its own output if streamed straight to
+    dists/<suite>/Release.  That made InRelease record a stale hash for
+    `Release` (the partial header apt-ftparchive had written before the walk
+    reached it), and `repo audit external` failed with MISMATCH Release
+    (2026-05-28).  Fix: write to a temp file OUTSIDE the walked subtree
+    (`staging/.release-tmp-*`), mv into place after apt-ftparchive
+    completes.  Pin the workaround via source-inspection — the real
+    exercise (apt-ftparchive + sudo + temp + mv) needs a live tree."""
+    import re
+    _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
+    with open(_ar) as fh:
+        _body = fh.read()
+    _m = re.search(r'def _generate_top_release\(.*?(?=\ndef )', _body,
+                   re.DOTALL)
+    assert _m, "_generate_top_release not found"
+    _fn = _m.group(0)
+    # The fix: temp file under staging/, NOT a direct write to output_path.
+    assert "tempfile.mkstemp(" in _fn, \
+        "_generate_top_release must write to a temp file (not output_path)"
+    assert "prefix='.release-tmp-'" in _fn, \
+        "temp file must be at staging root with .release-tmp- prefix"
+    assert "dir=staging" in _fn, \
+        "temp file must be created in staging/ (outside the walked subtree)"
+    # Followed by an sudo mv into the real path — atomic + handles root-owned
+    # parent dirs from prior runs.
+    assert "'mv', _tmp_path, output_path" in _fn, \
+        "must mv the temp file into place once apt-ftparchive finishes"
+    # The OLD bug pattern (`open(output_path, 'wb')` straight to the target
+    # file) must NOT be present.
+    assert "open(output_path, 'wb')" not in _fn, \
+        ("_generate_top_release must not stream apt-ftparchive output "
+         "directly to output_path — caused MISMATCH Release self-reference")
+
+
 def test_merge_remote_index_signs_locally_and_merges():
     """merge_remote_index must merge remote+local stanzas, scan the local
     pool, and sign locally (key never leaves the host)."""
@@ -18165,6 +18201,7 @@ def main() -> int:
         # UPD-01 step 5: merge_remote_index
         test_merge_remote_index_preserves_old_versions_multiversion,
         test_merge_packages_indexes_dedup_local_wins,
+        test_generate_top_release_avoids_self_reference_via_tempfile,
         test_merge_remote_index_signs_locally_and_merges,
         test_publish_suites_spec_includes_nonfree_components,
         # UPD-01 step 6: workload + Guard A preflight
