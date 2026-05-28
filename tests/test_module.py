@@ -1154,6 +1154,266 @@ def test_arch16_buildcontainer_consults_per_pkg_overrides():
         "(per-pkg override + global fallback) when options_override is None")
 
 
+def test_ux05a_prompt_informational_kwarg_accepted():
+    """UX-05a + f: Prompt(prompt_type, msg, informational=True) is a valid
+    construction; auto_yes is consulted only for informational YESNO."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.facade import Prompt, PROMPT_YESNO, PROMPT_PASSWORD
+    # informational accepted as keyword
+    _p = Prompt(PROMPT_YESNO, 'Proceed?', informational=True)
+    assert _p._informational is True
+    # default is False (back-compat)
+    _q = Prompt(PROMPT_YESNO, 'Proceed?')
+    assert _q._informational is False
+    # PROMPT_PASSWORD ignores informational (hard prompt)
+    _r = Prompt(PROMPT_PASSWORD, 'Sudo:', informational=True)
+    assert _r._informational is True   # stored, but get_response won't honour for non-YESNO
+
+
+def test_ux05a_auto_yes_short_circuits_informational_yesno():
+    """UX-05a + f: with backend.auto_yes=True, an informational YESNO
+    returns 'y' immediately without prompting; a non-informational YESNO
+    still waits."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    from tui.facade import Prompt, PROMPT_YESNO
+
+    class _StubBackend:
+        auto_yes = True
+        def __init__(self):
+            self.prompt_called = False
+        def prompt(self, message='', masked=False, keymode=False):
+            self.prompt_called = True
+            return 'n'      # would return 'n' if asked
+        def print(self, *_a, **_kw): pass
+        # console.print compat
+        def INFO(self, *_a, **_kw): pass
+        def WARNING(self, *_a, **_kw): pass
+        def ERROR(self, *_a, **_kw): pass
+        def console_mark(self): return 0
+        def console_trim_to(self, mark): pass
+
+    _saved = _tui.tui_instance
+    _b = _StubBackend()
+    _tui.tui_instance = _b
+    try:
+        # informational + auto_yes → auto-'y', no prompt() call
+        _r = Prompt(
+            PROMPT_YESNO, 'Proceed?', informational=True).get_response()
+        assert _r == 'y', _r
+        assert _b.prompt_called is False
+        # non-informational → falls through, prompt() called
+        _b.prompt_called = False
+        Prompt(PROMPT_YESNO, 'Proceed?').get_response()
+        assert _b.prompt_called is True
+    finally:
+        _tui.tui_instance = _saved
+
+
+def test_ux05a_auto_yes_does_not_skip_password_or_options():
+    """UX-05a + f: --yes must NOT auto-answer hard prompts (PASSWORD,
+    OPTIONS, INPUT, PAUSE) — operator input is required for those
+    regardless of the flag."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui as _tui
+    from tui.facade import (
+        Prompt, PROMPT_PASSWORD, PROMPT_OPTIONS, PROMPT_INPUT)
+
+    class _StubBackend:
+        auto_yes = True
+        def __init__(self):
+            self.prompt_called = 0
+        def prompt(self, message='', masked=False, keymode=False):
+            self.prompt_called += 1
+            return 'a'      # valid for the OPTIONS test below
+        def print(self, *_a, **_kw): pass
+        def INFO(self, *_a, **_kw): pass
+        def WARNING(self, *_a, **_kw): pass
+        def ERROR(self, *_a, **_kw): pass
+        def console_mark(self): return 0
+        def console_trim_to(self, mark): pass
+
+    _saved = _tui.tui_instance
+    _b = _StubBackend()
+    _tui.tui_instance = _b
+    try:
+        Prompt(PROMPT_PASSWORD, 'Sudo:',
+               informational=True).get_response()
+        Prompt(PROMPT_INPUT, 'Name:',
+               informational=True).get_response()
+        Prompt(PROMPT_OPTIONS, 'Pick:', options=['a', 'b'],
+               informational=True).get_response()
+        # All three should have hit the prompt path (auto-yes is YESNO-only)
+        assert _b.prompt_called == 3, _b.prompt_called
+    finally:
+        _tui.tui_instance = _saved
+
+
+def test_ux05b_atena_sudo_password_env_var_picked_up():
+    """UX-05b: BuildSystem.__init__ reads $ATHENA_SUDO_PASSWORD and pops
+    it from os.environ before prompting (no Prompt construction on env-
+    var path; env var no longer accessible to child processes)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _bs = os.path.join(_ROOT, 'scripts', 'buildsystem.py')
+    with open(_bs) as fh:
+        _src = fh.read()
+    # The constructor and for_iso factory both must read+pop the env var
+    # before reaching for Prompt(PROMPT_PASSWORD, ...).
+    assert "_os.environ.pop('ATHENA_SUDO_PASSWORD'" in _src, (
+        "UX-05b: ATHENA_SUDO_PASSWORD must be pop'd from os.environ "
+        "(read + remove in one step so the env var doesn't leak to "
+        "child subprocesses)")
+    # Pop must happen TWICE (once per code path: __init__ + for_iso)
+    assert _src.count(
+        "_os.environ.pop('ATHENA_SUDO_PASSWORD'") == 2, (
+        "UX-05b: env-var pickup must be in BOTH BuildSystem.__init__ "
+        "and BuildSystem.for_iso (the iso-only factory)")
+
+
+def test_ux05d_cli_print_emits_ansi_when_tty():
+    """UX-05d: Cli.print wraps the message in an ANSI sequence when
+    _use_color is True and an attribute matches a known colour key.
+    NO_COLOR env var disables (via _use_color=False)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import io
+    from unittest.mock import patch
+    import cli
+    _c = object.__new__(cli.Cli)
+    _c._use_color = True
+    _buf = io.StringIO()
+    with patch('builtins.print') as _p:
+        _c.print('hello', cli.Cli.COLOR_ERROR)
+        _args = _p.call_args.args
+        # ANSI red + reset wrap
+        assert _args[0].startswith('\x1b[31m'), _args[0]
+        assert _args[0].endswith('\x1b[0m')
+        assert 'hello' in _args[0]
+    # _use_color=False → plain text
+    _c._use_color = False
+    with patch('builtins.print') as _p:
+        _c.print('hello', cli.Cli.COLOR_ERROR)
+        assert _p.call_args.args[0] == 'hello'
+
+
+def test_ux05e_main_strips_cmd_and_yes_from_argv_and_seeds_backend():
+    """UX-05e: build.py:main reads `--cmd <cmd>` (potentially multiple)
+    and `--yes`, strips them from sys.argv before BuildConfig sees argv,
+    and seeds the backend's one_shot_cmds + auto_yes."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    # main() reads --yes, --cmd, --headless and strips each from sys.argv
+    for _flag in ("'--headless'", "'--yes'", "'--cmd'"):
+        assert _flag in _src, f"UX-05: main() must recognise {_flag}"
+    # one_shot_cmds threaded onto backend; auto_yes assigned
+    assert 'tui_inst.auto_yes = _auto_yes' in _src
+    assert "if hasattr(tui_inst, 'one_shot_cmds')" in _src
+
+
+def test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits():
+    """UX-05e: Cli with one_shot_cmds populated must dispatch each
+    in order then exit (no REPL).  Exit code reflects worst outcome."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import MagicMock, patch
+    import cli
+    _c = object.__new__(cli.Cli)
+    _c._cmds = {}
+    _c._widget_ids = {}
+    _c._next_widget_id = 0
+    _c._exit_code = None
+    _c.auto_yes = False
+    _c._use_color = False
+    _c.one_shot_cmds = ['foo bar baz', 'help']
+    _calls = []
+    _c._cmds['foo'] = (lambda *a: _calls.append(('foo', a)), '')
+    with patch('builtins.print'):
+        _c.wait()
+    assert _calls == [('foo', ('bar', 'baz'))], _calls
+    # _exit_code set to 0 because all dispatched OK
+    assert _c._exit_code == 0
+
+
+def test_ux05g_cmd_methods_reset_flags_on_entry():
+    """UX-05g: every cmd_* method that sets `self.flags.X = True` must
+    ALSO reset `self.flags.X = False` somewhere in the same function
+    body — guards against Ctrl+C / exception leaving a stale True from
+    a previous successful run.
+
+    Explicit allowlist: cmd_build_iso_live + cmd_build_iso_disk set
+    `chroot_verified = True` AFTER a successful in-line verify call
+    (the "force mode: re-verifying chroot" path).  Those flag-sets are
+    reachable only when verify already succeeded — honest by
+    construction, no reset needed.
+    """
+    import ast
+    _build_py = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_build_py) as fh:
+        _tree = ast.parse(fh.read())
+
+    _allowlist = {
+        # (function_name, flag_attribute): rationale
+        ('cmd_build_iso_live',  'chroot_verified'):
+            'side-effect refresh after successful re-verify',
+        ('cmd_build_iso_disk',  'chroot_verified'):
+            'side-effect refresh after successful re-verify',
+    }
+
+    def _is_flags_assign(node, value: bool):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            return False
+        _t = node.targets[0]
+        return (isinstance(_t, ast.Attribute)
+                and isinstance(_t.value, ast.Attribute)
+                and isinstance(_t.value.value, ast.Name)
+                and _t.value.value.id == 'self'
+                and _t.value.attr == 'flags'
+                and isinstance(node.value, ast.Constant)
+                and node.value.value is value)
+
+    _missing = []
+    for _func in ast.walk(_tree):
+        if not isinstance(_func, ast.FunctionDef):
+            continue
+        _resets: 'set[str]' = set()
+        _sets: 'list[tuple[str, int]]' = []
+        for _n in ast.walk(_func):
+            if _is_flags_assign(_n, True):
+                _sets.append((_n.targets[0].attr, _n.lineno))
+            elif _is_flags_assign(_n, False):
+                _resets.add(_n.targets[0].attr)
+        for _attr, _ln in _sets:
+            if _attr in _resets:
+                continue
+            if (_func.name, _attr) in _allowlist:
+                continue
+            _missing.append((_func.name, _attr, _ln))
+    assert not _missing, (
+        "UX-05g: every cmd_* function that sets a flag True must also "
+        "reset it to False on entry (so a Ctrl+C / exception during the "
+        "run can't leave a stale True from a prior success).  Missing "
+        "resets:\n  " + "\n  ".join(
+            f"{_n}: flags.{_a} = True at L{_l} without matching False-reset"
+            for _n, _a, _l in _missing))
+
+
+def test_ux05c_progressbar_step_does_not_print_in_cli():
+    """UX-05c: ProgressBar.step() must not invoke the backend's print
+    surface — only add_widget (start marker) and del_widget (done
+    marker) emit output.  This preserves the "no per-step flood" design
+    in CLI mode regardless of how fast the inner loop steps the bar."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    from tui.widgets import ProgressBar
+    _src = inspect.getsource(ProgressBar.step)
+    # ProgressBar.step body must not reach for any backend print path
+    assert 'print(' not in _src, (
+        "UX-05c: ProgressBar.step() must not print directly — would "
+        "flood CLI stdout under hot loops")
+    assert 'add_widget' not in _src and 'del_widget' not in _src, _src
+    assert 'self._tui' not in _src, _src
+
+
 def test_sec05_audit_build_deps_default_false():
     """SEC-05: `[Security] AuditBuildDeps` defaults to False — no
     behaviour change for existing operators on un-modified configs."""
@@ -18261,6 +18521,16 @@ def main() -> int:
         test_arch16_empty_per_pkg_section_name_rejected,
         # ARCH-17: type-annotation coverage gate
         test_arch17_top_offender_modules_fully_annotated,
+        # UX-05: TUI/CLI flexibility polish
+        test_ux05a_prompt_informational_kwarg_accepted,
+        test_ux05a_auto_yes_short_circuits_informational_yesno,
+        test_ux05a_auto_yes_does_not_skip_password_or_options,
+        test_ux05b_atena_sudo_password_env_var_picked_up,
+        test_ux05c_progressbar_step_does_not_print_in_cli,
+        test_ux05d_cli_print_emits_ansi_when_tty,
+        test_ux05e_main_strips_cmd_and_yes_from_argv_and_seeds_backend,
+        test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits,
+        test_ux05g_cmd_methods_reset_flags_on_entry,
         # SEC-05: opt-in build-dep audit gate
         test_sec05_audit_build_deps_default_false,
         test_sec05_audit_build_deps_parses_true,

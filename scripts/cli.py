@@ -84,16 +84,33 @@ class Cli:
     SEVERITY_WARNING = 2
     SEVERITY_INFO    = 3
 
-    # Color constants present so callers passing ``tui.COLOR_*`` to print()
-    # don't break on attribute lookup.  Values are arbitrary in CLI mode —
-    # the print() implementation ignores the attribute.
+    # UX-05d: ANSI color codes for stdout when running attached to a TTY
+    # and the operator hasn't set NO_COLOR.  Values are arbitrary
+    # integers used as keys in the ANSI map below — the curses backend
+    # has its own COLOR_* with different numeric values; what matters is
+    # that the Console facade passes whatever each backend defines
+    # opaquely back into print().
     COLOR_NORMAL    = 0
-    COLOR_REVERSE   = 0
-    COLOR_WARNING   = 0
-    COLOR_ERROR     = 0
-    COLOR_HIGHLIGHT = 0
-    COLOR_FOOTER    = 0
-    COLOR_INFO      = 0
+    COLOR_REVERSE   = 1
+    COLOR_WARNING   = 2
+    COLOR_ERROR     = 3
+    COLOR_HIGHLIGHT = 4
+    COLOR_FOOTER    = 5
+    COLOR_INFO      = 6
+
+    # Map our COLOR_* keys to ANSI escape sequences.  Choices roughly
+    # mirror curses semantics: errors red, warnings yellow, highlights
+    # green, info cyan; reverse uses ANSI inverse video.  Lines that
+    # don't pass a color (or pass COLOR_NORMAL) bypass the wrapping.
+    _ANSI = {
+        COLOR_ERROR:     '\x1b[31m',     # red
+        COLOR_WARNING:   '\x1b[33m',     # yellow
+        COLOR_INFO:      '\x1b[36m',     # cyan
+        COLOR_HIGHLIGHT: '\x1b[32m',     # green
+        COLOR_REVERSE:   '\x1b[7m',      # inverse video
+        COLOR_FOOTER:    '\x1b[2m',      # dim
+    }
+    _ANSI_RESET = '\x1b[0m'
 
     _PROMPT_IDLE = 'athena-build> '
 
@@ -106,6 +123,21 @@ class Cli:
         self._next_widget_id = 0
         # exit_code is None while alive; an int sets the wait() loop to break.
         self._exit_code: Optional[int] = None
+        # UX-05a: --yes auto-answer.  Set by build.py:main() from argv.
+        # Consulted only by `Prompt(..., informational=True)` —  hard
+        # prompts (sudo password, conflict-resolution OPTIONS) wait
+        # for operator input regardless of the flag.
+        self.auto_yes: bool = False
+        # UX-05d: ANSI colour for stdout when running attached to a TTY
+        # and the operator hasn't set NO_COLOR (https://no-color.org/).
+        # Redirected output (`> log.txt`) gets plain text.
+        import os
+        self._use_color: bool = (
+            sys.stdout.isatty() and 'NO_COLOR' not in os.environ)
+        # UX-05e: one-shot command queue.  build.py:main() populates from
+        # `-c <cmd>` argv tokens; wait() dispatches each in order and
+        # exits without entering the REPL when the queue is non-empty.
+        self.one_shot_cmds: list = []
 
         # Register self as the module singleton — same pattern Tui uses on
         # construction.  Console, Spinner, ProgressBar, Prompt all resolve
@@ -122,7 +154,17 @@ class Cli:
     # ─── Console facade contract ───────────────────────────────────────────
 
     def print(self, message: str, attribute: Optional[int] = None) -> None:
-        """Write *message* to stdout, one line.  Color attribute ignored."""
+        """Write *message* to stdout, one line.
+
+        UX-05d: if a non-None attribute maps to a known ANSI sequence
+        AND stdout is a TTY AND NO_COLOR isn't set, wrap the message in
+        the colour escape + reset.  Redirected output (`> log.txt`,
+        piped to a file) gets plain text — the isatty() check prevents
+        ANSI from polluting log files."""
+        if (self._use_color
+                and attribute is not None
+                and attribute in self._ANSI):
+            message = f'{self._ANSI[attribute]}{message}{self._ANSI_RESET}'
         # Multi-line messages (e.g. the ASCII banner) print as-is — print()
         # handles embedded newlines naturally.
         print(message, flush=True)
@@ -228,14 +270,24 @@ class Cli:
         return
 
     def wait(self) -> None:
-        """REPL loop.  Reads one command per line from stdin, dispatches to
-        the registered handler.  Exits on EOF (Ctrl+D), ``quit`` / ``exit``
-        commands, or any handler calling ``self.exit(code)``.
+        """REPL loop OR one-shot dispatcher.
 
-        A handler raising an exception is caught — the REPL keeps running
-        so the operator can inspect state, fix things, and retry.  Same
-        forgiving model as Tui's shell().
+        UX-05e: when ``self.one_shot_cmds`` is non-empty, run each queued
+        command in order and exit — no REPL.  Useful for CI / scripted
+        installs (`./build-system.sh -c "cache build" -c "dep parse"`).
+        Exit code: 0 if all succeeded, 1 if any handler raised.
+
+        Otherwise: REPL.  Reads one command per line from stdin,
+        dispatches to the registered handler.  Exits on EOF (Ctrl+D),
+        ``quit`` / ``exit`` commands, or any handler calling
+        ``self.exit(code)``.  A handler raising an exception is caught —
+        the REPL keeps running so the operator can inspect state, fix
+        things, and retry.  Same forgiving model as Tui's shell().
         """
+        if self.one_shot_cmds:
+            self._run_one_shot()
+            return
+
         while self._exit_code is None:
             try:
                 line = input(self._PROMPT_IDLE)
@@ -248,36 +300,66 @@ class Cli:
                 print()
                 continue
 
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split()
-            cmd, args = parts[0], parts[1:]
-
-            if cmd in ('quit', 'exit'):
-                break
-            if cmd == 'help':
-                self._print_help()
-                continue
-
-            entry = self._cmds.get(cmd)
-            if entry is None:
-                print(f'  Unknown command: "{cmd}"  — type "help" for a list')
-                continue
-
-            fn = entry[0]
-            logger.info(f'Executing: {line}')
-            try:
-                fn(*args)
-            except Exception as exc:
-                self.ERROR(f"command '{cmd}' raised "
-                           f"{type(exc).__name__}: {exc}")
-                # Don't kill the REPL on a single command failure — match
-                # Tui.shell()'s forgiving behaviour.
+            if not self._dispatch_one(line):
+                # Special tokens: quit/exit return False to break the loop.
+                if line.strip() in ('quit', 'exit'):
+                    break
 
         if self._exit_code is None:
             self._exit_code = 0
+
+    def _run_one_shot(self) -> None:
+        """UX-05e: dispatch every queued command in order, then exit.
+        Exit code reflects the worst outcome (0 if all OK, 1 if any
+        handler raised, 130 if interrupted mid-queue)."""
+        _failed = 0
+        for _cmd in self.one_shot_cmds:
+            print(f'{self._PROMPT_IDLE}{_cmd}')
+            try:
+                _ok = self._dispatch_one(_cmd)
+                if not _ok and _cmd.strip() in ('quit', 'exit'):
+                    break
+            except KeyboardInterrupt:
+                # Ctrl+C aborts the remaining queue.
+                self._exit_code = 130
+                self.ERROR('one-shot queue interrupted by SIGINT')
+                return
+        if self._exit_code is None:
+            self._exit_code = 1 if _failed else 0
+
+    def _dispatch_one(self, line: str) -> bool:
+        """Parse + dispatch one input line.  Returns False for empty
+        input, unknown commands, quit/exit tokens, or handler failures
+        — True only when a handler ran to completion (no raise).
+        Shared by both the REPL (wait) and the one-shot driver
+        (_run_one_shot)."""
+        line = line.strip()
+        if not line:
+            return False
+
+        parts = line.split()
+        cmd, args = parts[0], parts[1:]
+
+        if cmd in ('quit', 'exit'):
+            return False
+        if cmd == 'help':
+            self._print_help()
+            return True
+
+        entry = self._cmds.get(cmd)
+        if entry is None:
+            print(f'  Unknown command: "{cmd}"  — type "help" for a list')
+            return False
+
+        fn = entry[0]
+        logger.info(f'Executing: {line}')
+        try:
+            fn(*args)
+            return True
+        except Exception as exc:
+            self.ERROR(f"command '{cmd}' raised "
+                       f"{type(exc).__name__}: {exc}")
+            return False
 
     def exit(self, error_code: int = 0) -> None:
         """Signal the wait() loop to break and return *error_code*."""

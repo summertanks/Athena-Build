@@ -18,13 +18,17 @@ VERBOSE="0"
 CONFIG_FILE="config/build.conf"
 PKG_REQ_FILE="config/pkg.list"
 HEADLESS="0"
+AUTO_YES="0"
+ONESHOT_CMDS=()
 
 usage() { \
         echo -e "Usage:"; \
         echo -e "\t -c|--config-file <filename> : Config file giving basic system config"; \
         echo -e "\t -p|--pkg-list <filename> : File listing all packages included in distro"; \
         echo -e "\t -v|--verbose : Set verbosity high"; \
-        echo -e "\t --headless : Skip the curses TUI; run a plain stdin/stdout REPL (UX-05)"; \
+        echo -e "\t --headless : Skip the curses TUI; run a plain stdin/stdout REPL (UX-05 Path B)"; \
+        echo -e "\t --yes : Auto-answer informational YESNO prompts (UX-05a)"; \
+        echo -e "\t --cmd \"<cmd>\" : Run one command then exit; repeat for multiple (UX-05e).  Implies --headless"; \
 }
 
 BUILD_DIR=$(pwd)
@@ -37,7 +41,7 @@ set -o pipefail
 echo -e "Athena Build System Check..."
 
 # Parsing args
-ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless' -- "$@") || exit
+ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless,yes,cmd:' -- "$@") || exit
 eval "set -- $ARGS"
 
 while true; do
@@ -54,6 +58,12 @@ while true; do
 		(--headless)
 			HEADLESS=1;
 			shift;;
+		(--yes)
+			AUTO_YES=1;
+			shift;;
+		(--cmd)
+			ONESHOT_CMDS+=("$2");
+			shift 2;;
 		(-h|--help)
 			usage;
 			exit;;
@@ -368,12 +378,18 @@ fi
 
 echo "All required Python packages found."
 
-# Forward --headless to build.py only when set; build.py:main strips it
-# from sys.argv before BuildConfig (which uses argparse) sees it.
+# Forward UX-05 flags to build.py.  Each is stripped from sys.argv by
+# build.py:main before BuildConfig (which uses argparse) sees argv.
 PY_EXTRA=()
 if [[ "$HEADLESS" == "1" ]]; then
     PY_EXTRA+=(--headless)
 fi
+if [[ "$AUTO_YES" == "1" ]]; then
+    PY_EXTRA+=(--yes)
+fi
+for _cmd in "${ONESHOT_CMDS[@]}"; do
+    PY_EXTRA+=(--cmd "$_cmd")
+done
 
 python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$BUILD_DIR --config-file=$CONFIG_FILE "${PY_EXTRA[@]}"
 

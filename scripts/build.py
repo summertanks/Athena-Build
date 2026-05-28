@@ -1058,7 +1058,11 @@ class BuildSession:
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")
         if not self.dep_tree.validate_selection():
-            _resp = Prompt(PROMPT_YESNO, "There are one or more dependency validation failures, Proceed?").get_response()
+            _resp = Prompt(
+                PROMPT_YESNO,
+                "There are one or more dependency validation failures, Proceed?",
+                informational=True,   # UX-05f: safe to auto-yes under --yes
+            ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 self.flags.dep_check_ready = False
                 return
@@ -1082,7 +1086,11 @@ class BuildSession:
         console.print("Parsing Source Packages...", tui.COLOR_INFO)
 
         if not self.dep_tree.parse_sources():
-            _resp = Prompt(PROMPT_YESNO, "There are one or more source parse failures, Proceed?").get_response()
+            _resp = Prompt(
+                PROMPT_YESNO,
+                "There are one or more source parse failures, Proceed?",
+                informational=True,   # UX-05f: safe to auto-yes under --yes
+            ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
 
@@ -1095,9 +1103,11 @@ class BuildSession:
         if self.udeb_dep_tree is not None:
             console.print("Parsing Udeb Source Packages...", tui.COLOR_INFO)
             if not self.udeb_dep_tree.parse_sources():
-                _resp = Prompt(PROMPT_YESNO,
-                               "There are one or more udeb source parse failures, Proceed?"
-                               ).get_response()
+                _resp = Prompt(
+                    PROMPT_YESNO,
+                    "There are one or more udeb source parse failures, Proceed?",
+                    informational=True,   # UX-05f
+                ).get_response()
                 if _resp.lower() not in ('y', 'yes'):
                     return
             console.print(
@@ -1422,7 +1432,10 @@ class BuildSession:
         else:
             _msg = (f"Generate new signing key for '{self.config.signing_key_uid}'?")
 
-        _resp = Prompt(PROMPT_YESNO, _msg).get_response()
+        _resp = Prompt(
+            PROMPT_YESNO, _msg,
+            informational=True,   # UX-05f: signing-key one-time setup, OK under --yes
+        ).get_response()
         if _resp.lower() not in ('y', 'yes'):
             console.print("Aborted.")
             return
@@ -1543,7 +1556,11 @@ class BuildSession:
         # A size mismatch usually means a network interruption or a package whose
         # expected size in the index differs from what the mirror actually served.
         if _src_download_size != _downloaded_size:
-            _resp = Prompt(PROMPT_YESNO, "Download size mismatch, continue?").get_response()
+            _resp = Prompt(
+                PROMPT_YESNO,
+                "Download size mismatch, continue?",
+                informational=True,   # UX-05f
+            ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
 
@@ -1832,8 +1849,12 @@ class BuildSession:
         
         console.print( "valid key is required before the chroot setup can proceed.")
         
-        _resp = Prompt(PROMPT_YESNO, "Generate a new signing key for "
-                       "'{self.config.signing_key_uid}' now?").get_response()
+        _resp = Prompt(
+            PROMPT_YESNO,
+            "Generate a new signing key for "
+            "'{self.config.signing_key_uid}' now?",
+            informational=True,   # UX-05f: pre-chroot gate, OK under --yes
+        ).get_response()
         
         if _resp.lower() not in ('y', 'yes'):
             console.print("Aborted — signing key is mandatory", tui.COLOR_ERROR)
@@ -4927,6 +4948,13 @@ class BuildSession:
             console.print("Run 'source build' first")
             return
 
+        # UX-05g: reset flags on entry so a Ctrl+C / exception during this
+        # run can't leave stale True values from a previous successful
+        # run.  Re-set to True only on the success-tail (line ~5001 for
+        # chroot_ready, the verify call sets chroot_verified separately).
+        self.flags.chroot_ready = False
+        self.flags.chroot_verified = False
+
         # Verify the project signing key before any sudo / mount / dpkg work
         if not self._ensure_signing_key_verified():
             return
@@ -6788,6 +6816,11 @@ class BuildSession:
             console.print("Run 'container init' first")
             return
 
+        # UX-05g: reset on entry so an interrupted partial build can't
+        # leak a stale True from a previous successful run.  Re-set to
+        # True on the success-tail (~L7115).
+        self.flags.source_build_ready = False
+
         # Parse args via the static helper for testability.
         _err, _force, _subset, _names, _profile_override = \
             self._parse_source_build_args(args)
@@ -7083,7 +7116,11 @@ class BuildSession:
         )
         if _failed > 0:
             logger.error(f"{_failed} source build(s) failed")
-            _resp = Prompt(PROMPT_YESNO, "There are source build failures, Proceed?").get_response()
+            _resp = Prompt(
+                PROMPT_YESNO,
+                "There are source build failures, Proceed?",
+                informational=True,   # UX-05f
+            ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
 
@@ -7684,6 +7721,34 @@ def main(banner: str) -> None:
     if _headless:
         sys.argv.remove('--headless')
 
+    # UX-05a: --yes auto-answers informational YESNO prompts (e.g.
+    # "There are source build failures, Proceed?", "Generate a new
+    # signing key now?").  Hard prompts (sudo password, conflict-
+    # resolution OPTIONS, security-audit gates) still wait for the
+    # operator regardless.
+    _auto_yes = '--yes' in sys.argv
+    if _auto_yes:
+        sys.argv.remove('--yes')
+
+    # UX-05e: `--cmd <cmd>` queues one or more commands to run sequentially
+    # then exit, no REPL.  Multiple --cmd allowed; order preserved.
+    # Implies --headless (the TUI's curses screen makes no sense for one-
+    # shot).  Each <cmd> is one full command line (e.g. `--cmd "cache build"`
+    # `--cmd "cache parse"`); shell-quoting separates args within one --cmd.
+    # `-c` is taken by build-system.sh for --config-file, hence --cmd here.
+    _one_shot_cmds: 'list[str]' = []
+    _i = 0
+    while _i < len(sys.argv):
+        if sys.argv[_i] == '--cmd' and _i + 1 < len(sys.argv):
+            _one_shot_cmds.append(sys.argv[_i + 1])
+            del sys.argv[_i:_i + 2]
+            continue
+        _i += 1
+    if _one_shot_cmds and not _headless:
+        # -c implies headless — the curses screen would race the
+        # one-shot dispatcher.
+        _headless = True
+
     try:
         print("Initialising apt_pkg...")
         apt_pkg.init_system()
@@ -7729,6 +7794,12 @@ def main(banner: str) -> None:
         except Exception as e:
             print(f"FATAL: TUI initialisation failed: {e}")
             Exit(1)
+
+    # UX-05a/e: thread the parsed flags onto the backend.  Both Cli and
+    # Tui accept auto_yes; one_shot_cmds is Cli-only (Tui ignores).
+    tui_inst.auto_yes = _auto_yes
+    if hasattr(tui_inst, 'one_shot_cmds'):
+        tui_inst.one_shot_cmds = list(_one_shot_cmds)
 
     # Attach a timestamped FileHandler to the 'athena' logger after the
     # Tui is constructed.  Tui.__init__ calls setup_logging() to (re)bind
