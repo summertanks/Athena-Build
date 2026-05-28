@@ -12,11 +12,77 @@ Athena Build system is(trying to be) a (mostly) hands off 'build system' to buil
 The genesis of this project came from the conversation - while the Linux ecosystem as part of the FOSS world, but as the platform matured, can we really build the solution from source? As the build systems are becoming more complex, sparsely documented and obfuscated (personal opinion).
 
 ## FYI
- - This will be a maturing solution and not immediately suitable to building production system. Currently, best used for tinkering.
+ - This will be a maturing solution and not immediately suitable to building production system. Currently, best used for tinkering. See **Project maturity** below for a calibrated honest assessment of where the code actually is.
  - Can this be faster, YES. Is it worth making it faster (e.g. shifting to C, trading space with time, etc.) NO
  - It is NOT currently (or ever may be) supported by any of Debian Linux Houses (e.g. debian, ubuntu, etc)
  - Does it have Bugs - YES / MANY, please reach out to me and lets fix what you find.
  - REMEMBER, and this is especially important is that, it is a source build platform, it does nothing to upstream source packages. What you get is what you get. You will (rather quickly) realise as I have that just because source code is available doesnt mean it is ammeniable to being built. Fixing that is completely on you. You will learn to embrace a whole new level of 'oh, but it builds on my system'.
+
+## Project maturity
+
+> **TL;DR:** ~70–75% of a v1.0 derivative-distribution toolchain. The full pipeline (cache → dep parse → source build → chroot → ISO) works end-to-end on VMware BIOS + EFI and produces signed, incrementally-publishable apt repositories. Real-hardware coverage, parallel builds, and multi-arch are the largest gates between here and "I would ship this to a paying customer." Last calibrated by a 7-phase consolidation audit on 2026-05-28.
+
+The README's older self-assessment ("best used for tinkering") undersells where the code actually is — the pipeline produces verified bootable ISOs from source with signed metadata, an incremental update story (`+asg<R>u<N>` versioning, append-only multi-version publish), and a from-source debian-installer rebuilt through a parallel udeb dep tree. But it isn't yet at the operational maturity of an OBS or Yocto either.
+
+### Where the code is, by dimension
+
+| Dimension | Score | What works | What's missing |
+|---|---:|---|---|
+| Functional completeness | 80% | Live ISO + installer ISO + qcow2 disk image, end-to-end on VMware BIOS + EFI. Installer reaches `finish-install.d/20final-message` cleanly. | Real-hardware coverage (COMP-01h). |
+| Architecture | 80% | 12-flag BuildFlags FSM, 3 autorun pipelines, parallel deb/udeb dep trees over a shared source corpus, 5 audit-cohort scopes, idempotency guards on every long-running stage. | `MaxParallelBuilds` knob exists but `cmd_source_build` is strictly serial (COMP-03). |
+| Code quality | 80% | ruff-clean, comments explain *why* with date-stamped incident notes, structured `(ok, detail)` error returns, clear data-plane separation. | Two shell-string subprocess patterns flagged for consolidation (STA-20), one quiet trust-degradation in the signed-manifest reader (STA-19). |
+| Tests | 75% | 615 tests, single file by policy, policy-enforcer tests pin invariants (read-only-named commands can't call destructive helpers, stage-D path bans, fork helper-prefix shape, etc.). 558/558 pass under `python3 tests/test_module.py`. | ~10–15% silently no-op when host tools (dpkg-deb, gpg) are absent; ~22 `time.sleep` calls in TUI tests are timing-fragile. |
+| Reproducibility | 70% | Snapshot pinning via snapshot.debian.org, Docker image tagged + Dockerfile-hashed, post-build NMU strip yields pristine versions, sources.list rewritten in-container with `[check-valid-until=no]`. | No `reprotest` gate yet (CONF-06); SBOM (CycloneDX/SPDX) not generated (CONF-07). |
+| Security | 80% | InRelease GPG verified per mirror against debian-archive-keyring; project signing-key with sign+verify roundtrip gate before any chroot work; signed `Release`/`InRelease` on the published repo; Docker daemon URL guard; sudo password scrubbed after use. | STA-19 (manifest reader fail-closed); signing key uses `%no-protection` (no passphrase) — documented but operator-exposed. |
+| Operability | 75% | Curses TUI + headless `--cli` backend share one console facade; 12 top-level commands with `_group_help` tables; rich `print state/config/extras/…` views; per-build timestamped log files; structured autorun summary. | UX-05 sub-items pending (`--yes`, env-var sudo, ANSI color in CLI mode, `-c <cmd>` one-shot, Ctrl+C grace); no localization (UX-06). |
+| Identity / branding | 85% | Three-layer model (Athena toolchain / Asgard distribution / thor codename) enforced through `@DISTRIBUTION@/@BASE_ID@/@CODENAME@` token-subst in fork content. Collision gate FAILS the cache when upstream would dominate a fork. 8 forks audited clean. | A few Debian-named packages (`debian-faq`, `reportbug`) intentionally kept in pool for `[standard]` task; CONF-10 redesign pending. |
+| Documentation | 65% | This README, `TODO.md`, `docs/done.md`, 8 plan docs, `docs/branding-methodology.md`, `docs/pseudocode.md`, `docs/diagrams/build-fsm.{dot,png}`. | `docs/architecture.md` (DOC-02), `docs/patching.md` (DOC-03), `docs/release.md` (DOC-04). |
+| Scale / portability | 50% | Single-arch (amd64). Single-distro derivation (Debian bookworm). | COMP-04 (arm64), COMP-07 (per-release containers), COMP-11 (`Distro = ubuntu`). |
+
+### Comparative landscape
+
+The Linux distro build/composition tooling sits in two broad camps. Athena is squarely in the second.
+
+**Prebuilt-binary composers** (faster, narrower, NOT what Athena is):
+
+| Tool | Comparison |
+|---|---|
+| **debootstrap** | Bootstraps a minimal Debian root from a mirror. Mature, narrow, used as a building block — not a comparator. |
+| **live-build (Debian Live)** | Closest *shape* comparator. Pulls prebuilt `.debs` into a chroot, wraps in squashfs + GRUB. Athena's pipeline structure is similar but **Athena builds every package from source**; live-build trades that 30–60 min build time away for upstream-current binaries. |
+| **simple-cdd / mkarchiso / ubuntu-cdimage** | Distro-specific equivalents of live-build. Canonical's tooling is the most operationally mature; closed/internal. |
+| **Kickstart / anaconda (RHEL/Fedora)** | rpm/dnf side equivalent of d-i + simple-cdd combined. Different ecosystem, same camp. |
+
+**Source builders** (slower, more ambitious, what Athena is):
+
+| Tool | Comparison |
+|---|---|
+| **Yocto / OpenEmbedded** | Closest in *spirit*. Industrial-strength, ~15 years mature, multi-arch by design, parallel by default, infamous learning curve. Yocto targets embedded; Athena targets a Debian-faithful desktop/server derivative. Yocto is several orders of magnitude larger as a codebase + community. |
+| **buildroot** | Embedded Linux from source, simpler than Yocto. Same spirit, smaller surface. |
+| **Gentoo's catalyst** | Builds Gentoo stage tarballs from source via portage. Mature but Gentoo-specific. |
+| **Open Build Service (openSUSE/SUSE)** | Industrial multi-distro package build service with web UI + build farm. Builds *packages*; Athena builds *distribution compositions* on top of building packages. Different scope. |
+| **NixOS / Nix** | Different paradigm — declarative, content-addressed, no FHS. Not a direct comparator. |
+| **Devuan's build process** | Closest *ideological* neighbor. Devuan rebuilds ~50 systemd-tainted packages; Athena rebuilds the whole `pkg.list` closure (~800–900 sources). "Devuan but more total." |
+| **Pop!\_OS / elementary / LMDE** | Same end-state ambition as Asgard; build tooling private/opaque. Athena is the tooling you'd write if you wanted to be one of these but transparent. |
+| **Lunar / Sorcery / Frugalware** | Hobbyist source-built distros. Lower activity, less rigorous. Athena is meaningfully more current. |
+
+### Where Athena is unusually strong
+
+- **Inline incident archeology.** Comments explain *why* with date-stamped notes pointing at the original failure. Most peers don't document at this depth.
+- **Append-only multi-version publish.** The `+asg<R>u<N>` versioning + signed-manifest authority is more rigorous than live-build's "rebuild and overwrite" model.
+- **Fork collision gate.** The cache build FAILS when an upstream version would dominate a fork's version. Most derivatives silently ship the regression.
+- **Fail-loud identity policy.** No Debian residue allowed without an explicit allowlist; tested by source-grep policy enforcers.
+- **Snapshot pinning to `snapshot.debian.org`.** Full reproducibility across runs in a way live-build is not by default.
+
+### Where Athena is unusually weak
+
+- **Single-host, single-operator.** No build farm, no CI matrix, no per-PR build validation.
+- **Single arch.** Multi-arch is a significant cross-cutting refactor (COMP-04).
+- **No SBOM.** Increasingly expected of derivative distros; CONF-07 is open.
+- **Real-hardware testing depends on the operator** having access to varied hardware. Yocto has YP-CI; Canonical has hardware-enabled labs; Athena has the operator's local machines + VMware.
+
+### Honest bottom line
+
+For a derivative-distribution project, today's maturity is at the point where it **could ship a v1.0 to early adopters** — the pipeline is correct, the metadata is signed, the update story works. The largest gates to genuine production use are COMP-01h (real-hardware), COMP-03 (parallel builds), CONF-06 (reproducibility verification), and an enlarged test matrix. Operators with a tolerance for build time and a willingness to fix the occasional upstream-source-doesn't-build problem will find the tool more capable than the README's "tinkering" framing suggests.
 
 ### Linux
 The first question always is - What is Linux?  Linus Torvalds while studying at the University of Helsinki, wrote (for multiple reasons that I am not getting into here) a clone of UNIX operating system called 'Minix' and was supposed to be compatible to ***System V***. 
