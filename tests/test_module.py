@@ -1129,6 +1129,38 @@ def test_production_build_conf_has_noautodbgsym_in_build_options():
     assert 'nocheck' in _opts, _opts_raw
 
 
+def test_build_conf_ingests_nonfree_components_and_tunnels_firmware():
+    """build.conf ingests contrib/non-free/non-free-firmware (one [Mirror.*]
+    per component, incl. the security suite) and tunnels the curated
+    firmware/microcode SOURCES; pool.list selects the matching BINARIES so
+    they ship in the pool + publish under non-free-firmware."""
+    import configparser
+    _cp = configparser.ConfigParser(interpolation=None)
+    _cp.read(os.path.join(_ROOT, 'config', 'build.conf'))
+    _comps = {
+        _cp.get(_s, 'Component', fallback='main')
+        for _s in _cp.sections() if _s.startswith('Mirror.')
+    }
+    for _c in ('main', 'contrib', 'non-free', 'non-free-firmware'):
+        assert _c in _comps, (_c, _comps)
+    # security suite must also offer non-free-firmware (microcode security upd).
+    assert _cp.get('Mirror.security-non-free-firmware', 'Component') == \
+        'non-free-firmware'
+    assert _cp.get('Mirror.security-non-free-firmware', 'BASEID') == \
+        'debian-security'
+    _tun = {_t.strip() for _t in
+            _cp.get('Source', 'Tunneled', fallback='').split(',') if _t.strip()}
+    for _src in ('intel-microcode', 'amd64-microcode', 'firmware-nonfree'):
+        assert _src in _tun, (_src, _tun)
+    with open(os.path.join(_ROOT, 'config', 'pool.list')) as fh:
+        _pool = {ln.strip() for ln in fh
+                 if ln.strip() and not ln.lstrip().startswith('#')}
+    for _bin in ('intel-microcode', 'amd64-microcode', 'firmware-iwlwifi',
+                 'firmware-realtek', 'firmware-misc-nonfree',
+                 'firmware-amd-graphics'):
+        assert _bin in _pool, _bin
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DEP-3 header check
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2067,7 +2099,9 @@ def test_stage_d_buildconfig_paths_use_new_nested_layout():
         _pytest.skip(f"BuildConfig invalid in test env: {_cfg.error()}")
     # Each attr must contain the dists/ nesting (not be at repo root)
     for _attr in ('dir_repo_main', 'dir_repo_main_udeb', 'dir_repo_main_source',
-                  'dir_repo_doc', 'dir_repo_dbgsym', 'dir_repo_tests'):
+                  'dir_repo_doc', 'dir_repo_dbgsym', 'dir_repo_tests',
+                  'dir_repo_contrib', 'dir_repo_non_free',
+                  'dir_repo_non_free_firmware'):
         _val = getattr(_cfg, _attr)
         assert '/dists/' in _val, (
             f"{_attr} = {_val!r} doesn't use the new nested layout — "
@@ -2082,6 +2116,52 @@ def test_stage_d_buildconfig_paths_use_new_nested_layout():
         f"dir_repo_dbgsym = {_cfg.dir_repo_dbgsym!r} must be under the "
         f"<codename>-debug suite per Q2"
     )
+    # Non-main component dirs are real components under the primary suite.
+    assert _cfg.dir_repo_non_free_firmware.endswith(
+        os.path.join('non-free-firmware', f'binary-{_cfg.arch}')), \
+        _cfg.dir_repo_non_free_firmware
+    assert '-debug/' not in _cfg.dir_repo_non_free_firmware
+    # Component dirs are NOT in all_deb_dirs() (maintenance walks must skip
+    # pristine tunneled binaries); publish reads them directly instead.
+    for _d in (_cfg.dir_repo_contrib, _cfg.dir_repo_non_free,
+               _cfg.dir_repo_non_free_firmware):
+        assert _d not in _cfg.all_deb_dirs(), _d
+
+
+def test_deb_dest_for_filename_routes_by_component():
+    """deb_dest_for_filename routes a plain installable .deb to its component
+    dir when component != 'main'; default stays 'main'; the udeb special-case
+    and side-artifact dirs are unaffected.  Confirms the new component dirs
+    are created and intentionally excluded from all_deb_dirs()."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        _fw = 'intel-microcode_3.20230808.1_amd64.deb'
+        assert cfg.deb_dest_for_filename(_fw) == cfg.dir_repo_main
+        assert cfg.deb_dest_for_filename(_fw, 'non-free-firmware') == \
+            cfg.dir_repo_non_free_firmware
+        assert cfg.deb_dest_for_filename(_fw, 'non-free') == cfg.dir_repo_non_free
+        assert cfg.deb_dest_for_filename(_fw, 'contrib') == cfg.dir_repo_contrib
+        # udeb special-case wins even with a component.
+        assert cfg.deb_dest_for_filename(
+            'foo-udeb_1_amd64.udeb', 'non-free-firmware') == \
+            cfg.dir_repo_main_udeb
+        # Component dirs are created (dir-ensure) but intentionally NOT in
+        # all_deb_dirs() — that list feeds maintenance walks (strip/audit_nmu)
+        # which must not touch pristine tunneled binaries.
+        for _d in (cfg.dir_repo_contrib, cfg.dir_repo_non_free,
+                   cfg.dir_repo_non_free_firmware):
+            assert os.path.isdir(_d), _d
+            assert _d not in cfg.all_deb_dirs(), _d
+        assert '/dists/' in cfg.dir_repo_non_free_firmware
+        assert '-debug/' not in cfg.dir_repo_non_free_firmware
 
 
 def test_iso_installer_stage_disk_info_errors_when_dir_missing():
@@ -3390,17 +3470,22 @@ def test_preseed_pins_http_mirror_and_enables_use_mirror():
     assert 'apt-setup/use_mirror boolean false' not in _body, _body
 
 
-def test_preseed_keeps_target_sources_to_main_only():
-    """The target's apt sources must stay `main`-only with no deb-src, to match
-    what our repo actually publishes (avoids `apt update` warnings about a
-    missing non-free-firmware component / Sources index).  Two preseeds:
-      - hw-detect/firmware-lookup=never disables 50install-firmware, which would
-        otherwise db_set apt-setup/non-free-firmware=true (overriding a preseed).
-      - apt-setup/enable-source-repositories=false drops the deb-src line."""
+def test_preseed_enables_non_free_firmware_no_deb_src():
+    """The target's mirror line must include `main non-free-firmware` (the repo
+    now publishes that component) but NO deb-src, and the firmware machinery
+    must be RE-ENABLED so hw-detect installs microcode/firmware:
+      - apt-setup/non-free-firmware=true → 50mirror writes the component.
+      - hw-detect/firmware-lookup=never must be GONE (was the disable-firmware
+        escape hatch from when the repo had no non-free-firmware component).
+      - apt-setup/enable-source-repositories=false still drops the deb-src line.
+      - contrib/non-free are NOT forced true (we don't populate them yet)."""
     with open(os.path.join(_ROOT, 'installer', 'preseed', 'preseed.cfg')) as fh:
         _body = fh.read()
-    assert 'hw-detect/firmware-lookup string never' in _body, _body
+    assert 'apt-setup/non-free-firmware boolean true' in _body, _body
+    assert 'hw-detect/firmware-lookup string never' not in _body, _body
     assert 'apt-setup/enable-source-repositories boolean false' in _body, _body
+    assert 'apt-setup/non-free boolean true' not in _body, _body
+    assert 'apt-setup/contrib boolean true' not in _body, _body
 
 
 def test_choose_mirror_fork_drops_menu_item():
@@ -3460,6 +3545,9 @@ def test_finish_install_default_source_overlay():
     # Coords from the choose-mirror debconf keys — not a separate hardcoded URL.
     assert 'mirror/http/hostname' in _s and 'mirror/codename' in _s, _s
     assert 'sources.list.d/athena.list' in _s, _s
+    # Fallback line includes the non-free-firmware component (matches the
+    # selected-mirror line; the repo publishes that component).
+    assert 'main non-free-firmware' in _s, _s
 
 
 def test_installer_chroot_resolve_udeb_files_skips_virtual_aliases():
@@ -15983,7 +16071,7 @@ def test_segregate_never_deletes_existing_published_deb():
         _bc = _make_buildcontainer_stub(repo=_tmp)
 
         class _FakeConfig:
-            def deb_dest_for_filename(self, _f):
+            def deb_dest_for_filename(self, _f, component='main'):
                 return _dest_dir
 
         class _Src:
@@ -16051,7 +16139,7 @@ def test_check_build_matches_asg_variant_of_prediction():
         _bc = _make_buildcontainer_stub(repo=_tmp, buildlog=_log)
 
         class _FakeConfig:
-            def deb_dest_for_filename(self, _f):
+            def deb_dest_for_filename(self, _f, component='main'):
                 return _dest
 
         class _Src:
@@ -16062,6 +16150,47 @@ def test_check_build_matches_asg_variant_of_prediction():
             "check_build should match the stamped variant of the prediction")
         # a prediction with no on-disk match → False
         assert _bc.check_build(_Src(), ['openssh_9.2-1_amd64.deb']) is False
+
+
+def test_check_build_locates_non_main_component_deb():
+    """A tunneled non-main package's binaries live in their component dir;
+    check_build must use src._mirror.component to look there — otherwise it
+    looks in main, never finds them, and re-tunnels every run."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _main = os.path.join(_tmp, 'dists', 'test', 'main', 'binary-amd64')
+        _nff = os.path.join(
+            _tmp, 'dists', 'test', 'non-free-firmware', 'binary-amd64')
+        os.makedirs(_main)
+        os.makedirs(_nff)
+        _log = os.path.join(_tmp, 'log')
+        os.makedirs(_log)
+        # firmware deb lives ONLY in the non-free-firmware dir
+        _build_minimal_deb(os.path.join(_nff, 'intel-microcode_3.1_amd64.deb'),
+                           'intel-microcode', '3.1', 'amd64')
+        with open(os.path.join(_log, 'intel-microcode.result'), 'w') as fh:
+            fh.write('TUNNELED\n')
+        _bc = _make_buildcontainer_stub(repo=_tmp, buildlog=_log)
+
+        class _FakeConfig:
+            def deb_dest_for_filename(self, _f, component='main'):
+                return _nff if component == 'non-free-firmware' else _main
+
+        class _Mirror:
+            component = 'non-free-firmware'
+
+        class _Src:
+            package = 'intel-microcode'
+            _mirror = _Mirror()
+
+        _bc.config = _FakeConfig()
+        # Found in the component dir → True. Without the component lookup,
+        # check_build would search main, miss, and return False.
+        assert _bc.check_build(
+            _Src(), ['intel-microcode_3.1_amd64.deb']) is True
 
 
 def test_normalize_built_artifacts_stamps_delta_when_ledger_present():
@@ -16323,6 +16452,27 @@ def test_merge_remote_index_signs_locally_and_merges():
     assert 'merge_packages_indexes(' in _fn, "must merge remote+local stanzas"
     assert '_scan_packages_to(' in _fn, "must scan the local pool"
     assert 'sign_release_files(' in _fn, "must sign locally"
+    # Multi-component: non-main components are scanned + published when
+    # populated, and the top-level Release lists the populated set.
+    assert 'non-free-firmware' in _fn, "must publish non-free-firmware component"
+    assert "for _other in ('contrib', 'non-free', 'non-free-firmware')" in _fn
+    assert 'components=_populated' in _fn, \
+        "top Release must list the populated component set, not just main"
+
+
+def test_publish_suites_spec_includes_nonfree_components():
+    """Both the `repo index` and `repo publish` (full scope) suites_spec must
+    list the non-main components so generate_repo_indexes emits them (empty
+    ones auto-skip).  Minimal-scope publish stays main-only by design."""
+    import re
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as fh:
+        _body = fh.read()
+    _specs = re.findall(r"_codename:\s*\[([^\]]*?)\]", _body, re.DOTALL)
+    _multi = [s for s in _specs if 'doc' in s]
+    assert len(_multi) >= 2, _multi
+    for _s in _multi:
+        for _c in ('contrib', 'non-free', 'non-free-firmware'):
+            assert f"'{_c}'" in _s, (_c, _s)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -17337,6 +17487,7 @@ def main() -> int:
         test_mirror_rejects_suffix_without_leading_dash,
         test_mirror_with_snapshot_returns_new_instance_untouched_original,
         test_buildconfig_parses_three_mirrors,
+        test_deb_dest_for_filename_routes_by_component,
         test_buildconfig_rejects_no_mirrors,
         test_package_and_source_have_mirror_field,
         test_source_parses_security_stanza_without_files_field,
@@ -17465,7 +17616,7 @@ def main() -> int:
         test_installer_ships_forked_choose_mirror,
         test_athena_installer_data_drops_mirror_protocol_stub,
         test_preseed_pins_http_mirror_and_enables_use_mirror,
-        test_preseed_keeps_target_sources_to_main_only,
+        test_preseed_enables_non_free_firmware_no_deb_src,
         test_choose_mirror_fork_drops_menu_item,
         test_finish_install_cdrom_disable_overlay,
         test_finish_install_default_source_overlay,
@@ -17529,6 +17680,7 @@ def main() -> int:
         test_audit_nmu_residue_detects_layered_versions,
         # apply_distro_suffix — bump bumped binaries with `+thor1`
         test_production_build_conf_has_noautodbgsym_in_build_options,
+        test_build_conf_ingests_nonfree_components_and_tunnels_firmware,
         test_buildcontainer_emits_token_substitution_snippet,
         test_buildcontainer_token_subst_uses_if_not_short_circuit_and,
         test_buildcontainer_token_subst_no_double_braces_in_regular_strings,
@@ -17870,6 +18022,7 @@ def main() -> int:
         test_highest_asg_update_reads_remote_ledger,
         test_asg_next_n_is_per_file_and_cumulative,
         test_check_build_matches_asg_variant_of_prediction,
+        test_check_build_locates_non_main_component_deb,
         test_normalize_built_artifacts_stamps_delta_when_ledger_present,
         test_normalize_built_artifacts_no_stamp_without_ledger,
         test_postbuild_convergence_hard_fails_when_check_build_still_false,
@@ -17882,6 +18035,7 @@ def main() -> int:
         test_merge_remote_index_preserves_old_versions_multiversion,
         test_merge_packages_indexes_dedup_local_wins,
         test_merge_remote_index_signs_locally_and_merges,
+        test_publish_suites_spec_includes_nonfree_components,
         # UPD-01 step 6: workload + Guard A preflight
         test_workload_since_published_picks_only_advanced_bases,
         test_needs_bump_build_per_file_exact_un,

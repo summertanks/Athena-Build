@@ -875,13 +875,18 @@ class BuildContainer:
             return _moved_paths
         if not _files_at_root:
             return _moved_paths
+        # A source's binaries share its apt component (from the origin mirror).
+        # Forks / locally-discovered sources have no mirror (or a flat fork
+        # mirror) → 'main'.  Tunneled non-main packages don't reach here
+        # (_do_tunnel places them directly), but keep this correct/general.
+        _comp = getattr(getattr(src_pkg, '_mirror', None), 'component', '') or 'main'
         for _f in _files_at_root:
             _src = os.path.join(self.repo_path, _f)
             # CONF-01 Stage D: config helper routes to the right
             # nested apt-repo dir (e.g. main → dists/<codename>/main/
             # binary-<arch>/, main+.udeb → main/debian-installer/...,
             # dbgsym → dists/<codename>-debug/main/binary-<arch>/).
-            _dst_dir = self.config.deb_dest_for_filename(_f)
+            _dst_dir = self.config.deb_dest_for_filename(_f, _comp)
             os.makedirs(_dst_dir, exist_ok=True)
             _dst = os.path.join(_dst_dir, _f)
             try:
@@ -956,6 +961,11 @@ class BuildContainer:
         except OSError:
             return False
 
+        # Component (from origin mirror) so a non-main package's binaries are
+        # located in their component dir — e.g. a TUNNELED firmware package
+        # lives in repo/dists/<codename>/non-free-firmware/, not main; without
+        # this the presence check would always miss and re-tunnel every run.
+        _comp = getattr(getattr(src_pkg, '_mirror', None), 'component', '') or 'main'
         for _file in expected_files:
             # Only main-classified binaries gate rebuild; missing
             # -dev/-doc/-dbgsym/-tests are tolerated.  CONF-01 Stage D:
@@ -970,7 +980,7 @@ class BuildContainer:
             # exact-only os.path.isfile match was the CONF-13 rebuild-loop
             # cause: a stamped/ABI-variant on-disk file never matched, so the
             # source was rebuilt every run.
-            _dst_dir = self.config.deb_dest_for_filename(_file)
+            _dst_dir = self.config.deb_dest_for_filename(_file, _comp)
             _filename = utils.find_matching_artifact(_dst_dir, _file)
             if _filename is None:
                 return False

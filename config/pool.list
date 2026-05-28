@@ -197,3 +197,23 @@ alsa-utils
 cups
 fonts-symbola
 xorg
+
+# ─── Non-free firmware + CPU microcode (non-free-firmware component) ──
+# Curated subset of Debian's non-free-firmware, TUNNELED (prebuilt binaries,
+# see [Source] Tunneled in build.conf — sources intel-microcode /
+# amd64-microcode / firmware-nonfree).  Available in the pool so hw-detect's
+# install-time firmware machinery (post-base-installer.d/50install-firmware +
+# finish-install.d/08hw-detect) can apt-install the matching microcode/firmware
+# for the target's hardware.  These ship in the pool and publish under the
+# non-free-firmware component; NOT pre-installed in any chroot.
+#   microcode — apt-installed by hw-detect for the matching CPU vendor
+intel-microcode
+amd64-microcode
+#   Wi-Fi / NIC firmware (the common "no network after install" devices)
+firmware-iwlwifi
+firmware-realtek
+firmware-atheros
+firmware-brcm80211
+#   GPU + broad misc device firmware
+firmware-amd-graphics
+firmware-misc-nonfree

@@ -1758,6 +1758,21 @@ class BuildConfig:
             self.dir_repo_tests = os.path.join(
                 self.dir_repo, 'dists', _codename, 'tests',
                 f'binary-{self.arch}')
+            # Non-main components (ingested from Debian's contrib/non-free/
+            # non-free-firmware mirrors, redistributed in OUR repo as real
+            # components — license-correct separation).  Same shape as the
+            # doc/tests pseudo-components: dists/<codename>/<comp>/binary-<arch>/.
+            # Populated by component-aware routing (deb_dest_for_filename) for
+            # tunneled/built packages whose origin Mirror.component is non-main.
+            self.dir_repo_contrib = os.path.join(
+                self.dir_repo, 'dists', _codename, 'contrib',
+                f'binary-{self.arch}')
+            self.dir_repo_non_free = os.path.join(
+                self.dir_repo, 'dists', _codename, 'non-free',
+                f'binary-{self.arch}')
+            self.dir_repo_non_free_firmware = os.path.join(
+                self.dir_repo, 'dists', _codename, 'non-free-firmware',
+                f'binary-{self.arch}')
             self.dir_config = os.path.join(self.working_dir, config_parser.get('Directories', 'Config'))
             self.dir_image = os.path.join(self.working_dir, config_parser.get('Directories', 'Image'))
             # The [Directories] Chroot value is the PARENT directory holding
@@ -1819,6 +1834,8 @@ class BuildConfig:
                 self.dir_repo_main, self.dir_repo_main_udeb,
                 self.dir_repo_main_source,
                 self.dir_repo_doc, self.dir_repo_dbgsym, self.dir_repo_tests,
+                self.dir_repo_contrib, self.dir_repo_non_free,
+                self.dir_repo_non_free_firmware,
             ):
                 pathlib.Path(_sub).mkdir(parents=True, exist_ok=True)
 
@@ -1931,11 +1948,14 @@ class BuildConfig:
         flat paths like repo/main/.
         """
         _mapping = {
-            'main':      self.dir_repo_main,
-            'main-udeb': self.dir_repo_main_udeb,
-            'doc':       self.dir_repo_doc,
-            'dbgsym':    self.dir_repo_dbgsym,
-            'tests':     self.dir_repo_tests,
+            'main':             self.dir_repo_main,
+            'main-udeb':        self.dir_repo_main_udeb,
+            'doc':              self.dir_repo_doc,
+            'dbgsym':           self.dir_repo_dbgsym,
+            'tests':            self.dir_repo_tests,
+            'contrib':          self.dir_repo_contrib,
+            'non-free':         self.dir_repo_non_free,
+            'non-free-firmware': self.dir_repo_non_free_firmware,
         }
         if label not in _mapping:
             raise ValueError(
@@ -1944,7 +1964,8 @@ class BuildConfig:
             )
         return _mapping[label]
 
-    def deb_dest_for_filename(self, filename: str) -> str:
+    def deb_dest_for_filename(self, filename: str,
+                              component: str = 'main') -> str:
         """Compose classify_repo_subdir + deb_dir_for, with the udeb
         special-case (udebs route to main's debian-installer/ sibling,
         not main/binary-<arch>/).
@@ -1952,10 +1973,20 @@ class BuildConfig:
         The one helper callers (buildcontainer's _segregate, audits,
         cleanups) should use to find "where does THIS .deb/.udeb go?"
         — eliminates path-construction at the call site.
+
+        `component` is the package's apt component, derived from its origin
+        Mirror (NOT by inspecting the .deb).  For a non-main component
+        (contrib / non-free / non-free-firmware), a plain installable .deb
+        (suffix-label 'main') routes to that component's dir instead of main.
+        Side-artifact suffixes (-doc/-dbgsym/-test) keep their existing
+        pooled dirs regardless of component (we don't ship non-main side
+        artifacts).  Default 'main' keeps every existing caller unchanged.
         """
         _label = classify_repo_subdir(filename)
         if filename.endswith('.udeb') and _label == 'main':
             return self.dir_repo_main_udeb
+        if component != 'main' and _label == 'main':
+            return self.deb_dir_for(component)
         return self.deb_dir_for(_label)
 
     def all_deb_dirs(self) -> 'list[str]':

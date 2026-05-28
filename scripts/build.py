@@ -1670,13 +1670,19 @@ class BuildSession:
             logger.error(f"tunnel {src_pkg.package}: source has no _mirror — cache ingest bug")
             return False
         _base = src_pkg._mirror.url
+        # Route tunneled binaries to their apt component (from the origin
+        # mirror): non-free/contrib/non-free-firmware land in the matching
+        # repo/dists/<codename>/<comp>/ dir, main stays main.  Empty/flat
+        # component → main.
+        _comp = src_pkg._mirror.component or 'main'
         _success = True
 
         # Caller gates this on build_container_ready, so self.container
         # is non-None by the time we get here.
         assert self.container is not None
         for _filename in _files:
-            _dest = os.path.join(self.container.repo_path, _filename)
+            _dest = os.path.join(
+                self.config.deb_dest_for_filename(_filename, _comp), _filename)
 
             # Skip files already on disk — no integrity check here; the repo
             # directory is trusted to contain only valid packages.
@@ -2905,7 +2911,8 @@ class BuildSession:
 
         _codename = self.config.build_codename.strip('"').strip("'")
         _suites_spec: 'dict[str, list[str]]' = {
-            _codename: ['main', 'doc', 'tests'],
+            _codename: ['main', 'doc', 'tests',
+                        'contrib', 'non-free', 'non-free-firmware'],
             f'{_codename}-debug': ['main'],
         }
         _codename_for_suite = {
@@ -3309,7 +3316,9 @@ class BuildSession:
             _suites_spec = {_codename: ['main']}
         else:
             _deb_dists = os.path.join(self.config.dir_repo, 'dists')
-            _suites_spec = {_codename: ['main', 'doc', 'tests'],
+            _suites_spec = {_codename: ['main', 'doc', 'tests',
+                                        'contrib', 'non-free',
+                                        'non-free-firmware'],
                             f'{_codename}-debug': ['main']}
         if not os.path.isdir(_deb_dists):
             console.print(f"repo publish: {_deb_dists} missing — build first.",
