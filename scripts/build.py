@@ -3500,7 +3500,15 @@ class BuildSession:
             return
 
         # 4. Refresh the local manifest = the remote-scanned main Packages.
-        repo_audit.write_published_manifest(self.config, _main_pkgs)
+        # STA-21: fail loud on signing failure (silent unsigned writes
+        # would corrupt +asg uN bump derivation on the next publish).
+        if not repo_audit.write_published_manifest(self.config, _main_pkgs):
+            console.print(
+                "repo publish: local manifest sign FAILED — remote sync "
+                "succeeded but the local +asg uN authority is now empty.  "
+                "Run `key generate` / `key verify` then re-publish.",
+                tui.COLOR_ERROR)
+            return
         console.print(
             f"repo publish: synced {_scope} + re-indexed on remote "
             f"({_remote_root})", tui.COLOR_HIGHLIGHT)
@@ -4197,13 +4205,20 @@ class BuildSession:
         finally:
             _password = '*' * len(_password)  # noqa: F841
         # Refresh the local signed manifest = the merged multi-version index.
+        # STA-21: fail loud on signing failure.
         _merged = os.path.join(self.config.dir_repo_main, 'Packages')
         try:
             with open(_merged) as _fh:
-                repo_audit.write_published_manifest(self.config, _fh.read())
+                _ok = repo_audit.write_published_manifest(self.config, _fh.read())
         except OSError as e:
             console.print(f"repo: could not refresh manifest from {_merged}: {e}",
                           tui.COLOR_ERROR)
+            return False
+        if not _ok:
+            console.print(
+                "repo: local manifest sign FAILED — `+asg uN` bump "
+                "authority is now empty.  Run `key generate` / `key verify` "
+                "then re-run `repo refresh`.", tui.COLOR_ERROR)
             return False
         return True
 

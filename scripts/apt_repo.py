@@ -650,6 +650,141 @@ def remote_reindex_and_sign(
 
 
 
+def _run_dpkg_scan(
+    argv: 'list[str]', output_path: str, *,
+    cwd: Optional[str] = None,
+    password: Optional[str] = None,
+    label: str = '',
+    allow_empty: bool = True,
+) -> bool:
+    """Single shared helper for `dpkg-scanpackages` / `dpkg-scansources`.
+
+    Writes scanner stdout to a user-owned tempfile next to `output_path`,
+    then atomically installs it into place (with sudo when a password is
+    supplied; plain `os.replace` otherwise).  Spinner-wrapped — streaming
+    Perl stdout through sudo's pipe doesn't surface lines mid-scan
+    reliably even with `stdbuf -oL` (operator-observed 2026-05-22).
+
+    STA-22 (2026-05-28): consolidates the two prior near-parallel
+    shell-string subprocess patterns (`_scan_packages_to`,
+    `_scan_sources_to` here; `_scan_packages_with_progress` in
+    `scripts/repo_audit.py`).  The tempfile-then-install pattern is
+    strictly safer than direct shell redirect — it handles the
+    root-owned-file truncate case that bit chroot-build-installer's
+    audit pre-flight in May 2026.
+
+    Args:
+      argv:        Full argv for the scanner (e.g.
+                   `['dpkg-scanpackages', '-m', '-t', 'udeb', subdir]`).
+      output_path: Target on-disk location.  Atomically replaced.
+      cwd:         Run the scanner with this working directory (so
+                   `Filename:` entries are relative to staging/repo root).
+      password:    When set, runs via `sudo -S bash -c` and uses
+                   `sudo install` for the atomic move.  When None,
+                   runs the shell as the current user.
+      label:       Optional Spinner suffix (e.g. `'main (debs)'`).
+      allow_empty: When False, rc=0 but a zero-byte output is treated
+                   as failure (callers indexing the install corpus want
+                   this; optional components / udeb-less pools want
+                   `allow_empty=True`).
+
+    Returns True iff the scanner exited 0 AND the output landed at
+    `output_path`.  Logs stderr + emits an operator-visible ERROR on
+    failure.
+    """
+    import tempfile as _tempfile
+    _label_base = ('dpkg-scanpackages' if 'scanpackages' in argv[0]
+                   else 'dpkg-scansources')
+    _spin_label = f"{_label_base} ({label})" if label else _label_base
+    _spin = None
+    try:
+        if getattr(tui, 'tui_instance', None) is not None:
+            _spin = tui.Spinner(_spin_label)
+    except Exception:
+        _spin = None
+
+    _parent = os.path.dirname(output_path) or '.'
+    _tmp_fd, _tmp_path = _tempfile.mkstemp(
+        prefix='scan-', suffix='.tmp',
+        dir=_parent if os.access(_parent, os.W_OK) else None,
+    )
+    os.close(_tmp_fd)   # subprocess shell opens it via `>`
+
+    try:
+        _shell = (
+            f'cd {cwd or "."} && '
+            f'{" ".join(argv)} 2>/dev/null > {_tmp_path}'
+        )
+        if password is not None:
+            # Route through `_sudo` so the module-wide sudo wrapper owns
+            # password handling (consistent with every other sudo call
+            # in apt_repo + lets tests mock one surface).
+            _r = _sudo(['bash', '-c', _shell], password)
+        else:
+            _r = subprocess.run(
+                ['bash', '-c', _shell],
+                capture_output=True, text=True,
+            )
+    finally:
+        if _spin is not None:
+            _spin.done()
+
+    if _r.returncode != 0:
+        _err = (_r.stderr or '').strip()
+        tui.console.print(
+            f"ERROR: {_label_base} ({label}) failed: {_err[:200]}"
+        )
+        logger.error(
+            f"_run_dpkg_scan {label}: rc={_r.returncode}, stderr={_err}"
+        )
+        try:
+            os.unlink(_tmp_path)
+        except OSError:
+            pass
+        return False
+
+    if not allow_empty:
+        try:
+            _sz = os.path.getsize(_tmp_path)
+        except OSError:
+            _sz = 0
+        if _sz == 0:
+            tui.console.print(
+                f"ERROR: {_label_base} ({label}) produced empty output"
+            )
+            logger.error(
+                f"_run_dpkg_scan {label}: empty output at {_tmp_path}"
+            )
+            try:
+                os.unlink(_tmp_path)
+            except OSError:
+                pass
+            return False
+
+    # Atomic move into final location.  sudo install clobbers any
+    # pre-existing root-owned file; os.replace handles the user-owned
+    # case.  Tempfile is unlinked either way.
+    if password is not None:
+        _mv = _sudo(['install', '-m', '644', _tmp_path, output_path], password)
+        try:
+            os.unlink(_tmp_path)
+        except OSError:
+            pass
+        if _mv.returncode != 0:
+            logger.error(
+                f"sudo install {_tmp_path} → {output_path}: "
+                f"rc={_mv.returncode}, stderr={_mv.stderr.strip()[:200]}"
+            )
+            return False
+    else:
+        try:
+            os.replace(_tmp_path, output_path)
+        except OSError as e:
+            logger.error(f"rename {_tmp_path} → {output_path}: {e}")
+            return False
+    return True
+
+
 def _scan_packages_to(
     staging: str, pool_subdir: str, output_path: str,
     password: str, udeb: bool, allow_empty: bool = False,
@@ -658,50 +793,20 @@ def _scan_packages_to(
 
     Run with cwd=staging so Packages records carry relative Filename
     entries (matching the layout apt walks via /cdrom/pool/...).
-    Spinner-wrapped (no per-file ProgressBar): streaming Perl stdout
-    through sudo's pipe didn't surface lines mid-scan reliably even
-    with `stdbuf -oL` (operator-observed 2026-05-22) — a Spinner is
-    the honest signal here.
+    Thin wrapper around `_run_dpkg_scan` since STA-22 consolidation —
+    keeps the apt_repo-specific concerns (compress + record-count log
+    line) outside the shared helper.
     """
     _label = 'udebs' if udeb else 'debs'
     _argv = ['dpkg-scanpackages', '-m']
     if udeb:
         _argv += ['-t', 'udeb']
     _argv += [pool_subdir]
-    _spin = tui.Spinner(f"dpkg-scanpackages {pool_subdir} ({_label})")
-    try:
-        _shell = (
-            f'cd {staging} && '
-            f'{" ".join(_argv)} 2>/dev/null > {output_path}'
-        )
-        _r = _sudo(['bash', '-c', _shell], password)
-    finally:
-        _spin.done()
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: dpkg-scanpackages ({_label}) failed: "
-            f"{_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_scan_packages_to {_label}: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
-        )
-        return False
-    if not os.path.exists(output_path):
-        tui.console.print(
-            f"ERROR: Packages output {output_path} is missing"
-        )
-        logger.error(f"_scan_packages_to {_label}: missing output at {output_path}")
-        return False
-    # An empty index is valid for an optional component (e.g. a debs-only
-    # minimal pool has no udebs) — allow_empty lets the caller accept it.
-    # The main binary index keeps allow_empty=False, so an empty deb scan
-    # still fails loud.
-    if os.path.getsize(output_path) == 0 and not allow_empty:
-        tui.console.print(
-            f"ERROR: Packages output {output_path} is empty"
-        )
-        logger.error(f"_scan_packages_to {_label}: empty output at {output_path}")
+    if not _run_dpkg_scan(
+            _argv, output_path,
+            cwd=staging, password=password,
+            label=f"{pool_subdir} ({_label})",
+            allow_empty=allow_empty):
         return False
     _n = _count_records(output_path)
     tui.console.print(f"  → {_n} {_label} indexed")
@@ -711,28 +816,15 @@ def _scan_packages_to(
 def _scan_sources_to(
     staging: str, pool_subdir: str, output_path: str, password: str,
 ) -> bool:
-    """sudo dpkg-scansources <pool_subdir> > <output> + compress.
-
-    Same Spinner-wrapped approach as _scan_packages_to — see that
-    docstring for the streaming-vs-spinner rationale.
-    """
-    _spin = tui.Spinner(f"dpkg-scansources {pool_subdir}")
-    try:
-        _shell = (
-            f'cd {staging} && '
-            f'dpkg-scansources {pool_subdir} 2>/dev/null > {output_path}'
-        )
-        _r = _sudo(['bash', '-c', _shell], password)
-    finally:
-        _spin.done()
-    if _r.returncode != 0:
-        tui.console.print(
-            f"ERROR: dpkg-scansources failed: {_r.stderr.strip()[:200]}"
-        )
-        logger.error(
-            f"_scan_sources_to: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
-        )
+    """sudo dpkg-scansources <pool_subdir> > <output> + compress.  Thin
+    wrapper around `_run_dpkg_scan` since STA-22 consolidation."""
+    if not _run_dpkg_scan(
+            ['dpkg-scansources', pool_subdir], output_path,
+            cwd=staging, password=password,
+            label=pool_subdir,
+            # sources index is allowed empty (a debs-only minimal pool
+            # legitimately has no .dsc files); caller doesn't gate on it.
+            allow_empty=True):
         return False
     _n = _count_records(output_path) if os.path.exists(output_path) else 0
     tui.console.print(f"  → {_n} sources indexed")
