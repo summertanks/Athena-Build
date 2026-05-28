@@ -40,7 +40,7 @@ if [ -z "$host" ] || [ -z "$suite" ]; then
     exit 0
 fi
 
-echo "deb http://${host}${dir} ${suite} main" \
+echo "deb http://${host}${dir} ${suite} main non-free-firmware" \
     > /target/etc/apt/sources.list.d/athena.list
 logger -t athena-finish-install \
-    "no mirror selected; wrote default athena.list -> http://${host}${dir} ${suite} main"
+    "no mirror selected; wrote default athena.list -> http://${host}${dir} ${suite} main non-free-firmware"

@@ -450,9 +450,13 @@ def merge_remote_index(
 
     `remote_packages_path` is the Packages file fetched from the remote
     (repo_audit.fetch_remote_ledger caches it); '' / missing → local-only
-    (first publish to an empty remote).  Only `main` is merged here — the
-    binary pool clients `apt upgrade` from; the installer udeb pool is scanned
-    local-only (it ships on the ISO, not via client apt)."""
+    (first publish to an empty remote).  Only `main` is append-only MERGED here
+    (it accumulates +asg deltas across snapshots, so old versions must be
+    preserved from the remote).  Non-main components (contrib / non-free /
+    non-free-firmware) are TUNNELED pristine binaries pinned to the snapshot —
+    no multi-version history to preserve — so they're scanned LOCAL-ONLY and
+    published as real components when populated.  The installer udeb pool is
+    scanned local-only (it ships on the ISO, not via client apt)."""
     _comp = 'main'
     _binary_rel = f'dists/{suite}/{_comp}/binary-{arch}'
     _binary_abs = os.path.join(repo_root, _binary_rel)
@@ -496,11 +500,34 @@ def merge_remote_index(
                 _udeb_abs, suite, codename, _comp, arch, password):
             return False
 
+    # 3b. Non-main components — local-only scan (pristine tunneled binaries;
+    # no append-only history).  Populated ones join the top Release Components.
+    _populated = [_comp]
+    for _other in ('contrib', 'non-free', 'non-free-firmware'):
+        _other_rel = f'dists/{suite}/{_other}/binary-{arch}'
+        _other_abs = os.path.join(repo_root, _other_rel)
+        if not os.path.isdir(_other_abs):
+            continue
+        _other_pkgs = os.path.join(_other_abs, 'Packages')
+        if not _scan_packages_to(repo_root, _other_rel, _other_pkgs, password,
+                                 udeb=False, allow_empty=True):
+            return False
+        if _count_records(_other_pkgs) == 0:
+            continue   # empty component — don't publish or list it
+        if not _compress_index(_other_pkgs, password):
+            return False
+        if not _write_subdir_release(
+                _other_abs, suite, codename, _other, arch, password):
+            return False
+        _populated.append(_other)
+        tui.console.print(
+            f"  → {_other}: {_count_records(_other_pkgs)} record(s)")
+
     # 4. top-level Release + sign locally
     _top = os.path.join(repo_root, 'dists', suite, 'Release')
     if not _generate_top_release(
             repo_root, suite, codename, version, _top, password,
-            components=[_comp], description=f'Athena repo — {suite}'):
+            components=_populated, description=f'Athena repo — {suite}'):
         return False
     if signing_homedir is not None:
         if not sign_release_files(repo_root, suite, signing_homedir, password):
