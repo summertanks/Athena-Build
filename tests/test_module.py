@@ -3502,16 +3502,22 @@ def test_choose_mirror_fork_drops_menu_item():
 
 
 def test_finish_install_cdrom_disable_overlay():
-    """The cdrom-disable finish-install hook is overlaid + executable, and
-    only comments cdrom: entries when a network source exists."""
+    """The cdrom-disable finish-install hook is overlaid + executable, only
+    comments cdrom: entries when a network source exists, AND is numbered 11
+    so it runs AFTER 08hw-detect — 08hw-detect's apt-install of microcode /
+    open-vm-tools-desktop / shim-signed needs the cdrom source ACTIVE on
+    offline / no-mirror installs (caught 2026-05-28 when it was at 06 →
+    disabled cdrom before 08, every apt-install "Unable to locate package")."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from installer_chroot import _OVERLAY_MAP
-    assert ('finish-install/06athena-disable-cdrom',
-            'usr/lib/finish-install.d/06athena-disable-cdrom') in _OVERLAY_MAP, \
+    assert ('finish-install/11athena-disable-cdrom',
+            'usr/lib/finish-install.d/11athena-disable-cdrom') in _OVERLAY_MAP, \
         _OVERLAY_MAP
+    # Numeric prefix 11 > 08 → runs AFTER 08hw-detect's apt-install pass.
+    assert '08hw-detect' < '11athena-disable-cdrom'
     _hook = os.path.join(_ROOT, 'installer', 'finish-install',
-                         '06athena-disable-cdrom')
+                         '11athena-disable-cdrom')
     assert os.access(_hook, os.X_OK), "hook must be executable (cp -p preserves mode)"
     with open(_hook) as fh:
         _s = fh.read()
@@ -3519,22 +3525,46 @@ def test_finish_install_cdrom_disable_overlay():
     assert '(https?|ftp)' in _s, "must guard on a real network source existing"
 
 
+def test_iso_pool_staging_includes_non_main_component_dirs():
+    """The ISO pool staging must scan the non-main component dirs (firmware
+    + future contrib/non-free binaries) so they reach the cdrom — caught
+    2026-05-28: _stage_pool only walked main + main-udeb, so tunneled
+    firmware never made it onto the cdrom and finish-install.d/08hw-detect
+    apt-install of intel-microcode failed with 'Unable to locate'.
+    Pinned via source-inspection because _stage_pool needs sudo + a real
+    repo to exercise end-to-end."""
+    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as fh:
+        _body = fh.read()
+    # The build_installer_iso call must forward the non-main component dirs.
+    for _attr in ('dir_repo_non_free_firmware', 'dir_repo_non_free',
+                  'dir_repo_contrib'):
+        assert f'self.config.{_attr}' in _body, _attr
+    assert 'dir_repo_extras=[' in _body, _body[:200]
+    # And iso_installer must extend _pool_sources from that parameter.
+    with open(os.path.join(_ROOT, 'scripts', 'iso_installer.py')) as fh:
+        _iso = fh.read()
+    assert 'dir_repo_extras' in _iso, 'iso_installer must accept extras'
+    assert '_pool_sources.extend' in _iso, \
+        'iso_installer must extend _pool_sources from dir_repo_extras'
+
+
 def test_finish_install_default_source_overlay():
     """When the operator skips the mirror, 05athena-default-source writes a
     default Athena apt source (athena.list) so the installed system isn't
     stranded with only the cdrom source.  It must: be overlaid + executable,
-    run BEFORE 06 (numeric prefix), no-op when a network source already exists
-    (guard), derive coords from the same choose-mirror debconf keys (no
-    separate hardcoded URL), and write to sources.list.d/athena.list."""
+    run BEFORE the cdrom-disable hook (11) so that disable sees the network
+    source, no-op when a network source already exists (guard), derive coords
+    from the same choose-mirror debconf keys (no separate hardcoded URL), and
+    write to sources.list.d/athena.list."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from installer_chroot import _OVERLAY_MAP
     assert ('finish-install/05athena-default-source',
             'usr/lib/finish-install.d/05athena-default-source') in _OVERLAY_MAP, \
         _OVERLAY_MAP
-    # Numeric prefix 05 < 06 → run-parts runs the default-source hook before
+    # Numeric prefix 05 < 11 → run-parts runs the default-source hook before
     # the cdrom-disable hook, so the latter sees the new source.
-    assert '05athena-default-source' < '06athena-disable-cdrom'
+    assert '05athena-default-source' < '11athena-disable-cdrom'
     _hook = os.path.join(_ROOT, 'installer', 'finish-install',
                          '05athena-default-source')
     assert os.access(_hook, os.X_OK), "hook must be executable (cp -p preserves mode)"
@@ -17663,6 +17693,7 @@ def main() -> int:
         test_preseed_enables_non_free_firmware_no_deb_src,
         test_choose_mirror_fork_drops_menu_item,
         test_finish_install_cdrom_disable_overlay,
+        test_iso_pool_staging_includes_non_main_component_dirs,
         test_finish_install_default_source_overlay,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
