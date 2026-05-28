@@ -16193,6 +16193,50 @@ def test_check_build_locates_non_main_component_deb():
             _Src(), ['intel-microcode_3.1_amd64.deb']) is True
 
 
+def test_tunnel_filenames_for_source_uses_upstream_not_stripped():
+    """Tunneled = pristine Debian binary passthrough; the on-disk filename
+    keeps its upstream ~debNuN suffix (matches the .deb's internal Version
+    AND snapshot.debian.org's actual pool path).  Caught 2026-05-28 — the
+    earlier code used _predicted_files_for_source (strip_nmu pristine) and
+    either 404'd at snapshot or silently fetched a same-named unstable binary
+    (wrong version, wrong contents)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Tree:
+        src_pkg_files = {
+            'intel-microcode': ['intel-microcode_3.20251111.1_amd64.deb'],
+        }
+        selected_pkgs = {
+            'intel-microcode': {
+                'Filename': 'pool/non-free-firmware/i/intel-microcode/'
+                            'intel-microcode_3.20251111.1~deb12u1_amd64.deb',
+            },
+        }
+    _sess.dep_tree = _Tree()
+    _sess.udeb_dep_tree = None
+    _actual = _sess._tunnel_filenames_for_source('intel-microcode')
+    assert _actual == [
+        'intel-microcode_3.20251111.1~deb12u1_amd64.deb'], _actual
+
+
+def test_tunnel_filenames_falls_back_when_binary_not_in_cache():
+    """No cache entry for a predicted binary → fall back to the predicted
+    pristine name (best-effort; caller surfaces any 404 on download)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Tree:
+        src_pkg_files = {'ghost-src': ['ghost-bin_1.0_amd64.deb']}
+        selected_pkgs: dict = {}
+    _sess.dep_tree = _Tree()
+    _sess.udeb_dep_tree = None
+    assert _sess._tunnel_filenames_for_source('ghost-src') == \
+        ['ghost-bin_1.0_amd64.deb']
+
+
 def test_normalize_built_artifacts_stamps_delta_when_ledger_present():
     """A delta build (here forced via was_patched) with a remote ledger loaded
     gets +asg<R>u<N> stamped; N derives from the ledger."""
@@ -18023,6 +18067,8 @@ def main() -> int:
         test_asg_next_n_is_per_file_and_cumulative,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,
+        test_tunnel_filenames_for_source_uses_upstream_not_stripped,
+        test_tunnel_filenames_falls_back_when_binary_not_in_cache,
         test_normalize_built_artifacts_stamps_delta_when_ledger_present,
         test_normalize_built_artifacts_no_stamp_without_ledger,
         test_postbuild_convergence_hard_fails_when_check_build_still_false,
