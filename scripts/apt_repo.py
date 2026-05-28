@@ -873,7 +873,7 @@ def _generate_top_release(
     if os.path.lexists(output_path):
         _rm = subprocess.run(
             ['sudo', '-S', 'rm', '-f', output_path],
-            input=(password + '\n').encode('utf-8'),
+            input=password + '\n',         # str — text=True below
             capture_output=True, text=True,
         )
         if _rm.returncode != 0:
@@ -921,7 +921,7 @@ def _generate_top_release(
         # root-owned target parents safely.
         _mv = subprocess.run(
             ['sudo', '-S', 'mv', _tmp_path, output_path],
-            input=(password + '\n').encode('utf-8'),
+            input=password + '\n',         # str — text=True below
             capture_output=True, text=True,
         )
         if _mv.returncode != 0:

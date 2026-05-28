@@ -16566,6 +16566,58 @@ def test_merge_packages_indexes_dedup_local_wins():
     assert _secs[0] == ('foo', '1.0', '999')         # local won
 
 
+def test_generate_top_release_subprocess_text_mode_consistency():
+    """Python's `subprocess.run(..., text=True, input=bytes)` raises
+    AttributeError 'bytes object has no attribute encode' — under text mode
+    subprocess internally calls `input.encode(stdin.encoding)` to convert
+    str input, and bytes-input crashes that path.  Caught 2026-05-28 after
+    a publish failed mid-flight with `Error: 'bytes' object has no
+    attribute 'encode'`.  This test asserts no subprocess.run() inside
+    _generate_top_release mixes those two — either both bytes (no text=)
+    or both str (text=True)."""
+    import re
+    _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
+    with open(_ar) as fh:
+        _body = fh.read()
+    _m = re.search(r'def _generate_top_release\(.*?(?=\ndef )', _body,
+                   re.DOTALL)
+    assert _m, "_generate_top_release not found"
+    _fn = _m.group(0)
+    # Walk every subprocess.run(...) inside the function.  Balanced-paren
+    # match: find 'subprocess.run(' then consume up through the matching ')'.
+    _idx = 0
+    _calls: 'list[str]' = []
+    while True:
+        _start = _fn.find('subprocess.run(', _idx)
+        if _start < 0:
+            break
+        _depth = 0
+        _i = _start + len('subprocess.run')
+        while _i < len(_fn):
+            _ch = _fn[_i]
+            if _ch == '(':
+                _depth += 1
+            elif _ch == ')':
+                _depth -= 1
+                if _depth == 0:
+                    _calls.append(_fn[_start:_i + 1])
+                    _idx = _i + 1
+                    break
+            _i += 1
+        else:
+            break
+    assert _calls, "no subprocess.run() calls parsed from _generate_top_release"
+    for _c in _calls:
+        _has_text_true = 'text=True' in _c
+        _has_bytes_input = (".encode('utf-8')" in _c
+                            or '.encode("utf-8")' in _c)
+        assert not (_has_text_true and _has_bytes_input), (
+            f"subprocess.run() in _generate_top_release combines text=True "
+            f"with .encode('utf-8') input — Python will call .encode() on "
+            f"the bytes result and raise AttributeError at runtime:\n{_c}"
+        )
+
+
 def test_generate_top_release_avoids_self_reference_via_tempfile():
     """apt-ftparchive's `release` mode walks the suite dir and hashes every
     file it sees — including its own output if streamed straight to
@@ -18201,6 +18253,7 @@ def main() -> int:
         # UPD-01 step 5: merge_remote_index
         test_merge_remote_index_preserves_old_versions_multiversion,
         test_merge_packages_indexes_dedup_local_wins,
+        test_generate_top_release_subprocess_text_mode_consistency,
         test_generate_top_release_avoids_self_reference_via_tempfile,
         test_merge_remote_index_signs_locally_and_merges,
         test_publish_suites_spec_includes_nonfree_components,
