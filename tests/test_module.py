@@ -1150,14 +1150,15 @@ def test_build_conf_ingests_nonfree_components_and_tunnels_firmware():
         'debian-security'
     _tun = {_t.strip() for _t in
             _cp.get('Source', 'Tunneled', fallback='').split(',') if _t.strip()}
-    for _src in ('intel-microcode', 'amd64-microcode', 'firmware-nonfree'):
+    for _src in ('intel-microcode', 'amd64-microcode', 'firmware-nonfree',
+                 'shim-signed', 'shim-helpers-amd64-signed'):
         assert _src in _tun, (_src, _tun)
     with open(os.path.join(_ROOT, 'config', 'pool.list')) as fh:
         _pool = {ln.strip() for ln in fh
                  if ln.strip() and not ln.lstrip().startswith('#')}
     for _bin in ('intel-microcode', 'amd64-microcode', 'firmware-iwlwifi',
                  'firmware-realtek', 'firmware-misc-nonfree',
-                 'firmware-amd-graphics'):
+                 'firmware-amd-graphics', 'shim-signed'):
         assert _bin in _pool, _bin
 
 
