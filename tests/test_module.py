@@ -1151,7 +1151,10 @@ def test_build_conf_ingests_nonfree_components_and_tunnels_firmware():
     _tun = {_t.strip() for _t in
             _cp.get('Source', 'Tunneled', fallback='').split(',') if _t.strip()}
     for _src in ('intel-microcode', 'amd64-microcode', 'firmware-nonfree',
-                 'shim-signed', 'shim-helpers-amd64-signed'):
+                 'shim-signed', 'shim-helpers-amd64-signed',
+                 # grub2 tunneled so grub2-common / grub-efi-amd64-bin keep
+                 # the +deb12u1 version that shim-signed's hard Depends pin.
+                 'grub2'):
         assert _src in _tun, (_src, _tun)
     with open(os.path.join(_ROOT, 'config', 'pool.list')) as fh:
         _pool = {ln.strip() for ln in fh
