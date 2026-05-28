@@ -56,6 +56,16 @@
 # side here.
 grub-pc
 grub-efi-amd64
+# Secure-Boot chain-loader.  grub-installer apt-installs shim-signed
+# alongside grub-efi-amd64 on EFI; without it the install completes but
+# Secure-Boot-enabled machines fail to boot.  Microsoft pre-signed binary
+# — MUST tunnel (rebuilding would invalidate the signature).  Source
+# `shim-signed` produces shim-signed + shim-signed-common; the actual
+# signed EFI binary ships from `shim-helpers-amd64-signed` (separate
+# source, also tunneled — see [Source] Tunneled in build.conf).  The
+# resolver pulls shim-signed-common + shim-helpers-amd64-signed
+# transitively as Depends.
+shim-signed
 
 # ─── VMware guest tooling ──────────────────────────────────────────
 # `finish-install`'s `hw-detect` runs `apt-install open-vm-tools` on
