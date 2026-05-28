@@ -97,9 +97,12 @@ class _DepDriftMixin:
                 continue
             _filename  = self.normalize_repo_filename(_filename)
             # CONF-01 Stage D: _dir_repo_main is now dists/<codename>/
-            # main/binary-<arch>/, set by buildsystem.py composer.
-            _deb_path  = os.path.join(self._dir_repo_main, _filename)
-            if not os.path.exists(_deb_path):
+            # main/binary-<arch>/, set by buildsystem.py composer.  The on-disk
+            # .deb may carry a +asg<R>u<N> stamp; find_matching_artifact accepts
+            # the pristine name OR its stamped variant so drift detection isn't
+            # silently skipped for stamped packages.
+            _deb_path  = utils.find_matching_artifact(self._dir_repo_main, _filename)
+            if not _deb_path:
                 continue
             _proc = subprocess.run(
                 ['dpkg-deb', '-f', _deb_path],

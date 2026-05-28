@@ -2298,6 +2298,59 @@ def test_iso_installer_select_pool_files_includes_udebs_unconditionally():
         assert all(n.endswith('.udeb') for n in _kept)
 
 
+def test_iso_installer_select_pool_files_excludes_superseded():
+    """Fork-superseded upstream binaries (passed via exclude_names) are dropped
+    from the pool — even udebs, which are otherwise kept unconditionally — so an
+    upstream udeb a shipped fork Conflicts (apt-setup-udeb vs athena-setup-udeb)
+    can't ride onto the ISO and run its generators (the security.debian.org bug).
+    """
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from iso_installer import _select_pool_files
+    with tempfile.TemporaryDirectory() as _repo:
+        for _name in (
+            'apt-setup-udeb_0.182_amd64.udeb',              # superseded → drop
+            'athena-setup-udeb_0.182+athena1_amd64.udeb',   # fork → keep
+            'eject-udeb_2.38.1-5_amd64.udeb',               # normal → keep
+        ):
+            with open(os.path.join(_repo, _name), 'w') as fh:
+                fh.write('')
+        _kept, _skipped = _select_pool_files(
+            [_repo], deb_whitelist=set(), exclude_names={'apt-setup-udeb'})
+        _kept = [_fn for _, _fn in _kept]
+        assert 'apt-setup-udeb_0.182_amd64.udeb' not in _kept, _kept
+        assert 'athena-setup-udeb_0.182+athena1_amd64.udeb' in _kept
+        assert 'eject-udeb_2.38.1-5_amd64.udeb' in _kept
+        assert _skipped == 1
+
+
+def test_superseded_binary_names_excludes_selected():
+    """_superseded_binary_names returns names a SELECTED pkg Conflicts/Replaces,
+    minus names that are themselves selected — so a rename fork's upstream
+    binary is flagged, but a genuine pool mutual-exclusion (grub-pc/grub-efi,
+    both selected) is not."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Tree:
+        selected_pkgs = {
+            'athena-setup-udeb': {'Package': 'athena-setup-udeb',
+                                  'Conflicts': 'apt-setup-udeb',
+                                  'Replaces': 'apt-setup-udeb'},
+            'grub-efi-amd64': {'Package': 'grub-efi-amd64',
+                               'Conflicts': 'grub-pc'},
+            'grub-pc': {'Package': 'grub-pc'},          # also a selected pool extra
+        }
+
+    _sess.dep_tree = _Tree()
+    _sess.udeb_dep_tree = None
+    _out = _sess._superseded_binary_names()
+    assert 'apt-setup-udeb' in _out
+    assert 'grub-pc' not in _out
+
+
 def test_iso_installer_select_pool_files_drops_dbgsym_unconditionally():
     """dbgsym packages are debug symbols, ~25% of pool size, never
     needed on an installed system.  Even when their parent is in the
@@ -3337,6 +3390,19 @@ def test_preseed_pins_http_mirror_and_enables_use_mirror():
     assert 'apt-setup/use_mirror boolean false' not in _body, _body
 
 
+def test_preseed_keeps_target_sources_to_main_only():
+    """The target's apt sources must stay `main`-only with no deb-src, to match
+    what our repo actually publishes (avoids `apt update` warnings about a
+    missing non-free-firmware component / Sources index).  Two preseeds:
+      - hw-detect/firmware-lookup=never disables 50install-firmware, which would
+        otherwise db_set apt-setup/non-free-firmware=true (overriding a preseed).
+      - apt-setup/enable-source-repositories=false drops the deb-src line."""
+    with open(os.path.join(_ROOT, 'installer', 'preseed', 'preseed.cfg')) as fh:
+        _body = fh.read()
+    assert 'hw-detect/firmware-lookup string never' in _body, _body
+    assert 'apt-setup/enable-source-repositories boolean false' in _body, _body
+
+
 def test_choose_mirror_fork_drops_menu_item():
     """The forked choose-mirror drops XB-Installer-Menu-Item so it doesn't
     run as an early standalone step — apt-setup's 50mirror invokes it after
@@ -3366,6 +3432,34 @@ def test_finish_install_cdrom_disable_overlay():
         _s = fh.read()
     assert 'cdrom:' in _s and 'sed' in _s, _s
     assert '(https?|ftp)' in _s, "must guard on a real network source existing"
+
+
+def test_finish_install_default_source_overlay():
+    """When the operator skips the mirror, 05athena-default-source writes a
+    default Athena apt source (athena.list) so the installed system isn't
+    stranded with only the cdrom source.  It must: be overlaid + executable,
+    run BEFORE 06 (numeric prefix), no-op when a network source already exists
+    (guard), derive coords from the same choose-mirror debconf keys (no
+    separate hardcoded URL), and write to sources.list.d/athena.list."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _OVERLAY_MAP
+    assert ('finish-install/05athena-default-source',
+            'usr/lib/finish-install.d/05athena-default-source') in _OVERLAY_MAP, \
+        _OVERLAY_MAP
+    # Numeric prefix 05 < 06 → run-parts runs the default-source hook before
+    # the cdrom-disable hook, so the latter sees the new source.
+    assert '05athena-default-source' < '06athena-disable-cdrom'
+    _hook = os.path.join(_ROOT, 'installer', 'finish-install',
+                         '05athena-default-source')
+    assert os.access(_hook, os.X_OK), "hook must be executable (cp -p preserves mode)"
+    with open(_hook) as fh:
+        _s = fh.read()
+    # Guard: only fire when NO network source exists (mirror skipped).
+    assert '(https?|ftp)' in _s, "must guard on an existing network source"
+    # Coords from the choose-mirror debconf keys — not a separate hardcoded URL.
+    assert 'mirror/http/hostname' in _s and 'mirror/codename' in _s, _s
+    assert 'sources.list.d/athena.list' in _s, _s
 
 
 def test_installer_chroot_resolve_udeb_files_skips_virtual_aliases():
@@ -3423,6 +3517,33 @@ def test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix():
             selected_pkgs = {'busybox-udeb': pkg}
         out = _resolve_udeb_files(_UdebTree(), _udeb_dir)
         assert out == [_fake_path], out
+
+
+def test_installer_chroot_resolve_udeb_files_matches_asg_stamp():
+    """REGRESSION (2026-05-27 kernel panic 'no init found'): a udeb stamped with
+    a +asg<R>u<N> update marker (busybox-udeb after a security delta) must still
+    resolve — the index Filename is the PRISTINE name but the on-disk file is
+    stamped.  Without find_matching_artifact, busybox-udeb was dropped from the
+    initrd → no /bin/sh → the kernel couldn't exec /init."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _resolve_udeb_files
+
+    with tempfile.TemporaryDirectory() as _udeb_dir:
+        _stamped = os.path.join(
+            _udeb_dir, 'busybox-udeb_1.35.0-4+asg1u1_amd64.udeb')
+        with open(_stamped, 'wb') as fh:
+            fh.write(b'')
+        # Index Filename is the PRISTINE name (no +asg)
+        pkg = _FakePkg(
+            'busybox-udeb',
+            source='busybox',
+            filename='pool/main/b/busybox/busybox-udeb_1.35.0-4_amd64.udeb',
+        )
+        class _UdebTree:
+            selected_pkgs = {'busybox-udeb': pkg}
+        out = _resolve_udeb_files(_UdebTree(), _udeb_dir)
+        assert out == [_stamped], out
 
 
 def test_installer_chroot_resolve_udeb_files_logs_missing_silently():
@@ -3578,6 +3699,74 @@ def test_installer_chroot_run_depmod_indexes_each_kernel_present():
         assert _kvers == ['6.1.0-39-amd64', '6.1.0-42-amd64'], _kvers
         for _c in _depmod_cmds:
             assert _c[1] == '-a' and _c[2] == '-b' and _c[3] == _chroot, _c
+
+
+def test_installer_chroot_generator_guard_passes_when_both_present():
+    """The build-time invariant passes only when BOTH source generators
+    are present: 40cdrom (athena-cdrom-setup) AND 50mirror
+    (athena-mirror-setup)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _assert_apt_setup_generators
+    with tempfile.TemporaryDirectory() as _chroot:
+        _gendir = os.path.join(_chroot, 'usr/lib/apt-setup/generators')
+        os.makedirs(_gendir)
+        open(os.path.join(_gendir, '40cdrom'), 'w').close()
+        open(os.path.join(_gendir, '50mirror'), 'w').close()
+        assert _assert_apt_setup_generators(_chroot) is True
+
+
+def test_installer_chroot_generator_guard_fails_without_cdrom():
+    """No 40cdrom → no-mirror install path has no apt source → guard fails."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _assert_apt_setup_generators
+    with tempfile.TemporaryDirectory() as _chroot:
+        _gendir = os.path.join(_chroot, 'usr/lib/apt-setup/generators')
+        os.makedirs(_gendir)
+        open(os.path.join(_gendir, '50mirror'), 'w').close()
+        assert _assert_apt_setup_generators(_chroot) is False
+
+
+def test_installer_chroot_generator_guard_fails_without_mirror():
+    """No 50mirror → no network-mirror step and no mirror source in the
+    target's sources.list.  This is the 2026-05-27 regression: seeding
+    athena-cdrom-setup (whose Provides wrongly included apt-mirror-setup)
+    knocked the real athena-mirror-setup out of the closure.  The guard
+    must catch a missing 50mirror, not just 40cdrom."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _assert_apt_setup_generators
+    with tempfile.TemporaryDirectory() as _chroot:
+        _gendir = os.path.join(_chroot, 'usr/lib/apt-setup/generators')
+        os.makedirs(_gendir)
+        open(os.path.join(_gendir, '40cdrom'), 'w').close()
+        assert _assert_apt_setup_generators(_chroot) is False
+
+
+def test_athena_cdrom_setup_does_not_provide_mirror_setup():
+    """athena-cdrom-setup ships ONLY the cdrom generators (40cdrom/41cdset),
+    so it must Provides apt-cdrom-setup and NOTHING mirror-related.  If it
+    Provides apt-mirror-setup / athena-mirror-setup, seeding it silently
+    satisfies athena-setup-udeb's `Depends: athena-mirror-setup` and the real
+    50mirror is dropped from the installer (2026-05-27 regression)."""
+    _control = os.path.join(
+        _ROOT, 'fork/source/athena-apt-setup/debian/control')
+    with open(_control) as _f:
+        _text = _f.read()
+    # Isolate the athena-cdrom-setup stanza (blank-line separated).
+    _stanza = next(
+        s for s in _text.split('\n\n')
+        if 'Package: athena-cdrom-setup' in s
+    )
+    _provides = next(
+        (ln for ln in _stanza.splitlines() if ln.startswith('Provides:')),
+        '',
+    )
+    assert 'mirror-setup' not in _provides, (
+        f"athena-cdrom-setup must not Provide any *-mirror-setup: {_provides!r}"
+    )
+    assert 'apt-cdrom-setup' in _provides, _provides
 
 
 def test_athena_installer_data_ships_release_files_with_tokens():
@@ -11958,8 +12147,12 @@ def test_v2_cmdline_edit_and_history():
     assert c.text == 'draft', 'past-newest Down restores draft'
 
 
-def test_v2_dispatcher_key_events_edit_cmdline():
-    """KeyEvents in the no-prompt path edit the cmdline."""
+def test_v2_dispatcher_key_events_gated_without_prompt():
+    """Command-line editing is GATED on a pending prompt: while a command runs
+    (no prompt accepting input) keystrokes are IGNORED, so the busy state is
+    unambiguous and stray typing isn't captured.  (With a prompt active, keys
+    edit the line + Enter submits — see test_v2_dispatcher_prompt_future_round_trip.)
+    """
     import sys, threading, time
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from tui.dispatcher import Dispatcher
@@ -11969,12 +12162,13 @@ def test_v2_dispatcher_key_events_edit_cmdline():
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     time.sleep(0.02)
+    # No pending prompt (command-running state) → keystrokes dropped.
     for ch in 'abc':
         d.post(KeyEvent(ch))
     d.post(KeyEvent('KEY_LEFT'))
     d.post(KeyEvent('X'))
     time.sleep(0.05)
-    assert d.state.cmd.text == 'abXc', d.state.cmd.text
+    assert d.state.cmd.text == '', d.state.cmd.text
     d.post(Shutdown(0))
     t.join(timeout=1)
 
@@ -17243,6 +17437,8 @@ def main() -> int:
         test_iso_installer_stage_base_include_noop_on_empty_or_none,
         test_iso_installer_parse_deb_filename_handles_normal_filenames,
         test_iso_installer_select_pool_files_includes_udebs_unconditionally,
+        test_iso_installer_select_pool_files_excludes_superseded,
+        test_superseded_binary_names_excludes_selected,
         test_iso_installer_select_pool_files_drops_dbgsym_unconditionally,
         test_iso_installer_select_pool_files_filters_by_whitelist,
         test_iso_installer_select_pool_files_keeps_highest_version_per_name,
@@ -17269,10 +17465,13 @@ def main() -> int:
         test_installer_ships_forked_choose_mirror,
         test_athena_installer_data_drops_mirror_protocol_stub,
         test_preseed_pins_http_mirror_and_enables_use_mirror,
+        test_preseed_keeps_target_sources_to_main_only,
         test_choose_mirror_fork_drops_menu_item,
         test_finish_install_cdrom_disable_overlay,
+        test_finish_install_default_source_overlay,
         test_installer_chroot_resolve_udeb_files_skips_virtual_aliases,
         test_installer_chroot_resolve_udeb_files_strips_binnmu_suffix,
+        test_installer_chroot_resolve_udeb_files_matches_asg_stamp,
         test_installer_chroot_resolve_udeb_files_logs_missing_silently,
         test_installer_chroot_resolve_udeb_files_skips_record_without_filename,
         # FORK-01 Step 4: helpers replaced by athena-installer-data udeb
@@ -17283,6 +17482,10 @@ def main() -> int:
         test_installer_chroot_sudo_write_does_not_leak_password_to_tee,
         test_installer_chroot_run_depmod_skips_when_no_modules_dir,
         test_installer_chroot_run_depmod_indexes_each_kernel_present,
+        test_installer_chroot_generator_guard_passes_when_both_present,
+        test_installer_chroot_generator_guard_fails_without_cdrom,
+        test_installer_chroot_generator_guard_fails_without_mirror,
+        test_athena_cdrom_setup_does_not_provide_mirror_setup,
         test_strip_debian_residue_hooks_removes_known_files,
         test_strip_debian_residue_hooks_idempotent_on_missing_targets,
         test_strip_debian_residue_hooks_called_in_build_flow,
@@ -17535,7 +17738,7 @@ def main() -> int:
         test_v2_wrap_helpers_round_trip,
         test_v2_state_append_and_scroll,
         test_v2_cmdline_edit_and_history,
-        test_v2_dispatcher_key_events_edit_cmdline,
+        test_v2_dispatcher_key_events_gated_without_prompt,
         test_v2_dispatcher_prompt_future_round_trip,
         test_v2_dispatcher_tab_switch_by_index,
         test_v2_dispatcher_progressbar_widget_lifecycle,

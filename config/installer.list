@@ -49,6 +49,13 @@ partman-basicfilesystems
 # install time; user-setup-udeb creates the first user account;
 # grub-installer runs grub-install on the target.
 athena-setup-udeb
+# athena-cdrom-setup ships apt-setup's 40cdrom/41cdset generators (the
+# `deb cdrom:` apt-source via `apt-cdrom add`).  40cdrom runs before 50mirror,
+# so the cdrom source is written FIRST — apt-setup then succeeds even when the
+# operator declines the network mirror, making the install self-contained
+# (tasksel sees the pool index; grub-efi installs).  Without it, skipping the
+# mirror leaves no apt source and "Configure apt" fails.
+athena-cdrom-setup
 user-setup-udeb
 grub-installer
 # choose-mirror drives the network-mirror step.  apt-setup's 50mirror
