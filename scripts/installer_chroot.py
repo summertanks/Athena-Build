@@ -39,15 +39,23 @@ _OVERLAY_MAP = [
      'lib/debian-installer-startup.d/S99-syslog-to-serial'),
     # When the operator skips the network mirror, write a default Athena apt
     # source so the installed system isn't left with only the (about-to-be-
-    # disabled) cdrom source.  Numbered 05 to precede 06 below.  No-ops when a
-    # mirror was selected.  cp -p preserves its +x bit.
+    # disabled) cdrom source.  Numbered 05 — runs before 08hw-detect so the
+    # network fallback is in sources.list before any post-pkgsel apt-install
+    # tries to find packages by name.  No-ops when a mirror was selected.
+    # cp -p preserves its +x bit.
     ('finish-install/05athena-default-source',
      'usr/lib/finish-install.d/05athena-default-source'),
     # COMP-01: disable the install-disc apt source on the target post-install
     # (so apt doesn't block on "insert the disc").  Conditional on a network
-    # source existing — see the script.  cp -p preserves its +x bit.
-    ('finish-install/06athena-disable-cdrom',
-     'usr/lib/finish-install.d/06athena-disable-cdrom'),
+    # source existing — see the script.  Numbered 11 (NOT 06) so it runs AFTER
+    # 08hw-detect — that hook apt-installs queued microcode + vmware tools at
+    # finish-install time, and on offline / no-mirror installs the cdrom is
+    # the only source carrying those packages.  Caught 2026-05-28: at 06 it
+    # disabled cdrom BEFORE 08hw-detect, so apt-install couldn't find
+    # intel-microcode / open-vm-tools-desktop / shim-signed.  cp -p preserves
+    # its +x bit.
+    ('finish-install/11athena-disable-cdrom',
+     'usr/lib/finish-install.d/11athena-disable-cdrom'),
 ]
 
 

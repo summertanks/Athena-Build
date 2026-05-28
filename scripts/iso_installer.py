@@ -75,6 +75,7 @@ def build_installer_iso(
     expected_kernel_pkg: Optional[str] = None,
     dir_repo_main_udeb: Optional[str] = None,   # CONF-01 Stage D
     exclude_names: Optional[set] = None,        # fork-superseded upstream bins
+    dir_repo_extras: Optional['list[str]'] = None,  # non-main component dirs
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -148,6 +149,15 @@ def build_installer_iso(
     _pool_sources = [dir_repo]
     if dir_repo_main_udeb is not None:
         _pool_sources.append(dir_repo_main_udeb)
+    # Non-main component dirs (contrib/non-free/non-free-firmware) hold
+    # tunneled binaries that must ship on the cdrom too — without them
+    # finish-install.d/08hw-detect's apt-install of microcode/firmware
+    # fails with "Unable to locate package" (the cdrom pool is the only
+    # source available on an offline / no-mirror install).  _select_pool_
+    # _files uses non-recursive listdir so these MUST be passed in.
+    # Missing/empty dirs are tolerated (listdir errors are swallowed).
+    if dir_repo_extras:
+        _pool_sources.extend(d for d in dir_repo_extras if d)
     if not _stage_pool(_pool_sources, _staging, password, deb_whitelist,
                        exclude_names):
         return False

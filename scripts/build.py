@@ -5354,6 +5354,15 @@ class BuildSession:
                 # apt-setup-udeb vs athena-setup-udeb) from the pool — anna
                 # ignores Conflicts, so leaving them ships + runs both.
                 exclude_names=self._superseded_binary_names(),
+                # Non-main component dirs (tunneled firmware/microcode and
+                # any future contrib/non-free binaries) so they reach the
+                # cdrom pool — finish-install.d/08hw-detect apt-installs
+                # microcode from cdrom on offline/no-mirror installs.
+                dir_repo_extras=[
+                    self.config.dir_repo_non_free_firmware,
+                    self.config.dir_repo_non_free,
+                    self.config.dir_repo_contrib,
+                ],
             )
             if not _ok:
                 console.print(
