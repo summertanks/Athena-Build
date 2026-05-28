@@ -56,16 +56,15 @@
 # side here.
 grub-pc
 grub-efi-amd64
-# Secure-Boot chain-loader.  grub-installer apt-installs shim-signed
-# alongside grub-efi-amd64 on EFI; without it the install completes but
-# Secure-Boot-enabled machines fail to boot.  Microsoft pre-signed binary
-# — MUST tunnel (rebuilding would invalidate the signature).  Source
-# `shim-signed` produces shim-signed + shim-signed-common; the actual
-# signed EFI binary ships from `shim-helpers-amd64-signed` (separate
-# source, also tunneled — see [Source] Tunneled in build.conf).  The
-# resolver pulls shim-signed-common + shim-helpers-amd64-signed
-# transitively as Depends.
-shim-signed
+# NOTE: shim-signed is intentionally OMITTED — Athena has no Secure Boot
+# story shipped today.  grub-installer's "Additionally installing
+# shim-signed" step soft-fails (non-fatal); install completes on
+# Secure-Boot-disabled machines.  On machines with Secure Boot mandatorily
+# enabled, the user must disable it in firmware setup until SECBOOT-01
+# (self-signed + MOK enrollment, see docs/plans/secboot-01-mok-self-sign.md)
+# lands.  We deliberately do NOT tunnel Debian's shim-signed chain because
+# it pins a +debNuN-versioned grub2 (cascade) and ties Athena to Debian's
+# signing trust — that's a downstream-of-Debian posture we want to avoid.
 
 # ─── VMware guest tooling ──────────────────────────────────────────
 # `finish-install`'s `hw-detect` runs `apt-install open-vm-tools` on
