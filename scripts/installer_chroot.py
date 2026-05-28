@@ -27,8 +27,9 @@ logger = logging.getLogger('athena')
 # Engine mapping: (source path under installer_dir, target path under chroot)
 # This is the ONLY place the engine knows about installer/ contents — adding
 # a new mapping is a one-line append here + a row in installer/README.md.
-# `installer/branding/debconf-overrides.dat` is intentionally absent: it's
-# applied via a first-boot hook (Phase 6), not by chroot-build cp.
+# Note: Phase-6 branding overrides are no longer an engine-time overlay; they
+# ship inside fork/source/athena-installer-data/data/ and apply via a first-
+# boot hook (S40-athena-branding).  See docs/branding-methodology.md.
 _OVERLAY_MAP = [
     ('preseed/preseed.cfg',          'preseed.cfg'),
     ('cdebconf/cdebconf.conf',       'etc/cdebconf.conf'),
@@ -65,7 +66,7 @@ def build_installer_chroot(
     dir_chroot_installer: str,
     installer_dir: str,
     password: str,
-    codename: str = 'sid',
+    codename: str = 'thor',
 ) -> bool:
     """Build the installer chroot end to end.
 

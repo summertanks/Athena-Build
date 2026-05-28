@@ -23,7 +23,7 @@ from . import wrap
 from .events import (
     ClearTab, ConsoleMark, ConsoleTrim, KeyEvent, LogEvent, PrintEvent,
     PromptRequest, SetTabBuffer, Shutdown, StatusEvent, TabActivate, TabAdd,
-    TabRemove, WidgetAdd, WidgetRemove, WidgetTick,
+    TabRemove, WidgetAdd, WidgetRemove,
 )
 from .state import State
 
@@ -182,7 +182,6 @@ class Dispatcher:
         elif isinstance(e, StatusEvent):      self._on_status(e)
         elif isinstance(e, WidgetAdd):        self.state.add_widget(e.widget)
         elif isinstance(e, WidgetRemove):     self.state.remove_widget(e.widget_id)
-        elif isinstance(e, WidgetTick):       self.state.dirty = True
         elif isinstance(e, PromptRequest):    self._on_prompt(e)
         elif isinstance(e, TabActivate):      self.state.activate(e.name)
         elif isinstance(e, TabAdd):           self.state.add_tab(e.name)

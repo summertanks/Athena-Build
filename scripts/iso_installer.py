@@ -62,8 +62,8 @@ def build_installer_iso(
     password: str,
     iso_basename: str,
     container,
-    suite: str = 'athena',
-    codename: str = 'athena',
+    suite: str = 'thor',
+    codename: str = 'thor',
     version: str = '0.1',
     snapshot: str = '',
     base_include_pkgs: Optional[list] = None,
@@ -689,12 +689,6 @@ def _parse_deb_filename(filename: str) -> tuple:
     return _parts[0], _ver
 
 
-# Backwards-compat shim — older tests/callers may still reach for the
-# name-only parser.  Wraps the new tuple-returning helper.
-def _parse_deb_package_name(filename: str) -> str:
-    return _parse_deb_filename(filename)[0]
-
-
 def _debian_version_cmp(a: str, b: str) -> int:
     """Compare two Debian version strings.  Returns -1/0/1.
 
@@ -908,19 +902,6 @@ def _stage_pool(
             )
             return False
     return True
-
-
-def _bytes_in_dir(d: str) -> int:
-    """Best-effort recursive size sum — for the operator-facing log line."""
-    try:
-        _r = subprocess.run(
-            ['du', '-sb', d], capture_output=True, text=True, timeout=30,
-        )
-        if _r.returncode == 0:
-            return int(_r.stdout.split()[0])
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        pass
-    return 0
 
 
 def _run_grub_mkrescue(staging: str, iso_path: str,

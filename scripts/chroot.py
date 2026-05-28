@@ -1427,6 +1427,3 @@ class _ChrootMixin:
                 logger.error(f"_write_chroot_file {rel_path}: {_proc.stderr}")
         finally:
             os.unlink(_tmp_path)
-
-    # ── ISO build ─────────────────────────────────────────────────────────────
-

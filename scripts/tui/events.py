@@ -77,14 +77,6 @@ class WidgetRemove:
 
 
 @dataclass(frozen=True)
-class WidgetTick:
-    """Wake the dispatcher because a widget's visible state changed
-    (e.g. ProgressBar.step()) OR because a widget's animation deadline
-    expired.  Just marks the next render as dirty; no payload."""
-    pass
-
-
-@dataclass(frozen=True)
 class PromptRequest:
     """A blocking input request from a non-dispatcher thread.
 
@@ -170,7 +162,7 @@ class Shutdown:
 # ── List of all event types (handy for tests / discovery) ────────────────
 ALL_EVENT_TYPES: List[type] = [
     KeyEvent, PrintEvent, LogEvent, StatusEvent,
-    WidgetAdd, WidgetRemove, WidgetTick,
+    WidgetAdd, WidgetRemove,
     PromptRequest, TabActivate, TabAdd, ClearTab,
     ConsoleMark, ConsoleTrim, TabRemove, SetTabBuffer, Shutdown,
 ]

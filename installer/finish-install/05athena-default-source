@@ -1,6 +1,6 @@
 #!/bin/sh
 # Athena: when the operator SKIPS the network-mirror step, the target is left
-# with only the cdrom apt source (which 06athena-disable-cdrom would then NOT
+# with only the cdrom apt source (which 11athena-disable-cdrom would then NOT
 # disable, since it guards on a network source existing).  Write a default
 # network source so the installed system always has a reachable, network apt
 # source.
