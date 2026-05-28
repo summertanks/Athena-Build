@@ -63,13 +63,26 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
                 )
             _wipe_chroot = True
 
-        # dpkg and the install scripts run under sudo; collect the password once
-        # here and reuse it for all subprocess calls via sudo -S (stdin).
-        # Using tui.Prompt keeps input masked and routed through the TUI layer
-        # rather than writing directly to the terminal, which would corrupt the
-        # TUI rendering.
-        tui.console.print("Build system needs sudo — current user must be in the sudoers group")
-        self._password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        # UX-05b: sudo password.  Source order:
+        #   1. $ATHENA_SUDO_PASSWORD env var (scripted / CI runs).  Pop'd
+        #      from os.environ after read so it doesn't leak into child
+        #      subprocesses or appear in /proc/<pid>/environ for the
+        #      remainder of the run.
+        #   2. tui.Prompt (PROMPT_PASSWORD, masked) — interactive.
+        # dpkg and the install scripts run under sudo via sudo -S (stdin),
+        # cached for all subprocess calls.
+        import os as _os
+        _env_pw = _os.environ.pop('ATHENA_SUDO_PASSWORD', None)
+        if _env_pw is not None:
+            tui.console.print(
+                "Build system: using sudo password from ATHENA_SUDO_PASSWORD")
+            self._password = _env_pw
+        else:
+            tui.console.print(
+                "Build system needs sudo — current user must be in the "
+                "sudoers group")
+            self._password = Prompt(
+                PROMPT_PASSWORD, "Enter sudo password").get_response()
         # Initialised here so the .password property's post-scrub check
         # behaves the same on a fresh instance and a scrubbed one.
         self._password_scrubbed = False
@@ -128,8 +141,19 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
             if not os.path.exists(_dir):
                 raise RuntimeError(f"Missing essential directory: {_dir}")
 
-        tui.console.print("Build system needs sudo — current user must be in the sudoers group")
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        # UX-05b: same env-var pickup as the main constructor.
+        import os as _os
+        _env_pw = _os.environ.pop('ATHENA_SUDO_PASSWORD', None)
+        if _env_pw is not None:
+            tui.console.print(
+                "Build system: using sudo password from ATHENA_SUDO_PASSWORD")
+            _password = _env_pw
+        else:
+            tui.console.print(
+                "Build system needs sudo — current user must be in the "
+                "sudoers group")
+            _password = Prompt(
+                PROMPT_PASSWORD, "Enter sudo password").get_response()
         _proc = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
                                capture_output=True, text=True)
         if _proc.returncode != 0:

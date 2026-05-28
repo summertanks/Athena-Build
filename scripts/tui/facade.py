@@ -110,7 +110,16 @@ class Prompt:
     _YESNO = {'y', 'Y', 'n', 'N', 'yes', 'no', 'Yes', 'No'}
 
     def __init__(self, prompt_type: int, message: str,
-                 options: Optional[List[str]] = None) -> None:
+                 options: Optional[List[str]] = None,
+                 *, informational: bool = False) -> None:
+        """UX-05f: `informational=True` marks a YESNO prompt as
+        skippable under `--yes`.  Use it for "Proceed with X?"
+        confirmations where defaulting to yes is safe under unattended
+        operation.  Do NOT use it for hard-required prompts (sudo
+        password — those are PROMPT_PASSWORD anyway; conflict-resolution
+        OPTIONS; security audit gates per [Security] AuditBuildDeps).
+        Default False — backward-compat with existing call sites.
+        """
         if prompt_type not in self._VALID:
             raise ValueError(f'Invalid prompt type: {prompt_type}')
         if prompt_type == PROMPT_OPTIONS and (not options or len(options) < 2):
@@ -119,6 +128,7 @@ class Prompt:
         self._options = list(options) if options else []
         self._masked  = (prompt_type == PROMPT_PASSWORD)
         self._keymode = (prompt_type == PROMPT_PAUSE)
+        self._informational = informational
         if prompt_type == PROMPT_YESNO:
             self._message = f'{message} [y/n]: '
         elif prompt_type == PROMPT_OPTIONS:
@@ -130,6 +140,17 @@ class Prompt:
         b = _instance()
         if b is None:
             return ''
+        # UX-05a + 05f: auto-answer informational YESNO prompts under --yes.
+        # Hard prompts (sudo password, OPTIONS, INPUT, PAUSE) and
+        # non-informational YESNO (security gates etc.) always wait for
+        # operator input.  Honour the backend's auto_yes flag only when
+        # the prompt is BOTH a YESNO AND marked informational at the
+        # construction site.
+        if (self._type == PROMPT_YESNO
+                and self._informational
+                and getattr(b, 'auto_yes', False)):
+            console.print(f'  {self._message}y  [auto-answered: --yes]')
+            return 'y'
         while True:
             answer = b.prompt(
                 message=self._message,
