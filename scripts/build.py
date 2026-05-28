@@ -1658,7 +1658,16 @@ class BuildSession:
         Returns:
             True if every binary package was downloaded successfully, False otherwise.
         """
-        _files = self._predicted_files_for_source(src_pkg.package)
+        # Tunneled = pristine Debian binary passthrough.  The filename on
+        # disk MUST match the .deb's internal Version (else verify_pkg_artifact
+        # flags a filename↔control mismatch), and the URL must match what
+        # snapshot.debian.org actually serves — both are the upstream Filename
+        # from the cache (carries any ~debNuN / +debNuN suffix), NOT the
+        # strip_nmu pristine prediction.  _predicted_files_for_source returns
+        # the pristine names (right for BUILT packages whose strip rewrites
+        # both control + filename); for tunnel we resolve back to the upstream
+        # filename via dep_tree.selected_pkgs[bin].get('Filename').
+        _files = self._tunnel_filenames_for_source(src_pkg.package)
         if not _files:
             logger.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
             return False
@@ -1681,8 +1690,37 @@ class BuildSession:
         # is non-None by the time we get here.
         assert self.container is not None
         for _filename in _files:
-            _dest = os.path.join(
-                self.config.deb_dest_for_filename(_filename, _comp), _filename)
+            _dst_dir = self.config.deb_dest_for_filename(_filename, _comp)
+            _dest = os.path.join(_dst_dir, _filename)
+
+            # Wipe ANY same-binary .deb in the destination that doesn't match
+            # the current expected upstream filename.  A prior run with the
+            # strip_nmu-pristine bug could have left a wrong-version .deb here
+            # (e.g. amd64-microcode_3.x_amd64.deb when the snapshot's actual
+            # bookworm-security file is amd64-microcode_3.x~deb12u1_amd64.deb).
+            # Without this, both would coexist in repo/ and dpkg-scanpackages
+            # would publish both — apt would prefer the unsuffixed one (~deb
+            # sorts BEFORE the base), installing the wrong (unstable) binary.
+            _bin_name = _filename.split('_', 1)[0]
+            try:
+                for _existing in os.listdir(_dst_dir):
+                    if not (_existing.endswith('.deb') or _existing.endswith('.udeb')):
+                        continue
+                    if _existing.split('_', 1)[0] != _bin_name:
+                        continue
+                    if _existing == _filename:
+                        continue
+                    _stale = os.path.join(_dst_dir, _existing)
+                    logger.info(
+                        f"tunnel {src_pkg.package}: removing stale "
+                        f"non-matching {_existing} (expected {_filename})")
+                    try:
+                        os.remove(_stale)
+                    except OSError as _e:
+                        logger.warning(
+                            f"tunnel {src_pkg.package}: rm {_stale}: {_e}")
+            except OSError:
+                pass
 
             # Skip files already on disk — no integrity check here; the repo
             # directory is trusted to contain only valid packages.
@@ -1901,6 +1939,44 @@ class BuildSession:
                 if _f not in _files:
                     _files.append(_f)
         return _files
+
+    def _tunnel_filenames_for_source(self, src_name: str) -> 'list[str]':
+        """Same shape as _predicted_files_for_source but returns the ACTUAL
+        upstream binary filenames (Filename: from the cached Packages record)
+        instead of strip_nmu pristine names.
+
+        Tunneled packages are pristine Debian passthrough — the on-disk file
+        keeps its upstream NMU/security suffix (e.g. ~deb12u1) and the .deb's
+        internal control Version matches that filename.  Snapshot.debian.org
+        serves the file at that suffixed path; the pristine-stripped URL would
+        404 (or worse, coincidentally hit a same-named unstable binary — wrong
+        version, silent corruption, caught 2026-05-28 when amd64-microcode
+        downloaded the unsuffixed unstable build instead of the bookworm-
+        security ~deb12u1 build).
+
+        For each predicted binary name, look up the binary in the dep tree's
+        selected_pkgs (cache Package record) and return os.path.basename of
+        its Filename.  Falls back to the predicted name if the binary isn't
+        resolvable — caller surfaces the resulting fetch failure.
+        """
+        _predicted = self._predicted_files_for_source(src_name)
+        _actual: 'list[str]' = []
+        for _f in _predicted:
+            _bin_name = _f.split('_', 1)[0]
+            _pkg = None
+            if self.dep_tree is not None:
+                _pkg = self.dep_tree.selected_pkgs.get(_bin_name)
+            if _pkg is None and self.udeb_dep_tree is not None:
+                _pkg = self.udeb_dep_tree.selected_pkgs.get(_bin_name)
+            if _pkg is None:
+                logger.warning(
+                    f"tunnel: no cached binary {_bin_name!r} for source "
+                    f"{src_name!r} — falling back to predicted {_f}")
+                _actual.append(_f)
+                continue
+            _fn = (_pkg.get('Filename') or '').rsplit('/', 1)[-1]
+            _actual.append(_fn or _f)
+        return _actual
 
     def _resolve_deb_cohort(self) -> Optional[frozenset]:
         """Consumers audited as the .deb-cohort by package_audit's
@@ -6835,9 +6911,16 @@ class BuildSession:
 
             # Tunneled packages are always downloaded rather than built locally.
             # check_build() accepts 'TUNNELED' as a valid result so we can skip
-            # packages that were already tunneled in a previous run.
+            # packages that were already tunneled in a previous run.  Pass the
+            # UPSTREAM filenames (Filename: from cache) — tunnel saves the
+            # pristine Debian binary under its upstream name (preserving any
+            # ~debNuN / +debNuN suffix so on-disk name matches the .deb's
+            # internal Version).  Using the strip_nmu-pristine prediction here
+            # would never match and re-tunnel every run.
             if _src_pkg.package in self.config.tunnel_packages:
-                if self.container.check_build(_src_pkg, _expected_files):
+                _tunnel_expected = self._tunnel_filenames_for_source(
+                    _src_pkg.package)
+                if self.container.check_build(_src_pkg, _tunnel_expected):
                     logger.warning(f"Package {_src_pkg.package} already tunneled [SKIPPED]")
                     _skipped += 1
                     progress_bar.step(1)
