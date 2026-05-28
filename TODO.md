@@ -132,7 +132,6 @@ and an 8-check chroot verifier that gates ISO build.
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
-| SEC-05 | P2 | todo | The build container runs `apt-get install -y` on whatever the resolved build-deps are — without dep-graph review. Acceptable today, but add an opt-in “show me what is about to be installed” gate for hostile-mirror scenarios. |
 
 ## 8. Operator UX — P2 / P3
 
