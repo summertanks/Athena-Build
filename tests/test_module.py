@@ -6217,7 +6217,7 @@ def test_strip_nmu_from_deb_idempotent():
 def test_buildcontainer_calls_strip_post_build():
     """BuildContainer.build must normalise artifacts (strip NMU + UPD-01 asg
     stamp) post-dpkg-buildpackage on every successfully-built source, over
-    the just-emitted file list (STA-19).  Pin via code inspection."""
+    the just-emitted file list (STA-21).  Pin via code inspection."""
     _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
     with open(_bc) as fh:
         _body = fh.read()
@@ -6235,15 +6235,15 @@ def test_buildcontainer_calls_strip_post_build():
     assert ('self._normalize_built_artifacts(src_pkg, _emitted, _was_patched)'
             in _build_body), (
         "BuildContainer.build must call _normalize_built_artifacts with the "
-        "emitted-files list AND was_patched — REGRESSION to pre-STA-19 if the "
+        "emitted-files list AND was_patched — REGRESSION to pre-STA-21 if the "
         "file list is dropped (re-introduces the post-build full-repo stall)")
     assert '_emitted = self._segregate_built_artifacts(src_pkg)' in _build_body, (
         "_segregate_built_artifacts must return its moved-files list so "
-        "normalise iterates only those — REGRESSION to pre-STA-19 if dropped")
+        "normalise iterates only those — REGRESSION to pre-STA-21 if dropped")
 
 
 def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
-    """STA-19 anti-regression: _strip_nmu_from_built_artifacts must
+    """STA-21 anti-regression: _strip_nmu_from_built_artifacts must
     NOT walk repo/ subdirs nor open .debs to filter by Source field.
     Both were O(N) over the whole repo and caused a 2-3 minute
     post-build stall on every source build (CPU + I/O saturation
@@ -6275,13 +6275,13 @@ def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
     )
     # The anti-patterns we removed:
     assert 'DebFile(' not in _code_only and 'import DebFile' not in _code_only, (
-        "STA-19 REGRESSION: _strip_nmu_from_built_artifacts opens "
+        "STA-21 REGRESSION: _strip_nmu_from_built_artifacts opens "
         "files with DebFile — the slow code path (4500 fork+exec+tar "
         "cycles per build) we explicitly removed.  The just-emitted "
         "file list from segregate already identifies what to touch."
     )
     assert 'os.listdir' not in _code_only, (
-        "STA-19 REGRESSION: _strip_nmu_from_built_artifacts walks the "
+        "STA-21 REGRESSION: _strip_nmu_from_built_artifacts walks the "
         "repo via os.listdir — the slow code path.  Iterate the "
         "built_files arg directly."
     )
@@ -6290,7 +6290,7 @@ def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
     # tuple-literal form catches it without flagging the prose that
     # mentions the subdirs in passing.
     assert not re.search(r"for\s+\w+\s+in\s+\(\s*'main'", _code_only), (
-        "STA-19 REGRESSION: hard-coded subdir-name iteration suggests "
+        "STA-21 REGRESSION: hard-coded subdir-name iteration suggests "
         "a repo walk has been re-introduced.  Iterate built_files only."
     )
     # And the new signature must accept the file list.
@@ -17460,9 +17460,73 @@ def test_iso_filenames_carry_snapshot_tag():
 # UPD-01 decomposition — local manifest, external on/off, update-mode plumbing
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _stub_signed_manifest_gpg(repo_audit_module, signing_home_dir):
+    """Test helper: monkey-patch repo_audit's subprocess.run so gpg
+    --detach-sign succeeds (writing a stub .sig) and gpg --verify returns 0.
+    Returns the original subprocess.run so the test can restore it."""
+    import subprocess as _real_sp
+    _orig_run = repo_audit_module.subprocess.run
+
+    def _fake_run(argv, **kw):
+        if isinstance(argv, list) and argv and argv[0] == 'gpg':
+            if '--detach-sign' in argv:
+                _out = argv[argv.index('-o') + 1]
+                with open(_out, 'w') as _fh:
+                    _fh.write('-----BEGIN PGP SIGNATURE-----\nstub\n')
+                return _real_sp.CompletedProcess(argv, 0, b'', b'')
+            if '--verify' in argv:
+                return _real_sp.CompletedProcess(argv, 0, b'', b'')
+        return _orig_run(argv, **kw)
+
+    repo_audit_module.subprocess.run = _fake_run
+    os.makedirs(signing_home_dir, exist_ok=True)
+    return _orig_run
+
+
 def test_published_manifest_roundtrip_and_ledger():
-    """write/read the local signed manifest (unsigned when no key); the ledger
-    parses it into {package: [version,...]}."""
+    """STA-21: write/read the local signed manifest succeeds when signing
+    is set up; the ledger parses it into {package: [version,...]}.
+
+    Previously (pre-STA-21) the test pinned 'unsigned when no key' fall-
+    through behaviour; that path silently degraded trust and is now
+    refused (separate fail-closed tests below)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfgdir = os.path.join(_tmp, 'config')
+        _gnupg = os.path.join(_tmp, 'gnupg')
+        os.makedirs(_cfgdir)
+
+        class _Cfg:
+            dir_config = _cfgdir
+            dir_gnupg = _gnupg
+
+        _cfg = _Cfg()
+        _orig_run = _stub_signed_manifest_gpg(
+            repo_audit, os.path.join(_gnupg, 'signing'))
+        try:
+            assert repo_audit.published_ledger(_cfg) == {}    # nothing yet
+            _pk = (
+                'Package: openssl\nVersion: 3.0.15-1+asg1u1\n'
+                'Filename: dists/thor/main/binary-amd64/openssl_3.0.15-1+asg1u1_amd64.deb\n\n'
+                'Package: libc6\nVersion: 2.36-9\n'
+                'Filename: dists/thor/main/binary-amd64/libc6_2.36-9_amd64.deb\n')
+            assert repo_audit.write_published_manifest(_cfg, _pk) is True
+            assert os.path.exists(repo_audit.local_manifest_path(_cfg))
+            assert os.path.exists(repo_audit.local_manifest_path(_cfg) + '.sig')
+            assert 'openssl' in repo_audit.read_published_manifest(_cfg)
+            _led = repo_audit.published_ledger(_cfg)
+            assert _led['openssl'] == ['3.0.15-1+asg1u1']
+            assert _led['libc6'] == ['2.36-9']
+        finally:
+            repo_audit.subprocess.run = _orig_run
+
+
+def test_write_signed_manifest_fails_closed_when_signing_missing():
+    """STA-21: when the signing module / homedir is unavailable, the
+    writer must NOT leave an unsigned manifest behind — the local manifest
+    is the authority for `+asg uN` bump derivation, and a silently-
+    unsigned write corrupts that authority on the next publish."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import repo_audit
     with tempfile.TemporaryDirectory() as _tmp:
@@ -17470,21 +17534,198 @@ def test_published_manifest_roundtrip_and_ledger():
         os.makedirs(_cfgdir)
 
         class _Cfg:
+            # dir_gnupg INTENTIONALLY missing — simulates the
+            # signing-setup-broken scenario the STA-21 fix targets.
             dir_config = _cfgdir
 
         _cfg = _Cfg()
-        assert repo_audit.published_ledger(_cfg) == {}        # nothing yet
-        _pk = (
-            'Package: openssl\nVersion: 3.0.15-1+asg1u1\n'
-            'Filename: dists/thor/main/binary-amd64/openssl_3.0.15-1+asg1u1_amd64.deb\n\n'
-            'Package: libc6\nVersion: 2.36-9\n'
-            'Filename: dists/thor/main/binary-amd64/libc6_2.36-9_amd64.deb\n')
-        repo_audit.write_published_manifest(_cfg, _pk)
-        assert os.path.exists(repo_audit.local_manifest_path(_cfg))
-        assert 'openssl' in repo_audit.read_published_manifest(_cfg)
-        _led = repo_audit.published_ledger(_cfg)
-        assert _led['openssl'] == ['3.0.15-1+asg1u1']
-        assert _led['libc6'] == ['2.36-9']
+        _ok = repo_audit.write_published_manifest(
+            _cfg, 'Package: foo\nVersion: 1.0\n')
+        assert _ok is False, "must return False on signing-setup failure"
+        assert not os.path.exists(repo_audit.local_manifest_path(_cfg)), \
+            "unsigned manifest must NOT remain on disk (false-authority)"
+        assert repo_audit.read_published_manifest(_cfg) == ''
+        assert repo_audit.published_ledger(_cfg) == {}
+
+
+def test_read_signed_manifest_refuses_when_signing_setup_fails():
+    """STA-21: a present .sig sidecar with broken signing setup must NOT
+    fall through to read unverified text.  Returns '' so callers treat
+    the manifest as absent rather than trusted."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfgdir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfgdir)
+        _path = os.path.join(_cfgdir, 'published.manifest')
+        # Manually plant a manifest + sig pair (simulating a prior good
+        # write), then break signing setup (no dir_gnupg attr).
+        with open(_path, 'w') as _fh:
+            _fh.write('Package: openssl\nVersion: 3.0.15-1\n')
+        with open(_path + '.sig', 'w') as _fh:
+            _fh.write('-----BEGIN PGP SIGNATURE-----\n')
+
+        class _Cfg:
+            dir_config = _cfgdir
+            # No dir_gnupg — signing setup fails inside _read_signed_manifest
+
+        _cfg = _Cfg()
+        assert repo_audit.read_published_manifest(_cfg) == '', \
+            "must NOT return unverified text when signing setup is broken"
+
+
+def test_write_signed_manifest_scrubs_unsigned_file_on_sign_failure():
+    """STA-21: when gpg --detach-sign returns non-zero, the writer must
+    remove the unsigned manifest + any stale .sig so the next reader
+    sees the manifest as absent."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import subprocess as _real_sp
+    import repo_audit
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfgdir = os.path.join(_tmp, 'config')
+        _gnupg = os.path.join(_tmp, 'gnupg')
+        os.makedirs(_cfgdir)
+        os.makedirs(os.path.join(_gnupg, 'signing'))
+
+        class _Cfg:
+            dir_config = _cfgdir
+            dir_gnupg = _gnupg
+
+        _cfg = _Cfg()
+        _orig_run = repo_audit.subprocess.run
+
+        def _fake_run(argv, **kw):
+            # Make gpg --detach-sign FAIL (CalledProcessError under check=True)
+            if isinstance(argv, list) and argv and argv[0] == 'gpg':
+                raise _real_sp.CalledProcessError(2, argv, b'', b'gpg: no key')
+            return _orig_run(argv, **kw)
+
+        repo_audit.subprocess.run = _fake_run
+        try:
+            _ok = repo_audit.write_published_manifest(_cfg, 'Package: x\nVersion: 1\n')
+        finally:
+            repo_audit.subprocess.run = _orig_run
+        assert _ok is False
+        assert not os.path.exists(repo_audit.local_manifest_path(_cfg))
+        assert not os.path.exists(repo_audit.local_manifest_path(_cfg) + '.sig')
+
+
+def test_sta22_shared_dpkg_scan_helper_exists_and_is_consumed():
+    """STA-22: apt_repo._run_dpkg_scan is the single shared shell-subprocess
+    helper; both apt_repo's two scanners and repo_audit's
+    _scan_packages_with_progress wrapper delegate to it.  Pinning the
+    consolidation here so a future divergence reintroducing parallel
+    f-string-into-`sudo bash -c` patterns trips this test."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import apt_repo
+    import repo_audit
+    # Helper exists.
+    assert hasattr(apt_repo, '_run_dpkg_scan'), \
+        "STA-22: shared helper apt_repo._run_dpkg_scan must exist"
+    # Both apt_repo scanners delegate.
+    for _fn_name in ('_scan_packages_to', '_scan_sources_to'):
+        _src = inspect.getsource(getattr(apt_repo, _fn_name))
+        assert '_run_dpkg_scan(' in _src, (
+            f"STA-22: apt_repo.{_fn_name} must delegate to "
+            f"_run_dpkg_scan (no duplicate shell-string subprocess)")
+        # And must NOT carry the f-string-into-shell pattern anymore —
+        # that's the duplication STA-22 retired.  Look for the literal
+        # bash-c argv shape (allowing docstring prose to mention "sudo").
+        for _smell in ("'bash', '-c'", '["bash", "-c"]', "f'cd {"):
+            assert _smell not in _src, (
+                f"STA-22: apt_repo.{_fn_name} still contains shell-string "
+                f"pattern {_smell!r}; helper should own this")
+    # repo_audit wrapper delegates.
+    _src = inspect.getsource(repo_audit._scan_packages_with_progress)
+    assert 'apt_repo._run_dpkg_scan' in _src, (
+        "STA-22: repo_audit._scan_packages_with_progress must delegate "
+        "to apt_repo._run_dpkg_scan")
+    # And the wrapper should no longer carry its own subprocess.run +
+    # tempfile choreography.
+    assert 'subprocess.run' not in _src and 'mkstemp' not in _src, (
+        "STA-22: wrapper should be a thin delegation, not a duplicate "
+        "of the helper's internals")
+    # The 5 dead "Reserved" parameters from the pre-consolidation shape
+    # must be gone.
+    _sig = inspect.signature(repo_audit._scan_packages_with_progress)
+    for _dead in ('count_dir', 'include_udeb', 'count_extensions', 'use_shell'):
+        assert _dead not in _sig.parameters, (
+            f"STA-22: pre-consolidation dead parameter {_dead!r} "
+            f"must be removed from the wrapper signature")
+
+
+def test_sta22_run_dpkg_scan_writes_via_tempfile():
+    """STA-22: the consolidated helper writes via a tempfile then
+    `os.replace` (or `sudo install`), NOT via a direct shell-redirect to
+    `output_path`.  The tempfile pattern handles the root-owned-file
+    truncate case that the pre-consolidation `_scan_packages_to` shape
+    couldn't (operator-observed 2026-05-22)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import apt_repo
+    _src = inspect.getsource(apt_repo._run_dpkg_scan)
+    assert 'mkstemp(' in _src, \
+        "STA-22: helper must allocate a tempfile (mkstemp)"
+    assert 'os.replace(' in _src or "'install'" in _src, (
+        "STA-22: helper must atomically move the tempfile into place "
+        "(os.replace for non-sudo, sudo install for sudo paths)")
+
+
+def test_sta22_run_dpkg_scan_honours_allow_empty():
+    """STA-22: when allow_empty=False, a successful scan with zero-byte
+    output is treated as failure (callers indexing the install corpus
+    want this).  When allow_empty=True, zero bytes is fine (sparse
+    optional-component pools)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import subprocess as _real_sp
+    import apt_repo
+    _orig_run = apt_repo.subprocess.run
+
+    def _fake_run_empty(argv, **kw):
+        # Simulate a successful scan that produces an empty output file.
+        # The shell command opens the tempfile via `> path`; mimic by
+        # creating an empty file at the path embedded in the shell.
+        if isinstance(argv, list) and argv and argv[0] == 'bash':
+            _shell = argv[-1]
+            # Extract the `> /path/to/tmp` redirect target
+            _tmp = _shell.rsplit('> ', 1)[-1].strip()
+            with open(_tmp, 'w'):
+                pass
+            return _real_sp.CompletedProcess(argv, 0, '', '')
+        return _orig_run(argv, **kw)
+
+    with tempfile.TemporaryDirectory() as _t:
+        _out = os.path.join(_t, 'Packages')
+        apt_repo.subprocess.run = _fake_run_empty
+        try:
+            _ok_strict = apt_repo._run_dpkg_scan(
+                ['dpkg-scanpackages', '-m', 'pool'], _out,
+                cwd=_t, allow_empty=False)
+            _ok_relaxed = apt_repo._run_dpkg_scan(
+                ['dpkg-scanpackages', '-m', 'pool'], _out,
+                cwd=_t, allow_empty=True)
+        finally:
+            apt_repo.subprocess.run = _orig_run
+        assert _ok_strict is False, "allow_empty=False must fail on empty"
+        assert _ok_relaxed is True, "allow_empty=True must accept empty"
+
+
+def test_cmd_repo_publish_surfaces_sign_failure():
+    """STA-21: build.py's repo-publish handler must surface the
+    write_published_manifest False return as an operator-facing ERROR
+    rather than silently proceeding."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _b = fh.read()
+    # Both publish paths (ssh-driven + repo_refresh) must gate on the bool
+    assert 'if not repo_audit.write_published_manifest(' in _b, (
+        "cmd_repo_publish must check the bool return of "
+        "write_published_manifest and bail on False (STA-21 fail-closed).")
+    assert '+asg uN' in _b, (
+        "operator-facing error must explain the +asg uN impact so the "
+        "fix path (key generate / verify) is obvious.")
 
 
 def test_manifest_vs_remote_discrepancies():
@@ -18285,6 +18526,15 @@ def main() -> int:
         test_iso_filenames_carry_snapshot_tag,
         # UPD-01 decomposition: manifest, external on/off, update-mode plumbing
         test_published_manifest_roundtrip_and_ledger,
+        # STA-21: fail-closed signing manifest
+        test_write_signed_manifest_fails_closed_when_signing_missing,
+        test_read_signed_manifest_refuses_when_signing_setup_fails,
+        test_write_signed_manifest_scrubs_unsigned_file_on_sign_failure,
+        # STA-22: consolidated _scan_packages_* shell-subprocess helper
+        test_sta22_shared_dpkg_scan_helper_exists_and_is_consumed,
+        test_sta22_run_dpkg_scan_writes_via_tempfile,
+        test_sta22_run_dpkg_scan_honours_allow_empty,
+        test_cmd_repo_publish_surfaces_sign_failure,
         test_manifest_vs_remote_discrepancies,
         test_repo_external_disable_and_enable_empty_rebaselines,
         test_update_build_pending_logic,

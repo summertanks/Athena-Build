@@ -165,131 +165,29 @@ def invalidate_cache(repo_dir: Optional[str] = None) -> None:
 
 
 def _scan_packages_with_progress(
-    argv: 'list[str]', output_path: str, count_dir: str,
-    *, label_subdir: str = '',
-    include_udeb: bool = True,
-    count_extensions: 'Optional[tuple[str, ...]]' = None,
+    argv: 'list[str]', output_path: str,
     cwd: 'Optional[str]' = None,
+    *, label_subdir: str = '',
     sudo_password: 'Optional[str]' = None,
-    use_shell: bool = False,
 ) -> bool:
-    """Run `dpkg-scanpackages` / `dpkg-scansources` and tee stdout to
-    `output_path`, wrapped in a Spinner.
+    """Thin wrapper around `apt_repo._run_dpkg_scan` (STA-22 consolidation).
 
-    Name kept for back-compat with the prior ProgressBar shape — the
-    "progress" is now indeterminate.  Streaming Perl stdout through
-    Python's pipe reader fails to flush mid-run reliably even with
-    `stdbuf -oL` (Python's BufferedReader re-buffers on top of the
-    Perl-side flush, so the bar stayed at 0/N for the whole scan —
-    operator-observed 2026-05-22 across both `repo audit` cold-cache
-    runs and `chroot build installer` pre-flight audit).  Spinner is
-    the honest signal.
-
-    Args:
-      argv:           argv for the scanner (dpkg-scanpackages / -scansources).
-      output_path:    Tee target for stdout.  Overwrites existing.
-      count_dir:      Reserved (was for pre-counting bar maxvalue).
-                      Kept in signature for caller stability.
-      label_subdir:   Optional sub-label for the Spinner.
-      include_udeb:   Reserved (was for pre-count extension select).
-      count_extensions: Reserved (was for pre-count override).
-      cwd:            Optional working dir for the subprocess.
-      sudo_password:  When set, runs argv under `sudo -S` and pipes
-                      the password on stdin; also drives the post-
-                      run `sudo install` of the tempfile into place.
-      use_shell:      Reserved; the new path uses shell redirection
-                      always (it's how we get stdout straight to the
-                      tempfile via `> path` under sudo).
+    Kept under this name because `scan_repo_state` calls it; signature
+    simplified — the five "Reserved (kept for caller stability)" params
+    from the pre-consolidation shape are gone since there's only one
+    caller and it doesn't pass them.
 
     Returns True on success, False on subprocess failure (logs stderr).
     """
-    del count_dir, include_udeb, count_extensions, use_shell
-
-    _spin = None
-    try:
-        from tui import Spinner as _Sp, tui_instance as _ti
-        if _ti is not None:
-            _label_base = ('dpkg-scanpackages' if 'scanpackages' in argv[0]
-                           else 'dpkg-scansources')
-            _label = (f"{_label_base} ({label_subdir})" if label_subdir
-                      else _label_base)
-            _spin = _Sp(_label)
-    except Exception:
-        _spin = None
-
-    # Write to a user-owned tempfile first, then `sudo install`
-    # into place.  Direct open(output_path, 'w') would fail when a
-    # prior sudo-shell-redirect run left a root-owned file at
-    # output_path that the user can't truncate (operator-observed
-    # Permission denied at repo/dists/<suite>/<comp>/binary-<arch>/
-    # Packages, 2026-05-22).
-    import tempfile as _tempfile
-    _parent = os.path.dirname(output_path) or '.'
-    _tmp_fd, _tmp_path = _tempfile.mkstemp(
-        prefix='scan-pkg-', suffix='.tmp',
-        dir=_parent if os.access(_parent, os.W_OK) else None,
+    import apt_repo
+    return apt_repo._run_dpkg_scan(
+        argv, output_path,
+        cwd=cwd, password=sudo_password,
+        label=label_subdir,
+        # repo-audit scan is allowed empty; caller checks the parsed
+        # state and treats no-pkgs as a legitimate "fresh repo".
+        allow_empty=True,
     )
-    os.close(_tmp_fd)   # we'll let the subprocess shell open it via >
-
-    if sudo_password is not None:
-        _real_cmd = (
-            f'cd {cwd or "."} && '
-            f'{" ".join(argv)} 2>/dev/null > {_tmp_path}'
-        )
-        _r = subprocess.run(
-            ['sudo', '-S', 'bash', '-c', _real_cmd],
-            input=sudo_password + '\n',
-            capture_output=True, text=True,
-        )
-    else:
-        _real_cmd = (
-            f'cd {cwd or "."} && '
-            f'{" ".join(argv)} 2>/dev/null > {_tmp_path}'
-        )
-        _r = subprocess.run(
-            ['bash', '-c', _real_cmd],
-            capture_output=True, text=True,
-        )
-
-    if _spin is not None:
-        _spin.done()
-
-    if _r.returncode != 0:
-        _err = (_r.stderr or '').strip()
-        logger.error(f"{argv[0]} failed (rc={_r.returncode}): {_err[:400]}")
-        try:
-            os.unlink(_tmp_path)
-        except OSError:
-            pass
-        return False
-
-    # Move tempfile into place.  With sudo, `install` clobbers any
-    # pre-existing root-owned file at output_path and preserves the
-    # root-owned-644 semantics callers had under the original shell-
-    # redirect pattern.  Without sudo, plain os.replace.
-    if sudo_password is not None:
-        _mv = subprocess.run(
-            ['sudo', '-S', 'install', '-m', '644', _tmp_path, output_path],
-            input=sudo_password + '\n',
-            capture_output=True, text=True,
-        )
-        try:
-            os.unlink(_tmp_path)
-        except OSError:
-            pass
-        if _mv.returncode != 0:
-            logger.error(
-                f"sudo install {_tmp_path} → {output_path} failed: "
-                f"{_mv.stderr.strip()[:400]}"
-            )
-            return False
-    else:
-        try:
-            os.replace(_tmp_path, output_path)
-        except OSError as e:
-            logger.error(f"rename {_tmp_path} → {output_path} failed: {e}")
-            return False
-    return True
 
 
 def scan_repo_state(config, subdir: str = 'main',
@@ -401,8 +299,8 @@ def scan_repo_state(config, subdir: str = 'main',
             _scan_argv += ['-t', 'udeb']
         _scan_argv += [_repo_dir, '/dev/null']
         if not _scan_packages_with_progress(
-                _scan_argv,
-                _pkg_file, _repo_dir, label_subdir=subdir):
+                _scan_argv, _pkg_file,
+                cwd=_repo_dir, label_subdir=subdir):
             return None
 
     apt_pkg.init_system()
@@ -541,35 +439,76 @@ def local_manifest_path(config) -> str:
     return os.path.join(config.dir_config, 'published.manifest')
 
 
-def _write_signed_manifest(path: str, packages_text: str, config) -> None:
-    """Write a Packages-format manifest + a detached GPG signature (best-effort
-    with the project signing key; unsigned + warned if no key).  Shared by the
-    published-manifest and the local build ledger."""
+def _write_signed_manifest(path: str, packages_text: str, config) -> bool:
+    """Write a Packages-format manifest + detached GPG signature.
+
+    Returns True iff BOTH the manifest text AND a valid detached signature
+    landed on disk.  Returns False on ANY failure — disk write, signing-
+    setup (missing signing module / homedir), or gpg sign command failure
+    — AND removes any partially-written manifest so a future
+    `_read_signed_manifest` returns '' (no false authority).
+
+    STA-21 (2026-05-28): previously logged WARNING + fell through on
+    broad exception during signing setup, leaving an UNSIGNED manifest on
+    disk.  `_read_signed_manifest` only verifies when `.sig` is present,
+    so a silently-unsigned write became a silently-trusted read on the
+    next publish — and the local manifest is the authority for `+asg uN`
+    bump derivation.  Quiet trust degradation could mint colliding bump
+    numbers.  Now we fail loud: caller (`write_published_manifest` →
+    `cmd_repo_publish`) checks the bool and surfaces to the operator.
+    """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as _fh:
             _fh.write(packages_text)
     except OSError as e:
         logger.error(f"_write_signed_manifest: {path}: {e}")
-        return
+        return False
+
+    def _scrub_manifest():
+        # Remove the unsigned manifest + any stale .sig so the next read
+        # treats it as absent rather than authoritative.
+        for _f in (path, path + '.sig'):
+            try:
+                os.remove(_f)
+            except OSError:
+                pass
+
     try:
         import signing
         _home = signing.signing_home(config)
-        if _home and os.path.isdir(_home):
-            _sig = path + '.sig'
-            if os.path.exists(_sig):
-                os.remove(_sig)
-            subprocess.run(
-                ['gpg', '--homedir', _home, '--batch', '--yes',
-                 '--detach-sign', '--armor', '-o', _sig, path],
-                check=True, capture_output=True)
+        if not _home or not os.path.isdir(_home):
+            raise RuntimeError(
+                f"signing homedir missing or unreadable: {_home!r} — "
+                f"generate a signing key first (`key generate`)")
+        _sig = path + '.sig'
+        if os.path.exists(_sig):
+            os.remove(_sig)
+        subprocess.run(
+            ['gpg', '--homedir', _home, '--batch', '--yes',
+             '--detach-sign', '--armor', '-o', _sig, path],
+            check=True, capture_output=True)
+        return True
     except Exception as e:
-        logger.warning(f"_write_signed_manifest: signing skipped ({e})")
+        logger.error(
+            f"_write_signed_manifest: signing FAILED for {path} ({e}) — "
+            f"removing unsigned manifest to prevent false authority")
+        _scrub_manifest()
+        return False
 
 
 def _read_signed_manifest(path: str, config) -> str:
-    """Return the manifest text (verifying its signature when present); '' if
-    absent or if a present signature FAILS to verify (refuse a tampered file)."""
+    """Return the manifest text (signature-verified); '' if absent, if a
+    present signature FAILS to verify, or if signing setup itself fails.
+
+    STA-21 (2026-05-28): previously, a broad exception during
+    `import signing` / homedir lookup logged WARNING and fell through to
+    read the file UNVERIFIED.  A configuration error in signing must
+    never cause the caller to trust unverified content — especially
+    since the manifest is the authority for `+asg uN` bump derivation.
+    Now: any signing-setup failure with a `.sig` present returns ''
+    (manifest treated as absent), the same as a verify failure.
+    """
     if not os.path.isfile(path):
         return ''
     _sig = path + '.sig'
@@ -577,6 +516,11 @@ def _read_signed_manifest(path: str, config) -> str:
         try:
             import signing
             _home = signing.signing_home(config)
+            if not _home or not os.path.isdir(_home):
+                logger.error(
+                    f"_read_signed_manifest: signing homedir missing — "
+                    f"refusing to read {path} unverified")
+                return ''
             _r = subprocess.run(
                 ['gpg', '--homedir', _home, '--batch', '--verify', _sig, path],
                 capture_output=True)
@@ -586,7 +530,10 @@ def _read_signed_manifest(path: str, config) -> str:
                     f"{path} — refusing to use it")
                 return ''
         except Exception as e:
-            logger.warning(f"_read_signed_manifest: verify skipped ({e})")
+            logger.error(
+                f"_read_signed_manifest: signing setup failed ({e}) — "
+                f"refusing to read {path} unverified")
+            return ''
     try:
         with open(path) as _fh:
             return _fh.read()
@@ -595,9 +542,12 @@ def _read_signed_manifest(path: str, config) -> str:
         return ''
 
 
-def write_published_manifest(config, packages_text: str) -> None:
-    """Write the published-manifest + detached signature."""
-    _write_signed_manifest(local_manifest_path(config), packages_text, config)
+def write_published_manifest(config, packages_text: str) -> bool:
+    """Write the published-manifest + detached signature.  Returns True iff
+    BOTH text and signature landed on disk; False on any failure (manifest
+    is removed in that case — see _write_signed_manifest)."""
+    return _write_signed_manifest(
+        local_manifest_path(config), packages_text, config)
 
 
 def read_published_manifest(config) -> str:
