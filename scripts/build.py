@@ -2610,13 +2610,31 @@ class BuildSession:
     def _report_nmu_residue(self, state, *, verbose: bool) -> None:
         """NMU-suffix residue check — absorbed from the former
         `cmd_audit_nmu` (deleted in P3 2026-05-23).  Catches any .deb
-        in repo/ that bypassed BuildContainer's post-build stripper."""
-        _findings = repo_audit.audit_nmu_residue(state)
+        in repo/ that bypassed BuildContainer's post-build stripper.
+
+        Tunneled packages are EXCLUDED — they're pristine Debian binary
+        passthrough and MUST keep their upstream ~debNuN / +debNuN suffix
+        (shim-signed et al. carry Microsoft Secure Boot signatures that
+        any rewrite would invalidate)."""
+        _tun = set(self.config.tunnel_packages)
+        _findings = repo_audit.audit_nmu_residue(state, tunnel_sources=_tun)
+        # Count how many binaries we skipped because their source is tunneled
+        # — surface it so the operator knows what audit chose not to scan.
+        _skipped = 0
+        if _tun:
+            for _pkg, _entry in state.packages.items():
+                _src_field = (_entry.get('Source') or _pkg).strip()
+                _src_name = _src_field.split(' ', 1)[0]
+                if _src_name in _tun:
+                    _skipped += 1
+        _scanned = len(state.packages) - _skipped
+        _tail = (f" ({_skipped} tunneled binary/binaries skipped — "
+                 f"pristine passthrough)" if _skipped else "")
         console.print("\n=== NMU RESIDUE ===")
         if not _findings:
             console.print(
-                f"  clean ({len(state.packages)} pkgs scanned, "
-                f"no +bN / +debNuN / ~bpoN+N residue)"
+                f"  clean ({_scanned} pkgs scanned, "
+                f"no +bN / +debNuN / ~bpoN+N residue){_tail}"
             )
             return
         from collections import Counter
@@ -2624,7 +2642,7 @@ class BuildSession:
         _pkgs_with_residue = sorted({f[0] for f in _findings})
         console.print(
             f"  {len(_findings):5d} finding(s) across "
-            f"{len(_pkgs_with_residue)} pkg(s):"
+            f"{len(_pkgs_with_residue)} pkg(s){_tail}:"
         )
         for _field, _count in _by_field.most_common():
             console.print(f"    {_count:5d}  {_field}")
@@ -2644,7 +2662,8 @@ class BuildSession:
                 )
         console.print(
             "  Fix: `repo repair strip` re-applies the strip to every "
-            ".deb in repo/.",
+            ".deb in repo/ (tunneled packages auto-skipped — pristine "
+            "passthrough must keep its upstream suffix).",
             tui.COLOR_INFO,
         )
 
@@ -4232,6 +4251,28 @@ class BuildSession:
         # dists/<codename>-debug/main/binary-<arch>/.  Walk all of
         # them so strip catches every tier.
         _repo = self.config.dir_repo
+        # Tunneled packages must NOT be stripped — they're pristine Debian
+        # binary passthrough and rewriting their control/filename would
+        # invalidate any embedded signature (shim-signed et al. carry
+        # Microsoft Secure Boot signatures).  Compute the set of binary
+        # NAMES whose source is tunneled, then skip them in the loop below.
+        _tunnel_bins: 'set[str]' = set()
+        _tun = set(self.config.tunnel_packages)
+        if _tun and self.flags.cache_ready and self.cache is not None:
+            for _bin_name, _pkg in self.cache.package_hashtable.items():
+                _src_field = (_pkg.get('Source') or _bin_name).strip()
+                _src_name = _src_field.split(' ', 1)[0]
+                if _src_name in _tun:
+                    _tunnel_bins.add(_bin_name)
+        elif _tun:
+            # Cache not loaded: fall back to source-name match (only catches
+            # binaries whose name equals their source, e.g. intel-microcode).
+            # Log so the operator knows broader-set skips weren't possible.
+            logger.warning(
+                "strip_repo: cache not ready — tunnel-skip falls back to "
+                "source-name match only (run `cache parse` for full coverage)"
+            )
+            _tunnel_bins = set(_tun)
         _files: 'list[str]' = []
         for _deb_dir in self.config.all_deb_dirs():
             try:
@@ -4261,7 +4302,7 @@ class BuildSession:
                 console.print("Aborted")
                 return
 
-        _rewritten = _unchanged = _failed = 0
+        _rewritten = _unchanged = _failed = _tunneled_skipped = 0
         _total_strips = 0
         _bar = ProgressBar(
             label='Strip NMU', maxvalue=len(_files), show_rate=False,
@@ -4269,6 +4310,13 @@ class BuildSession:
         for _path in _files:
             _bar.step(1)
             _f = os.path.basename(_path)
+            # Skip pristine tunneled passthrough — rewriting would corrupt
+            # any embedded signature (Microsoft Secure Boot on shim-signed,
+            # for one).  The suffix is intentional, not residue.
+            _bin_name = _f.split('_', 1)[0]
+            if _bin_name in _tunnel_bins:
+                _tunneled_skipped += 1
+                continue
             try:
                 _r = utils.strip_nmu_from_deb(_path)
                 if _r['status'] == 'rewritten':
@@ -4301,9 +4349,11 @@ class BuildSession:
         # snapshot in dir_temp is now stale.
         repo_audit.invalidate_cache(self.config.dir_repo)
 
+        _tun_tail = (f", {_tunneled_skipped} tunneled (preserved)"
+                     if _tunneled_skipped else "")
         console.print(
             f"Strip complete: {_rewritten} rewritten, "
-            f"{_unchanged} unchanged, {_failed} failed.  "
+            f"{_unchanged} unchanged, {_failed} failed{_tun_tail}.  "
             f"{_total_strips} suffix(es) stripped in total.  "
             f"Run `repo audit_nmu` to confirm zero residue."
         )
