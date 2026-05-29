@@ -17328,6 +17328,197 @@ def test_comp03_reap_all_live_uses_snapshot_not_live_iteration():
         "dict while another thread deregisters would raise")
 
 
+def test_comp03_phase4_parallel_path_uses_thread_pool_executor():
+    """COMP-03 Phase 4: when MaxParallelBuilds > 1, cmd_source_build's
+    build sub-phase uses ThreadPoolExecutor.  Pinned via source-grep
+    so a future refactor that switches to multiprocessing or asyncio
+    (each carry distinct subtle bugs around Docker SDK handle sharing)
+    must update the test deliberately."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    assert _m, "cmd_source_build not found"
+    _body = _m.group(0)
+    assert 'concurrent.futures' in _body, (
+        "Phase 4 parallel path must use concurrent.futures")
+    assert 'ThreadPoolExecutor' in _body
+    assert 'max_workers=_n_parallel' in _body, (
+        "executor must size max_workers from MaxParallelBuilds")
+    assert 'as_completed' in _body, (
+        "Phase 4: results consumed via as_completed for parallel "
+        "accounting in the main thread")
+
+
+def test_comp03_phase4_serial_path_kept_for_max_parallel_builds_one():
+    """COMP-03 Phase 4 backward-compat: MaxParallelBuilds == 1 must
+    take a serial for-loop path (no executor, no scoped signal
+    handler), so the existing serial behaviour is preserved verbatim
+    as the debugging mode + zero-risk fallback."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    # Branch guard on max_parallel_builds <= 1 must exist.
+    assert 'if _n_parallel <= 1:' in _body, (
+        "Phase 4: MaxParallelBuilds <= 1 must short-circuit to the "
+        "serial path (zero executor overhead, easy debugging)")
+
+
+def test_comp03_phase4_installs_scoped_sigint_handler_around_executor():
+    """COMP-03 Phase 4: the SIGINT handler is installed JUST around
+    the executor block (not globally) so REPL Ctrl+C semantics
+    elsewhere are unaffected; restored in a finally."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert _re.search(
+        r'_old_sigint\s*=\s*_signal\.signal\(_signal\.SIGINT', _body), (
+        "Phase 4: must save the previous SIGINT handler before installing "
+        "the scoped one")
+    assert '_signal.signal(_signal.SIGINT, _old_sigint)' in _body, (
+        "Phase 4: must restore the previous SIGINT handler in finally")
+    assert 'self.container.request_shutdown()' in _body, (
+        "Phase 4: SIGINT handler must call request_shutdown() so reap "
+        "unblocks workers (Phase 3 contract)")
+
+
+def test_comp03_phase4_executor_shutdown_uses_wait_true_and_cancel_futures():
+    """COMP-03 Phase 4: executor.shutdown(wait=True, cancel_futures=True)
+    on the way out — wait=True so workers drain their finally blocks
+    (container reap, scratch-dir rmtree); cancel_futures=True so queued
+    builds don't run after shutdown."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert _re.search(
+        r'_executor\.shutdown\(\s*wait=True,\s*cancel_futures=True\s*\)',
+        _body), (
+        "Phase 4: executor.shutdown must use wait=True AND "
+        "cancel_futures=True — wait=False races worker cleanup; missing "
+        "cancel_futures lets queued builds run after shutdown")
+
+
+def test_comp03_phase4_pool_breaks_on_shutdown_event():
+    """COMP-03 Phase 4: the as_completed loop checks
+    self.container.shutdown_event between completions, breaking out
+    once SIGINT-driven request_shutdown has fired so we don't tally
+    more results than we'll actually wait for."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert 'self.container.shutdown_event.is_set()' in _body, (
+        "Phase 4: as_completed loop must check shutdown_event for "
+        "early-break on SIGINT")
+
+
+def test_comp03_phase4_tunnel_sub_phase_runs_serial_before_parallel():
+    """COMP-03 Phase 4: tunneled sources (network-bound, dest-dir
+    locked) run as a SERIAL pre-phase, before the parallel build
+    pool.  Avoids parallel tunneling racing on rsync into the same
+    component dir + simplifies progress reporting."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    # _tunnel_pkgs partition exists BEFORE the parallel branch.
+    _tunnel_idx = _body.find('_tunnel_pkgs')
+    _parallel_idx = _body.find('ThreadPoolExecutor')
+    assert _tunnel_idx > 0, "tunnel partition missing"
+    assert _parallel_idx > _tunnel_idx, (
+        "Phase 4: tunneled sub-phase must run BEFORE the parallel "
+        "ThreadPoolExecutor block")
+
+
+def test_comp03_phase4_build_one_source_skip_src_returns_skipped():
+    """COMP-03 Phase 4 worker contract: _build_one_source returns
+    ('skipped', 0) when the source is on cache.skip_src.  Behaviour
+    test using a thin BuildSession stub."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    _sess = build.BuildSession.__new__(build.BuildSession)
+
+    class _FakeCache:
+        skip_src = {'skipped-pkg'}
+
+    class _FakeConfig:
+        tunnel_packages = []
+    _sess.cache = _FakeCache()
+    _sess.config = _FakeConfig()
+
+    class _Src:
+        package = 'skipped-pkg'
+        version = '1.0'
+
+    _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
+    assert _result == 'skipped', _result
+
+
+def test_comp03_phase4_build_one_source_tunneled_calls_do_tunnel():
+    """COMP-03 Phase 4 worker contract: when src is on tunnel_packages,
+    _build_one_source returns ('tunneled', 0) on successful download
+    and ('failed', 0) on tunnel failure — NOT ('built', 0).  Mocked."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    _sess = build.BuildSession.__new__(build.BuildSession)
+
+    class _FakeCache:
+        skip_src = set()
+
+    class _FakeConfig:
+        tunnel_packages = ['tunnel-me']
+
+    class _FakeContainer:
+        asg_ledger = None
+
+        def check_build(self, _src, _expected):
+            return False  # not previously tunneled
+    _sess.cache = _FakeCache()
+    _sess.config = _FakeConfig()
+    _sess.container = _FakeContainer()
+    # Stub out _predicted_files_for_source and _tunnel_filenames_for_source.
+    _sess._predicted_files_for_source = lambda _n: []
+    _sess._tunnel_filenames_for_source = lambda _n: []
+    _sess._do_tunnel = lambda _src: True  # tunnel succeeds
+
+    class _Src:
+        package = 'tunnel-me'
+        version = '1.0'
+
+    _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
+    assert _result == 'tunneled', _result
+
+    _sess._do_tunnel = lambda _src: False  # tunnel fails
+    _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
+    assert _result == 'failed', _result
+
+
 def test_comp03_buildcontainer_init_sweeps_build_stage_survivors():
     """COMP-03 Phase 1 source contract: BuildContainer.__init__ must
     sweep the contents of config.dir_build_stage on startup.  Belt-
@@ -17556,19 +17747,22 @@ def test_normalize_built_artifacts_no_stamp_without_ledger():
 
 
 def test_postbuild_convergence_hard_fails_when_check_build_still_false():
-    """Guard B: cmd_source_build must re-check check_build after a PASS and
-    hard-fail (not silently rebuild next run) on non-convergence."""
+    """Guard B: the per-source build path must re-check check_build
+    after a PASS and hard-fail (not silently rebuild next run) on
+    non-convergence.  Logic lives in _build_one_source (COMP-03 Phase 4
+    extracted the per-source unit from the cmd_source_build loop body)."""
     import re as _re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
         _body = fh.read()
-    _m = _re.search(r'def cmd_source_build\(self.*?(?=\n    def )',
+    _m = _re.search(r'def _build_one_source\(.*?(?=\n    def )',
                     _body, _re.DOTALL)
-    assert _m, "cmd_source_build not found"
+    assert _m, "_build_one_source not found"
     _b = _m.group(0)
     assert 'if _build_result and self.container.check_build(' in _b, (
         "Guard B: a PASS must be re-validated through check_build")
-    assert 'elif _build_result:' in _b and 'check_build still false' in _b, (
+    assert ('if _build_result:' in _b
+            and 'check_build still false' in _b), (
         "Guard B: a built-but-unconverged source must hard-fail with a diagnostic")
 
 
@@ -18344,8 +18538,9 @@ def test_source_build_autodetects_update_mode():
     """source build self-detects update mode (gotcha G): a subset/bare call
     routes to _do_update_build when a delta is pending; _do_update_build uses
     the published→current diff + the manifest ledger, and rebuilds WITHOUT
-    blanket force — the loaded ledger makes cmd_source_build's loop bump-aware
-    (already-built skipped; same-base re-spins rebuilt as bump-targets)."""
+    blanket force — the loaded ledger makes the per-source build path bump-
+    aware (already-built skipped; same-base re-spins rebuilt as bump-targets).
+    COMP-03 Phase 4 extracted the per-source unit into _build_one_source."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
@@ -18355,8 +18550,11 @@ def test_source_build_autodetects_update_mode():
     assert '_update_build_pending()' in _b and '_do_update_build()' in _b, (
         "source build must auto-detect + route to update mode")
     assert 'not _names' in _b, "explicit package names opt out of update mode"
-    assert '_needs_bump_build(' in _b, (
-        "the build loop must be bump-aware (rebuild same-base re-spins)")
+    # Bump-awareness lives in _build_one_source after the Phase 4 refactor.
+    _w = re.search(r'def _build_one_source\(.*?(?=\n    def )', _body, re.DOTALL)
+    assert _w, "_build_one_source not found"
+    assert '_needs_bump_build(' in _w.group(0), (
+        "the per-source build path must be bump-aware (rebuild same-base re-spins)")
     _u = re.search(r'def _do_update_build\(self.*?(?=\n    def )', _body, re.DOTALL)
     _ub = _u.group(0)
     assert '_workload_since_snapshot(' in _ub, "update build diffs published→current"
@@ -19708,6 +19906,15 @@ def main() -> int:
         test_comp03_request_shutdown_sets_event_and_reaps,
         test_comp03_shutdown_event_initialised_in_init,
         test_comp03_reap_all_live_uses_snapshot_not_live_iteration,
+        # COMP-03 Phase 4: ThreadPoolExecutor parallel path in cmd_source_build
+        test_comp03_phase4_parallel_path_uses_thread_pool_executor,
+        test_comp03_phase4_serial_path_kept_for_max_parallel_builds_one,
+        test_comp03_phase4_installs_scoped_sigint_handler_around_executor,
+        test_comp03_phase4_executor_shutdown_uses_wait_true_and_cancel_futures,
+        test_comp03_phase4_pool_breaks_on_shutdown_event,
+        test_comp03_phase4_tunnel_sub_phase_runs_serial_before_parallel,
+        test_comp03_phase4_build_one_source_skip_src_returns_skipped,
+        test_comp03_phase4_build_one_source_tunneled_calls_do_tunnel,
         # UPD-01 step 3: build-side stamping + check_build matching + Guard B
         test_highest_asg_update_reads_remote_ledger,
         test_asg_next_n_is_per_file_and_cumulative,

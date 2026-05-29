@@ -6750,6 +6750,109 @@ class BuildSession:
                 tui.COLOR_INFO,
             )
 
+    def _build_one_source(
+        self, _src_pkg,
+        _force: bool,
+        _bump_active: bool,
+        _bump_release,
+        _profile_override,
+    ) -> 'tuple[str, int]':
+        """COMP-03 Phase 4: one source's work unit.  Extracted from the
+        old serial loop in cmd_source_build so the parallel
+        ThreadPoolExecutor path can submit the same operation N at a
+        time without duplicating the per-source check_build / skip_src
+        / tunnel / bump-target / build / verify logic.
+
+        Returns ('built'|'tunneled'|'failed'|'skipped', 0).  The int
+        slot is reserved for future extensibility (e.g. wall-clock).
+
+        Thread-safety contract: this method touches only its arguments,
+        self.config (read-only on the build path), self.cache (read-
+        only here), self.container (registry + check_build + build —
+        all thread-safe under Phase 1's per-worker scratch dir + Phase
+        2's _live_lock-guarded registry), and the logger.  Counters
+        and progress_bar.step are NOT touched here — caller tallies on
+        the main thread after the worker returns.
+        """
+        # Packages on the skip_src list are excluded unconditionally —
+        # typically packages that are known to be unbuildable in the
+        # current environment.
+        if _src_pkg.package in self.cache.skip_src:
+            logger.warning(f"Package {_src_pkg.package} in skip_list")
+            return ('skipped', 0)
+
+        # Predicted artefacts (union across both dep_trees) — used by
+        # both check_build (skip-rebuild gate) and _do_tunnel.
+        _expected_files = self._predicted_files_for_source(_src_pkg.package)
+
+        # Tunneled packages: download Debian's pristine binary instead
+        # of building locally.  check_build accepts 'TUNNELED' as a
+        # valid result so we can skip packages already tunneled in a
+        # previous run.  Pass UPSTREAM filenames (Filename: from cache).
+        if _src_pkg.package in self.config.tunnel_packages:
+            _tunnel_expected = self._tunnel_filenames_for_source(
+                _src_pkg.package)
+            if self.container.check_build(_src_pkg, _tunnel_expected):
+                logger.warning(
+                    f"Package {_src_pkg.package} already tunneled [SKIPPED]")
+                return ('skipped', 0)
+            _build_result = self._do_tunnel(_src_pkg)
+            if _build_result:
+                logger.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
+                return ('tunneled', 0)
+            logger.error(f"Tunnel {_src_pkg.package} [FAIL]")
+            return ('failed', 0)
+
+        # Bump-target: same-base re-spin whose current-generation +asg uN
+        # is missing.  Forces rebuild even un-forced so the stamp can
+        # mint the new uN.  Idempotent: once uN exists it's no longer
+        # a target.
+        _bump_target = (
+            _bump_active and self._needs_bump_build(
+                _src_pkg.package, _src_pkg,
+                self.container.asg_ledger, _bump_release))
+
+        # Skip packages with a valid existing build result unless force
+        # is set — but never skip a bump-target.
+        if (not _force and not _bump_target
+                and self.container.check_build(_src_pkg, _expected_files)):
+            logger.info(
+                f"Package {_src_pkg.package} already built [SKIPPED]")
+            return ('skipped', 0)
+
+        _build_result = self.container.build(
+            _src_pkg,
+            profiles_override=_profile_override,
+            options_override=_profile_override,
+        )
+
+        if _build_result and self.container.check_build(
+                _src_pkg, _expected_files):
+            logger.info(f"Building Package {_src_pkg.package} [PASS]")
+            # Loop guard: a bump-target must come out stamped (its uN
+            # now present).  If still missing, the predicate and the
+            # post-build stamper disagreed — warn so it's visible.
+            if _bump_target and self._needs_bump_build(
+                    _src_pkg.package, _src_pkg,
+                    self.container.asg_ledger, _bump_release):
+                logger.warning(
+                    f"asg-bump: {_src_pkg.package} built but its +asg uN "
+                    f"artifact is still absent — bump predicate/stamper "
+                    f"mismatch; shipped unstamped this generation")
+            return ('built', 0)
+        if _build_result:
+            # Guard B (UPD-01): the build reported PASS but check_build
+            # still can't find/match the predicted artifacts — non-
+            # convergence (CONF-13 cross-run rebuild-loop shape).  Fail
+            # loudly NOW.
+            logger.error(
+                f"Building Package {_src_pkg.package} [FAIL] — built but "
+                f"check_build still false (predicted artifact missing or "
+                f"unmatched): expected {_expected_files}")
+            return ('failed', 0)
+        logger.error(f"Building Package {_src_pkg.package} [FAIL]")
+        return ('failed', 0)
+
     def cmd_source_build(self, *args):
         """Build source packages inside the Docker build container.
 
@@ -6997,106 +7100,113 @@ class BuildSession:
             except (TypeError, ValueError):
                 _bump_active = False   # can't derive N → stamper skips too
 
-        for _index, _src_pkg in enumerate(packages, start=1):
+        # COMP-03 Phase 4: split the work into tunneled (serial — network-
+        # bound, dest-dir-locked) and to-build (parallelisable).  The
+        # serial path falls through to MaxParallelBuilds==1 below.
+        _tunnel_pkgs = [
+            _p for _p in packages
+            if _p.package in self.config.tunnel_packages
+        ]
+        _build_pkgs = [
+            _p for _p in packages
+            if _p.package not in self.config.tunnel_packages
+        ]
+
+        # Tunnel sub-phase: always serial (network I/O + apt repo lock).
+        for _src_pkg in _tunnel_pkgs:
             progress_bar.label(_src_pkg.package)
-            _ = _index   # surfaced via {value} on the bar
-
-
-            # Packages on the skip_src list are excluded unconditionally — typically
-            # packages that are known to be unbuildable in the current environment.
-            if _src_pkg.package in self.cache.skip_src:
-                logger.warning(f"Package {_src_pkg.package} in skip_list")
-                _skipped = _skipped + 1
-                progress_bar.step(1)
-                continue
-
-            # Predicted artefacts (union across both dep_trees) — used by
-            # both check_build (skip-rebuild gate) and _do_tunnel.  Source
-            # objects no longer carry .pkgs; the per-tree maps live on
-            # DependencyTree.src_pkg_files.
-            _expected_files = self._predicted_files_for_source(_src_pkg.package)
-
-            # Tunneled packages are always downloaded rather than built locally.
-            # check_build() accepts 'TUNNELED' as a valid result so we can skip
-            # packages that were already tunneled in a previous run.  Pass the
-            # UPSTREAM filenames (Filename: from cache) — tunnel saves the
-            # pristine Debian binary under its upstream name (preserving any
-            # ~debNuN / +debNuN suffix so on-disk name matches the .deb's
-            # internal Version).  Using the strip_nmu-pristine prediction here
-            # would never match and re-tunnel every run.
-            if _src_pkg.package in self.config.tunnel_packages:
-                _tunnel_expected = self._tunnel_filenames_for_source(
-                    _src_pkg.package)
-                if self.container.check_build(_src_pkg, _tunnel_expected):
-                    logger.warning(f"Package {_src_pkg.package} already tunneled [SKIPPED]")
-                    _skipped += 1
-                    progress_bar.step(1)
-                    continue
-                _build_result = self._do_tunnel(_src_pkg)
-                if _build_result:
-                    logger.warning(f"Tunnel {_src_pkg.package} [TUNNELED]")
-                    _tunneled += 1
-                else:
-                    logger.error(f"Tunnel {_src_pkg.package} [FAIL]")
-                    _failed += 1
-                progress_bar.step(1)
-                continue
-
-            # Bump-target: same-base re-spin whose current-generation +asg uN
-            # is missing.  Forces THIS package's rebuild even un-forced, so the
-            # stamp can mint the new uN (the filename-based skip would wrongly
-            # skip it).  Idempotent: once uN exists it's no longer a target.
-            _bump_target = (
-                _bump_active and self._needs_bump_build(
-                    _src_pkg.package, _src_pkg,
-                    self.container.asg_ledger, _bump_release))
-
-            # Skip packages with a valid existing build result unless force is
-            # set — but never skip a bump-target.
-            if (not _force and not _bump_target
-                    and self.container.check_build(_src_pkg, _expected_files)):
-                logger.info(f"Package {_src_pkg.package} already built [SKIPPED]")
-                _skipped = _skipped + 1
-                progress_bar.step(1)
-                continue
-
-            _build_result = self.container.build(
-                _src_pkg,
-                profiles_override=_profile_override,
-                options_override=_profile_override,
-            )
-
-            if _build_result and self.container.check_build(
-                    _src_pkg, _expected_files):
-                logger.info(f"Building Package {_src_pkg.package} [PASS]")
-                _built = _built + 1
-                # Loop guard: a bump-target must come out stamped (its uN now
-                # present).  If it's still missing, the predicate and the
-                # post-build stamper disagreed — warn so it's visible rather
-                # than silently re-targeting every run.
-                if _bump_target and self._needs_bump_build(
-                        _src_pkg.package, _src_pkg,
-                        self.container.asg_ledger, _bump_release):
-                    logger.warning(
-                        f"asg-bump: {_src_pkg.package} built but its +asg uN "
-                        f"artifact is still absent — bump predicate/stamper "
-                        f"mismatch; shipped unstamped this generation")
-            elif _build_result:
-                # Guard B (UPD-01): the build reported PASS but check_build
-                # still can't find/match the predicted artifacts — that's
-                # non-convergence (the CONF-13 cross-run rebuild-loop shape).
-                # Fail loudly NOW with a diagnostic instead of silently
-                # rebuilding the same source every subsequent run.
-                logger.error(
-                    f"Building Package {_src_pkg.package} [FAIL] — built but "
-                    f"check_build still false (predicted artifact missing or "
-                    f"unmatched): expected {_expected_files}")
-                _failed = _failed + 1
+            _result, _ = self._build_one_source(
+                _src_pkg, _force, _bump_active, _bump_release,
+                _profile_override)
+            if _result == 'built':
+                _built += 1
+            elif _result == 'tunneled':
+                _tunneled += 1
+            elif _result == 'failed':
+                _failed += 1
             else:
-                logger.error(f"Building Package {_src_pkg.package} [FAIL]")
-                _failed = _failed + 1
-
+                _skipped += 1
             progress_bar.step(1)
+
+        # Build sub-phase: serial when MaxParallelBuilds == 1 (backward-
+        # compat verbatim with the pre-Phase-4 loop), else
+        # ThreadPoolExecutor with N workers + scoped SIGINT handler that
+        # calls self.container.request_shutdown() (Phase 3) — force-
+        # removing in-flight containers unblocks workers from
+        # container.wait/logs so the executor drains in ~100ms instead
+        # of waiting for 90-minute builds to finish.
+        _n_parallel = self.config.max_parallel_builds
+        if _n_parallel <= 1:
+            for _src_pkg in _build_pkgs:
+                progress_bar.label(_src_pkg.package)
+                _result, _ = self._build_one_source(
+                    _src_pkg, _force, _bump_active, _bump_release,
+                    _profile_override)
+                if _result == 'built':
+                    _built += 1
+                elif _result == 'tunneled':
+                    _tunneled += 1
+                elif _result == 'failed':
+                    _failed += 1
+                else:
+                    _skipped += 1
+                progress_bar.step(1)
+        else:
+            progress_bar.label(f'Source Build ({_n_parallel} workers)')
+            import concurrent.futures as _cf
+            import signal as _signal
+            # Scoped SIGINT handler: re-installed for the executor block
+            # only.  On Ctrl+C, signal request_shutdown() on the build
+            # container (sets shutdown_event + reaps live containers);
+            # the next as_completed yield will then see futures
+            # complete-with-False and the loop breaks via shutdown_event.
+            def _on_sigint(_sig, _frame):
+                logger.warning(
+                    "SIGINT received during parallel source_build — "
+                    "reaping live containers and shutting down workers")
+                self.container.request_shutdown()
+            _old_sigint = _signal.signal(_signal.SIGINT, _on_sigint)
+            try:
+                _executor = _cf.ThreadPoolExecutor(max_workers=_n_parallel)
+                try:
+                    _futs = {
+                        _executor.submit(
+                            self._build_one_source,
+                            _p, _force, _bump_active, _bump_release,
+                            _profile_override): _p
+                        for _p in _build_pkgs
+                    }
+                    for _fut in _cf.as_completed(_futs):
+                        _pkg = _futs[_fut]
+                        try:
+                            _result, _ = _fut.result()
+                        except Exception as _e:    # noqa: BLE001
+                            logger.error(
+                                f"worker for {_pkg.package} raised: {_e}")
+                            _result = 'failed'
+                        if _result == 'built':
+                            _built += 1
+                        elif _result == 'tunneled':
+                            _tunneled += 1
+                        elif _result == 'failed':
+                            _failed += 1
+                        else:
+                            _skipped += 1
+                        progress_bar.step(1)
+                        if self.container.shutdown_event.is_set():
+                            logger.warning(
+                                "shutdown_event set — cancelling "
+                                "remaining queued builds")
+                            break
+                finally:
+                    # wait=True: workers must drain their finally blocks
+                    # (container reap, scratch-dir rmtree); reap already
+                    # unblocked their I/O so drain is ~100ms.
+                    # cancel_futures=True: queued-but-not-started futures
+                    # are dropped so the pool doesn't pull them on shutdown.
+                    _executor.shutdown(wait=True, cancel_futures=True)
+            finally:
+                _signal.signal(_signal.SIGINT, _old_sigint)
 
         progress_bar.close(persist=True)
 
