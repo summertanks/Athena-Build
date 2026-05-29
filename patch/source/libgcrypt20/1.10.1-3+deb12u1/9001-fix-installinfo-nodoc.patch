@@ -1,0 +1,23 @@
+Description: Fix override_dh_installinfo crashing when nodoc skips info installation
+ With nodoc in DEB_BUILD_OPTIONS, dh_installinfo does not install files into
+ debian/libgcrypt20-doc/usr/share/info/. The existing guard only checks for
+ the package staging directory (which dh always creates), not for the info
+ subdirectory, so the subsequent `cd` fails and the build aborts.
+ Tighten the guard to check the info directory directly.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-03
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -63,7 +63,7 @@ override_dh_auto_install-arch:
+
+ override_dh_installinfo:
+ 	dh_installinfo
+-	if test -e debian/libgcrypt20-doc ; then \
++	if test -e debian/libgcrypt20-doc/usr/share/info ; then \
+ 		cd debian/libgcrypt20-doc/usr/share/info && \
+ 		sed -i -e 's:image src="\([^"]*.png"\):image src="/usr/share/doc/libgcrypt20-doc/html/\1:g' *.info* ; \
+ 	fi

@@ -1,0 +1,33 @@
+Description: Guard override_dh_installinfo sed loop against nodoc build option
+ With nodoc in DEB_BUILD_OPTIONS, dh_installinfo skips installing .info
+ files into debian/gnutls-doc/usr/share/info/.  The override_dh_installinfo
+ rule still runs the post-install sed that rewrites image src= attributes
+ inside *.info* files, but the unmatched glob expands to the literal
+ string "*.info*" and sed aborts with
+   sed: can't read *.info*: No such file or directory
+ This kills the whole binary target.
+ .
+ Wrap the sed loop in an ifeq nodoc guard so the override is a clean no-op
+ under nodoc; the post-install rewrite is purely cosmetic for the HTML
+ image references and is irrelevant when the .info files do not exist.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-07
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -102,10 +102,12 @@
+
+ override_dh_installinfo:
+ 	dh_installinfo $(BDIR)
++ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
+ 	if test -e debian/gnutls-doc ; then \
+ 		cd debian/gnutls-doc/usr/share/info && \
+ 		sed -i -e 's:image src="\([^"]*.png"\):image src="/usr/share/doc/gnutls-doc/html/\1:g' *.info* ; \
+ 	fi
++endif
+
+ override_dh_installchangelogs:
+ 	dh_installchangelogs $(BDIR)

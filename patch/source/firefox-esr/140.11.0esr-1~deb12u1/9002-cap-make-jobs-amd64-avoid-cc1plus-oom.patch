@@ -1,0 +1,106 @@
+Description: cap parallel make jobs on amd64 to avoid cc1plus OOM
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-05-15
+Bug-Athena: Surfaced 2026-05-15 after the DEBIAN_RUST_LTO=-Clto=off
+ patch (9001) successfully unblocked the gkrust OOM but exposed a
+ second, distinct OOM during C++ compile.  Failure-mode in the build
+ log:
+ .
+   g++-11: fatal error: Killed signal terminated program cc1plus
+   compilation terminated.
+   make[5]: *** [config/rules.mk:674: UnifiedBindings26.o] Error 1
+ .
+ Same memory-pressure root cause, different process getting OOM-killed.
+ Mozilla's `Unified_cpp_*.cpp` / `UnifiedBindings*.cpp` are auto-
+ generated concatenations of many source files into a single
+ compilation unit (the "unified build" technique — reduces header-parse
+ overhead, but each .cpp becomes a 10-50k LoC monster).  cc1plus's
+ peak resident set on these is ~3 GB; with `dh_auto_build --parallel`
+ falling back to `nproc` (= 8 on this host), 8 concurrent cc1plus
+ reach ~24 GB.  Combined with the parallel gkrust rustc still running
+ (now ~2-3 GB with -Clto=off, was ~6-8 GB with -Clto), total memory
+ demand on a 16 GB host saturates and the kernel OOM-killer fires.
+ .
+ PRIOR ATTEMPT (commit 103557f, this same patch's earlier shape)
+ exported `DEB_BUILD_OPTION_PARALLEL=1` and had NO effect — the build
+ still ran `make -j8` and cc1plus OOM'd identically.  Root cause:
+ wrong env var.  `dh_auto_build`'s parallelism comes from debhelper's
+ `Dh_Lib::get_buildoption('parallel')`, which reads `DEB_BUILD_OPTIONS`
+ (the canonical input string — same one that holds `nodoc nocheck`)
+ and parses `parallel=N` out of it.  Verbatim from
+ debhelper's lib/Debian/Debhelper/Dh_Lib.pm:
+ .
+   sub get_buildoption {
+       my ($wanted, $default) = @_;
+       return $default if not exists($ENV{DEB_BUILD_OPTIONS});
+       foreach my $opt (split(/\s+/, $ENV{DEB_BUILD_OPTIONS})) {
+           if ($opt =~ /^parallel=(-?\d+)$/ && $wanted eq 'parallel') {
+               return $1;
+           }
+           ...
+ .
+ `DEB_BUILD_OPTION_PARALLEL` is a related-but-different env var
+ dpkg-buildpackage sometimes pre-populates as a convenience for raw
+ makefile recipes that want an integer; dh_auto_build does NOT read
+ it.  The two names are confusingly similar; this is the second
+ time the conflation has bitten this session.
+ .
+ Right fix: mutate DEB_BUILD_OPTIONS itself in debian/rules.  Append
+ `parallel=1` so dh_auto_build's get_buildoption returns 1, capping
+ the make invocation to `make -j1`.  Arch-gated on amd64 to mirror
+ the matching DEBIAN_RUST_LTO block just above.
+ .
+ Memory math on a 16 GB host:
+ .
+   At -j1: 1 × ~3 GB cc1plus + ~3 GB gkrust + ~1-2 GB shell/parents
+           = ~7 GB peak.  Comfortable headroom.
+   At -j2: 2 × ~3 GB cc1plus + ~3 GB gkrust = ~10 GB peak.  Likely
+           safe but less margin.
+   At -j8: 8 × ~3 GB cc1plus + ~3 GB gkrust = ~27 GB peak.  OOMs.
+ .
+ Trade-off: -j1 is ~6-8x slower than -j8 for the C++ portion (gkrust
+ is already a single rustc, so the Rust phase is unaffected).  Total
+ firefox-esr wall-clock at -j1 is ~3-5 hours vs ~30-45 min at -j8 —
+ but the -j8 build OOMs and produces nothing.  Slow + working beats
+ fast + broken.
+ .
+ Verification this time: the `parallel=N` knob is the canonical
+ Debian-policy input.  Reference: Debian Policy 4.9.1.  Verbatim
+ in debhelper's get_buildoption — directly cited above.  In
+ production, dh_auto_build's chosen `make -jN` will be visible in
+ the build log; expected pattern is `make -j1` instead of `make -j8`.
+ If a future run shows `make -j2` or higher despite this patch,
+ either dpkg-buildpackage stripped the appended value (it shouldn't —
+ the env var is propagated verbatim) or another mechanism is at
+ work and this patch needs another round.
+ .
+ Pairs with 9001 (DEBIAN_RUST_LTO=-Clto=off).  Both apply on amd64.
+ Mirrors the existing armhf and s390x arch-gated memory-budget
+ patterns in upstream Debian's debian/rules.
+ .
+ Revert this patch only when paired with confirmation that the
+ build host has ≥ ~24 GB RAM headroom, OR when [Source] parallelism
+ in build.conf is dropped to 1 globally (which already serialises
+ rust+c++ across the pipeline so per-package -j8 is fine).
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -251,6 +251,15 @@ endif
+ ifeq (amd64,$(DEB_BUILD_ARCH))
+ export DEBIAN_RUST_LTO=-Clto=off
+ endif
++# Athena amd64: build hosts may have ~16 GB RAM.  Mozilla's
++# UnifiedBindings*.cpp files compile at ~3 GB peak per cc1plus; default
++# -j8 + parallel gkrust together exceed the OOM threshold.  Append
++# parallel=1 to DEB_BUILD_OPTIONS so dh_auto_build's get_buildoption()
++# reads it (DEB_BUILD_OPTION_PARALLEL is NOT what dh_auto_build reads —
++# debhelper parses DEB_BUILD_OPTIONS directly).
++ifeq (amd64,$(DEB_BUILD_ARCH))
++export DEB_BUILD_OPTIONS := $(DEB_BUILD_OPTIONS) parallel=1
++endif
+ 
+ stamps/build-$(PRODUCT):: stamps/configure-check-$(PRODUCT)
+ 	+dh_auto_build --parallel --builddirectory=build-$(PRODUCT)
