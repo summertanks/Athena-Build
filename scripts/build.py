@@ -7158,7 +7158,7 @@ class BuildSession:
             # Scoped SIGINT handler: re-installed for the executor block
             # only.  On Ctrl+C, signal request_shutdown() on the build
             # container (sets shutdown_event + reaps live containers);
-            # the next as_completed yield will then see futures
+            # the next wait() yield will then see futures
             # complete-with-False and the loop breaks via shutdown_event.
             def _on_sigint(_sig, _frame):
                 logger.warning(
@@ -7168,36 +7168,74 @@ class BuildSession:
             _old_sigint = _signal.signal(_signal.SIGINT, _on_sigint)
             try:
                 _executor = _cf.ThreadPoolExecutor(max_workers=_n_parallel)
+                # COMP-03 Phase 6: heavy-package scheduler.  Sources in
+                # config.heavy_packages run alone — they only start once
+                # every in-flight build has drained, and while they
+                # execute no new builds are submitted.  Empty set =
+                # behaviour identical to a vanilla "submit all + drain"
+                # pool (the scheduler degenerates to fill-to-N + wait).
+                _heavy = self.config.heavy_packages
+                _pending = list(_build_pkgs)              # FIFO
+                _in_flight: 'dict' = {}                   # Future -> src_pkg
+
+                def _heavy_active() -> bool:
+                    return any(_p.package in _heavy
+                               for _p in _in_flight.values())
+
+                def _can_submit_next() -> bool:
+                    if not _pending:
+                        return False
+                    # A heavy build in flight blocks every new submission
+                    # (drain-before-resume contract).
+                    if _heavy_active():
+                        return False
+                    _nxt = _pending[0]
+                    # A heavy build must wait until the in-flight pool
+                    # has fully drained before starting.
+                    if _nxt.package in _heavy and _in_flight:
+                        return False
+                    return len(_in_flight) < _n_parallel
                 try:
-                    _futs = {
-                        _executor.submit(
-                            self._build_one_source,
-                            _p, _force, _bump_active, _bump_release,
-                            _profile_override): _p
-                        for _p in _build_pkgs
-                    }
-                    for _fut in _cf.as_completed(_futs):
-                        _pkg = _futs[_fut]
-                        try:
-                            _result, _ = _fut.result()
-                        except Exception as _e:    # noqa: BLE001
-                            logger.error(
-                                f"worker for {_pkg.package} raised: {_e}")
-                            _result = 'failed'
-                        if _result == 'built':
-                            _built += 1
-                        elif _result == 'tunneled':
-                            _tunneled += 1
-                        elif _result == 'failed':
-                            _failed += 1
-                        else:
-                            _skipped += 1
-                        progress_bar.step(1)
-                        if self.container.shutdown_event.is_set():
-                            logger.warning(
-                                "shutdown_event set — cancelling "
-                                "remaining queued builds")
+                    _break = False
+                    while (_pending or _in_flight) and not _break:
+                        while _can_submit_next():
+                            _nxt = _pending.pop(0)
+                            _fut = _executor.submit(
+                                self._build_one_source,
+                                _nxt, _force, _bump_active, _bump_release,
+                                _profile_override)
+                            _in_flight[_fut] = _nxt
+                        if not _in_flight:
+                            # Pending only — but _can_submit_next is False.
+                            # The only way that happens with empty in-flight
+                            # is shutdown_event mid-loop; break out.
                             break
+                        _done, _ = _cf.wait(
+                            list(_in_flight.keys()),
+                            return_when=_cf.FIRST_COMPLETED)
+                        for _fut in _done:
+                            _pkg = _in_flight.pop(_fut)
+                            try:
+                                _result, _ = _fut.result()
+                            except Exception as _e:    # noqa: BLE001
+                                logger.error(
+                                    f"worker for {_pkg.package} raised: {_e}")
+                                _result = 'failed'
+                            if _result == 'built':
+                                _built += 1
+                            elif _result == 'tunneled':
+                                _tunneled += 1
+                            elif _result == 'failed':
+                                _failed += 1
+                            else:
+                                _skipped += 1
+                            progress_bar.step(1)
+                            if self.container.shutdown_event.is_set():
+                                logger.warning(
+                                    "shutdown_event set — cancelling "
+                                    "remaining queued builds")
+                                _break = True
+                                break
                 finally:
                     # wait=True: workers must drain their finally blocks
                     # (container reap, scratch-dir rmtree); reap already

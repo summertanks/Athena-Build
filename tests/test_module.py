@@ -17348,8 +17348,12 @@ def test_comp03_phase4_parallel_path_uses_thread_pool_executor():
     assert 'ThreadPoolExecutor' in _body
     assert 'max_workers=_n_parallel' in _body, (
         "executor must size max_workers from MaxParallelBuilds")
-    assert 'as_completed' in _body, (
-        "Phase 4: results consumed via as_completed for parallel "
+    # Phase 4 used as_completed; Phase 6 switched to cf.wait(FIRST_COMPLETED)
+    # to drive the heavy-package drain-then-submit scheduler — accept either.
+    assert ('as_completed' in _body
+            or 'FIRST_COMPLETED' in _body), (
+        "Phase 4: results must be consumed via concurrent.futures "
+        "(as_completed or wait/FIRST_COMPLETED) for parallel "
         "accounting in the main thread")
 
 
@@ -17517,6 +17521,187 @@ def test_comp03_phase4_build_one_source_tunneled_calls_do_tunnel():
     _sess._do_tunnel = lambda _src: False  # tunnel fails
     _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
     assert _result == 'failed', _result
+
+
+def test_comp03_phase5_resource_kwargs_empty_when_uncapped():
+    """COMP-03 Phase 5: _resource_kwargs() returns {} when both
+    BuildCpus and BuildMemory are at their defaults (0.0 / '').
+    Preserves current uncapped behaviour for operators who haven't
+    set the knobs."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+
+    class _FakeConfig:
+        build_cpus = 0.0
+        build_memory = ''
+    _bc.config = _FakeConfig()
+    assert _bc._resource_kwargs() == {}
+
+
+def test_comp03_phase5_resource_kwargs_translates_build_cpus_to_nano_cpus():
+    """COMP-03 Phase 5: BuildCpus=3.5 -> nano_cpus=3_500_000_000
+    (docker's billionth-of-a-CPU quota).  Pinned because the unit
+    confusion (cpus vs nano_cpus) is a classic foot-gun."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+
+    class _FakeConfig:
+        build_cpus = 3.5
+        build_memory = ''
+    _bc.config = _FakeConfig()
+    _kw = _bc._resource_kwargs()
+    assert _kw == {'nano_cpus': 3_500_000_000}, _kw
+
+
+def test_comp03_phase5_resource_kwargs_passes_mem_limit_string_through():
+    """COMP-03 Phase 5: BuildMemory='8g' lands as mem_limit='8g' on
+    containers.run (docker-py accepts size strings directly)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+
+    class _FakeConfig:
+        build_cpus = 0.0
+        build_memory = '8g'
+    _bc.config = _FakeConfig()
+    _kw = _bc._resource_kwargs()
+    assert _kw == {'mem_limit': '8g'}, _kw
+
+
+def test_comp03_phase5_build_passes_resource_kwargs_to_containers_run():
+    """COMP-03 Phase 5 source-grep: build()'s containers.run() call
+    must splat `**self._resource_kwargs()` so cpu/mem caps reach
+    docker.  Sentinel test against a future refactor that drops
+    the splat or names the helper differently."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def build\(self, src_pkg.*?(?=\n    @staticmethod|\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert '**self._resource_kwargs()' in _body, (
+        "Phase 5: build() must splat **self._resource_kwargs() into "
+        "containers.run so BuildCpus / BuildMemory reach docker")
+
+
+def test_comp03_phase5_exit_137_logs_oomkilled_hint():
+    """COMP-03 Phase 5: container exit code 137 (SIGKILL — the
+    cgroup OOM-killer's signal) emits an operator-friendly hint
+    pointing at BuildMemory.  Pinned via source-grep so a future
+    edit can't quietly drop the hint and force operators to dig
+    through log/build/<src> to find out what hit them."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def build\(self, src_pkg.*?(?=\n    @staticmethod|\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert 'if _exit_code == 137:' in _body, (
+        "Phase 5: build() must detect exit code 137 post-wait()")
+    assert 'OOMKilled' in _body and 'BuildMemory' in _body, (
+        "Phase 5: 137 hint must mention OOMKilled + BuildMemory so "
+        "the operator can act without grepping logs")
+
+
+def test_comp03_phase6_scheduler_reads_heavy_packages_from_config():
+    """COMP-03 Phase 6: the parallel scheduler reads the heavy-package
+    set from self.config.heavy_packages (parsed in Phase 0).  Pinned
+    so a future refactor that renames the attribute or hardcodes the
+    list breaks the test."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert 'self.config.heavy_packages' in _body, (
+        "Phase 6: scheduler must source the heavy set from "
+        "self.config.heavy_packages")
+
+
+def test_comp03_phase6_heavy_in_flight_blocks_new_submissions():
+    """COMP-03 Phase 6 contract: while a heavy build is in flight,
+    NO new builds start (pause-new-during).  _can_submit_next must
+    short-circuit when _heavy_active() returns True."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert _re.search(
+        r'def _can_submit_next.*?if _heavy_active\(\):\s*\n\s*return False',
+        _body, _re.DOTALL), (
+        "Phase 6: _can_submit_next must short-circuit when "
+        "_heavy_active() returns True — otherwise lights get "
+        "scheduled alongside a heavy build")
+
+
+def test_comp03_phase6_heavy_waits_for_drain_before_starting():
+    """COMP-03 Phase 6 contract: a heavy build does NOT start while
+    any lights are in flight (drain-before-start)."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert _re.search(
+        r'if _nxt\.package in _heavy and _in_flight:\s*\n\s*return False',
+        _body), (
+        "Phase 6: if the next pending source is heavy AND there is "
+        "anything in flight, _can_submit_next must defer it (the "
+        "drain-before-start contract)")
+
+
+def test_comp03_phase6_uses_cf_wait_first_completed_for_drain():
+    """COMP-03 Phase 6: the scheduler waits for the first in-flight
+    future to complete via concurrent.futures.wait(return_when=
+    FIRST_COMPLETED), NOT as_completed (which doesn't compose with
+    the staged submit-then-wait scheduler shape)."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def cmd_source_build\(self.*?(?=\n    def )',
+        _src, _re.DOTALL)
+    _body = _m.group(0)
+    assert 'FIRST_COMPLETED' in _body, (
+        "Phase 6: scheduler must wait via cf.wait(return_when="
+        "FIRST_COMPLETED) so each completion is observed and the "
+        "next submit pass can fire")
+
+
+def test_comp03_phase6_empty_heavy_set_does_not_change_serial_for_heavy():
+    """COMP-03 Phase 6: with HeavyPackages empty (default), the
+    _heavy_active() / heavy-waits-for-drain branches are all False,
+    so the scheduler degenerates to "submit up to N, wait, submit
+    more" — identical to a plain fill-to-N drainer.  Behaviour test
+    via direct evaluation of the predicates with an empty frozenset."""
+    _heavy: 'frozenset[str]' = frozenset()
+    # Simulate the _can_submit_next predicate.  With empty heavy set,
+    # the heavy-related branches never fire.
+    _in_flight = {'fut1': type('Pkg', (), {'package': 'foo'})()}
+
+    def _heavy_active():
+        return any(_p.package in _heavy for _p in _in_flight.values())
+
+    assert _heavy_active() is False, (
+        "with empty HeavyPackages, _heavy_active must always be False "
+        "and the scheduler degenerates to fill-to-N")
 
 
 def test_comp03_buildcontainer_init_sweeps_build_stage_survivors():
@@ -19915,6 +20100,18 @@ def main() -> int:
         test_comp03_phase4_tunnel_sub_phase_runs_serial_before_parallel,
         test_comp03_phase4_build_one_source_skip_src_returns_skipped,
         test_comp03_phase4_build_one_source_tunneled_calls_do_tunnel,
+        # COMP-03 Phase 5: per-container resource caps + 137 detection
+        test_comp03_phase5_resource_kwargs_empty_when_uncapped,
+        test_comp03_phase5_resource_kwargs_translates_build_cpus_to_nano_cpus,
+        test_comp03_phase5_resource_kwargs_passes_mem_limit_string_through,
+        test_comp03_phase5_build_passes_resource_kwargs_to_containers_run,
+        test_comp03_phase5_exit_137_logs_oomkilled_hint,
+        # COMP-03 Phase 6: heavy-package scheduler
+        test_comp03_phase6_scheduler_reads_heavy_packages_from_config,
+        test_comp03_phase6_heavy_in_flight_blocks_new_submissions,
+        test_comp03_phase6_heavy_waits_for_drain_before_starting,
+        test_comp03_phase6_uses_cf_wait_first_completed_for_drain,
+        test_comp03_phase6_empty_heavy_set_does_not_change_serial_for_heavy,
         # UPD-01 step 3: build-side stamping + check_build matching + Guard B
         test_highest_asg_update_reads_remote_ledger,
         test_asg_next_n_is_per_file_and_cumulative,

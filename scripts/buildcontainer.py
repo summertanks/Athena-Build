@@ -296,6 +296,29 @@ class BuildContainer:
             f"tcp://127.0.0.1, or set up TLS and add 'tls=true' to the URL."
         )
 
+    def _resource_kwargs(self) -> dict:
+        """COMP-03 Phase 5: per-container CPU + RAM caps for
+        containers.run().  Translates BuildConfig's BuildCpus /
+        BuildMemory into docker-py's nano_cpus / mem_limit kwargs.
+        Returns {} when both knobs are unset (current uncapped
+        behaviour preserved); applied uniformly under serial and
+        parallel paths (harmless under serial; protective under
+        parallel where N concurrent dpkg-buildpackage runs would
+        otherwise oversubscribe the host).
+
+        nano_cpus is docker's billionth-of-a-CPU quota — passing
+        nano_cpus=3_500_000_000 caps the container at 3.5 CPUs.
+        mem_limit accepts docker's size strings ('8g', '512m'); a
+        container exceeding it is OOM-killed (exit 137), detected
+        post-wait() with an operator-friendly hint.
+        """
+        _kwargs: dict = {}
+        if self.config.build_cpus > 0:
+            _kwargs['nano_cpus'] = int(self.config.build_cpus * 1_000_000_000)
+        if self.config.build_memory:
+            _kwargs['mem_limit'] = self.config.build_memory
+        return _kwargs
+
     def _register_live(self, container) -> None:
         """COMP-03 Phase 2: track a freshly-started container in the
         in-process registry.  Phase 3's reap_all_live() iterates this
@@ -705,6 +728,7 @@ class BuildContainer:
                     _scratch_dir:     {'bind': '/repo',   'mode': 'rw'},
                     src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
                 },
+                **self._resource_kwargs(),
             )
             self._register_live(container)
             logger.info(
@@ -716,6 +740,27 @@ class BuildContainer:
                     fh.write(line.decode("utf-8"))
 
             _exit_code = container.wait()['StatusCode']
+
+            # COMP-03 Phase 5: exit code 137 = SIGKILL, which docker
+            # produces both when the container hits its mem_limit (the
+            # cgroup OOM killer fires) and when we force-remove it
+            # externally (Phase 3 reap_all_live).  Surface the OOM
+            # hint loudly so the operator knows to raise BuildMemory
+            # — distinguishing this from a generic build failure or a
+            # shutdown-driven kill is hard without OOMKilled flag from
+            # docker; we log the hint either way and let the operator
+            # check log/build/<src> for context.
+            if _exit_code == 137:
+                logger.error(
+                    f"Build {src_pkg.package} container exited 137 "
+                    f"(SIGKILL — likely OOMKilled).  Raise [Build] "
+                    f"BuildMemory in config/build.conf if memory is "
+                    f"the constraint, or check log/build/{src_pkg.package} "
+                    f"for the build's final output")
+                tui.console.print(
+                    f"  {src_pkg.package}: exit 137 — likely OOMKilled; "
+                    f"raise [Build] BuildMemory",
+                    tui.COLOR_WARNING)
 
             _build_result = (_exit_code == 0)
             with open(os.path.join(self.buildlog_path, _filename_prefix + '.result'), 'w') as fh:
