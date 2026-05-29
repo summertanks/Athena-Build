@@ -1472,6 +1472,9 @@ class BuildConfig:
     build_profiles: frozenset
     build_options: frozenset
     max_parallel_builds: int
+    build_cpus: float
+    build_memory: str
+    heavy_packages: 'frozenset[str]'
 
     security_keyring: str
     security_disabled: bool
@@ -1485,6 +1488,7 @@ class BuildConfig:
     dir_log: str
     dir_cache: str
     dir_temp: str
+    dir_build_stage: str
     dir_source: str
     dir_repo: str
     # The dir_repo_* attrs point at the *.deb / *.udeb dirs in the
@@ -1736,7 +1740,56 @@ class BuildConfig:
                     self.build_profiles_per_pkg[_pkg] = frozenset(
                         p.strip() for p in _pp.split(',') if p.strip())
 
-            self.max_parallel_builds = config_parser.getint('Build', 'MaxParallelBuilds', fallback=4)
+            # COMP-03: parallel source-build pool size, per-container
+            # resource caps, and heavy-package serialization list.
+            # MaxParallelBuilds is capped at 8 to stay under docker-py's
+            # default urllib3 pool size (10) — without the cap, parallel
+            # workers can exhaust the pool and stall on streaming logs.
+            # Set MaxParallelBuilds = 1 (the default) to disable
+            # parallelism entirely and take the existing serial path.
+            self.max_parallel_builds = config_parser.getint(
+                'Build', 'MaxParallelBuilds', fallback=1)
+            if self.max_parallel_builds < 1:
+                self.error_str = (
+                    f"[Build] MaxParallelBuilds must be >= 1, got "
+                    f"{self.max_parallel_builds}"
+                )
+                return
+            if self.max_parallel_builds > 8:
+                self.error_str = (
+                    f"[Build] MaxParallelBuilds must be <= 8 (docker-py's "
+                    f"default urllib3 pool size is 10; higher values "
+                    f"exhaust the pool under streaming logs), got "
+                    f"{self.max_parallel_builds}"
+                )
+                return
+
+            # BuildCpus / BuildMemory: per-container ceilings, passed to
+            # docker-py as nano_cpus + mem_limit on containers.run().
+            # Both optional; 0.0 / '' = no cap.  Operator guidance: on
+            # a host with H cpus a sane starting point is BuildCpus =
+            # (H // MaxParallelBuilds) * 0.8 — but the right value is
+            # workload-dependent so we don't compute a default.
+            self.build_cpus = config_parser.getfloat(
+                'Build', 'BuildCpus', fallback=0.0)
+            if self.build_cpus < 0:
+                self.error_str = (
+                    f"[Build] BuildCpus must be >= 0.0, got "
+                    f"{self.build_cpus}"
+                )
+                return
+            self.build_memory = config_parser.get(
+                'Build', 'BuildMemory', fallback='').strip()
+
+            # HeavyPackages: comma-separated source names treated as
+            # "build alone" by the parallel scheduler — when the next
+            # ready job is in this set, all in-flight builds drain
+            # first; while it runs, no new builds start.  Empty = no
+            # heavy-package serialization.
+            _heavy = config_parser.get(
+                'Build', 'HeavyPackages', fallback='').strip()
+            self.heavy_packages = frozenset(
+                p.strip() for p in _heavy.split(',') if p.strip())
 
             # Mirror InRelease GPG verification.  Default: enabled,
             # using the host-provided debian-archive-keyring.  Disabled
@@ -1759,6 +1812,18 @@ class BuildConfig:
             self.audit_build_deps = config_parser.getboolean(
                 'Security', 'AuditBuildDeps', fallback=False
             )
+            # COMP-03 mutex: AuditBuildDeps is an interactive PROMPT_YESNO
+            # inside BuildContainer.build() (buildcontainer.py:708).  Under
+            # parallel workers, multiple prompts would collide on stdin.
+            # Fail-closed at config load — these two are mutually exclusive.
+            if self.audit_build_deps and self.max_parallel_builds > 1:
+                self.error_str = (
+                    "[Security] AuditBuildDeps and [Build] MaxParallelBuilds "
+                    "> 1 are mutually exclusive — the audit gate is an "
+                    "interactive prompt; parallel workers would collide on "
+                    "stdin.  Set one or the other."
+                )
+                return
             if not self.security_disabled:
                 if not os.path.isfile(self.security_keyring):
                     self.error_str = (
@@ -1778,6 +1843,15 @@ class BuildConfig:
             self.dir_log = os.path.join(self.working_dir, config_parser.get('Directories', 'Log'))
             self.dir_cache = os.path.join(self.working_dir, config_parser.get('Directories', 'Cache'))
             self.dir_temp = os.path.join(self.working_dir, config_parser.get('Directories', 'Temp'))
+            # COMP-03 Phase 1: per-worker scratch repo dir.  Each
+            # BuildContainer.build() invocation creates
+            # <dir_build_stage>/<uuid>/ and bind-mounts it as /repo
+            # inside the build container, isolating one source's
+            # emitted .debs from every other concurrent worker (would
+            # otherwise race on `os.listdir(repo_path)` in segregate).
+            # Survivors from killed runs are swept at BuildContainer
+            # __init__.
+            self.dir_build_stage = os.path.join(self.dir_temp, 'build-stage')
             self.dir_source = os.path.join(self.working_dir, config_parser.get('Directories', 'Source'))
             self.dir_repo = os.path.join(self.working_dir, config_parser.get('Directories', 'Repo'))
             # repo/ uses the apt-conformant unified layout (CONF-01
@@ -1884,6 +1958,7 @@ class BuildConfig:
             
             pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_build_stage).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_source).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_repo).mkdir(parents=True, exist_ok=True)
             for _sub in (
@@ -1957,6 +2032,7 @@ class BuildConfig:
 
             for _dir in (
                 self.dir_download, self.dir_log, self.dir_cache, self.dir_temp,
+                self.dir_build_stage,
                 self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
                 self.dir_fork, self.dir_fork_source, self.dir_fork_source_repo,

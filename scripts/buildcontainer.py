@@ -2,6 +2,9 @@
 import hashlib
 import logging
 import os
+import shutil
+import threading
+import uuid
 from typing import TYPE_CHECKING, Optional, Tuple
 import utils
 from utils import BuildConfig, version_no_epoch
@@ -18,6 +21,13 @@ if TYPE_CHECKING:
     from repo_audit import RepoState
 
 logger = logging.getLogger('athena')
+
+# COMP-03 Phase 1: serialises segregate's per-file moves from
+# every worker's scratch dir into the shared repo subdirs.  Held
+# only for the duration of one source's move loop (microseconds);
+# isolates the os.makedirs / collision-check / os.rename triad so
+# two workers can't race on the same dest filename or component dir.
+_REPO_DEST_LOCK = threading.Lock()
 
 
 class BuildContainer:
@@ -176,6 +186,27 @@ class BuildContainer:
                 raise RuntimeError(f"Docker image build failed: {e}")
 
         self.image = image
+
+        # COMP-03 Phase 1: sweep any per-worker scratch dirs left over
+        # from a prior run (kill -9 / OOM / docker-daemon crash skipped
+        # the finally-block rmtree).  Best-effort — a permission error
+        # here is non-fatal: this run's per-worker dirs use fresh uuid4
+        # names so they won't collide with survivors.
+        _stage_root = config.dir_build_stage
+        try:
+            _survivors = [
+                _d for _d in os.listdir(_stage_root)
+                if os.path.isdir(os.path.join(_stage_root, _d))
+            ]
+            for _d in _survivors:
+                shutil.rmtree(
+                    os.path.join(_stage_root, _d), ignore_errors=True)
+            if _survivors:
+                tui.console.print(
+                    f"BuildContainer: swept {len(_survivors)} leftover "
+                    f"build-stage dir(s) from previous run")
+        except OSError:
+            pass
 
 
     @staticmethod
@@ -529,6 +560,16 @@ class BuildContainer:
         # mid-build — flow through the finally so a leftover container can
         # never accumulate in `docker ps -a` between runs.
         container = None
+        # COMP-03 Phase 1: per-worker scratch repo dir.  The container's
+        # final `cp *.deb /repo/` writes here, NOT into the shared
+        # self.repo_path — so concurrent workers can't race on the
+        # `os.listdir(repo_path)` scan inside _segregate_built_artifacts.
+        # Segregate moves files from this dir into the real repo
+        # subdirs (under _REPO_DEST_LOCK).  Created here, removed in the
+        # finally block regardless of build outcome.
+        _scratch_dir = os.path.join(
+            self.config.dir_build_stage, uuid.uuid4().hex)
+        os.makedirs(_scratch_dir, exist_ok=True)
         try:
             src_patch_path = os.path.join(self.patch_path, src_pkg.package, version_no_epoch(src_pkg.version))
             if not os.path.exists(src_patch_path):
@@ -542,7 +583,7 @@ class BuildContainer:
                 detach=True, auto_remove=False,
                 volumes={
                     self.src_path:    {'bind': '/source', 'mode': 'rw'},
-                    self.repo_path:   {'bind': '/repo',   'mode': 'rw'},
+                    _scratch_dir:     {'bind': '/repo',   'mode': 'rw'},
                     src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
                 },
             )
@@ -604,7 +645,8 @@ class BuildContainer:
                 #    in-place rewrites land at the final location.
                 #    Returns post-move absolute paths — fed to strip so
                 #    we don't rescan the whole repo (STA-19).
-                _emitted = self._segregate_built_artifacts(src_pkg)
+                _emitted = self._segregate_built_artifacts(
+                    src_pkg, _scratch_dir)
                 # 2. Normalise the emitted .debs (now in their subdirs):
                 #    strip NMU → pristine, then stamp +asg<R>u<N> when this
                 #    is a delta build AND a remote ledger is loaded (UPD-01).
@@ -638,6 +680,11 @@ class BuildContainer:
                         f"Failed to remove container {container.short_id} "
                         f"for {src_pkg.package}: {e}"
                     )
+            # COMP-03 Phase 1: rmtree the per-worker scratch dir even on
+            # failure paths (the container may have copied .debs in
+            # before crashing).  ignore_errors so a fs issue here can't
+            # mask the original exception or build result.
+            shutil.rmtree(_scratch_dir, ignore_errors=True)
 
     @staticmethod
     def _render_install_cmd(plain_deps: 'list[str]',
@@ -992,11 +1039,13 @@ class BuildContainer:
                 f"asg-stamp: marked {_n_stamped} artifact(s) from source "
                 f"{src_pkg.package} (+asg{_release}, per-file N)")
 
-    def _segregate_built_artifacts(self, src_pkg) -> 'list[str]':
+    def _segregate_built_artifacts(self, src_pkg,
+                                   source_dir: str) -> 'list[str]':
         """After dpkg-buildpackage's `cp *.deb /repo/`, the binaries
-        land at repo/ ROOT (not in any subdir).  This pass classifies
-        each by name and moves it to the right subdir per
-        utils.classify_repo_subdir:
+        land in the worker's PER-BUILD scratch dir (`source_dir`,
+        mounted as /repo inside the container — see build()).  This
+        pass classifies each by name and moves it to the right
+        repo subdir per utils.classify_repo_subdir:
 
           main    installable binaries + udebs
           dev     -dev side artifacts
@@ -1004,63 +1053,90 @@ class BuildContainer:
           dbgsym  -dbgsym side artifacts
           tests   -test / -tests side artifacts
 
-        Operates ONLY on the just-emitted files (those at repo/ root) —
-        existing subdir contents are left alone.  Returns the list of
-        post-move absolute paths so the caller
+        COMP-03 Phase 1 contract: reads ONLY from `source_dir` —
+        never the shared repo root.  Concurrent workers see disjoint
+        scratch dirs; the destination-side moves are serialised by
+        `_REPO_DEST_LOCK` so two workers can't race on the same
+        component dir's collision check.  All-or-nothing per source:
+        if any move fails, every move already done for THIS source
+        is rolled back into source_dir and the function returns [].
+
+        Returns the list of post-move absolute paths so the caller
         (_normalize_built_artifacts) can iterate only the
         just-emitted files (STA-19 fix — was rescanning the whole
         repo + opening every .deb with DebFile to identify them).
-        Returns empty list on no-files-at-root (tunneled build).
+        Returns empty list on no-files-in-scratch (tunneled build,
+        empty build, or rolled-back partial failure).
         """
         _moved_paths: 'list[str]' = []
         try:
-            _files_at_root = [
-                _f for _f in os.listdir(self.repo_path)
+            _files = [
+                _f for _f in os.listdir(source_dir)
                 if (_f.endswith('.deb') or _f.endswith('.udeb'))
-                and os.path.isfile(os.path.join(self.repo_path, _f))
+                and os.path.isfile(os.path.join(source_dir, _f))
             ]
         except OSError as e:
             logger.warning(
-                f"segregate: cannot list {self.repo_path}: {e}"
+                f"segregate: cannot list {source_dir}: {e}"
             )
             return _moved_paths
-        if not _files_at_root:
+        if not _files:
             return _moved_paths
         # A source's binaries share its apt component (from the origin mirror).
         # Forks / locally-discovered sources have no mirror (or a flat fork
         # mirror) → 'main'.  Tunneled non-main packages don't reach here
         # (_do_tunnel places them directly), but keep this correct/general.
         _comp = getattr(getattr(src_pkg, '_mirror', None), 'component', '') or 'main'
-        for _f in _files_at_root:
-            _src = os.path.join(self.repo_path, _f)
-            # CONF-01 Stage D: config helper routes to the right
-            # nested apt-repo dir (e.g. main → dists/<codename>/main/
-            # binary-<arch>/, main+.udeb → main/debian-installer/...,
-            # dbgsym → dists/<codename>-debug/main/binary-<arch>/).
-            _dst_dir = self.config.deb_dest_for_filename(_f, _comp)
-            os.makedirs(_dst_dir, exist_ok=True)
-            _dst = os.path.join(_dst_dir, _f)
-            try:
-                if os.path.exists(_dst):
-                    # UPD-01 append-only invariant: an automatic build path
-                    # must NEVER os.remove a file already living in a
-                    # published dir (all_deb_dirs()).  With +asg<R>u<N> a
-                    # rebuilt delta emits a NEW filename, so an exact-name
-                    # collision means a byte-identical rebuild — keep the
-                    # existing artifact, drop the freshly-built dup (which
-                    # sits at the repo/ root, a prunable intermediate).
+        with _REPO_DEST_LOCK:
+            for _f in _files:
+                _src = os.path.join(source_dir, _f)
+                # CONF-01 Stage D: config helper routes to the right
+                # nested apt-repo dir (e.g. main → dists/<codename>/main/
+                # binary-<arch>/, main+.udeb → main/debian-installer/...,
+                # dbgsym → dists/<codename>-debug/main/binary-<arch>/).
+                _dst_dir = self.config.deb_dest_for_filename(_f, _comp)
+                _dst = os.path.join(_dst_dir, _f)
+                try:
+                    os.makedirs(_dst_dir, exist_ok=True)
+                    if os.path.exists(_dst):
+                        # UPD-01 append-only invariant: an automatic build
+                        # path must NEVER os.remove a file already living in
+                        # a published dir (all_deb_dirs()).  With +asg<R>u<N>
+                        # a rebuilt delta emits a NEW filename, so an exact-
+                        # name collision means a byte-identical rebuild —
+                        # keep the existing artifact, drop the freshly-built
+                        # dup (which sits in the worker's scratch dir, a
+                        # prunable intermediate that the build()
+                        # finally-block rmtrees anyway).
+                        logger.warning(
+                            f"segregate: {_f} already present in "
+                            f"{_dst_dir} — keeping existing (append-only), "
+                            f"dropping rebuilt dup"
+                        )
+                        os.remove(_src)
+                        continue
+                    os.rename(_src, _dst)
+                    _moved_paths.append(_dst)
+                except OSError as e:
+                    # All-or-nothing per source: roll back every move done
+                    # for THIS call so the caller sees a clean empty list
+                    # (no partial _normalize / asg-stamp on a half-populated
+                    # set, no partial signed-manifest entry for STA-21).
                     logger.warning(
-                        f"segregate: {_f} already present in {_dst_dir} — "
-                        f"keeping existing (append-only), dropping rebuilt dup"
+                        f"segregate: failed to move {_f} → {_dst_dir}: {e} "
+                        f"(rolling back {len(_moved_paths)} prior move(s))"
                     )
-                    os.remove(_src)
-                    continue
-                os.rename(_src, _dst)
-                _moved_paths.append(_dst)
-            except OSError as e:
-                logger.warning(
-                    f"segregate: failed to move {_f} → {_dst_dir}: {e}"
-                )
+                    for _done_dst in _moved_paths:
+                        _back = os.path.join(
+                            source_dir, os.path.basename(_done_dst))
+                        try:
+                            os.rename(_done_dst, _back)
+                        except OSError as _re:
+                            logger.error(
+                                f"segregate: rollback of {_done_dst} → "
+                                f"{_back} also failed: {_re}"
+                            )
+                    return []
         if _moved_paths:
             logger.info(
                 f"segregate: {len(_moved_paths)} artifact(s) from "
