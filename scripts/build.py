@@ -1605,7 +1605,8 @@ class BuildSession:
             console.print(f"source sync {_name}: fetching "
                           f"{len(_src.files)} file(s)…")
             utils.download_source(
-                _SingleSrcTree(_name, _src), self.config.dir_source,
+                _SingleSrcTree(_name, _src),  # type: ignore[arg-type]
+                self.config.dir_source,
             )
 
 
@@ -2109,6 +2110,7 @@ class BuildSession:
             # _source_state needs container.is_ar_file
             return True
 
+        assert self.dep_tree is not None
         _srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
             for _n, _s in self.udeb_dep_tree.selected_srcs.items():
@@ -4030,7 +4032,10 @@ class BuildSession:
                 not in ('y', 'yes'):
             console.print("  aborted — pin unchanged")
             return False
-        utils.write_snapshot_state(self.config, **{which: target})
+        if which == 'base':
+            utils.write_snapshot_state(self.config, base=target)
+        else:
+            utils.write_snapshot_state(self.config, current=target)
         console.print(
             f"snapshot select: {which} pin set to {target} "
             f"(config/snapshot.state)")
@@ -5827,11 +5832,11 @@ class BuildSession:
             # stamped variant (find_matching_artifact) — same reconciliation
             # check_build uses, so a stamped delta isn't seen as "missing".
             _dst_dir = self.config.deb_dest_for_filename(_f)
-            _path = utils.find_matching_artifact(_dst_dir, _f)
-            if _path is None:
+            _match = utils.find_matching_artifact(_dst_dir, _f)
+            if _match is None:
                 _all_present = False
                 break
-            if not self.container.is_ar_file(_path):
+            if not self.container.is_ar_file(_match):
                 _all_present = False
                 break
 
@@ -5888,6 +5893,7 @@ class BuildSession:
 
         _verbose = 'verbose' in args
 
+        assert self.dep_tree is not None
         _srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
             for _name, _src in self.udeb_dep_tree.selected_srcs.items():
@@ -6000,6 +6006,7 @@ class BuildSession:
         target snapshot, so rebuilding every base-advanced source yields a
         consistent pool (no separate synthesized-stanza solve needed)."""
         _published = repo_audit.published_base_versions(ledger)
+        assert self.dep_tree is not None
         _srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
             for _n, _s in self.udeb_dep_tree.selected_srcs.items():
@@ -6037,6 +6044,7 @@ class BuildSession:
         if _target is None:
             return None, (f"could not fetch the target snapshot ({target_ts}) "
                           f"Sources index — check network / the timestamp")
+        assert self.dep_tree is not None
         _srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
             for _n, _s in self.udeb_dep_tree.selected_srcs.items():
@@ -6065,6 +6073,7 @@ class BuildSession:
         if _from is None:
             return None, (f"could not fetch the published snapshot ({from_ts}) "
                           f"Sources index — check network / the timestamp")
+        assert self.dep_tree is not None
         _srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
             for _n, _s in self.udeb_dep_tree.selected_srcs.items():
@@ -6304,6 +6313,7 @@ class BuildSession:
 
         # Merge deb + udeb dep trees.  Source objects shared via
         # source_hashtable, so the dict-update naturally dedupes.
+        assert self.dep_tree is not None
         _srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
             for _name, _src in self.udeb_dep_tree.selected_srcs.items():
@@ -6683,7 +6693,8 @@ class BuildSession:
             f"file(s) (version {_src.version})…"
         )
         utils.download_source(
-            _SingleSrcTree(pkg, _src), self.config.dir_source,
+            _SingleSrcTree(pkg, _src),  # type: ignore[arg-type]
+            self.config.dir_source,
         )
 
         # Find the .dsc — dpkg-source -x needs it.
@@ -6774,6 +6785,12 @@ class BuildSession:
         and progress_bar.step are NOT touched here — caller tallies on
         the main thread after the worker returns.
         """
+        # cmd_source_build's prelude (callers below) gates on these being
+        # non-None; the asserts narrow the Optional types for mypy and
+        # document the contract for human readers.
+        assert self.cache is not None
+        assert self.container is not None
+
         # Packages on the skip_src list are excluded unconditionally —
         # typically packages that are known to be unbuildable in the
         # current environment.
@@ -6810,7 +6827,7 @@ class BuildSession:
         _bump_target = (
             _bump_active and self._needs_bump_build(
                 _src_pkg.package, _src_pkg,
-                self.container.asg_ledger, _bump_release))
+                self.container.asg_ledger or {}, _bump_release))
 
         # Skip packages with a valid existing build result unless force
         # is set — but never skip a bump-target.
@@ -6834,7 +6851,7 @@ class BuildSession:
             # post-build stamper disagreed — warn so it's visible.
             if _bump_target and self._needs_bump_build(
                     _src_pkg.package, _src_pkg,
-                    self.container.asg_ledger, _bump_release):
+                    self.container.asg_ledger or {}, _bump_release):
                 logger.warning(
                     f"asg-bump: {_src_pkg.package} built but its +asg uN "
                     f"artifact is still absent — bump predicate/stamper "
