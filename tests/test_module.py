@@ -1628,6 +1628,158 @@ def test_arch16_empty_per_pkg_section_name_rejected():
         assert 'empty package name' in cfg.error_str, cfg.error_str
 
 
+def test_comp03_buildconfig_defaults_for_new_keys():
+    """COMP-03 Phase 0: BuildCpus / BuildMemory / HeavyPackages are
+    optional; absent keys land at 0.0 / '' / frozenset() so a
+    build.conf without them keeps current (uncapped) serial behaviour."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        assert cfg.build_cpus == 0.0
+        assert cfg.build_memory == ''
+        assert cfg.heavy_packages == frozenset()
+
+
+def test_comp03_buildconfig_parses_explicit_values():
+    """COMP-03 Phase 0: explicit BuildCpus / BuildMemory / HeavyPackages
+    values surface on the BuildConfig."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'MaxParallelBuilds = 1',
+        ('MaxParallelBuilds = 4\n'
+         '    BuildCpus = 3.5\n'
+         '    BuildMemory = 8g\n'
+         '    HeavyPackages = firefox-esr, gcc-12, llvm-toolchain-15'),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        assert cfg.max_parallel_builds == 4
+        assert cfg.build_cpus == 3.5
+        assert cfg.build_memory == '8g'
+        assert cfg.heavy_packages == frozenset(
+            {'firefox-esr', 'gcc-12', 'llvm-toolchain-15'})
+
+
+def test_comp03_max_parallel_builds_capped_at_8():
+    """COMP-03 Phase 0: MaxParallelBuilds > 8 fails closed at config
+    load because docker-py's default urllib3 pool size is 10 — higher
+    worker counts exhaust the pool under streaming logs."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'MaxParallelBuilds = 1', 'MaxParallelBuilds = 9')
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert not cfg.is_valid
+        assert 'MaxParallelBuilds must be <= 8' in cfg.error_str
+
+
+def test_comp03_max_parallel_builds_rejects_zero():
+    """COMP-03 Phase 0: MaxParallelBuilds < 1 fails closed (the serial
+    path is `== 1`, parallel is `> 1` — `== 0` is an operator typo)."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'MaxParallelBuilds = 1', 'MaxParallelBuilds = 0')
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert not cfg.is_valid
+        assert 'MaxParallelBuilds must be >= 1' in cfg.error_str
+
+
+def test_comp03_buildcpus_rejects_negative():
+    """COMP-03 Phase 0: BuildCpus < 0 is meaningless (docker --cpus
+    rejects it); fail closed at config load."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY.replace(
+        'MaxParallelBuilds = 1',
+        'MaxParallelBuilds = 1\n    BuildCpus = -1.0',
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert not cfg.is_valid
+        assert 'BuildCpus must be >= 0.0' in cfg.error_str
+
+
+def test_comp03_audit_build_deps_and_parallel_mutex_fails_closed():
+    """COMP-03 Phase 0: AuditBuildDeps + MaxParallelBuilds > 1 fails
+    closed.  Reason: the audit gate is an interactive PROMPT_YESNO
+    inside BuildContainer.build(); under parallel workers, multiple
+    prompts would collide on stdin."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = (_BASE_CONF_BODY.replace(
+        'MaxParallelBuilds = 1', 'MaxParallelBuilds = 4')
+        + '\n    [Security]\n'
+          '    Disabled = true\n'
+          '    AuditBuildDeps = true\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert not cfg.is_valid
+        assert 'mutually exclusive' in cfg.error_str
+        assert 'AuditBuildDeps' in cfg.error_str
+        assert 'MaxParallelBuilds' in cfg.error_str
+
+
+def test_comp03_audit_build_deps_with_serial_is_allowed():
+    """COMP-03 Phase 0: AuditBuildDeps + MaxParallelBuilds == 1 is the
+    intended pairing — serial path, one prompt at a time.  Must NOT
+    trip the mutex."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    body = _BASE_CONF_BODY + (
+        '\n    [Security]\n'
+        '    Disabled = true\n'
+        '    AuditBuildDeps = true\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, body.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        assert cfg.audit_build_deps is True
+        assert cfg.max_parallel_builds == 1
+
+
 def test_production_build_conf_has_noautodbgsym_in_build_options():
     """Pin `noautodbgsym` in config/build.conf's [Source] BuildOptions.
     Without it, dh_strip emits a `pkg-dbgsym_*.deb` companion for every
@@ -6767,9 +6919,17 @@ def test_buildcontainer_calls_strip_post_build():
         "BuildContainer.build must call _normalize_built_artifacts with the "
         "emitted-files list AND was_patched — REGRESSION to pre-STA-21 if the "
         "file list is dropped (re-introduces the post-build full-repo stall)")
-    assert '_emitted = self._segregate_built_artifacts(src_pkg)' in _build_body, (
+    # COMP-03 Phase 1: signature now (src_pkg, scratch_dir) — match either
+    # whitespace shape (single-line or multi-line call site).
+    import re as _re_check
+    assert _re_check.search(
+        r'_emitted\s*=\s*self\._segregate_built_artifacts\(\s*src_pkg\s*,\s*_scratch_dir\s*\)',
+        _build_body), (
         "_segregate_built_artifacts must return its moved-files list so "
-        "normalise iterates only those — REGRESSION to pre-STA-21 if dropped")
+        "normalise iterates only those — REGRESSION to pre-STA-21 if dropped; "
+        "COMP-03 Phase 1 also requires the per-worker scratch dir arg "
+        "(`_scratch_dir`) so concurrent workers don't race on the host-side "
+        "os.listdir(repo_path) scan")
 
 
 def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
@@ -16691,7 +16851,9 @@ def test_segregate_never_deletes_existing_published_deb():
             package = 'openssl'
 
         _bc.config = _FakeConfig()
-        _moved = _bc._segregate_built_artifacts(_Src())
+        # COMP-03 Phase 1: segregate reads from the worker's per-build
+        # scratch dir (the rebuilt-dup .deb above), NOT self.repo_path.
+        _moved = _bc._segregate_built_artifacts(_Src(), _tmp)
 
         with open(os.path.join(_dest_dir, _fn)) as fh:
             assert fh.read() == 'PUBLISHED-ORIGINAL', (
@@ -16700,6 +16862,227 @@ def test_segregate_never_deletes_existing_published_deb():
             "rebuilt dup should be dropped from repo/ root")
         assert os.path.join(_dest_dir, _fn) not in _moved, (
             "a kept-existing collision must not be reported as freshly moved")
+
+
+def test_comp03_segregate_signature_takes_source_dir():
+    """COMP-03 Phase 1: _segregate_built_artifacts now takes an explicit
+    source_dir arg.  Pinned via inspect.signature so a future refactor
+    that drops the arg (and silently reverts to reading self.repo_path)
+    fails the test instead of silently re-introducing the segregate
+    race that would misroute concurrent workers' .debs."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import buildcontainer
+    _params = list(inspect.signature(
+        buildcontainer.BuildContainer._segregate_built_artifacts
+    ).parameters.keys())
+    assert _params == ['self', 'src_pkg', 'source_dir'], (
+        f"signature regression: expected (self, src_pkg, source_dir), "
+        f"got {_params}")
+
+
+def test_comp03_segregate_does_not_read_self_repo_path():
+    """COMP-03 Phase 1 invariant: _segregate_built_artifacts must
+    read its files from the source_dir parameter, NOT
+    self.repo_path.  Source-grep so a future refactor can't silently
+    regress to the parallel-mode segregate race."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import buildcontainer
+    _src = inspect.getsource(
+        buildcontainer.BuildContainer._segregate_built_artifacts)
+    # Reading self.repo_path inside segregate is the regression.  Match
+    # specific read shapes (listdir, path.join) so a stray docstring
+    # reference doesn't false-positive.
+    _bad = (
+        'os.listdir(self.repo_path)',
+        'os.path.join(self.repo_path,',
+        'os.path.isfile(os.path.join(self.repo_path,',
+    )
+    for _b in _bad:
+        assert _b not in _src, (
+            f"COMP-03 Phase 1: segregate must not read from "
+            f"self.repo_path (found `{_b}`) — concurrent workers' "
+            f".debs would be misclassified.  Use the source_dir "
+            f"argument instead.")
+
+
+def test_comp03_segregate_cross_source_isolation_via_scratch_dir():
+    """COMP-03 Phase 1 behaviour: segregate ignores foreign .debs sitting
+    in self.repo_path and only acts on the source_dir argument.  Simulates
+    worker A finishing while worker B's .debs sit unmoved in the shared
+    repo root (under the old code, A would mis-classify B's binaries)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _repo = os.path.join(_tmp, 'repo')
+        _scratch_a = os.path.join(_tmp, 'stage', 'worker-a')
+        _dest_dir = os.path.join(_repo, 'dists', 'thor', 'main', 'binary-amd64')
+        os.makedirs(_repo)
+        os.makedirs(_scratch_a)
+        os.makedirs(_dest_dir)
+        # Worker A's just-built file lives in its scratch dir.
+        with open(os.path.join(_scratch_a, 'foo_1.0_amd64.deb'), 'w') as fh:
+            fh.write('A')
+        # Worker B's just-built file sits unmoved in the shared repo root —
+        # under the OLD os.listdir(self.repo_path) code, A would pick this up.
+        with open(os.path.join(_repo, 'bar_2.0_amd64.deb'), 'w') as fh:
+            fh.write('B')
+
+        _bc = _make_buildcontainer_stub(repo=_repo)
+
+        class _FakeConfig:
+            def deb_dest_for_filename(self, _f, component='main'):
+                return _dest_dir
+
+        class _SrcA:
+            package = 'foo'
+
+        _bc.config = _FakeConfig()
+        _moved = _bc._segregate_built_artifacts(_SrcA(), _scratch_a)
+        # A's file is segregated.
+        assert _moved == [os.path.join(_dest_dir, 'foo_1.0_amd64.deb')]
+        assert os.path.exists(os.path.join(_dest_dir, 'foo_1.0_amd64.deb'))
+        # B's file in the shared repo root is UNTOUCHED — worker A must
+        # not have touched it (the race that would silently misroute it
+        # to A's component dir is precisely what Phase 1 eliminates).
+        assert os.path.exists(os.path.join(_repo, 'bar_2.0_amd64.deb'))
+        with open(os.path.join(_repo, 'bar_2.0_amd64.deb')) as fh:
+            assert fh.read() == 'B'
+
+
+def test_comp03_segregate_rolls_back_on_move_failure():
+    """COMP-03 Phase 1 all-or-nothing: if any move fails mid-iteration,
+    prior successful moves are reversed and the function returns []
+    so the caller can't observe a half-populated set.  Simulates by
+    using a deb_dest_for_filename that points the second file at a
+    non-existent / unwritable parent dir."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _scratch = os.path.join(_tmp, 'stage')
+        _good_dest = os.path.join(_tmp, 'dists', 'thor', 'main', 'binary-amd64')
+        os.makedirs(_scratch)
+        os.makedirs(_good_dest)
+        with open(os.path.join(_scratch, 'first_1.0_amd64.deb'), 'w') as fh:
+            fh.write('FIRST')
+        with open(os.path.join(_scratch, 'second_1.0_amd64.deb'), 'w') as fh:
+            fh.write('SECOND')
+
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+
+        # makedirs is best-effort idempotent for normal paths; to FORCE
+        # an OSError during the move, we make the destination dir
+        # read-only AFTER the first successful rename — using a tiny
+        # FakeConfig that flips a flag after the first call.
+        _calls = {'n': 0}
+
+        class _FakeConfig:
+            def deb_dest_for_filename(self, _f, component='main'):
+                _calls['n'] += 1
+                if _calls['n'] >= 2:
+                    # second file points at a file (not a dir) → makedirs
+                    # raises FileExistsError that isn't suppressed by
+                    # exist_ok=True (it suppresses only existing
+                    # directories), so segregate's makedirs raises OSError.
+                    return os.path.join(_tmp, 'first_1.0_amd64.deb')
+                return _good_dest
+
+        class _Src:
+            package = 'multi'
+
+        _bc.config = _FakeConfig()
+        # Pre-create the file the second call's dest would shadow.
+        with open(os.path.join(_tmp, 'first_1.0_amd64.deb'), 'w') as fh:
+            fh.write('SHADOW')
+
+        _moved = _bc._segregate_built_artifacts(_Src(), _scratch)
+        # Rollback returns empty list (no caller may observe partial set).
+        assert _moved == [], _moved
+        # The first file was moved into _good_dest then rolled back into
+        # _scratch.  Either way it must NOT remain in _good_dest.
+        assert not os.path.exists(
+            os.path.join(_good_dest, 'first_1.0_amd64.deb')), (
+            "rollback failed: first file still in dest after rollback")
+        assert os.path.exists(os.path.join(_scratch, 'first_1.0_amd64.deb'))
+
+
+def test_comp03_build_uses_per_worker_scratch_dir_in_volume_bind():
+    """COMP-03 Phase 1 AST contract: BuildContainer.build() must:
+      1. Compute a per-build _scratch_dir under config.dir_build_stage
+         using uuid (so concurrent workers never collide).
+      2. Bind _scratch_dir → /repo in containers.run() (NOT self.repo_path).
+      3. rmtree _scratch_dir in the finally block.
+
+    All three are silent-regression vectors: dropping any of them
+    silently re-introduces the parallel-mode race or leaks scratch
+    dirs across runs."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(r'def build\(self, src_pkg.*?(?=\n    @staticmethod|\n    def )',
+                    _src, _re.DOTALL)
+    assert _m, "BuildContainer.build not found"
+    _body = _m.group(0)
+    # 1. uuid-derived per-build scratch dir under dir_build_stage.
+    assert _re.search(
+        r'_scratch_dir\s*=\s*os\.path\.join\(\s*self\.config\.dir_build_stage,\s*uuid\.uuid4\(\)',
+        _body), (
+        "COMP-03 Phase 1: build() must allocate a uuid-named scratch "
+        "dir under config.dir_build_stage")
+    # 2. /repo bind points at the scratch dir.
+    assert _re.search(
+        r"_scratch_dir:\s*\{\s*'bind':\s*'/repo'", _body), (
+        "COMP-03 Phase 1: the /repo bind mount must use _scratch_dir, "
+        "not self.repo_path — regression to the parallel-mode race")
+    assert "self.repo_path:   {'bind': '/repo'" not in _body, (
+        "regression: the old shared-repo bind is back")
+    # 3. rmtree in finally.
+    assert 'shutil.rmtree(_scratch_dir' in _body, (
+        "COMP-03 Phase 1: build()'s finally block must rmtree the "
+        "per-worker scratch dir — leaks pile up otherwise")
+
+
+def test_comp03_buildconfig_creates_and_validates_dir_build_stage():
+    """COMP-03 Phase 1: dir_build_stage must be auto-created and
+    writability-checked at config load (mirrors the dir-ensure
+    pattern for every other build-tree directory)."""
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        # Attribute exists, sits under dir_temp, and the dir is real + writable.
+        assert hasattr(cfg, 'dir_build_stage')
+        assert cfg.dir_build_stage == os.path.join(cfg.dir_temp, 'build-stage')
+        assert os.path.isdir(cfg.dir_build_stage)
+        assert os.access(cfg.dir_build_stage, os.W_OK)
+
+
+def test_comp03_buildcontainer_init_sweeps_build_stage_survivors():
+    """COMP-03 Phase 1 source contract: BuildContainer.__init__ must
+    sweep the contents of config.dir_build_stage on startup.  Belt-
+    and-braces for kill -9 / OOM / docker-daemon crash paths where
+    the build()'s finally-block rmtree didn't run."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    # Find the __init__ method.
+    _m = _re.search(r'def __init__\(self,\s*config:.*?(?=\n    @staticmethod|\n    def )',
+                    _src, _re.DOTALL)
+    assert _m, "BuildContainer.__init__ not found"
+    _body = _m.group(0)
+    # Listing under dir_build_stage + shutil.rmtree of each survivor.
+    assert 'config.dir_build_stage' in _body, (
+        "COMP-03 Phase 1: __init__ must reference config.dir_build_stage "
+        "to sweep survivors")
+    assert _re.search(r'shutil\.rmtree\(', _body), (
+        "COMP-03 Phase 1: __init__ must shutil.rmtree leftover build-stage dirs")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -18539,6 +18922,14 @@ def main() -> int:
         test_sec05_gate_short_circuits_when_no_deps,
         test_sec05_gate_returns_false_when_operator_declines,
         test_sec05_gate_returns_false_when_preview_infrastructure_fails,
+        # COMP-03 Phase 0: parallel-build config plumbing
+        test_comp03_buildconfig_defaults_for_new_keys,
+        test_comp03_buildconfig_parses_explicit_values,
+        test_comp03_max_parallel_builds_capped_at_8,
+        test_comp03_max_parallel_builds_rejects_zero,
+        test_comp03_buildcpus_rejects_negative,
+        test_comp03_audit_build_deps_and_parallel_mutex_fails_closed,
+        test_comp03_audit_build_deps_with_serial_is_allowed,
         test_check_dep3_header_clean_patch_returns_empty,
         test_check_dep3_header_missing_origin_returns_field,
         test_check_dep3_header_subject_satisfies_description,
@@ -19030,6 +19421,14 @@ def main() -> int:
         # UPD-01 step 2: append-only enforcement
         test_publish_rsync_is_additive_no_delete,
         test_segregate_never_deletes_existing_published_deb,
+        # COMP-03 Phase 1: per-worker scratch repo dir + segregate refactor
+        test_comp03_segregate_signature_takes_source_dir,
+        test_comp03_segregate_does_not_read_self_repo_path,
+        test_comp03_segregate_cross_source_isolation_via_scratch_dir,
+        test_comp03_segregate_rolls_back_on_move_failure,
+        test_comp03_build_uses_per_worker_scratch_dir_in_volume_bind,
+        test_comp03_buildconfig_creates_and_validates_dir_build_stage,
+        test_comp03_buildcontainer_init_sweeps_build_stage_survivors,
         # UPD-01 step 3: build-side stamping + check_build matching + Guard B
         test_highest_asg_update_reads_remote_ledger,
         test_asg_next_n_is_per_file_and_cumulative,
