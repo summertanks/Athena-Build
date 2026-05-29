@@ -7160,12 +7160,27 @@ class BuildSession:
             # container (sets shutdown_event + reaps live containers);
             # the next wait() yield will then see futures
             # complete-with-False and the loop breaks via shutdown_event.
+            #
+            # signal.signal() can ONLY be called from the main thread.
+            # In TUI mode cmd_source_build runs on the shell worker
+            # thread (tui/tui.py:_shell), so the call raises ValueError.
+            # Best-effort install: skip the scoped hook off the main
+            # thread; workers can't be SIGINT-aborted there, but
+            # executor.shutdown(wait=True, cancel_futures=True) in
+            # finally still drains on command exit.
             def _on_sigint(_sig, _frame):
                 logger.warning(
                     "SIGINT received during parallel source_build — "
                     "reaping live containers and shutting down workers")
                 self.container.request_shutdown()
-            _old_sigint = _signal.signal(_signal.SIGINT, _on_sigint)
+            _old_sigint = None
+            try:
+                _old_sigint = _signal.signal(_signal.SIGINT, _on_sigint)
+            except ValueError:
+                logger.warning(
+                    "cmd_source_build: not running on the main thread — "
+                    "SIGINT-driven container reap unavailable; in-flight "
+                    "workers will run to completion if Ctrl+C fires")
             try:
                 _executor = _cf.ThreadPoolExecutor(max_workers=_n_parallel)
                 # COMP-03 Phase 6: heavy-package scheduler.  Sources in
@@ -7244,7 +7259,8 @@ class BuildSession:
                     # are dropped so the pool doesn't pull them on shutdown.
                     _executor.shutdown(wait=True, cancel_futures=True)
             finally:
-                _signal.signal(_signal.SIGINT, _old_sigint)
+                if _old_sigint is not None:
+                    _signal.signal(_signal.SIGINT, _old_sigint)
 
         progress_bar.close(persist=True)
 
