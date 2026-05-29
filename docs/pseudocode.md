@@ -1165,6 +1165,97 @@ or module writes it), and the consumer (what depends on it).
 
 ---
 
+## `source audit` vs `source build all` (UPDATE mode) — why the counts differ
+
+Operators routinely see a smaller "needs rebuild" count from `source
+audit` than from `source build all` when the snapshot has moved and a
+prior publish exists.  Concrete example after a snapshot advance:
+
+```
+> source audit
+    857  ok                                       864  total
+      1  needs_build: linux
+      2  stale_pass: bind9, linux-signed-amd64
+      4  tunneled
+
+> source build all
+source build: UPDATE mode — published 20260517T203347Z → current
+  20260529T081521Z; rebuilding the changed source delta (+asg-stamped,
+  per-file N) plus any other source needing a build.
+  11 changed source(s): bind9, evince, firefox-esr, gnutls28, haveged,
+  krb5, libgcrypt20, linux, linux-signed-amd64, rsync, samba
+```
+
+The two commands ask different questions; both answers are correct.
+
+**`source audit` asks**: *is my LOCAL on-disk repo self-consistent
+against the current cache?*
+
+- For each `selected_src`, predict the pristine binary filename
+  (`<pkg>_<pristine-version>_<arch>.deb`), check it on disk via
+  `find_matching_artifact`, validate with `verify_pkg_artifact`.
+- The `strip_nmu_at_build` policy ([[strip-nmu-at-build]]) strips
+  `+debNuN`, `~bpoN+N`, `+bN`, `+rpiN`, legacy `-Nb` from every
+  produced binary's Version field, so the predicted filename is the
+  PRISTINE upstream version.
+- Therefore, a Debian security bump that only moves the NMU counter
+  (`+deb12u14 → +deb12u15`) does NOT change the predicted pristine
+  binary name → the existing `.deb` still matches → audit says **ok**.
+- Only sources where the **pristine base** genuinely shifted
+  (`linux 6.1.146-1 → 6.1.147-1`, or a `-1 → -2` Debian-revision bump)
+  produce a different predicted name and surface as `needs_build` or
+  `stale_pass`.
+
+**`source build all` in UPDATE mode asks**: *between the LAST PUBLISH
+snapshot and the CURRENT snapshot, which sources need a
+`+asg<R>u<N>`-stamped rebuild so the next publish advertises the
+security delta?*
+
+- Triggered automatically by `_update_build_pending()` when
+  `snapshot.state` says `published != current` (i.e. the operator has
+  advanced the pin since the last `repo publish`).
+- `_workload_since_snapshot()` compares the source version at the
+  published snapshot to the source version at the current snapshot.
+  ANY move — including pure `+deb12u14 → +deb12u15` security bumps
+  that strip to the same pristine binary — is in the workload.
+- `_do_update_build()` rebuilds each workload source and the post-
+  build stamper applies `+asg<R>u<N>` ([[+asg-update-versioning]]) so
+  downstream apt clients see a new version available and pull it,
+  even when the underlying binary is byte-identical to what was last
+  shipped.
+
+The 11-vs-3 split in the example breaks down as:
+
+| Category | Sources | Why audit didn't flag them |
+|----------|---------|-----------------------------|
+| Pristine base changed | `linux`, `bind9`, `linux-signed-amd64` | (audit DID flag these — `needs_build` + 2 `stale_pass`) |
+| Debian `+deb12uN` security delta only | `evince`, `firefox-esr`, `gnutls28`, `haveged`, `krb5`, `libgcrypt20`, `rsync`, `samba` | strip_nmu means the predicted pristine filename matches on-disk → audit ok |
+
+The split is intentional, not redundant: `audit` tracks **local
+correctness** (will a fresh install boot? — yes, every predicted .deb
+is present and matches the cache), `update mode` tracks **published
+delta** (do we owe our apt subscribers a security re-issue? — yes,
+8 sources moved upstream and we need to mint stamped binaries to
+advertise that).
+
+Aligning them would require disabling `strip_nmu_from_deb`, which
+would re-introduce Debian's release-cycle metadata
+(`+deb12uN` / `~bpoN+N`) into our archive — violating the
+pristine-upstream invariant on which the [[+asg-update-versioning]]
+scheme is built (asg-stamps assume a clean pristine base to suffix).
+
+Where each lives in code:
+- `audit`: `repo_audit.audit_*` family + `BuildContainer.check_build`
+  + `find_matching_artifact` (in `utils.py`).
+- update workload: `BuildSession._workload_since_snapshot()` (in
+  `build.py`) — diffs published-snapshot Sources index vs current.
+- update orchestration: `BuildSession._do_update_build()` (in
+  `build.py`) — loads `asg_ledger` from `config/published.manifest`,
+  then drives `cmd_source_build` over the workload with bump-aware
+  skip semantics ([[bump-target-build-loop]]).
+
+---
+
 ## Reading guide
 
 To trace a typical build end-to-end:
