@@ -17397,6 +17397,19 @@ def test_comp03_phase4_installs_scoped_sigint_handler_around_executor():
     assert 'self.container.request_shutdown()' in _body, (
         "Phase 4: SIGINT handler must call request_shutdown() so reap "
         "unblocks workers (Phase 3 contract)")
+    # Anti-regression: signal.signal() raises ValueError when called off
+    # the main thread.  In TUI mode cmd_source_build runs on the shell
+    # worker thread, so the install MUST be guarded by try/except
+    # ValueError and the restore MUST be gated on whether the install
+    # succeeded (else NameError on _old_sigint).
+    assert 'except ValueError' in _body, (
+        "Phase 4: scoped SIGINT install must be wrapped in try/except "
+        "ValueError — signal.signal() can only be called from the main "
+        "thread; off-main-thread (TUI shell worker) raises ValueError "
+        "and crashes the build")
+    assert 'if _old_sigint is not None' in _body, (
+        "Phase 4: restore must be gated on whether the install succeeded "
+        "so an off-main-thread skip path doesn't NameError on _old_sigint")
 
 
 def test_comp03_phase4_executor_shutdown_uses_wait_true_and_cancel_futures():
