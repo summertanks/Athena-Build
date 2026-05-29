@@ -33,21 +33,21 @@ class VersionConstraint:
     <constraints> are in form of =, <<, >>, >=, <=
     = and !<constraints> will be considered hard assignments
     """
-    
+
 
     def __init__(self, version: Version, constraint: str):
         self._version: Version   = version
         self._constraint: str    = constraint.strip()
-        
+
         if not self._constraint:
             self._constraint = '='
-        
+
         if self._constraint not in ['=', '>', '<', '>=', '<=', '>>', '<<']:
             raise ValueError(f"Invalid operator: {self._constraint}")
 
     def __repr__(self):
         return f"{self._constraint} {self._version}"
-    
+
     def is_satisfied_by(self, candidate: Version) -> bool:
 
         if self._constraint == '=':
@@ -66,7 +66,7 @@ class VersionConstraint:
             return candidate < self._version
         else:
             raise ValueError(f"Unknown operator: {self._constraint}")
-    
+
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, VersionConstraint):
             return NotImplemented
@@ -74,15 +74,15 @@ class VersionConstraint:
 
     def __hash__(self):
         return hash((self._version, self._constraint))
-    
+
     @property
     def version(self) -> Version:
         return self._version
-    
+
     @property
     def constraint(self) -> str:
         return self._constraint
-    
+
 
 class Package(Packages):
     # Package: Record is typically of the format, other records not shown
@@ -95,7 +95,7 @@ class Package(Packages):
     # Depends: one or more packages, may include version in (), versions have prefix << >> <= >= =
     #          may have arch specified as name:arch e.g. gcc:amd64, python3:any
     #          dependencies which can be satisfied by multiple packages separated by |
-    
+
     # source:         str = ''
     # source_version: str = ''
 
@@ -140,7 +140,7 @@ class Package(Packages):
         # this will be set to the highest priority of those packages that depends on them.
         # e.g. if 'required' package has a dependency, they will be 'required' too
         self.priority:       str  = ''
-                                    
+
         self.arch:           str  = ''   # Architecture of the package, e.g. amd64, arm64, etc.
 
         self.installed:  bool = False  # Whether the package is installed or not
@@ -150,10 +150,10 @@ class Package(Packages):
 
         # Setting Values post calling super()
         super().__init__(section)
-        
+
         # List of version constraints for the package
         self._constraints: Dict[Version, VersionConstraint] = {}
-        
+
         for _field in ['Package', 'Version', 'Architecture']:
             _pkg_name = self.get('Package', '<unknown>')
             if _field not in self:
@@ -180,7 +180,7 @@ class Package(Packages):
             self.priority = 'optional'
 
         # UPDATE: source & source_version is now in superclass as properties
-        # If the source package and source package version are the same as the binary package, an explicit 
+        # If the source package and source package version are the same as the binary package, an explicit
         # "Source" field will not be within the paragraph.
         #       self.source = self.package
         #       self.source_version = self.version
@@ -280,7 +280,7 @@ class Package(Packages):
         return None
 
     def get_provides(self) -> List[Tuple[str, Version]]:
-        
+
         if not self.isvalid:
             return []
 
@@ -332,10 +332,10 @@ class Package(Packages):
                 except (IndexError, ValueError, AttributeError, TypeError) as e:
                     logger.warning(f"Skipping malformed provides entry for '{self.package}': {e}")
                     continue
-        
+
         # provides a list of tupples
         # [('acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn', '8.0.5+ds+~cs19.19.27-3'), ('node-acorn-bigint','1.0.0'), ]
-    
+
         return _provides_names
 
     @property
@@ -407,28 +407,28 @@ class Package(Packages):
         if version not in self._constraints:
             self._constraints[version] = VersionConstraint(version, constraint)
             return True
-        
+
         old_constraint: str = self._constraints[version].constraint
 
         # Constraint is already there, nothing to add
         if old_constraint == constraint:
             return True
-        
+
         action = constraint_action[constraint][old_constraint]
-        
+
         _constraint = VersionConstraint(version, constraint)
-        
+
         if action == 'nc':
             return True
-        
+
         elif action == 'xg':
             self._constraints[version] = _constraint
             return True
-        
+
         elif action == 'eq':
             self._constraints[version] = VersionConstraint(version, '=')
             return True
-        
+
         else:
             tui.console.print(f"WARNING: Cannot resolve conflicting constraints for "
                               f"{self.package} {_constraint} vs {old_constraint}, ignoring")
@@ -472,9 +472,9 @@ class Source(Sources):
 
         # Whether the package is valid or not, set to True if all required fields are present
         self._isvalid: bool = False
-        
+
         super().__init__(section)
-        
+
         for _field in ['Package', 'Version', 'Directory']:
             _pkg_name = self.get('Package', '<unknown>')
             if _field not in self:
@@ -562,13 +562,13 @@ class Source(Sources):
                     self.package_list.append(str(_item).strip())
         elif isinstance(_raw_pkg_list, str):
             self.package_list = [line.strip() for line in _raw_pkg_list.split('\n') if line.strip()]
-       
+
         _arch_field = self.get('Architecture', '').strip()
         if not _arch_field:
             self.arch = ['any']
         else:
             self.arch = _arch_field.split()
-        
+
         self._isvalid = True  # Package is valid if all required fields are present
 
     @property

@@ -1405,10 +1405,10 @@ class BuildSession:
         Usage: generate_signing_key [force]
 
           force — overwrite an existing key for the same UID. use with caution,
-          it invalidates previously signed repos. Prompts for confirmation in either case; 
+          it invalidates previously signed repos. Prompts for confirmation in either case;
 
-        - UID comes from `[Repo] SigningKeyUid` in build.conf.  
-        - Private is under `<dir_gnupg>/signing/`; 
+        - UID comes from `[Repo] SigningKeyUid` in build.conf.
+        - Private is under `<dir_gnupg>/signing/`;
         - Public key is exported to `<dir_gnupg>/signing/athena-archive-keyring.gpg` f
         """
         import signing
@@ -1441,7 +1441,7 @@ class BuildSession:
             return
 
         console.print(f"Generating signing key for '{self.config.signing_key_uid}'...",tui.COLOR_INFO,)
-        
+
         if not signing.generate_key(self.config):
             console.print("ERROR: key generation failed — see log for the gpg stderr", tui.COLOR_ERROR,)
             return
@@ -1451,7 +1451,7 @@ class BuildSession:
             console.print("ERROR: key generation completed but the key is not "
                 "queryable — likely a gpg homedir permission issue", tui.COLOR_ERROR,)
             return
-        
+
         console.print("Signing key generated:", tui.COLOR_HIGHLIGHT)
         console.print(f"  Fingerprint : {_info['fingerprint']}")
         console.print(f"  UID         : {_info['uid']}")
@@ -1467,8 +1467,8 @@ class BuildSession:
         sign+verify roundtrip against a small test payload.
 
         Reports the key's fingerprint, uid, creation, expiration —
-        plus an OK/FAIL line for the roundtrip itself.  
-        
+        plus an OK/FAIL line for the roundtrip itself.
+
         Catches: missing key, expired key, missing pubkey, gpg-agent issues,
         keys that grew a passphrase out-of-band.
         """
@@ -1722,7 +1722,7 @@ class BuildSession:
             _bin_name = _filename.split('_', 1)[0]
             try:
                 for _existing in os.listdir(_dst_dir):
-                    if not (_existing.endswith('.deb') or _existing.endswith('.udeb')):
+                    if not (_existing.endswith(('.deb', '.udeb'))):
                         continue
                     if _existing.split('_', 1)[0] != _bin_name:
                         continue
@@ -1796,7 +1796,7 @@ class BuildSession:
 
         _success = _failed = 0
         progress_bar = ProgressBar(label='Tunnel', maxvalue=len(packages), show_rate=False)
-        
+
         for _src_pkg in packages:
             _result = self._do_tunnel(_src_pkg)
             if _result:
@@ -1823,7 +1823,7 @@ class BuildSession:
         On failure (no key, expired, agent issues, …), prompts the
         operator with PROMPT_YESNO to generate a key now.  If they
         accept, runs the same flow as `cmd_generate_signing_key`
-        then re-verifies. If they decline, returns False so the caller 
+        then re-verifies. If they decline, returns False so the caller
         (cmd_build_chroot_live) bails before any heavy chroot setup happens.
 
         Returns True iff the key is verified at exit; the flag mirrors
@@ -1847,16 +1847,16 @@ class BuildSession:
         # out-of-band.  Surface the actual reason before the prompt so
         # the operator can decide whether `generate` is the right fix.
         console.print(f"Signing key check FAILED — {_msg}", tui.COLOR_WARNING)
-        
+
         console.print( "valid key is required before the chroot setup can proceed.")
-        
+
         _resp = Prompt(
             PROMPT_YESNO,
             "Generate a new signing key for "
             "'{self.config.signing_key_uid}' now?",
             informational=True,   # UX-05f: pre-chroot gate, OK under --yes
         ).get_response()
-        
+
         if _resp.lower() not in ('y', 'yes'):
             console.print("Aborted — signing key is mandatory", tui.COLOR_ERROR)
             self.flags.signing_key_verified = False
@@ -1877,14 +1877,14 @@ class BuildSession:
             console.print(f"ERROR: newly-generated key failed verify — {_msg}",tui.COLOR_ERROR)
             self.flags.signing_key_verified = False
             return False
-        
+
         _info = signing.get_key_info(self.config)
         console.print("Signing key generated and verified:", tui.COLOR_HIGHLIGHT)
         if _info is not None:
             console.print(f"  Fingerprint : {_info['fingerprint']}")
             console.print(f"  UID         : {_info['uid']}")
             console.print(f"  Public key  : {signing.signing_pubkey_path(self.config)}")
-        
+
         self.flags.signing_key_verified = True
         return True
 
@@ -3193,7 +3193,7 @@ class BuildSession:
 
         _copied = _skipped = 0
         for _f in sorted(os.listdir(_src_dir)):
-            if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+            if not (_f.endswith(('.deb', '.udeb'))):
                 continue
             if apt_repo.deb_excluded_from_minimal(_f):
                 _skipped += 1
@@ -4318,7 +4318,7 @@ class BuildSession:
         for _deb_dir in self.config.all_deb_dirs():
             try:
                 for _f in os.listdir(_deb_dir):
-                    if _f.endswith('.deb') or _f.endswith('.udeb'):
+                    if _f.endswith(('.deb', '.udeb')):
                         _files.append(os.path.join(_deb_dir, _f))
             except OSError:
                 continue
@@ -4480,7 +4480,7 @@ class BuildSession:
             # (name, pristine-base, arch) for a name_ver_arch.(u)deb file —
             # base via utils.pristine_base so a +asg<R>u<N> stamp groups with
             # its pristine prediction.  None if not in name_ver_arch shape.
-            if not (_fn.endswith('.deb') or _fn.endswith('.udeb')):
+            if not (_fn.endswith(('.deb', '.udeb'))):
                 return None
             _stem = _fn.rsplit('.', 1)[0]
             _parts = _stem.split('_')
@@ -5001,7 +5001,7 @@ class BuildSession:
             return
 
         # Bracket the BuildSystem's lifetime so the cached sudo password is
-        # scrubbed on every exit path — success, build failure, 
+        # scrubbed on every exit path — success, build failure,
         try:
             console.print("Building chroot environment...")
             _result = build_system.build_chroot(debug=_debug)
@@ -5131,7 +5131,7 @@ class BuildSession:
 
 
     # -------------------------------Command: build_iso---------------------
-    
+
     def cmd_build_iso_live(self, *args):
         """Build a bootable hybrid BIOS/EFI live ISO from the assembled chroot.
 
@@ -6014,7 +6014,7 @@ class BuildSession:
         _out: 'set[str]' = set()
         for _name in _srcs:
             for _f in self._predicted_files_for_source(_name):
-                if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+                if not (_f.endswith(('.deb', '.udeb'))):
                     continue
                 _parts = _f.rsplit('.', 1)[0].split('_')
                 if len(_parts) != 3:
@@ -6122,7 +6122,7 @@ class BuildSession:
         if utils.strip_nmu_suffix(str(src.version)) == str(src.version):
             return False                      # clean new base — not a re-spin
         for _f in self._predicted_files_for_source(name):
-            if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+            if not (_f.endswith(('.deb', '.udeb'))):
                 continue
             if utils.classify_repo_subdir(_f) != 'main':
                 continue
@@ -6249,7 +6249,7 @@ class BuildSession:
         _offenders: 'list[tuple[str, str]]' = []
         for _name in names:
             for _f in self._predicted_files_for_source(_name):
-                if not (_f.endswith('.deb') or _f.endswith('.udeb')):
+                if not (_f.endswith(('.deb', '.udeb'))):
                     continue
                 _stamped = utils.asg_filename(_f, _release, 1)
                 if _stamped == _f or not utils.match_pristine_base(_f, _stamped):

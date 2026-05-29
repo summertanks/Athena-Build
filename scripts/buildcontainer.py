@@ -127,7 +127,7 @@ class BuildContainer:
             except docker.errors.APIError as e:
                 logger.error(f"Athena Build Docker: Error {e}")
                 tui.console.print(f"Athena Build Docker: Error {e}")
-                raise RuntimeError(f"Cannot connect to local Docker daemon: {e}")
+                raise RuntimeError(f"Cannot connect to local Docker daemon: {e}") from e
 
         self._image_tag = f"athenalinux:build-{config.container_release}"
         _image_tag = self._image_tag
@@ -178,12 +178,12 @@ class BuildContainer:
                 except (FileNotFoundError, PermissionError) as e:
                     logger.error(f"Error writing docker build log: {e}")
                     tui.console.print(f"Error writing docker build log: {e}")
-                    raise RuntimeError(f"Cannot write Docker build log: {e}")
-                
+                    raise RuntimeError(f"Cannot write Docker build log: {e}") from e
+
             except docker.errors.APIError as e:
                 logger.error(f"Athena Build Docker: Error {e}")
                 tui.console.print(f"Athena Build Docker: Error {e}")
-                raise RuntimeError(f"Docker image build failed: {e}")
+                raise RuntimeError(f"Docker image build failed: {e}") from e
 
         self.image = image
 
@@ -1256,7 +1256,7 @@ class BuildContainer:
         try:
             _files = [
                 _f for _f in os.listdir(source_dir)
-                if (_f.endswith('.deb') or _f.endswith('.udeb'))
+                if (_f.endswith(('.deb', '.udeb')))
                 and os.path.isfile(os.path.join(source_dir, _f))
             ]
         except OSError as e:

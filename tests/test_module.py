@@ -102,8 +102,8 @@ def test_mirror_rejects_empty_required_fields():
         ('id', ''), ('baseurl', ''), ('baseid', ''),
         ('release', ''), ('arch', ''),
     ]:
-        kwargs = dict(id='main', baseurl='http://x.test', baseid='debian',
-                      release='bookworm', suffix='', component='main', arch='amd64')
+        kwargs = {'id': 'main', 'baseurl': 'http://x.test', 'baseid': 'debian',
+                      'release': 'bookworm', 'suffix': '', 'component': 'main', 'arch': 'amd64'}
         kwargs[_field] = _bad
         try:
             Mirror(**kwargs)
@@ -2031,7 +2031,7 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         _calls = []
         # Stamp the target with a recorder; the dispatcher should call it.
         setattr(_sess, _target_name,
-                lambda *a, _name=_target_name, **kw: _calls.append((_name, a, kw)))
+                lambda *a, _name=_target_name, _c=_calls, **kw: _c.append((_name, a, kw)))
         _dispatch = getattr(_sess, _group_name)
         _dispatch(_verb, 'arg1', 'arg2')
         assert _calls == [(_target_name, ('arg1', 'arg2'), {})], (
@@ -7901,11 +7901,11 @@ def test_print_no_handler_crashes_on_uninitialized_session():
     stub = _PrintSessionStub()
     for name, (handler, _group, _desc) in print_commands.CATEGORIES.items():
         try:
-            _capture_console_print(lambda: handler(stub))
+            _capture_console_print(lambda h=handler: h(stub))
         except Exception as e:
             raise AssertionError(
                 f"handler for {name!r} crashed on uninitialised session: "
-                f"{type(e).__name__}: {e}")
+                f"{type(e).__name__}: {e}") from e
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8652,7 +8652,7 @@ def _sta18_make_dt():
             self._fields = {'Package': name}
             self.version = Version(version)
             # provides shape: ((name, version_str_or_None), ...)
-            self._provides_map = {n: v for n, v in provides}
+            self._provides_map = dict(provides)
             self.breaks = []
             self.conflicts = []
             self.alt_depends = []
@@ -13738,7 +13738,7 @@ def test_mirror_validation_allows_empty_component():
     try:
         Mirror(id='fork', baseurl='file:///tmp', baseid='fork',
                release='', suffix='', component='', arch='amd64')
-        assert False, "empty release should have raised"
+        raise AssertionError("empty release should have raised")
     except ValueError:
         pass
 

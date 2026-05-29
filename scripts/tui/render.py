@@ -198,7 +198,7 @@ class Renderer:
                 self._footer.mvwin(self._h - FOOTER_HEIGHT, 0)
             except curses.error:
                 pass
-        for name, win in self._tab_wins.items():
+        for _name, win in self._tab_wins.items():
             try:
                 win.resize(self._tab_h, self._w)
                 win.mvwin(0, 0)

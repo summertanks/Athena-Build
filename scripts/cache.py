@@ -637,7 +637,7 @@ class Cache:
             f'{len(self.source_hashtable)} source names, '
             f'{len(self.udeb_hashtable)} udeb names across {len(self.mirrors)} mirror(s)'
         )
-        
+
         # Pick the latest gcc major present in the index and drop older majors
         # from self.required.  We scan the *whole* index (not just self.required)
         # because Bookworm's gcc-N-base is Priority: optional — it won't show up

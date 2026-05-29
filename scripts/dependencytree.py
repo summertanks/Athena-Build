@@ -338,7 +338,7 @@ class DependencyTree:
     def parse_dependency(self, package_name: str,
                          version: Optional[Version] = None,
                          constraint: str = '') -> Optional[package.Package]:
-        
+
         _selected_pkg: package.Package
         # Normalise constraint — fall back to '>=' for anything unrecognised
         _constraint = constraint if constraint in self._VALID_CONSTRAINTS else '>='
@@ -435,7 +435,7 @@ class DependencyTree:
         elif len(_pkg_candidates) == 0:
             tui.console.print(f"Dependency Check: Cant find anything that provides: {package_name}")
             return None
-        
+
         # Case - III: One package found
         elif len(_pkg_candidates) == 1:
             _selected_pkg = _pkg_candidates[0]
@@ -489,7 +489,7 @@ class DependencyTree:
         # the early-return at the top of this function (checking selected_pkgs) only works
         # if A is already recorded here before parse_dependency(B) runs.
         self.selected_pkgs[_selected_pkg['Package']] = _selected_pkg
-        
+
         # Also register every virtual name this package provides so that the L84 early-return
         # catches virtual-name lookups (e.g. 'awk' → gawk_pkg) without needing the L93 loop.
         for _provided_name, _ in _selected_pkg.get_provides():
@@ -498,7 +498,7 @@ class DependencyTree:
         # list packages to get dependencies for (copy — the loop below mutates _depends,
         # aliasing _selected_pkg.depends would corrupt the Package's stored list)
         _depends = list(_selected_pkg.depends)
-        
+
         # Pre-Depends must be satisfied before the package can unpack — treat same as Depends
         _depends += list(_selected_pkg.pre_depends)
 
@@ -506,7 +506,7 @@ class DependencyTree:
         # Virtual names are registered in selected_pkgs at L134-135, so the name check
         # below covers both real packages and provides without a separate provides lookup.
         _alt_depends = _selected_pkg.alt_depends
-        
+
         for _alt in _alt_depends:
             # Find alts already selected whose version constraint is also satisfied.
             # `_alt_dep` here is a dep-tuple (name, ver, op) — distinct from

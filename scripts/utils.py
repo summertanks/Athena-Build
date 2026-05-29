@@ -90,7 +90,7 @@ def classify_repo_subdir(filename: str) -> str:
         return 'doc'
     if _pkg.endswith('-dbgsym'):
         return 'dbgsym'
-    if _pkg.endswith('-tests') or _pkg.endswith('-test'):
+    if _pkg.endswith(('-tests', '-test')):
         return 'tests'
     return 'main'
 
@@ -192,7 +192,7 @@ def normalize_repo_filename(filename: str) -> str:
     Malformed filenames (not in `name_version_arch.ext` shape) are
     returned unchanged — best-effort, doesn't raise.
     """
-    if not (filename.endswith('.deb') or filename.endswith('.udeb')):
+    if not (filename.endswith(('.deb', '.udeb'))):
         return filename
     _name, _ext = os.path.splitext(filename)
     _parts = _name.split('_')
@@ -271,7 +271,7 @@ def asg_filename(filename: str, release: int, n: int) -> str:
     """Map a pristine repo filename to its +asg<R>u<N> stamped form
     (name_base_arch.ext → name_base+asgRuN_arch.ext).  No-op on a filename
     not in name_version_arch shape."""
-    if not (filename.endswith('.deb') or filename.endswith('.udeb')):
+    if not (filename.endswith(('.deb', '.udeb'))):
         return filename
     _name, _ext = os.path.splitext(filename)
     _parts = _name.split('_')
@@ -606,7 +606,7 @@ def strip_nmu_from_deb(deb_path: str) -> dict:
         'status': 'unchanged', 'new_path': deb_path, 'strips_count': 0,
     }
     _base = os.path.basename(deb_path)
-    if not (_base.endswith('.deb') or _base.endswith('.udeb')):
+    if not (_base.endswith(('.deb', '.udeb'))):
         _result['status'] = 'skipped'
         return _result
     _name, _ext = os.path.splitext(_base)
@@ -707,7 +707,7 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
 
     _result = {'status': 'skipped', 'new_path': deb_path, 'version': None}
     _base = os.path.basename(deb_path)
-    if not (_base.endswith('.deb') or _base.endswith('.udeb')):
+    if not (_base.endswith(('.deb', '.udeb'))):
         return _result
     _name, _ext = os.path.splitext(_base)
     _parts = _name.split('_')
@@ -1079,9 +1079,9 @@ def check_dep3_header(patch_path: str) -> list:
                 if _i >= 40 or _line.startswith('---'):
                     break       # past the header, into the diff
                 _s = _line.strip()
-                if _s.startswith('Description:') or _s.startswith('Subject:'):
+                if _s.startswith(('Description:', 'Subject:')):
                     found.add('Description')
-                elif _s.startswith('Origin:') or _s.startswith('Author:'):
+                elif _s.startswith(('Origin:', 'Author:')):
                     found.add('Origin')
     except OSError:
         # Caller will warn separately on read failure; pretend complete.
@@ -1515,7 +1515,7 @@ class BuildConfig:
     dir_patch_empty: str
 
     _config_valid: bool
-    
+
     def __init__(self) -> None:
 
         # Set when config is validated
@@ -1523,7 +1523,7 @@ class BuildConfig:
 
         # Setting up config parsers
         config_parser = configparser.ConfigParser()
-        
+
         self.error_str = ''
 
         try:
@@ -1916,7 +1916,7 @@ class BuildConfig:
             self.dir_buildroot        = os.path.join(self.working_dir, config_parser.get('Directories', 'Chroot'))
             self.dir_chroot           = os.path.join(self.dir_buildroot, 'live')
             self.dir_chroot_installer = os.path.join(self.dir_buildroot, 'installer')
-            
+
             self.dir_patch = os.path.join(self.working_dir, config_parser.get('Directories', 'Patch'))
             self.dir_patch_source = os.path.join(self.dir_patch, 'source')
             self.dir_patch_preinstall = os.path.join(self.dir_patch, 'pre-install')
@@ -1948,14 +1948,14 @@ class BuildConfig:
         except (configparser.Error, OSError) as e:
             self.error_str = str(e)
             return
-        
+
         try:
             if not os.access(self.working_dir, os.W_OK):
                 raise PermissionError(f'Working directory is not writable: {self.working_dir}')
 
             pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
-            
+
             pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_build_stage).mkdir(parents=True, exist_ok=True)
@@ -2047,9 +2047,9 @@ class BuildConfig:
         except OSError as e:
             self.error_str = f"Failed to prepare build directories: {e}"
             return
-        
+
         self._config_valid = True
-    
+
     @property
     def is_valid(self) -> bool:
         """
@@ -2137,7 +2137,7 @@ class BuildConfig:
             self.dir_repo_dbgsym,
             self.dir_repo_tests,
         ]
-    
+
     def build_options_for(self, pkg_name: str) -> 'frozenset[str]':
         """Return the effective DEB_BUILD_OPTIONS set for a source pkg.
 
@@ -2163,7 +2163,7 @@ class BuildConfig:
             str: Error string if config is invalid, empty string otherwise
         """
         return self.error_str
-    
+
 def download_file(url: str, filename: str) -> tuple:
     """Downloads file and updates progressbar in incremental manner.
 
@@ -2345,7 +2345,6 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
                         pass
                 # Fall through to the size + sha256 verification below
                 # (which gates _file_list[_file] for downstream consumers).
-                pass
             else:
                 # Use the size from the InRelease-verified Sources index instead
                 # of a HEAD probe — saves one round-trip per file and removes
