@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import textwrap
+import threading
 
 # Allow running from project root: `python3 tests/test_module.py`
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17063,6 +17064,270 @@ def test_comp03_buildconfig_creates_and_validates_dir_build_stage():
         assert os.access(cfg.dir_build_stage, os.W_OK)
 
 
+def test_comp03_register_live_adds_under_lock_and_is_idempotent():
+    """COMP-03 Phase 2: _register_live adds the container to the
+    registry under self._live_lock; re-registering the same short_id
+    is a no-op (idempotent — pinned by overwriting the same key)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc._live = {}
+    _bc._live_lock = threading.Lock()
+
+    class _FakeContainer:
+        def __init__(self, sid):
+            self.short_id = sid
+
+    _c1 = _FakeContainer('abc123')
+    _c2 = _FakeContainer('def456')
+    _bc._register_live(_c1)
+    _bc._register_live(_c2)
+    assert set(_bc._live.keys()) == {'abc123', 'def456'}
+    # Idempotent — same short_id re-registered is a no-op
+    _bc._register_live(_c1)
+    assert len(_bc._live) == 2
+
+
+def test_comp03_deregister_live_removes_and_tolerates_missing_key():
+    """COMP-03 Phase 2: _deregister_live drops the container from
+    the registry; a missing key is fine (Phase 3's reap_all_live
+    may have removed it concurrently)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc._live = {}
+    _bc._live_lock = threading.Lock()
+
+    class _FakeContainer:
+        def __init__(self, sid):
+            self.short_id = sid
+
+    _c = _FakeContainer('abc123')
+    _bc._register_live(_c)
+    assert 'abc123' in _bc._live
+    _bc._deregister_live(_c)
+    assert 'abc123' not in _bc._live
+    # Re-deregistering is fine (no KeyError) — race-tolerance contract
+    _bc._deregister_live(_c)
+    assert _bc._live == {}
+
+
+def test_comp03_all_containers_run_sites_carry_athena_label():
+    """COMP-03 Phase 2 source-grep: every `self.client.containers.run(`
+    invocation in buildcontainer.py must pass `labels=self._container_labels`
+    so the startup orphan reap (and the `docker ps --filter` operator
+    workflow) can identify our containers reliably."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    # Find every containers.run(...) invocation (multi-line) and assert
+    # labels= appears inside the call's argument list.
+    _calls = list(_re.finditer(
+        r'self\.client\.containers\.run\((.*?)\)\s*(?:\n\s*self\._register_live|\n\s*logger|\n\s*_buf|\n\s*\w+\s*=|\Z)',
+        _src, _re.DOTALL))
+    assert len(_calls) >= 3, (
+        f"expected >=3 containers.run sites (build / SEC-05 preview / "
+        f"grub-mkrescue); found {len(_calls)}")
+    for _m in _calls:
+        _args = _m.group(1)
+        assert 'labels=self._container_labels' in _args, (
+            f"containers.run site missing `labels=self._container_labels`:\n"
+            f"{_args[:300]}")
+
+
+def test_comp03_register_live_called_after_each_containers_run():
+    """COMP-03 Phase 2 source-grep: every `containers.run` immediately
+    feeds the result into `_register_live(...)` so SIGINT-driven reap
+    can find every owned container."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    # Three pairings expected; each `containers.run(...)` block should
+    # be followed within a few lines by `self._register_live(container)`.
+    _runs = _src.count('self.client.containers.run(')
+    _regs = _src.count('self._register_live(container)')
+    assert _regs >= _runs, (
+        f"expected >= {_runs} _register_live calls (one per containers.run "
+        f"site); found {_regs}")
+
+
+def test_comp03_deregister_live_called_in_every_finally():
+    """COMP-03 Phase 2: every container-owning finally block deregisters
+    via `self._deregister_live(container)` — without it, a stale entry
+    in self._live would survive a successful build and reap_all_live
+    would issue a doomed remove(force=True) against a non-existent
+    container next time it fires."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    _runs = _src.count('self.client.containers.run(')
+    _deregs = _src.count('self._deregister_live(container)')
+    assert _deregs >= _runs, (
+        f"expected >= {_runs} _deregister_live calls (one per finally "
+        f"block); found {_deregs}")
+
+
+def test_comp03_startup_orphan_reap_filters_by_athena_label():
+    """COMP-03 Phase 2: __init__'s orphan-reap must pass
+    filters={'label': 'com.athena.build=1'} to containers.list so it
+    NEVER touches unrelated containers running on the host."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    assert _re.search(
+        r"containers\.list\(\s*all=True\s*,\s*filters=\{\s*'label'\s*:\s*'com\.athena\.build=1'\s*\}",
+        _src), (
+        "COMP-03 Phase 2: orphan-reap must filter by "
+        "label=com.athena.build=1 — without that filter, it would "
+        "force-remove unrelated containers on the host")
+
+
+def test_comp03_container_labels_include_pid_for_disambiguation():
+    """COMP-03 Phase 2: the labels dict carries both com.athena.build
+    AND com.athena.pid so operators inspecting via `docker ps` can
+    tell apart containers from concurrent athena-build processes."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r"self\._container_labels\s*=\s*\{(.*?)\}",
+        _src, _re.DOTALL)
+    assert _m, "self._container_labels initialisation not found"
+    _body = _m.group(1)
+    assert "'com.athena.build'" in _body and "'1'" in _body
+    assert "'com.athena.pid'" in _body and 'os.getpid()' in _body
+
+
+def test_comp03_reap_all_live_force_removes_every_registered_container():
+    """COMP-03 Phase 3: reap_all_live() iterates a snapshot of the
+    registry and force-removes each container.  Returns the count
+    reaped — caller logs it."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc._live = {}
+    _bc._live_lock = threading.Lock()
+    _bc.shutdown_event = threading.Event()
+
+    class _FakeContainer:
+        def __init__(self, sid):
+            self.short_id = sid
+            self.remove_called_with = None
+
+        def remove(self, force=False):
+            self.remove_called_with = force
+
+    _c1 = _FakeContainer('aaa')
+    _c2 = _FakeContainer('bbb')
+    _c3 = _FakeContainer('ccc')
+    _bc._register_live(_c1)
+    _bc._register_live(_c2)
+    _bc._register_live(_c3)
+    _n = _bc.reap_all_live()
+    assert _n == 3, _n
+    for _c in (_c1, _c2, _c3):
+        assert _c.remove_called_with is True, (
+            "every reaped container must be removed with force=True so "
+            "still-running containers actually die")
+
+
+def test_comp03_reap_all_live_is_idempotent_and_tolerates_api_error():
+    """COMP-03 Phase 3: reap_all_live() called twice is fine; a
+    container raising docker.errors.APIError on remove is logged
+    and skipped, not propagated (race with the worker's own finally
+    block having already cleaned up)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    import docker as _dk
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc._live = {}
+    _bc._live_lock = threading.Lock()
+    _bc.shutdown_event = threading.Event()
+
+    class _RaisingContainer:
+        short_id = 'raise'
+
+        def remove(self, force=False):
+            raise _dk.errors.APIError("simulated race")
+
+    _bc._register_live(_RaisingContainer())
+    # Should not raise; counts only successful removes.
+    _n = _bc.reap_all_live()
+    assert _n == 0, _n
+    # Idempotent — second call against an empty registry returns 0.
+    # (We left the raising container in the registry intentionally;
+    # the iteration uses a snapshot so it does NOT auto-deregister.
+    # In production, the worker's own finally will deregister.)
+    _bc._live.clear()
+    assert _bc.reap_all_live() == 0
+
+
+def test_comp03_request_shutdown_sets_event_and_reaps():
+    """COMP-03 Phase 3: request_shutdown() flips shutdown_event AND
+    calls reap_all_live() in one step — workers between jobs see the
+    event flip, workers inside container.wait/logs unblock because
+    their containers were just force-removed."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    _bc._live = {}
+    _bc._live_lock = threading.Lock()
+    _bc.shutdown_event = threading.Event()
+
+    class _FakeContainer:
+        short_id = 'sid'
+
+        def remove(self, force=False):
+            return None
+
+    _bc._register_live(_FakeContainer())
+    assert not _bc.shutdown_event.is_set()
+    _n = _bc.request_shutdown()
+    assert _bc.shutdown_event.is_set(), (
+        "request_shutdown must flip the shutdown_event so workers "
+        "checking between jobs bail out")
+    assert _n == 1, _n
+
+
+def test_comp03_shutdown_event_initialised_in_init():
+    """COMP-03 Phase 3: BuildContainer.__init__ initialises
+    self.shutdown_event as a threading.Event so workers can consult
+    it without worrying about attribute existence."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    assert 'self.shutdown_event = threading.Event()' in _src, (
+        "COMP-03 Phase 3: BuildContainer.__init__ must initialise "
+        "self.shutdown_event = threading.Event()")
+
+
+def test_comp03_reap_all_live_uses_snapshot_not_live_iteration():
+    """COMP-03 Phase 3 safety: reap_all_live() must iterate a SNAPSHOT
+    taken under _live_lock, not the live dict — otherwise a concurrent
+    _deregister_live() during iteration would raise
+    `dictionary changed size during iteration`.  Pinned via source-grep."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _src = fh.read()
+    import re as _re
+    _m = _re.search(
+        r'def reap_all_live\(self\).*?(?=\n    def )',
+        _src, _re.DOTALL)
+    assert _m, "reap_all_live not found"
+    _body = _m.group(0)
+    # The lock-acquire must take a snapshot (list of values) before
+    # the iteration loop, not call .remove inside the with-block.
+    assert _re.search(
+        r"with self\._live_lock:\s*\n\s+_snapshot\s*=\s*list\(self\._live\.values\(\)\)",
+        _body), (
+        "reap_all_live must snapshot self._live.values() under the lock, "
+        "then iterate the snapshot outside the lock — iterating the live "
+        "dict while another thread deregisters would raise")
+
+
 def test_comp03_buildcontainer_init_sweeps_build_stage_survivors():
     """COMP-03 Phase 1 source contract: BuildContainer.__init__ must
     sweep the contents of config.dir_build_stage on startup.  Belt-
@@ -19429,6 +19694,20 @@ def main() -> int:
         test_comp03_build_uses_per_worker_scratch_dir_in_volume_bind,
         test_comp03_buildconfig_creates_and_validates_dir_build_stage,
         test_comp03_buildcontainer_init_sweeps_build_stage_survivors,
+        # COMP-03 Phase 2: live-container registry + label-based orphan reap
+        test_comp03_register_live_adds_under_lock_and_is_idempotent,
+        test_comp03_deregister_live_removes_and_tolerates_missing_key,
+        test_comp03_all_containers_run_sites_carry_athena_label,
+        test_comp03_register_live_called_after_each_containers_run,
+        test_comp03_deregister_live_called_in_every_finally,
+        test_comp03_startup_orphan_reap_filters_by_athena_label,
+        test_comp03_container_labels_include_pid_for_disambiguation,
+        # COMP-03 Phase 3: shutdown_event + request_shutdown + reap_all_live
+        test_comp03_reap_all_live_force_removes_every_registered_container,
+        test_comp03_reap_all_live_is_idempotent_and_tolerates_api_error,
+        test_comp03_request_shutdown_sets_event_and_reaps,
+        test_comp03_shutdown_event_initialised_in_init,
+        test_comp03_reap_all_live_uses_snapshot_not_live_iteration,
         # UPD-01 step 3: build-side stamping + check_build matching + Guard B
         test_highest_asg_update_reads_remote_ledger,
         test_asg_next_n_is_per_file_and_cumulative,
