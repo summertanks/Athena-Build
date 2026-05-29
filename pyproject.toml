@@ -74,15 +74,27 @@ line-length = 100
 target-version = "py39"
 
 [tool.ruff.lint]
-# Conservative baseline ruleset — only "almost certainly a bug" checks
-# turned on so the first CI run reflects the codebase honestly rather
-# than failing on style choices we haven't decided about.  The full
-# ruff catalogue (E / W / B / I / UP / SIM / etc.) can be enabled
-# incrementally as we agree on house style; the right gate for that
-# is a follow-on ticket, not this one.
+# F + E9 baseline (pyflakes + syntax-level pycodestyle) was widened
+# 2026-05-29 to include a handful of high-signal families that fire
+# mostly on real bugs rather than style preferences:
+#   B   — flake8-bugbear: real-bug catchers (B904 raise-from, B023
+#         late-binding closure, B011 assert-False, etc.)
+#   C4  — flake8-comprehensions: unnecessary dict()/list() calls
+#   PIE — flake8-pie: anti-patterns (PIE810 multiple startswith/
+#         endswith → tuple)
+#   W   — pycodestyle warnings (W291/W292/W293 whitespace)
+# Still deferred (would need broader cleanup before turning on):
+#   E   (full pycodestyle — line-length etc.), UP (pyupgrade —
+#   quoted-annotation removal, literal rewrites), I (isort —
+#   import ordering), N (naming), RUF (mixed quality), SIM
+#   (opinionated).  Each is its own follow-on.
 select = [
     "F",      # pyflakes — unused imports, undefined names, redefined symbols
     "E9",     # pycodestyle errors that are syntax-level (E901 SyntaxError, etc.)
+    "B",      # flake8-bugbear — likely-bug catchers
+    "C4",     # flake8-comprehensions — unnecessary container calls
+    "PIE",    # flake8-pie — anti-patterns
+    "W",      # pycodestyle warnings — whitespace
 ]
 ignore = [
     "F401",   # unused imports — many tui re-exports + intentional warm-up imports

@@ -196,7 +196,7 @@ class _ChrootMixin:
                                  capture_output=True, text=True)
         _not_installed = [
             l.split()[0] for l in _status.stdout.splitlines()
-            if l.endswith('\thalf-configured') or l.endswith('\tunpacked')
+            if l.endswith(('\thalf-configured', '\tunpacked'))
         ] if _status.returncode == 0 else []
 
         if _not_installed:
@@ -1053,7 +1053,7 @@ class _ChrootMixin:
         # Two parts here - copy files and then run commands
         # TODO: Let it load from file rather than hard coding it, risk of something malicious coming in though
         # Parse files to copy
-        for root, dirs, files in os.walk(self._dir_preinstall_patch):
+        for root, _dirs, files in os.walk(self._dir_preinstall_patch):
 
             if len(files) == 0:
                 continue
@@ -1129,7 +1129,7 @@ class _ChrootMixin:
         permission fixups belong in the overlay files themselves or in
         generate_system_configs().
         """
-        for root, dirs, files in os.walk(self._dir_postinstall_patch):
+        for root, _dirs, files in os.walk(self._dir_postinstall_patch):
             if not files:
                 continue
 
