@@ -17486,8 +17486,14 @@ def test_comp03_phase4_build_one_source_skip_src_returns_skipped():
 
     class _FakeConfig:
         tunnel_packages = []
+
+    class _FakeContainer:
+        # Present so the assert-non-None at the top of _build_one_source
+        # passes; the skip-src early-return doesn't touch it otherwise.
+        asg_ledger = None
     _sess.cache = _FakeCache()
     _sess.config = _FakeConfig()
+    _sess.container = _FakeContainer()
 
     class _Src:
         package = 'skipped-pkg'

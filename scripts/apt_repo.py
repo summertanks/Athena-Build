@@ -607,8 +607,7 @@ def remote_reindex_and_sign(
                 try:
                     _text = _remote_scan_packages(
                         ssh_cmd, userhost, remote_root, _rel, udeb=_udeb)
-                    _ok = _text is not None
-                    if _ok:
+                    if _text is not None:
                         _abs = os.path.join(staging, _rel)
                         os.makedirs(_abs, exist_ok=True)
                         _out = os.path.join(_abs, 'Packages')
@@ -618,9 +617,11 @@ def remote_reindex_and_sign(
                                and _write_subdir_release(
                                    _abs, _suite, _codename, _comp, arch,
                                    password))
+                    else:
+                        _ok = False
                 finally:
                     _spin.done()
-                if not _ok:
+                if not _ok or _text is None:
                     return None
                 if not _udeb and _comp not in _populated:
                     _populated.append(_comp)

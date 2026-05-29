@@ -211,6 +211,13 @@ class BuildContainer:
             'com.athena.build': '1',
             'com.athena.pid': str(os.getpid()),
         }
+        # UPD-01 stamping ledger: {package_name: [asg-stamped versions
+        # already published]}.  Set from build.py around _do_update_build
+        # before each update-mode build and cleared after; remains None
+        # for a plain (non-update) `source build` so the stamper passes
+        # through pristine.  Declared here for type narrowing — the
+        # runtime setters and the stamper consumer both read this name.
+        self.asg_ledger: 'dict[str, list[str]] | None' = None
 
         # COMP-03 Phase 1: sweep any per-worker scratch dirs left over
         # from a prior run (kill -9 / OOM / docker-daemon crash skipped

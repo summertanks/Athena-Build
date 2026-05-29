@@ -679,7 +679,7 @@ def _restamp_control_text(content: str, old_version: str,
     for _line in content.splitlines(keepends=True):
         if _line and _line[0] not in (' ', '\t'):
             _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
-            _in_target = bool(_m) and _m.group(1) in _NMU_STRIP_FIELDS
+            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
         if _in_target:
             _new_lines.append(_pin_re.sub(lambda _m: f'(= {new_version})', _line))
         else:
