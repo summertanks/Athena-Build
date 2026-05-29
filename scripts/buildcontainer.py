@@ -187,6 +187,31 @@ class BuildContainer:
 
         self.image = image
 
+        # COMP-03 Phase 2: live-container registry.  Every container
+        # spawned by this BuildContainer (build / SEC-05 preview /
+        # grub-mkrescue) registers here on `containers.run()` return and
+        # deregisters in its finally block, so Phase 3's reap_all_live()
+        # has an in-process list to force-remove on SIGINT.
+        # Lock guards the dict against concurrent register/deregister
+        # under the parallel ThreadPoolExecutor (Phase 4).
+        self._live: 'dict[str, docker.models.containers.Container]' = {}
+        self._live_lock = threading.Lock()
+        # COMP-03 Phase 3: shutdown_event is set by request_shutdown()
+        # (which also reaps all live containers).  Parallel workers
+        # (Phase 4) consult it between scheduled jobs to bail out
+        # without starting new builds; SIGINT-driven cleanup flips it
+        # so reap_all_live() unblocks workers stuck in container.wait()
+        # / container.logs(stream=True).
+        self.shutdown_event = threading.Event()
+        # The label every spawned container carries — used by the
+        # startup orphan reap below + by the `docker ps` filter
+        # operators can run from another terminal during a build.
+        # com.athena.pid disambiguates which python process owns each.
+        self._container_labels = {
+            'com.athena.build': '1',
+            'com.athena.pid': str(os.getpid()),
+        }
+
         # COMP-03 Phase 1: sweep any per-worker scratch dirs left over
         # from a prior run (kill -9 / OOM / docker-daemon crash skipped
         # the finally-block rmtree).  Best-effort — a permission error
@@ -207,6 +232,28 @@ class BuildContainer:
                     f"build-stage dir(s) from previous run")
         except OSError:
             pass
+
+        # COMP-03 Phase 2: sweep any leftover docker containers from a
+        # prior run that didn't reach its build()/run_grub_mkrescue/
+        # capture finally-block (kill -9 / SIGSEGV / daemon restart).
+        # Filter by our owner label so we never touch unrelated
+        # containers running on the host.  Best-effort.
+        try:
+            assert self.client is not None
+            _orphans = self.client.containers.list(
+                all=True, filters={'label': 'com.athena.build=1'})
+            for _c in _orphans:
+                try:
+                    _c.remove(force=True)
+                except docker.errors.APIError as e:
+                    logger.warning(
+                        f"orphan-reap: cannot remove {_c.short_id}: {e}")
+            if _orphans:
+                tui.console.print(
+                    f"BuildContainer: reaped {len(_orphans)} orphan "
+                    f"container(s) from previous run")
+        except docker.errors.APIError as e:
+            logger.warning(f"orphan-reap: docker error: {e}")
 
 
     @staticmethod
@@ -248,6 +295,77 @@ class BuildContainer:
             f"host filesystem and become root.  Use unix:// or loopback "
             f"tcp://127.0.0.1, or set up TLS and add 'tls=true' to the URL."
         )
+
+    def _register_live(self, container) -> None:
+        """COMP-03 Phase 2: track a freshly-started container in the
+        in-process registry.  Phase 3's reap_all_live() iterates this
+        registry under _live_lock to force-remove every owned
+        container on SIGINT.  Idempotent (re-registering an existing
+        short_id is a no-op).
+        """
+        with self._live_lock:
+            self._live[container.short_id] = container
+
+    def _deregister_live(self, container) -> None:
+        """COMP-03 Phase 2: drop a container from the registry after
+        its build()/preview/grub-mkrescue finally-block reaches the
+        normal cleanup path.  Idempotent (a missing key is fine —
+        reap_all_live() may have removed it concurrently).
+        """
+        with self._live_lock:
+            self._live.pop(container.short_id, None)
+
+    def reap_all_live(self) -> int:
+        """COMP-03 Phase 3: force-remove every container currently in
+        the live registry.  Iterates a snapshot of the registry (taken
+        under _live_lock) so workers can keep deregistering as they
+        notice their containers vanish.  Returns the count of reaped
+        containers — caller logs the number.
+
+        Idempotent: calling twice with no new containers in between
+        is a no-op (the second pass sees an empty snapshot).
+
+        Force-removing a container unblocks worker threads stuck
+        inside `container.wait()` (raises docker.errors.NotFound) and
+        the `container.logs(stream=True)` generator (StopIteration as
+        the daemon's chunked stream ends).  Both bubble up to the
+        worker's finally block, which calls _deregister_live() again
+        and then container.remove(force=True) — the latter then
+        raises NotFound which the existing except APIError catches.
+        """
+        with self._live_lock:
+            _snapshot = list(self._live.values())
+        _reaped = 0
+        for _c in _snapshot:
+            try:
+                _c.remove(force=True)
+                _reaped += 1
+            except docker.errors.APIError as e:
+                # NotFound is fine — race with the worker's own
+                # finally block that already removed the container.
+                logger.warning(
+                    f"reap_all_live: {_c.short_id}: {e}")
+        return _reaped
+
+    def request_shutdown(self) -> int:
+        """COMP-03 Phase 3: signal every parallel worker to stop and
+        force-reap every container they have in flight.  Sets
+        self.shutdown_event (workers check between jobs) and calls
+        reap_all_live() (force-removes in-flight containers so workers
+        unblock from container.wait/logs immediately).
+
+        Returns the number of containers reaped, for the caller's log
+        message.  Idempotent — calling twice just resets nothing
+        and reap_all_live's second pass sees an empty registry.
+
+        Wired into the SIGINT chain by cmd_source_build's scoped hook
+        (Phase 4): on Ctrl+C during a parallel pool, the main thread
+        calls request_shutdown() → reap_all_live unblocks the workers
+        → the ThreadPoolExecutor drains within ~100ms instead of
+        waiting for 90-minute builds to finish.
+        """
+        self.shutdown_event.set()
+        return self.reap_all_live()
 
     @staticmethod
     def _hash_dockerfile(config_dir: str) -> str:
@@ -581,12 +699,14 @@ class BuildContainer:
             container = self.client.containers.run(
                 self._image_tag, command=["/bin/bash", "-c", cmd_str],
                 detach=True, auto_remove=False,
+                labels=self._container_labels,
                 volumes={
                     self.src_path:    {'bind': '/source', 'mode': 'rw'},
                     _scratch_dir:     {'bind': '/repo',   'mode': 'rw'},
                     src_patch_path:   {'bind': '/patch',  'mode': 'rw'},
                 },
             )
+            self._register_live(container)
             logger.info(
                 f"Build container {container.short_id} started for {src_pkg.package}"
             )
@@ -680,6 +800,12 @@ class BuildContainer:
                         f"Failed to remove container {container.short_id} "
                         f"for {src_pkg.package}: {e}"
                     )
+                # COMP-03 Phase 2: drop from registry AFTER the remove
+                # attempt so reap_all_live (Phase 3) can still find the
+                # container if it fires before we get here.  Deregister
+                # always — even on remove failure, the container is no
+                # longer being managed by this worker.
+                self._deregister_live(container)
             # COMP-03 Phase 1: rmtree the per-worker scratch dir even on
             # failure paths (the container may have copied .debs in
             # before crashing).  ignore_errors so a fs issue here can't
@@ -794,7 +920,9 @@ class BuildContainer:
             container = self.client.containers.run(
                 self._image_tag, command=["/bin/bash", "-c", cmd_str],
                 detach=True, auto_remove=False,
+                labels=self._container_labels,
             )
+            self._register_live(container)
             _buf: bytes = b''
             for _line in container.logs(stream=True):
                 _buf += _line
@@ -817,6 +945,7 @@ class BuildContainer:
                     container.remove(force=True)
                 except docker.errors.APIError:
                     pass
+                self._deregister_live(container)
 
     def run_grub_mkrescue(self, staging_dir: str, output_iso: str,
                             password: str) -> 'tuple[bool, str, str]':
@@ -908,11 +1037,13 @@ class BuildContainer:
                 self._image_tag,
                 command=['/bin/bash', '-c', cmd_str],
                 detach=True, auto_remove=False,
+                labels=self._container_labels,
                 volumes={
                     staging_dir: {'bind': '/staging', 'mode': 'rw'},
                     _output_dir: {'bind': '/output',  'mode': 'rw'},
                 },
             )
+            self._register_live(container)
             logger.info(
                 f"grub-mkrescue container {container.short_id} started "
                 f"(staging={staging_dir}, output={output_iso})"
@@ -945,6 +1076,7 @@ class BuildContainer:
                         f"Failed to remove grub-mkrescue container "
                         f"{container.short_id}: {e}"
                     )
+                self._deregister_live(container)
 
     def _normalize_built_artifacts(self, src_pkg,
                                    built_files: 'list[str]',
