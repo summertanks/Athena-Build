@@ -15,48 +15,74 @@ ARG ARCHIVE_KEY
 ARG SECURITY_ARCHIVE_KEY
 ARG SNAPSHOT_TS
 
-# CONF-15: pin the toolchain layer to OUR snapshot, not the live Debian
-# mirror.  Pre-CONF-15 this RUN used the base image's stock sources.list
-# (= live deb.debian.org); when the live mirror advanced past our
-# `[Snapshot] Timestamp` pin, pre-installed library packages ended up
-# NEWER than what our snapshot/repo ship.  dpkg-shlibdeps inside the
-# build container then read the newer .shlibs and embedded
-# minimum-version constraints (e.g. wpasupplicant-udeb →
-# libcrypto3-udeb (>= 3.0.20)) pointing at versions we don't carry —
-# the 2026-05-23 false-bind.
+# CONF-15 (revised — install-then-realign): pin the toolchain layer to
+# OUR snapshot, but in two steps so apt's `install` step uses the live
+# mirror it already knows packages exist on, then the snapshot view
+# realigns the installed set.
 #
-# The fix is in three steps below:
-#   (a) wipe the base image's apt sources (both legacy sources.list and
-#       deb822 sources.list.d/*.{sources,list}) — bookworm-slim's default
-#       deb822 file otherwise keeps feeding apt live URLs even with our
-#       sources.list rewrite.
-#   (b) write a one-line snapshot.debian.org source pinning EVERY apt
-#       transaction in the image to OUR snapshot TS, plus an apt
-#       preferences file at Pin-Priority 1001 so version downgrades
-#       (when our snapshot is older than the base image's pre-installed
-#       library set) are forced rather than refused.
-#   (c) `dist-upgrade --allow-downgrades` to align the base image's
-#       pre-installed library set with the snapshot view BEFORE
-#       installing the toolchain.  Without this, pre-installed
-#       libraries from the live base image stay newer than snapshot.
+# Why two steps?  An earlier single-step attempt (rewrite sources to
+# snapshot FIRST, then `apt-get install -y <toolchain>`) failed at image
+# build with ~15 packages reported "Unable to locate" — debhelper,
+# python3, gettext, autoconf, automake, libtool, po-debconf, etc.  The
+# same TS works for per-build `apt-get install` of build-deps inside the
+# resulting image; the difference is that per-build container starts with
+# the toolchain already installed (so apt-get install <build-dep> only
+# needs to find the build-deps, not the toolchain).  At image-build time
+# the toolchain is the FIRST resolve against snapshot, and something
+# about the index at snapshot.debian.org makes those names not surface
+# despite `apt-get update` succeeding.  Diagnosed but not root-caused;
+# the install-then-realign shape sidesteps it entirely.
 #
-# Once (a)-(c) run, `apt-get install -y <toolchain>` resolves entirely
-# against the snapshot.  Pre-CONF-15, this `apt-get install` was the
-# contamination point.  Post-CONF-15, the per-build dist-upgrade in
-# BuildContainer.build (line 689) becomes a no-op and has been removed.
+# Step (a) — apt-get install <toolchain> against the base image's
+# default sources.list.  This is the LIVE mirror (deb.debian.org), which
+# we know carries every toolchain package by name.  Same shape the
+# pre-CONF-15 Dockerfile used; the contamination problem CONF-15 was
+# fixing happens at PER-BUILD time, not here.
 #
-# Library `-dev` packages still MUST NOT be pre-installed here — they
-# come from each source's Build-Depends at per-build time, against the
-# snapshot mirrors written by _write_snapshot_sources_cmd (which include
-# the full mirror set: main + security + updates).
+# Step (b) — wipe sources, write snapshot sources (main + -updates +
+# -security at the SAME TS), and apt-get update.  After this point the
+# container's apt view is at snapshot.
+#
+# Step (c) — `apt-get -y --allow-downgrades dist-upgrade` realigns the
+# installed package set with the snapshot view.  Pre-installed library
+# packages that are newer than snapshot get downgraded; missing ones
+# get pulled.  Pin-Priority 1001 on snapshot.debian.org origin forces
+# the downgrade direction (default priority 500 keeps installed-newer).
+#
+# After (a)+(b)+(c), the image's installed set is at snapshot.  Per-build
+# inside this image starts already-aligned; no per-build dist-upgrade
+# needed.
+#
+# Library `-dev` packages still MUST NOT be installed in step (a) —
+# their .shlibs would be embedded in fresh builds at the LIVE mirror
+# version even after the realign.  Step (a) keeps to language-agnostic
+# toolchain (build-essential, python, autoconf, etc.); -dev packages
+# come from each source's Build-Depends at per-build time.
+#
+# SNAPSHOT_TS must be passed by the build-args; an empty SNAPSHOT_TS
+# fails the build LOUDLY rather than silently leaving the image at the
+# live mirror (which would re-introduce the contamination problem).
+
+# (a) toolchain install against the live mirror.
 RUN set -eux; \
-    rm -f /etc/apt/sources.list \
-          /etc/apt/sources.list.d/*.sources \
-          /etc/apt/sources.list.d/*.list; \
+    apt-get update; \
+    apt-get install -y \
+        net-tools iputils-ping util-linux \
+        bc bison build-essential cpio flex ca-certificates less sudo keyboard-configuration \
+        vim gettext debhelper texinfo groff media-types gperf procps \
+        python3-minimal python3 dh-python python3-distutils python3-debian python3-gpg \
+        apt-file autoconf autotools-dev automake gettext debhelper diffstat zip libtool po-debconf; \
+    apt-get clean
+
+# (b)+(c) switch sources to OUR snapshot and realign the installed set.
+RUN set -eux; \
     if [ -z "${SNAPSHOT_TS}" ]; then \
         echo "ERROR: SNAPSHOT_TS build-arg is empty — pass it from BuildContainer.__init__" >&2; \
         exit 1; \
     fi; \
+    rm -f /etc/apt/sources.list \
+          /etc/apt/sources.list.d/*.sources \
+          /etc/apt/sources.list.d/*.list; \
     { \
         echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE} main"; \
         echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-updates main"; \
@@ -66,14 +92,9 @@ RUN set -eux; \
         > /etc/apt/preferences.d/athena-snapshot; \
     apt-get update; \
     apt-get -y -o Acquire::Retries=5 --allow-downgrades dist-upgrade; \
-    apt-get install -y \
-        net-tools iputils-ping util-linux \
-        bc bison build-essential cpio flex ca-certificates less sudo keyboard-configuration \
-        vim gettext debhelper texinfo groff media-types gperf procps \
-        python3-minimal python3 dh-python python3-distutils python3-debian python3-gpg \
-        apt-file autoconf autotools-dev automake gettext debhelper diffstat zip libtool po-debconf; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
+
 # Enable IPv6
 RUN echo 'net.ipv6.conf.all.disable_ipv6=0' >> /etc/sysctl.conf
 RUN echo 'net.ipv6.conf.default.disable_ipv6=0' >> /etc/sysctl.conf

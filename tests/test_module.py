@@ -4909,14 +4909,24 @@ def test_conf15_dockerfile_pins_toolchain_to_snapshot():
     # 4. The Pin-Priority 1001 preferences file is written (forces
     # downgrade when our snapshot is older than the base-image pkg set).
     assert 'Pin-Priority: 1001' in _body
-    # 5. apt-get install runs AFTER the sources.list rewrite.  Greps by
-    # ordering: `apt-get install` index must come after `sources.list`
-    # rewrite + apt-get update.
-    _idx_rewrite = _body.find('echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}')
-    _idx_update = _body.find('apt-get update', _idx_rewrite)
-    _idx_install = _body.find('apt-get install', _idx_update)
-    assert 0 < _idx_rewrite < _idx_update < _idx_install, (
-        "Dockerfile ordering must be: sources rewrite → apt update → apt install")
+    # 5. Two-step shape: `apt-get install` (against the live mirror)
+    # runs BEFORE the sources.list rewrite + dist-upgrade.  Single-step
+    # rewrite-then-install failed at image build with ~15 "Unable to
+    # locate" errors (debhelper, python3, gettext, ...) — diagnosed but
+    # not root-caused.  Install-then-realign sidesteps it.
+    #
+    # Strip comment lines so historical references in the explanatory
+    # block don't false-positive on the keyword.
+    _code_only = '\n'.join(
+        _line for _line in _body.splitlines()
+        if not _line.lstrip().startswith('#'))
+    _idx_install = _code_only.find('apt-get install -y')
+    _idx_rewrite = _code_only.find(
+        'echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}')
+    _idx_dist_upgrade = _code_only.find('--allow-downgrades dist-upgrade')
+    assert 0 < _idx_install < _idx_rewrite < _idx_dist_upgrade, (
+        "Dockerfile ordering must be: apt-get install (live) → rewrite "
+        "sources to snapshot → dist-upgrade --allow-downgrades to realign")
     # 6. SNAPSHOT_TS guard — empty TS must fail the build loudly, not
     # silently default to live URLs.
     assert '-z "${SNAPSHOT_TS}"' in _body, (
