@@ -33,7 +33,7 @@ VALID_CONSTRAINTS = frozenset({'=', '>=', '<=', '>>', '<<', '>', '<'})
 # next-time-we-need-it edit happens in one place and is greppable.
 #
 # _DEFAULT_CONTAINER_RELEASE — Debian release the build container
-# pins to when [Build] CONTAINER_RELEASE is absent.  Today's only
+# pins to when [Base] CONTAINER_RELEASE is absent.  Today's only
 # tested target is bookworm; trixie would work but is unverified.
 # A non-Debian distro under COMP-11 would override this.
 _DEFAULT_CONTAINER_RELEASE = 'bookworm'
@@ -1631,15 +1631,19 @@ class BuildConfig:
             self.build_codename     = _strip_quotes(config_parser.get('Build', 'CODENAME'))
             self.build_version      = _strip_quotes(config_parser.get('Build', 'VERSION'))
 
-            self.container_release = config_parser.get('Build', 'CONTAINER_RELEASE', fallback=_DEFAULT_CONTAINER_RELEASE)
+            # CONTAINER_RELEASE lives under [Base] — it's a base-system
+            # pin (Debian release the build container tracks), not an
+            # Athena-build knob.  Moved from [Build] 2026-05-29.
+            self.container_release = config_parser.get(
+                'Base', 'CONTAINER_RELEASE',
+                fallback=_DEFAULT_CONTAINER_RELEASE)
             self.docker_server = config_parser.get('Build', 'DOCKER_SERVER', fallback='')
             # When true, depth-1 Recommends of selected packages are
             # pulled into selected_pkgs / selected_srcs (downloaded but not
             # built by default; not installed in chroot).  See build.conf for
             # the full operator-facing rationale.
-            self.include_recommends_in_repo = config_parser.getboolean(
-                'Build', 'IncludeRecommendsInRepo', fallback=True
-            )
+            self.include_recommends = config_parser.getboolean(
+                'Build', 'IncludeRecommends', fallback=True)
             # COMP-09: default size for `iso build disk` output.  Sparse
             # qcow2 — actual on-disk footprint is much smaller (~chroot
             # size + metadata).  Operator overrides via `iso build disk

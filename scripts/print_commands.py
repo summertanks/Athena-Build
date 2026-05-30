@@ -107,8 +107,8 @@ def _print_config(session, *_extras) -> None:
     tui.console.print(f"    Build version       : {cfg.build_version}")
     tui.console.print(
         f"    Recommends in repo  : "
-        f"{getattr(cfg, 'include_recommends_in_repo', False)}  "
-        f"([Build] IncludeRecommendsInRepo)"
+        f"{getattr(cfg, 'include_recommends', False)}  "
+        f"([Build] IncludeRecommends)"
     )
     if getattr(cfg, 'build_profiles', None):
         tui.console.print(f"    Build profiles      : {', '.join(sorted(cfg.build_profiles))}")
@@ -291,7 +291,7 @@ def _print_stats(session, *_extras) -> None:
         # invisible and confused the operator on the first real run.
         _extras_n = len(getattr(dt, 'extras_pkg_names', set()))
         _extras_only_n = len(getattr(dt, 'extras_src_names', set()))
-        _toggle = getattr(cfg, 'include_recommends_in_repo', False)
+        _toggle = getattr(cfg, 'include_recommends', False)
         tui.console.print(
             f"  Dep tree: extras (recom) : {_extras_n} pkg(s) "
             f"from {_extras_only_n} extras-only source(s)  "
@@ -498,7 +498,7 @@ def _print_extras(session, *_extras) -> None:
     if not extras_pkg_names:
         tui.console.print(
             "No recommended extras pulled "
-            "(check [Build] IncludeRecommendsInRepo in build.conf)"
+            "(check [Build] IncludeRecommends in build.conf)"
         )
         return
     # Map binary name → source name for display.  Walk selected_srcs and

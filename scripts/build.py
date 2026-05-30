@@ -1044,8 +1044,8 @@ class BuildSession:
             f"{len(self.dep_tree.pool_extras_pkg_names)}"
         )
 
-        # When [Build] IncludeRecommendsInRepo is on (default)
-        if self.config.include_recommends_in_repo:
+        # When [Build] IncludeRecommends is on (default)
+        if self.config.include_recommends:
             _added = self.dep_tree.pull_recommends_extras()
             if _added:
                 console.print(
@@ -1053,7 +1053,7 @@ class BuildSession:
             else:
                 console.print("EXTRAS: 0 recommends added — if unexpected check logs ", tui.COLOR_INFO)
         else:
-            console.print("EXTRAS: disabled — check IncludeRecommendsInRepo", tui.COLOR_INFO)
+            console.print("EXTRAS: disabled — check IncludeRecommends", tui.COLOR_INFO)
 
         # --- Validation ---------------------------------------------------------
         console.print("Checking Breaks and Conflicts...")
