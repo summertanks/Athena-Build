@@ -1,12 +1,20 @@
-# Publishing the Asgard apt repo to a VM (COMP-02)
+# Publishing the Asgard apt repo (COMP-02)
 
-How to host the built apt repository on a VM (cloud or local) and publish to
-it over rsync + SSH, so an installed Asgard system can `apt update` /
-`apt install` from it.
+How to publish the built apt repository so an installed Asgard system can
+`apt update` / `apt install` from it.  Two transports are supported:
 
-This is the host-without-limits alternative to GitHub Pages, which can't
-hold the repo (GitHub rejects >100 MB files and Pages caps a site at ~1 GB;
-the pool is multiple GB).
+- **`repo publish ssh`** — to a VM (cloud or local) over rsync + SSH; an
+  HTTP server on the VM (nginx) serves the result.  Use this when the repo
+  needs to be reachable from multiple machines.
+- **`repo publish local <path>`** — to a local filesystem path: USB stick,
+  mounted NFS / SMB share, a web server's docroot on the build host, etc.
+  Use this for sneakernet, single-host installs, or when staging a tree
+  before later transport.
+
+Both transports respect `[Repo] ExternalEnabled`; disabled = manifest-only
+(no transport at all).  Either is a host-without-limits alternative to
+GitHub Pages, which can't hold the repo (GitHub rejects >100 MB files and
+Pages caps a site at ~1 GB; the pool is multiple GB).
 
 ## How it fits together
 
@@ -15,6 +23,11 @@ build box                         VM (140.245.198.222)            apt clients
 ─────────                         ────────────────────            ───────────
 repo/ or publish/   ──rsync+ssh──▶  ~/asgard/{dists,pool}  ──http──▶  apt update
   (repo index …)     repo publish     (served by nginx)      AptSourceURL
+
+                       OR, for a local destination:
+
+repo/ or publish/   ────rsync────▶  /mnt/usb/asgard/dists/  (or any local path)
+                    repo publish local <path>
 ```
 
 - **`repo publish ssh …`** rsyncs the `.deb`s to the VM **additively**
@@ -24,7 +37,12 @@ repo/ or publish/   ──rsync+ssh──▶  ~/asgard/{dists,pool}  ──http�
   what's actually there — `full` and `minimal` never clobber each other) and
   **signs locally** (the signing key never leaves the build box).  No separate
   `repo index` step is needed.
-- **nginx** on the VM serves the synced directory over HTTP.
+- **`repo publish local <path>`** runs the same flow without the ssh wrapper:
+  rsync local-to-local (same additive + `--ignore-existing` invariants),
+  `dpkg-scanpackages` in-process against `<path>/dists/`, sign locally, refresh
+  the manifest.  If `<path>` doesn't exist, you'll be prompted to `mkdir -p`.
+- **nginx** on the VM (or any HTTP server pointed at the local destination)
+  serves the synced directory over HTTP.
 - The installed system reads it via **`AptSourceURL`** (written into
   `/etc/apt/sources.list.d/athena.list`).
 
@@ -119,10 +137,12 @@ If that's `200 OK` but it's unreachable from outside, it's the firewall.
   sudo netfilter-persistent save        # persist across reboot (iptables-persistent)
   ```
 
-## 3. Publish (indexing happens on the VM)
+## 3. Publish (indexing happens at the destination)
 
 No separate `repo index` step — `repo publish` pushes the `.deb`s and then
-rebuilds + signs the index:
+rebuilds + signs the index.
+
+### SSH transport
 
 ```
 repo publish ssh full       # push the whole pool's .debs → VM
@@ -139,10 +159,49 @@ metadata, and refreshes the local signed manifest.  Because the index is
 rebuilt from the remote, `full` then `minimal` (or either order) leaves the
 published `Packages` as the **union** on the remote — no clobber.
 
-**Local-only testing (no VM):** `repo external disable` → `repo publish ssh
-full` indexes into the local signed manifest and skips rsync.  `repo external
-enable` returns to publishing (onto an empty remote it rebaselines
-`current = base`).
+### Local transport
+
+```
+repo publish local /mnt/usb/asgard full        # whole pool → local path
+# or
+repo publish local /var/www/asgard minimal     # runtime subset only
+```
+
+Same flow as the SSH transport but in-process:
+- rsync runs local-to-local (no `-e ssh`),
+- `dpkg-scanpackages` runs against `<path>/dists/` directly,
+- signing happens locally as before,
+- the local signed manifest reflects what was just laid down.
+
+If `<path>` doesn't exist you'll be prompted (`Create <path>?  y/n`) to
+`mkdir -p` it.  Useful for sneakernet (USB stick → offline target), staging
+under a web docroot served by a local nginx, or single-host testing.
+
+### Local-only testing (no destination at all)
+
+`repo external disable` → `repo publish ssh full` indexes into the local
+signed manifest and skips rsync.  `repo external enable` returns to
+publishing (onto an empty remote it rebaselines `current = base`).
+
+## 3a. Summary (inspect a published destination)
+
+To verify the state of an already-published destination without re-publishing:
+
+```
+repo summary ssh                       # against [Repo] PublishSshTarget
+repo summary local /mnt/usb/asgard     # against any local path
+```
+
+Reports for both transports:
+- destination + suites discovered
+- file count + total bytes under `dists/`
+- per-suite `InRelease` signature (verifies against our pubkey) + its
+  `Date:` field
+- snapshot pin state (base / published / current) from `config/snapshot.state`
+- local signed manifest tally (binary versions / packages tracked — the
+  `+asg uN` bump authority)
+
+Read-only — never mutates the destination.
 
 ## 4. Point the installed system at it
 

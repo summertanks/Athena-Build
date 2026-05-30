@@ -3213,37 +3213,23 @@ class BuildSession:
         return True
 
     def _print_publish_size_summary(self) -> None:
-        """Summarise publish/ + warn about GitHub's 100 MB per-file push
-        limit (skips any .git/ checkout)."""
+        """Summarise publish/ (the local staging dir for `repo index minimal`).
+        File count + total size — useful for a quick "what am I about to
+        ship?" before invoking `repo publish ssh|local minimal`."""
         _root = self.config.dir_publish
         _total = 0
         _n = 0
-        _oversized: 'list[tuple[str, int]]' = []
         for _dp, _dirs, _files in os.walk(_root):
-            if '.git' in _dp.split(os.sep):
-                continue
             for _f in _files:
                 _p = os.path.join(_dp, _f)
                 if not os.path.isfile(_p):
                     continue
-                _sz = os.path.getsize(_p)
-                _total += _sz
+                _total += os.path.getsize(_p)
                 _n += 1
-                if _sz > 100 * 2 ** 20:
-                    _oversized.append((os.path.relpath(_p, _root), _sz))
         console.print(
             f"publish/: {_n} file(s), {_total // 2 ** 20} MB total",
             tui.COLOR_HIGHLIGHT,
         )
-        if _oversized:
-            console.print(
-                "  WARNING: over GitHub's 100 MB push limit — `repo publish "
-                "git minimal` will refuse these:",
-                tui.COLOR_WARNING,
-            )
-            for _rel, _sz in _oversized:
-                console.print(f"    {_sz // 2 ** 20:5d} MB  {_rel}",
-                              tui.COLOR_WARNING)
 
     def cmd_audit_external(self, *args):
         """COMP-02: audit the EXTERNALLY-published repo at [Repo]
@@ -3681,6 +3667,199 @@ class BuildSession:
 
         self._publish_finalize(scope, _main_pkgs, _dest)
 
+    def cmd_repo_summary(self, *args):
+        """COMP-02: print a summary of the published repo at the destination.
+
+        Usage:
+          repo summary ssh                 (against [Repo] PublishSshTarget)
+          repo summary local <path>        (against a local filesystem path)
+
+        Reports:
+          - destination + suites discovered there
+          - file count + total bytes under <dest>/dists/
+          - per-suite InRelease signature (verifies against our pubkey) +
+            its `Date:` field
+          - snapshot pin state (base / published / current) from
+            config/snapshot.state
+          - local signed manifest tally (binary versions / source packages
+            tracked — = the +asg uN bump authority)
+
+        Read-only — never mutates the destination."""
+        _kind = args[0] if args else ''
+        if _kind == 'ssh':
+            return self._summary_via_ssh()
+        if _kind == 'local':
+            _path = args[1] if len(args) > 1 else ''
+            if not _path:
+                console.print("Usage: repo summary local <path>")
+                return
+            return self._summary_via_local(_path)
+        console.print("Usage: repo summary ssh")
+        console.print("       repo summary local <path>")
+
+    def _summary_via_ssh(self) -> None:
+        """COMP-02 summary via the ssh transport — ssh out to the configured
+        PublishSshTarget and inspect dists/ in place (no fetch of pool .debs;
+        just stat + cat InRelease)."""
+        _target = self.config.publish_ssh_target
+        if not _target:
+            console.print(
+                "repo summary: [Repo] PublishSshTarget is unset.",
+                tui.COLOR_ERROR)
+            return
+        _dist_id = self.config.build_base_id
+        if ':' in _target:
+            _userhost, _basepath = _target.split(':', 1)
+        else:
+            _userhost, _basepath = _target, ''
+        _root_path = (_basepath.rstrip('/') + '/' + _dist_id
+                      if _basepath else _dist_id)
+        _ssh = ['ssh']
+        if self.config.publish_ssh_key:
+            _ssh += ['-i', self.config.publish_ssh_key]
+
+        def _has_inrelease(suite: str) -> bool:
+            _r = subprocess.run(
+                _ssh + [_userhost, 'test', '-f',
+                        f'{_root_path}/dists/{suite}/InRelease'],
+                capture_output=True, text=True)
+            return _r.returncode == 0
+
+        def _read_inrelease(suite: str):
+            _r = subprocess.run(
+                _ssh + [_userhost, 'cat',
+                        f'{_root_path}/dists/{suite}/InRelease'],
+                capture_output=True, text=True)
+            return _r.stdout if _r.returncode == 0 else None
+
+        def _walk():
+            _r = subprocess.run(
+                _ssh + [_userhost,
+                        f'find {_root_path}/dists -type f '
+                        f'-printf "%s\\n" 2>/dev/null'],
+                capture_output=True, text=True)
+            _sizes = [int(_x) for _x in _r.stdout.split() if _x.isdigit()]
+            return len(_sizes), sum(_sizes)
+
+        self._summarize_destination(
+            f'ssh://{_userhost}:{_root_path}',
+            _has_inrelease, _read_inrelease, _walk)
+
+    def _summary_via_local(self, local_path: str) -> None:
+        """COMP-02 summary via the local transport — stat the destination
+        directly."""
+        _dest = os.path.abspath(os.path.expanduser(local_path))
+        if not os.path.isdir(_dest):
+            console.print(
+                f"repo summary: {_dest} not found.", tui.COLOR_ERROR)
+            return
+
+        def _has_inrelease(suite: str) -> bool:
+            return os.path.isfile(
+                os.path.join(_dest, 'dists', suite, 'InRelease'))
+
+        def _read_inrelease(suite: str):
+            _p = os.path.join(_dest, 'dists', suite, 'InRelease')
+            try:
+                with open(_p) as _fh:
+                    return _fh.read()
+            except OSError:
+                return None
+
+        def _walk():
+            _n, _bytes = 0, 0
+            _dists_root = os.path.join(_dest, 'dists')
+            if os.path.isdir(_dists_root):
+                for _dp, _dirs, _files in os.walk(_dists_root):
+                    for _f in _files:
+                        _p = os.path.join(_dp, _f)
+                        if os.path.isfile(_p):
+                            _n += 1
+                            _bytes += os.path.getsize(_p)
+            return _n, _bytes
+
+        self._summarize_destination(
+            _dest, _has_inrelease, _read_inrelease, _walk)
+
+    def _summarize_destination(self, label: str, has_inrelease,
+                                read_inrelease, walk_files) -> None:
+        """Shared body of `_summary_via_{ssh,local}`.  Transport-specific bits
+        are the three callables:
+          has_inrelease(suite) → bool       — probe for InRelease at the dest
+          read_inrelease(suite) → str|None  — read its content (or None)
+          walk_files() → (n, bytes)         — count + sum of files under dists/
+
+        Everything else (signature verify, snapshot pin readout, manifest
+        tally) is destination-agnostic."""
+        import signing
+        import tempfile
+        _codename = self.config.build_codename.strip('"').strip("'")
+        console.print(f"repo summary @ {label}", tui.COLOR_HIGHLIGHT)
+
+        # 1. file walk under dists/
+        _n, _bytes = walk_files()
+        console.print(
+            f"  Files            : {_n:,} file(s)  "
+            f"{_bytes // (2 ** 20):,} MB")
+
+        # 2. per-suite InRelease signature + date
+        _keyring = signing.signing_pubkey_path(self.config)
+        _have_key = os.path.exists(_keyring)
+        for _suite in (_codename, f'{_codename}-debug'):
+            if not has_inrelease(_suite):
+                continue
+            _text = read_inrelease(_suite)
+            if _text is None:
+                console.print(
+                    f"  InRelease ({_suite}) : (could not read)",
+                    tui.COLOR_WARNING)
+                continue
+            _date = ''
+            for _line in _text.splitlines():
+                if _line.startswith('Date:'):
+                    _date = _line.split(':', 1)[1].strip()
+                    break
+            if not _have_key:
+                console.print(
+                    f"  InRelease ({_suite}) : (no pubkey at {_keyring} — "
+                    f"`key generate` first)", tui.COLOR_WARNING)
+            else:
+                with tempfile.TemporaryDirectory(
+                        prefix='athena-summary-') as _tmp:
+                    _gnupg = os.path.join(_tmp, 'gnupg')
+                    os.makedirs(_gnupg)
+                    os.chmod(_gnupg, 0o700)
+                    _inrel = os.path.join(_tmp, 'InRelease')
+                    with open(_inrel, 'w') as _fh:
+                        _fh.write(_text)
+                    _ok, _detail = utils.verify_inrelease(
+                        _inrel, _keyring, _gnupg)
+                if _ok:
+                    console.print(
+                        f"  InRelease ({_suite}) : [✓] {_detail}")
+                else:
+                    console.print(
+                        f"  InRelease ({_suite}) : [x] {_detail}",
+                        tui.COLOR_ERROR)
+            if _date:
+                console.print(f"                     dated {_date}")
+
+        # 3. snapshot pin state
+        _state = utils.read_snapshot_state(self.config)
+        console.print(
+            f"  Snapshot pins    : base      {_state.get('base', '(unset)')}")
+        console.print(
+            f"                     published {_state.get('published', '(unset)')}")
+        console.print(
+            f"                     current   {_state.get('current', '(unset)')}")
+
+        # 4. local signed manifest tally
+        _ledger = repo_audit.published_ledger(self.config)
+        _bins = sum(len(_v) for _v in _ledger.values())
+        console.print(
+            f"  Local manifest   : {_bins:,} binary version(s) across "
+            f"{len(_ledger):,} package(s)")
+
     def _rsync_streamed(self, label, src, dest, ssh_cmd, delete=False,
                         ignore_existing=False, filters=None):
         """rsync -aH (ADDITIVE by default) with --info=progress2, mirroring
@@ -3777,6 +3956,15 @@ class BuildSession:
                                    'PublishSshTarget (run `repo index full` first)',
             'publish ssh minimal': 'rsync the minimal publish/ to '
                                    'PublishSshTarget (run `repo index minimal` first)',
+            'publish local <path> [full|minimal]':
+                                   'COMP-02: copy + reindex at a local filesystem '
+                                   'destination (USB / NFS / web docroot); '
+                                   'missing <path> prompts to mkdir -p',
+            'summary ssh':         'COMP-02: summary of the ssh destination '
+                                   '(files, suites, InRelease signature + date, '
+                                   'snapshot pins, manifest tally) — read-only',
+            'summary local <path>':'COMP-02: same summary against a local '
+                                   'filesystem destination',
             'refresh':        'UPD-01: realise the selected current pin — rebuild '
                               'the published→current source delta, +asg-stamp, '
                               'merge-index, publish additively, prune (no target; '
@@ -3807,6 +3995,8 @@ class BuildSession:
             return self._group_help('repo', _table, f'index {_sub}')
         if action == 'publish':
             return self.cmd_repo_publish(*args)
+        if action == 'summary':
+            return self.cmd_repo_summary(*args)
         if action == 'external':
             return self.cmd_repo_external(*args)
         return self._group_help('repo', _table, action)

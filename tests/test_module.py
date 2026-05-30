@@ -5430,7 +5430,7 @@ def test_cmd_iso_build_requires_subaction():
         f"bare `iso build` must not invoke any handler, got {_called}")
 
 
-# ─── COMP-02: repo index minimal/full + publish git minimal ──────────────────
+# ─── COMP-02: repo index minimal/full + publish ssh/local ───────────────────
 
 def test_repo_index_dispatch():
     """`repo index full` (and bare `repo index`) → cmd_index_repo;
@@ -19562,6 +19562,108 @@ def test_cmd_repo_publish_dispatch_arg_parsing():
     assert 'repo publish local' in _fn
 
 
+def test_cmd_repo_summary_dispatch():
+    """`repo summary ssh` → _summary_via_ssh; `repo summary local <path>`
+    → _summary_via_local; bad usage prints both lines without raising."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess._summary_via_ssh = lambda *a, **kw: _calls.append(('ssh', a, kw))
+    _sess._summary_via_local = (
+        lambda *a, **kw: _calls.append(('local', a, kw)))
+
+    _sess.cmd_repo_summary('ssh')
+    assert _calls == [('ssh', (), {})], _calls
+    _calls.clear()
+
+    _sess.cmd_repo_summary('local', '/mnt/usb/asgard')
+    assert _calls == [('local', ('/mnt/usb/asgard',), {})], _calls
+    _calls.clear()
+
+    # No path → no dispatch.
+    _sess.cmd_repo_summary('local')
+    assert _calls == [], _calls
+
+    # Bad kind → no dispatch.
+    _sess.cmd_repo_summary('wat')
+    assert _calls == [], _calls
+
+
+def test_summary_via_local_reports_missing_dest():
+    """`repo summary local <missing-path>` errors clearly without touching the
+    fs."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _captured = []
+    _orig = build.console.print
+    build.console.print = (
+        lambda *a, **kw: _captured.append(' '.join(str(x) for x in a)))
+    try:
+        with tempfile.TemporaryDirectory() as _tmp:
+            _missing = os.path.join(_tmp, 'never-existed')
+            _sess._summary_via_local(_missing)
+            _path_was_created = os.path.isdir(_missing)
+    finally:
+        build.console.print = _orig
+    _out = '\n'.join(_captured)
+    assert 'not found' in _out, _out
+    assert not _path_was_created, "summary must NOT create the missing dest"
+
+
+def test_summarize_destination_skips_pubkey_check_when_missing():
+    """When the signing pubkey doesn't exist (`key generate` not yet run),
+    `_summarize_destination` reports it as such instead of crashing."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Cfg:
+        build_codename = 'thor'
+        # signing.signing_pubkey_path reads dir_gnupg; point at /nonexistent
+        dir_gnupg = '/nonexistent/path'
+        # repo_audit.published_ledger reads config/published.manifest
+        dir_config = '/nonexistent/config'
+        working_dir = '/nonexistent/work'
+    _sess.config = _Cfg()
+    # Make read_snapshot_state + published_ledger return safe defaults.
+    import utils as _utils
+    import repo_audit as _ra
+    _orig_state = _utils.read_snapshot_state
+    _orig_ledger = _ra.published_ledger
+    _utils.read_snapshot_state = lambda _c: {
+        'base': 'X', 'current': 'Y', 'published': 'Z'}
+    _ra.published_ledger = lambda _c: {}
+    _captured = []
+    _orig_print = build.console.print
+    build.console.print = (
+        lambda *a, **kw: _captured.append(' '.join(str(x) for x in a)))
+    try:
+        _sess._summarize_destination(
+            'TESTLABEL',
+            has_inrelease=lambda _s: True,
+            read_inrelease=lambda _s: (
+                "Origin: Athena\nDate: Fri, 28 May 2026 14:32:17 UTC\n"),
+            walk_files=lambda: (123, 1024 * 1024 * 50))
+    finally:
+        build.console.print = _orig_print
+        _utils.read_snapshot_state = _orig_state
+        _ra.published_ledger = _orig_ledger
+    _out = '\n'.join(_captured)
+    assert 'TESTLABEL' in _out, _out
+    assert '123 file(s)' in _out, _out
+    assert '50 MB' in _out, _out
+    assert 'no pubkey' in _out, (
+        f"missing pubkey should surface, not crash; got {_out!r}")
+    assert 'Snapshot pins' in _out, _out
+    assert 'base      X' in _out, _out
+    assert 'current   Y' in _out, _out
+    assert 'published Z' in _out, _out
+
+
 def test_publish_via_local_prompts_for_mkdir_and_aborts_on_no():
     """`repo publish local <path>` prompts to mkdir -p when <path> is
     missing.  Operator answer != y → no .deb copy attempted."""
@@ -20337,6 +20439,9 @@ def main() -> int:
         test_local_scan_packages_argv_no_ssh,
         test_cmd_repo_publish_dispatch_arg_parsing,
         test_publish_via_local_prompts_for_mkdir_and_aborts_on_no,
+        test_cmd_repo_summary_dispatch,
+        test_summary_via_local_reports_missing_dest,
+        test_summarize_destination_skips_pubkey_check_when_missing,
         test_index_minimal_stages_nested_subset,
     ]
     failures = 0
