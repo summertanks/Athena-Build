@@ -857,6 +857,75 @@ class Cache:
         """
         return UdebCacheView(self)
 
+    # ── UX-04 pickle support ────────────────────────────────────────────
+    # Drop the non-picklable bits and flatten lambda-factory defaultdicts.
+    # Restored to original shape on __setstate__.  _arch_table (DpkgArchTable
+    # from python-debian) carries C-extension state that doesn't round-trip
+    # reliably and is cheap to recompute on load.  _compression_openers is
+    # a list of (suffix, open-callable) — lambdas can't pickle.
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('_arch_table', None)
+        state.pop('_compression_openers', None)
+        state['package_hashtable'] = {
+            k: dict(v) for k, v in self.package_hashtable.items()
+        }
+        state['udeb_hashtable'] = {
+            k: dict(v) for k, v in self.udeb_hashtable.items()
+        }
+        state['source_hashtable'] = dict(self.source_hashtable)
+        state['_upstream_collisions'] = dict(self._upstream_collisions)
+        state['_upstream_udeb_collisions'] = dict(self._upstream_udeb_collisions)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Restore defaultdict factories with original shapes.
+        _ph: 'Dict[str, Dict[Version, List[Package]]]' = defaultdict(
+            lambda: defaultdict(list))
+        for k, v in self.package_hashtable.items():
+            _inner: 'Dict[Version, List[Package]]' = defaultdict(list)
+            _inner.update(v)
+            _ph[k] = _inner
+        self.package_hashtable = _ph
+
+        _uh: 'Dict[str, Dict[Version, List[Package]]]' = defaultdict(
+            lambda: defaultdict(list))
+        for k, v in self.udeb_hashtable.items():
+            _inner = defaultdict(list)
+            _inner.update(v)
+            _uh[k] = _inner
+        self.udeb_hashtable = _uh
+
+        _sh: 'Dict[str, List[Source]]' = defaultdict(list)
+        _sh.update(self.source_hashtable)
+        self.source_hashtable = _sh
+
+        _uc: 'Dict[str, List[Tuple[str, str]]]' = defaultdict(list)
+        _uc.update(self._upstream_collisions)
+        self._upstream_collisions = _uc
+
+        _uuc: 'Dict[str, List[Tuple[str, str]]]' = defaultdict(list)
+        _uuc.update(self._upstream_udeb_collisions)
+        self._upstream_udeb_collisions = _uuc
+
+        try:
+            self._arch_table = DpkgArchTable.load_arch_table()
+        except (OSError, RuntimeError, ValueError, KeyError):
+            # Best-effort load; downstream arch checks fall through to
+            # wildcard handling when this is None.  Matches package.py.
+            self._arch_table = None
+
+        # Re-derive _compression_openers (lambdas; never serialised).
+        import lzma as _lzma
+        import gzip as _gzip
+        import bz2 as _bz2
+        self._compression_openers = [
+            ('.xz',  _lzma.open),
+            ('.gz',  _gzip.open),
+            ('.bz2', _bz2.open),
+        ]
+
 
 class UdebCacheView:
     """Cache wrapper for udeb-world resolution.

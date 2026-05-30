@@ -11,6 +11,19 @@ from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger('athena')
 
+# UX-04: python-debian's Deb822 base uses an OrderedSet whose __keys
+# nodes hold weakrefs.  Those plus the parsed-relation mixin caches
+# can't pickle.  Drop them on __getstate__ — they're reconstructed on
+# load by re-initialising Deb822 with the captured field dict (Package)
+# or raw_text (Source — its multi-valued field wrappers also carry
+# weakrefs, so field-replay isn't enough).
+_DEB822_INTERNAL_PREFIXES = ('_Deb822', '_PkgRelationMixin',
+                              '_VersionAccessorMixin')
+_DEB822_INTERNAL_ATTRS = frozenset({
+    'encoding', 'decoder', 'gpg_info', '_err_str',
+})
+
+
 _arch_table: Optional[DpkgArchTable] = None
 
 def _load_arch_table() -> Optional[DpkgArchTable]:
@@ -434,6 +447,29 @@ class Package(Packages):
                               f"{self.package} {_constraint} vs {old_constraint}, ignoring")
             return False
 
+    # ── UX-04 pickle support ────────────────────────────────────────────
+    # Replay field-by-field on load so Deb822's internal OrderedSet (with
+    # weakref __keys) is reconstructed fresh rather than serialised.  Drop
+    # the Deb822-internal attributes (_Deb822Dict__*, _PkgRelationMixin__*
+    # caches, encoding/decoder/gpg_info) from __dict__ — they're rebuilt
+    # by Packages.__init__ + the field replays.
+    def __getstate__(self):
+        return {
+            '_fields': {k: self[k] for k in self.keys()},
+            '_attrs': {
+                k: v for k, v in self.__dict__.items()
+                if not k.startswith(_DEB822_INTERNAL_PREFIXES)
+                and k not in _DEB822_INTERNAL_ATTRS
+            },
+        }
+
+    def __setstate__(self, state):
+        Packages.__init__(self)
+        for k, v in state['_fields'].items():
+            self[k] = v
+        self.__dict__.update(state['_attrs'])
+
+
 class Source(Sources):
     """ Class to hold source package information.
     Source package is the original package from which binary packages are built
@@ -657,3 +693,27 @@ class Source(Sources):
         if len(_providers) < 2:
             return group
         return [(_p, _ver, _op) for _p in _providers] + [(_name, _ver, _op)]
+
+    # ── UX-04 pickle support ────────────────────────────────────────────
+    # Source uses raw_text-based restore rather than field replay because
+    # its multi-valued fields (Files, Checksums-Sha256, Build-Depends) come
+    # back from python-debian as wrappers whose internal lists carry
+    # weakrefs.  Source.__init__ stashes the original stanza in raw_text;
+    # re-init Deb822 from that on load to get clean instances.
+    def __getstate__(self):
+        return {
+            '_attrs': {
+                k: v for k, v in self.__dict__.items()
+                if not k.startswith(_DEB822_INTERNAL_PREFIXES)
+                and k not in _DEB822_INTERNAL_ATTRS
+            },
+        }
+
+    def __setstate__(self, state):
+        import io
+        _attrs = state['_attrs']
+        _raw = _attrs.get('raw_text', b'')
+        if isinstance(_raw, str):
+            _raw = _raw.encode('utf-8', errors='replace')
+        Sources.__init__(self, io.BytesIO(_raw))
+        self.__dict__.update(_attrs)

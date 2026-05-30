@@ -245,6 +245,18 @@ The override implies `force` — a prior `.result` file reflects the *old* profi
 
 Multiple bracket-tokens in one invocation is an error (we don't try to merge or pick).  `recommended` and named packages are mutually exclusive — pick one mode.
 
+### Resuming a prior session
+
+After `cache parse` (or any later stage) succeeds, the toolchain persists `Cache` + `DependencyTree` to `<dir_cache>/session.pkl.gz` + a fingerprint of every input that fed them.  Next launch can skip the ~40s of cache build + parse:
+
+```
+./build-system.sh --resume    # or, inside the TUI: `resume`
+```
+
+`resume` verifies the fingerprint (config, mirror InReleases, fork tree hashes, patch sets, snapshot, arch, build profiles) and refuses with a "what changed" message on any mismatch.  Fix the listed delta, then `cache parse` to rebuild — the next resume will succeed.
+
+Even without `--resume`, the TUI prints a one-line banner showing which non-in-memory flags were persisted by the prior session (`download`, `source_build`, `chroot_*`, `iso_*`).  In-memory flags (`cache_ready`, `dep_check_ready`, `build_container_ready`, `signing_key_verified`) are reset on every launch — they need `resume` (or a fresh `cache parse` / `container init` / `key verify`) to flip True again.
+
 ### Where logs live
 
 Everything logged at INFO and above (and `dpkg`/`mksquashfs`/`grub-mkrescue` subprocess transcripts, at DEBUG) goes to a single file:
