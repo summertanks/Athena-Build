@@ -4866,7 +4866,7 @@ def test_conf15_dockerfile_pins_toolchain_to_snapshot():
     dpkg-shlibdeps; this test pins the fix shape.
 
     Required shape:
-      - ARG SNAPSHOT_BASEURL / ARCHIVE_KEY / SNAPSHOT_TS declared
+      - ARG SNAPSHOT_BASEURL / ARCHIVE_NAME / SNAPSHOT_TS declared
       - sources.list wiped THEN written with snapshot URL
       - apt-get update + dist-upgrade run BEFORE apt-get install
       - SNAPSHOT_TS validated non-empty (fails the build, not silent)"""
@@ -4874,11 +4874,11 @@ def test_conf15_dockerfile_pins_toolchain_to_snapshot():
     with open(_df) as fh:
         _body = fh.read()
     # 1. The four new build-args declared (both pre-FROM and re-declared
-    # post-FROM, since Docker scopes them that way).  SECURITY_ARCHIVE_KEY
-    # joins ARCHIVE_KEY because the bookworm-security suite uses a
+    # post-FROM, since Docker scopes them that way).  SECURITY_ARCHIVE_NAME
+    # joins ARCHIVE_NAME because the bookworm-security suite uses a
     # different archive prefix on snapshot.debian.org.
-    for _arg in ('SNAPSHOT_BASEURL', 'ARCHIVE_KEY',
-                 'SECURITY_ARCHIVE_KEY', 'SNAPSHOT_TS'):
+    for _arg in ('SNAPSHOT_BASEURL', 'ARCHIVE_NAME',
+                 'SECURITY_ARCHIVE_NAME', 'SNAPSHOT_TS'):
         assert f'ARG {_arg}' in _body, f"Dockerfile missing ARG {_arg}"
     # 2. The legacy sources.list AND deb822 sources.list.d/*.{sources,list}
     # are both wiped (bookworm-slim ships deb822 by default).
@@ -4894,16 +4894,16 @@ def test_conf15_dockerfile_pins_toolchain_to_snapshot():
     # SNAPSHOT_TS — apt resolves `<URI>/dists/<suite>/InRelease` and a
     # trailing slash here produces `<TS>//dists/...` that snapshot.d.o
     # 404s on.
-    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE} main' in _body, (
+    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_NAME}/${SNAPSHOT_TS} ${RELEASE} main' in _body, (
         "Dockerfile must write the main snapshot URL")
-    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-updates main' in _body, (
+    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_NAME}/${SNAPSHOT_TS} ${RELEASE}-updates main' in _body, (
         "Dockerfile must write the -updates snapshot URL — Architecture: all "
         "packages (debhelper, autoconf, python3, …) can be in -updates rather "
         "than main at a given TS")
-    assert '${SNAPSHOT_BASEURL}/${SECURITY_ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-security main' in _body, (
+    assert '${SNAPSHOT_BASEURL}/${SECURITY_ARCHIVE_NAME}/${SNAPSHOT_TS} ${RELEASE}-security main' in _body, (
         "Dockerfile must write the -security snapshot URL (different archive "
         "prefix on snapshot.debian.org: debian-security, not debian)")
-    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS}/ ' not in _body, (
+    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_NAME}/${SNAPSHOT_TS}/ ' not in _body, (
         "Dockerfile must NOT have a trailing slash after SNAPSHOT_TS — "
         "snapshot.debian.org 404s on the resulting //dists/ double slash")
     # 4. The Pin-Priority 1001 preferences file is written (forces
@@ -4959,7 +4959,7 @@ def test_conf15_buildcontainer_image_tag_carries_snapshot_ts():
 
 def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
     """CONF-15: client.images.build(buildargs=…) MUST pass
-    SNAPSHOT_BASEURL / ARCHIVE_KEY / SNAPSHOT_TS so the Dockerfile's
+    SNAPSHOT_BASEURL / ARCHIVE_NAME / SNAPSHOT_TS so the Dockerfile's
     sources.list rewrite has the values it needs to compose the snapshot
     URL.  Without these, the Dockerfile's guard fails the build (`-z
     SNAPSHOT_TS`) — that's the intended loud failure mode."""
@@ -4972,15 +4972,15 @@ def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
         _body)
     assert _m, "client.images.build(... buildargs={...}) not found"
     _kwargs = _m.group(0)
-    for _arg in ("'SNAPSHOT_BASEURL'", "'ARCHIVE_KEY'",
-                 "'SECURITY_ARCHIVE_KEY'", "'SNAPSHOT_TS'"):
+    for _arg in ("'SNAPSHOT_BASEURL'", "'ARCHIVE_NAME'",
+                 "'SECURITY_ARCHIVE_NAME'", "'SNAPSHOT_TS'"):
         assert _arg in _kwargs, (
             f"buildargs missing {_arg} — Dockerfile guard will fail "
             f"the image build")
-    # ARCHIVE_KEY is the primary archive (debian), not security.  The
+    # ARCHIVE_NAME is the primary archive (debian), not security.  The
     # per-build sources.list still spans the full mirror set.
-    assert "'ARCHIVE_KEY':" in _kwargs and "'debian'" in _kwargs, (
-        "ARCHIVE_KEY should be the primary 'debian' archive")
+    assert "'ARCHIVE_NAME':" in _kwargs and "'debian'" in _kwargs, (
+        "ARCHIVE_NAME should be the primary 'debian' archive")
     assert 'self.snapshot_ts' in _kwargs, (
         "SNAPSHOT_TS must be self.snapshot_ts (the resolved pin), not a literal")
 

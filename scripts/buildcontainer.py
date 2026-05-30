@@ -184,8 +184,8 @@ class BuildContainer:
                         # (e.g. debhelper, python3, autoconf at 20260529
                         # — Architecture: all packages in flux on the
                         # bookworm stable suite).
-                        'ARCHIVE_KEY':          'debian',
-                        'SECURITY_ARCHIVE_KEY': 'debian-security',
+                        'ARCHIVE_NAME':          'debian',
+                        'SECURITY_ARCHIVE_NAME': 'debian-security',
                         'SNAPSHOT_TS':          self.snapshot_ts,
                     },
                     labels={'athena.dockerfile.sha256': dockerfile_hash},
