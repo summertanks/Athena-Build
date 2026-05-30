@@ -565,7 +565,7 @@ class _ChrootMixin:
         # Depth-1 Recommends pulled into selected_pkgs for the repo (and
         # downloaded by source_download) but NOT meant for chroot install
         # — filter them out here so the live ISO stays minimal.  Empty
-        # set when [Build] IncludeRecommendsInRepo is off, in which case
+        # set when [Build] IncludeRecommends is off, in which case
         # the filter is a no-op.
         _extras = self._dependencytree.extras_pkg_names
 

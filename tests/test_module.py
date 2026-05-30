@@ -200,13 +200,13 @@ _BASE_CONF_BODY = """
     VERSION = "1"
     CHANNEL = "stable"
     MaxParallelBuilds = 1
-    CONTAINER_RELEASE = bookworm
 
     [Base]
     BASEURL = http://deb.debian.org
     BASEID = debian
     RELEASE = bookworm
     BASEVERSION = 12.0
+    CONTAINER_RELEASE = bookworm
     {mirror_block}
     [Directories]
     Log = log
@@ -7864,7 +7864,7 @@ class _PrintSessionStub:
             snapshot_enabled = False
             snapshot_timestamp_config = ''
             tunnel_packages: list = []
-            include_recommends_in_repo = False
+            include_recommends = False
             signing_key_uid = 'Athena Build <athena@local>'
             working_dir = '/tmp/build'
             dir_cache = '/tmp/build/cache'
@@ -10812,7 +10812,7 @@ def test_print_extras_handles_empty_extras_set():
     output = _capture_console_print(
         lambda: print_commands._print_extras(_Sess())
     )
-    assert 'IncludeRecommendsInRepo' in output
+    assert 'IncludeRecommends' in output
 
 
 # ─── source_build [profiles] override parsing ────────────────────

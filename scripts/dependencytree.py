@@ -89,13 +89,13 @@ class DependencyTree:
         self.selected_srcs: Dict[str, package.Source]  = {}
         # Subset of selected_pkgs whose entries were pulled in via
         # depth-1 Recommends-of-selected (rather than the required/important/
-        # manual closure).  Empty when [Build] IncludeRecommendsInRepo is off.
+        # manual closure).  Empty when [Build] IncludeRecommends is off.
         # build_chroot filters these out of the install batches; source_build
         # default skips them; `source_build recommended` builds only them.
         self.extras_pkg_names: set = set()
         # Subset of selected_srcs.keys() whose every produced binary is in
         # extras_pkg_names — i.e. sources that are here ONLY for the recommends
-        # (would not be in selected_srcs without IncludeRecommendsInRepo).
+        # (would not be in selected_srcs without IncludeRecommends).
         # Mixed sources (some selected binaries, some extras binaries) are NOT
         # in this set — source_build builds them normally and the recommended
         # binaries fall out as side artefacts of dpkg-buildpackage.  Derived
