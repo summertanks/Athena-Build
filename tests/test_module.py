@@ -5584,24 +5584,37 @@ def test_publish_full_remote_scan_flow_wiring():
     """`repo publish` (external on): push only .debs immutably
     (--ignore-existing + deb filter) → rebuild the index ON THE REMOTE
     (remote_reindex_and_sign) → upload metadata → refresh manifest → prune +
-    record published.  External off → local merge, no rsync."""
+    record published.  External off → local merge, no rsync.
+
+    Post-COMP-02-local refactor: the ssh flow moved into `_publish_via_ssh`
+    and the manifest/prune tail into `_publish_finalize`; cmd_repo_publish
+    is now the dispatcher.  Each invariant pins where it lives."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
         _body = fh.read()
-    _m = re.search(r'def cmd_repo_publish\(self.*?(?=\n    def )', _body, re.DOTALL)
-    _b = _m.group(0)
-    assert '_external_enabled()' in _b, "must gate on the external flag"
-    assert 'ignore_existing=True' in _b and 'filters=_debfilter' in _b, (
+    _disp = re.search(
+        r'def cmd_repo_publish\(self.*?(?=\n    def )', _body, re.DOTALL)
+    _ssh = re.search(
+        r'def _publish_via_ssh\(self.*?(?=\n    def )', _body, re.DOTALL)
+    _fin = re.search(
+        r'def _publish_finalize\(self.*?(?=\n    def )', _body, re.DOTALL)
+    assert _disp and _ssh and _fin, "publish dispatcher/ssh/finalize missing"
+    _d, _s, _f = _disp.group(0), _ssh.group(0), _fin.group(0)
+    # Dispatcher: external gate + local-only fallback.
+    assert '_external_enabled()' in _d, "must gate on the external flag"
+    assert '_refresh_merge_index()' in _d, "external-off path indexes locally"
+    # ssh arm: immutable .deb push + remote reindex + metadata push.
+    assert 'ignore_existing=True' in _s and 'filters=_debfilter' in _s, (
         "the .deb pool pass must be immutable (--ignore-existing + deb filter)")
-    assert 'remote_reindex_and_sign(' in _b, "must rebuild the index on the remote"
-    assert 'write_published_manifest(' in _b, "must refresh the local manifest"
-    assert '_refresh_merge_index()' in _b, "external-off path indexes locally"
-    assert 'cmd_package_cleanup' in _b and \
-        'published=self._snapshot_current()' in _b, "full prunes + records published"
-    # ordering: deb push BEFORE remote re-index BEFORE metadata push
-    assert (_b.index('ignore_existing=True') < _b.index('remote_reindex_and_sign(')
-            < _b.index('rsync index')), "deb push → remote reindex → metadata push"
+    assert 'remote_reindex_and_sign(' in _s, "must rebuild the index on the remote"
+    # ordering inside the ssh arm: deb push BEFORE remote re-index BEFORE metadata push.
+    assert (_s.index('ignore_existing=True') < _s.index('remote_reindex_and_sign(')
+            < _s.index('rsync index')), "deb push → remote reindex → metadata push"
+    # Finalize: manifest refresh + prune + record-published.
+    assert 'write_published_manifest(' in _f, "must refresh the local manifest"
+    assert 'cmd_package_cleanup' in _f and \
+        'published=self._snapshot_current()' in _f, "full prunes + records published"
 
 
 def test_repo_audit_external_dispatch():
@@ -19451,7 +19464,10 @@ def test_remote_scan_packages_builds_ssh_argv():
 
 def test_remote_reindex_wiring():
     """remote_reindex_and_sign scans REMOTELY but builds Release + signs
-    LOCALLY (key never leaves the box)."""
+    LOCALLY (key never leaves the box).  Post-COMP-02-local refactor: the
+    shared body lives in `_reindex_and_sign_via`; remote_ is a thin wrapper
+    that closes over _remote_has_debs/_remote_scan_packages.  The "signing
+    stays local" invariant is now in the shared body."""
     _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
     with open(_ar) as fh:
         _b = fh.read()
@@ -19459,10 +19475,130 @@ def test_remote_reindex_wiring():
     _m = re.search(r'def remote_reindex_and_sign\(.*?(?=\ndef )', _b, re.DOTALL)
     assert _m, "remote_reindex_and_sign not found"
     _fn = _m.group(0)
+    # The wrapper must delegate to the shared body AND pass the remote scan.
+    assert '_reindex_and_sign_via(' in _fn, (
+        "remote_reindex_and_sign should delegate to the shared body")
     assert '_remote_scan_packages(' in _fn, "scan must run on the remote"
+    # The shared body must invoke the local-only helpers.
+    _v = re.search(r'def _reindex_and_sign_via\(.*?(?=\ndef )', _b, re.DOTALL)
+    assert _v, "_reindex_and_sign_via not found"
+    _vfn = _v.group(0)
     for _local in ('_compress_index(', '_write_subdir_release(',
                    '_generate_top_release(', 'sign_release_files('):
-        assert _local in _fn, f"{_local} (local) missing — signing must stay local"
+        assert _local in _vfn, (
+            f"{_local} (local) missing in _reindex_and_sign_via — "
+            f"signing must stay local")
+
+
+def test_local_reindex_wiring():
+    """COMP-02 local-publish twin: local_reindex_and_sign delegates to the
+    same shared body, closing over the local-fs helpers — no ssh, no
+    `remote_root`/`userhost`."""
+    _ar = os.path.join(_ROOT, 'scripts', 'apt_repo.py')
+    with open(_ar) as fh:
+        _b = fh.read()
+    import re
+    _m = re.search(r'def local_reindex_and_sign\(.*?(?=\ndef )', _b, re.DOTALL)
+    assert _m, "local_reindex_and_sign not found"
+    _fn = _m.group(0)
+    assert '_reindex_and_sign_via(' in _fn, (
+        "local_reindex_and_sign should delegate to the shared body")
+    assert '_local_has_debs(' in _fn, "must use the local-fs has-debs probe"
+    assert '_local_scan_packages(' in _fn, (
+        "must use the local-fs dpkg-scanpackages")
+    # No ssh leakage.
+    assert 'ssh_cmd' not in _fn, "local twin must not take an ssh_cmd"
+    assert 'userhost' not in _fn, "local twin must not take a userhost"
+
+
+def test_local_scan_packages_argv_no_ssh():
+    """_local_scan_packages runs dpkg-scanpackages directly via subprocess,
+    NOT through ssh."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+    _calls = []
+    _orig_run = apt_repo.subprocess.run
+
+    def _fake_run(argv, **kw):
+        _calls.append((argv, kw))
+        class _R:
+            returncode = 0
+            stdout = 'Package: foo\nVersion: 1.0\n\n'
+            stderr = ''
+        return _R()
+    apt_repo.subprocess.run = _fake_run
+    try:
+        _out = apt_repo._local_scan_packages(
+            '/tmp/some-root', 'dists/thor/main/binary-amd64', udeb=False)
+    finally:
+        apt_repo.subprocess.run = _orig_run
+    assert _out and 'Package: foo' in _out
+    assert len(_calls) == 1
+    _argv, _kw = _calls[0]
+    assert _argv[0] == 'dpkg-scanpackages', (
+        f"first argv element must be dpkg-scanpackages, got {_argv[0]}")
+    assert 'ssh' not in _argv, f"ssh leaked into local scan argv: {_argv}"
+    assert _kw.get('cwd') == '/tmp/some-root', (
+        f"cwd must be the dest root, got {_kw.get('cwd')}")
+
+
+def test_cmd_repo_publish_dispatch_arg_parsing():
+    """`repo publish` accepts `ssh [full|minimal]` AND
+    `local <path> [full|minimal]`.  Bad usage prints both lines."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _b = fh.read()
+    import re
+    _m = re.search(r'def cmd_repo_publish\(self.*?(?=\n    def )', _b, re.DOTALL)
+    assert _m, "cmd_repo_publish not found"
+    _fn = _m.group(0)
+    # Both transport arms exist + the dispatcher routes to them.
+    assert '_kind == \'local\'' in _fn
+    assert '_kind == \'ssh\'' in _fn
+    assert '_publish_via_ssh(' in _fn
+    assert '_publish_via_local(' in _fn
+    # Usage hints cover both transports.
+    assert 'repo publish ssh' in _fn
+    assert 'repo publish local' in _fn
+
+
+def test_publish_via_local_prompts_for_mkdir_and_aborts_on_no():
+    """`repo publish local <path>` prompts to mkdir -p when <path> is
+    missing.  Operator answer != y → no .deb copy attempted."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+
+    class _Cfg:
+        def __init__(_self, _tmp):
+            _self.build_codename = 'thor'
+            _self.dir_temp = _tmp
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess.config = _Cfg(_tmp)
+        _calls = []
+        _sess._rsync_streamed = (
+            lambda *a, **kw: _calls.append(('rsync', a, kw)) or 0)
+        # Patch Prompt to refuse mkdir.
+        import build as _build_mod
+        _orig_prompt = _build_mod.Prompt
+        class _RefuseMkdir:
+            def __init__(_self, _kind, _msg):
+                pass
+            def get_response(_self):
+                return 'n'
+        _build_mod.Prompt = _RefuseMkdir
+        try:
+            _missing = os.path.join(_tmp, 'does-not-exist')
+            _sess._publish_via_local(
+                'full', _missing, deb_dists='/ignored', suites_spec={})
+        finally:
+            _build_mod.Prompt = _orig_prompt
+        # rsync should NOT have been called.
+        assert not _calls, (
+            f"refusing mkdir must abort before rsync; got {_calls}")
+        # Path should not have been created.
+        assert not os.path.isdir(_missing), (
+            "refusing mkdir must NOT create the dir")
 
 
 def test_index_minimal_stages_nested_subset():
@@ -20197,6 +20333,10 @@ def main() -> int:
         # UPD-02: index on the remote
         test_remote_scan_packages_builds_ssh_argv,
         test_remote_reindex_wiring,
+        test_local_reindex_wiring,
+        test_local_scan_packages_argv_no_ssh,
+        test_cmd_repo_publish_dispatch_arg_parsing,
+        test_publish_via_local_prompts_for_mkdir_and_aborts_on_no,
         test_index_minimal_stages_nested_subset,
     ]
     failures = 0
