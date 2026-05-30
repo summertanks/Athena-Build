@@ -4859,6 +4859,131 @@ def test_athena_branding_ships_target_grub_background():
     )
 
 
+def test_conf15_dockerfile_pins_toolchain_to_snapshot():
+    """CONF-15: the Dockerfile MUST rewrite /etc/apt/sources.list to point
+    at OUR snapshot BEFORE any `apt-get install` runs.  Pre-CONF-15 the
+    toolchain layer pulled from live deb.debian.org which contaminated
+    dpkg-shlibdeps; this test pins the fix shape.
+
+    Required shape:
+      - ARG SNAPSHOT_BASEURL / ARCHIVE_KEY / SNAPSHOT_TS declared
+      - sources.list wiped THEN written with snapshot URL
+      - apt-get update + dist-upgrade run BEFORE apt-get install
+      - SNAPSHOT_TS validated non-empty (fails the build, not silent)"""
+    _df = os.path.join(_ROOT, 'config', 'Dockerfile')
+    with open(_df) as fh:
+        _body = fh.read()
+    # 1. The three new build-args declared (both pre-FROM and re-declared
+    # post-FROM, since Docker scopes them that way).
+    for _arg in ('SNAPSHOT_BASEURL', 'ARCHIVE_KEY', 'SNAPSHOT_TS'):
+        assert f'ARG {_arg}' in _body, f"Dockerfile missing ARG {_arg}"
+    # 2. The legacy sources.list AND deb822 sources.list.d/*.{sources,list}
+    # are both wiped (bookworm-slim ships deb822 by default).
+    assert 'rm -f /etc/apt/sources.list' in _body
+    assert '/etc/apt/sources.list.d/*.sources' in _body
+    assert '/etc/apt/sources.list.d/*.list' in _body
+    # 3. The snapshot URL is written into sources.list using the ARGs.
+    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS}/' in _body, (
+        "Dockerfile must compose the snapshot URL from the three ARGs")
+    # 4. The Pin-Priority 1001 preferences file is written (forces
+    # downgrade when our snapshot is older than the base-image pkg set).
+    assert 'Pin-Priority: 1001' in _body
+    # 5. apt-get install runs AFTER the sources.list rewrite.  Greps by
+    # ordering: `apt-get install` index must come after `sources.list`
+    # rewrite + apt-get update.
+    _idx_rewrite = _body.find('echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}')
+    _idx_update = _body.find('apt-get update', _idx_rewrite)
+    _idx_install = _body.find('apt-get install', _idx_update)
+    assert 0 < _idx_rewrite < _idx_update < _idx_install, (
+        "Dockerfile ordering must be: sources rewrite → apt update → apt install")
+    # 6. SNAPSHOT_TS guard — empty TS must fail the build loudly, not
+    # silently default to live URLs.
+    assert '-z "${SNAPSHOT_TS}"' in _body, (
+        "Dockerfile must reject an empty SNAPSHOT_TS instead of silently "
+        "falling back to live mirrors")
+
+
+def test_conf15_buildcontainer_image_tag_carries_snapshot_ts():
+    """CONF-15: image tag MUST include the snapshot TS so a `[Snapshot]
+    Timestamp` change invalidates the image cache automatically.
+    Pre-CONF-15 the tag was `athenalinux:build-<release>`; an operator's
+    snapshot advance left the old image in place against an older snapshot."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    # The assignment spans a few lines (f-string with two interpolations).
+    # Grab from `self._image_tag =` through the closing `)` / `"`.
+    _m = re.search(
+        r'self\._image_tag\s*=[^\n]*(?:\n[ ]+[^\n]+){0,4}',
+        _body)
+    assert _m, "self._image_tag assignment not found"
+    _snippet = _m.group(0)
+    assert 'config.container_release' in _snippet, (
+        f"image tag should still include container_release; got:\n{_snippet}")
+    assert 'self.snapshot_ts' in _snippet, (
+        f"image tag must include self.snapshot_ts to invalidate on "
+        f"snapshot advance; got:\n{_snippet}")
+
+
+def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
+    """CONF-15: client.images.build(buildargs=…) MUST pass
+    SNAPSHOT_BASEURL / ARCHIVE_KEY / SNAPSHOT_TS so the Dockerfile's
+    sources.list rewrite has the values it needs to compose the snapshot
+    URL.  Without these, the Dockerfile's guard fails the build (`-z
+    SNAPSHOT_TS`) — that's the intended loud failure mode."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r"self\.client\.images\.build\([\s\S]+?buildargs\s*=\s*\{[\s\S]+?\}",
+        _body)
+    assert _m, "client.images.build(... buildargs={...}) not found"
+    _kwargs = _m.group(0)
+    for _arg in ("'SNAPSHOT_BASEURL'", "'ARCHIVE_KEY'", "'SNAPSHOT_TS'"):
+        assert _arg in _kwargs, (
+            f"buildargs missing {_arg} — Dockerfile guard will fail "
+            f"the image build")
+    # ARCHIVE_KEY is the primary archive (debian), not security.  The
+    # per-build sources.list still spans the full mirror set.
+    assert "'ARCHIVE_KEY':" in _kwargs and "'debian'" in _kwargs, (
+        "ARCHIVE_KEY should be the primary 'debian' archive")
+    assert 'self.snapshot_ts' in _kwargs, (
+        "SNAPSHOT_TS must be self.snapshot_ts (the resolved pin), not a literal")
+
+
+def test_conf15_per_build_dist_upgrade_workaround_removed():
+    """CONF-15: the per-build `apt-get --allow-downgrades dist-upgrade`
+    step in cmd_str was the workaround for the toolchain-layer-not-pinned
+    bug.  Once the Dockerfile pins the toolchain to snapshot at image-build
+    time, this per-build step is redundant — the image's installed
+    libraries are already at snapshot.  Removed to keep the per-build
+    flow minimal."""
+    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
+    with open(_bc) as fh:
+        _body = fh.read()
+    # Find the build() method body (~200-line chunk).
+    import re
+    _m = re.search(
+        r'def build\(self, src_pkg.*?(?=\n    def )', _body, re.DOTALL)
+    assert _m, "build() method body not found"
+    _build_body = _m.group(0)
+    # Strip comment lines so the historical note in the docstring/comments
+    # explaining the removal doesn't false-positive.  Only the executable
+    # cmd_str shell strings should be searched.
+    _code_only = '\n'.join(
+        _line for _line in _build_body.splitlines()
+        if not _line.lstrip().startswith('#'))
+    # Pin: the dist-upgrade command no longer appears in the cmd_str
+    # assembly inside build().  (The Dockerfile still uses dist-upgrade
+    # — that's correct and lives outside build().)
+    assert '--allow-downgrades dist-upgrade' not in _code_only, (
+        "Per-build --allow-downgrades dist-upgrade should be removed in "
+        "CONF-15 — the toolchain layer is now pinned at image-build time, "
+        "making this step redundant")
+
+
 def test_buildcontainer_injects_athena_codename_env():
     """FORK-01 Step 4: BuildContainer.deb_build_env must set ATHENA_CODENAME
     from BuildConfig.build_codename so debian/rules in fork pkgs can
@@ -19996,6 +20121,10 @@ def main() -> int:
         test_find_kernel_prefers_expected_kernel_pkg_match,
         test_find_kernel_falls_back_to_highest_when_no_match,
         test_buildcontainer_changelog_uses_codename_field,
+        test_conf15_dockerfile_pins_toolchain_to_snapshot,
+        test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
+        test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
+        test_conf15_per_build_dist_upgrade_workaround_removed,
         # version_no_epoch — patch dir lookup must match Debian filename convention
         test_version_no_epoch_strips_epoch_from_debian_version,
         test_version_no_epoch_no_change_when_no_epoch,

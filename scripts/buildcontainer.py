@@ -129,7 +129,16 @@ class BuildContainer:
                 tui.console.print(f"Athena Build Docker: Error {e}")
                 raise RuntimeError(f"Cannot connect to local Docker daemon: {e}") from e
 
-        self._image_tag = f"athenalinux:build-{config.container_release}"
+        # CONF-15: bake the snapshot TS into the image tag so a snapshot
+        # advance ([Snapshot] Timestamp change in build.conf) invalidates
+        # the image cache automatically — `docker images` lookup misses
+        # the old tag, we build a fresh image against the new snapshot.
+        # Pre-CONF-15 the tag was `athenalinux:build-<release>`; an
+        # operator's `[Snapshot] Timestamp` change wouldn't invalidate
+        # the existing image even though its toolchain layer was now
+        # against an older snapshot.
+        self._image_tag = (
+            f"athenalinux:build-{config.container_release}-{self.snapshot_ts}")
         _image_tag = self._image_tag
         dockerfile_hash = self._hash_dockerfile(config.dir_config)
         _needs_build = False
@@ -155,9 +164,21 @@ class BuildContainer:
 
         if _needs_build:
             try:
+                # CONF-15: pass the snapshot triplet as build-args so the
+                # Dockerfile's first RUN can rewrite /etc/apt/sources.list
+                # to OUR snapshot BEFORE any `apt-get install` (so even the
+                # toolchain layer is pinned, not just per-build steps).
                 image, build_logs = self.client.images.build(
                     path=config.dir_config, tag=_image_tag,
-                    buildargs={'RELEASE': config.container_release},
+                    buildargs={
+                        'RELEASE':          config.container_release,
+                        'SNAPSHOT_BASEURL': config.snapshot_baseurl,
+                        # The toolchain only needs the primary archive
+                        # (debian).  Per-build sources.list still spans
+                        # the full mirror set (main+security+updates).
+                        'ARCHIVE_KEY':      'debian',
+                        'SNAPSHOT_TS':      self.snapshot_ts,
+                    },
                     labels={'athena.dockerfile.sha256': dockerfile_hash},
                     nocache=False, rm=True, )
 
@@ -673,24 +694,22 @@ class BuildContainer:
         # normalise the Version field + all dep-constraint version
         # references — stripping +bN, +debNuN, ~bpoN+N, +rpiN, etc.
         # so internal cross-refs resolve cleanly inside our repo.
-        # apt -y --allow-downgrades dist-upgrade — align the container's
-        # already-installed packages with snapshot's view BEFORE building.
-        # The base image (debian:bookworm-slim) ships libssl3 / libc6 /
-        # libcrypto3-udeb's shlibs file etc. at the LIVE mirror's current
-        # version, which can be NEWER than our snapshot's index.  With
-        # the Pin-Priority 1001 written by _write_snapshot_sources_cmd,
-        # apt's Candidate for every snapshot-pkg becomes the snapshot
-        # version even when the installed version is newer.  dist-upgrade
-        # (not plain `upgrade`) is required because libssl3's downgrade
-        # cascades through dpkg / libc6 / libcap2 / krb5 / glib / openssl
-        # etc. — `upgrade` won't pull through dep-tree downgrades.
-        # `--allow-downgrades` then unlocks the actual version moves apt
-        # planned but refuses to execute under default -y.
+        #
+        # CONF-15: the per-build `apt-get -y --allow-downgrades dist-upgrade`
+        # step that used to live here was removed once the toolchain layer
+        # was pinned to the snapshot at image-build time (Dockerfile +
+        # __init__ buildargs).  The image's installed packages are already
+        # at snapshot's view; per-build sources.list expands to the full
+        # mirror set (main + security + updates) at the SAME snapshot TS,
+        # so apt-get update + the per-source apt-get install resolve
+        # entirely within the snapshot universe with no drift to correct.
+        # If a future change reintroduces drift (e.g. moving back to a
+        # live-mirror base image), bring this back as `sudo apt-get -y
+        # -o Acquire::Retries=5 --allow-downgrades dist-upgrade;`
+        # between _write_sources and _dep_install.
         cmd_str = f'set -e; set -o errexit; set -o nounset; set -o pipefail; ' \
                   f'{_write_sources}' \
                   f'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq; ' \
-                  f'sudo DEBIAN_FRONTEND=noninteractive apt-get -y ' \
-                  f'-o Acquire::Retries=5 --allow-downgrades dist-upgrade; ' \
                   f'{_dep_install}' \
                   f'cd /home/athena; cp /source/{_filename_prefix}* .; ' \
                   f'dpkg-source -x {_dsc_file} {_filename_prefix}; ' \
