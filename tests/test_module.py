@@ -4873,24 +4873,36 @@ def test_conf15_dockerfile_pins_toolchain_to_snapshot():
     _df = os.path.join(_ROOT, 'config', 'Dockerfile')
     with open(_df) as fh:
         _body = fh.read()
-    # 1. The three new build-args declared (both pre-FROM and re-declared
-    # post-FROM, since Docker scopes them that way).
-    for _arg in ('SNAPSHOT_BASEURL', 'ARCHIVE_KEY', 'SNAPSHOT_TS'):
+    # 1. The four new build-args declared (both pre-FROM and re-declared
+    # post-FROM, since Docker scopes them that way).  SECURITY_ARCHIVE_KEY
+    # joins ARCHIVE_KEY because the bookworm-security suite uses a
+    # different archive prefix on snapshot.debian.org.
+    for _arg in ('SNAPSHOT_BASEURL', 'ARCHIVE_KEY',
+                 'SECURITY_ARCHIVE_KEY', 'SNAPSHOT_TS'):
         assert f'ARG {_arg}' in _body, f"Dockerfile missing ARG {_arg}"
     # 2. The legacy sources.list AND deb822 sources.list.d/*.{sources,list}
     # are both wiped (bookworm-slim ships deb822 by default).
     assert 'rm -f /etc/apt/sources.list' in _body
     assert '/etc/apt/sources.list.d/*.sources' in _body
     assert '/etc/apt/sources.list.d/*.list' in _body
-    # 3. The snapshot URL is written into sources.list using the ARGs.
-    # No trailing slash after SNAPSHOT_TS — apt resolves the InRelease
-    # URL as `<URI>/dists/<suite>/InRelease`, and trailing slash here
-    # produces a double-slash (`/<TS>//dists/...`) that snapshot.debian.org
-    # 404s on.  Matches the format `_write_snapshot_sources_cmd` uses for
-    # per-build sources.list.
-    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ' in _body, (
-        "Dockerfile must compose the snapshot URL with NO trailing slash "
-        "after SNAPSHOT_TS — trailing slash → //dists/<suite>/InRelease 404")
+    # 3. THREE snapshot URLs are written into sources.list: main, -updates,
+    # and -security.  Mirrors the per-build _write_snapshot_sources_cmd
+    # shape — necessary because packages can be present in any of the
+    # three pockets at a given snapshot TS, and the toolchain layer must
+    # cover all of them (e.g. Architecture: all packages drift across
+    # main vs -updates around point releases).  No trailing slash after
+    # SNAPSHOT_TS — apt resolves `<URI>/dists/<suite>/InRelease` and a
+    # trailing slash here produces `<TS>//dists/...` that snapshot.d.o
+    # 404s on.
+    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE} main' in _body, (
+        "Dockerfile must write the main snapshot URL")
+    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-updates main' in _body, (
+        "Dockerfile must write the -updates snapshot URL — Architecture: all "
+        "packages (debhelper, autoconf, python3, …) can be in -updates rather "
+        "than main at a given TS")
+    assert '${SNAPSHOT_BASEURL}/${SECURITY_ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-security main' in _body, (
+        "Dockerfile must write the -security snapshot URL (different archive "
+        "prefix on snapshot.debian.org: debian-security, not debian)")
     assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS}/ ' not in _body, (
         "Dockerfile must NOT have a trailing slash after SNAPSHOT_TS — "
         "snapshot.debian.org 404s on the resulting //dists/ double slash")
@@ -4950,7 +4962,8 @@ def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
         _body)
     assert _m, "client.images.build(... buildargs={...}) not found"
     _kwargs = _m.group(0)
-    for _arg in ("'SNAPSHOT_BASEURL'", "'ARCHIVE_KEY'", "'SNAPSHOT_TS'"):
+    for _arg in ("'SNAPSHOT_BASEURL'", "'ARCHIVE_KEY'",
+                 "'SECURITY_ARCHIVE_KEY'", "'SNAPSHOT_TS'"):
         assert _arg in _kwargs, (
             f"buildargs missing {_arg} — Dockerfile guard will fail "
             f"the image build")

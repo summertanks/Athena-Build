@@ -171,13 +171,22 @@ class BuildContainer:
                 image, build_logs = self.client.images.build(
                     path=config.dir_config, tag=_image_tag,
                     buildargs={
-                        'RELEASE':          config.container_release,
-                        'SNAPSHOT_BASEURL': config.snapshot_baseurl,
-                        # The toolchain only needs the primary archive
-                        # (debian).  Per-build sources.list still spans
-                        # the full mirror set (main+security+updates).
-                        'ARCHIVE_KEY':      'debian',
-                        'SNAPSHOT_TS':      self.snapshot_ts,
+                        'RELEASE':              config.container_release,
+                        'SNAPSHOT_BASEURL':     config.snapshot_baseurl,
+                        # The toolchain Dockerfile writes three sources
+                        # (main + -updates + -security) so packages that
+                        # have moved to a security pocket / been pulled
+                        # from main resolve correctly — mirrors
+                        # _write_snapshot_sources_cmd's per-build shape.
+                        # Without -updates/-security, packages absent
+                        # from the release suite at a given TS surface as
+                        # `apt-get install` "Unable to locate package …"
+                        # (e.g. debhelper, python3, autoconf at 20260529
+                        # — Architecture: all packages in flux on the
+                        # bookworm stable suite).
+                        'ARCHIVE_KEY':          'debian',
+                        'SECURITY_ARCHIVE_KEY': 'debian-security',
+                        'SNAPSHOT_TS':          self.snapshot_ts,
                     },
                     labels={'athena.dockerfile.sha256': dockerfile_hash},
                     nocache=False, rm=True, )

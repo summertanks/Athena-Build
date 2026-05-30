@@ -1,6 +1,7 @@
 ARG RELEASE=bookworm
 ARG SNAPSHOT_BASEURL=https://snapshot.debian.org/archive
 ARG ARCHIVE_KEY=debian
+ARG SECURITY_ARCHIVE_KEY=debian-security
 ARG SNAPSHOT_TS=
 
 FROM debian:${RELEASE}-slim
@@ -11,6 +12,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG RELEASE
 ARG SNAPSHOT_BASEURL
 ARG ARCHIVE_KEY
+ARG SECURITY_ARCHIVE_KEY
 ARG SNAPSHOT_TS
 
 # CONF-15: pin the toolchain layer to OUR snapshot, not the live Debian
@@ -55,8 +57,11 @@ RUN set -eux; \
         echo "ERROR: SNAPSHOT_TS build-arg is empty — pass it from BuildContainer.__init__" >&2; \
         exit 1; \
     fi; \
-    echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE} main" \
-        > /etc/apt/sources.list; \
+    { \
+        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE} main"; \
+        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-updates main"; \
+        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${SECURITY_ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-security main"; \
+    } > /etc/apt/sources.list; \
     printf 'Package: *\nPin: origin snapshot.debian.org\nPin-Priority: 1001\n' \
         > /etc/apt/preferences.d/athena-snapshot; \
     apt-get update; \
