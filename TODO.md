@@ -127,10 +127,6 @@ and an 8-check chroot verifier that gates ISO build.
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
-| DOC-02 | P1 | todo | A `docs/architecture.md` describing the pipeline stages and `BuildFlags` contract. Today this knowledge is only in commit messages and inline docstrings. |
-| DOC-03 | P1 | todo | A `docs/patching.md` formalising the `patch/source/<pkg>/<ver>/9001-*.patch` and `patch/{pre,post}-install/` conventions. The README has fragments. |
-| DOC-04 | P2 | todo | `docs/release.md` describing how to cut a derivative distro release once CONF-01..03 land (signing key, snapshot timestamp, pkg.list freeze). |
-| DOC-05 | P2 | todo | Move the inline “Installing Docker” block out of `README.md` into `docs/install-docker.md`. |
 | DOC-06 | P2 | todo | Keep `README.md` in sync with the code as the project evolves.  When a pipeline stage is added/renamed, a default in `config/build.conf` changes, a new common failure mode appears (or an old one is fixed), or the operator workflow shifts — update the README in the same PR.  Periodic audit: when closing each ticket touching `scripts/` or `config/`, scan README §Building Image and amend if the change is operator-visible.  Footer note in the README points future-me here. |
 
 ## 7. Security & supply-chain — P0 / P1

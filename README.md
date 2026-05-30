@@ -167,7 +167,7 @@ Each stage sets a `BuildFlags` bit on success; later stages refuse to run unless
 A Debian-derived host. Development happens on Debian bookworm; trixie should work, current Ubuntu LTS likely too. You need:
 
 - **sudo**. The chroot install steps shell out to `mount --bind`, `chroot`, `dpkg`. Run the build as a normal user; the TUI will prompt for your sudo password at the start of `chroot build` (and again at the start of `iso build live`) and zero it from memory the instant each command exits — pass or fail (see STA-07).
-- **Docker Engine** (not Docker Desktop). The source-build container runs build-deps in isolation. The `Misc / Installing Docker` section at the bottom has the apt incantation for an up-to-date Engine.
+- **Docker Engine** (not Docker Desktop). The source-build container runs build-deps in isolation. See [`docs/install-docker.md`](docs/install-docker.md) for the apt incantation that gets you an up-to-date Engine from Docker's own repo (the distro packages are usually too old).
 - **Python ≥ 3.9** plus `python3-apt`, `python3-debian`, `python3-gnupg`, `python3-requests`, `python3-psutil`, `python3-docker`. The wrapper `build-system.sh` checks `py_requirements.txt` and tells you what's missing.
 - **debian-archive-keyring** — used to GPG-verify mirror `InRelease` files. On a Debian host it's almost always there; on Ubuntu you may need to apt-install it (see `[Security]` in `config/build.conf` for the keyring path).
 - **Disk** — budget ~30 GB for a full bookworm-derived build. The bulk lives in `source/` (raw upstream tarballs), `build/` (per-package build trees inside the container), `repo/` (the produced `.deb`s), and `buildroot/` (the chroot the ISO is built from).
@@ -366,22 +366,15 @@ errors (`E9`).  Tightening the catalogue (style, import order, modernisation)
 is a follow-on task; see `ARCH-06` in `TODO.md`.  mypy is `continue-on-error`
 in CI for the same reason.
 
-## Misc
+## Further reading
 
-### Installing Docker
-
-Installing docker manually, the distribution repo packages are old.
-Everything under superuser
-```commandline
-apt-get remove docker docker-engine docker.io containerd runc
-apt-get install ca-certificates curl gnupg lsb-release
-mkdir -m 0755 -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" |  tee /etc/apt/sources.list.d/docker.list > /dev/null
-apt-get update
-apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-usermod -aG docker $USER
-```
+- [`docs/architecture.md`](docs/architecture.md) — pipeline stages, `BuildFlags` contract, module overview.
+- [`docs/patching.md`](docs/patching.md) — source / pre-install / post-install patch conventions + DEP-3.
+- [`docs/release.md`](docs/release.md) — release runbook (snapshot pin → key → build → publish → tag).
+- [`docs/repo-publish-vm-setup.md`](docs/repo-publish-vm-setup.md) — ssh + local publish + `repo summary`.
+- [`docs/install-docker.md`](docs/install-docker.md) — Docker Engine install on the build host.
+- [`docs/pseudocode.md`](docs/pseudocode.md) — natural-English walkthrough of every module.
+- [`TODO.md`](TODO.md) — open work, with severity + status + history preserved.
 
 ---
 
