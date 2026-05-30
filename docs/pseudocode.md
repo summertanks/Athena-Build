@@ -1147,7 +1147,7 @@ or module writes it), and the consumer (what depends on it).
 | `image/<distribution>-<version>-<arch>.iso` | hybrid BIOS+EFI ISO | `cmd_build_iso_live` or `cmd_build_iso_installer` | end user | Final shipped artifact. |
 | `image/<distribution>-<version>-<arch>.qcow2` | qcow2 disk image | `cmd_build_iso_disk` | end user | Pre-installed bootable VM image. |
 | `image/<iso>.user` | one-line | iso build | end user | Per-build random username for the live boot (security). |
-| `publish/` | mirror-shaped tree | `cmd_repo_publish git minimal` | git push | Network-publish staging. |
+| `publish/` | mirror-shaped tree (runtime subset) | `cmd_index_repo_minimal` | `cmd_repo_publish ssh\|local minimal` | Minimal-publish staging — `.debs` from `repo/main/binary-<arch>/` minus `-dbg/-dbgsym/-source/`. |
 | `patch/source/<pkg>/<ver>/9001-*.patch` | unified diff with DEP-3 header | operator | `BuildContainer.build` (live read at build time) | DEP-3 header validated by `utils.check_dep3_header`. |
 | `patch/pre-install/<pkg>/*.{sh,patch}` | shell or patch | operator | `_ChrootMixin.pre_install` | Applied to the chroot before the matching package is installed. |
 | `patch/post-install/<pkg>/*.{sh,patch}` | shell or patch | operator | `_ChrootMixin._apply_post_install_patches` | Applied after the package is installed. |
