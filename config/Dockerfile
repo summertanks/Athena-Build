@@ -55,7 +55,7 @@ RUN set -eux; \
         echo "ERROR: SNAPSHOT_TS build-arg is empty — pass it from BuildContainer.__init__" >&2; \
         exit 1; \
     fi; \
-    echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS}/ ${RELEASE} main" \
+    echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE} main" \
         > /etc/apt/sources.list; \
     printf 'Package: *\nPin: origin snapshot.debian.org\nPin-Priority: 1001\n' \
         > /etc/apt/preferences.d/athena-snapshot; \
