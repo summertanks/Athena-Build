@@ -4883,8 +4883,17 @@ def test_conf15_dockerfile_pins_toolchain_to_snapshot():
     assert '/etc/apt/sources.list.d/*.sources' in _body
     assert '/etc/apt/sources.list.d/*.list' in _body
     # 3. The snapshot URL is written into sources.list using the ARGs.
-    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS}/' in _body, (
-        "Dockerfile must compose the snapshot URL from the three ARGs")
+    # No trailing slash after SNAPSHOT_TS — apt resolves the InRelease
+    # URL as `<URI>/dists/<suite>/InRelease`, and trailing slash here
+    # produces a double-slash (`/<TS>//dists/...`) that snapshot.debian.org
+    # 404s on.  Matches the format `_write_snapshot_sources_cmd` uses for
+    # per-build sources.list.
+    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ' in _body, (
+        "Dockerfile must compose the snapshot URL with NO trailing slash "
+        "after SNAPSHOT_TS — trailing slash → //dists/<suite>/InRelease 404")
+    assert '${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS}/ ' not in _body, (
+        "Dockerfile must NOT have a trailing slash after SNAPSHOT_TS — "
+        "snapshot.debian.org 404s on the resulting //dists/ double slash")
     # 4. The Pin-Priority 1001 preferences file is written (forces
     # downgrade when our snapshot is older than the base-image pkg set).
     assert 'Pin-Priority: 1001' in _body
