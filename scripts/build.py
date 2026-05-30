@@ -3376,35 +3376,57 @@ class BuildSession:
             console.print(f"    remote-only:   {_pv}")
 
     def cmd_repo_publish(self, *args):
-        """UPD-02: publish the repo, then rebuild the index ON THE REMOTE.
+        """UPD-02 + COMP-02: publish the repo, then rebuild the index at the
+        destination.
 
-        Usage: repo publish ssh [full|minimal]   (default: full)
+        Usage:
+          repo publish ssh [full|minimal]              (default scope: full)
+          repo publish local <path> [full|minimal]     (default scope: full)
 
           full    — push the whole local pool's .debs.
           minimal — push only the runtime subset (staged nested via
                     cmd_index_repo_minimal; no debug/source/udeb).
 
-        Flow (external repo ENABLED): rsync only the .debs up — ADDITIVE +
-        `--ignore-existing` (immutable per filename, so a re-publish never
-        re-uploads an existing .deb) — then run `dpkg-scanpackages` ON THE VM
-        to rebuild the index from what's ACTUALLY there (sign LOCALLY), upload
-        the regenerated metadata, and refresh the local manifest.  Because the
-        index is rebuilt from the remote, full and minimal never clobber each
-        other — the published `Packages` is always the union present on the
-        remote.  full then prunes local + records published = current.
+        ssh: rsync only the .debs up (ADDITIVE + `--ignore-existing` — .debs
+        are immutable per filename, so a re-publish never re-uploads an
+        existing one), run `dpkg-scanpackages` ON THE VM to rebuild the
+        index from what's ACTUALLY there (sign LOCALLY), upload the
+        regenerated metadata, and refresh the local manifest.  The remote
+        needs `dpkg-dev` installed; its host fingerprint must be in
+        known_hosts (publish is non-interactive).
+
+        local: same flow but the destination is a local filesystem path
+        (USB stick, NFS share, web-server docroot, etc.) — rsync runs
+        local-to-local (no `-e`), and `dpkg-scanpackages` runs in-process
+        instead of via ssh.  Missing target prompts to mkdir -p.
+
+        Because the index is rebuilt from what's at the destination, full
+        and minimal never clobber each other — the published `Packages` is
+        always the union present at the destination.  full then prunes
+        local + records published = current.
 
         External repo DISABLED (`repo external disable`): full only — index
-        locally into the signed manifest (the +asg bump authority), no rsync.
-        The <dist-id> dir must exist on the VM (which needs `dpkg-dev`); the
-        host fingerprint must be in known_hosts (publish is non-interactive).
+        locally into the signed manifest (the +asg bump authority), no
+        transport.  Both `ssh` and `local` transports respect this gate.
         """
         _kind = args[0] if len(args) > 0 else ''
-        _scope = args[1] if len(args) > 1 else 'full'
-        if _kind != 'ssh' or _scope not in ('full', 'minimal'):
+        if _kind == 'local':
+            _local_path = args[1] if len(args) > 1 else ''
+            _scope = args[2] if len(args) > 2 else 'full'
+            if not _local_path or _scope not in ('full', 'minimal'):
+                console.print("Usage: repo publish local <path> [full|minimal]")
+                return
+        elif _kind == 'ssh':
+            _scope = args[1] if len(args) > 1 else 'full'
+            _local_path = ''
+            if _scope not in ('full', 'minimal'):
+                console.print("Usage: repo publish ssh [full|minimal]")
+                return
+        else:
             console.print("Usage: repo publish ssh [full|minimal]")
+            console.print("       repo publish local <path> [full|minimal]")
             return
         _external = self._external_enabled()
-        _codename = self.config.build_codename.strip('"').strip("'")
 
         # ── External DISABLED → local-only (full): index into the manifest. ──
         if not _external:
@@ -3427,9 +3449,26 @@ class BuildSession:
             return
 
         # ── External ENABLED. Stage the deb source tree + suites to index. ──
-        if _scope == 'minimal':
+        _deb_dists, _suites_spec = self._publish_stage_source(_scope)
+        if _deb_dists is None or _suites_spec is None:
+            return
+
+        if _kind == 'ssh':
+            self._publish_via_ssh(_scope, _deb_dists, _suites_spec)
+        else:
+            self._publish_via_local(_scope, _local_path, _deb_dists,
+                                    _suites_spec)
+
+    def _publish_stage_source(self, scope: str):
+        """Stage the .deb source tree and the suites-spec the reindex will
+        walk.  full uses dir_repo/dists (everything); minimal calls
+        cmd_index_repo_minimal which lays out the runtime subset under
+        dir_publish/dists.  Returns (deb_dists_path, suites_spec) or
+        (None, None) on failure."""
+        _codename = self.config.build_codename.strip('"').strip("'")
+        if scope == 'minimal':
             if not self.cmd_index_repo_minimal():
-                return
+                return None, None
             _deb_dists = os.path.join(self.config.dir_publish, 'dists')
             _suites_spec = {_codename: ['main']}
         else:
@@ -3441,8 +3480,47 @@ class BuildSession:
         if not os.path.isdir(_deb_dists):
             console.print(f"repo publish: {_deb_dists} missing — build first.",
                           tui.COLOR_ERROR)
-            return
+            return None, None
+        return _deb_dists, _suites_spec
 
+    def _publish_finalize(self, scope: str, main_pkgs: str, what: str) -> None:
+        """Shared tail of every transport's publish path: refresh the local
+        signed manifest from the just-indexed main Packages, surface the
+        success line, and (for full) publish-before-prune + record
+        published = current.  `what` is the human-readable destination label
+        for the success line (`ssh://...` or local path)."""
+        _codename = self.config.build_codename.strip('"').strip("'")
+        # STA-21: fail loud on signing failure (silent unsigned writes
+        # would corrupt +asg uN bump derivation on the next publish).
+        if not repo_audit.write_published_manifest(self.config, main_pkgs):
+            console.print(
+                "repo publish: local manifest sign FAILED — sync succeeded "
+                "but the local +asg uN authority is now empty.  Run `key "
+                "generate` / `key verify` then re-publish.",
+                tui.COLOR_ERROR)
+            return
+        console.print(
+            f"repo publish: synced {scope} + re-indexed at "
+            f"{what}", tui.COLOR_HIGHLIGHT)
+        if self.config.apt_source_url:
+            console.print(
+                f"  apt source: {self.config.apt_source_url} {_codename} main",
+                tui.COLOR_INFO)
+        if scope == 'full':
+            console.print("repo publish: pruning local to single-snapshot…")
+            if self.flags.dep_check_ready:
+                self.cmd_package_cleanup('force')
+            utils.write_snapshot_state(
+                self.config, published=self._snapshot_current())
+            console.print(
+                f"repo publish: published is now {self._snapshot_current()}.",
+                tui.COLOR_HIGHLIGHT)
+
+    def _publish_via_ssh(self, scope: str, deb_dists: str,
+                          suites_spec: dict) -> None:
+        """UPD-02 ssh transport — rsync .debs to PublishSshTarget, reindex on
+        the remote VM, upload metadata, refresh the local manifest."""
+        _codename = self.config.build_codename.strip('"').strip("'")
         _target = self.config.publish_ssh_target
         if not _target:
             console.print(
@@ -3478,7 +3556,7 @@ class BuildSession:
         _debfilter = ['--include=*/', '--include=*.deb', '--include=*.udeb',
                       '--exclude=*']
         if self._rsync_streamed(
-                f'rsync debs → {_remote_root}', _deb_dists,
+                f'rsync debs → {_remote_root}', deb_dists,
                 f'{_remote_root}/dists/', _ssh,
                 ignore_existing=True, filters=_debfilter) != 0:
             console.print("repo publish: .deb upload failed — see log.",
@@ -3500,8 +3578,8 @@ class BuildSession:
         try:
             _main_pkgs = apt_repo.remote_reindex_and_sign(
                 staging=_staging, ssh_cmd=_ssh, userhost=_userhost,
-                remote_root=_root_path, suites_spec=_suites_spec,
-                codename_for_suite={_s: _s for _s in _suites_spec},
+                remote_root=_root_path, suites_spec=suites_spec,
+                codename_for_suite={_s: _s for _s in suites_spec},
                 primary_suite=_codename, arch=self.config.arch,
                 version=self.config.build_version.strip('"').strip("'"),
                 password=_password,
@@ -3522,34 +3600,86 @@ class BuildSession:
                           tui.COLOR_ERROR)
             return
 
-        # 4. Refresh the local manifest = the remote-scanned main Packages.
-        # STA-21: fail loud on signing failure (silent unsigned writes
-        # would corrupt +asg uN bump derivation on the next publish).
-        if not repo_audit.write_published_manifest(self.config, _main_pkgs):
+        self._publish_finalize(scope, _main_pkgs, _remote_root)
+
+    def _publish_via_local(self, scope: str, local_path: str,
+                            deb_dists: str, suites_spec: dict) -> None:
+        """COMP-02 local transport — rsync .debs to a local destination
+        (USB / NFS / web docroot / etc.), reindex in-process with
+        dpkg-scanpackages, refresh the local manifest.  Twin of
+        _publish_via_ssh but no `-e ssh`, no remote `test -d`, and no
+        dpkg-dev-on-the-VM requirement (host's dpkg-dev does the scan)."""
+        _codename = self.config.build_codename.strip('"').strip("'")
+        _dest = os.path.abspath(os.path.expanduser(local_path))
+        if not os.path.isdir(_dest):
+            _resp = Prompt(
+                PROMPT_YESNO,
+                f"Create local publish target {_dest}?").get_response().lower()
+            if _resp not in ('y', 'yes'):
+                console.print("repo publish: target missing — aborted.",
+                              tui.COLOR_ERROR)
+                return
+            try:
+                os.makedirs(_dest, exist_ok=True)
+            except OSError as e:
+                console.print(
+                    f"repo publish: cannot create {_dest}: {e}",
+                    tui.COLOR_ERROR)
+                return
+        if not os.access(_dest, os.W_OK):
             console.print(
-                "repo publish: local manifest sign FAILED — remote sync "
-                "succeeded but the local +asg uN authority is now empty.  "
-                "Run `key generate` / `key verify` then re-publish.",
+                f"repo publish: {_dest} is not writable.",
                 tui.COLOR_ERROR)
             return
-        console.print(
-            f"repo publish: synced {_scope} + re-indexed on remote "
-            f"({_remote_root})", tui.COLOR_HIGHLIGHT)
-        if self.config.apt_source_url:
-            console.print(
-                f"  apt source: {self.config.apt_source_url} {_codename} main",
-                tui.COLOR_INFO)
 
-        # 5. full: publish-before-prune + record published = current.
-        if _scope == 'full':
-            console.print("repo publish: pruning local to single-snapshot…")
-            if self.flags.dep_check_ready:
-                self.cmd_package_cleanup('force')
-            utils.write_snapshot_state(
-                self.config, published=self._snapshot_current())
-            console.print(
-                f"repo publish: published is now {self._snapshot_current()}.",
-                tui.COLOR_HIGHLIGHT)
+        # 1. Copy only the .debs (immutable → --ignore-existing, deb-only).
+        _debfilter = ['--include=*/', '--include=*.deb', '--include=*.udeb',
+                      '--exclude=*']
+        if self._rsync_streamed(
+                f'rsync debs → {_dest}', deb_dists,
+                f'{_dest}/dists/', ssh_cmd=[],
+                ignore_existing=True, filters=_debfilter) != 0:
+            console.print("repo publish: .deb copy failed — see log.",
+                          tui.COLOR_ERROR)
+            return
+
+        # 2. Rebuild the index from what's at the destination (in-process).
+        import signing
+        import apt_repo
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        if subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
+                          capture_output=True, text=True).returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            return
+        _staging = os.path.join(self.config.dir_temp, 'local-reindex')
+        if os.path.isdir(_staging):
+            shutil.rmtree(_staging)
+        os.makedirs(_staging, exist_ok=True)
+        try:
+            _main_pkgs = apt_repo.local_reindex_and_sign(
+                staging=_staging, dest_root=_dest, suites_spec=suites_spec,
+                codename_for_suite={_s: _s for _s in suites_spec},
+                primary_suite=_codename, arch=self.config.arch,
+                version=self.config.build_version.strip('"').strip("'"),
+                password=_password,
+                signing_homedir=signing.signing_home(self.config))
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
+        if _main_pkgs is None:
+            console.print("repo publish: local re-index failed — see log.",
+                          tui.COLOR_ERROR)
+            return
+
+        # 3. Copy the freshly-generated metadata (staging → dest).
+        if self._rsync_streamed(
+                f'rsync index → {_dest}',
+                os.path.join(_staging, 'dists'),
+                f'{_dest}/dists/', ssh_cmd=[]) != 0:
+            console.print("repo publish: metadata copy failed — see log.",
+                          tui.COLOR_ERROR)
+            return
+
+        self._publish_finalize(scope, _main_pkgs, _dest)
 
     def _rsync_streamed(self, label, src, dest, ssh_cmd, delete=False,
                         ignore_existing=False, filters=None):
@@ -3561,15 +3691,18 @@ class BuildSession:
         non-progress lines are kept for the error log.  Returns the rsync
         return code.
 
-        delete=False (default) → NO `--delete`: the remote ACCUMULATES files,
-        never removing a published version absent from the local tree (the
-        UPD-01 append-only guarantee).  delete=True is reserved for an
+        delete=False (default) → NO `--delete`: the destination ACCUMULATES
+        files, never removing a published version absent from the local tree
+        (the UPD-01 append-only guarantee).  delete=True is reserved for an
         explicit, deliberate mirror-reset — never the normal publish path.
 
         ignore_existing=True (UPD-02) → `--ignore-existing`: skip files already
-        present on the remote by NAME (not mtime) — for the immutable .deb pool
-        pass, so a re-publish never re-uploads unchanged .debs.  `filters` are
-        extra rsync `--include`/`--exclude` args (e.g. a deb-only filter)."""
+        present at the destination by NAME (not mtime) — for the immutable .deb
+        pool pass, so a re-publish never re-uploads unchanged .debs.  `filters`
+        are extra rsync `--include`/`--exclude` args (e.g. a deb-only filter).
+
+        ssh_cmd=[] (COMP-02 local publish) → no `-e` arg, so rsync runs in
+        local-to-local mode (`dest` is a plain filesystem path)."""
         _bar = ProgressBar(label, itr_label='', maxvalue=100,
                            show_rate=False, label_width=34)
         _argv = ['rsync', '-aH']
@@ -3578,8 +3711,10 @@ class BuildSession:
         if ignore_existing:
             _argv.append('--ignore-existing')
         _argv += list(filters or [])
-        _argv += ['--info=progress2',
-                  '-e', ' '.join(ssh_cmd), f'{src}/', dest]
+        _argv += ['--info=progress2']
+        if ssh_cmd:
+            _argv += ['-e', ' '.join(ssh_cmd)]
+        _argv += [f'{src}/', dest]
         _proc = subprocess.Popen(
             _argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         _tail: 'list[str]' = []

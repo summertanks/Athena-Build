@@ -568,25 +568,50 @@ def _remote_scan_packages(ssh_cmd: 'list[str]', userhost: str,
     return _r.stdout
 
 
-def remote_reindex_and_sign(
-    staging: str, ssh_cmd: 'list[str]', userhost: str, remote_root: str,
+def _local_has_debs(root: str, rel: str) -> bool:
+    """True if the local subdir `<root>/<rel>` holds any .deb/.udeb.  Twin of
+    `_remote_has_debs` for the `repo publish local <path>` transport."""
+    _abs = os.path.join(root, rel)
+    if not os.path.isdir(_abs):
+        return False
+    return any(_f.endswith(('.deb', '.udeb')) for _f in os.listdir(_abs))
+
+
+def _local_scan_packages(root: str, rel: str, udeb: bool) -> 'Optional[str]':
+    """Run dpkg-scanpackages LOCALLY over `<root>/<rel>` and return the
+    Packages text (Filenames relative to root).  Twin of `_remote_scan_packages`
+    for the `repo publish local <path>` transport.  None on failure."""
+    _argv = ['dpkg-scanpackages', '-m']
+    if udeb:
+        _argv += ['-t', 'udeb']
+    _argv += [rel, '/dev/null']
+    _r = subprocess.run(_argv, capture_output=True, text=True, cwd=root)
+    if _r.returncode != 0:
+        tui.console.print(
+            f"ERROR: dpkg-scanpackages {rel}: {_r.stderr.strip()[:200]} "
+            f"(is dpkg-dev installed?)")
+        logger.error(f"_local_scan_packages {rel}: rc={_r.returncode}")
+        return None
+    return _r.stdout
+
+
+def _reindex_and_sign_via(
+    staging: str, has_debs, scan_packages, transport_label: str,
     suites_spec: 'dict[str, list[str]]', codename_for_suite: dict,
     primary_suite: str, arch: str, version: str, password: str,
     signing_homedir: 'Optional[str]' = None,
     description_for_suite: 'Optional[dict]' = None,
 ) -> 'Optional[str]':
-    """Regenerate the apt index from what's ACTUALLY on the remote (UPD-02):
-    `dpkg-scanpackages` runs ON THE VM (via ssh) over each remote pool subdir;
-    the metadata is assembled in a LOCAL `staging` mirror and signed LOCALLY
-    (key never leaves the box).  The caller then rsyncs `staging/dists` up.
+    """Shared body of `{remote,local}_reindex_and_sign` — assemble the apt
+    index from what's actually present at the destination and sign it
+    locally.  `has_debs(rel)` and `scan_packages(rel, udeb)` abstract over
+    where the .debs live; everything else (compress, per-subdir Release,
+    top Release, signing) is destination-agnostic and runs against
+    `staging`.  `transport_label` colours the spinner ('remote scan + sign'
+    vs 'local scan + sign').
 
-    Only the SCAN is remote (needs dpkg-dev on the VM); compress / per-subdir
-    Release / top Release (apt-ftparchive over the local staging tree, which
-    hashes the Packages files, not the .debs) / signing all stay local.
-
-    Returns the PRIMARY suite's main/binary-<arch> Packages text (for the local
-    manifest), or None on failure.  Subdirs with no .debs on the remote are
-    skipped (e.g. doc/tests/debug/udeb after a minimal publish)."""
+    Returns the PRIMARY suite's main/binary-<arch> Packages text (for the
+    local manifest), or None on failure."""
     if description_for_suite is None:
         description_for_suite = {}
     _main_packages = ''
@@ -599,14 +624,14 @@ def remote_reindex_and_sign(
                     (False, f'{_comp}/binary-{arch}'),
                     (True,  f'{_comp}/debian-installer/binary-{arch}')):
                 _rel = f'dists/{_suite}/{_sub}'
-                if not _remote_has_debs(ssh_cmd, userhost, remote_root, _rel):
+                if not has_debs(_rel):
                     continue
-                # The remote dpkg-scanpackages over a big pool (+ local
+                # The dpkg-scanpackages over a big pool (+ local
                 # compress/Release) is the publish's main dead time — spin it.
-                _spin = tui.Spinner(f"indexing {_rel} (remote scan + sign)")
+                _spin = tui.Spinner(
+                    f"indexing {_rel} ({transport_label} scan + sign)")
                 try:
-                    _text = _remote_scan_packages(
-                        ssh_cmd, userhost, remote_root, _rel, udeb=_udeb)
+                    _text = scan_packages(_rel, _udeb)
                     if _text is not None:
                         _abs = os.path.join(staging, _rel)
                         os.makedirs(_abs, exist_ok=True)
@@ -645,9 +670,61 @@ def remote_reindex_and_sign(
         if not _ok:
             return None
         tui.console.print(
-            f"  → dists/{_suite}/ re-indexed from remote + signed "
+            f"  → dists/{_suite}/ re-indexed from {transport_label} + signed "
             f"(components: {', '.join(_populated)})", tui.COLOR_HIGHLIGHT)
     return _main_packages
+
+
+def remote_reindex_and_sign(
+    staging: str, ssh_cmd: 'list[str]', userhost: str, remote_root: str,
+    suites_spec: 'dict[str, list[str]]', codename_for_suite: dict,
+    primary_suite: str, arch: str, version: str, password: str,
+    signing_homedir: 'Optional[str]' = None,
+    description_for_suite: 'Optional[dict]' = None,
+) -> 'Optional[str]':
+    """Regenerate the apt index from what's ACTUALLY on the remote (UPD-02):
+    `dpkg-scanpackages` runs ON THE VM (via ssh) over each remote pool subdir;
+    the metadata is assembled in a LOCAL `staging` mirror and signed LOCALLY
+    (key never leaves the box).  The caller then rsyncs `staging/dists` up.
+
+    Only the SCAN is remote (needs dpkg-dev on the VM); compress / per-subdir
+    Release / top Release (apt-ftparchive over the local staging tree, which
+    hashes the Packages files, not the .debs) / signing all stay local.
+
+    Returns the PRIMARY suite's main/binary-<arch> Packages text (for the local
+    manifest), or None on failure.  Subdirs with no .debs on the remote are
+    skipped (e.g. doc/tests/debug/udeb after a minimal publish)."""
+    return _reindex_and_sign_via(
+        staging,
+        lambda _rel: _remote_has_debs(ssh_cmd, userhost, remote_root, _rel),
+        lambda _rel, _udeb: _remote_scan_packages(
+            ssh_cmd, userhost, remote_root, _rel, _udeb),
+        'remote', suites_spec, codename_for_suite,
+        primary_suite, arch, version, password,
+        signing_homedir, description_for_suite,
+    )
+
+
+def local_reindex_and_sign(
+    staging: str, dest_root: str,
+    suites_spec: 'dict[str, list[str]]', codename_for_suite: dict,
+    primary_suite: str, arch: str, version: str, password: str,
+    signing_homedir: 'Optional[str]' = None,
+    description_for_suite: 'Optional[dict]' = None,
+) -> 'Optional[str]':
+    """COMP-02: regenerate the apt index from what's at the local destination
+    `dest_root` (after the additive .deb copy).  Twin of `remote_reindex_and_sign`
+    for the `repo publish local <path>` transport — no ssh wrapper; everything
+    runs in-process.  Same merge-from-destination contract so the published
+    Packages reflects prior versions kept at `dest_root` (UPD-01 append-only)."""
+    return _reindex_and_sign_via(
+        staging,
+        lambda _rel: _local_has_debs(dest_root, _rel),
+        lambda _rel, _udeb: _local_scan_packages(dest_root, _rel, _udeb),
+        'local', suites_spec, codename_for_suite,
+        primary_suite, arch, version, password,
+        signing_homedir, description_for_suite,
+    )
 
 
 
