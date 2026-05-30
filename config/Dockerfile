@@ -1,7 +1,7 @@
 ARG RELEASE=bookworm
 ARG SNAPSHOT_BASEURL=https://snapshot.debian.org/archive
-ARG ARCHIVE_KEY=debian
-ARG SECURITY_ARCHIVE_KEY=debian-security
+ARG ARCHIVE_NAME=debian
+ARG SECURITY_ARCHIVE_NAME=debian-security
 ARG SNAPSHOT_TS=
 
 FROM debian:${RELEASE}-slim
@@ -11,8 +11,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 # re-declared here.
 ARG RELEASE
 ARG SNAPSHOT_BASEURL
-ARG ARCHIVE_KEY
-ARG SECURITY_ARCHIVE_KEY
+ARG ARCHIVE_NAME
+ARG SECURITY_ARCHIVE_NAME
 ARG SNAPSHOT_TS
 
 # CONF-15 (revised — install-then-realign): pin the toolchain layer to
@@ -84,9 +84,9 @@ RUN set -eux; \
           /etc/apt/sources.list.d/*.sources \
           /etc/apt/sources.list.d/*.list; \
     { \
-        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE} main"; \
-        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-updates main"; \
-        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${SECURITY_ARCHIVE_KEY}/${SNAPSHOT_TS} ${RELEASE}-security main"; \
+        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_NAME}/${SNAPSHOT_TS} ${RELEASE} main"; \
+        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${ARCHIVE_NAME}/${SNAPSHOT_TS} ${RELEASE}-updates main"; \
+        echo "deb [check-valid-until=no] ${SNAPSHOT_BASEURL}/${SECURITY_ARCHIVE_NAME}/${SNAPSHOT_TS} ${RELEASE}-security main"; \
     } > /etc/apt/sources.list; \
     printf 'Package: *\nPin: origin snapshot.debian.org\nPin-Priority: 1001\n' \
         > /etc/apt/preferences.d/athena-snapshot; \
