@@ -201,6 +201,43 @@ class BuildContainer:
                     tui.console.print(f"Error writing docker build log: {e}")
                     raise RuntimeError(f"Cannot write Docker build log: {e}") from e
 
+            except docker.errors.BuildError as e:
+                # BuildError carries the streamed build_log iterator —
+                # drain it into log/docker_build.log so the operator can
+                # see what apt actually said, and print the tail so the
+                # cause surfaces inline (the SDK's default `e.msg` is
+                # just "command returned non-zero code: N" and drops the
+                # streamed stderr that actually explains why).
+                _log_path = os.path.join(self.log_path, 'docker_build.log')
+                _tail: 'list[str]' = []
+                try:
+                    with open(_log_path, 'w') as fh:
+                        # docker-py types build_log as Iterator[JSON]; mypy's
+                        # `JSON` recursive alias doesn't unify with a dict
+                        # comprehension assignment.  isinstance guards the
+                        # access at runtime, so the ignore is safe.
+                        for chunk in e.build_log or iter(()):  # type: ignore[assignment]
+                            if not isinstance(chunk, dict):
+                                continue
+                            for _key in ('stream', 'error'):
+                                _val = chunk.get(_key)
+                                if isinstance(_val, str):
+                                    for line in _val.splitlines():
+                                        fh.write(line + '\n')
+                                        _tail.append(line)
+                except OSError:
+                    pass
+                logger.error(
+                    f"Docker image build FAILED: {e.msg}; tail={_tail[-25:]}")
+                tui.console.print(f"Docker image build FAILED: {e.msg}")
+                if _tail:
+                    tui.console.print(
+                        f"  last {min(len(_tail), 25)} line(s) of streamed "
+                        f"build output (full log: {_log_path}):",
+                        tui.COLOR_ERROR)
+                    for _line in _tail[-25:]:
+                        tui.console.print(f"    {_line}", tui.COLOR_ERROR)
+                raise RuntimeError(f"Docker image build failed: {e.msg}") from e
             except docker.errors.APIError as e:
                 logger.error(f"Athena Build Docker: Error {e}")
                 tui.console.print(f"Athena Build Docker: Error {e}")
