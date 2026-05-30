@@ -30,6 +30,7 @@ atexit.register(_FAULT_LOG.close)
 
 import tui
 import datetime
+import json
 import os
 import glob
 import re
@@ -51,6 +52,7 @@ import dependencytree
 import buildsystem
 import installer_chroot
 import iso_installer
+import persistence
 import repo_audit
 import signal
 
@@ -78,43 +80,127 @@ class BuildFlags:
     Each flag is set to True at the end of its corresponding command handler
     and checked as a prerequisite by later stages.  This prevents commands
     from running on stale or missing state without repeating the earlier work.
+
+    UX-04: when constructed via `BuildFlags.load(path)`, every flag
+    transition autosaves to a JSON sidecar (cheap, ~1 ms).  Cross-restart
+    visibility — operator sees prior-state banner via `restored_summary()`
+    in main() even without running `resume`.
     """
 
-    def __init__(self):
-        self.cache_ready: bool = False             # build_cache completed
-        self.dep_check_ready: bool = False         # parse_dependency completed
-        self.download_ready: bool = False          # source_download completed
-        self.build_container_ready: bool = False   # build_container initialised
-        self.source_build_ready: bool = False      # source_build completed
-        self.signing_key_verified: bool = False    # signing key sign+verify roundtrip
-        self.chroot_ready: bool = False            # build_chroot completed (live)
-        self.chroot_verified: bool = False         # build_chroot + verify_chroot all checks passed
-        # Installer chroot built from udeb closure.  Independent of
-        # chroot_ready/_verified — the two chroots have different
-        # lifecycles (live = squashfs payload; installer = initrd).
-        self.chroot_installer_ready: bool = False  # build_chroot installer completed
-        # Set on a successful `iso build live` / `iso build installer`.  Lets
-        # `autorun live` / `autorun installer` gate the ISO-build step the
-        # same way they gate every other stage — without these the autorun
-        # step driver has no flag to check, so a silent ISO-build failure
-        # would not be caught.
-        self.iso_live_ready: bool = False
-        self.iso_installer_ready: bool = False
-        # Set on a successful `iso build disk`.  The disk image reuses the
-        # verified live chroot (same gate as iso_live_ready) but is a
-        # distinct end-state artifact (qcow2, not ISO), so it carries its
-        # own flag — lets `autorun disk` gate the final step and `print
-        # state` surface the disk target.
-        self.iso_disk_ready: bool = False
+    # Class-level annotations — mypy uses these to see the attributes that
+    # __init__ sets via object.__setattr__.  They don't create class
+    # attributes; assignment still goes to the instance __dict__.
+    cache_ready:             bool
+    dep_check_ready:         bool
+    download_ready:          bool
+    build_container_ready:   bool
+    source_build_ready:      bool
+    signing_key_verified:    bool
+    chroot_ready:            bool
+    chroot_verified:         bool
+    chroot_installer_ready:  bool
+    iso_live_ready:          bool
+    iso_installer_ready:     bool
+    iso_disk_ready:          bool
+    _save_path:              'Optional[str]'
+
+    _FIELDS = (
+        'cache_ready', 'dep_check_ready', 'download_ready',
+        'build_container_ready', 'source_build_ready',
+        'signing_key_verified',
+        'chroot_ready', 'chroot_verified', 'chroot_installer_ready',
+        'iso_live_ready', 'iso_installer_ready', 'iso_disk_ready',
+    )
+
+    # Flags whose meaning depends on in-memory state (Cache, DT,
+    # BuildContainer, signing key validity) that has to be re-established
+    # at session start.  Persisted to disk but reset to False on load —
+    # `cmd_resume` flips cache_ready / dep_check_ready True after the
+    # restore wires Cache + DT; `cmd_init_container` flips
+    # build_container_ready; `_ensure_signing_key_verified` does the key.
+    _IN_MEMORY_ONLY = frozenset((
+        'cache_ready', 'dep_check_ready',
+        'build_container_ready', 'signing_key_verified',
+    ))
+
+    _FILENAME = 'buildflags.json'
+    _FORMAT_VERSION = 1
+
+    def __init__(self, save_path: 'Optional[str]' = None):
+        # _save_path must exist BEFORE the field-set loop so that
+        # __setattr__'s autosave check sees None (= disabled) during
+        # initial assignment.
+        object.__setattr__(self, '_save_path', None)
+        for _f in self._FIELDS:
+            object.__setattr__(self, _f, False)
+        # NOW enable autosave (if requested).
+        object.__setattr__(self, '_save_path', save_path)
+
+    def __setattr__(self, name: str, value) -> None:
+        object.__setattr__(self, name, value)
+        if name in self._FIELDS and self._save_path:
+            self._autosave()
+
+    def _autosave(self) -> None:
+        # __setattr__ only calls this when _save_path is truthy.
+        assert self._save_path is not None
+        try:
+            _payload = {
+                '_format_version': self._FORMAT_VERSION,
+                'flags': {_f: getattr(self, _f) for _f in self._FIELDS},
+            }
+            _tmp = self._save_path + '.tmp'
+            with open(_tmp, 'w') as _fh:
+                json.dump(_payload, _fh, indent=2, sort_keys=True)
+            os.replace(_tmp, self._save_path)
+        except OSError as _e:
+            logger.warning(f"BuildFlags autosave: {_e}")
+
+    @classmethod
+    def default_path(cls, config) -> str:
+        return os.path.join(config.dir_cache, cls._FILENAME)
+
+    @classmethod
+    def load(cls, save_path: str) -> 'BuildFlags':
+        """Read the JSON sidecar (if present), construct a BuildFlags with
+        autosave enabled at `save_path`, and reset `_IN_MEMORY_ONLY` flags
+        to False (their backing in-memory state isn't loaded yet)."""
+        _flags = cls(save_path=None)
+        if os.path.isfile(save_path):
+            try:
+                with open(save_path) as _fh:
+                    _payload = json.load(_fh)
+                if (_payload.get('_format_version') == cls._FORMAT_VERSION
+                        and isinstance(_payload.get('flags'), dict)):
+                    for _f, _v in _payload['flags'].items():
+                        if _f in cls._FIELDS:
+                            object.__setattr__(_flags, _f, bool(_v))
+            except (OSError, json.JSONDecodeError) as _e:
+                logger.warning(
+                    f"BuildFlags.load({save_path}): {_e}; starting fresh")
+        # In-memory flags reset — see _IN_MEMORY_ONLY rationale.
+        for _f in cls._IN_MEMORY_ONLY:
+            object.__setattr__(_flags, _f, False)
+        # Enable autosave now that all initial values are settled.
+        object.__setattr__(_flags, '_save_path', save_path)
+        return _flags
+
+    def restored_summary(self) -> str:
+        """Comma-separated list of persisted-True flags (excluding the
+        in-memory-only ones) for the startup banner."""
+        _kept = [
+            _f.replace('_ready', '')
+            for _f in self._FIELDS
+            if _f not in self._IN_MEMORY_ONLY and getattr(self, _f)
+        ]
+        return ', '.join(_kept)
 
     def __str__(self) -> str:
         """Return a compact one-line status string for display in the TUI."""
-        fields = ['cache_ready', 'dep_check_ready', 'download_ready',
-                  'build_container_ready', 'source_build_ready',
-                  'signing_key_verified',
-                  'chroot_ready', 'chroot_verified', 'chroot_installer_ready',
-                  'iso_live_ready', 'iso_installer_ready', 'iso_disk_ready']
-        return '  '.join(f"[{'✓' if getattr(self, f) else '·'}] {f.replace('_ready', '')}" for f in fields)
+        return '  '.join(
+            f"[{'✓' if getattr(self, _f) else '·'}] {_f.replace('_ready', '')}"
+            for _f in self._FIELDS
+        )
 
 
 def _dedupe_bidirectional_conflicts(conflicts):
@@ -170,7 +256,13 @@ class BuildSession:
         # touching it.
         self.udeb_dep_tree: 'Optional[dependencytree.DependencyTree]' = None
         self.container: 'Optional[buildcontainer.BuildContainer]' = None
-        self.flags: BuildFlags = BuildFlags()
+        # UX-04: BuildFlags.load reads buildflags.json (created on every
+        # flag transition) and resets _IN_MEMORY_ONLY flags to False —
+        # they need cmd_resume to actually rebuild Cache + DT before
+        # they're true again.  Operator sees prior state via the
+        # restored_summary banner in main() without needing `resume`.
+        self.flags: BuildFlags = BuildFlags.load(
+            BuildFlags.default_path(config))
         self.last_source_build_counts: 'Optional[dict]' = None
 
     @staticmethod
@@ -684,7 +776,13 @@ class BuildSession:
         self.cache = None
         self.dep_tree = None
         self.udeb_dep_tree = None
-        self.flags = BuildFlags()
+        # UX-04: keep autosave wiring so the wipe is reflected on disk.
+        self.flags = BuildFlags.load(BuildFlags.default_path(self.config))
+        # After a buildroot wipe every flag should be False even if the
+        # JSON still carries True (the underlying state is gone).  Set
+        # each one through the property to trigger autosave.
+        for _f in BuildFlags._FIELDS:
+            setattr(self.flags, _f, False)
         self.last_source_build_counts = None
         # Scrub the password we just collected — same hygiene the rest
         # of the codebase uses for sudo passwords.
@@ -1154,6 +1252,10 @@ class BuildSession:
 
         console.print(f"Selected {len(self.dep_tree.selected_srcs)} source packages", tui.COLOR_HIGHLIGHT)
         self.flags.dep_check_ready = True
+        # UX-04: persist Cache + DT to dir_cache/session.pkl.gz so
+        # `resume` (next process) can skip cache build + cache parse.
+        # Best-effort: a save failure is logged but the build continues.
+        persistence.save_session(self, self.config.dir_cache)
 
 
     # --------------------------------------Command: patch_refresh-------------------------------------
@@ -7631,6 +7733,9 @@ class BuildSession:
                 return
 
         self.flags.source_build_ready = True
+        # UX-04: refresh the session pickle so last_source_build_counts
+        # is captured for the print summary on a future resume.
+        persistence.save_session(self, self.config.dir_cache)
 
 
     # ---------------------------------------------------------------------------
@@ -8078,6 +8183,74 @@ class BuildSession:
             return self.cmd_clean_all(*args)
         return self._group_help('clean', _table, action)
 
+    def cmd_resume(self, *args) -> None:
+        """UX-04: restore Cache + DependencyTree + udeb_dep_tree from the
+        last persisted session, gated by a fingerprint of every input
+        that fed the saved state.
+
+        Sequence:
+          1. persistence.restore_session — verify fingerprint, unpickle
+             Cache + DT, rewire DT's __cache backref.  Returns None on
+             any failure (the operator gets a clear "what changed" or
+             "what's missing" message).
+          2. Best-effort cmd_init_container — re-init Docker client.
+             Failure here doesn't void the restore; cache_ready and
+             dep_check_ready stay True, only build_container_ready
+             stays False.
+
+        On success: cache_ready + dep_check_ready True in-memory (they
+        were reset by BuildFlags.load — UX-04 _IN_MEMORY_ONLY invariant).
+        Operator can immediately run any command without paying the
+        cache build + cache parse cost.
+
+        On failure: the session is left in the same shape as a fresh
+        BuildSession (cache/dep_tree None; the operator runs
+        `cache parse` to rebuild).
+        """
+        del args
+        if self.cache is not None and self.flags.cache_ready:
+            console.print(
+                "resume: already restored this session — no-op",
+                tui.COLOR_INFO)
+            return
+        # UX-05g: defensive reset on entry so a partial-restore failure
+        # never leaves a stale True from a prior attempt.
+        self.flags.cache_ready = False
+        self.flags.dep_check_ready = False
+        _restored = persistence.restore_session(
+            self.config,
+            lambda msg: console.print(msg, tui.COLOR_WARNING),
+        )
+        if _restored is None:
+            return
+        self.cache = _restored.cache
+        self.dep_tree = _restored.dep_tree
+        self.udeb_dep_tree = _restored.udeb_dep_tree
+        if _restored.last_source_build_counts is not None:
+            self.last_source_build_counts = _restored.last_source_build_counts
+        self.flags.cache_ready = True
+        self.flags.dep_check_ready = True
+        # Use the local _restored references for the print so mypy doesn't
+        # need to narrow self.cache / self.dep_tree out of their Optional.
+        _n_pkgs = sum(len(_v) for _v in _restored.cache.package_hashtable.values())
+        _n_srcs = sum(len(_v) for _v in _restored.cache.source_hashtable.values())
+        console.print(
+            f"resume: restored Cache ({_n_pkgs:,} pkgs / {_n_srcs:,} src) "
+            f"+ DependencyTree ({len(_restored.dep_tree.selected_pkgs):,} selected_pkgs / "
+            f"{len(_restored.dep_tree.selected_srcs):,} selected_srcs)",
+            tui.COLOR_HIGHLIGHT,
+        )
+        # Best-effort container re-init.  Failure → build_container_ready
+        # stays False; operator runs `container init` later.
+        try:
+            self.cmd_init_container()
+        except Exception as _e:  # noqa: BLE001 — Docker unreachable shouldn't void the resume
+            logger.warning(f"resume: container re-init failed: {_e}")
+            console.print(
+                f"resume: container re-init failed — {_e}.  "
+                "Run `container init` manually before building.",
+                tui.COLOR_WARNING)
+
     def cmd_auto_run(self, action: str = '', *args):
         """Group dispatcher: bare `autorun` → autorun live (preserves
         existing UX); explicit `autorun live` or `autorun installer`
@@ -8236,6 +8409,14 @@ def main(banner: str) -> None:
     if _auto_yes:
         sys.argv.remove('--yes')
 
+    # UX-04: `--resume` auto-fires cmd_resume after command registration
+    # so `build-system.sh --resume` lands the operator at the same place
+    # the prior session left off (Cache + DT restored from pickle,
+    # fingerprint-gated).
+    _resume = '--resume' in sys.argv
+    if _resume:
+        sys.argv.remove('--resume')
+
     # UX-05e: `--cmd <cmd>` queues one or more commands to run sequentially
     # then exit, no REPL.  Multiple --cmd allowed; order preserved.
     # Implies --headless (the TUI's curses screen makes no sense for one-
@@ -8337,6 +8518,7 @@ def main(banner: str) -> None:
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
+    tui.register_command('resume',    session.cmd_resume,    'Resume:     resume — UX-04 restore Cache + DT from prior session')
     tui.register_command('print',     session.cmd_print,     'Print:      print build state — try `print help`')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
@@ -8344,6 +8526,23 @@ def main(banner: str) -> None:
     console.print(f"\tArch\t\t\t{config.arch}")
     console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
     console.print(f"\tBuild Distribution\t{config.build_distribution} {config.build_version} ({config.build_codename})")
+
+    # UX-04: announce persisted-flag state across restarts so the operator
+    # knows prior session left something behind without needing to ask.
+    _restored = session.flags.restored_summary()
+    if _restored:
+        console.print(
+            f"Restored from prior session: {_restored}", tui.COLOR_INFO)
+        console.print(
+            "  in-memory state (cache + dep tree) not yet wired — run "
+            "`resume` to restore, or `cache parse` to rebuild.",
+            tui.COLOR_INFO,
+        )
+
+    # UX-04: `--resume` auto-fires cmd_resume after registration so the
+    # operator can `build-system.sh --resume` and get instant state.
+    if _resume:
+        session.cmd_resume()
 
     tui_inst.wait()
     Exit(0)

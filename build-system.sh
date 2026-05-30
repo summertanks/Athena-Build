@@ -19,6 +19,7 @@ CONFIG_FILE="config/build.conf"
 PKG_REQ_FILE="config/pkg.list"
 HEADLESS="0"
 AUTO_YES="0"
+RESUME="0"
 ONESHOT_CMDS=()
 
 usage() { \
@@ -29,6 +30,7 @@ usage() { \
         echo -e "\t --headless : Skip the curses TUI; run a plain stdin/stdout REPL (UX-05 Path B)"; \
         echo -e "\t --yes : Auto-answer informational YESNO prompts (UX-05a)"; \
         echo -e "\t --cmd \"<cmd>\" : Run one command then exit; repeat for multiple (UX-05e).  Implies --headless"; \
+        echo -e "\t --resume : Restore Cache + DependencyTree from prior session (UX-04); fingerprint-gated"; \
 }
 
 BUILD_DIR=$(pwd)
@@ -41,7 +43,7 @@ set -o pipefail
 echo -e "Athena Build System Check..."
 
 # Parsing args
-ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless,yes,cmd:' -- "$@") || exit
+ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless,yes,resume,cmd:' -- "$@") || exit
 eval "set -- $ARGS"
 
 while true; do
@@ -60,6 +62,9 @@ while true; do
 			shift;;
 		(--yes)
 			AUTO_YES=1;
+			shift;;
+		(--resume)
+			RESUME=1;
 			shift;;
 		(--cmd)
 			ONESHOT_CMDS+=("$2");
@@ -386,6 +391,9 @@ if [[ "$HEADLESS" == "1" ]]; then
 fi
 if [[ "$AUTO_YES" == "1" ]]; then
     PY_EXTRA+=(--yes)
+fi
+if [[ "$RESUME" == "1" ]]; then
+    PY_EXTRA+=(--resume)
 fi
 for _cmd in "${ONESHOT_CMDS[@]}"; do
     PY_EXTRA+=(--cmd "$_cmd")

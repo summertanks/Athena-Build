@@ -1141,3 +1141,28 @@ class DependencyTree:
         for _pkg in self.selected_srcs:
             _download_size += self.selected_srcs[_pkg].download_size
         return _download_size
+
+    # ── UX-04 pickle support ────────────────────────────────────────────
+    # Drop the back-ref to Cache (rewired by persistence.restore_session
+    # after Cache is rebuilt from disk + DT is unpickled) and flatten
+    # __lookahead's defaultdict (lambdas can't pickle).  Both are
+    # restored on __setstate__ — __cache to None (caller rewires),
+    # __lookahead to a fresh defaultdict(dict).
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('_DependencyTree__cache', None)
+        _la = state.get('_DependencyTree__lookahead')
+        if _la is not None:
+            state['_DependencyTree__lookahead'] = {
+                k: dict(v) for k, v in _la.items()
+            }
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        _la_flat = self.__dict__.get('_DependencyTree__lookahead', {})
+        _la: 'Dict[str, Dict[Version, package.Package]]' = defaultdict(dict)
+        _la.update(_la_flat)
+        self.__dict__['_DependencyTree__lookahead'] = _la
+        # __cache is rewired by persistence.restore_session.
+        self.__dict__['_DependencyTree__cache'] = None
