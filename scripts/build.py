@@ -6590,6 +6590,11 @@ class BuildSession:
         can't see the change) are rebuilt as bump-targets; genuinely-missing
         binaries (needs_build, e.g. a fresh fork) build normally.  Resumable +
         idempotent."""
+        # UX-05g defensive reset.  cmd_source_build already resets on entry
+        # before routing here, but the convention pins False-on-entry for
+        # every function that sets the flag True — so a future direct
+        # caller can't leak a stale True if this raises mid-run.
+        self.flags.source_build_ready = False
         _published = self._snapshot_published()
         _current = self._snapshot_current()
         console.print(
@@ -6665,6 +6670,13 @@ class BuildSession:
             if not _delta_to_build and not _extra:
                 console.print("source build: everything already up-to-date for "
                               "this generation — nothing to build.")
+                # Treat "nothing to build" as success — the workload is in
+                # the published state, repo/ has the binaries, downstream
+                # stages can proceed.  cmd_source_build's entry guard at
+                # ~L7381 reset the flag to False; if we don't re-arm it
+                # here, autorun aborts at the next step thinking the
+                # build didn't complete.
+                self.flags.source_build_ready = True
                 return
             # Pass the full delta workload (the loop skips the up-to-date and
             # rebuilds bump-targets) plus the extra needs_build sources.  Ledger
