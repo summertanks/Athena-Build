@@ -9542,6 +9542,42 @@ def test_athena_tasksel_task_keys_mirror_pkg_list_groups():
         )
 
 
+def test_athena_tasksel_no_test_new_install_skip():
+    """`Test-new-install: mark skip` tells tasksel to hide the task
+    from the new-install dialog — Debian uses this for `standard`
+    because Priority: standard already auto-installs those pkgs.
+
+    We DON'T have the Priority-driven path: standard ships via an
+    explicit Key: list (see project_pkg_list_groups_mirror_tasksel_keys
+    memory).  So if `mark skip` is present, the operator never sees
+    the task and the Key: pkgs only land via base_include — meaning
+    operator can't toggle the group off and might not realize it's
+    being installed.
+
+    Caught 2026-05-31 install: operator reported 5/6 non-base tasks
+    visible in the installer, `standard` missing.  Root cause was
+    `Test-new-install: mark skip` left over from the upstream
+    template that seeded the file."""
+    import glob
+    _tasks_dir = os.path.join(_ROOT, 'fork', 'source',
+                              'athena-tasksel', 'tasks')
+    for _path in sorted(glob.glob(os.path.join(_tasks_dir, '*'))):
+        if not os.path.isfile(_path) or os.path.basename(_path) == 'README':
+            continue
+        with open(_path) as fh:
+            for _i, _line in enumerate(fh, 1):
+                _stripped = _line.strip()
+                # Skip blank + comments.
+                if not _stripped or _stripped.startswith('#'):
+                    continue
+                if _stripped.startswith('Test-new-install:'):
+                    assert 'skip' not in _stripped.lower(), (
+                        f"{_path}:{_i} has `{_stripped}` — would hide the "
+                        f"task from the installer.  Athena tasks ship via "
+                        f"explicit Key: list; remove this line."
+                    )
+
+
 def test_athena_pkgsel_no_popcon_pre_pkgsel_hook():
     """Athena ships as Athena (no Debian telemetry residue per
     project_filter_debian_specific_installer_hooks memory).  Upstream
@@ -21288,6 +21324,7 @@ def main() -> int:
         test_athena_tasksel_control_provides_conflicts_replaces_tasksel,
         test_athena_tasksel_depends_on_athena_tasksel_data_directly,
         test_athena_tasksel_task_keys_mirror_pkg_list_groups,
+        test_athena_tasksel_no_test_new_install_skip,
         test_athena_pkgsel_no_popcon_pre_pkgsel_hook,
         test_athena_pkgsel_fork_postinst_drops_debian_tasks_only_prefix,
         test_athena_pkgsel_control_provides_conflicts_replaces_pkgsel,
