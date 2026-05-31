@@ -13417,6 +13417,88 @@ def test_v2_logging_bridge_routes_by_stage():
     d.post(Shutdown(0))
 
 
+def test_render_failure_one_shot_capture_writes_post_mortem():
+    """When the renderer raises, the dispatcher's _safe_render captures
+    the first failure to disk with state context — replaces the old
+    blanket `except: pass` that hid renderer regressions silently.
+
+    Regression for the 2026-05-31 log-tab-removal incident: render
+    started failing after `repo audit`, no further output painted,
+    operator saw no error.  Couldn't pin the mechanism without ground
+    truth; this capture makes the next occurrence diagnosable."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui import dispatcher as _disp
+    from tui.events import PrintEvent
+    from tui.state import State
+
+    # Renderer that always raises — simulates the silent-render bug.
+    class _Boom:
+        def render(self, state):
+            raise RuntimeError('simulated curses error: bad window')
+        def width(self): return 80
+        def content_rows(self): return 20
+
+    with tempfile.TemporaryDirectory() as td:
+        _path = os.path.join(td, 'render-failure.log')
+        # Override the capture target + reset one-shot guard.
+        _disp.RENDER_FAILURE_PATH = _path
+        _disp._reset_render_failure_state()
+        try:
+            d = _disp.Dispatcher(_Boom(), State())
+            # First dirty render — should capture.
+            d.state.dirty = True
+            d._safe_render()
+            assert _disp.render_failure_count() == 1
+            assert os.path.isfile(_path), 'first failure should write the file'
+            body = open(_path).read()
+            assert 'TUI render failure' in body
+            assert 'RuntimeError' in body
+            assert 'simulated curses error' in body
+            assert 'active_tab:' in body
+            assert 'console' in body                # one of the default tabs
+            assert 'traceback:' in body
+
+            # Second dirty render — counter bumps, file NOT rewritten.
+            _first_mtime = os.path.getmtime(_path)
+            d.state.dirty = True
+            d._safe_render()
+            assert _disp.render_failure_count() == 2
+            assert os.path.getmtime(_path) == _first_mtime, (
+                'second failure must not rewrite the file (one-shot)'
+            )
+        finally:
+            _disp.RENDER_FAILURE_PATH = None
+            _disp._reset_render_failure_state()
+
+
+def test_render_failure_capture_no_op_on_success():
+    """A renderer that succeeds doesn't write the post-mortem file."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui import dispatcher as _disp
+    from tui.state import State
+
+    class _OK:
+        def render(self, state): pass
+        def width(self): return 80
+        def content_rows(self): return 20
+
+    with tempfile.TemporaryDirectory() as td:
+        _path = os.path.join(td, 'render-failure.log')
+        _disp.RENDER_FAILURE_PATH = _path
+        _disp._reset_render_failure_state()
+        try:
+            d = _disp.Dispatcher(_OK(), State())
+            d.state.dirty = True
+            d._safe_render()
+            assert _disp.render_failure_count() == 0
+            assert not os.path.exists(_path)
+        finally:
+            _disp.RENDER_FAILURE_PATH = None
+            _disp._reset_render_failure_state()
+
+
 def test_logging_bridge_splits_multiline_records():
     """A single log record with embedded \\n must produce one buffer
     entry per line, not one mega-entry that wrap_line slices arbitrarily
@@ -21623,6 +21705,9 @@ def main() -> int:
         test_per_module_logger_names_pin_routing,
         # TUI log bridge — multi-line records split per buffer entry
         test_logging_bridge_splits_multiline_records,
+        # TUI render-failure capture (replaces silent-swallow)
+        test_render_failure_one_shot_capture_writes_post_mortem,
+        test_render_failure_capture_no_op_on_success,
     ]
     failures = 0
     for t in tests:
