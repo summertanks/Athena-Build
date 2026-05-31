@@ -16536,6 +16536,7 @@ def _make_offline_cache(tmpdir: str,
     c._fork_src_names  = set()
     c._upstream_collisions      = defaultdict(list)
     c._upstream_udeb_collisions = defaultdict(list)
+    c._upstream_source_collisions = defaultdict(list)
 
     # Write Packages + Sources blobs and stamp mirror_cache_files /
     # mirror_udeb_cache_files (these are what __build_cache /
@@ -17022,6 +17023,120 @@ def test_cache_build_fork_supersede_drops_upstream_silently():
     # Upstream version was logged as superseded.
     assert 'athena-base-files' in c._upstream_collisions
     assert ('main', '12.4+deb12u14') in c._upstream_collisions['athena-base-files']
+
+
+def _conf11_drift_pkg_stanzas(version: str) -> str:
+    """Build a Packages stanza for athena-thing at the given version."""
+    return (
+        "Package: athena-thing\n"
+        f"Version: {version}\n"
+        "Architecture: all\n"
+        f"Filename: pool/main/a/athena-thing/athena-thing_{version}_all.deb\n"
+        "Size: 100\n"
+        "SHA256: " + ("a" * 64) + "\n"
+    )
+
+
+def _conf11_drift_src_stanzas(version: str, sha_seed: str = 'a') -> str:
+    """Build a Sources stanza for athena-thing at the given version."""
+    return (
+        "Package: athena-thing\n"
+        "Binary: athena-thing\n"
+        f"Version: {version}\n"
+        "Architecture: any\n"
+        "Directory: pool/main/a/athena-thing\n"
+        "Checksums-Sha256:\n"
+        " " + (sha_seed * 64) + f" 100 athena-thing_{version}.dsc\n"
+    )
+
+
+def test_conf11_source_drift_tracks_upstream_version():
+    """CONF-11 follow-up 2026-05-31: the source supersede walk now records
+    upstream version in _upstream_source_collisions so the audit can warn
+    when upstream source advances past fork.  Pin the parallel-to-
+    `_upstream_collisions` shape."""
+    import tempfile
+    _fork_pkg = _conf11_drift_pkg_stanzas('1.0+deb12u1+athena1')
+    _upstream_pkg = _conf11_drift_pkg_stanzas('1.0+deb12u1')
+    _fork_src = _conf11_drift_src_stanzas('1.0+deb12u1+athena1', 'a')
+    _upstream_src = _conf11_drift_src_stanzas('1.0+deb12u1', 'c')
+    with tempfile.TemporaryDirectory() as td:
+        c = _make_offline_cache(
+            td,
+            packages={'fork': _fork_pkg, 'main': _upstream_pkg},
+            sources={'fork': _fork_src, 'main': _upstream_src},
+        )
+    assert c.is_valid is True, c.error_str
+    # Upstream source version is now recorded — was silently lost pre-fix.
+    assert 'athena-thing' in c._upstream_source_collisions, (
+        c._upstream_source_collisions)
+    assert ('main', '1.0+deb12u1') in c._upstream_source_collisions['athena-thing']
+
+
+def test_conf11_source_drift_audit_silent_when_fork_ahead():
+    """Drift audit is silent when fork source dominates upstream source —
+    the normal `+athenaN` tiebreaker case.  No warning, no error_str."""
+    import io
+    import logging as _lg
+    import tempfile
+    _fork_pkg = _conf11_drift_pkg_stanzas('1.0+deb12u1+athena1')
+    _upstream_pkg = _conf11_drift_pkg_stanzas('1.0+deb12u1')
+    _fork_src = _conf11_drift_src_stanzas('1.0+deb12u1+athena1', 'a')
+    _upstream_src = _conf11_drift_src_stanzas('1.0+deb12u1', 'c')
+    _buf = io.StringIO()
+    _h = _lg.StreamHandler(_buf)
+    _h.setLevel(_lg.WARNING)
+    _logger = _lg.getLogger('athena')
+    _logger.addHandler(_h)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            c = _make_offline_cache(
+                td,
+                packages={'fork': _fork_pkg, 'main': _upstream_pkg},
+                sources={'fork': _fork_src, 'main': _upstream_src},
+            )
+    finally:
+        _logger.removeHandler(_h)
+    assert c.is_valid is True
+    # No drift warning fired (fork is strictly ahead by +athena1 tiebreaker).
+    assert 'fork source drift' not in _buf.getvalue(), _buf.getvalue()
+
+
+def test_conf11_source_drift_audit_fires_when_upstream_advances():
+    """When upstream source version >= fork source version, the drift
+    audit emits a WARNING.  Advisory only — c.is_valid stays True
+    (build doesn't fail on source drift; binary/udeb gate handles those)."""
+    import io
+    import logging as _lg
+    import tempfile
+    _fork_pkg = _conf11_drift_pkg_stanzas('1.0+deb12u1+athena1')
+    # Upstream BINARY stays old so the binary collision gate doesn't fail
+    # the build — we want to isolate the source-side audit signal.
+    _upstream_pkg = _conf11_drift_pkg_stanzas('1.0+deb12u1')
+    _fork_src = _conf11_drift_src_stanzas('1.0+deb12u1+athena1', 'a')
+    # Upstream SOURCE has advanced past fork's NMU layer.
+    _upstream_src = _conf11_drift_src_stanzas('1.0+deb12u2', 'c')
+    _buf = io.StringIO()
+    _h = _lg.StreamHandler(_buf)
+    _h.setLevel(_lg.WARNING)
+    _logger = _lg.getLogger('athena')
+    _logger.addHandler(_h)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            c = _make_offline_cache(
+                td,
+                packages={'fork': _fork_pkg, 'main': _upstream_pkg},
+                sources={'fork': _fork_src, 'main': _upstream_src},
+            )
+    finally:
+        _logger.removeHandler(_h)
+    # Advisory only: build still valid.
+    assert c.is_valid is True, c.error_str
+    # Drift warning fired naming the colliding source.
+    _log = _buf.getvalue()
+    assert 'fork source drift' in _log, _log
+    assert 'athena-thing' in _log, _log
+    assert '1.0+deb12u2' in _log, _log
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -20948,6 +21063,9 @@ def main() -> int:
         test_signing_generate_key_returns_false_when_export_step_fails,
         test_cache_build_populates_upstream_collisions_via_real_path,
         test_cache_build_fork_supersede_drops_upstream_silently,
+        test_conf11_source_drift_tracks_upstream_version,
+        test_conf11_source_drift_audit_silent_when_fork_ahead,
+        test_conf11_source_drift_audit_fires_when_upstream_advances,
         # UPD-01 step 1: +asg<R>u<N> version-suffix primitives
         test_nmu_regex_does_not_eat_asg_suffix,
         test_pristine_base_strips_both_layers,
