@@ -6,10 +6,9 @@ Description: GNOME Desktop Environment
  system settings, browser, common GNOME apps + utilities, PIM stack
  (calendar/contacts/clocks), software center, and admin GUI tools.
  .
- Derived from Debian's gnome-desktop task content (gnome-core +
- gnome meta) merged with @DISTRIBUTION@-specific additions
- (firefox-esr as default browser, gnome-screenshot, Noto+DejaVu
- fonts).
+ Combines the gnome-core + gnome meta-package contents with
+ @DISTRIBUTION@-specific additions (firefox-esr as default browser,
+ gnome-screenshot, Noto+DejaVu fonts).
  Mirrors the content of config/pkg.list [gnome-desktop] — keep in
  sync when adding/removing packages.
 Key:

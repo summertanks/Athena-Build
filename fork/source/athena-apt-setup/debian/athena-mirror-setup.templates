@@ -8,8 +8,8 @@ Type: boolean
 Default: false
 # :sl5:
 _Description: Use non-free firmware?
- Some non-free firmware has been made to work with Debian. Though this
- firmware is not at all a part of Debian, standard Debian tools can be used
+ Some non-free firmware has been made to work with @DISTRIBUTION@. Though this
+ firmware is not at all a part of @DISTRIBUTION@, standard @DISTRIBUTION@ tools can be used
  to install it. This firmware has varying licenses which may prevent you
  from using, modifying, or sharing it.
  .
@@ -20,8 +20,8 @@ Type: boolean
 Default: false
 # :sl1:
 _Description: Use non-free software?
- Some non-free software has been made to work with Debian. Though this
- software is not at all a part of Debian, standard Debian tools can be used
+ Some non-free software has been made to work with @DISTRIBUTION@. Though this
+ software is not at all a part of @DISTRIBUTION@, standard @DISTRIBUTION@ tools can be used
  to install it. This software has varying licenses which may prevent you
  from using, modifying, or sharing it.
  .
@@ -32,9 +32,9 @@ Type: boolean
 Default: false
 # :sl1:
 _Description: Use contrib software?
- Some additional software has been made to work with Debian. Though this
+ Some additional software has been made to work with @DISTRIBUTION@. Though this
  software is free, it depends on non-free software for its operation. This
- software is not a part of Debian, but standard Debian tools can be
+ software is not a part of @DISTRIBUTION@, but standard @DISTRIBUTION@ tools can be
  used to install it.
  .
  Please choose whether you want this software to be made available to you.

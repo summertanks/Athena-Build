@@ -41,7 +41,7 @@ install:
 	install -m 755 tests/debconf $(DESTDIR)/usr/lib/tasksel/tests/
 	install -m 755 tests/lang $(DESTDIR)/usr/lib/tasksel/tests/
 	install -m 755 packages/list $(DESTDIR)/usr/lib/tasksel/packages/
-	pod2man --section=8 --center "Debian specific manpage" --release $(VERSION) tasksel.pod | gzip -9c > $(DESTDIR)/usr/share/man/man8/tasksel.8.gz
+	pod2man --section=8 --center "@DISTRIBUTION@ specific manpage" --release $(VERSION) tasksel.pod | gzip -9c > $(DESTDIR)/usr/share/man/man8/tasksel.8.gz
 	for lang in $(LANGS); do \
 		[ ! -d $(LOCALEDIR)/$$lang/LC_MESSAGES/ ] && mkdir -p $(LOCALEDIR)/$$lang/LC_MESSAGES/; \
 		install -m 644 po/$$lang.mo $(LOCALEDIR)/$$lang/LC_MESSAGES/tasksel.mo; \

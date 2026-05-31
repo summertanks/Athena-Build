@@ -1,0 +1,91 @@
+# audit/identity-allowlist — CONF-10 durable handling
+#
+# Each non-empty, non-# line records ONE permitted residue exception:
+#
+#   <path-glob>\t<token-name>\t<reason>
+#
+#   path-glob   fnmatch-style glob against the scanner's relative path
+#               (relative to fork/source for the S1 fork audit, relative
+#               to the staging tree for the S3 ISO audit).
+#   token-name  IDENTITY_TOKENS key (see scripts/identity_scan.py), or
+#               '*' to allow every token at this path.
+#   reason      Free-text rationale.  Surfaces when this entry
+#               suppresses a finding.  Be specific.
+#
+# Categories (kept in this order):
+#   1. Legal / policy retention — copyright, changelog, upstream READMEs.
+#   2. Non-shipped fork metadata — debian/control prose, source comments.
+#   3. Dormant network-install surface — choose-mirror entire tree, kept
+#      in source for future re-activation but not exercised today.
+#   4. Operator-facing fork docs — README.md describing the fork itself.
+#
+# When the audit fires on a new file, decide: is it (a) actual leakage
+# to fix, or (b) a category-1..4 exception?  Add a line here only for (b).
+
+# ── 1. Legal / policy retention ────────────────────────────────────────
+*/debian/changelog	*	upstream changelog history (legally required to retain)
+*/debian/copyright	*	upstream license attribution (legally required)
+*/debian/README	*	upstream package README retention
+*/debian/README.*	*	upstream package README variants
+*/licenses/*	*	upstream license texts
+*/copyright	*	upstream copyright file retention
+
+# ── 2. Non-shipped fork metadata ───────────────────────────────────────
+# debian/control Description / Maintainer fields surface only in dpkg-query;
+# operator never sees them on the installed system at runtime.
+*/debian/control	Debian	descriptive prose in package Description (XSBC-Original-Maintainer + fork prose)
+*/debian/control	debian.org	XSBC-Original-Maintainer / Original-Maintainer (Debian Policy fork convention)
+# Build-system source code comments — never shipped to installed system.
+*/apt-setup-verify	debian.org	source-code comment about apt-setup upstream history
+*/generators/*	Debian	apt-setup generator source-code comments (build-time only)
+*/generators/*	debian.org	apt-setup generator source-code comments (build-time only)
+
+# ── 3. Dormant network-install surface (choose-mirror) ─────────────────
+# CD-only mode is the default today (project_self_contained_repo).
+# choose-mirror remains forked for future re-activation; its templates
+# + mirrorlist describe a Debian-style mirror infrastructure that's not
+# exercised under the current build.  Re-audit this allowlist block if
+# `[Build] EnableNetworkInstall = true` ever lands.
+choose-mirror/*	*	network-install fork — dormant in CD-only mode; rebrand pending re-activation
+choose-mirror/debian/*	*	choose-mirror upstream debian/* metadata
+choose-mirror/README.Athena	*	fork-specific operator README (intentional upstream comparison)
+
+# ── 4. Operator-facing fork docs (README.md describing the fork) ───────
+*/README	Debian	operator-facing fork README — discusses upstream Debian relationship
+*/README.md	Debian	operator-facing fork README — discusses upstream Debian relationship
+*/README.md	debian.org	operator-facing fork README — discusses upstream Debian relationship
+*/README.FHS	*	upstream FHS-policy README retention
+*/TODO	*	upstream TODO file retention
+
+# ── 5. athena-tasksel pod / perl tasksel source ────────────────────────
+# tasksel.pod is operator-facing man-page material discussing how
+# tasksel relates to upstream Debian.  tasksel.pl is the perl driver
+# with Debian references in code comments.
+athena-tasksel/tasksel.pod	*	tasksel pod source — upstream-comparison docs
+athena-tasksel/tasksel.pl	*	tasksel perl driver — code comments
+athena-tasksel/tasksel.po	*	tasksel translation source
+
+# ── 6. athena-installer-data ramdisk descriptive control ───────────────
+athena-installer-data/debian/control	Debian	description ("static data files needed by the Debian Installer ramdisk")
+
+# ── 7. athena-branding 50-athena.cfg (live-config descriptors) ─────────
+athena-branding/data/50-athena.cfg	*	upstream live-config script that documents Debian variants
+
+# ── 8. Vendor identity files + system-info templates ───────────────────
+# base-files/origins/debian is the dpkg-vendor identity file that
+# explicitly declares Asgard as a Debian-derivative; the filename and
+# `Parent-Vendor: Debian` content are structural, not branding.
+base-files/origins/debian	*	dpkg-vendor parent-distro declaration (structural)
+# info dir template — surfaces in `info` browser; TODO rebrand prose in
+# a follow-up.  Comment-line "In Debian #OSNAME#…" is template text,
+# not exposed prose.
+base-files/share/info.dir	Debian	system info dir template — rebrand TODO (low-visibility)
+
+# ── 9. Test fixtures + internal source comments ────────────────────────
+athena-tasksel/tests/*	*	tasksel test fixtures — comment text, not shipped
+athena-pkgsel/pre-pkgsel.d/20update-policy	Debian	source-code comment about upstream default behavior
+athena-tasksel/debian/rules	Debian	build-rules source comment (not shipped)
+athena-tasksel/README.translators	*	translator docs — points to DDTP (upstream translation resource)
+
+# ── 10. Top-level operator-facing fork READMEs ─────────────────────────
+README.md	*	operator-facing fork-tree README — documents fork rationale

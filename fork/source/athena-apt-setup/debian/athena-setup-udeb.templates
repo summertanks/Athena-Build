@@ -85,7 +85,7 @@ _Description: Cannot access repository
 Template: apt-setup/services-select
 Type: multiselect
 Choices-C: security, updates, backports
-# SEC_HOST is a host name (e.g. security.debian.org)
+# SEC_HOST is a host name (e.g. security.${BASEURL_HOST})
 # Translators: the *entire* string should be under 55 columns
 # including host name. In short, KEEP THIS SHORT and, yes, that's tricky
 # :sl1:
@@ -93,7 +93,7 @@ __Choices: security updates (from ${SEC_HOST}), release updates, backported soft
 Default: security, updates
 # :sl1:
 _Description: Services to use:
- Debian has two services that provide updates to releases: security and
+ @DISTRIBUTION@ has two services that provide updates to releases: security and
  release updates.
  .
  Security updates help to keep your system secured against attacks. Enabling
