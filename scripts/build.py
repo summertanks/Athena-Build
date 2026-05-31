@@ -5532,6 +5532,17 @@ class BuildSession:
         try:
             console.print("Building installer chroot from udeb closure...")
             _codename = self.config.build_codename.strip('"').strip("'")
+            # CONF-10 S2: pool_pkg_names = the set of pkg names the
+            # installed system's apt will see at /cdrom/pool.  Union of
+            # the canonical deb closure + the pool_extras additions;
+            # passed to installer_chroot so the apt-install audit in
+            # pre-pkgsel.d / finish-install.d can cross-reference each
+            # apt-install target against what actually ships.  Empty/None
+            # = skip audit (legacy compat).
+            _pool_pkg_names: 'set[str]' = set()
+            if self.dep_tree is not None:
+                _pool_pkg_names = set(self.dep_tree.canonical_pkgs.keys())
+                _pool_pkg_names |= self.dep_tree.pool_extras_pkg_names
             _ok = installer_chroot.build_installer_chroot(
                 udeb_tree=self.udeb_dep_tree,
                 dir_udebs=self.config.dir_repo_main_udeb,
@@ -5539,6 +5550,7 @@ class BuildSession:
                 installer_dir=os.path.join(self.config.working_dir, 'installer'),
                 password=_password,
                 codename=_codename,
+                pool_pkg_names=_pool_pkg_names,
             )
             if not _ok:
                 console.print(

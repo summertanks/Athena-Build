@@ -16,7 +16,7 @@ project_installer_from_source.md.
 import logging
 import os
 import subprocess
-from typing import List, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 import tui
 import utils
@@ -70,6 +70,7 @@ def build_installer_chroot(
     installer_dir: str,
     password: str,
     codename: str = 'thor',
+    pool_pkg_names: 'Optional[set[str]]' = None,
 ) -> bool:
     """Build the installer chroot end to end.
 
@@ -117,7 +118,9 @@ def build_installer_chroot(
     if not _assert_apt_setup_generators(dir_chroot_installer):
         return False
 
-    if not _strip_debian_residue_hooks(dir_chroot_installer, password):
+    if not _audit_and_strip_chroot_hooks(
+            dir_chroot_installer, pool_pkg_names,
+            installer_dir, password):
         return False
 
     # Stock d-i image-build actions that aren't done by any udeb's
@@ -441,66 +444,120 @@ def _assert_apt_setup_generators(dir_chroot_installer: str) -> bool:
     return _ok
 
 
-def _strip_debian_residue_hooks(
-    dir_chroot_installer: str, password: str,
+def _audit_and_strip_chroot_hooks(
+    dir_chroot_installer: str,
+    pool_pkg_names: 'Optional[set[str]]',
+    installer_dir: str,
+    password: str,
 ) -> bool:
-    """Remove pre-pkgsel.d hooks from upstream udebs that apt-install
-    Debian-specific tools (discover, installation-report) we don't
-    ship in our pool.
+    """CONF-10 S2 — durable replacement for the hardcoded strip list.
 
     Per the "Athena ships as Athena" principle
     (memory/project_filter_debian_specific_installer_hooks.md), every
-    apt-install in pkgsel's pre-hooks loop must either succeed against
-    OUR pool or be excluded entirely.  The two upstream hooks below
-    target Debian-only packages:
+    apt-install in pre-pkgsel.d / finish-install.d must either resolve
+    against our pool or be excluded entirely.
 
-      hw-detect:/usr/lib/pre-pkgsel.d/20install-hwpackages
-        → apt-install discover (Debian hardware-detection DB used by
-          discover-pkginstall).  We don't ship discover; the hook
-          fails with `E: Unable to locate package discover` and
-          discover-pkginstall is a no-op anyway.
+    Pre-CONF-10: hardcoded `_targets = (20install-hwpackages,
+    50save-logs)` — rotted whenever upstream added/renamed a hook.
 
-      save-logs:/usr/lib/pre-pkgsel.d/50save-logs
-        → apt-install installation-report (Debian BTS install-report
-          submission tool).  We don't ship it; failure noise only.
+    Post-CONF-10: walks the unpacked installer chroot's hook trees,
+    parses every `apt-install X` line, and cross-references the named
+    pkgs against the build's pool.  Decisions:
 
-    NOT stripped:
-      hw-detect:/usr/lib/pre-pkgsel.d/50install-firmware  — processes
-        /var/cache/firmware/*.deb (firmware blobs the operator drops
-        in via the d-i firmware loader).  Generic, not Debian-specific.
+      • all pkgs in pool                          → no action
+      • unpooled, hook listed in
+        installer/strip-hooks-allowlist           → sudo rm -f
+      • unpooled, hook NOT allowlisted, soft
+        (`apt-install X || true`)                 → WARN + leave in place
+      • unpooled, hook NOT allowlisted, hard      → FAIL build
 
-    Each strip is `rm -f` so missing files are non-fatal (e.g., if a
-    future udeb rev drops the hook upstream, our cleanup no-ops).
+    `pool_pkg_names=None` (or empty) — audit skipped (build.py call
+    sites without a dep tree, early tests).  Returns True so the
+    legacy fallback behavior is preserved.
 
-    Returns True on success, False on any sudo rm failure (which
-    indicates a sudo-cred / FS-permission problem worth surfacing,
-    not a missing target).
-    """
-    logger.info("strip Debian-residue pre-pkgsel.d hooks (hw-detect, save-logs)")
-    _targets = (
-        'usr/lib/pre-pkgsel.d/20install-hwpackages',   # hw-detect → discover
-        'usr/lib/pre-pkgsel.d/50save-logs',            # save-logs → installation-report
+    Returns True on success / WARN-only outcomes, False on FAIL
+    findings or sudo rm failures."""
+    if not pool_pkg_names:
+        logger.info(
+            "_audit_and_strip_chroot_hooks: no pool_pkg_names provided "
+            "— skipping (legacy compat)"
+        )
+        return True
+    import identity_scan
+    _allow_path = os.path.join(installer_dir, '..', 'installer',
+                               'strip-hooks-allowlist')
+    # The above join is awkward when installer_dir already IS the
+    # installer dir.  Normalise: the canonical home of the allowlist
+    # is `<working>/installer/strip-hooks-allowlist`; reach it from
+    # the installer_dir passed to build_installer_chroot which is
+    # `<working>/installer`.
+    if os.path.basename(os.path.normpath(installer_dir)) == 'installer':
+        _allow_path = os.path.join(installer_dir, 'strip-hooks-allowlist')
+    _allow_path = os.path.normpath(_allow_path)
+
+    logger.info(
+        f"audit chroot hooks vs pool ({len(pool_pkg_names)} pkg names); "
+        f"allowlist={_allow_path}"
     )
-    _stripped = 0
-    for _rel in _targets:
-        _abs = os.path.join(dir_chroot_installer, _rel)
+    _findings = identity_scan.audit_chroot_hooks(
+        dir_chroot_installer, pool_pkg_names, _allow_path,
+    )
+    if not _findings:
+        logger.info("audit chroot hooks: all apt-install targets in pool")
+        return True
+
+    _hard_fails = [f for f in _findings if f['action'] == 'fail']
+    _warns      = [f for f in _findings if f['action'] == 'warn']
+    _strips     = [f for f in _findings if f['action'] == 'strip']
+
+    # WARN-level findings — best-effort `|| true` apt-install of
+    # something not in our pool.  Doesn't break the build but worth
+    # surfacing so the operator can choose to allowlist-strip.
+    for _f in _warns:
+        logger.warning(
+            f"hook {_f['path']}:{_f['line_no']} apt-install "
+            f"(soft) targets unpooled pkg(s): {_f['missing_pkgs']}"
+        )
+
+    # STRIP — operator opted into removing the hook via allowlist.
+    _stripped_paths: 'set[str]' = set()
+    for _f in _strips:
+        _path = str(_f['path'])
+        if _path in _stripped_paths:
+            continue                       # multiple apt-install lines
+        _abs = os.path.join(dir_chroot_installer, _path)
         _r = _sudo(['rm', '-f', _abs], password)
         if _r.returncode != 0:
             logger.error(
-                f"_strip_debian_residue_hooks: rm -f {_abs} failed: "
-                f"rc={_r.returncode}, stderr={_r.stderr.strip()}"
+                f"strip hook {_path}: rm -f failed rc={_r.returncode}, "
+                f"stderr={_r.stderr.strip()}"
             )
             tui.console.print(
-                f"ERROR: cannot strip {_rel} from installer chroot"
+                f"ERROR: cannot strip {_path} from installer chroot"
             )
             return False
-        # We can't easily tell pre-strip presence (rm -f is silent on
-        # missing) — count what's there now via stat.
-        if not os.path.exists(_abs):
-            _stripped += 1
+        _stripped_paths.add(_path)
+        logger.info(f"stripped {_path} ({_f.get('reason', '?')})")
+
+    # FAIL — unpooled hard apt-install, not allowlisted.  Build aborts
+    # with an actionable diagnostic per hit.
+    if _hard_fails:
+        for _f in _hard_fails:
+            logger.error(
+                f"hook {_f['path']}:{_f['line_no']} apt-install targets "
+                f"pkg(s) not in pool: {_f['missing_pkgs']} — either add "
+                f"to pool.list, change the hook, or allow-strip in "
+                f"{_allow_path}"
+            )
+        tui.console.print(
+            f"ERROR: {len(_hard_fails)} installer hook(s) reference "
+            f"unpooled packages — see log", tui.COLOR_ERROR,
+        )
+        return False
+
     tui.console.print(
-        f"Stripped {_stripped}/{len(_targets)} Debian-residue "
-        f"pre-pkgsel.d hooks"
+        f"chroot hooks: stripped {len(_stripped_paths)}, "
+        f"warned {len(_warns)} soft-failure(s)"
     )
     return True
 
