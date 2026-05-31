@@ -13908,6 +13908,14 @@ def _setup_fork_test_tmpdir(tmp: str, with_pkg: bool = True) -> object:
                  bc.dir_repo_dbgsym, bc.dir_repo_tests):
         os.makedirs(_sub, exist_ok=True)
     os.makedirs(os.path.join(bc.dir_log, 'build'), exist_ok=True)
+    # CONF-10: write a permissive identity-allowlist so the fork_mirror
+    # gate doesn't fire on test fixtures (which contain debian/copyright
+    # boilerplate referencing debian.org).  Tests here exercise
+    # fork_mirror behavior, not the identity audit itself — that lives
+    # in dedicated test_identity_scan_* tests.
+    os.makedirs(os.path.join(tmp, 'audit'), exist_ok=True)
+    with open(os.path.join(tmp, 'audit', 'identity-allowlist'), 'w') as fh:
+        fh.write('*\t*\ttest fixture — absorbs every token\n')
     if with_pkg:
         _pkg_dir = os.path.join(bc.dir_fork_source, 'athena-installer-data')
         os.makedirs(os.path.join(_pkg_dir, 'debian'), exist_ok=True)
@@ -17242,6 +17250,141 @@ def test_conf11_source_drift_audit_fires_when_upstream_advances():
     assert 'fork source drift' in _log, _log
     assert 'athena-thing' in _log, _log
     assert '1.0+deb12u2' in _log, _log
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONF-10 / AUDIT-01 — identity-residue scanner
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_identity_scan_finds_debian_token_in_template():
+    """audit_identity finds a Debian-prose hit in a debconf templates body."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import audit_identity
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(os.path.join(td, 'fork-pkg', 'debian'))
+        with open(os.path.join(td, 'fork-pkg', 'debian',
+                               'fork-pkg.templates'), 'w') as fh:
+            fh.write(
+                'Template: example/some\nType: text\n'
+                '_Description: Use the Debian-style mirror?\n'
+            )
+        findings = audit_identity(td)
+    assert len(findings) == 1, findings
+    assert findings[0]['token'] == 'Debian'
+    assert 'fork-pkg' in findings[0]['path']
+
+
+def test_identity_scan_allowlist_absorbs_finding():
+    """A matching allowlist entry suppresses the finding."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import audit_identity
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(os.path.join(td, 'p', 'debian'))
+        with open(os.path.join(td, 'p', 'debian', 'changelog'), 'w') as fh:
+            fh.write('p (1.0) thor; urgency=low\n  * Forked from Debian.\n')
+        _allow = os.path.join(td, 'identity-allowlist')
+        with open(_allow, 'w') as fh:
+            fh.write('*/debian/changelog\t*\tlegal retention\n')
+        findings = audit_identity(td, _allow)
+    assert findings == [], findings
+
+
+def test_identity_scan_skips_binary_globs():
+    """Binary file types (.deb, .png, etc) are not greped."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import audit_identity
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, 'pkg.deb'), 'w') as fh:
+            fh.write('Debian inside binary archive\n')
+        with open(os.path.join(td, 'translations.po'), 'w') as fh:
+            fh.write('msgstr "Debian"\n')
+        findings = audit_identity(td)
+    assert findings == [], (
+        f'binary / .po file should be skipped; got {findings}'
+    )
+
+
+def test_identity_scan_word_boundary_excludes_discoverable():
+    """The `discover` token uses \\b — `discoverable` in license text
+    should NOT match."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import audit_identity
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, 'cc0.txt'), 'w') as fh:
+            fh.write('the present or absence of errors, '
+                     'whether or not discoverable, all to\n')
+        findings = audit_identity(td)
+    # No `\bdiscover\b` match; also no Debian/debian.org.
+    assert findings == [], findings
+
+
+def test_identity_scan_allowlist_wildcard_token():
+    """Allowlist '*' for token-name absorbs every token at the path."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import audit_identity
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, 'multi.txt'), 'w') as fh:
+            fh.write(
+                'See https://bugs.debian.org/x for details.\n'
+                'Original by Debian Project.\n'
+                'Uses popularity-contest data.\n'
+            )
+        _allow = os.path.join(td, 'allow')
+        with open(_allow, 'w') as fh:
+            fh.write('multi.txt\t*\tfixture\n')
+        findings = audit_identity(td, _allow)
+    assert findings == [], findings
+
+
+def test_identity_scan_specific_token_does_not_absorb_others():
+    """An allowlist entry naming `debian.org` lets that token through
+    but still surfaces `Debian` hits on the same file."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import audit_identity
+    with tempfile.TemporaryDirectory() as td_root:
+        # Allowlist OUTSIDE the scan root — otherwise the scanner would
+        # walk the allowlist file itself and surface its own "debian.org"
+        # token reference.
+        td = os.path.join(td_root, 'scan')
+        os.makedirs(td)
+        with open(os.path.join(td, 'mix.txt'), 'w') as fh:
+            fh.write(
+                'See https://debian.org/path  -- intentional\n'
+                'Originally Debian-derived.            -- leakage\n'
+            )
+        _allow = os.path.join(td_root, 'allow')
+        with open(_allow, 'w') as fh:
+            fh.write('mix.txt\tdebian.org\tdoc URL OK\n')
+        findings = audit_identity(td, _allow)
+    assert len(findings) == 1, findings
+    assert findings[0]['token'] == 'Debian'
+
+
+def test_identity_scan_fork_mirror_gate_fails_build():
+    """generate_fork_mirror() returns False when identity audit finds an
+    unallowlisted hit — replaces the hardcoded installer_chroot strip
+    list with a build-time gate."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        # Overwrite the permissive allowlist with an empty one so the
+        # debian.org URL in our test fixture's debian/copyright actually
+        # trips the gate.
+        with open(os.path.join(tmp, 'audit', 'identity-allowlist'), 'w') as fh:
+            fh.write('# empty: every token is a violation\n')
+        ok = fork_mirror.generate_fork_mirror(bc)
+    assert ok is False, (
+        'expected fork_mirror to abort on unallowlisted identity hit'
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21171,6 +21314,14 @@ def main() -> int:
         test_conf11_source_drift_tracks_upstream_version,
         test_conf11_source_drift_audit_silent_when_fork_ahead,
         test_conf11_source_drift_audit_fires_when_upstream_advances,
+        # CONF-10 / AUDIT-01 identity-residue scanner
+        test_identity_scan_finds_debian_token_in_template,
+        test_identity_scan_allowlist_absorbs_finding,
+        test_identity_scan_skips_binary_globs,
+        test_identity_scan_word_boundary_excludes_discoverable,
+        test_identity_scan_allowlist_wildcard_token,
+        test_identity_scan_specific_token_does_not_absorb_others,
+        test_identity_scan_fork_mirror_gate_fails_build,
         # UPD-01 step 1: +asg<R>u<N> version-suffix primitives
         test_nmu_regex_does_not_eat_asg_suffix,
         test_pristine_base_strips_both_layers,

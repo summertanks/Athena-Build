@@ -2,11 +2,10 @@ Task: standard
 Section: user
 Description: standard system utilities
  A curated set of command-line utilities that @DISTRIBUTION@ installs
- by default.  Derivative of Debian's "standard" task but uses an
- explicit Key: list (@DISTRIBUTION@-chosen) rather than the broad
- "Packages: standard" Priority sigil.  Operator who wants any
- Debian-standard package not listed here can apt-install
- individually post-install — they're all available in /cdrom/pool.
+ by default.  Uses an explicit Key: list rather than the broad
+ Priority: standard sigil.  Operator who wants any standard-priority
+ package not listed here can apt-install individually post-install —
+ all available in /cdrom/pool.
 Key:
  bash-completion
  bzip2
