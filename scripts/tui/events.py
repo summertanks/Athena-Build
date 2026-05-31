@@ -50,7 +50,7 @@ class LogEvent:
     the dispatcher doesn't import `logging`."""
     severity: int
     text: str
-    tab: str = 'build'
+    tab: str = 'log'
 
 
 @dataclass(frozen=True)
