@@ -114,6 +114,28 @@ def _should_skip(rel_path: str) -> bool:
     return any(fnmatch.fnmatch(rel_path, pat) for pat in _SKIP_GLOBS)
 
 
+def _is_binary_file(abs_path: str, probe_bytes: int = 4096) -> bool:
+    """Best-effort binary-vs-text classifier: read up to `probe_bytes`
+    bytes and treat the file as binary if it contains a NUL byte.
+
+    Catches files the SKIP_GLOBS list doesn't anticipate by extension:
+    `boot/vmlinuz` (Linux kernel image, no extension), `*.efi`
+    bootloader stubs, signed kernel modules, etc.  Without this guard
+    the audit greps the kernel's embedded build-id strings (e.g.
+    `debian-kernel@lists.debian.org`, `Debian Secure Boot CA`) and
+    treats them as identity leakage — caught 2026-05-31 staged ISO
+    audit on `boot/vmlinuz`.
+
+    Read errors → treat as binary (caller's `try` already discards,
+    same fail-open behaviour)."""
+    try:
+        with open(abs_path, 'rb') as fh:
+            chunk = fh.read(probe_bytes)
+    except OSError:
+        return True
+    return b'\x00' in chunk
+
+
 def audit_identity(root: str,
                    allowlist_path: Optional[str] = None
                    ) -> List[Dict[str, object]]:
@@ -139,6 +161,8 @@ def audit_identity(root: str,
             abs_path = os.path.join(dirpath, fn)
             rel_path = os.path.relpath(abs_path, root)
             if _should_skip(rel_path):
+                continue
+            if _is_binary_file(abs_path):
                 continue
             try:
                 with open(abs_path, 'r', encoding='utf-8',
