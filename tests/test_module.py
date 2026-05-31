@@ -17435,6 +17435,87 @@ def test_identity_scan_specific_token_does_not_absorb_others():
     assert findings[0]['token'] == 'Debian'
 
 
+def test_audit_staged_iso_passes_clean_tree():
+    """A staged tree with no Debian tokens passes (returns True)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from iso_installer import _audit_staged_iso
+    with tempfile.TemporaryDirectory() as td:
+        _staging = os.path.join(td, 'buildroot', 'image', 'staging')
+        _dir_image = os.path.dirname(_staging)
+        os.makedirs(_staging)
+        os.makedirs(os.path.join(td, 'audit'))
+        with open(os.path.join(td, 'audit', 'identity-allowlist'), 'w') as fh:
+            fh.write('# empty allowlist\n')
+        # Plant clean content (Asgard, not Debian).
+        os.makedirs(os.path.join(_staging, '.disk'))
+        with open(os.path.join(_staging, '.disk', 'info'), 'w') as fh:
+            fh.write('Asgard 0.1 "thor" - amd64 INSTALLER\n')
+        assert _audit_staged_iso(_staging, _dir_image) is True
+
+
+def test_audit_staged_iso_fails_on_debian_leak():
+    """An unsubstituted Debian token in staged content aborts the build."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from iso_installer import _audit_staged_iso
+    with tempfile.TemporaryDirectory() as td:
+        _staging = os.path.join(td, 'buildroot', 'image', 'staging')
+        _dir_image = os.path.dirname(_staging)
+        os.makedirs(_staging)
+        os.makedirs(os.path.join(td, 'audit'))
+        with open(os.path.join(td, 'audit', 'identity-allowlist'), 'w') as fh:
+            fh.write('# empty — every token is a violation\n')
+        os.makedirs(os.path.join(_staging, '.disk'))
+        with open(os.path.join(_staging, '.disk', 'info'), 'w') as fh:
+            fh.write('Debian 12.4 "bookworm" - amd64 INSTALLER\n')
+        assert _audit_staged_iso(_staging, _dir_image) is False
+
+
+def test_audit_staged_iso_skips_when_no_allowlist():
+    """No allowlist anywhere up the tree → audit logs a warning and
+    returns True (degraded — doesn't break iso build for test fixtures
+    that haven't laid down the audit/ dir)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from iso_installer import _audit_staged_iso
+    with tempfile.TemporaryDirectory() as td:
+        _staging = os.path.join(td, 'staging'); os.makedirs(_staging)
+        with open(os.path.join(_staging, 'info'), 'w') as fh:
+            fh.write('Debian leak that would normally trip the gate\n')
+        assert _audit_staged_iso(_staging, td) is True
+
+
+def test_audit_staged_iso_skips_binary_pool():
+    """Pool .deb files in the staging tree are skipped by the scanner's
+    binary-glob filter — wouldn't trip on the Debian-name strings
+    inside a binary archive."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from iso_installer import _audit_staged_iso
+    with tempfile.TemporaryDirectory() as td:
+        _staging = os.path.join(td, 'buildroot', 'image', 'staging')
+        _dir_image = os.path.dirname(_staging)
+        os.makedirs(_staging)
+        os.makedirs(os.path.join(td, 'audit'))
+        with open(os.path.join(td, 'audit', 'identity-allowlist'), 'w') as fh:
+            fh.write('# empty\n')
+        # Plant a fake .deb in pool/
+        _pool = os.path.join(_staging, 'pool', 'main', 'b')
+        os.makedirs(_pool)
+        with open(os.path.join(_pool, 'base-files_12.4_amd64.deb'), 'wb') as fh:
+            fh.write(b'!<arch>\nDebian inside binary archive bytes\n')
+        # And a clean .disk/info
+        os.makedirs(os.path.join(_staging, '.disk'))
+        with open(os.path.join(_staging, '.disk', 'info'), 'w') as fh:
+            fh.write('Asgard 0.1 (thor)\n')
+        assert _audit_staged_iso(_staging, _dir_image) is True
+
+
 def test_identity_scan_fork_mirror_gate_fails_build():
     """generate_fork_mirror() returns False when identity audit finds an
     unallowlisted hit — replaces the hardcoded installer_chroot strip
@@ -21395,6 +21476,11 @@ def main() -> int:
         test_identity_scan_allowlist_wildcard_token,
         test_identity_scan_specific_token_does_not_absorb_others,
         test_identity_scan_fork_mirror_gate_fails_build,
+        # CONF-10 S3 staged-ISO identity audit
+        test_audit_staged_iso_passes_clean_tree,
+        test_audit_staged_iso_fails_on_debian_leak,
+        test_audit_staged_iso_skips_when_no_allowlist,
+        test_audit_staged_iso_skips_binary_pool,
         # UPD-01 step 1: +asg<R>u<N> version-suffix primitives
         test_nmu_regex_does_not_eat_asg_suffix,
         test_pristine_base_strips_both_layers,
