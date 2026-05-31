@@ -224,9 +224,13 @@ def _parse_apt_install_line(line: str) -> Optional[Tuple[List[str], bool]]:
         if tail_part.startswith(('true', ':')):
             soft_failure = True
         after = head_part
-    # Also stop at && / ; / | / redirects so chained commands don't
-    # leak into the pkg list.
-    for sep in ('&&', ';', '|', '>', '<'):
+    # Command terminators only (&& and ;) — DON'T pre-split on
+    # > / < / | here.  Those collide with file-descriptor redirects
+    # like `brltty 1>&2` (caught 2026-05-31: a `>` pre-split made
+    # the parser report ['brltty', '1'] from upstream 07brltty).
+    # The per-token walk below handles redirects + pipes cleanly via
+    # shlex tokenisation.
+    for sep in ('&&', ';'):
         if sep in after:
             after = after.split(sep, 1)[0]
 
@@ -234,10 +238,25 @@ def _parse_apt_install_line(line: str) -> Optional[Tuple[List[str], bool]]:
         tokens = shlex.split(after.strip())
     except ValueError:
         return None
-    pkgs = [
-        t for t in tokens
-        if t and not t.startswith('-') and not t.startswith('$')
-    ]
+
+    # Shell redirect operators that may appear AFTER the pkg list.
+    # Numbered variants (`1>`, `2>&1`, `1>&2`, `&>file`) match the regex
+    # below.  Once we hit one of these, everything past it is shell
+    # plumbing, not an apt-install argument.
+    _redirect_token_literals = {'|', '>', '<', '>>', '<<', '&>', '|&'}
+    _redirect_token_re = re.compile(r'^\d*[<>]&?\d*$')
+
+    pkgs: List[str] = []
+    for _t in tokens:
+        if not _t:
+            continue
+        if _t in _redirect_token_literals or _redirect_token_re.match(_t):
+            break
+        if _t.startswith('-'):
+            continue
+        if _t.startswith('$'):
+            continue
+        pkgs.append(_t)
     return (pkgs, soft_failure) if pkgs else None
 
 

@@ -5448,6 +5448,26 @@ def test_parse_apt_install_line_variants():
     ) == (['foo'], False)
     # Variable expansion args skipped (not auditable).
     assert _parse_apt_install_line('apt-install $PKG\n') is None
+    # Shell redirects must not contaminate the pkg list.  Caught
+    # 2026-05-31: upstream 07brltty's `apt-install brltty 1>&2` was
+    # mis-parsed as ['brltty', '1'] because the pre-shlex split on `>`
+    # grabbed the file descriptor number.  New parser shlex-tokenises
+    # and breaks at the first redirect-or-pipe token.
+    assert _parse_apt_install_line('    if apt-install brltty 1>&2; then\n') == (
+        ['brltty'], False
+    )
+    assert _parse_apt_install_line('apt-install foo > /dev/null\n') == (
+        ['foo'], False
+    )
+    assert _parse_apt_install_line('apt-install foo 2>&1\n') == (
+        ['foo'], False
+    )
+    assert _parse_apt_install_line('apt-install foo | grep bar\n') == (
+        ['foo'], False
+    )
+    assert _parse_apt_install_line('apt-install foo >> file.log\n') == (
+        ['foo'], False
+    )
 
 
 def test_installer_chroot_register_self_appends_debian_installer_stanza():

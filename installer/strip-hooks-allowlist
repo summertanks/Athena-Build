@@ -28,3 +28,21 @@ usr/lib/pre-pkgsel.d/20install-hwpackages	hw-detect → discover (Debian hardwar
 # submission tool.  We don't ship it; the hook fails with locator error
 # and would generate log spam.  Strip.
 usr/lib/pre-pkgsel.d/50save-logs	save-logs → installation-report (Debian BTS tool not in pool)
+
+# rootskel ships /usr/lib/finish-install.d/07rootskel with a
+# `apt-install compiz` line inside `if /bin/in-target dpkg -l
+# mate-session-manager`.  Compiz is the legacy MATE window
+# compositor used for the dark-theme accessibility path; we don't
+# ship MATE so the guard never satisfies at install time.  The
+# audit greps statically and can't see the guard — strip rather
+# than fork the udeb (upstream layout may shift across releases).
+usr/lib/finish-install.d/07rootskel	rootskel → compiz (MATE dark-theme path; we don't ship mate-session-manager)
+
+# brltty ships /usr/lib/finish-install.d/07brltty with a
+# `apt-install brltty 1>&2` line inside `if [ -r $pid ] && kill -0
+# $(cat $pid)` — fires only if a brltty daemon was running during
+# install (i.e., the brltty udeb was present in the installer
+# ramdisk).  We don't ship the brltty udeb (accessibility is
+# deferred until INST-02), so the guard never satisfies.  Revisit
+# this entry when INST-02 lands and brltty is in the udeb closure.
+usr/lib/finish-install.d/07brltty	brltty → brltty (accessibility path; we don't ship brltty udeb — revisit when INST-02 lands)
