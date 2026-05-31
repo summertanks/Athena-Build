@@ -5278,29 +5278,18 @@ def test_buildcontainer_changelog_uses_codename_field():
         "must read self.codename so [Build] CODENAME rolls correctly")
 
 
-def test_strip_debian_residue_hooks_removes_known_files():
-    """pre-pkgsel.d hooks from upstream hw-detect and save-logs udebs
-    try to apt-install Debian-specific tools (discover, installation-
-    report) that aren't in our pool.  build_installer_chroot must
-    strip them after udeb unpack so pkgsel's pre-hooks loop doesn't
-    spam `E: Unable to locate package X` during install.
-
-    Verifies: with both hook files present in a synthetic chroot
-    layout, _strip_debian_residue_hooks calls `rm -f` on both and
-    they're gone afterwards.  Missing files are non-fatal (rm -f
-    is silent on missing) — covered by the no-op return path.
-    """
+def test_audit_chroot_hooks_strip_allowlisted():
+    """A hook running `apt-install <unpooled>` is auto-stripped when its
+    path is in installer/strip-hooks-allowlist.  CONF-10 S2 — replaces
+    the rotting hardcoded _targets list with a build-time audit."""
     import sys, tempfile
     from unittest.mock import patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _strip_debian_residue_hooks
+    from installer_chroot import _audit_and_strip_chroot_hooks
 
     def _fake_sudo(cmd, _pw):
-        # Mimic `sudo rm -f <path>` semantics: ignore missing.
         class _R:
-            returncode = 0
-            stderr = ''
-            stdout = ''
+            returncode = 0; stderr = ''; stdout = ''
         if cmd[0] == 'rm' and cmd[1] == '-f':
             try:
                 os.unlink(cmd[2])
@@ -5308,77 +5297,157 @@ def test_strip_debian_residue_hooks_removes_known_files():
                 pass
         return _R()
 
-    with tempfile.TemporaryDirectory() as _chroot:
-        # Plant the two hooks plus a third (50install-firmware) we
-        # MUST leave alone.
-        for _rel in (
-            'usr/lib/pre-pkgsel.d/20install-hwpackages',
-            'usr/lib/pre-pkgsel.d/50save-logs',
-            'usr/lib/pre-pkgsel.d/50install-firmware',
-        ):
-            _abs = os.path.join(_chroot, _rel)
+    with tempfile.TemporaryDirectory() as _root:
+        _chroot = os.path.join(_root, 'chroot')
+        _inst   = os.path.join(_root, 'installer')
+        os.makedirs(_inst)
+        # Plant two upstream-style Debian-residue hooks + one firmware
+        # hook that only references pooled packages.
+        _hooks = {
+            'usr/lib/pre-pkgsel.d/20install-hwpackages':
+                '#!/bin/sh\napt-install discover\n',
+            'usr/lib/pre-pkgsel.d/50save-logs':
+                '#!/bin/sh\napt-install installation-report\n',
+            'usr/lib/pre-pkgsel.d/50install-firmware':
+                '#!/bin/sh\napt-install firmware-misc-nonfree || true\n',
+        }
+        for rel, body in _hooks.items():
+            _abs = os.path.join(_chroot, rel)
             os.makedirs(os.path.dirname(_abs), exist_ok=True)
             with open(_abs, 'w') as fh:
-                fh.write('#!/bin/sh\n# stub\n')
-
-        with patch('installer_chroot._sudo', side_effect=_fake_sudo):
-            assert _strip_debian_residue_hooks(_chroot, 'pw') is True
-
-        # The two Debian-residue hooks are gone.
-        for _rel in (
-            'usr/lib/pre-pkgsel.d/20install-hwpackages',
-            'usr/lib/pre-pkgsel.d/50save-logs',
-        ):
-            assert not os.path.exists(os.path.join(_chroot, _rel)), (
-                f"{_rel} should have been stripped"
+                fh.write(body)
+        # Allowlist the two Debian-residue ones.
+        with open(os.path.join(_inst, 'strip-hooks-allowlist'), 'w') as fh:
+            fh.write(
+                'usr/lib/pre-pkgsel.d/20install-hwpackages\tdiscover not in pool\n'
+                'usr/lib/pre-pkgsel.d/50save-logs\tinstallation-report not in pool\n'
             )
-        # The kept hook stays.
-        _kept = os.path.join(_chroot, 'usr/lib/pre-pkgsel.d/50install-firmware')
-        assert os.path.exists(_kept), (
-            "50install-firmware must NOT be stripped (firmware loader, "
-            "not Debian-specific)"
-        )
-
-
-def test_strip_debian_residue_hooks_idempotent_on_missing_targets():
-    """A subsequent install build (or one where upstream dropped the
-    hooks already) shouldn't fail.  `rm -f` is silent on missing →
-    function returns True with zero files actually removed."""
-    import sys, tempfile
-    from unittest.mock import patch
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from installer_chroot import _strip_debian_residue_hooks
-
-    def _fake_sudo(cmd, _pw):
-        class _R:
-            returncode = 0
-            stderr = ''
-            stdout = ''
-        if cmd[0] == 'rm' and cmd[1] == '-f':
-            try:
-                os.unlink(cmd[2])
-            except FileNotFoundError:
-                pass
-        return _R()
-
-    with tempfile.TemporaryDirectory() as _chroot:
-        # No pre-pkgsel.d/ at all.
+        # firmware-misc-nonfree IS in pool — 50install-firmware audit
+        # passes; no action.
+        pool = {'firmware-misc-nonfree', 'base-files', 'bash'}
         with patch('installer_chroot._sudo', side_effect=_fake_sudo):
-            assert _strip_debian_residue_hooks(_chroot, 'pw') is True
+            ok = _audit_and_strip_chroot_hooks(_chroot, pool, _inst, 'pw')
+        assert ok is True
+        # The two allowlisted residue hooks are gone.
+        for rel in ('usr/lib/pre-pkgsel.d/20install-hwpackages',
+                    'usr/lib/pre-pkgsel.d/50save-logs'):
+            assert not os.path.exists(os.path.join(_chroot, rel)), (
+                f'{rel} should have been stripped'
+            )
+        # The firmware hook stays (its apt-install target IS in pool).
+        assert os.path.exists(os.path.join(
+            _chroot, 'usr/lib/pre-pkgsel.d/50install-firmware'))
 
 
-def test_strip_debian_residue_hooks_called_in_build_flow():
+def test_audit_chroot_hooks_no_op_when_no_hooks():
+    """Empty hook trees / missing chroot subtrees → audit no-ops.
+    Replaces the old _strip_debian_residue_hooks_idempotent_on_missing
+    test; new audit walks subtrees and skips when they don't exist."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _audit_and_strip_chroot_hooks
+    with tempfile.TemporaryDirectory() as _root:
+        _chroot = os.path.join(_root, 'chroot'); os.makedirs(_chroot)
+        _inst   = os.path.join(_root, 'installer'); os.makedirs(_inst)
+        ok = _audit_and_strip_chroot_hooks(
+            _chroot, {'bash'}, _inst, 'pw'
+        )
+    assert ok is True
+
+
+def test_audit_chroot_hooks_called_in_build_flow():
     """Pin the call-site in build_installer_chroot so a future refactor
-    can't silently drop the strip step.  Static check on the source —
-    cheaper than a full integration test."""
+    can't silently drop the audit step."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import inspect
     from installer_chroot import build_installer_chroot
     _src = inspect.getsource(build_installer_chroot)
-    assert '_strip_debian_residue_hooks(' in _src, (
-        "_strip_debian_residue_hooks call missing from "
-        "build_installer_chroot — Debian residue won't get stripped"
+    assert '_audit_and_strip_chroot_hooks(' in _src, (
+        "_audit_and_strip_chroot_hooks call missing from "
+        "build_installer_chroot — installer residue won't be audited"
     )
+
+
+def test_audit_chroot_hooks_fail_on_hard_unpooled():
+    """An `apt-install X` (no `|| true`) targeting an unpooled, non-
+    allowlisted package fails the build."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _audit_and_strip_chroot_hooks
+    with tempfile.TemporaryDirectory() as _root:
+        _chroot = os.path.join(_root, 'chroot')
+        _inst   = os.path.join(_root, 'installer'); os.makedirs(_inst)
+        _hook = os.path.join(_chroot, 'usr/lib/pre-pkgsel.d/30unknown')
+        os.makedirs(os.path.dirname(_hook), exist_ok=True)
+        with open(_hook, 'w') as fh:
+            fh.write('#!/bin/sh\napt-install mystery-pkg\n')
+        # Empty allowlist file; mystery-pkg not in pool → hard fail.
+        with open(os.path.join(_inst, 'strip-hooks-allowlist'), 'w') as fh:
+            fh.write('# empty\n')
+        ok = _audit_and_strip_chroot_hooks(_chroot, {'base-files'}, _inst, 'pw')
+    assert ok is False
+
+
+def test_audit_chroot_hooks_warn_on_soft_unpooled():
+    """`apt-install X || true` targeting an unpooled pkg is soft —
+    surfaces as WARN, build still passes."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _audit_and_strip_chroot_hooks
+    with tempfile.TemporaryDirectory() as _root:
+        _chroot = os.path.join(_root, 'chroot')
+        _inst   = os.path.join(_root, 'installer'); os.makedirs(_inst)
+        _hook = os.path.join(_chroot, 'usr/lib/pre-pkgsel.d/40best-effort')
+        os.makedirs(os.path.dirname(_hook), exist_ok=True)
+        with open(_hook, 'w') as fh:
+            fh.write('#!/bin/sh\napt-install optional-pkg || true\n')
+        with open(os.path.join(_inst, 'strip-hooks-allowlist'), 'w') as fh:
+            fh.write('# empty\n')
+        ok = _audit_and_strip_chroot_hooks(_chroot, {'base-files'}, _inst, 'pw')
+    assert ok is True   # soft failure ≠ hard failure
+
+
+def test_audit_chroot_hooks_skips_when_no_pool():
+    """pool_pkg_names=None or empty → audit short-circuits (legacy
+    callers without a built dep tree get a no-op)."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from installer_chroot import _audit_and_strip_chroot_hooks
+    with tempfile.TemporaryDirectory() as _root:
+        _chroot = os.path.join(_root, 'chroot')
+        _inst   = os.path.join(_root, 'installer'); os.makedirs(_inst)
+        # Plant a hook that would otherwise fail.
+        _hook = os.path.join(_chroot, 'usr/lib/pre-pkgsel.d/99bad')
+        os.makedirs(os.path.dirname(_hook), exist_ok=True)
+        with open(_hook, 'w') as fh:
+            fh.write('#!/bin/sh\napt-install never-in-pool\n')
+        # None pool → skip; True returned.
+        ok = _audit_and_strip_chroot_hooks(_chroot, None, _inst, 'pw')
+    assert ok is True
+
+
+def test_parse_apt_install_line_variants():
+    """The parser handles the common forms found in real hooks."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import _parse_apt_install_line
+    assert _parse_apt_install_line('apt-install foo\n') == (['foo'], False)
+    assert _parse_apt_install_line('	apt-install foo bar\n') == (['foo', 'bar'], False)
+    assert _parse_apt_install_line('apt-install foo || true\n') == (['foo'], True)
+    assert _parse_apt_install_line('apt-install foo || :\n') == (['foo'], True)
+    # $logoutput wrapper (apt-setup generators)
+    assert _parse_apt_install_line('$logoutput apt-install ca-certificates\n') == (
+        ['ca-certificates'], False
+    )
+    # Comment lines and non-matches return None.
+    assert _parse_apt_install_line('# apt-install foo\n') is None
+    assert _parse_apt_install_line('echo apt-get install foo\n') is None
+    # --no-install-recommends and similar flags skipped.
+    assert _parse_apt_install_line(
+        'apt-install --no-install-recommends foo\n'
+    ) == (['foo'], False)
+    # Variable expansion args skipped (not auditable).
+    assert _parse_apt_install_line('apt-install $PKG\n') is None
 
 
 def test_installer_chroot_register_self_appends_debian_installer_stanza():
@@ -20924,9 +20993,13 @@ def main() -> int:
         test_installer_chroot_generator_guard_fails_without_cdrom,
         test_installer_chroot_generator_guard_fails_without_mirror,
         test_athena_cdrom_setup_does_not_provide_mirror_setup,
-        test_strip_debian_residue_hooks_removes_known_files,
-        test_strip_debian_residue_hooks_idempotent_on_missing_targets,
-        test_strip_debian_residue_hooks_called_in_build_flow,
+        test_audit_chroot_hooks_strip_allowlisted,
+        test_audit_chroot_hooks_no_op_when_no_hooks,
+        test_audit_chroot_hooks_called_in_build_flow,
+        test_audit_chroot_hooks_fail_on_hard_unpooled,
+        test_audit_chroot_hooks_warn_on_soft_unpooled,
+        test_audit_chroot_hooks_skips_when_no_pool,
+        test_parse_apt_install_line_variants,
         test_installer_chroot_register_self_appends_debian_installer_stanza,
         test_installer_chroot_register_self_idempotent_on_repeat,
         test_installer_grub_cfg_has_preseed_kernel_cmdline,

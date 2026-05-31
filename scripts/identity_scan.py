@@ -33,7 +33,8 @@ import fnmatch
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+import shlex
+from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger('athena.cache')
 
@@ -156,4 +157,192 @@ def audit_identity(root: str,
                             })
             except (OSError, UnicodeDecodeError):
                 continue
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S2 — Chroot apt-install audit (replaces installer_chroot._strip_debian_
+# residue_hooks' hardcoded _targets list).
+#
+# pre-pkgsel.d and finish-install.d hooks shipped by upstream udebs
+# call `apt-install X` against the target system's apt during d-i's
+# pre-packageselection phase.  When X is not in our pool, the call
+# fails noisily — sometimes fatally, sometimes (with `|| true`) just
+# generating error log spam.
+#
+# This audit walks every hook script, extracts the apt-install pkg
+# arguments, and cross-references against the pool the installer
+# ships.  Outcomes:
+#   • all pkgs in pool                          → no action
+#   • unpooled pkgs, hook listed in allowlist   → STRIP (rm -f)
+#   • unpooled pkgs, hook NOT allowlisted, soft (|| true)  → WARN
+#   • unpooled pkgs, hook NOT allowlisted, hard apt-install → FAIL
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_HOOK_SUBTREES = (
+    'usr/lib/pre-pkgsel.d',
+    'usr/lib/finish-install.d',
+    'lib/finish-install.d',
+)
+
+
+def _parse_apt_install_line(line: str) -> Optional[Tuple[List[str], bool]]:
+    """Extract pkg names from one line if it invokes apt-install.
+
+    Returns (pkg_names, soft_failure) or None.
+    `soft_failure=True` when the tail is `|| true` / `|| :` (intentional
+    best-effort apt-install).
+
+    Handles common shapes:
+        apt-install foo
+        apt-install foo bar baz
+        apt-install foo || true
+        apt-install foo || :
+        apt-install --no-install-recommends foo
+        $logoutput apt-install foo                  (apt-setup generator wrapper)
+    Skips `$VAR` arguments — variable expansion is not auditable here."""
+    stripped = line.lstrip()
+    if stripped.startswith('#'):
+        return None
+    if 'apt-install' not in stripped:
+        return None
+    # Strip trailing inline-comment.  Conservative: only treat ' #' as a
+    # comment marker so URLs containing # in the body don't get clipped.
+    head = stripped.split(' #', 1)[0]
+    # Take whatever follows the `apt-install` token.  Multiple occurrences
+    # of the literal in one line (rare) would be malformed; take the first.
+    after = head.split('apt-install', 1)[1]
+
+    soft_failure = False
+    # `|| true` / `|| :` makes the apt-install best-effort.  Recognise the
+    # tail then drop everything from `||` onward so we don't try to parse
+    # the suffix as another apt-install argument.
+    if '||' in after:
+        head_part, tail_part = after.split('||', 1)
+        tail_part = tail_part.strip()
+        if tail_part.startswith(('true', ':')):
+            soft_failure = True
+        after = head_part
+    # Also stop at && / ; / | / redirects so chained commands don't
+    # leak into the pkg list.
+    for sep in ('&&', ';', '|', '>', '<'):
+        if sep in after:
+            after = after.split(sep, 1)[0]
+
+    try:
+        tokens = shlex.split(after.strip())
+    except ValueError:
+        return None
+    pkgs = [
+        t for t in tokens
+        if t and not t.startswith('-') and not t.startswith('$')
+    ]
+    return (pkgs, soft_failure) if pkgs else None
+
+
+def _normalise_hook_path(abs_path: str, chroot_root: str) -> str:
+    """abs_path → chroot-relative posix-style path (forward slashes)."""
+    rel = os.path.relpath(abs_path, chroot_root)
+    return rel.replace(os.sep, '/')
+
+
+def _load_strip_allowlist(path: str) -> List[Tuple[str, str]]:
+    """Parse `installer/strip-hooks-allowlist` into [(path_glob, reason)].
+
+    Simpler than identity-allowlist (no token column): hook either
+    matches a glob and is auto-stripped, or it doesn't and any
+    unpooled apt-install causes a failure / warning.
+    """
+    rules: List[Tuple[str, str]] = []
+    if not path or not os.path.isfile(path):
+        return rules
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            for raw in fh:
+                ln = raw.rstrip('\n')
+                if not ln or ln.lstrip().startswith('#'):
+                    continue
+                parts = ln.split('\t')
+                if len(parts) < 2:
+                    continue
+                rules.append((parts[0].strip(), parts[1].strip()))
+    except OSError as e:
+        logger.warning(
+            f"identity_scan: cannot read strip-hooks allowlist {path}: {e}"
+        )
+    return rules
+
+
+def _hook_is_allowlisted(rel_path: str,
+                         rules: List[Tuple[str, str]]) -> Optional[str]:
+    for glob, reason in rules:
+        if fnmatch.fnmatch(rel_path, glob):
+            return reason
+    return None
+
+
+def audit_chroot_hooks(chroot_root: str,
+                       pool_pkg_names: Set[str],
+                       allowlist_path: Optional[str] = None
+                       ) -> List[Dict[str, object]]:
+    """Walk hook subtrees under chroot_root and audit every apt-install
+    against pool_pkg_names.
+
+    Returns findings list — each dict has:
+      path          : chroot-relative hook path
+      line_no       : 1-based line of the apt-install call
+      missing_pkgs  : list of named pkgs absent from pool_pkg_names
+      soft_failure  : True if line was `apt-install … || true|:` form
+      action        : 'strip' | 'warn' | 'fail'
+      reason        : (only for 'strip') allowlist rationale
+
+    Empty pool_pkg_names short-circuits to no findings — callers
+    without a built pool yet (early test fixtures) get a no-op."""
+    findings: List[Dict[str, object]] = []
+    if not pool_pkg_names:
+        return findings
+    if not os.path.isdir(chroot_root):
+        return findings
+    allowlist = _load_strip_allowlist(allowlist_path) if allowlist_path else []
+
+    for subtree in _HOOK_SUBTREES:
+        root = os.path.join(chroot_root, subtree)
+        if not os.path.isdir(root):
+            continue
+        for fn in sorted(os.listdir(root)):
+            abs_path = os.path.join(root, fn)
+            if not os.path.isfile(abs_path):
+                continue
+            rel_path = _normalise_hook_path(abs_path, chroot_root)
+            try:
+                with open(abs_path, 'r', encoding='utf-8',
+                          errors='replace') as fh:
+                    lines = fh.readlines()
+            except OSError:
+                continue
+            for i, line in enumerate(lines, 1):
+                parsed = _parse_apt_install_line(line)
+                if parsed is None:
+                    continue
+                pkgs, soft = parsed
+                missing = [p for p in pkgs if p not in pool_pkg_names]
+                if not missing:
+                    continue
+                allow_reason = _hook_is_allowlisted(rel_path, allowlist)
+                if allow_reason is not None:
+                    findings.append({
+                        'path': rel_path, 'line_no': i,
+                        'missing_pkgs': missing,
+                        'soft_failure': soft,
+                        'action': 'strip',
+                        'reason': allow_reason,
+                    })
+                else:
+                    findings.append({
+                        'path': rel_path, 'line_no': i,
+                        'missing_pkgs': missing,
+                        'soft_failure': soft,
+                        'action': 'warn' if soft else 'fail',
+                    })
     return findings

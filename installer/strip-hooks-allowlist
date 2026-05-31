@@ -1,0 +1,30 @@
+# installer/strip-hooks-allowlist — CONF-10 S2 audit
+#
+# Each non-empty, non-# line names ONE installer-chroot hook that we
+# intentionally strip post-unpack because its `apt-install <X>` targets
+# a Debian-specific package not present in our pool:
+#
+#   <hook-path-glob>\t<reason>
+#
+#   hook-path-glob  fnmatch-style glob, matched against the chroot-
+#                   relative posix path of the hook file
+#                   (e.g. `usr/lib/pre-pkgsel.d/20install-hwpackages`).
+#   reason          Free-text rationale.  Surfaces in build log
+#                   when the strip applies.
+#
+# A hook whose apt-install targets are all in our pool needs no entry
+# here — it stays in the chroot.  A hook whose targets miss the pool
+# and which is NOT here aborts the build (the gate replacing the
+# rotting hardcoded list in installer_chroot.py).
+
+# hw-detect ships /usr/lib/pre-pkgsel.d/20install-hwpackages that runs
+# `apt-install discover` — Debian's hardware-detection DB used by
+# discover-pkginstall.  We don't ship discover; the install hook
+# fails with "Unable to locate package discover".  Strip.
+usr/lib/pre-pkgsel.d/20install-hwpackages	hw-detect → discover (Debian hardware-detection DB not in pool)
+
+# save-logs ships /usr/lib/pre-pkgsel.d/50save-logs that runs
+# `apt-install installation-report` — Debian's BTS install-report
+# submission tool.  We don't ship it; the hook fails with locator error
+# and would generate log spam.  Strip.
+usr/lib/pre-pkgsel.d/50save-logs	save-logs → installation-report (Debian BTS tool not in pool)
