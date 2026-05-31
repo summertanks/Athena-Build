@@ -17514,6 +17514,34 @@ def test_identity_scan_skips_binary_globs():
     )
 
 
+def test_identity_scan_skips_extensionless_binary_via_nul_probe():
+    """Files without a known binary extension (e.g. `boot/vmlinuz`) are
+    skipped via NUL-byte detection.  Caught 2026-05-31 staged ISO
+    audit: the kernel image's embedded build-id strings
+    (`debian-kernel@lists.debian.org`, `Debian Secure Boot CA`) were
+    grep'd as identity leakage because `vmlinuz` has no extension."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from identity_scan import audit_identity
+    with tempfile.TemporaryDirectory() as td:
+        # Simulate a kernel binary: NUL bytes interspersed with
+        # printable text that the audit's regex would otherwise match.
+        os.makedirs(os.path.join(td, 'boot'))
+        with open(os.path.join(td, 'boot', 'vmlinuz'), 'wb') as fh:
+            fh.write(b'GCC: (Debian 12.2.0-14) 12.2.0\x00\x00\x00')
+            fh.write(b'debian-kernel@lists.debian.org\x00')
+            fh.write(b'Debian Secure Boot CA\x00\xff\xfe\x00')
+        # And a sibling text file the audit MUST still scan.
+        with open(os.path.join(td, 'boot', 'config.txt'), 'w') as fh:
+            fh.write('reference to Debian package\n')
+        findings = audit_identity(td)
+    # vmlinuz skipped → only the text file's hit remains.
+    _paths = sorted(f['path'] for f in findings)
+    assert _paths == [os.path.join('boot', 'config.txt')], (
+        f"vmlinuz should be skipped via NUL probe; got {_paths}"
+    )
+
+
 def test_identity_scan_word_boundary_excludes_discoverable():
     """The `discover` token uses \\b — `discoverable` in license text
     should NOT match."""
@@ -21650,6 +21678,7 @@ def main() -> int:
         test_identity_scan_finds_debian_token_in_template,
         test_identity_scan_allowlist_absorbs_finding,
         test_identity_scan_skips_binary_globs,
+        test_identity_scan_skips_extensionless_binary_via_nul_probe,
         test_identity_scan_word_boundary_excludes_discoverable,
         test_identity_scan_allowlist_wildcard_token,
         test_identity_scan_specific_token_does_not_absorb_others,

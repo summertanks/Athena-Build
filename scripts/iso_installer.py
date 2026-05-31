@@ -1050,14 +1050,22 @@ def _audit_staged_iso(staging: str, dir_image: str) -> bool:
     if not _findings:
         logger.info("audit staged ISO: no identity residue")
         return True
-    for _f in _findings:
-        logger.error(
-            f"staged-ISO leak {_f['path']}:{_f['line_no']} "
-            f"[{_f['token']}]: {_f['line']}"
-        )
+    # Mirror each finding to the console so the operator sees the
+    # actionable diagnostic on the active tab regardless of whether
+    # they switch to the iso tab to read the logger.error stream.
     tui.console.print(
-        f"ERROR: {len(_findings)} identity residue hit(s) in staged "
-        f"ISO — see log", tui.COLOR_ERROR,
+        f"ERROR: {len(_findings)} identity residue hit(s) in staged ISO:",
+        tui.COLOR_ERROR,
+    )
+    for _f in _findings:
+        _msg = (
+            f"  {_f['path']}:{_f['line_no']} [{_f['token']}]: {_f['line']}"
+        )
+        tui.console.print(_msg, tui.COLOR_ERROR)
+        logger.error(f"staged-ISO leak {_msg.strip()}")
+    tui.console.print(
+        f"Either rebrand the source or add an explicit entry to "
+        f"{_allow_path}", tui.COLOR_ERROR,
     )
     return False
 
