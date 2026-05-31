@@ -41,7 +41,7 @@ from apt_repo import (
     export_pubkey_to_staging,
 )
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.iso')
 
 
 # Real kernel packages carry a numeric ABI in the package name:
@@ -110,6 +110,11 @@ def build_installer_iso(
     Returns True on success, False on any unrecoverable error.  All
     errors are logged AND printed to the console.
     """
+    logger.info(
+        f"build_installer_iso: → {iso_basename} "
+        f"(suite={suite}, codename={codename}, version={version}, "
+        f"snapshot={snapshot or '-'})"
+    )
     _staging = os.path.join(dir_image, 'staging-installer')
 
     if not _prepare_staging(_staging, password):
@@ -223,6 +228,7 @@ def _prepare_staging(staging: str, password: str) -> bool:
     mkdir so the top-level stays user-owned (same pattern as
     installer_chroot._wipe_and_create — see comment there).
     """
+    logger.info(f"prepare staging: wipe + recreate {staging}")
     tui.console.print(f"Wiping staging tree {staging}...")
     _r = _sudo(['rm', '-rf', staging], password)
     if _r.returncode != 0:
@@ -267,6 +273,10 @@ def _find_kernel(dir_repo: str, dir_chroot_installer: str,
     Returns absolute path to vmlinuz on success, None if neither
     strategy yields one.
     """
+    logger.info(
+        f"find kernel: chroot={dir_chroot_installer}/boot, repo={dir_repo}, "
+        f"expected={expected_kernel_pkg or '-'}"
+    )
     # Strategy 1: chroot's boot dir
     _candidates = sorted(glob.glob(
         os.path.join(dir_chroot_installer, 'boot', 'vmlinuz-*')))
@@ -391,6 +401,7 @@ def _find_kernel(dir_repo: str, dir_chroot_installer: str,
 
 def _stage_kernel(kernel_src: str, staging: str) -> bool:
     """Copy vmlinuz into staging/boot/ with the conventional name."""
+    logger.info(f"stage kernel: {os.path.basename(kernel_src)} → boot/vmlinuz")
     _dst = os.path.join(staging, 'boot', 'vmlinuz')
     try:
         shutil.copy2(kernel_src, _dst)
@@ -412,6 +423,7 @@ def _build_initrd(dir_chroot_installer: str, staging: str,
     expects.  `--quiet` suppresses the per-file chatter — full transcript
     available in the file log via stderr capture if needed.
     """
+    logger.info(f"build initrd: cpio | gzip {dir_chroot_installer} → boot/initrd.gz")
     _initrd = os.path.join(staging, 'boot', 'initrd.gz')
     # `find . -print0 | cpio --null -o -H newc | gzip > initrd.gz`
     # Run as a single shell pipeline under sudo so cpio can read the
@@ -471,6 +483,7 @@ def _stage_grub_cfg(staging: str, installer_dir: str) -> bool:
         `if loadfont … ; then … background_image …; fi` guard simply
         skips the splash; boot still works in text mode.
     """
+    logger.info(f"stage grub.cfg + boot assets from {installer_dir}/boot/")
     _src = os.path.join(installer_dir, 'boot', 'grub.cfg')
     if not os.path.exists(_src):
         tui.console.print(
@@ -532,6 +545,10 @@ def _stage_disk_info(
     would silently reject the disc; better to fail loud at iso-build
     than have the operator boot and see "No installation media".
     """
+    logger.info(
+        f"stage .disk markers: codename={codename}, version={version}, "
+        f"snapshot={snapshot or '-'}"
+    )
     _src_dir = os.path.join(installer_dir, 'disk')
     if not os.path.isdir(_src_dir):
         tui.console.print(
@@ -611,6 +628,10 @@ def _stage_base_include(staging: str, pkgs: Optional[list]) -> bool:
     Generating this from dep_tree.selected_pkgs at iso-build time keeps
     target install set == ISO pool closure, no manual list to drift.
     """
+    logger.info(
+        f"stage base_include: {len(pkgs) if pkgs else 0} package(s) → "
+        f".disk/base_include"
+    )
     if not pkgs:
         tui.console.print("base_include: skipped (no package list provided)")
         return True
@@ -645,6 +666,10 @@ def _stage_group_manifests(staging: str, pkg_groups: 'dict[str, set]') -> bool:
 
     Returns True on success / no-op (empty `pkg_groups`).
     """
+    logger.info(
+        f"stage group manifests: {len(pkg_groups) if pkg_groups else 0} "
+        f"group(s) → .disk/groups/"
+    )
     if not pkg_groups:
         return True
     _dir = os.path.join(staging, '.disk', 'groups')
@@ -843,9 +868,17 @@ def _stage_pool(
     without hitting ARG_MAX, preserves modes/timestamps, runs under
     sudo for root-owned files in repo/.
     """
+    logger.info(
+        f"stage pool: scanning {len(source_dirs)} source dir(s); "
+        f"whitelist={'on' if deb_whitelist else 'off'}, "
+        f"exclude={len(exclude_names) if exclude_names else 0}"
+    )
     _dst = os.path.join(staging, 'pool')
     _kept, _skipped = _select_pool_files(source_dirs, deb_whitelist,
                                          exclude_names)
+    logger.info(
+        f"stage pool: selected {len(_kept)} file(s), filtered {_skipped}"
+    )
     if not _kept:
         tui.console.print(
             f"ERROR: pool selection produced 0 files from {source_dirs} "
@@ -934,6 +967,10 @@ def _run_grub_mkrescue(staging: str, iso_path: str,
                    itself runs as root with passwordless sudo, so the
                    password isn't actually needed inside).
     """
+    logger.info(
+        f"grub-mkrescue: staging={staging} → {os.path.basename(iso_path)} "
+        f"(via build container)"
+    )
     if container is None:
         tui.console.print(
             "ERROR: grub-mkrescue requires the build container "

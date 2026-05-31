@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     # inside the function body so the runtime dep stays optional.
     from repo_audit import RepoState
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.build')
 
 # COMP-03 Phase 1: serialises segregate's per-file moves from
 # every worker's scratch dir into the shared repo subdirs.  Held
@@ -546,6 +546,10 @@ class BuildContainer:
         nodoc to actually produce -doc binaries that the default build
         would skip.
         """
+        logger.info(
+            f"build {src_pkg.package} v{src_pkg.version} "
+            f"(profiles={profiles_override}, options={options_override})"
+        )
 
         _plain_deps: 'list[str]' = []
         _or_groups: 'list[list[str]]' = []
@@ -1097,6 +1101,9 @@ class BuildContainer:
         Returns (ok, stdout, stderr) for the caller to log and surface.
         """
         del password   # noqa: F841 — see Args.password rationale
+        logger.info(
+            f"run_grub_mkrescue: staging={staging_dir} → {output_iso} (in container)"
+        )
 
         # Path-prep + cmd construction
         _output_dir   = os.path.dirname(os.path.abspath(output_iso))

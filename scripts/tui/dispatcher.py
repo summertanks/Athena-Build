@@ -353,7 +353,13 @@ class Dispatcher:
         attr = e.severity
         if hasattr(self._renderer, 'attr_for_severity'):
             attr = self._renderer.attr_for_severity(e.severity)
-        tab.append([(e.text, attr)], self._renderer.width())
+        # Split on embedded newlines so each line becomes its own buffer
+        # entry — same pattern as _on_print.  Without this, a single log
+        # record containing dpkg/subprocess output (often hundreds of
+        # lines) is wrap_line'd as one giant text and slices arbitrarily
+        # across line boundaries.
+        lines = [(line, attr) for line in e.text.split('\n')]
+        tab.append(lines, self._renderer.width())
         self.state.dirty = True
 
     def _on_status(self, e: StatusEvent) -> None:

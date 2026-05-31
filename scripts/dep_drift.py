@@ -25,7 +25,7 @@ import utils
 if TYPE_CHECKING:
     import dependencytree
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.cache')
 
 
 class _DepDriftMixin:
@@ -90,6 +90,10 @@ class _DepDriftMixin:
         aborts via RuntimeError — proceeding would just fail at install time
         with a less actionable message.
         """
+        logger.info(
+            f"dep_drift: scanning {len(self._dependencytree.canonical_pkgs)} "
+            f"canonical pkg(s) for cache↔disk skew"
+        )
         import package as _pkg_module
         for _pkg_name, _pkg_obj in self._dependencytree.canonical_pkgs.items():
             _filename = os.path.basename(_pkg_obj.get('Filename', ''))

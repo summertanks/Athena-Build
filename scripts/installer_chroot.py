@@ -24,7 +24,7 @@ import utils
 if TYPE_CHECKING:
     import dependencytree   # forward-reference target for type hints
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.chroot')
 
 
 # Engine mapping: (source path under installer_dir, target path under chroot)
@@ -90,6 +90,9 @@ def build_installer_chroot(
     are logged AND printed to the console; caller does not need to
     re-surface them.
     """
+    logger.info(
+        f"build_installer_chroot: → {dir_chroot_installer} (codename={codename})"
+    )
     if not _wipe_and_create(dir_chroot_installer, password):
         return False
 
@@ -182,6 +185,7 @@ def _wipe_and_create(dir_chroot_installer: str, password: str) -> bool:
     next launch.  `rm -rf` is a no-op on a missing path so the first
     call here on a fresh install just succeeds without any wipe work.
     """
+    logger.info(f"wipe + recreate {dir_chroot_installer}")
     tui.console.print(f"Wiping {dir_chroot_installer}...")
     _r = _sudo(['rm', '-rf', dir_chroot_installer], password)
     if _r.returncode != 0:
@@ -214,6 +218,7 @@ def _bootstrap_dpkg(dir_chroot_installer: str, password: str) -> bool:
     run when its admin dir is absent.  Mirrors chroot.py's
     _init_dpkg_database for the deb world.
     """
+    logger.info(f"bootstrap_dpkg: init var/lib/dpkg under {dir_chroot_installer}")
     _dpkg_dirs = [
         'var/lib/dpkg',
         'var/lib/dpkg/info',
@@ -266,6 +271,10 @@ def _resolve_udeb_files(udeb_tree: 'dependencytree.DependencyTree',
     Missing-on-disk udebs are logged + skipped (warning); caller
     notices if the list is too short.
     """
+    logger.info(
+        f"resolve_udeb_files: {len(udeb_tree.selected_pkgs)} candidate(s) "
+        f"from {dir_udebs}"
+    )
     _files: List[str] = []
     _main = dir_udebs
     for _name in udeb_tree.selected_pkgs:
@@ -324,6 +333,9 @@ def _dpkg_unpack(
     dpkg exits non-zero AND we can't attribute the failure to
     --force-depends/--force-overwrite warnings.
     """
+    logger.info(
+        f"dpkg --unpack: {len(udeb_files)} udeb(s) → {dir_chroot_installer}"
+    )
     tui.console.print(
         f"Unpacking {len(udeb_files)} udeb(s) into {dir_chroot_installer}..."
     )
@@ -341,9 +353,23 @@ def _dpkg_unpack(
     # genuine errors (vs warnings).  Most operators will accept the
     # warnings; outright failure (e.g. file conflict, bad archive) is
     # what we gate on.
-    logger.info(
-        f"_dpkg_unpack stdout:\n{_r.stdout}\n_dpkg_unpack stderr:\n{_r.stderr}"
+    # Per-line emit (one logger call per dpkg line) so each becomes its
+    # own buffer entry in the TUI — emitting the whole stdout as a single
+    # multi-line record makes the log tab wrap-slice it across line
+    # boundaries (caught 2026-05-31).  "Selecting/Preparing/Unpacking"
+    # stay at INFO so the chroot tab paints them as progress; everything
+    # else (file lists, debconf chatter) at DEBUG to keep the tab quiet.
+    _PROGRESS_PREFIXES = (
+        'Selecting ', 'Preparing to unpack ', 'Unpacking ',
+        'Setting up ', 'Processing triggers for ',
     )
+    for _line in _r.stdout.splitlines():
+        if _line.startswith(_PROGRESS_PREFIXES):
+            logger.info(_line)
+        else:
+            logger.debug(_line)
+    for _line in _r.stderr.splitlines():
+        logger.debug(f"stderr: {_line}")
     if _r.returncode == 0:
         return True
     # Heuristic: if stderr contains the word "error" (dpkg prefixes hard
@@ -450,6 +476,7 @@ def _strip_debian_residue_hooks(
     indicates a sudo-cred / FS-permission problem worth surfacing,
     not a missing target).
     """
+    logger.info("strip Debian-residue pre-pkgsel.d hooks (hw-detect, save-logs)")
     _targets = (
         'usr/lib/pre-pkgsel.d/20install-hwpackages',   # hw-detect → discover
         'usr/lib/pre-pkgsel.d/50save-logs',            # save-logs → installation-report
@@ -489,6 +516,7 @@ def _apply_installer_overlay(
     file drops it in the right place under installer/; operator who's
     fine with the udeb defaults leaves the source absent.
     """
+    logger.info(f"apply installer overlay from {installer_dir}/")
     for _src_rel, _dst_rel in _OVERLAY_MAP:
         _src = os.path.join(installer_dir, _src_rel)
         if not os.path.exists(_src):

@@ -9,7 +9,7 @@ import utils
 
 from typing import List, Dict, Any, Optional, Tuple
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.cache')
 
 # UX-04: python-debian's Deb822 base uses an OrderedSet whose __keys
 # nodes hold weakrefs.  Those plus the parsed-relation mixin caches

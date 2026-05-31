@@ -14,7 +14,7 @@ import logging
 import tui
 from tui import Prompt, PROMPT_OPTIONS
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.cache')
 
 
 def _auto_pick_candidate(candidates, prefer_name=None):
@@ -1054,6 +1054,10 @@ class DependencyTree:
         that need the union across both trees take both maps and union
         explicitly at the call site.
         """
+        logger.info(
+            f"parse_sources: resolving sources for {len(self.selected_pkgs)} "
+            f"selected pkg(s)"
+        )
         _found = True
         # Reset src_pkg_files — caller may invoke parse_sources multiple
         # times (e.g. `dep parse force` after pkg.list edits).  Stale

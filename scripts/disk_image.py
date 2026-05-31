@@ -46,7 +46,7 @@ import tui
 if TYPE_CHECKING:
     from buildcontainer import BuildContainer   # noqa: F401
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.iso')
 
 
 # sfdisk script that produces our 3-partition layout.  GPT label;
@@ -114,6 +114,9 @@ def build_disk_image(
     breaking the caller signature.
     """
     del container   # v1: all on host; follow-up moves grub-install in-container
+    logger.info(
+        f"build_disk_image: {dir_chroot} → {output_qcow2} ({size_gb}G)"
+    )
     if not os.path.isdir(dir_chroot):
         tui.console.print(f"ERROR: chroot dir not found: {dir_chroot}")
         return False
@@ -133,6 +136,7 @@ def build_disk_image(
 
     try:
         # ── Step 1: allocate sparse raw image ─────────────────────────────
+        logger.info(f"step 1/8: truncate -s {size_gb}G {_raw}")
         tui.console.print(
             f"Allocating {size_gb} GB sparse raw image at {_raw}..."
         )
@@ -145,6 +149,7 @@ def build_disk_image(
             return False
 
         # ── Step 2: losetup -P attach ─────────────────────────────────────
+        logger.info(f"step 2/8: losetup -P {_raw}")
         _r = _sudo(['losetup', '-Pf', '--show', _raw], password)
         if _r.returncode != 0:
             tui.console.print(
@@ -161,6 +166,7 @@ def build_disk_image(
         tui.console.print(f"Attached at {_loop_dev}")
 
         # ── Step 3: sfdisk GPT ────────────────────────────────────────────
+        logger.info(f"step 3/8: sfdisk GPT layout on {_loop_dev}")
         # Write script to a tempfile + shell-redirect into sfdisk so
         # sudo's stdin gets ONLY the password and sfdisk's stdin gets
         # ONLY the script.  The combined-input approach left "label:
@@ -202,6 +208,9 @@ def build_disk_image(
         _root_part = f'{_loop_dev}p3'
 
         # ── Step 4: mkfs ──────────────────────────────────────────────────
+        logger.info(
+            f"step 4/8: mkfs.fat ESP ({_efi_part}) + mkfs.ext4 root ({_root_part})"
+        )
         _spin = tui.Spinner(f"mkfs.fat ESP + mkfs.ext4 root on {_loop_dev}")
         try:
             _r = _sudo(['mkfs.fat', '-F', '32', '-n', 'EFI', _efi_part],
@@ -222,6 +231,7 @@ def build_disk_image(
             _spin.done()
 
         # ── Step 5: mount root, then EFI under root/boot/efi ──────────────
+        logger.info(f"step 5/8: mount root + ESP under {_mnt}")
         _r = _sudo(['mkdir', '-p', _mnt], password)
         if _r.returncode != 0:
             tui.console.print(
@@ -252,6 +262,7 @@ def build_disk_image(
         _efi_mounted = True
 
         # ── Step 6: rsync chroot → root ───────────────────────────────────
+        logger.info(f"step 6/8: rsync {dir_chroot} → {_mnt}")
         _spin = tui.Spinner(
             f"rsync chroot → {_root_part} ({dir_chroot} → root partition)"
         )
@@ -273,6 +284,7 @@ def build_disk_image(
             return False
 
         # ── Step 7: fstab from blkid UUIDs ────────────────────────────────
+        logger.info("step 7/8: write /etc/fstab from blkid UUIDs")
         _root_uuid = _read_uuid(_root_part, password)
         _efi_uuid  = _read_uuid(_efi_part,  password)
         if not _root_uuid or not _efi_uuid:
@@ -308,6 +320,7 @@ def build_disk_image(
             return False
 
         # ── Step 8: bind /proc /sys /dev /dev/pts + grub-install ──────────
+        logger.info("step 8/8: bind-mount + grub-install (EFI + BIOS)")
         for _src, _sub in (
             ('/proc',    'proc'),
             ('/sys',     'sys'),
@@ -471,6 +484,7 @@ def build_disk_image(
             _sudo(['losetup', '-d', _loop_dev], password, capture=True)
             _loop_dev = None
 
+        logger.info(f"qcow2 convert: {_raw} → {output_qcow2}")
         return _convert_to_qcow2(_raw, output_qcow2, password)
 
     finally:

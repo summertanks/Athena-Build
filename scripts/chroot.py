@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     import dependencytree
     from utils import BuildConfig
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.chroot')
 
 
 class _ChrootMixin:
@@ -77,6 +77,10 @@ class _ChrootMixin:
         # All canonical packages — filter out virtual-package alias entries
         # (entries where the key differs from Package['Package']).
         all_pkgs = [p for p in selected if p == selected[p]['Package']]
+        logger.info(
+            f"build_chroot: {self._dir_chroot} ← {len(all_pkgs)} pkgs "
+            f"(debug={debug})"
+        )
 
         # gcc-NN-base bootstrap: libc6 → libgcc-s1 → gcc-NN-base forms a
         # Pre-Depends cycle Kahn cannot break on its own.  Pre-install these
@@ -138,7 +142,7 @@ class _ChrootMixin:
             # alongside INFO/WARNING/ERROR records, so the unified run
             # log replaces the legacy chroot-install.log.
             tui.console.print(f"Batch 0 (bootstrap): {libc_seed}")
-            logger.debug('--- Batch 0 (bootstrap) ---')
+            logger.info(f"batch 0 (libc bootstrap): {libc_seed}")
             self._unpack_packages(libc_seed)
             configured |= self._configure_packages(libc_seed)
 
@@ -151,8 +155,10 @@ class _ChrootMixin:
                 if _force:
                     _label += " [cycle, --force-depends]"
                 tui.console.print(_label)
-                logger.debug(f'--- Batch {_i} ({len(_batch)} pkgs'
-                             f'{", forced" if _force else ""}) ---')
+                logger.info(
+                    f"batch {_i}/{len(batches)}: {len(_batch)} pkg(s)"
+                    f"{' [cycle, --force-depends]' if _force else ''}"
+                )
                 self._unpack_packages(_batch)
                 configured |= self._configure_packages(_batch, force_deps=_force)
 
@@ -172,7 +178,7 @@ class _ChrootMixin:
                 "Final configure sweep — "
                 "retrying any postinst-deferred packages..."
             )
-            logger.debug('--- Final configure sweep ---')
+            logger.info("final configure sweep: dpkg --configure -a")
             _final_configured = self._configure_chroot(is_final=True)
             configured |= _final_configured
         except RuntimeError as e:
@@ -356,6 +362,8 @@ class _ChrootMixin:
         reported as "Setting up X (version)" — i.e., successfully configured.
         Failed packages are NOT in the returned set.
         """
+        if is_final:
+            logger.info("configure_chroot: final dpkg --configure -a (surfaces errors)")
         _chroot = self._dir_chroot
         _dpkg_in_chroot = self._chroot_dpkg_available()
 
@@ -1052,6 +1060,7 @@ class _ChrootMixin:
     def pre_install(self):
         # Two parts here - copy files and then run commands
         # TODO: Let it load from file rather than hard coding it, risk of something malicious coming in though
+        logger.info(f"pre_install: overlay + patch from {self._dir_preinstall_patch}")
         # Parse files to copy
         for root, _dirs, files in os.walk(self._dir_preinstall_patch):
 
@@ -1129,6 +1138,7 @@ class _ChrootMixin:
         permission fixups belong in the overlay files themselves or in
         generate_system_configs().
         """
+        logger.info(f"post_install: overlay + patch from {self._dir_postinstall_patch}")
         for root, _dirs, files in os.walk(self._dir_postinstall_patch):
             if not files:
                 continue
@@ -1179,6 +1189,7 @@ class _ChrootMixin:
           /etc/machine-id      — empty; systemd generates on first boot
           /etc/apt/sources.list — APT repository for the installed system
         """
+        logger.info(f"generate_system_configs (debug={debug})")
         cfg = self._config
         # Three-layer identity (see memory/project_three_layer_identity.md):
         #   _name     = [Build] DISTRIBUTION    — display name ("Asgard")

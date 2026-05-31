@@ -61,7 +61,7 @@ import logging
 from tui import Tui, console, Prompt, PROMPT_YESNO, PROMPT_INPUT, PROMPT_PASSWORD, Spinner, ProgressBar, Exit
 from tui import setup_file_logging
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.build')
 
 asciiart_logo = (
     '╭─╮╶┬╴╷ ╷╭─╴╭╮╷╭─╮   ╭╮ ╷ ╷╷╷  ╶┬╮   ╭─╮╷ ╷╭─╮╶┬╴╭─╴╭┬╮\n'
