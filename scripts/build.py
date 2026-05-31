@@ -8527,17 +8527,21 @@ def main(banner: str) -> None:
     console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
     console.print(f"\tBuild Distribution\t{config.build_distribution} {config.build_version} ({config.build_codename})")
 
-    # UX-04: announce persisted-flag state across restarts so the operator
-    # knows prior session left something behind without needing to ask.
+    # UX-04: announce persisted-flag state across restarts so the
+    # operator knows prior session left something behind without needing
+    # to ask.  When --resume is set, suppress the "not yet wired" hint
+    # since cmd_resume is about to fire and wire it — the hint would be
+    # immediately contradicted by the resume output.
     _restored = session.flags.restored_summary()
     if _restored:
         console.print(
             f"Restored from prior session: {_restored}", tui.COLOR_INFO)
-        console.print(
-            "  in-memory state (cache + dep tree) not yet wired — run "
-            "`resume` to restore, or `cache parse` to rebuild.",
-            tui.COLOR_INFO,
-        )
+        if not _resume:
+            console.print(
+                "  in-memory state (cache + dep tree) not yet wired — run "
+                "`resume` to restore, or `cache parse` to rebuild.",
+                tui.COLOR_INFO,
+            )
 
     # UX-04: `--resume` auto-fires cmd_resume after registration so the
     # operator can `build-system.sh --resume` and get instant state.
