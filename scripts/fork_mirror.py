@@ -94,6 +94,25 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
     for _pkg_dir in pkg_dirs:
         _check_and_invalidate_fork_pkg(_pkg_dir, buildconfig)
 
+    # CONF-11: audit each fork pkg's own build system for paths it
+    # references but doesn't have.  Surfaces the 2026-05-18 athena-tasksel
+    # / `packages/list` class of bug at cache-build time rather than deep
+    # inside a failed dpkg-buildpackage with an opaque `install: cannot
+    # stat` error.  Warnings only — operator triages.
+    for _pkg_dir in pkg_dirs:
+        _findings = audit_fork_tree(_pkg_dir)
+        if not _findings:
+            continue
+        _pkg_name = os.path.basename(_pkg_dir)
+        tui.console.print(
+            f"fork_mirror: {_pkg_name}: {len(_findings)} dangling "
+            f"build-system reference(s) — see log", tui.COLOR_WARNING)
+        for _f in _findings:
+            logger.warning(
+                f"audit_fork_tree {_pkg_name}: "
+                f"{_f['file']}:{_f['line_no']} → '{_f['source']}' "
+                f"({_f['reason']})")
+
     src_pkg_files = _generate_source_packages(pkg_dirs, dir_fork_source_repo)
     if not src_pkg_files:
         tui.console.print(
@@ -793,3 +812,140 @@ def _write_release(dir_fork: str, codename: str,
     with open(os.path.join(dir_fork, 'Release'), 'w') as fh:
         fh.write('\n'.join(_lines))
         fh.write('\n')
+
+
+# ── CONF-11 fork-tree internal completeness audit ─────────────────────────
+
+# `install` short-flags that take a separate value as the next token.  All
+# others are no-arg flags.  Used by `_scan_install_sources` to walk past
+# the flag block to find the SOURCE operand(s).
+_INSTALL_FLAGS_WITH_ARG = frozenset({'-m', '-o', '-g', '-S'})
+
+
+def _scan_install_sources(line: str) -> List[str]:
+    """Return concrete source paths referenced by an `install` command on
+    `line`.  Skips variable-expanded paths (start with `$` or `$$`),
+    absolute paths (start with `/`), and the destination operand.
+
+    Handles `install <flags> SOURCE [SOURCE...] DEST`.  Returns [] for
+    `install -d <dirs>` (directory-only form, no source).
+    """
+    _tokens = line.split()
+    if 'install' not in _tokens:
+        return []
+    _i = _tokens.index('install') + 1
+    while _i < len(_tokens):
+        _t = _tokens[_i]
+        if _t in ('-d', '-D'):
+            return []                    # no SOURCE operands
+        if _t == '-t':
+            return []                    # target-dir form; too ambiguous
+        if _t in _INSTALL_FLAGS_WITH_ARG:
+            _i += 2                      # flag + value
+            continue
+        if _t.startswith('-'):
+            _i += 1                      # no-arg flag
+            continue
+        break
+    _rest = _tokens[_i:]
+    # Strip a trailing line-continuation '\' if present.
+    if _rest and _rest[-1] == '\\':
+        _rest = _rest[:-1]
+    if len(_rest) < 2:
+        return []                        # need at least SOURCE + DEST
+    _sources = _rest[:-1]                # last is DEST
+    return [
+        _s for _s in _sources
+        if _s and not _s.startswith(('$', '/', '-', '<', '>', '|'))
+    ]
+
+
+def _scan_cp_sources(line: str) -> List[str]:
+    """Return concrete source paths referenced by a `cp` command on `line`.
+    Skips variable-expanded paths and absolute paths.  Handles
+    `cp [-flags] SOURCE [SOURCE...] DEST`.
+    """
+    _tokens = line.split()
+    if 'cp' not in _tokens:
+        return []
+    _i = _tokens.index('cp') + 1
+    while _i < len(_tokens) and _tokens[_i].startswith('-'):
+        if _tokens[_i] in ('-t', '--target-directory'):
+            return []                    # target-dir form; too ambiguous
+        _i += 1
+    _rest = _tokens[_i:]
+    if _rest and _rest[-1] == '\\':
+        _rest = _rest[:-1]
+    if len(_rest) < 2:
+        return []
+    _sources = _rest[:-1]
+    return [
+        _s for _s in _sources
+        if _s and not _s.startswith(('$', '/', '-', '<', '>', '|'))
+    ]
+
+
+def audit_fork_tree(pkg_dir: str) -> 'List[Dict[str, str]]':
+    """Audit a fork/source/<pkg>/ tree for build-system promises that
+    point at files NOT in the tree.
+
+    Scans `Makefile` and `debian/rules` for `install <flags> <src> <dst>`
+    and `cp [-flags] <src> <dst>` patterns with concrete (non-variable,
+    non-absolute) source paths; verifies each source exists in the fork
+    tree.  Glob patterns (`etc/*`) require ≥1 match.
+
+    Returns a list of findings, each a dict with:
+      file      — relative path of the file that referenced the source
+      line_no   — 1-based line number in that file
+      source    — the dangling source path (as written)
+      reason    — human-readable why-it-failed
+
+    Empty list ⇒ audit clean.  Surfaces the 2026-05-18 athena-tasksel /
+    `packages/list` class of bug at cache-build time rather than deep
+    inside a failed `dpkg-buildpackage`.
+
+    Design note (CONF-11): a `debian/<binary>.install` audit was
+    considered + dropped because dh_install runs AFTER the build target,
+    so `.install` legitimately references built binaries and generated
+    debian/* files.  Static-time existence check would false-positive on
+    every package that builds before installing (e.g. choose-mirror's
+    `choose-mirror` C binary).  The original athena-tasksel `packages/list`
+    incident was a `Makefile install` reference, not a `.install` entry —
+    so the Makefile/rules scan is the load-bearing check anyway.
+    """
+    _findings: 'List[Dict[str, str]]' = []
+
+    for _scan_rel in ('Makefile', os.path.join('debian', 'rules')):
+        _scan_path = os.path.join(pkg_dir, _scan_rel)
+        if not os.path.isfile(_scan_path):
+            continue
+        try:
+            with open(_scan_path) as _fh:
+                for _line_no, _line in enumerate(_fh, 1):
+                    if _line.lstrip().startswith('#'):
+                        continue
+                    for _src in _scan_install_sources(_line) + _scan_cp_sources(_line):
+                        # Skip Makefile-escaped shell vars and interpolated
+                        # paths anywhere.
+                        if '$' in _src:
+                            continue
+                        _abs = os.path.join(pkg_dir, _src)
+                        if any(_c in _src for _c in '*?['):
+                            if not glob.glob(_abs):
+                                _findings.append({
+                                    'file':    _scan_rel,
+                                    'line_no': str(_line_no),
+                                    'source':  _src,
+                                    'reason':  'no match for glob in fork tree',
+                                })
+                        elif not os.path.exists(_abs):
+                            _findings.append({
+                                'file':    _scan_rel,
+                                'line_no': str(_line_no),
+                                'source':  _src,
+                                'reason':  'file not found in fork tree',
+                            })
+        except OSError as _e:
+            logger.warning(f"audit_fork_tree: cannot read {_scan_path}: {_e}")
+
+    return _findings
