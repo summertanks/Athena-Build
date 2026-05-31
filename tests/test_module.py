@@ -13348,6 +13348,107 @@ def test_v2_logging_bridge_routes_by_stage():
     d.post(Shutdown(0))
 
 
+def test_logging_bridge_splits_multiline_records():
+    """A single log record with embedded \\n must produce one buffer
+    entry per line, not one mega-entry that wrap_line slices arbitrarily
+    across line boundaries.  Regression for the 2026-05-31 chroot-tab
+    truncation: _dpkg_unpack dumped full stdout (~1500 lines) as one
+    record; the renderer's char-based wrap_line then chopped the
+    concatenated text into 70-char slices that crossed the real line
+    boundaries, presenting unreadable right-tails to the operator."""
+    import sys, threading, time, logging as _logging
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.dispatcher import Dispatcher
+    from tui.events import Shutdown
+    from tui.logging_bridge import setup_logging
+
+    d = Dispatcher(_v2_fake_renderer())
+    threading.Thread(target=d.run, daemon=True).start()
+    time.sleep(0.02)
+    setup_logging(d)
+
+    # Simulate the _dpkg_unpack pattern — one record, three logical lines.
+    _logging.getLogger('athena.chroot').info(
+        'Selecting previously unselected package libc6-udeb.\n'
+        'Preparing to unpack .../libc6-udeb_2.36-9_amd64.udeb ...\n'
+        'Unpacking libc6-udeb (2.36-9) ...'
+    )
+    time.sleep(0.1)
+
+    chroot_buf = [t for t, _ in d.state.tabs['chroot'].buffer]
+    # Each \n-separated line should be its own buffer entry — and no
+    # entry should contain a literal \n character.
+    assert any(line == 'Selecting previously unselected package libc6-udeb.'
+               for line in chroot_buf), chroot_buf
+    assert any(line.startswith('Preparing to unpack ') for line in chroot_buf), chroot_buf
+    assert any(line == 'Unpacking libc6-udeb (2.36-9) ...'
+               for line in chroot_buf), chroot_buf
+    assert not any('\n' in line for line in chroot_buf), (
+        'no buffer entry should contain a literal \\n'
+    )
+    d.post(Shutdown(0))
+
+
+def test_per_module_logger_names_pin_routing():
+    """Each scripts/*.py module's bare module-level `logger` must point
+    at the right logger name so its records route to the right TUI tab
+    via _tab_for_logger.  Pinned to prevent silent regression to bare
+    'athena' (which routes everything to the 'log' catch-all)."""
+    import re
+    expected = {
+        # cache stage — cache parse / dep walk / fork mirror / dep drift
+        'cache':            'athena.cache',
+        'dependencytree':   'athena.cache',
+        'dep_drift':        'athena.cache',
+        'fork_mirror':      'athena.cache',
+        'package':          'athena.cache',
+        # build stage — orchestrator + per-source build container
+        'build':            'athena.build',
+        'buildcontainer':   'athena.build',
+        # chroot stage — live + installer chroot bring-up
+        'chroot':           'athena.chroot',
+        'installer_chroot': 'athena.chroot',
+        # iso stage — squashfs / grub / qcow2
+        'iso':              'athena.iso',
+        'iso_installer':    'athena.iso',
+        'disk_image':       'athena.iso',
+        # cross-stage / generic — bare 'athena' → log tab
+        'utils':            'athena',
+        'signing':          'athena',
+        'apt_repo':         'athena',
+        'repo_audit':       'athena',
+        'persistence':      'athena',
+        'cli':              'athena',
+    }
+
+    def _tab(name):
+        if name.startswith('athena.'):
+            return name[len('athena.'):].split('.', 1)[0]
+        return 'log'
+
+    pat = re.compile(
+        r"^logger\s*=\s*logging\.getLogger\(\s*'(athena(?:\.[a-z_]+)?)'\s*\)",
+        re.MULTILINE,
+    )
+    scripts_dir = os.path.join(_ROOT, 'scripts')
+    for mod, expected_name in expected.items():
+        path = os.path.join(scripts_dir, f'{mod}.py')
+        assert os.path.isfile(path), f'expected module missing: {path}'
+        with open(path) as f:
+            body = f.read()
+        m = pat.search(body)
+        assert m, (
+            f'{mod}.py: no module-level '
+            f"`logger = logging.getLogger('athena…')` found"
+        )
+        actual = m.group(1)
+        assert actual == expected_name, (
+            f'{mod}.py: expected logger {expected_name!r} '
+            f'(tab {_tab(expected_name)!r}); got {actual!r} '
+            f'(tab {_tab(actual)!r})'
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # COMP-06 — package-set selector
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21205,6 +21306,10 @@ def main() -> int:
         test_ux04_cmd_resume_registered,
         test_ux04_resume_flag_in_build_system_sh,
         test_ux04_save_session_called_after_parse_dependency,
+        # TUI tab routing — per-module logger name → tab mapping
+        test_per_module_logger_names_pin_routing,
+        # TUI log bridge — multi-line records split per buffer entry
+        test_logging_bridge_splits_multiline_records,
     ]
     failures = 0
     for t in tests:

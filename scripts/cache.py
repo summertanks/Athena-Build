@@ -20,7 +20,7 @@ from package import Package, Source
 
 from tui import ProgressBar, Spinner
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.cache')
 
 
 def _lookup_packages(hashtable: 'Dict[str, Dict[Version, List[Package]]]',
@@ -240,6 +240,9 @@ class Cache:
         single conspicuous WARN at the start of the cache build so the
         bypass is never silent.
         """
+        logger.info(
+            f"fetch InRelease + Packages + Sources for {len(self.mirrors)} mirror(s)"
+        )
         if self._security_disabled:
             logger.warning(
                 "Security: GPG verification of InRelease is DISABLED — "
@@ -492,6 +495,9 @@ class Cache:
         Package/Source has its `_mirror` field stamped so consumers
         (download_source, tunnel_package) can fetch from the right pool.
         """
+        logger.info(
+            f"build cache: arch={arch}, mirrors={[m.id for m in self.mirrors]}"
+        )
         parser_spinner = Spinner("Parsing Package Files")
 
         for _mirror in self.mirrors:
@@ -677,6 +683,12 @@ class Cache:
         tui.console.print(
             f"Udeb Required / Important : "
             f"{len(self.udeb_required)} / {len(self.udeb_important)}"
+        )
+        logger.info(
+            f"cache build complete: pkgs={len(self.package_hashtable)}, "
+            f"srcs={len(self.source_hashtable)}, "
+            f"udebs={len(self.udeb_hashtable)}, "
+            f"required={len(self.required)}, important={len(self.important)}"
         )
 
         # Collision gate (must be the LAST step in cache build — runs

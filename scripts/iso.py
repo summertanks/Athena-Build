@@ -20,7 +20,7 @@ import utils
 if TYPE_CHECKING:
     from utils import BuildConfig
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.iso')
 
 
 # Common English first names used as the random live-user account.
@@ -80,7 +80,11 @@ class _IsoMixin:
         Returns:
             True on success, False if any step fails.
         """
+        logger.info(
+            f"build_iso (live): chroot={self._dir_chroot} → {self._dir_image}/"
+        )
         # ── Step 1: locate kernel and initramfs ───────────────────────────────
+        logger.info("step 1/6: locate kernel + initramfs in chroot/boot/")
         _boot = os.path.join(self._dir_chroot, 'boot')
         _kernels = sorted(glob.glob(os.path.join(_boot, 'vmlinuz-*')))
         _initrds = sorted(glob.glob(os.path.join(_boot, 'initrd.img-*')))
@@ -101,6 +105,7 @@ class _IsoMixin:
         tui.console.print(f"Initrd  : {os.path.basename(_initrd)}")
 
         # ── Step 2: create staging tree ───────────────────────────────────────
+        logger.info("step 2/6: create staging/{boot,boot/grub,live}/")
         _staging      = os.path.join(self._dir_image, 'staging')
         _staging_boot = os.path.join(_staging, 'boot')
         _staging_grub = os.path.join(_staging, 'boot', 'grub')
@@ -110,11 +115,16 @@ class _IsoMixin:
             os.makedirs(_d, exist_ok=True)
 
         # ── Step 3: copy kernel and initramfs ─────────────────────────────────
+        logger.info(
+            f"step 3/6: copy {os.path.basename(_kernel)} + "
+            f"{os.path.basename(_initrd)} → staging/boot/"
+        )
         shutil.copy2(_kernel, os.path.join(_staging_boot, 'vmlinuz'))
         shutil.copy2(_initrd, os.path.join(_staging_boot, 'initrd.img'))
         tui.console.print("Kernel and initramfs copied to staging")
 
         # ── Step 4: write grub.cfg ────────────────────────────────────────────
+        logger.info("step 4/6: write boot/grub/grub.cfg + stage background")
         # 'boot=live' is the live-boot trigger; live-boot locates the squashfs
         # under /live/filesystem.squashfs on the boot device and mounts it as
         # the root filesystem with overlayfs.
@@ -190,6 +200,9 @@ class _IsoMixin:
             )
 
         # ── Step 5: create squashfs ───────────────────────────────────────────
+        logger.info(
+            f"step 5/6: mksquashfs xz {self._dir_chroot} → staging/live/filesystem.squashfs"
+        )
         # Runtime virtual directories (proc, sys, dev, run, tmp) must NOT be
         # excluded as directories — live-boot's initramfs bind-mounts /dev,
         # /proc, /sys, /run into the new root and needs those directories to
@@ -247,6 +260,7 @@ class _IsoMixin:
         tui.console.print(f"squashfs created: {_sq_mb} MB")
 
         # ── Step 6: run grub-mkrescue ─────────────────────────────────────────
+        logger.info("step 6/6: grub-mkrescue (in build container) → ISO")
         # COMP-14 fix path (b): run grub-mkrescue inside the build
         # container so the ISO embeds bookworm's GRUB toolchain instead
         # of the host's.  Eliminates the "host runs trixie → ISO

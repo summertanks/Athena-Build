@@ -31,7 +31,7 @@ from debian.deb822 import Deb822
 import tui
 import utils
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.cache')
 
 # Mandatory Packages fields per the Debian spec — populated with safe
 # placeholders for unbuilt binaries.  Cache never consults Size/SHA256
@@ -71,6 +71,7 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
     dir_fork_source_repo = buildconfig.dir_fork_source_repo
     codename             = buildconfig.build_codename
 
+    logger.info(f"generate_fork_mirror: scanning {dir_fork_source}")
     pkg_dirs = _discover_fork_source_trees(dir_fork_source)
     if not pkg_dirs:
         logger.info(f"fork_mirror: no source trees in {dir_fork_source} — skipping mirror generation")
@@ -81,6 +82,10 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
     os.makedirs(dir_fork, exist_ok=True)
     os.makedirs(dir_fork_source_repo, exist_ok=True)
 
+    logger.info(
+        f"fork_mirror: discovered {len(pkg_dirs)} source tree(s) — "
+        f"{[os.path.basename(d) for d in pkg_dirs]}"
+    )
     tui.console.print(
         f"fork_mirror: discovered {len(pkg_dirs)} source tree(s) in fork/source/"
     )
@@ -113,6 +118,7 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
                 f"{_f['file']}:{_f['line_no']} → '{_f['source']}' "
                 f"({_f['reason']})")
 
+    logger.info(f"fork_mirror: dpkg-source -b across {len(pkg_dirs)} tree(s)")
     src_pkg_files = _generate_source_packages(pkg_dirs, dir_fork_source_repo)
     if not src_pkg_files:
         tui.console.print(
@@ -123,6 +129,10 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
 
     deb_stanzas, udeb_stanzas = _build_packages_stanzas(pkg_dirs, buildconfig.arch)
     src_stanzas = _build_sources_stanzas(src_pkg_files)
+    logger.info(
+        f"fork_mirror: indices ready — {len(deb_stanzas)} deb / "
+        f"{len(udeb_stanzas)} udeb / {len(src_stanzas)} source stanza(s)"
+    )
 
     _write_index(os.path.join(dir_fork, 'Packages'),      deb_stanzas)
     _write_index(os.path.join(dir_fork, 'Packages-udeb'), udeb_stanzas)
