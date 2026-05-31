@@ -14,10 +14,12 @@ mutating method (State owns it; dispatcher checks once per event).
 """
 from __future__ import annotations
 
+import os
 import queue
 import time
+import traceback as _traceback
 from concurrent.futures import Future
-from typing import Callable, Optional, Protocol
+from typing import Callable, List, Optional, Protocol
 
 from . import wrap
 from .events import (
@@ -26,6 +28,98 @@ from .events import (
     TabRemove, WidgetAdd, WidgetRemove,
 )
 from .state import State
+
+
+# ── Render-failure capture ───────────────────────────────────────────────
+# The dispatcher's _safe_render historically swallowed exceptions
+# silently — the comment said "Log via stderr in the bridge layer"
+# but nothing actually logged.  A render that started raising stayed
+# silent: buffers filled, but nothing painted; operator saw no error,
+# no echo, no body output for the rest of the session.  Surfaced
+# 2026-05-31 after the log-tab removal (commits 1097e32 → bd14f2b);
+# couldn't pin the mechanism without ground truth.
+#
+# Strategy: ONE-SHOT capture on the FIRST failure.  Subsequent fails
+# just bump the counter — no log spam if the failure repeats every
+# event for the rest of the session.  File path is overrideable for
+# tests via RENDER_FAILURE_PATH.
+
+RENDER_FAILURE_PATH: Optional[str] = None        # test hook
+_render_failure_count: int = 0
+
+
+def _default_failure_paths() -> List[str]:
+    """Where to drop the post-mortem if no test override.  cwd-relative
+    `log/` first (matches the project's dir_log convention so build.py
+    operators find it next to their build logs); /tmp fallback if log/
+    isn't writable (test runs from /tmp etc)."""
+    return [
+        os.path.join(os.getcwd(), 'log', 'render-failure.log'),
+        os.path.join('/tmp', 'athena-render-failure.log'),
+    ]
+
+
+def _capture_render_failure(state: State, exc: BaseException) -> None:
+    """Write a render-failure post-mortem the first time render() raises.
+
+    Subsequent calls increment the counter only — no I/O on repeat
+    failures (a broken render typically fires on every event for the
+    rest of the session, would spam the disk otherwise)."""
+    global _render_failure_count
+    _render_failure_count += 1
+    if _render_failure_count > 1:
+        return
+    paths = (
+        [RENDER_FAILURE_PATH] if RENDER_FAILURE_PATH else _default_failure_paths()
+    )
+    lines: List[str] = [
+        '=== TUI render failure (one-shot capture) ===',
+        f'timestamp:        {time.strftime("%Y-%m-%dT%H:%M:%S")}',
+        f'exception:        {type(exc).__name__}: {exc}',
+    ]
+    try:
+        lines.append(f'active_tab:       {state.active_tab_name()}')
+    except Exception:
+        lines.append('active_tab:       (active_tab_name raised)')
+    try:
+        lines.append(f'tabs:             {list(state.tabs.keys())}')
+        for _name, _t in state.tabs.items():
+            lines.append(
+                f'  {_name:<10s} buffer={len(_t.buffer):>5d} '
+                f'scroll_offset={_t.scroll_offset}'
+            )
+    except Exception:
+        lines.append('tabs:             (state.tabs introspection raised)')
+    lines.append(f'widgets:          {len(getattr(state, "widgets", []))}')
+    lines.append('')
+    lines.append('traceback:')
+    lines.append(_traceback.format_exc())
+    body = '\n'.join(lines) + '\n'
+    for _path in paths:
+        try:
+            _parent = os.path.dirname(_path)
+            if _parent:
+                os.makedirs(_parent, exist_ok=True)
+            with open(_path, 'w', encoding='utf-8') as _fh:
+                _fh.write(body)
+            return
+        except OSError:
+            continue
+
+
+def render_failure_count() -> int:
+    """Public accessor — number of render() failures since process start
+    (or last reset).  Useful for tests + an in-TUI `print state` row
+    that surfaces "your TUI is silently broken" instead of leaving the
+    operator guessing."""
+    return _render_failure_count
+
+
+def _reset_render_failure_state() -> None:
+    """Test-only reset: clear the one-shot guard so the next failure
+    re-captures.  Production code never calls this."""
+    global _render_failure_count
+    _render_failure_count = 0
 
 
 # ── Renderer protocol — keeps dispatcher.py free of curses imports ─────
@@ -168,10 +262,12 @@ class Dispatcher:
             return
         try:
             self._renderer.render(self.state)
-        except Exception:
-            # Renderer failure must not kill the loop.  Log via stderr
-            # in the bridge layer; here just clear dirty and continue.
-            pass
+        except Exception as exc:
+            # Renderer failure must not kill the loop.  First failure
+            # is captured to disk (see _capture_render_failure) so
+            # post-mortems aren't blind; further failures only bump
+            # the counter, no log spam.
+            _capture_render_failure(self.state, exc)
         self.state.dirty = False
 
     # ─── Event dispatch ──────────────────────────────────────────────────
