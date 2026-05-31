@@ -19759,6 +19759,45 @@ def test_source_build_autodetects_update_mode():
         "(forks etc.), so `source build all` builds everything the audit lists")
 
 
+def test_do_update_build_sets_source_build_ready_on_nothing_to_build():
+    """`_do_update_build`'s "everything up-to-date — nothing to build"
+    early-return must set `source_build_ready = True`.
+
+    Pre-fix: cmd_source_build reset the flag to False on entry, then
+    routed to _do_update_build for UPDATE mode.  When the workload was
+    empty (nothing changed since published), _do_update_build returned
+    without re-arming the flag.  Autorun then saw source_build_ready
+    still False and aborted the next stage with "'source build
+    installer' did not complete — aborting" — even though there was
+    nothing wrong; the binaries were all up-to-date.
+
+    Caught 2026-05-31 autorun installer.  Source-level check: scan
+    the _do_update_build body for the up-to-date branch and verify
+    the success flag gets set there."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    _u = re.search(r'def _do_update_build\(self.*?(?=\n    def )',
+                    _body, re.DOTALL)
+    assert _u, '_do_update_build not found'
+    _ub = _u.group(0)
+    # Find the "nothing to build" branch + assert it sets the flag.
+    _nothing_to_build = re.search(
+        r'if not _delta_to_build and not _extra:.*?return',
+        _ub, re.DOTALL,
+    )
+    assert _nothing_to_build, (
+        "could not locate the 'nothing to build' branch in _do_update_build"
+    )
+    _branch = _nothing_to_build.group(0)
+    assert 'self.flags.source_build_ready = True' in _branch, (
+        "'nothing to build' is a success case but the early-return doesn't "
+        "re-arm source_build_ready; autorun will abort the next stage.  "
+        "Set the flag True before `return`."
+    )
+
+
 def test_workload_current_to_target_diffs_against_target_snapshot():
     """`snapshot workload`'s core: a source is in the workload iff its version
     AT THE TARGET snapshot is newer than the current pin's version."""
@@ -21692,6 +21731,7 @@ def main() -> int:
         test_repo_refresh_is_thin_wrapper,
         test_publish_full_folds_index_merge_prune_and_gates_rsync,
         test_source_build_autodetects_update_mode,
+        test_do_update_build_sets_source_build_ready_on_nothing_to_build,
         test_workload_current_to_target_diffs_against_target_snapshot,
         test_workload_detects_debNuN_source_change_ignores_unchanged,
         test_workload_since_snapshot_diffs_published_to_current,
