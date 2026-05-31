@@ -14013,6 +14013,193 @@ def test_fork_mirror_generate_emits_complete_layout():
             f"no .dsc in source/repo/: {repo_files}"
 
 
+# ─── CONF-11: fork-tree internal completeness audit ─────────────────────────
+
+def _conf11_make_fork_pkg(root: str, makefile: str = '', rules: str = '',
+                          extra_files: 'list[str] | None' = None,
+                          binaries: 'list[str] | None' = None) -> str:
+    """Build a fake fork/source/<pkg>/ tree for audit testing.
+    Returns the pkg_dir.  `extra_files` are touched relative to pkg_dir.
+    `binaries` lists the Package: stanzas to write to debian/control."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _pkg_dir = os.path.join(root, 'testpkg')
+    os.makedirs(os.path.join(_pkg_dir, 'debian'), exist_ok=True)
+    _ctrl_lines = ['Source: testpkg', 'Maintainer: x', '']
+    for _b in (binaries or ['testpkg']):
+        _ctrl_lines += [f'Package: {_b}', 'Architecture: all',
+                        'Description: x', '']
+    with open(os.path.join(_pkg_dir, 'debian', 'control'), 'w') as _fh:
+        _fh.write('\n'.join(_ctrl_lines))
+    if makefile:
+        with open(os.path.join(_pkg_dir, 'Makefile'), 'w') as _fh:
+            _fh.write(makefile)
+    if rules:
+        with open(os.path.join(_pkg_dir, 'debian', 'rules'), 'w') as _fh:
+            _fh.write(rules)
+    for _rel in (extra_files or []):
+        _abs = os.path.join(_pkg_dir, _rel)
+        os.makedirs(os.path.dirname(_abs), exist_ok=True)
+        with open(_abs, 'w') as _fh:
+            _fh.write('content\n')
+    return _pkg_dir
+
+
+def test_conf11_audit_clean_when_all_paths_exist():
+    """Audit returns [] when every install/cp reference is satisfied."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _tmp:
+        _pkg = _conf11_make_fork_pkg(_tmp,
+            makefile='install:\n\tinstall -m 755 foo.sh $(DESTDIR)/usr/bin/foo\n',
+            extra_files=['foo.sh'])
+        assert fork_mirror.audit_fork_tree(_pkg) == []
+
+
+def test_conf11_audit_athena_tasksel_packages_list_regression():
+    """The original 2026-05-18 incident: athena-tasksel Makefile
+    references `packages/list` which is missing from the fork."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _tmp:
+        _pkg = _conf11_make_fork_pkg(_tmp,
+            makefile=(
+                'install:\n'
+                '\tinstall -m 755 tasksel.pl $(DESTDIR)/usr/bin/tasksel\n'
+                '\tinstall -m 755 packages/list $(DESTDIR)/usr/lib/tasksel/packages/\n'
+            ),
+            extra_files=['tasksel.pl'])   # packages/list NOT created
+        _findings = fork_mirror.audit_fork_tree(_pkg)
+        assert len(_findings) == 1, _findings
+        _f = _findings[0]
+        assert _f['file'] == 'Makefile'
+        assert _f['source'] == 'packages/list'
+        assert 'not found' in _f['reason']
+
+
+def test_conf11_audit_skips_variable_expanded_paths():
+    """Sources containing `$` (variable expansion) can't be resolved
+    statically; audit must skip them rather than false-positive."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _tmp:
+        _pkg = _conf11_make_fork_pkg(_tmp,
+            makefile=(
+                'install:\n'
+                '\tinstall -d $(DESTDIR)/usr/bin\n'         # -d form, no src
+                '\tinstall -m 644 $(TASKDESC) $(DESTDIR)/usr/share\n'
+                '\tfor f in foo bar; do install -m 755 $$f $(DESTDIR)/x; done\n'
+            ))
+        # None of those have a concrete static source; audit returns [].
+        assert fork_mirror.audit_fork_tree(_pkg) == []
+
+
+def test_conf11_audit_glob_matches_existing_dir_contents():
+    """`install ... etc/* $(DESTDIR)/etc` is clean when etc/ has files."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _tmp:
+        _pkg = _conf11_make_fork_pkg(_tmp,
+            rules=(
+                '#!/usr/bin/make -f\n'
+                'override_dh_auto_install:\n'
+                '\tinstall -p -m 644 etc/* $(DESTDIR)/etc\n'
+            ),
+            extra_files=['etc/foo.conf', 'etc/bar.conf'])
+        assert fork_mirror.audit_fork_tree(_pkg) == []
+
+
+def test_conf11_audit_glob_flags_no_matching_files():
+    """A glob source that matches nothing in the fork tree IS flagged."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _tmp:
+        _pkg = _conf11_make_fork_pkg(_tmp,
+            rules=(
+                '#!/usr/bin/make -f\n'
+                'override_dh_auto_install:\n'
+                '\tinstall -p -m 644 motd/* $(DESTDIR)/etc\n'
+            ))   # motd/ never created
+        _findings = fork_mirror.audit_fork_tree(_pkg)
+        assert len(_findings) == 1
+        assert _findings[0]['source'] == 'motd/*'
+        assert 'glob' in _findings[0]['reason']
+
+
+def test_conf11_audit_skips_comment_lines():
+    """Commented `install` lines (Makefile or rules) must not be parsed."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _tmp:
+        _pkg = _conf11_make_fork_pkg(_tmp,
+            makefile=(
+                'install:\n'
+                '\t# install -m 755 disabled-thing $(DESTDIR)/usr/bin/foo\n'
+            ))
+        assert fork_mirror.audit_fork_tree(_pkg) == []
+
+
+def test_conf11_scan_install_sources_handles_multi_source_form():
+    """`install -m 755 SRC1 SRC2 DEST` — all but last token are sources."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    _sources = fork_mirror._scan_install_sources(
+        '\tinstall -m 755 alpha.sh beta.sh $(DESTDIR)/usr/bin/\n')
+    assert _sources == ['alpha.sh', 'beta.sh']
+
+
+def test_conf11_scan_cp_sources_handles_flags_and_skips_variables():
+    """`cp -r foo bar` captures foo; `cp -r $(SRC) bar` skips."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import fork_mirror
+    assert fork_mirror._scan_cp_sources(
+        '\tcp -r assets/ debian/foo/usr/share/\n') == ['assets/']
+    assert fork_mirror._scan_cp_sources(
+        '\tcp -r $(SRC) debian/foo/usr/share/\n') == []
+
+
+def test_conf11_audit_no_makefile_no_rules_returns_empty():
+    """A fork tree without Makefile or debian/rules has nothing to audit;
+    audit returns [] silently (not an error)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as _tmp:
+        _pkg = _conf11_make_fork_pkg(_tmp)
+        assert fork_mirror.audit_fork_tree(_pkg) == []
+
+
+def test_conf11_audit_real_fork_trees_clean():
+    """Sanity: every checked-in fork/source/<pkg>/ tree must audit
+    clean.  Any new finding here is a real regression — investigate
+    before silencing."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    _fork_source = os.path.join(_ROOT, 'fork', 'source')
+    if not os.path.isdir(_fork_source):
+        return    # no fork tree in this checkout — skip
+    _trouble: 'list' = []
+    for _name in sorted(os.listdir(_fork_source)):
+        _pkg_dir = os.path.join(_fork_source, _name)
+        if not os.path.isdir(_pkg_dir) or _name == 'repo':
+            continue
+        _findings = fork_mirror.audit_fork_tree(_pkg_dir)
+        if _findings:
+            _trouble.append((_name, _findings))
+    assert not _trouble, (
+        "fork tree(s) have dangling build-system references:\n  " +
+        "\n  ".join(
+            f"{_n}: {len(_f)} finding(s) — first: "
+            f"{_f[0]['file']}:{_f[0]['line_no']} {_f[0]['source']}"
+            for _n, _f in _trouble))
+
+
 def test_fork_mirror_strips_epoch_from_constructed_filenames():
     """Epoch'd fork versions (athena-apt-setup is 1:0.182+athena1) must NOT
     leak the epoch into constructed/expected filenames — dpkg omits the
@@ -20664,6 +20851,17 @@ def main() -> int:
         test_fork_mirror_generate_empty_tree_returns_false,
         test_fork_mirror_generate_emits_complete_layout,
         test_fork_mirror_strips_epoch_from_constructed_filenames,
+        # CONF-11 fork-tree internal completeness audit
+        test_conf11_audit_clean_when_all_paths_exist,
+        test_conf11_audit_athena_tasksel_packages_list_regression,
+        test_conf11_audit_skips_variable_expanded_paths,
+        test_conf11_audit_glob_matches_existing_dir_contents,
+        test_conf11_audit_glob_flags_no_matching_files,
+        test_conf11_audit_skips_comment_lines,
+        test_conf11_scan_install_sources_handles_multi_source_form,
+        test_conf11_scan_cp_sources_handles_flags_and_skips_variables,
+        test_conf11_audit_no_makefile_no_rules_returns_empty,
+        test_conf11_audit_real_fork_trees_clean,
         test_fork_mirror_packages_udeb_routing_and_placeholder_hashes,
         test_fork_mirror_sources_uses_real_hashes_and_directory,
         test_fork_mirror_register_prepends_at_index_zero,
