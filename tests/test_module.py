@@ -13133,7 +13133,7 @@ def test_v2_state_append_and_scroll():
     from tui.state import State
 
     s = State()
-    assert 'console' in s.tabs and 'log' in s.tabs
+    assert 'console' in s.tabs and 'cache' in s.tabs
     assert s.active_tab_name() == 'console'
 
     # At-bottom: scroll stays 0 after append.
@@ -13146,9 +13146,9 @@ def test_v2_state_append_and_scroll():
     assert s.tabs['console'].scroll_offset == 7
 
     # Long line wraps to 3 rows at w=10; offset increments by 3.
-    s.tabs['log'].scroll_offset = 1
-    s.tabs['log'].append([('x' * 25, 0)], width=10)
-    assert s.tabs['log'].scroll_offset == 1 + 3
+    s.tabs['cache'].scroll_offset = 1
+    s.tabs['cache'].append([('x' * 25, 0)], width=10)
+    assert s.tabs['cache'].scroll_offset == 1 + 3
 
 
 def test_v2_cmdline_edit_and_history():
@@ -13241,7 +13241,7 @@ def test_v2_dispatcher_tab_switch_by_index():
     d = Dispatcher(_v2_fake_renderer())
     threading.Thread(target=d.run, daemon=True).start()
     time.sleep(0.02)
-    d.post(KeyEvent('KEY_F(3)'))   # cache (index 2)
+    d.post(KeyEvent('KEY_F(2)'))   # cache (index 1, post log-tab removal)
     time.sleep(0.05)
     assert d.state.active_tab_name() == 'cache'
     d.post(KeyEvent('KEY_F(99)'))  # out of range — no change
@@ -13336,10 +13336,11 @@ def test_v2_logging_bridge_routes_by_stage():
     _logging.getLogger('athena.iso').error('iso stage')
     time.sleep(0.1)
 
-    log_buf   = [t for t, _ in d.state.tabs['log'].buffer]
+    build_buf = [t for t, _ in d.state.tabs['build'].buffer]
     cache_buf = [t for t, _ in d.state.tabs['cache'].buffer]
     iso_buf   = [t for t, _ in d.state.tabs['iso'].buffer]
-    assert any('plain athena' in line for line in log_buf), log_buf
+    # bare 'athena' routes to the 'build' fallback (post log-tab removal).
+    assert any('plain athena' in line for line in build_buf), build_buf
     assert any('cache stage'  in line for line in cache_buf), cache_buf
     assert any('iso stage'    in line for line in iso_buf), iso_buf
 
@@ -13392,8 +13393,9 @@ def test_logging_bridge_splits_multiline_records():
 def test_per_module_logger_names_pin_routing():
     """Each scripts/*.py module's bare module-level `logger` must point
     at the right logger name so its records route to the right TUI tab
-    via _tab_for_logger.  Pinned to prevent silent regression to bare
-    'athena' (which routes everything to the 'log' catch-all)."""
+    via _tab_for_logger.  Pinned to prevent silent regression.  Bare
+    'athena' falls back to the 'build' tab (post log-tab removal) —
+    the cross-stage helpers are orchestrator-adjacent."""
     import re
     expected = {
         # cache stage — cache parse / dep walk / fork mirror / dep drift
@@ -13412,7 +13414,7 @@ def test_per_module_logger_names_pin_routing():
         'iso':              'athena.iso',
         'iso_installer':    'athena.iso',
         'disk_image':       'athena.iso',
-        # cross-stage / generic — bare 'athena' → log tab
+        # cross-stage / generic — bare 'athena' → build tab (fallback)
         'utils':            'athena',
         'signing':          'athena',
         'apt_repo':         'athena',
@@ -13424,7 +13426,7 @@ def test_per_module_logger_names_pin_routing():
     def _tab(name):
         if name.startswith('athena.'):
             return name[len('athena.'):].split('.', 1)[0]
-        return 'log'
+        return 'build'
 
     pat = re.compile(
         r"^logger\s*=\s*logging\.getLogger\(\s*'(athena(?:\.[a-z_]+)?)'\s*\)",
