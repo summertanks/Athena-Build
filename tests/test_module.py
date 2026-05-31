@@ -13414,8 +13414,10 @@ def test_per_module_logger_names_pin_routing():
         'iso':              'athena.iso',
         'iso_installer':    'athena.iso',
         'disk_image':       'athena.iso',
+        # utils: file download / sha256 / snapshot resolution — runs
+        # at cache time; route to cache tab not the bare fallback.
+        'utils':            'athena.cache',
         # cross-stage / generic — bare 'athena' → build tab (fallback)
-        'utils':            'athena',
         'signing':          'athena',
         'apt_repo':         'athena',
         'repo_audit':       'athena',

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     # so the runtime import would cycle.
     import dependencytree
 
-logger = logging.getLogger('athena')
+logger = logging.getLogger('athena.cache')
 
 
 # Version constraint operators accepted by apt_pkg.check_dep — the seven
