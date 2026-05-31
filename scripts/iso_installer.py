@@ -179,6 +179,15 @@ def build_installer_iso(
         if not _stage_group_manifests(_staging, pkg_groups):
             return False
 
+    # CONF-10 S3: identity-residue scan over the staged ISO root, after
+    # all the text-staging steps have copied + substituted but before
+    # binary-heavy steps (apt-repo generation, signing, mkrescue) — so
+    # a residue hit aborts cheaply.  Reuses the audit_identity walker
+    # + the same allowlist file as S1; pool/*.deb and other binaries
+    # are filtered out by the scanner's _SKIP_GLOBS.
+    if not _audit_staged_iso(_staging, dir_image):
+        return False
+
     if not generate_apt_repo(_staging, suite, codename, version, password):
         return False
 
@@ -1001,6 +1010,56 @@ def _run_grub_mkrescue(staging: str, iso_path: str,
         )
         return False
     return True
+
+
+def _audit_staged_iso(staging: str, dir_image: str) -> bool:
+    """CONF-10 S3 — identity-residue scan over the staged ISO root.
+
+    Walks `staging` for Debian-name tokens that survived staging-time
+    substitution.  Reuses identity_scan.audit_identity (same walker
+    + skip-globs the S1 fork audit uses; pool/*.deb is binary-filtered).
+
+    Allowlist resolution: walks up the parents of `dir_image` looking
+    for `audit/identity-allowlist`.  In production, `dir_image` is
+    `<working>/buildroot/image` so the allowlist resolves in 2 hops.
+
+    Returns True when no findings (or no allowlist found — degrades to
+    a warning so a test fixture without the file doesn't break iso
+    build).  False on any unallowlisted hit."""
+    from identity_scan import audit_identity
+    _working = dir_image
+    _allow_path: 'Optional[str]' = None
+    for _ in range(6):
+        _working = os.path.dirname(_working)
+        if not _working or _working == '/':
+            break
+        _candidate = os.path.join(_working, 'audit', 'identity-allowlist')
+        if os.path.isfile(_candidate):
+            _allow_path = _candidate
+            break
+    if _allow_path is None:
+        logger.warning(
+            f"_audit_staged_iso: no audit/identity-allowlist found above "
+            f"{dir_image} — staged-ISO not gated for this build"
+        )
+        return True
+    logger.info(
+        f"audit staged ISO {staging} (allowlist={_allow_path})"
+    )
+    _findings = audit_identity(staging, _allow_path)
+    if not _findings:
+        logger.info("audit staged ISO: no identity residue")
+        return True
+    for _f in _findings:
+        logger.error(
+            f"staged-ISO leak {_f['path']}:{_f['line_no']} "
+            f"[{_f['token']}]: {_f['line']}"
+        )
+    tui.console.print(
+        f"ERROR: {len(_findings)} identity residue hit(s) in staged "
+        f"ISO — see log", tui.COLOR_ERROR,
+    )
+    return False
 
 
 def _report_iso(iso_path: str) -> None:
