@@ -204,6 +204,13 @@ class Cache:
         # the HIGHEST recorded upstream version.
         self._upstream_collisions:      Dict[str, List[Tuple[str, str]]] = defaultdict(list)
         self._upstream_udeb_collisions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+        # CONF-11 follow-up 2026-05-31: parallel for source records.  The
+        # binary/udeb collision gate fails the build when upstream >= fork
+        # (build can't ship correctly), but sources are only metadata —
+        # too noisy as a build-killer.  Track them anyway so the audit
+        # can warn the operator that upstream source has advanced past
+        # the fork (= rebase recommended; not a hard gate).
+        self._upstream_source_collisions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
 
         # Download files
         if self.__get_files() < 0:
@@ -602,12 +609,18 @@ class Cache:
 
                 # Fork supersede for source records (parallels the binary
                 # supersede above).  Fork sources are walked first; upstream
-                # sources of the same name get dropped.
+                # sources of the same name get dropped.  Track the dropped
+                # upstream version so _audit_fork_source_drift can warn
+                # when upstream has advanced past the fork (CONF-11
+                # follow-up 2026-05-31).
                 if _is_fork:
                     self._fork_src_names.add(_src.package)
                 elif _src.package in self._fork_src_names:
+                    self._upstream_source_collisions[_src.package].append(
+                        (_mirror.id, str(_src.version))
+                    )
                     logger.info(
-                        f"[{_mirror.id}] dropped source {_src.package} — superseded by fork"
+                        f"[{_mirror.id}] dropped source {_src.package} v{_src.version} — superseded by fork"
                     )
                     continue
 
@@ -672,10 +685,59 @@ class Cache:
         # error_str and return False so the calling Cache.__init__
         # leaves _config_valid=False; downstream code already exits on
         # is_valid==False.
+        # CONF-11 follow-up 2026-05-31: warn on upstream source drift
+        # before the collision gate.  Binary/udeb collisions are fatal
+        # (the gate fails the build); source collisions are advisory
+        # (build still ships, but the fork is stale relative to upstream
+        # source — rebase recommended).  Run first so the warning shows
+        # even when the binary/udeb gate goes on to fail the build.
+        self._audit_fork_source_drift()
+
         if not self._verify_no_fork_collisions():
             return False
 
         return True
+
+    def _audit_fork_source_drift(self) -> None:
+        """Warn when upstream's max version of a forked source has caught
+        up to or advanced past the fork's version.
+
+        Sources don't have an existing collision gate (unlike binaries
+        and udebs, where _verify_no_fork_collisions fails the build).
+        This audit fills the gap: if upstream source has moved past the
+        fork's source, the fork is shipping stale code — rebase
+        recommended.  Advisory only, never fails the build.
+        """
+        if not self._upstream_source_collisions:
+            return
+        _findings: 'List[Tuple[str, str, str, str]]' = []
+        # (name, fork_ver, dropped_mirror, dropped_upstream_ver)
+        for _name, _entries in self._upstream_source_collisions.items():
+            _fork_sources = self.source_hashtable.get(_name, [])
+            if not _fork_sources:
+                # Shouldn't happen — fork name was recorded but no source
+                # record landed.  Skip.
+                continue
+            _fork_ver = max((_s.version for _s in _fork_sources), key=Version)
+            for _mirror_id, _up_ver in _entries:
+                if Version(_up_ver) >= Version(_fork_ver):
+                    _findings.append(
+                        (_name, str(_fork_ver), _mirror_id, _up_ver)
+                    )
+        if not _findings:
+            return
+        _msg_lines = [
+            f"  {_name}: fork {_fork} ≤ upstream {_up} [{_mirror}]"
+            for _name, _fork, _mirror, _up in _findings
+        ]
+        _msg = (
+            f"fork source drift: {len(_findings)} fork(s) at or behind "
+            f"upstream — rebase recommended:\n" + "\n".join(_msg_lines) +
+            "\n  (advisory only; build continues.  Binary/udeb collisions "
+            "would still fail the build via the existing collision gate.)"
+        )
+        logger.warning(_msg)
+        tui.console.print(_msg)
 
     def _verify_no_fork_collisions(self) -> bool:
         """End-of-build gate: for every upstream record dropped by the
@@ -876,6 +938,7 @@ class Cache:
         state['source_hashtable'] = dict(self.source_hashtable)
         state['_upstream_collisions'] = dict(self._upstream_collisions)
         state['_upstream_udeb_collisions'] = dict(self._upstream_udeb_collisions)
+        state['_upstream_source_collisions'] = dict(self._upstream_source_collisions)
         return state
 
     def __setstate__(self, state):
@@ -908,6 +971,12 @@ class Cache:
         _uuc: 'Dict[str, List[Tuple[str, str]]]' = defaultdict(list)
         _uuc.update(self._upstream_udeb_collisions)
         self._upstream_udeb_collisions = _uuc
+
+        # Same shape for the source-side dict (CONF-11 follow-up).  Restore
+        # safely even on pickles produced before this attr was added.
+        _usc: 'Dict[str, List[Tuple[str, str]]]' = defaultdict(list)
+        _usc.update(getattr(self, '_upstream_source_collisions', {}))
+        self._upstream_source_collisions = _usc
 
         try:
             self._arch_table = DpkgArchTable.load_arch_table()
