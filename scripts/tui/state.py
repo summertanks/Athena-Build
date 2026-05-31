@@ -25,7 +25,7 @@ MAX_BUFFER_LINES = 10000
 
 # ── Default tabs (insertion order = F1..Fn mapping) ──────────────────────
 DEFAULT_TABS: Tuple[str, ...] = (
-    'console', 'cache', 'build', 'chroot', 'iso',
+    'console', 'log', 'cache', 'build', 'chroot', 'iso',
 )
 
 

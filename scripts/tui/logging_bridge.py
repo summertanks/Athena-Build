@@ -22,16 +22,15 @@ logging.addLevelName(DISPLAY, 'DISPLAY')
 
 
 def _tab_for_logger(name: str) -> str:
-    """athena.<stage> -> '<stage>'; bare athena / unknown -> 'build'.
+    """athena.<stage> -> '<stage>'; bare athena / unknown -> 'log'.
 
-    The 'build' fallback covers cross-stage helper modules (utils,
-    signing, apt_repo, repo_audit, persistence, cli) that don't bind
-    to a specific pipeline stage.  Their records — repo Release gen,
-    GPG signing, file downloads, session save/restore — live with the
-    orchestrator's tab since build.py drives the dispatch."""
+    The 'log' tab is the catch-all home for cross-stage helper modules
+    (utils, signing, apt_repo, repo_audit, persistence, cli) that don't
+    bind to a specific pipeline stage, plus anything routing through
+    bare athena (e.g. tui.py's command-handler error path)."""
     if name.startswith(LOGGER_NAME + '.'):
         return name[len(LOGGER_NAME) + 1:].split('.', 1)[0]
-    return 'build'
+    return 'log'
 
 
 class _LogTabHandler(logging.Handler):
