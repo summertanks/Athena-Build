@@ -17682,6 +17682,101 @@ def test_audit_staged_iso_skips_binary_pool():
         assert _audit_staged_iso(_staging, _dir_image) is True
 
 
+def test_audit_identity_scan_default_true():
+    """[Audit] IdentityScan defaults to True when the section is absent —
+    production builds keep the gate on without operator action."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import BuildConfig
+    with tempfile.TemporaryDirectory() as tmp:
+        mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+"""
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block),
+        )
+        bc = _build_config_from(tmp, cfg_path)
+    assert bc.is_valid, bc.error_str
+    assert bc.audit_identity_scan is True
+
+
+def test_audit_identity_scan_explicit_false_parses():
+    """An explicit `[Audit] IdentityScan = false` flips the flag."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import BuildConfig
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+"""
+    body = _BASE_CONF_BODY.format(mirror_block=mirror_block) + (
+        "\n    [Audit]\n    IdentityScan = false\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(tmp, body)
+        bc = _build_config_from(tmp, cfg_path)
+    assert bc.is_valid, bc.error_str
+    assert bc.audit_identity_scan is False
+
+
+def test_fork_mirror_skips_identity_audit_when_disabled():
+    """generate_fork_mirror short-circuits the S1 identity scan when
+    buildconfig.audit_identity_scan is False — operator-disabled audits
+    must not gate the build."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import fork_mirror
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _setup_fork_test_tmpdir(tmp, with_pkg=True)
+        # Disable identity audit AND wipe the permissive allowlist —
+        # if the audit ran, the fixture's debian/copyright debian.org
+        # URL would trip the gate.  Disabled → audit skipped → build
+        # passes regardless of allowlist content.
+        with open(os.path.join(tmp, 'audit', 'identity-allowlist'), 'w') as fh:
+            fh.write('# empty: every token would be a violation if scanned\n')
+        bc.audit_identity_scan = False
+        ok = fork_mirror.generate_fork_mirror(bc)
+    assert ok is True, (
+        'identity audit disabled — fork_mirror must still succeed'
+    )
+
+
+def test_iso_installer_skips_staged_iso_audit_when_disabled():
+    """build_installer_iso threads audit_identity_scan through to
+    _audit_staged_iso; when False, the audit is skipped + a WARN
+    logged."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import iso_installer
+    _src = inspect.getsource(iso_installer.build_installer_iso)
+    assert 'audit_identity_scan' in _src, (
+        'build_installer_iso must accept the audit_identity_scan kwarg'
+    )
+    assert 'if audit_identity_scan' in _src, (
+        'audit gate must be conditional on the flag'
+    )
+
+
+def test_iso_installer_call_site_passes_audit_flag():
+    """build.py's installer-iso call site must pass
+    audit_identity_scan from config so the [Audit] knob actually
+    reaches iso_installer.  Source-level pin — otherwise the kwarg
+    silently defaults to True and the operator-disabled audit still
+    runs."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    assert 'audit_identity_scan=self.config.audit_identity_scan' in _body, (
+        'build.py must thread self.config.audit_identity_scan into '
+        'iso_installer.build_installer_iso — otherwise [Audit] '
+        'IdentityScan = false has no effect on iso build'
+    )
+
+
 def test_identity_scan_fork_mirror_gate_fails_build():
     """generate_fork_mirror() returns False when identity audit finds an
     unallowlisted hit — replaces the hardcoded installer_chroot strip
@@ -21683,6 +21778,12 @@ def main() -> int:
         test_identity_scan_allowlist_wildcard_token,
         test_identity_scan_specific_token_does_not_absorb_others,
         test_identity_scan_fork_mirror_gate_fails_build,
+        # CONF-10 [Audit] IdentityScan config toggle
+        test_audit_identity_scan_default_true,
+        test_audit_identity_scan_explicit_false_parses,
+        test_fork_mirror_skips_identity_audit_when_disabled,
+        test_iso_installer_skips_staged_iso_audit_when_disabled,
+        test_iso_installer_call_site_passes_audit_flag,
         # CONF-10 S3 staged-ISO identity audit
         test_audit_staged_iso_passes_clean_tree,
         test_audit_staged_iso_fails_on_debian_leak,

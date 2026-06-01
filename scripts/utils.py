@@ -1816,6 +1816,15 @@ class BuildConfig:
             self.audit_build_deps = config_parser.getboolean(
                 'Security', 'AuditBuildDeps', fallback=False
             )
+            # CONF-10 identity-residue scans (S1 + S3).  Default ON —
+            # rebrand drift at upstream-rebase time fails loud at build
+            # time instead of silently on the installed system.  Set
+            # false for dev iteration on intentionally-incomplete forks.
+            # S2 chroot apt-install audit is independent + always-on
+            # (it concerns install-time correctness, not Debian identity).
+            self.audit_identity_scan = config_parser.getboolean(
+                'Audit', 'IdentityScan', fallback=True
+            )
             # COMP-03 mutex: AuditBuildDeps is an interactive PROMPT_YESNO
             # inside BuildContainer.build() (buildcontainer.py:708).  Under
             # parallel workers, multiple prompts would collide on stdin.

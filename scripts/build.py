@@ -5900,6 +5900,8 @@ class BuildSession:
                     self.config.dir_repo_non_free,
                     self.config.dir_repo_contrib,
                 ],
+                # [Audit] IdentityScan — gates the S3 staged-ISO scan.
+                audit_identity_scan=self.config.audit_identity_scan,
             )
             if not _ok:
                 console.print(

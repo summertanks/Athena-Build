@@ -79,6 +79,7 @@ def build_installer_iso(
     dir_repo_main_udeb: Optional[str] = None,   # CONF-01 Stage D
     exclude_names: Optional[set] = None,        # fork-superseded upstream bins
     dir_repo_extras: Optional['list[str]'] = None,  # non-main component dirs
+    audit_identity_scan: bool = True,            # [Audit] IdentityScan
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -184,9 +185,16 @@ def build_installer_iso(
     # binary-heavy steps (apt-repo generation, signing, mkrescue) — so
     # a residue hit aborts cheaply.  Reuses the audit_identity walker
     # + the same allowlist file as S1; pool/*.deb and other binaries
-    # are filtered out by the scanner's _SKIP_GLOBS.
-    if not _audit_staged_iso(_staging, dir_image):
-        return False
+    # are filtered out by the scanner's _SKIP_GLOBS + NUL-byte probe.
+    # Gated by [Audit] IdentityScan in build.conf (default true).
+    if audit_identity_scan:
+        if not _audit_staged_iso(_staging, dir_image):
+            return False
+    else:
+        logger.warning(
+            "_audit_staged_iso: SKIPPED via [Audit] IdentityScan = false "
+            "— Debian residue can ship without flagging"
+        )
 
     if not generate_apt_repo(_staging, suite, codename, version, password):
         return False

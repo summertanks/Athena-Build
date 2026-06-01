@@ -125,27 +125,35 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
     # install.  Allowlist at audit/identity-allowlist absorbs the
     # legitimate retention (copyright/changelog/source comments).
     # Hard-fails the build on any unallowlisted hit — see ticket text.
-    from identity_scan import audit_identity
-    _allowlist_path = os.path.join(
-        buildconfig.working_dir, 'audit', 'identity-allowlist',
-    )
-    _id_findings = audit_identity(dir_fork_source, _allowlist_path)
-    if _id_findings:
-        tui.console.print(
-            f"fork_mirror: {len(_id_findings)} identity-leak(s) — "
-            f"see log", tui.COLOR_ERROR,
+    # Gated by [Audit] IdentityScan in build.conf (default true).
+    if getattr(buildconfig, 'audit_identity_scan', True):
+        from identity_scan import audit_identity
+        _allowlist_path = os.path.join(
+            buildconfig.working_dir, 'audit', 'identity-allowlist',
         )
-        for _f in _id_findings:
-            logger.error(
-                f"identity-leak {_f['path']}:{_f['line_no']} "
-                f"[{_f['token']}]: {_f['line']}"
+        _id_findings = audit_identity(dir_fork_source, _allowlist_path)
+        if _id_findings:
+            tui.console.print(
+                f"fork_mirror: {len(_id_findings)} identity-leak(s) — "
+                f"see log", tui.COLOR_ERROR,
             )
-        logger.error(
-            f"fork_mirror: ABORT — {len(_id_findings)} identity "
-            f"residue hit(s).  Either rebrand the source or add an "
-            f"explicit entry to {_allowlist_path}"
+            for _f in _id_findings:
+                logger.error(
+                    f"identity-leak {_f['path']}:{_f['line_no']} "
+                    f"[{_f['token']}]: {_f['line']}"
+                )
+            logger.error(
+                f"fork_mirror: ABORT — {len(_id_findings)} identity "
+                f"residue hit(s).  Either rebrand the source or add an "
+                f"explicit entry to {_allowlist_path}"
+            )
+            return False
+    else:
+        logger.warning(
+            "fork_mirror: identity audit DISABLED via "
+            "[Audit] IdentityScan = false — Debian residue can ship "
+            "without flagging.  Re-enable for production builds."
         )
-        return False
 
     logger.info(f"fork_mirror: dpkg-source -b across {len(pkg_dirs)} tree(s)")
     src_pkg_files = _generate_source_packages(pkg_dirs, dir_fork_source_repo)
