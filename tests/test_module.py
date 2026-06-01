@@ -6929,6 +6929,67 @@ def test_strip_nmu_from_control_text_walks_relation_fields():
     assert '2+b1' in _out, "Description text should not be stripped"
 
 
+def test_strip_nmu_inserts_x_athena_upstream_version_when_stripped():
+    """When a Version field carries an NMU suffix that strip rewrites,
+    `X-Athena-Upstream-Version:` is inserted right after the (new)
+    Version line carrying the original pre-strip version.  Preserves
+    CVE-tracking provenance — see docs/cve-tracking.md."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_control_text
+    _ctrl = (
+        'Package: libfoo\n'
+        'Version: 1.0-2+deb12u3\n'
+        'Architecture: amd64\n'
+    )
+    _out, _n = strip_nmu_from_control_text(_ctrl)
+    assert _n >= 1
+    assert 'Version: 1.0-2\n' in _out
+    assert (
+        'X-Athena-Upstream-Version: 1.0-2+deb12u3\n' in _out
+    ), f'X-field not inserted after strip: {_out!r}'
+    # Field must sit DIRECTLY after the Version line, not elsewhere.
+    _lines = _out.splitlines()
+    _v_idx = next(i for i, ln in enumerate(_lines)
+                  if ln.startswith('Version: '))
+    assert _lines[_v_idx + 1].startswith('X-Athena-Upstream-Version: '), (
+        f'X-field not adjacent to Version line: {_lines}'
+    )
+
+
+def test_strip_nmu_omits_x_field_for_pristine_version():
+    """A control text whose Version is already pristine doesn't get
+    the X-field — pristine sources need no record (Version IS the
+    upstream version).  Idempotent: re-stripping a pristine .deb is a
+    no-op, no provenance pollution."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_control_text
+    _ctrl = (
+        'Package: libfoo\n'
+        'Version: 1.0-2\n'
+        'Architecture: amd64\n'
+    )
+    _out, _n = strip_nmu_from_control_text(_ctrl)
+    assert _n == 0
+    assert 'X-Athena-Upstream-Version:' not in _out
+
+
+def test_strip_nmu_x_field_idempotent_on_already_stamped():
+    """A control text that ALREADY has `X-Athena-Upstream-Version:`
+    (e.g. a re-strip of a previously-stripped .deb) doesn't double-
+    insert the field."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import strip_nmu_from_control_text
+    _ctrl = (
+        'Package: libfoo\n'
+        'Version: 1.0-2\n'
+        'X-Athena-Upstream-Version: 1.0-2+deb12u3\n'
+        'Architecture: amd64\n'
+    )
+    _out, _ = strip_nmu_from_control_text(_ctrl)
+    # Exactly one X-field after the round-trip.
+    assert _out.count('X-Athena-Upstream-Version:') == 1
+
+
 def test_strip_nmu_pair_rewrite_collapses_sibling_idiom():
     """The upstream `X (>> V), X (<< V-.)` "any debrev of upstream V"
     idiom is collapsed to `X (= our_version)` at strip time.  After
@@ -21382,6 +21443,69 @@ def test_sbom_empty_out_path_no_ops():
     assert _path == ''
 
 
+def test_cve_command_registered():
+    """`cve` command must be registered in main() alongside `sbom`
+    so the operator can invoke it from the TUI."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    assert "register_command('cve'" in _body, (
+        "main() must register the `cve` command — otherwise "
+        "cmd_cve is unreachable from the TUI"
+    )
+
+
+def test_cve_skips_when_grype_absent():
+    """cmd_cve must `shutil.which` grype and bail with an install hint
+    when absent — grype is an OPTIONAL prerequisite (per build-system.sh)
+    so the command should be a friendly no-op rather than a stack trace.
+    Source-level pin since exercising the full method requires a
+    BuildSession + Config + dir_image fixture."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def cmd_cve\(self.*?(?=\n    def )', _body, re.DOTALL,
+    )
+    assert _m, 'cmd_cve definition not found'
+    _ub = _m.group(0)
+    assert "shutil.which('grype')" in _ub or "_shutil.which('grype')" in _ub, (
+        "cmd_cve must check for grype on PATH before invoking"
+    )
+    assert 'install' in _ub.lower(), (
+        "cmd_cve must surface install instructions when grype is absent"
+    )
+
+
+def test_build_system_sh_grype_is_non_blocking():
+    """build-system.sh checks for grype at startup but does NOT exit
+    on its absence — grype is OPTIONAL.  Source-level pin: the check
+    block must use the warning shape (echo 'W:') and must NOT be
+    followed by an `exit 1`."""
+    _bs = os.path.join(_ROOT, 'build-system.sh')
+    with open(_bs) as fh:
+        _body = fh.read()
+    assert 'command -v grype' in _body, (
+        'build-system.sh must check for grype on PATH'
+    )
+    import re
+    # Match the grype-check block: from the `if [ -x "$(command -v grype`
+    # line through the closing `fi`.
+    _m = re.search(
+        r'if \[ -x "\$\(command -v grype.*?\nfi',
+        _body, re.DOTALL,
+    )
+    assert _m, 'grype check block not found in build-system.sh'
+    _block = _m.group(0)
+    assert 'exit 1' not in _block, (
+        'grype check must be non-blocking (no exit 1 on absence)'
+    )
+    assert 'W: grype' in _block, (
+        'grype-absent branch must use the W: (warning) shape'
+    )
+
+
 def test_sbom_command_registered():
     """`sbom` command must be registered in main() so the operator
     can invoke it from the TUI.  Source-level pin."""
@@ -21640,6 +21764,9 @@ def main() -> int:
         test_strip_nmu_suffix_strips_known_patterns,
         test_strip_nmu_suffix_idempotent,
         test_strip_nmu_from_control_text_walks_relation_fields,
+        test_strip_nmu_inserts_x_athena_upstream_version_when_stripped,
+        test_strip_nmu_omits_x_field_for_pristine_version,
+        test_strip_nmu_x_field_idempotent_on_already_stamped,
         test_strip_nmu_pair_rewrite_collapses_sibling_idiom,
         test_strip_nmu_pair_rewrite_only_when_pair_matches,
         test_strip_nmu_pair_rewrite_idempotent,
@@ -22172,6 +22299,10 @@ def main() -> int:
         test_sbom_purl_format,
         test_sbom_empty_out_path_no_ops,
         test_sbom_command_registered,
+        # CVE-01 grype integration
+        test_cve_command_registered,
+        test_cve_skips_when_grype_absent,
+        test_build_system_sh_grype_is_non_blocking,
         # TUI tab routing — per-module logger name → tab mapping
         test_per_module_logger_names_pin_routing,
         # TUI log bridge — multi-line records split per buffer entry
