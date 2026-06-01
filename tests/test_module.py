@@ -21160,6 +21160,240 @@ def test_ux04_resume_flag_in_build_system_sh():
         f"getopt long-options missing 'resume': {_m.group(1) if _m else '<no match>'}")
 
 
+def _sbom_test_buildconfig(tmp: str) -> object:
+    """Minimal BuildConfig-shaped namespace for sbom tests — only the
+    attributes generate_cdx reads.  No patches dir, no snapshot, no
+    container; tests that exercise those paths set them up explicitly."""
+    from types import SimpleNamespace
+    bc = SimpleNamespace()
+    bc.build_distribution = 'Asgard'
+    bc.build_version      = '1'
+    bc.build_codename     = 'thor'
+    bc.build_base_id      = 'asgard'
+    bc.arch               = 'amd64'
+    bc.dir_patch_source   = os.path.join(tmp, 'patch', 'source')
+    bc.snapshot_baseurl   = ''
+    # snapshot_iso_tag depends on a real BuildConfig; tests below
+    # avoid that by computing out_path themselves.
+    return bc
+
+
+def _sbom_test_src(name: str, version: str, dsc_sha: str = ''):
+    """Minimal Source-shaped object: package + version + files-dict
+    (with a .dsc entry carrying the optional sha256)."""
+    from types import SimpleNamespace
+    s = SimpleNamespace()
+    s.package = name
+    s.version = version
+    s.files = {
+        f'{name}_{version}.dsc': {'sha256': dsc_sha, 'size': 0,
+                                   'md5': '', 'path': ''},
+    }
+    return s
+
+
+def test_sbom_emits_valid_cyclonedx_skeleton():
+    """generate_cdx produces a CycloneDX 1.5 JSON with all required
+    top-level fields + one component per source."""
+    import sys, tempfile, json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import sbom
+    from types import SimpleNamespace
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _sbom_test_buildconfig(tmp)
+        _dt = SimpleNamespace()
+        _dt.selected_srcs = {
+            'base-files':    _sbom_test_src('base-files',    '12.4',
+                                             'sha-bf'),
+            'openssl':       _sbom_test_src('openssl',       '3.0.15-1',
+                                             'sha-ssl'),
+        }
+        _out = os.path.join(tmp, 'sbom.cdx.json')
+        _path = sbom.generate_cdx(bc, _dt, out_path=_out)
+        assert _path == _out
+        with open(_out) as fh:
+            doc = json.load(fh)
+    assert doc['bomFormat']    == 'CycloneDX'
+    assert doc['specVersion']  == '1.5'
+    assert doc['version']      == 1
+    assert doc['serialNumber'].startswith('urn:uuid:')
+    assert doc['metadata']['component']['type']    == 'operating-system'
+    assert doc['metadata']['component']['name']    == 'Asgard'
+    assert doc['metadata']['component']['version'] == '1'
+    _props = {p['name']: p['value']
+              for p in doc['metadata']['component']['properties']}
+    assert _props['athena:codename']  == 'thor'
+    assert _props['athena:arch']      == 'amd64'
+    assert _props['athena:base-id']   == 'asgard'
+    assert len(doc['components']) == 2
+    _by_name = {c['name']: c for c in doc['components']}
+    assert _by_name['base-files']['version'] == '12.4'
+    assert _by_name['base-files']['purl']    == 'pkg:deb/asgard/base-files@12.4'
+    assert _by_name['base-files']['hashes']  == [
+        {'alg': 'SHA-256', 'content': 'sha-bf'}
+    ]
+
+
+def test_sbom_components_sorted_by_name():
+    """Components emit in lexical name order — deterministic across
+    runs so diffs between consecutive SBOMs reflect actual source
+    changes, not dict iteration order."""
+    import sys, tempfile, json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import sbom
+    from types import SimpleNamespace
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _sbom_test_buildconfig(tmp)
+        _dt = SimpleNamespace()
+        # Dict insertion order intentionally NOT alphabetical.
+        _dt.selected_srcs = {
+            'zlib':       _sbom_test_src('zlib',       '1.2.13'),
+            'apt':        _sbom_test_src('apt',        '2.6.1'),
+            'libc6':      _sbom_test_src('libc6',      '2.36-9'),
+        }
+        _out = os.path.join(tmp, 'sbom.cdx.json')
+        sbom.generate_cdx(bc, _dt, out_path=_out)
+        with open(_out) as fh:
+            doc = json.load(fh)
+    _names = [c['name'] for c in doc['components']]
+    assert _names == ['apt', 'libc6', 'zlib'], _names
+
+
+def test_sbom_dedupes_udeb_only_sources_into_union():
+    """A source present in BOTH dep_tree.selected_srcs and
+    udeb_dep_tree.selected_srcs appears ONCE in the SBOM; sources
+    unique to the udeb tree are added."""
+    import sys, tempfile, json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import sbom
+    from types import SimpleNamespace
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _sbom_test_buildconfig(tmp)
+        _dt = SimpleNamespace()
+        _dt.selected_srcs = {
+            'glibc':      _sbom_test_src('glibc',      '2.36-9'),
+            'gcc-12':     _sbom_test_src('gcc-12',     '12.2.0-14'),
+        }
+        _udt = SimpleNamespace()
+        _udt.selected_srcs = {
+            'glibc':      _sbom_test_src('glibc',      '2.36-9'),  # shared
+            'busybox':    _sbom_test_src('busybox',    '1.35.0'),  # udeb-only
+        }
+        _out = os.path.join(tmp, 'sbom.cdx.json')
+        sbom.generate_cdx(bc, _dt, udeb_dep_tree=_udt, out_path=_out)
+        with open(_out) as fh:
+            doc = json.load(fh)
+    _names = sorted(c['name'] for c in doc['components'])
+    assert _names == ['busybox', 'gcc-12', 'glibc']
+
+
+def test_sbom_patch_set_hash_zero_when_no_patches():
+    """Pristine source (no patch/source/<name>/<ver>/ dir) gets
+    athena:patch-count=0 and a deterministic empty-input sha256 in
+    athena:patch-set-hash."""
+    import sys, tempfile, json, hashlib
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import sbom
+    from types import SimpleNamespace
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _sbom_test_buildconfig(tmp)
+        _dt = SimpleNamespace()
+        _dt.selected_srcs = {
+            'openssl': _sbom_test_src('openssl', '3.0.15-1'),
+        }
+        _out = os.path.join(tmp, 'sbom.cdx.json')
+        sbom.generate_cdx(bc, _dt, out_path=_out)
+        with open(_out) as fh:
+            doc = json.load(fh)
+    _props = {p['name']: p['value']
+              for p in doc['components'][0]['properties']}
+    assert _props['athena:patch-count']    == '0'
+    # Empty patch list → patch_set_hash returns sha256 of "" — fixed.
+    assert _props['athena:patch-set-hash'] == hashlib.sha256(b'').hexdigest()
+
+
+def test_sbom_patch_set_hash_nonempty_when_patches_present():
+    """A source with patches in patch/source/<name>/<ver>/ gets a
+    real patch-set hash + patch-files property listing the names."""
+    import sys, tempfile, json, hashlib
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import sbom
+    from types import SimpleNamespace
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _sbom_test_buildconfig(tmp)
+        _pdir = os.path.join(bc.dir_patch_source, 'libfoo', '1.0')
+        os.makedirs(_pdir)
+        with open(os.path.join(_pdir, '9001-something.patch'), 'w') as fh:
+            fh.write('--- a\n+++ b\n@@ -0 +1 @@\n+x\n')
+        with open(os.path.join(_pdir, '9002-another.patch'), 'w') as fh:
+            fh.write('--- a\n+++ b\n@@ -0 +1 @@\n+y\n')
+        _dt = SimpleNamespace()
+        _dt.selected_srcs = {
+            'libfoo': _sbom_test_src('libfoo', '1.0'),
+        }
+        _out = os.path.join(tmp, 'sbom.cdx.json')
+        sbom.generate_cdx(bc, _dt, out_path=_out)
+        with open(_out) as fh:
+            doc = json.load(fh)
+    _props = {p['name']: p['value']
+              for p in doc['components'][0]['properties']}
+    assert _props['athena:patch-count'] == '2'
+    assert _props['athena:patch-set-hash'] != hashlib.sha256(b'').hexdigest()
+    assert _props['athena:patch-files']  == (
+        '9001-something.patch, 9002-another.patch'
+    )
+
+
+def test_sbom_purl_format():
+    """PURL conforms to the package-url deb-type convention:
+    pkg:deb/<vendor>/<name>@<version>.  Vendor = build_base_id."""
+    import sys, tempfile, json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import sbom
+    from types import SimpleNamespace
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _sbom_test_buildconfig(tmp)
+        _dt = SimpleNamespace()
+        _dt.selected_srcs = {
+            'tasksel': _sbom_test_src('tasksel', '3.73+athena1'),
+        }
+        _out = os.path.join(tmp, 'sbom.cdx.json')
+        sbom.generate_cdx(bc, _dt, out_path=_out)
+        with open(_out) as fh:
+            doc = json.load(fh)
+    assert doc['components'][0]['purl'] == (
+        'pkg:deb/asgard/tasksel@3.73+athena1'
+    )
+
+
+def test_sbom_empty_out_path_no_ops():
+    """generate_cdx('', ...) returns '' and writes nothing.  Caller
+    chooses the location; an empty path is a programming error
+    surfaced via the empty return."""
+    import sys, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import sbom
+    from types import SimpleNamespace
+    with tempfile.TemporaryDirectory() as tmp:
+        bc = _sbom_test_buildconfig(tmp)
+        _dt = SimpleNamespace()
+        _dt.selected_srcs = {}
+        _path = sbom.generate_cdx(bc, _dt, out_path='')
+    assert _path == ''
+
+
+def test_sbom_command_registered():
+    """`sbom` command must be registered in main() so the operator
+    can invoke it from the TUI.  Source-level pin."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    assert "register_command('sbom'" in _body, (
+        "main() must register the `sbom` command — otherwise the "
+        "operator has no way to invoke cmd_sbom from the TUI"
+    )
+
+
 def test_ux04_save_session_called_after_parse_dependency():
     """cmd_parse_dependency calls persistence.save_session at the tail
     so the next process can `resume` without re-parsing."""
@@ -21929,6 +22163,15 @@ def main() -> int:
         test_ux04_cmd_resume_registered,
         test_ux04_resume_flag_in_build_system_sh,
         test_ux04_save_session_called_after_parse_dependency,
+        # CONF-07 SBOM
+        test_sbom_emits_valid_cyclonedx_skeleton,
+        test_sbom_components_sorted_by_name,
+        test_sbom_dedupes_udeb_only_sources_into_union,
+        test_sbom_patch_set_hash_zero_when_no_patches,
+        test_sbom_patch_set_hash_nonempty_when_patches_present,
+        test_sbom_purl_format,
+        test_sbom_empty_out_path_no_ops,
+        test_sbom_command_registered,
         # TUI tab routing — per-module logger name → tab mapping
         test_per_module_logger_names_pin_routing,
         # TUI log bridge — multi-line records split per buffer entry
