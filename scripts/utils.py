@@ -376,11 +376,34 @@ def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
     Version field AND every version constraint in dep-related fields
     of a DEBIAN/control text.
 
+    When Version actually changes (i.e. an NMU suffix existed and got
+    stripped), an `X-Athena-Upstream-Version:` line is inserted right
+    after the new Version line carrying the original (pre-strip)
+    version.  This preserves CVE-tracking provenance: tools that read
+    the installed dpkg DB would otherwise misclassify our pristine-
+    versioned binaries as the pre-security-update upstream version
+    (see docs/cve-tracking.md).  The field is omitted when Version
+    didn't change — pristine sources need no record since their
+    Version IS the upstream version.
+
     Walks fields line-by-line (handles multi-line continuation).
-    Idempotent: re-running on already-stripped text counts zero strips.
+    Idempotent: re-running on already-stripped text counts zero strips
+    and skips the X-field insertion (already present from the prior run).
     """
     _total = 0
     _content = content
+
+    # Snapshot the original Version up front so we know what (if
+    # anything) to record in X-Athena-Upstream-Version.  Done before
+    # the strip rewrite so the value is the genuine pre-strip Version.
+    _orig_match = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
+    _orig_version = _orig_match.group(1) if _orig_match else ''
+    _stripped_version = (
+        strip_nmu_suffix(_orig_version) if _orig_version else ''
+    )
+    _version_was_stripped = (
+        bool(_stripped_version) and _stripped_version != _orig_version
+    )
 
     # Strip from the Version: field.
     def _sub_version(_m: 're.Match') -> str:
@@ -395,6 +418,21 @@ def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
         r'^Version: (\S+)\s*$',
         _sub_version, _content, count=1, flags=re.MULTILINE,
     )
+
+    # Provenance: record the pre-strip upstream Version as an X-field
+    # right after the (now-stripped) Version line.  Only when the
+    # strip actually changed the Version (pristine packages need
+    # nothing) and only when the field isn't already present
+    # (idempotent re-runs).
+    if _version_was_stripped and 'X-Athena-Upstream-Version:' not in _content:
+        _content = re.sub(
+            r'^(Version: \S+)\s*$',
+            lambda _m: (
+                f'{_m.group(1)}\n'
+                f'X-Athena-Upstream-Version: {_orig_version}'
+            ),
+            _content, count=1, flags=re.MULTILINE,
+        )
 
     # Per-relation version-constraint stripper: matches `(OP VERSION)`
     # within a dep-field's value.  Operator is preserved verbatim.

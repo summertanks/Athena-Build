@@ -8282,6 +8282,163 @@ class BuildSession:
             tui.COLOR_HIGHLIGHT,
         )
 
+    def cmd_cve(self, *args):
+        """CVE-01: scan the latest SBOM against Grype's vulnerability
+        databases (NVD + GHSA + Debian Security Tracker).
+
+        Reads a CycloneDX 1.5 JSON SBOM (produced by `sbom`) and
+        delegates to grype for the actual lookup.  Renders a severity
+        summary on the console + writes the full JSON report next to
+        the SBOM.
+
+        Usage:
+          cve               — scan the most recent .cdx.json in dir_image
+          cve <path>        — scan the given SBOM path
+
+        Grype is an OPTIONAL prerequisite (warned at startup).  When
+        absent this command prints install instructions + returns
+        without scanning.
+
+        Note: scans the SBOM, NOT the live dpkg DB.  Live-system
+        scanning produces false positives for our NMU-stripped
+        binaries (see docs/cve-tracking.md).  The
+        X-Athena-Upstream-Version field on each .deb preserves the
+        upstream version for future custom matchers; until then,
+        SBOM-side scanning is the source of truth.
+        """
+        import shlex as _shlex
+        import shutil as _shutil
+        import subprocess as _subprocess
+        from collections import Counter as _Counter
+
+        _grype = _shutil.which('grype')
+        if not _grype:
+            console.print(
+                "cve: `grype` not on PATH — install via Anchore's "
+                "static binary release: "
+                "curl -sSfL https://raw.githubusercontent.com/anchore/grype/"
+                "main/install.sh | sudo sh -s -- -b /usr/local/bin",
+                tui.COLOR_WARNING,
+            )
+            console.print(
+                "Once installed, re-run `cve [path]` to scan the SBOM.",
+                tui.COLOR_INFO,
+            )
+            return
+
+        # Resolve SBOM path.
+        if args:
+            _sbom_path = args[0]
+        else:
+            try:
+                _candidates = sorted(
+                    (_f for _f in os.listdir(self.config.dir_image)
+                     if _f.endswith('.cdx.json')),
+                    key=lambda _f: os.path.getmtime(
+                        os.path.join(self.config.dir_image, _f)),
+                    reverse=True,
+                )
+            except OSError as _e:
+                console.print(f"cve: cannot list {self.config.dir_image}: {_e}")
+                return
+            if not _candidates:
+                console.print(
+                    f"cve: no .cdx.json found in {self.config.dir_image} — "
+                    f"run `sbom` first"
+                )
+                return
+            _sbom_path = os.path.join(self.config.dir_image, _candidates[0])
+            console.print(f"cve: using {_candidates[0]} (most recent SBOM)")
+
+        if not os.path.isfile(_sbom_path):
+            console.print(f"cve: SBOM not found: {_sbom_path}")
+            return
+
+        _report_path = _sbom_path.replace('.cdx.json', '.cve.json')
+        _cmd = [_grype, f'sbom:{_sbom_path}', '-o', 'json']
+        logger.info(f"cve: {' '.join(_shlex.quote(_p) for _p in _cmd)}")
+
+        # grype's first run downloads the vuln DB (~30s); spinner so
+        # the operator sees progress.
+        _spin = tui.Spinner(
+            f"grype scan {os.path.basename(_sbom_path)}"
+        )
+        try:
+            _r = _subprocess.run(_cmd, capture_output=True, text=True)
+        finally:
+            _spin.done()
+        if _r.returncode != 0:
+            console.print(
+                f"cve: grype exited {_r.returncode}: "
+                f"{_r.stderr.strip()[:200]}",
+                tui.COLOR_ERROR,
+            )
+            logger.error(
+                f"cve: grype stderr_tail={_r.stderr.strip().splitlines()[-5:]}"
+            )
+            return
+
+        try:
+            import json as _json
+            _doc = _json.loads(_r.stdout)
+        except (ValueError, TypeError) as _e:
+            console.print(f"cve: grype output not JSON-parseable: {_e}")
+            return
+
+        # Persist full report.
+        try:
+            with open(_report_path, 'w', encoding='utf-8') as _fh:
+                _fh.write(_r.stdout)
+        except OSError as _e:
+            logger.warning(f"cve: could not write report sidecar {_report_path}: {_e}")
+
+        # Render severity summary on console.
+        _matches = _doc.get('matches', []) or []
+        if not _matches:
+            console.print(
+                "cve: clean — no vulnerabilities reported",
+                tui.COLOR_HIGHLIGHT,
+            )
+            console.print(f"cve: report → {_report_path}")
+            return
+
+        _by_sev: _Counter = _Counter()
+        for _m in _matches:
+            _sev = (_m.get('vulnerability', {}) or {}).get('severity', 'Unknown')
+            _by_sev[_sev] += 1
+
+        console.print(
+            f"cve: {len(_matches)} finding(s) across "
+            f"{len({_m.get('artifact', {}).get('name', '') for _m in _matches})}"
+            f" component(s)",
+            tui.COLOR_WARNING,
+        )
+        for _sev in ('Critical', 'High', 'Medium', 'Low', 'Negligible', 'Unknown'):
+            if _by_sev.get(_sev, 0):
+                console.print(f"  {_sev:11s} {_by_sev[_sev]}")
+
+        # Show the top critical/high findings so the operator has
+        # actionable context without leaving the TUI.
+        _top = [
+            _m for _m in _matches
+            if (_m.get('vulnerability', {}) or {}).get('severity')
+            in ('Critical', 'High')
+        ]
+        if _top:
+            console.print(f"\nTop {min(10, len(_top))} Critical/High:")
+            for _m in _top[:10]:
+                _vuln = _m.get('vulnerability', {}) or {}
+                _art = _m.get('artifact', {}) or {}
+                _fix = (_vuln.get('fix') or {}).get('versions') or []
+                _fix_str = (', '.join(_fix) if _fix else '—')
+                console.print(
+                    f"  [{_vuln.get('severity', '?'):8s}] "
+                    f"{_vuln.get('id', '?'):16s} "
+                    f"{_art.get('name', '?')}@{_art.get('version', '?')}  "
+                    f"fix: {_fix_str}"
+                )
+        console.print(f"\ncve: report → {_report_path}")
+
     def cmd_resume(self, *args) -> None:
         """UX-04: restore Cache + DependencyTree + udeb_dep_tree from the
         last persisted session, gated by a fingerprint of every input
@@ -8617,6 +8774,7 @@ def main(banner: str) -> None:
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
+    tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
     tui.register_command('resume',    session.cmd_resume,    'Resume:     resume — UX-04 restore Cache + DT from prior session')
     tui.register_command('print',     session.cmd_print,     'Print:      print build state — try `print help`')

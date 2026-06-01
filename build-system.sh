@@ -283,6 +283,17 @@ else
     echo "All disk image build tools found."
 fi
 
+# CVE-01: grype is an OPTIONAL prerequisite — used by `cve` to scan the
+# generated SBOM (`scripts/sbom.py` output) against the NVD + GHSA +
+# Debian Security Tracker DBs.  Build pipeline runs fine without it;
+# the `cve` command is only useful when grype is on PATH.  Non-blocking
+# warning here so the operator knows how to enable it.
+if [ -x "$(command -v grype || true)" ]; then
+    echo "Using grype $(grype version 2>/dev/null | head -n1 || true) — cve command enabled"
+else
+    echo "W: grype not found — cve command will be a no-op.  Install: https://github.com/anchore/grype/releases (or apt repo: https://anchore.github.io/grype/install.sh)"
+fi
+
 # Checking build directories
 echo "Checking Build Directories (everything is relative to the script path)"
 mkdir -p $BUILD_DIR/$DIR_TMP
