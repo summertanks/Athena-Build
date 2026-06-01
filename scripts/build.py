@@ -8209,6 +8209,79 @@ class BuildSession:
             return self.cmd_clean_all(*args)
         return self._group_help('clean', _table, action)
 
+    def cmd_sbom(self, *args):
+        """CONF-07: emit a CycloneDX 1.5 JSON Software Bill of Materials.
+
+        Walks dep_tree.selected_srcs (∪ udeb_dep_tree.selected_srcs)
+        and writes one component per source — name + version + DSC
+        sha256 + patch-set hash + PURL (`pkg:deb/<base-id>/<name>@
+        <version>`).  Top-level metadata records distribution +
+        version + codename + arch + snapshot timestamp.
+
+        Usage:
+          sbom               — write to <dir_image>/<distro-version-
+                                snapshot-arch>.cdx.json (next to ISOs)
+          sbom <path>        — write to the given path
+
+        Requires a parsed dep tree; run `cache parse` first.
+        """
+        if not self.flags.dep_check_ready:
+            console.print(
+                "sbom: dep tree not built — run `cache parse` first"
+            )
+            return
+        if self.dep_tree is None:
+            console.print(
+                "sbom: dep_tree is None even though dep_check_ready is set "
+                "— this should not happen; rerun `cache parse`"
+            )
+            return
+
+        import sbom as _sbom_mod
+        if args:
+            _out = args[0]
+        else:
+            _snap = utils.snapshot_iso_tag(self.config)
+            _distro = str(self.config.build_distribution).strip(
+                '"').strip("'").lower()
+            _version = str(self.config.build_version).strip(
+                '"').strip("'")
+            _arch = self.config.arch
+            _basename = (
+                f"{_distro}-{_version}-{_snap}-{_arch}"
+                if _snap
+                else f"{_distro}-{_version}-{_arch}"
+            )
+            _out = os.path.join(
+                self.config.dir_image, f"{_basename}.cdx.json",
+            )
+
+        _path = _sbom_mod.generate_cdx(
+            self.config,
+            self.dep_tree,
+            udeb_dep_tree=self.udeb_dep_tree,
+            out_path=_out,
+            container=self.container,
+        )
+        if not _path:
+            console.print("ERROR: sbom generation failed — see log")
+            return
+
+        try:
+            _size_kb = os.path.getsize(_path) // 1024
+        except OSError:
+            _size_kb = 0
+        _n = len(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            # Same dedup the generator applies.
+            _udeb_only = set(self.udeb_dep_tree.selected_srcs.keys()) - set(
+                self.dep_tree.selected_srcs.keys())
+            _n += len(_udeb_only)
+        console.print(
+            f"sbom: {_path} ({_size_kb} KB, {_n} component(s))",
+            tui.COLOR_HIGHLIGHT,
+        )
+
     def cmd_resume(self, *args) -> None:
         """UX-04: restore Cache + DependencyTree + udeb_dep_tree from the
         last persisted session, gated by a fingerprint of every input
@@ -8543,6 +8616,7 @@ def main(banner: str) -> None:
     tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
+    tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
     tui.register_command('resume',    session.cmd_resume,    'Resume:     resume — UX-04 restore Cache + DT from prior session')
     tui.register_command('print',     session.cmd_print,     'Print:      print build state — try `print help`')
