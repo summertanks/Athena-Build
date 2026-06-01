@@ -12357,6 +12357,50 @@ def test_write_athena_apt_source_writes_signed_by_when_url_set():
     assert _content.endswith('\n'), "apt source line must be newline-terminated"
 
 
+def test_live_chroot_sources_list_is_self_contained():
+    """Per project_self_contained_repo: the live chroot's
+    /etc/apt/sources.list must NOT carry active `deb` lines pointing
+    at upstream mirrors.  The header is a comment-only template;
+    reference lines are commented; the network apt-source path goes
+    through sources.list.d/athena.list when [Repo] AptSourceURL is
+    set.
+
+    Caught 2026-06-01 live ISO test: every cfg.mirrors entry was
+    being written as an active `deb` line → apt-update on the
+    booted live system hit deb.debian.org.  Self-contained
+    invariant violated."""
+    import inspect, re, sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import chroot
+    # Source-level check: the loop that previously wrote `deb …`
+    # lines from cfg.mirrors into the chroot's sources.list must be
+    # gone.  An active deb-line template would re-introduce the
+    # regression.
+    _src = inspect.getsource(chroot._ChrootMixin.generate_system_configs)
+    # No active deb-line writes from the mirror loop.
+    _active_deb_lines = re.findall(
+        r"^\s*['\"]?deb \{[^#]*\}", _src, re.MULTILINE,
+    )
+    assert not _active_deb_lines, (
+        f"generate_system_configs still composes active `deb` "
+        f"lines: {_active_deb_lines}.  Per self-contained policy, "
+        f"the chroot sources.list must be comment-only by default; "
+        f"the network apt source goes through "
+        f"sources.list.d/athena.list (see _write_athena_apt_source)."
+    )
+    # The comment-only reference template uses `# deb {…}` for
+    # operator awareness — that's allowed.
+    assert "'# deb {" in _src or '"# deb {' in _src, (
+        "expected commented-deb reference template lines listing "
+        "build-time mirrors (operator-facing context)"
+    )
+    # The header must call out the self-contained policy so a
+    # future contributor doesn't reintroduce the bug.
+    assert 'self-contained' in _src.lower(), (
+        "sources.list header must mention the self-contained policy"
+    )
+
+
 # ─── UX-05 Path B: headless CLI backend (scripts/cli.py) ────────────────────
 
 def _fresh_cli():
@@ -21977,6 +22021,7 @@ def main() -> int:
         test_install_signing_keyring_warns_on_cp_failure,
         test_write_athena_apt_source_noop_when_url_empty,
         test_write_athena_apt_source_writes_signed_by_when_url_set,
+        test_live_chroot_sources_list_is_self_contained,
         # UX-05 Path B: headless CLI backend
         test_cli_print_writes_to_stdout,
         test_cli_severity_methods_write_to_stderr_with_tags,

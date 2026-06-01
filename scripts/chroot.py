@@ -1254,18 +1254,43 @@ class _ChrootMixin:
         # it on first boot.  Must exist (even empty) for systemd to start.
         self._write_chroot_file('/etc/machine-id', '')
 
-        # /etc/apt/sources.list — lets the installed system update itself
-        # from the same mirrors used to build it.  Composed from the
-        # configured mirrors so a config change rebases the live system too.
-        # Extra components (contrib/non-free/non-free-firmware) added to each
-        # line so the running system can install firmware/non-free pkgs even
-        # though our build only consumes 'main'.
-        _extra_comp = 'contrib non-free non-free-firmware'
-        _lines = [
-            f'deb {_m.url} {_m.suite} {_m.component} {_extra_comp}\n'
+        # /etc/apt/sources.list — header-only template by default.  Per
+        # project_self_contained_repo memory, the installed system's apt
+        # pool is OUR repo only; we must never default to deb.debian.org
+        # (or any other upstream mirror) on a shipped image.
+        #
+        # The network apt-source path goes through
+        # /etc/apt/sources.list.d/athena.list, written by
+        # _write_athena_apt_source below when [Repo] AptSourceURL is
+        # configured.  Live ISOs without an AptSourceURL have NO apt
+        # sources by default — apt-install fails loud rather than
+        # silently pulling from upstream Debian.
+        #
+        # If the operator wants upstream Debian back on the running
+        # system (off-policy, but their machine), they can uncomment
+        # the example lines in the template — derived from the
+        # configured [Mirror.*] sections of the build's build.conf so
+        # the URLs match what the cache was built against.
+        _example_lines = ''.join(
+            f'# deb {_m.url} {_m.suite} {_m.component}\n'
             for _m in cfg.mirrors
-        ]
-        self._write_chroot_file('/etc/apt/sources.list', ''.join(_lines))
+        )
+        _sources_list = (
+            '# /etc/apt/sources.list — Asgard self-contained policy.\n'
+            '#\n'
+            '# This file is intentionally empty.  The Asgard apt pool\n'
+            '# ships on the installer ISO + (optionally) at a network\n'
+            '# URL configured via [Repo] AptSourceURL in build.conf,\n'
+            '# which writes /etc/apt/sources.list.d/athena.list.  Live\n'
+            '# images that need apt access at boot should either set\n'
+            '# AptSourceURL at build time or have the operator mount\n'
+            '# the installation media and `apt-cdrom add` it.\n'
+            '#\n'
+            '# For reference, the build pulled upstream packages from\n'
+            '# these mirrors at cache-build time (NOT enabled here):\n'
+            f'{_example_lines}'
+        )
+        self._write_chroot_file('/etc/apt/sources.list', _sources_list)
 
         # Forward all journal entries to /dev/console (= ttyS0 via console=ttyS0
         # kernel cmdline) so auth/PAM failures are visible on serial output
