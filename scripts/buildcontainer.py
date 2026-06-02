@@ -893,7 +893,7 @@ class BuildContainer:
             # container's verdict before any post-processing.  If the
             # process is killed between here and phase=done, the audit
             # sees 'interrupted at container_exited' — strictly more
-            # information than today's 'no .result' = 'unknown'.
+            # information than just "record missing" = "unknown".
             _elapsed = round(time.monotonic() - _t_start, 3)
             self._record_phase(
                 src_pkg.package, phase='container_exited',
@@ -1477,7 +1477,7 @@ class BuildContainer:
         build call across the full dep tree:
 
           1. expected_files is non-empty
-          2. log/build/<src>.result reads PASS or TUNNELED
+          2. log/build/<src>.build.json classifies as 'ok' or 'tunneled'
           3. Every predicted INSTALLABLE binary (classified to main)
              in expected_files exists at repo/main/<file> AND is a
              syntactically valid ar archive (is_ar_file).
@@ -1505,23 +1505,17 @@ class BuildContainer:
         if not expected_files:
             return False
 
-        # OBS-01: prefer the signed build.json record.  An interrupted
-        # build (non-terminal phase) is treated as "not built" — same as
-        # missing .result was historically.  Falls back to .result for
-        # pre-rollout builds.
+        # OBS-01: the signed build.json record is the sole source of
+        # truth for "has this been built".  An interrupted record
+        # (non-terminal phase) or missing record is treated as "not
+        # built" — the audit's classify_build_record returns 'missing'
+        # / 'interrupted' / 'fail' for everything except 'ok' and
+        # 'tunneled'.
         _record = utils.read_build_record(self.buildlog_path, src_pkg.package)
-        if _record is not None:
-            _state = utils.classify_build_record(_record)
-            if _state not in ('ok', 'tunneled'):
-                return False
-        else:
-            result_file = os.path.join(self.buildlog_path, src_pkg.package + '.result')
-            try:
-                with open(result_file, 'r') as fh:
-                    if fh.readline().strip() not in ('PASS', 'TUNNELED'):
-                        return False
-            except OSError:
-                return False
+        if _record is None:
+            return False
+        if utils.classify_build_record(_record) not in ('ok', 'tunneled'):
+            return False
 
         # Component (from origin mirror) so a non-main package's binaries are
         # located in their component dir — e.g. a TUNNELED firmware package
