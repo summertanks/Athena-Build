@@ -1,9 +1,0 @@
-Task: asgard-games
-Section: user
-Description: Casual games and BitTorrent
- Light entertainment layer: gnome-games bundle for mahjong /
- sudoku / chess / mines / solitaire variants plus transmission-gtk
- for BitTorrent.  Most opinionated category and ships opt-in only.
- Selecting this task pulls the GNOME desktop set automatically.
-Key:
- asgard-games
