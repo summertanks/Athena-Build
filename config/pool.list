@@ -207,6 +207,15 @@ cups
 fonts-symbola
 xorg
 
+# ─── Asgard operator-facing metapackages ──────────────────────────
+# Empty-payload `.deb`s whose Depends: list is a curated group.
+# Ship in the pool so operators can `apt install asgard-<group>` on
+# a booted system and pull the whole group atomically.  Built from
+# fork/source/asgard-<group>/.  Pattern B per docs/branding-
+# methodology.md — coexists with the pkg.list group + tasksel Key
+# list, replaces neither.
+asgard-gnome-desktop
+
 # ─── Non-free firmware + CPU microcode (non-free-firmware component) ──
 # Curated subset of Debian's non-free-firmware, TUNNELED (prebuilt binaries,
 # see [Source] Tunneled in build.conf — sources intel-microcode /
