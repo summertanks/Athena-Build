@@ -22235,6 +22235,61 @@ def test_migrate_legacy_records_prune_deletes_legacy_files():
         assert _u.read_build_record(_td, 'foo') is not None
 
 
+def test_cmd_source_migrate_records_accepts_both_dryrun_spellings():
+    """Operator-facing arg parser must accept `dryrun` AND `dry-run`.
+    Caught 2026-06-02: `dryrun` (no hyphen) silently fell through to a
+    real migration because the parser only checked `'dry-run' in args`.
+    Both spellings must set the dry-run flag so the bare `dryrun`
+    invocation does NOT touch disk."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+    import utils as _u
+    from unittest.mock import MagicMock
+
+    for _alias in ('dry-run', 'dryrun'):
+        with tempfile.TemporaryDirectory() as _tmp:
+            _buildlog = os.path.join(_tmp, 'log', 'build')
+            os.makedirs(_buildlog, exist_ok=True)
+            with open(os.path.join(_buildlog, 'foo.result'), 'w') as _fh:
+                _fh.write('PASS\n')
+
+            class _Src:
+                version = '1.0'
+                pkgs = ['foo_1.0_amd64.deb']
+
+            class _Cfg:
+                dir_log = os.path.join(_tmp, 'log')
+                dir_source = os.path.join(_tmp, 'source')
+                dir_patch_source = os.path.join(_tmp, 'patch', 'source')
+
+            class _Container:
+                buildlog_path = _buildlog
+
+            class _Flags:
+                cache_ready = True
+                dep_check_ready = True
+                build_container_ready = True
+
+            _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+            _sess.config = _Cfg
+            _sess.dep_tree = MagicMock(selected_srcs={'foo': _Src()})
+            _sess.udeb_dep_tree = None
+            _sess.container = _Container
+            _sess.flags = _Flags
+
+            _sess.cmd_source_migrate_records(_alias)
+
+            # Dry-run must NOT have written the signed record.
+            assert _u.read_build_record(_buildlog, 'foo') is None, (
+                f"`{_alias}` should leave disk untouched; a signed record "
+                f"was written")
+            # Legacy .result must still be present (untouched).
+            assert os.path.exists(os.path.join(_buildlog, 'foo.result')), (
+                f"`{_alias}` should leave the legacy .result file intact")
+
+
 def test_migrate_legacy_records_dry_run_writes_nothing():
     _u = _utils_module()
     with tempfile.TemporaryDirectory() as _td:
@@ -23170,6 +23225,7 @@ def main() -> int:
         test_migrate_legacy_records_skipped_when_no_version,
         test_migrate_legacy_records_prune_deletes_legacy_files,
         test_migrate_legacy_records_dry_run_writes_nothing,
+        test_cmd_source_migrate_records_accepts_both_dryrun_spellings,
         test_migrate_legacy_records_idempotent_when_record_already_exists,
         test_migrate_legacy_records_unknown_status_token,
         test_print_build_times_aggregates_elapsed_across_records,
