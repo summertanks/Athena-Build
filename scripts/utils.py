@@ -2784,10 +2784,21 @@ def download_file(url: str, filename: str) -> tuple:
         rather than a generic "download failed".
     """
     from urllib.parse import urlsplit, unquote
+    # IMPORTANT: import requests.ConnectionError as RequestsConnectionError
+    # — Python's builtin `ConnectionError` is NOT a base class of requests'
+    # ConnectionError (they both extend OSError but have no subclass
+    # relationship).  A bare `except ConnectionError` in this scope binds
+    # to the builtin and silently misses every requests-raised connection
+    # reset / connection aborted error — including the TCP RST that
+    # snapshot.debian.org issues under load.  Caught 2026-06-02: retry
+    # loop appeared to work for ReadTimeout but never retried connection
+    # resets, so the user saw a single "download failed" with no retry
+    # log lines.
     from requests import (
         Timeout, TooManyRedirects, HTTPError, RequestException,
         ConnectTimeout, ReadTimeout,
     )
+    from requests.exceptions import ConnectionError as RequestsConnectionError
 
     # file:// fast-path: local copy via shutil.copy, no HTTP, no progress
     # bar (transfers are small + instant).  Returns same (size, detail)
@@ -2862,7 +2873,7 @@ def download_file(url: str, filename: str) -> tuple:
                     progress_bar.close()
                     return bytes_written, ''
 
-            except (ConnectTimeout, ReadTimeout, ConnectionError) as e:
+            except (ConnectTimeout, ReadTimeout, RequestsConnectionError) as e:
                 if _attempt < _HTTP_RETRY_COUNT - 1:
                     _backoff = 2 ** _attempt   # 1s, 2s
                     logger.warning(
@@ -2913,7 +2924,7 @@ def download_file(url: str, filename: str) -> tuple:
         tui.console.print(f"ERROR: read timeout for {url}")
         logger.error(f"download_file({url}): {_detail}")
         return -1, _detail
-    except (ConnectionError, Timeout, TooManyRedirects, RequestException) as e:
+    except (RequestsConnectionError, Timeout, TooManyRedirects, RequestException) as e:
         _detail = f"{type(e).__name__}: {e}"
         tui.console.print(f"ERROR: download failed for {url}")
         logger.error(f"download_file({url}): {_detail}")

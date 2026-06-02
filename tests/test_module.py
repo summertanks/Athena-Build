@@ -22006,6 +22006,58 @@ def test_download_file_retries_on_transient_timeout():
         assert _calls.count('head') == 3, f"expected 3 HEAD calls, got {_calls}"
 
 
+def test_download_file_retries_on_requests_connection_error():
+    """A TCP RST from the server raises `requests.exceptions.ConnectionError`,
+    which is NOT a subclass of Python's builtin `ConnectionError` — they
+    both extend OSError but have no subclass relationship.  A bare
+    `except ConnectionError` in the retry block binds to the builtin
+    and silently misses every requests-raised reset.  Caught 2026-06-02
+    when snapshot.debian.org issued a TCP RST under load and the user
+    saw 'download failed' with zero retry log lines.  This test pins
+    the requests-specific exception type."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import utils as _u
+    from unittest.mock import patch as _patch, MagicMock
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+
+    _head_calls = []
+
+    def _head_reset_then_succeed(url, **kw):
+        _head_calls.append(1)
+        if len(_head_calls) < 3:
+            raise RequestsConnectionError(
+                'Connection aborted.',
+                ConnectionResetError(104, 'Connection reset by peer'))
+        _r = MagicMock()
+        _r.headers = {'content-length': '42'}
+        return _r
+
+    def _get_ok(url, **kw):
+        _r = MagicMock()
+        _r.__enter__ = lambda _s: _r
+        _r.__exit__ = lambda _s, *_a: None
+        _r.headers = {'content-length': '42'}
+        _r.iter_content = lambda chunk_size: [b'x' * 42]
+        _r.raise_for_status = lambda: None
+        return _r
+
+    with tempfile.TemporaryDirectory() as _td, \
+            _patch('requests.head', side_effect=_head_reset_then_succeed), \
+            _patch('requests.get',  side_effect=_get_ok), \
+            _patch('time.sleep'):
+        _size, _detail = _u.download_file(
+            'http://example.test/file', os.path.join(_td, 'out'))
+        assert _size == 42, (
+            f"requests.ConnectionError must trigger retry; got size={_size}, "
+            f"detail={_detail!r}.  If size=-1, the retry block is binding "
+            f"to Python's builtin ConnectionError and missing the requests "
+            f"exception class.")
+        assert len(_head_calls) == 3, (
+            f"expected 3 HEAD attempts (2 resets + 1 success), got {len(_head_calls)}")
+
+
 def test_download_file_does_not_retry_on_http_error():
     """HTTPError (4xx/5xx) is deterministic — retrying just re-hits the
     same response.  download_file must NOT retry these.  Pins the
@@ -23109,6 +23161,7 @@ def main() -> int:
         test_source_state_interrupted_when_record_is_non_terminal,
         test_cmd_source_repair_clears_interrupted_record,
         test_download_file_retries_on_transient_timeout,
+        test_download_file_retries_on_requests_connection_error,
         test_download_file_does_not_retry_on_http_error,
         test_every_outbound_request_carries_user_agent_header,
         test_migrate_legacy_records_pass_with_patchhash,
