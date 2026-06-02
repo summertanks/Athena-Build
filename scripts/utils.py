@@ -110,6 +110,41 @@ _HTTP_TIMEOUT_STREAM = 120  # streamed downloads (InRelease, .deb, …)
 _HTTP_RETRY_COUNT = 3
 
 
+# Module-level requests.Session — reuses TCP/TLS connections across
+# requests via HTTP keep-alive.  Critical for snapshot.debian.org:
+# our cache build / source sync hits ~2000+ files on one host, and
+# a fresh TLS handshake per file costs 300-500ms × 2000 = ~15 min
+# wasted before any actual content transfer.  With keep-alive,
+# subsequent requests on the same connection skip the handshake.
+#
+# Also amortizes snapshot's per-connection rate limit (~1 req/sec
+# sustained): one connection serving 2000 requests is far better
+# than 2000 connections each rate-limited independently.
+#
+# Lazy-initialized so importing utils doesn't open a session
+# unnecessarily (e.g., tests that don't make network calls).
+# Thread-safe: requests.Session.get / .head are safe to call
+# concurrently; urllib3's connection pool serialises per-connection.
+import threading as _threading
+_HTTP_SESSION_LOCK = _threading.Lock()
+_http_session_instance: 'Optional[requests.Session]' = None
+
+
+def _http_session() -> 'requests.Session':
+    """Lazy module-level requests.Session with our standard headers
+    pre-set.  Callers that pass `headers=` per-request will get the
+    union (per-call headers override session-default).
+    """
+    global _http_session_instance
+    if _http_session_instance is None:
+        with _HTTP_SESSION_LOCK:
+            if _http_session_instance is None:
+                _s = requests.Session()
+                _s.headers.update(_HTTP_HEADERS)
+                _http_session_instance = _s
+    return _http_session_instance
+
+
 def classify_repo_subdir(filename: str) -> str:
     """Return the subdir under repo/ where `filename` belongs.
 
@@ -1577,7 +1612,7 @@ def _query_snapshot_latest(api_url: str, archive_keys: 'List[str]') -> str:
     snapshot mirror can configure them without code changes.
     """
     try:
-        resp = requests.get(
+        resp = _http_session().get(
             api_url, timeout=_HTTP_TIMEOUT_FAST, headers=_HTTP_HEADERS)
         resp.raise_for_status()
         data = resp.json()
@@ -1617,7 +1652,7 @@ def list_snapshots_between(config: 'BuildConfig', after_ts: str,
     `snapshot select`'s "advance current → one of these" picker.  Returns []
     on query failure or when there are no snapshots in range."""
     try:
-        resp = requests.get(
+        resp = _http_session().get(
             config.snapshot_timestamp_api, timeout=_HTTP_TIMEOUT_FAST,
             headers=_HTTP_HEADERS)
         resp.raise_for_status()
@@ -1654,7 +1689,7 @@ def _validate_snapshot_timestamp(
         snap = m.with_snapshot(ts, baseurl=snapshot_baseurl)
         url  = snap.dist_url + 'InRelease'
         try:
-            resp = requests.head(
+            resp = _http_session().head(
                 url, timeout=_HTTP_TIMEOUT_FAST,
                 allow_redirects=True, headers=_HTTP_HEADERS)
         except Exception as e:
@@ -2644,11 +2679,11 @@ def download_file(url: str, filename: str) -> tuple:
                 # bar with maxvalue=0).  Take the larger of HEAD / GET content-length
                 # so whichever one knows wins, and fall back to a 1 MB seed if both
                 # are 0 — the bar will expand dynamically as bytes arrive.
-                head = requests.head(
+                head = _http_session().head(
                     url, timeout=_HTTP_TIMEOUT_FAST, headers=_HTTP_HEADERS)
                 head_size = int(head.headers.get('content-length', 0))
 
-                with requests.get(
+                with _http_session().get(
                         url, stream=True, timeout=_HTTP_TIMEOUT_STREAM,
                         headers=_HTTP_HEADERS) as response:
                     response.raise_for_status()
@@ -2831,37 +2866,62 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
                 # of a HEAD probe — saves one round-trip per file and removes
                 # the prior bug where a HEAD that returned 0 still produced
                 # `_downloaded_size += 0` while the GET silently 404ed.
-                try:
-                    with requests.get(
-                            _url, stream=True, timeout=_HTTP_TIMEOUT_STREAM,
-                            headers=_HTTP_HEADERS) as response:
-                        # raise_for_status surfaces 4xx/5xx as HTTPError so the
-                        # existing requests-exception handler logs a clear
-                        # "HTTP <status>" message instead of the prior cryptic
-                        # downstream "Hash mismatch" the user saw on 404s.
-                        response.raise_for_status()
-                        with open(_download_path, 'wb') as f:
-                            for chunk in response.iter_content(chunk_size=1024):
-                                if chunk:
-                                    f.write(chunk)
-                                    if progress_bar is not None:
-                                        progress_bar.step(len(chunk))
-
-                except (ConnectionError, Timeout, TooManyRedirects, HTTPError, RequestException) as e:
-                    tui.console.print(f"ERROR: HTTP failure for {_url}")
-                    logger.error(f"download_source({_url}): {e}")
-                    continue
-                except OSError as e:
-                    tui.console.print(f"ERROR: cannot write {_download_path}")
-                    logger.error(f"download_source write {_download_path}: {e}")
-                    continue
-                except ValueError as e:
-                    tui.console.print(f"ERROR: malformed response for {_url}")
-                    logger.error(f"download_source parse {_url}: {e}")
-                    continue
-                except Exception as e:
-                    tui.console.print(f"ERROR: unexpected failure for {_url}")
-                    logger.error(f"download_source({_url}): {type(e).__name__}: {e}")
+                #
+                # Retry on transient failures (ReadTimeout, ConnectTimeout,
+                # ConnectionError) — snapshot.debian.org stalls
+                # intermittently on cold-cache files and a single retry
+                # usually clears it.  HTTPError is NOT retried (4xx/5xx are
+                # deterministic).  Matches download_file's retry policy.
+                import time as _time
+                from requests.exceptions import (
+                    ConnectionError as _ReqConnErr,
+                    ReadTimeout as _ReqReadTimeout,
+                    ConnectTimeout as _ReqConnTimeout,
+                )
+                _retry_failed = False
+                for _attempt in range(_HTTP_RETRY_COUNT):
+                    try:
+                        with _http_session().get(
+                                _url, stream=True,
+                                timeout=_HTTP_TIMEOUT_STREAM) as response:
+                            response.raise_for_status()
+                            with open(_download_path, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=8192):
+                                    if chunk:
+                                        f.write(chunk)
+                                        if progress_bar is not None:
+                                            progress_bar.step(len(chunk))
+                        break  # success
+                    except (_ReqConnErr, _ReqReadTimeout, _ReqConnTimeout) as e:
+                        if _attempt < _HTTP_RETRY_COUNT - 1:
+                            _backoff = 2 ** _attempt
+                            logger.warning(
+                                f"download_source({_url}): "
+                                f"{type(e).__name__} on attempt {_attempt + 1}/"
+                                f"{_HTTP_RETRY_COUNT}, retrying after {_backoff}s")
+                            _time.sleep(_backoff)
+                            continue
+                        tui.console.print(
+                            f"ERROR: HTTP failure for {_url} (after retries)")
+                        logger.error(f"download_source({_url}): {e}")
+                        _retry_failed = True
+                        break
+                    except (Timeout, TooManyRedirects, HTTPError, RequestException) as e:
+                        tui.console.print(f"ERROR: HTTP failure for {_url}")
+                        logger.error(f"download_source({_url}): {e}")
+                        _retry_failed = True
+                        break
+                    except OSError as e:
+                        tui.console.print(f"ERROR: cannot write {_download_path}")
+                        logger.error(f"download_source write {_download_path}: {e}")
+                        _retry_failed = True
+                        break
+                    except ValueError as e:
+                        tui.console.print(f"ERROR: malformed response for {_url}")
+                        logger.error(f"download_source parse {_url}: {e}")
+                        _retry_failed = True
+                        break
+                if _retry_failed:
                     continue
 
             # Validate what landed on disk *before* the sha256 check, so a
