@@ -1,0 +1,10 @@
+Task: asgard-network-services
+Section: user
+Description: Network discovery and proxy auto-detect
+ Adds avahi for mDNS / Bonjour service discovery on the .local
+ domain plus libnss-mdns to wire it through glibc plus the
+ libproxy plugin set for automatic proxy resolution via
+ NetworkManager / GSettings / WebKit.  Polish layer for laptop
+ and mobile use.  Selecting this task pulls the GNOME desktop set.
+Key:
+ asgard-network-services

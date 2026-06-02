@@ -1,0 +1,11 @@
+Task: asgard-gnome-extras
+Section: user
+Description: GNOME extras and apps
+ Adds the full GNOME app set beyond the desktop core: maps,
+ weather, characters, font viewer, color manager, backgrounds,
+ Bluetooth send-to, user-share, sushi preview, initial-setup
+ wizard, remote desktop server, cantarell font, seahorse keyring
+ GUI, zenity dialog helper.  Selecting this task pulls the GNOME
+ desktop set automatically.
+Key:
+ asgard-gnome-extras
