@@ -953,7 +953,7 @@ def _download_source_with_mocked_get(mock_resp_factory, expected_size: int = 100
     during the call, so callers can assert on the wording without any live
     network or real Mirror infrastructure.
     """
-    from unittest.mock import patch
+    from unittest.mock import patch, MagicMock
     import utils
     from utils import Mirror
 
@@ -993,7 +993,9 @@ def _download_source_with_mocked_get(mock_resp_factory, expected_size: int = 100
     utils.ProgressBar = _Bar          # type: ignore[assignment,misc]
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(utils.requests, 'get', return_value=mock_resp_factory()):
+            _ms = MagicMock()
+            _ms.get.return_value = mock_resp_factory()
+            with patch.object(utils, '_http_session', return_value=_ms):
                 utils.download_source(_Dt(), tmp)
     finally:
         utils.tui.console = saved_console
@@ -6564,8 +6566,10 @@ def test_download_file_returns_http_status_detail_on_404():
             _resp.reason = 'Not Found'
             mock_get.raise_for_status.side_effect = HTTPError('404 Client Error', response=_resp)
 
-            with patch.object(utils.requests, 'head', return_value=mock_head), \
-                 patch.object(utils.requests, 'get', return_value=mock_get):
+            _ms = MagicMock()
+            _ms.head.return_value = mock_head
+            _ms.get.return_value = mock_get
+            with patch.object(utils, '_http_session', return_value=_ms):
                 size, detail = utils.download_file('http://x.test/missing', os.path.join(tmp, 'out'))
 
             assert size == -1, size
@@ -6613,8 +6617,10 @@ def test_download_file_success_returns_size_and_empty_detail():
             mock_get.raise_for_status.return_value = None
             mock_get.iter_content.return_value = [b'hello world']
 
-            with patch.object(utils.requests, 'head', return_value=mock_head), \
-                 patch.object(utils.requests, 'get', return_value=mock_get):
+            _ms = MagicMock()
+            _ms.head.return_value = mock_head
+            _ms.get.return_value = mock_get
+            with patch.object(utils, '_http_session', return_value=_ms):
                 size, detail = utils.download_file('http://x.test/ok', os.path.join(tmp, 'out'))
 
             assert size == 11, size
@@ -6665,8 +6671,10 @@ def test_download_file_zero_content_length_does_not_freeze_bar():
             _payload = [b'x' * 8192] * 256   # 2 MB in 8 KB chunks
             mock_get.iter_content.return_value = _payload
 
-            with patch.object(utils.requests, 'head', return_value=mock_head), \
-                 patch.object(utils.requests, 'get', return_value=mock_get):
+            _ms = MagicMock()
+            _ms.head.return_value = mock_head
+            _ms.get.return_value = mock_get
+            with patch.object(utils, '_http_session', return_value=_ms):
                 size, detail = utils.download_file('http://x.test/big', os.path.join(tmp, 'out'))
 
             assert size == 2 * 1024 * 1024, size
@@ -19567,13 +19575,12 @@ def test_list_snapshots_between_filters_range_and_unions_keys():
         snapshot_timestamp_api = 'http://x'
         snapshot_archive_keys = ['debian', 'debian-security']
 
-    _saved = utils.requests.get
-    utils.requests.get = lambda *a, **k: _Resp()
-    try:
+    from unittest.mock import patch, MagicMock
+    _ms = MagicMock()
+    _ms.get.return_value = _Resp()
+    with patch.object(utils, '_http_session', return_value=_ms):
         _got = utils.list_snapshots_between(
             _Cfg(), '20260514T000000Z', '20260526T000000Z')
-    finally:
-        utils.requests.get = _saved
     # strictly > 0514 and <= 0526, union of both keys, sorted, deduped
     assert _got == ['20260515T000000Z', '20260518T000000Z',
                     '20260526T000000Z'], _got
@@ -21751,9 +21758,11 @@ def test_download_file_retries_on_transient_timeout():
         _r.raise_for_status = lambda: None
         return _r
 
+    _ms = MagicMock()
+    _ms.head = MagicMock(side_effect=_head_then_succeed)
+    _ms.get  = MagicMock(side_effect=_get_succeed)
     with tempfile.TemporaryDirectory() as _td, \
-            _patch('requests.head', side_effect=_head_then_succeed), \
-            _patch('requests.get',  side_effect=_get_succeed), \
+            _patch.object(_u, '_http_session', return_value=_ms), \
             _patch('time.sleep'):    # don't actually wait in tests
         _size, _detail = _u.download_file(
             'http://example.test/file', os.path.join(_td, 'out'))
@@ -21800,9 +21809,11 @@ def test_download_file_retries_on_requests_connection_error():
         _r.raise_for_status = lambda: None
         return _r
 
+    _ms = MagicMock()
+    _ms.head = MagicMock(side_effect=_head_reset_then_succeed)
+    _ms.get  = MagicMock(side_effect=_get_ok)
     with tempfile.TemporaryDirectory() as _td, \
-            _patch('requests.head', side_effect=_head_reset_then_succeed), \
-            _patch('requests.get',  side_effect=_get_ok), \
+            _patch.object(_u, '_http_session', return_value=_ms), \
             _patch('time.sleep'):
         _size, _detail = _u.download_file(
             'http://example.test/file', os.path.join(_td, 'out'))
@@ -21845,9 +21856,11 @@ def test_download_file_does_not_retry_on_http_error():
         _r.raise_for_status = MagicMock(side_effect=_err)
         return _r
 
+    _ms = MagicMock()
+    _ms.head = MagicMock(side_effect=_head_ok)
+    _ms.get  = MagicMock(side_effect=_get_404)
     with tempfile.TemporaryDirectory() as _td, \
-            _patch('requests.head', side_effect=_head_ok), \
-            _patch('requests.get',  side_effect=_get_404), \
+            _patch.object(_u, '_http_session', return_value=_ms), \
             _patch('time.sleep'):
         _size, _detail = _u.download_file(
             'http://example.test/missing', os.path.join(_td, 'out'))
@@ -21858,52 +21871,55 @@ def test_download_file_does_not_retry_on_http_error():
             f"HTTPError must not retry; got {_calls.count('get')} GETs")
 
 
-def test_every_outbound_request_carries_user_agent_header():
-    """snapshot.debian.org rate-limits the default python-requests UA so
-    aggressively that our 10s HEAD probes time out routinely (browser /
-    curl / apt sail through unthrottled because they advertise distinct
-    UAs).  Pin the invariant: every requests.{get,head,post,put} call
-    site in scripts/ must pass headers=_HTTP_HEADERS (or carry an
-    explicit User-Agent in its own headers dict).  Greps the source so a
-    new call site that forgets the header is caught by CI, not at the
-    next cache build."""
+def test_http_session_is_module_level_singleton():
+    """Two _http_session() calls in the same process must return the
+    SAME Session instance — that's what gives us HTTP keep-alive
+    across calls.  If a future refactor changes this to construct
+    a new Session per call, snapshot.debian.org sync goes from
+    fast back to ~15min of TLS handshake overhead."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    _a = _u._http_session()
+    _b = _u._http_session()
+    assert _a is _b, "expected same Session instance, got distinct objects"
+    # Session must carry our User-Agent so per-call headers aren't required.
+    assert _a.headers.get('User-Agent') == 'athena-build/0.1'
+
+
+def test_every_outbound_request_uses_http_session():
+    """Two invariants in one greps:
+
+    1) No bare `requests.{get,head,post,put}(...)` call sites in
+       scripts/ — those bypass our module-level Session and so lose
+       HTTP keep-alive (~300-500ms TLS handshake per request that the
+       Session amortizes across a single TCP connection).
+
+    2) Future call sites that DO use _http_session() inherit the
+       User-Agent from the Session's headers — so the per-call
+       headers= argument becomes optional.
+
+    Catches a new call site that forgets to route through the Session
+    at CI time, not after the next 30-minute source sync stalls."""
     import re as _re
     _root = os.path.join(_ROOT, 'scripts')
     _offenders: 'list[str]' = []
-    _call = _re.compile(r'requests\.(get|head|post|put)\s*\(')
+    _bare = _re.compile(r'\brequests\.(get|head|post|put)\s*\(')
     for _dir, _, _files in os.walk(_root):
         for _name in _files:
             if not _name.endswith('.py'):
                 continue
             _path = os.path.join(_dir, _name)
             with open(_path) as _fh:
-                _lines = _fh.readlines()
-            # Walk line-by-line: when a `requests.<verb>(` opens, scan
-            # forward until the matching close paren and verify the
-            # call carries User-Agent (either via _HTTP_HEADERS or an
-            # inline headers={'User-Agent': ...}).
-            _i = 0
-            while _i < len(_lines):
-                if not _call.search(_lines[_i]):
-                    _i += 1
-                    continue
-                _depth = 0
-                _buf = ''
-                _j = _i
-                while _j < len(_lines):
-                    _buf += _lines[_j]
-                    _depth += _lines[_j].count('(') - _lines[_j].count(')')
-                    if _depth <= 0 and '(' in _buf:
-                        break
-                    _j += 1
-                if ('_HTTP_HEADERS' not in _buf
-                        and 'User-Agent' not in _buf):
-                    _rel = os.path.relpath(_path, _ROOT)
-                    _offenders.append(f"{_rel}:L{_i + 1}")
-                _i = _j + 1
+                _content = _fh.read()
+            for _m in _bare.finditer(_content):
+                _line_no = _content[:_m.start()].count('\n') + 1
+                _rel = os.path.relpath(_path, _ROOT)
+                _offenders.append(f"{_rel}:L{_line_no}")
     assert not _offenders, (
-        "requests call(s) without User-Agent — snapshot.debian.org will "
-        "throttle these to death:\n  " + "\n  ".join(_offenders))
+        "bare requests.{get,head,post,put}(...) call(s) outside the "
+        "Session — these bypass keep-alive and force a fresh TLS "
+        "handshake per request:\n  " + "\n  ".join(_offenders))
 
 
 def test_print_build_times_aggregates_elapsed_across_records():
@@ -22781,7 +22797,8 @@ def main() -> int:
         test_download_file_retries_on_transient_timeout,
         test_download_file_retries_on_requests_connection_error,
         test_download_file_does_not_retry_on_http_error,
-        test_every_outbound_request_carries_user_agent_header,
+        test_http_session_is_module_level_singleton,
+        test_every_outbound_request_uses_http_session,
         test_print_build_times_aggregates_elapsed_across_records,
         test_print_build_times_skips_tampered_records,
         test_build_record_canonical_json_stable_across_key_order,
