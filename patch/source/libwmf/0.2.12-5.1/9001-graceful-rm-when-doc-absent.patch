@@ -1,0 +1,38 @@
+Description: skip Makefile-stripping rm when nodoc disables doc generation
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-06-02
+Bug-Athena: libwmf's debian/rules execute_after_dh_installdocs-indep
+ unconditionally runs `rm debian/libwmf-doc/usr/share/doc/libwmf-dev/doc/Makefile*`
+ (and two deeper glob variants) to strip the autotools Makefiles
+ that dh_installdocs would otherwise copy into the libwmf-doc
+ binary alongside the doxygen-rendered HTML.
+ .
+ Under DEB_BUILD_OPTIONS=nodoc the doc tree is never generated and
+ dh_installdocs ships an empty libwmf-doc, so none of those three
+ globs match.  Shell expands them to their literal pattern, `rm`
+ returns "No such file or directory" for each, and exits 1 → build
+ dies in binary-indep.
+ .
+ Fix: wrap the rm in `ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))`
+ so the target no-ops cleanly when nodoc is active.  Behaviour
+ without nodoc is unchanged.
+ .
+ TEMPORARY: nodoc is a workaround for missing doc-build tooling in
+ the build pool, not a permanent policy.  DELETE THIS PATCH when
+ CONF-08 lands and nodoc is dropped from [Source] BuildOptions /
+ BuildProfiles in config/build.conf.
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/rules
++++ b/debian/rules
+@@ -34,6 +34,8 @@ execute_after_dh_install-arch:
+ 	ln -s libwmflite-0.2.so.7 debian/libwmf-dev/usr/lib/$(DEB_HOST_MULTIARCH)/libwmflite-0.2.so
+
+ execute_after_dh_installdocs-indep:
++ifeq (,$(findstring nodoc,$(DEB_BUILD_OPTIONS)))
+ 	rm debian/libwmf-doc/usr/share/doc/libwmf-dev/doc/Makefile* \
+ 		debian/libwmf-doc/usr/share/doc/libwmf-dev/doc/*/Makefile* \
+ 		debian/libwmf-doc/usr/share/doc/libwmf-dev/doc/*/*/Makefile*
++endif
