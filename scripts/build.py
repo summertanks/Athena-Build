@@ -1261,8 +1261,8 @@ class BuildSession:
     # --------------------------------------Command: patch_refresh-------------------------------------
 
     def _refresh_patches(self) -> int:
-        # ⚠️  DESTRUCTIVE — DELETES .result FILES when patch-set content
-        # has changed since the last build (see ~line 1261 below).
+        # ⚠️  DESTRUCTIVE — DELETES build.json records when patch-set
+        # content has changed since the last build (see ~line 1336 below).
         # The name "refresh" is misleading by today's standards;
         # callers expecting read-only semantics MUST NOT invoke this.
         # Read-only commands (cmd_source_audit, cmd_print*, anything
@@ -1275,7 +1275,7 @@ class BuildSession:
         # state" — over-counted by 47 packages because the side
         # effect wiped their PASS state.
         #
-        # If you need ONLY the patch_list population (not the .result
+        # If you need ONLY the patch_list population (not the record
         # invalidation), split this function or extract that pass.
         #
         # Scan the patch tree for files matching <package>/<version>/*.patch and
@@ -1333,182 +1333,97 @@ class BuildSession:
         _patched = sum(1 for _s in _unified_srcs.values() if _s.patch_list)
         console.print(f"Found patches for {_patched} source package(s)", tui.COLOR_INFO)
 
-        # Invalidate stale .result files when the patch SET for a source
+        # Invalidate stale build records when the patch SET for a source
         # has changed since the last successful build.  Without this,
         # autorun's source-build step happily skips packages with
         # `[SKIPPED] already built` even after the operator drops a new
         # patch in patch/source/<pkg>/<ver>/ — and the patch never takes
         # effect.  Caught 2026-05-13 with the base-installer Phase C
         # keyring patch: the patch was on disk, _refresh_patches
-        # discovered it, but check_build saw the older .result + .udeb
-        # and skipped the rebuild.  Install booted the unpatched
+        # discovered it, but check_build saw the older .udeb and
+        # skipped the rebuild.  Install booted the unpatched
         # base-installer → `gpgv: Can't check signature: No public key`.
         #
         # Two-stage check.  Stage 1 (cheap) is mtime: if no patch is
-        # newer than .result, nothing to do.  Stage 2 (precise) is
+        # newer than the record, nothing to do.  Stage 2 (precise) is
         # content hash: only invalidate when the patch CONTENT actually
         # changed, not just the mtime.  This avoids spurious rebuilds
         # from header-only edits (DEP-3 commentary, comment tweaks) that
         # bump the mtime but produce an identical diff.
         #
-        # Migration: when no .patchhash exists yet (pre-CONF-08 builds),
-        # we trust that the existing .result reflects the current patch
-        # set (the build that produced it must have applied them), write
-        # a baseline hash, and skip invalidation.  Subsequent runs use
-        # the recorded baseline normally.
-        #
-        # Also catches patch REMOVAL: empty patch_list with an existing
-        # .patchhash for a non-empty old set → hash differs → invalidate.
-        # (Previously documented as not worth the schema; the hash file
-        # makes it free.)
+        # Also catches patch REMOVAL: empty patch_list with a non-empty
+        # stored hash → hash differs → invalidate.
         _buildlog = os.path.join(self.config.dir_log, 'build')
         _invalidated = []
-
-        def _remove_build_record(_pkg_name: str) -> None:
-            # OBS-01 migration helper: invalidation must drop the signed
-            # record alongside the legacy sidecars so the new and old
-            # surfaces stay consistent for repo audit.  Best-effort —
-            # absent file is fine (FileNotFoundError swallowed).
-            _rp = os.path.join(_buildlog, _pkg_name + utils.BUILD_RECORD_SUFFIX)
-            try:
-                os.remove(_rp)
-            except FileNotFoundError:
-                pass
-            except OSError as _e:
-                logger.warning(
-                    f"[patch] {_pkg_name}: cannot remove stale {_rp}: {_e}")
-
         for _pkg, _src in _unified_srcs.items():
-            _result_file = os.path.join(_buildlog, _pkg + '.result')
             _record_path = os.path.join(
                 _buildlog, _pkg + utils.BUILD_RECORD_SUFFIX)
-            if (not os.path.exists(_result_file)
-                    and not os.path.exists(_record_path)):
-                continue
-            _patch_dir = os.path.join(
-                self.config.dir_patch_source, _pkg, utils.version_no_epoch(_src.version),
-            )
-            _hash_file = os.path.join(_buildlog, _pkg + '.patchhash')
-            _stored_hash = None
-            # OBS-01: prefer the signed record's hash; fall back to legacy.
             _record = utils.read_build_record(_buildlog, _pkg)
-            if _record is not None:
-                _rec_hash = _record.get('patch_set_hash')
-                if isinstance(_rec_hash, str) and _rec_hash:
-                    _stored_hash = _rec_hash
-            if _stored_hash is None:
-                try:
-                    with open(_hash_file, 'r') as fh:
-                        _stored_hash = fh.read().strip() or None
-                except OSError:
-                    pass
+            if _record is None:
+                continue  # nothing to invalidate
+            _stored_hash = str(_record.get('patch_set_hash') or '')
+            _patch_dir = os.path.join(
+                self.config.dir_patch_source, _pkg,
+                utils.version_no_epoch(_src.version),
+            )
 
-            # Patch removal: no patches now, but a baseline hash exists
-            # for a previous non-empty set → invalidate.  (Hash of empty
-            # set differs from any non-empty hash.)
-            if not _src.patch_list:
-                if _stored_hash is None:
-                    continue
-                _current_hash = utils.patch_set_hash(_patch_dir, [])
-                if _stored_hash == _current_hash:
-                    continue
-                try:
-                    if os.path.exists(_result_file):
-                        os.remove(_result_file)
-                    if os.path.exists(_hash_file):
-                        os.remove(_hash_file)
-                    _remove_build_record(_pkg)
-                    _invalidated.append(_pkg)
-                except OSError as e:
-                    logger.warning(
-                        f"[patch] {_pkg}: cannot remove stale {_result_file}: {e}"
-                    )
-                continue
-
-            # mtime gate uses the build.json mtime when present, else
-            # falls back to .result (legacy).  Either reflects "when the
-            # build last wrote state for this pkg".
-            _gate_path = (_record_path if os.path.exists(_record_path)
-                          else _result_file)
+            # Stage 1: mtime gate.  Re-hashing every source's patch tree
+            # on every patch_refresh is wasteful when nothing changed —
+            # gate on "is any patch file newer than the record?"
             try:
-                _result_mtime = os.path.getmtime(_gate_path)
+                _record_mtime = os.path.getmtime(_record_path)
             except OSError:
                 continue
             _newer = any(
-                os.path.getmtime(os.path.join(_patch_dir, _pf)) > _result_mtime
-                for _pf in _src.patch_list
+                os.path.getmtime(os.path.join(_patch_dir, _pf)) > _record_mtime
+                for _pf in (_src.patch_list or [])
                 if os.path.exists(os.path.join(_patch_dir, _pf))
             )
-            if not _newer:
+            # Patch-removal case: no patches now, but record carries a
+            # non-empty hash → still need to compare (empty-set hash vs
+            # stored).  Bypass the mtime gate for that case.
+            if not _newer and not (_stored_hash and not _src.patch_list):
                 continue
 
-            _current_hash = utils.patch_set_hash(_patch_dir, _src.patch_list)
-
-            # Compute a target mtime that is guaranteed > every patch
-            # mtime, so the next patch_refresh's mtime gate won't keep
-            # re-entering this branch.  os.utime(path, None) uses the
-            # kernel clock and can land slightly BEFORE a patch mtime
-            # set from time.time() (different clock sources / coarser
-            # resolution); set the value explicitly instead.
-            _newest_patch_mtime = max(
-                (os.path.getmtime(os.path.join(_patch_dir, _pf))
-                 for _pf in _src.patch_list
-                 if os.path.exists(os.path.join(_patch_dir, _pf))),
-                default=0.0,
-            )
-            _touch_mtime = max(time.time(), _newest_patch_mtime + 1.0)
-
-            if _stored_hash is None:
-                # First encounter post-upgrade (or post-clean): the
-                # existing .result was written by a build that already
-                # applied the current patch set.  Record the baseline,
-                # touch .result so we don't re-enter this branch every
-                # patch_refresh, and skip invalidation.
-                try:
-                    with open(_hash_file, 'w') as fh:
-                        fh.write(_current_hash + '\n')
-                    if os.path.exists(_result_file):
-                        os.utime(_result_file, (_touch_mtime, _touch_mtime))
-                    if os.path.exists(_record_path):
-                        os.utime(_record_path, (_touch_mtime, _touch_mtime))
-                except OSError as e:
-                    logger.warning(
-                        f"[patch] {_pkg}: cannot write {_hash_file}: {e}"
-                    )
-                continue
-
+            # Stage 2: content hash.
+            _current_hash = utils.patch_set_hash(
+                _patch_dir, _src.patch_list or [])
             if _stored_hash == _current_hash:
                 # Cosmetic edit (header / comment) — content unchanged.
-                # Touch .result + .build.json to reset the mtime gate.
+                # Touch the record so the next refresh's mtime gate
+                # doesn't keep tripping.  Computed >= every patch
+                # mtime so kernel-clock vs time.time() drift can't
+                # leave it behind.
+                _newest_patch_mtime = max(
+                    (os.path.getmtime(os.path.join(_patch_dir, _pf))
+                     for _pf in (_src.patch_list or [])
+                     if os.path.exists(os.path.join(_patch_dir, _pf))),
+                    default=0.0,
+                )
+                _touch_mtime = max(time.time(), _newest_patch_mtime + 1.0)
                 try:
-                    if os.path.exists(_result_file):
-                        os.utime(_result_file, (_touch_mtime, _touch_mtime))
-                    if os.path.exists(_record_path):
-                        os.utime(_record_path, (_touch_mtime, _touch_mtime))
+                    os.utime(_record_path, (_touch_mtime, _touch_mtime))
                 except OSError:
                     pass
                 continue
 
-            # Real content change — invalidate + record new baseline.
+            # Real content change — drop the record.  Next source build
+            # will rebuild and write a fresh one with the current hash.
             try:
-                if os.path.exists(_result_file):
-                    os.remove(_result_file)
-                _remove_build_record(_pkg)
-                with open(_hash_file, 'w') as fh:
-                    fh.write(_current_hash + '\n')
+                os.remove(_record_path)
                 _invalidated.append(_pkg)
             except OSError as e:
                 logger.warning(
-                    f"[patch] {_pkg}: cannot remove stale {_result_file}: {e}"
+                    f"[patch] {_pkg}: cannot remove stale {_record_path}: {e}"
                 )
         if _invalidated:
             _names = ', '.join(sorted(_invalidated))
             console.print(
-                f"Invalidated {len(_invalidated)} stale .result file(s) — "
+                f"Invalidated {len(_invalidated)} stale build record(s) — "
                 f"these will rebuild next source_build: {_names}",
                 tui.COLOR_INFO,
             )
-            logger.info(f"[patch] invalidated stale .result: {_names}")
+            logger.info(f"[patch] invalidated stale build records: {_names}")
         return _patched
 
     def cmd_patch_refresh(self):
@@ -2259,17 +2174,11 @@ class BuildSession:
           needs_sync   — source files missing or .verified absent
           stale_pass   — record=PASS but state drifted (patches changed
                           since the build wrote the record)
-          interrupted  — OBS-01: build process was killed mid-flight;
-                          on-disk artifacts can't be trusted
-          repairable   — binaries valid but record missing
-                          (BUT: see below — repairable is treated as
-                          soft, not hard)
+          interrupted  — build process was killed mid-flight; on-disk
+                          artifacts can't be trusted
 
-        repairable is SOFT (operator should `source repair` but the
-        chroot build can still succeed — apt + dpkg don't read the
-        build record; it's build-pipeline metadata).  Hard fails are
-        needs_build / needs_sync / stale_pass / interrupted which would
-        either miss .debs entirely or include stale ones.
+        All four states would either miss .debs entirely or include
+        stale ones if the chroot build proceeded.
 
         Returns True to proceed, False to abort.  Cheap (~5s) — each
         per-source classify is a few stat() calls.
@@ -2292,9 +2201,8 @@ class BuildSession:
                     _srcs[_n] = _s
 
         _hard = ('needs_build', 'needs_sync', 'stale_pass', 'interrupted')
-        _soft = ('repairable',)
         _by_state: 'dict[str, list[str]]' = {
-            _s: [] for _s in _hard + _soft
+            _s: [] for _s in _hard
         }
         for _name, _src in _srcs.items():
             _state = self._source_state(_name, _src)
@@ -2302,9 +2210,8 @@ class BuildSession:
                 _by_state[_state].append(_name)
 
         _hard_count = sum(len(_by_state[_s]) for _s in _hard)
-        _soft_count = sum(len(_by_state[_s]) for _s in _soft)
 
-        if _hard_count == 0 and _soft_count == 0:
+        if _hard_count == 0:
             console.print(
                 f"Source audit OK: {len(_srcs)} sources synced, "
                 f"built, fresh."
@@ -2312,32 +2219,25 @@ class BuildSession:
             return True
 
         console.print("Source audit found build-state issues:")
-        for _state in _hard + _soft:
+        for _state in _hard:
             _names = _by_state[_state]
             if not _names:
                 continue
-            _marker = '(hard)' if _state in _hard else '(soft)'
-            console.print(
-                f"  {len(_names):5d}  {_state}  {_marker}"
-            )
-        for _state in _hard + _soft:
+            console.print(f"  {len(_names):5d}  {_state}")
+        for _state in _hard:
             _names = sorted(_by_state[_state])
             if not _names:
                 continue
             self._print_wrapped_names(f"    {_state}", _names)
         console.print(
             "  Fix: `source build` (rebuilds), `source repair` "
-            "(aligns .result), `source sync` (re-fetches)."
+            "(clears stale records), `source sync` (re-fetches)."
         )
 
-        if _hard_count == 0:
-            # Only soft findings — proceed silently.  Audit reports
-            # the count above; no prompt needed.
-            return True
         _resp = Prompt(
             PROMPT_YESNO,
             "Proceed with chroot build despite source audit "
-            "findings?  (hard: rebuild recommended)",
+            "findings?  (rebuild recommended)",
         ).get_response()
         return _resp.lower() in ('y', 'yes')
 
@@ -2705,23 +2605,13 @@ class BuildSession:
                     if not _expected:
                         _no_pkgs += 1
                         continue
-                    # OBS-01: prefer the signed record; fall back to .result.
-                    _is_tunneled = False
+                    # OBS-01: tunneled sources are pristine upstream
+                    # passthrough copies — skip deep-verify (different
+                    # version semantics than our built binaries).
                     _record = utils.read_build_record(
                         self.container.buildlog_path, _name)
-                    if _record is not None:
-                        _is_tunneled = (
-                            utils.classify_build_record(_record) == 'tunneled')
-                    else:
-                        _result_file = os.path.join(
-                            self.container.buildlog_path, _name + '.result')
-                        try:
-                            with open(_result_file) as fh:
-                                _is_tunneled = (
-                                    fh.readline().strip() == 'TUNNELED')
-                        except OSError:
-                            pass
-                    if _is_tunneled:
+                    if (_record is not None
+                            and utils.classify_build_record(_record) == 'tunneled'):
                         _skipped_tunneled += 1
                         continue
                     _any_missing = False
@@ -6227,26 +6117,16 @@ class BuildSession:
           'differs'  — stored hash disagrees.  Patches on disk have
                        changed since the build wrote its record.
 
-          'absent'   — no record (pre-OBS-01 build, operator wiped
-                       log/build/, or tamper).  Caller decides.
-
-        OBS-01 migration: prefers the signed build.json record's
-        patch_set_hash field; falls back to the legacy <pkg>.patchhash
-        sidecar for pre-rollout builds.  The .patchhash fallback is
-        removed in chunk 5 of the rollout.
+          'absent'   — no signed record, or the record's
+                       patch_set_hash field is empty (legitimate when
+                       a source declares no patches AND was built
+                       before any patches landed).  Caller decides.
         """
         _buildlog = os.path.join(self.config.dir_log, 'build')
-        _stored = ''
         _record = utils.read_build_record(_buildlog, pkg)
-        if _record is not None:
-            _stored = str(_record.get('patch_set_hash') or '')
-        if not _stored:
-            _hash_file = os.path.join(_buildlog, pkg + '.patchhash')
-            try:
-                with open(_hash_file, 'r') as fh:
-                    _stored = fh.read().strip()
-            except OSError:
-                return 'absent'
+        if _record is None:
+            return 'absent'
+        _stored = str(_record.get('patch_set_hash') or '')
         if not _stored:
             return 'absent'
         _patch_dir = os.path.join(
@@ -6267,14 +6147,12 @@ class BuildSession:
                           # second-guess").
         'needs_sync',     # source files missing or .verified absent
         'needs_build',    # binaries missing or invalid (legitimate rebuild)
-        'interrupted',    # OBS-01: record has a non-terminal phase —
-                          # build process was killed mid-flight.  Repair
+        'interrupted',    # record has a non-terminal phase — build
+                          # process was killed mid-flight.  Repair
                           # CLEARS the record so next build re-runs and
                           # produces a proper terminal phase.
         'stale_pass',     # record=PASS but state has drifted (binaries
                           # gone OR patches changed) — repair would CLEAR
-        'repairable',     # binaries present + valid but record MISSING
-                          # — repair would WRITE done/PASS
     )
 
     def _source_state(self, pkg: str, src) -> str:
@@ -6283,84 +6161,62 @@ class BuildSession:
 
         Two axes of evidence feed the classification:
 
-          A. .result content — PASS / FAIL / TUNNELED / missing.
-          B. .patchhash status — matches / differs / absent.
+          A. signed build.json record — classified by
+             utils.classify_build_record into 'missing' / 'interrupted'
+             / 'ok' / 'fail' / 'tunneled'.
+          B. patch_set_hash drift — does the record's stored hash
+             match the current on-disk patch set?
 
-        And one filesystem check: do predicted binaries exist + open
+        Plus one filesystem check: do predicted binaries exist + open
         as valid ar archives?
 
         Resolution table (binaries valid case):
 
-          | .result | .patchhash | state       |
-          |---------|------------|-------------|
-          | PASS    | matches    | ok          |
-          | PASS    | differs    | stale_pass  ← patches drifted
-          | PASS    | absent     | ok           (migration; presume current)
-          | missing | matches    | repairable  ← write PASS
-          | missing | differs    | needs_build ← binaries stale, must rebuild
-          | missing | absent     | needs_build ← no proof of freshness
-          | FAIL    | any        | fail         (operator marker; no-op)
-          | TUNNELED| any        | tunneled
+          | record      | patch hash | state       |
+          |-------------|------------|-------------|
+          | ok          | matches    | ok          |
+          | ok          | differs    | stale_pass  ← patches drifted
+          | ok          | absent     | ok           (no patches declared)
+          | missing     | any        | needs_build ← no record = rebuild
+          | fail        | any        | fail         (operator marker; no-op)
+          | tunneled    | any        | tunneled
+          | interrupted | any        | interrupted  (rebuild required)
 
-        Why 'needs_build' rather than 'repairable' when .patchhash is
-        absent: without a baseline we can't prove the on-disk binaries
-        match the current patch set.  Conservatively assume they're
-        stale; require a rebuild.  This makes the audit/repair cycle
-        SETTLE in one round when repair clears stale_pass (which
-        deletes both .result and .patchhash) — the next audit reports
-        'needs_build' and the operator knows to rebuild, not repair
-        again.
+        Missing record always routes to 'needs_build' — without a
+        record we have no proof the on-disk binaries match the current
+        patches, so a rebuild is the only safe action.
 
         Resolution order (short-circuits):
           1. no predicted binaries → 'no_pkgs'
-          2. .result=TUNNELED → 'tunneled'
-          3. .result=FAIL → 'fail'
+          2. record=tunneled → 'tunneled'
+          3. record=fail → 'fail'
           4. any source file missing on disk OR .verified absent → 'needs_sync'
-          5. any predicted binary missing/not-ar → 'stale_pass' (if PASS)
+          5. record=interrupted → 'interrupted'
+          6. any predicted binary missing/not-ar → 'stale_pass' (if ok)
              else 'needs_build'
-          6. classify via the table above
+          7. classify via the table above
         """
         _expected = self._predicted_files_for_source(pkg)
         if not _expected:
             return 'no_pkgs'
         _buildlog = os.path.join(self.config.dir_log, 'build')
 
-        # OBS-01: prefer the signed build.json record.  classify_build_record
-        # returns:
+        # OBS-01: the signed build.json record is the sole source of
+        # truth.  classify_build_record returns:
         #   'missing'     — file absent / tampered / corrupt
-        #   'interrupted' — phase != done|failed|tunneled (process killed
-        #                   mid-build).  Triggers rebuild via 'needs_build'
-        #                   below; binaries-present check still runs first.
+        #   'interrupted' — phase != done|failed|tunneled (process
+        #                   killed mid-build).  Routed to its own state
+        #                   below so audit distinguishes from "never
+        #                   tried".
         #   'ok' / 'fail' / 'tunneled' — terminal phases.
-        # During migration the legacy .result file is consulted only when
-        # the record is missing (pre-rollout builds).
         _record = utils.read_build_record(_buildlog, pkg)
-        _result_first_line = ''
-        _result_exists = False
-        _interrupted = False
-        if _record is not None:
-            _record_state = utils.classify_build_record(_record)
-            _result_exists = True
-            if _record_state == 'tunneled':
-                return 'tunneled'
-            if _record_state == 'fail':
-                return 'fail'
-            if _record_state == 'interrupted':
-                _interrupted = True
-            elif _record_state == 'ok':
-                _result_first_line = 'PASS'
-        else:
-            _result_file = os.path.join(_buildlog, pkg + '.result')
-            try:
-                with open(_result_file) as fh:
-                    _result_first_line = fh.readline().strip()
-                    _result_exists = True
-            except OSError:
-                pass
-            if _result_first_line == 'TUNNELED':
-                return 'tunneled'
-            if _result_first_line == 'FAIL':
-                return 'fail'
+        _record_state = utils.classify_build_record(_record)
+        if _record_state == 'tunneled':
+            return 'tunneled'
+        if _record_state == 'fail':
+            return 'fail'
+        _interrupted = (_record_state == 'interrupted')
+        _record_ok = (_record_state == 'ok')
 
         # (4) source files — every entry in src.files must exist on
         # disk with a .verified sidecar (download_source's gate).
@@ -6407,44 +6263,40 @@ class BuildSession:
                 break
 
         if not _all_present:
-            return 'stale_pass' if _result_first_line == 'PASS' else 'needs_build'
+            return 'stale_pass' if _record_ok else 'needs_build'
 
-        # (6) binaries valid; classify via .result × .patchhash table.
+        # (6) binaries valid; classify via record × patch_set_hash.
         _patchhash = self._patchhash_status(pkg, src)
-        if _result_first_line == 'PASS':
-            # PASS row.  Matches OR absent (migration) → ok.  Differs
-            # → stale_pass.
+        if _record_ok:
+            # PASS row.  Matches OR absent (no patches declared) → ok.
+            # Differs → stale_pass.
             return 'stale_pass' if _patchhash == 'differs' else 'ok'
 
-        # .result missing (or atypical content).  Without .patchhash
-        # matching, we can't prove binaries are current — must rebuild.
-        if _patchhash == 'matches':
-            return 'repairable'
+        # No record (fail / interrupted / tunneled handled above).
+        # Without a record we have no proof binaries reflect current
+        # patches — rebuild is the only safe action.
         return 'needs_build'
 
 
     def cmd_source_repair(self, *args):
-        """Align .result files with current source state.  MUTATOR.
+        """Align build records with current source state.  MUTATOR.
 
         Usage: source repair [verbose]
 
         Walks every source via `_source_state` and acts on each state:
 
-          repairable  — binaries valid but .result missing  → WRITE PASS.
-                        (Original 2026-05-19 use case: recover from the
-                        cmd_source_rescan/_refresh_patches incident
-                        that wiped ~47 .result files.)
-          stale_pass  — .result=PASS but state drifted (binaries gone
-                        OR patches changed)  → CLEAR .result (and its
-                        .patchhash if patches changed).  Next
-                        `source build` will rebuild.
-          others      — leave alone.  needs_build / needs_sync /
-                        tunneled / ok / no_pkgs are not repair's
-                        concern; `source audit` reports them.
+          stale_pass   — record=done but state drifted (binaries gone
+                         OR patches changed)  → drop the record so
+                         next `source build` rebuilds.
+          interrupted  — non-terminal phase (build killed mid-flight)
+                         → drop the record.
+          others       — leave alone.  needs_build / needs_sync /
+                         tunneled / ok / fail / no_pkgs are not
+                         repair's concern; `source audit` reports them.
 
         `source repair` does NOT trigger a rebuild itself — it only
-        adjusts the .result sidecars so the NEXT `source build` does
-        the right thing.
+        adjusts the records so the NEXT `source build` does the right
+        thing.
 
         Prereqs: cache build + cache parse + container init.
         """
@@ -6466,7 +6318,6 @@ class BuildSession:
                 if _name not in _srcs:
                     _srcs[_name] = _src
 
-        _restored: 'list[str]' = []
         _cleared:  'list[str]' = []
         _other:    'dict[str, int]' = {}
 
@@ -6478,68 +6329,26 @@ class BuildSession:
             for _name, _src in sorted(_srcs.items()):
                 _bar.step(1)
                 _state = self._source_state(_name, _src)
-                if _state == 'repairable':
-                    # OBS-01: write a synthetic terminal record so the
-                    # next audit sees phase=done / status=PASS without
-                    # rerunning the build.  patch_set_hash is computed
-                    # from the current on-disk patch set (matches what
-                    # the missing-record state means: "binaries exist
-                    # under the current patches, marker was lost").
-                    _patch_dir = os.path.join(
-                        self.config.dir_patch_source, _name,
-                        utils.version_no_epoch(_src.version),
-                    )
-                    _hash = utils.patch_set_hash(
-                        _patch_dir, _src.patch_list or [])
-                    _now = utils._utc_now_iso()
-                    _rec = utils.new_build_record(
-                        package=_name, intended_version=str(_src.version),
-                        patch_set_hash=_hash, started=_now,
-                    )
-                    _rec.update({
-                        'phase': 'done', 'status': 'PASS',
-                        'built_version': utils.strip_nmu_suffix(
-                            str(_src.version)),
-                        'finished': _now, 'elapsed_seconds': 0.0,
-                        'exit_code': 0,
-                    })
+                if _state in ('stale_pass', 'interrupted'):
+                    # stale_pass: record=done but state has drifted
+                    #   (binaries gone OR patches changed).
+                    # interrupted: build process was killed mid-flight
+                    #   — on-disk artifacts can't be trusted.
+                    # Same action: drop the signed record so the next
+                    # source build rebuilds.
+                    _f = os.path.join(
+                        self.container.buildlog_path,
+                        _name + utils.BUILD_RECORD_SUFFIX)
                     try:
-                        utils.write_build_record(
-                            self.container.buildlog_path, _rec)
-                        _restored.append(_name)
-                        logger.info(f"source repair: restored {_name}")
-                    except OSError as e:
-                        console.print(
-                            f"ERROR: cannot write record for {_name}: {e}",
-                            tui.COLOR_ERROR,
-                        )
-                elif _state in ('stale_pass', 'interrupted'):
-                    # stale_pass: PASS marker on disk but state has
-                    #   drifted (binaries gone OR patches changed).
-                    # interrupted (OBS-01): build process was killed
-                    #   mid-flight — on-disk artifacts can't be trusted.
-                    # Same action for both: clear all build-marker
-                    # surfaces (signed record + legacy .result /
-                    # .patchhash).  Next source build rebuilds.
-                    _removed_any = False
-                    for _suffix in (
-                            utils.BUILD_RECORD_SUFFIX, '.result', '.patchhash'):
-                        _f = os.path.join(
-                            self.container.buildlog_path, _name + _suffix)
-                        try:
-                            os.remove(_f)
-                            _removed_any = True
-                        except FileNotFoundError:
-                            pass
-                        except OSError as e:
-                            logger.warning(
-                                f"source repair: cannot remove {_f}: {e}"
-                            )
-                    if _removed_any:
+                        os.remove(_f)
                         _cleared.append(_name)
                         logger.info(
-                            f"source repair: cleared {_state} {_name}"
-                        )
+                            f"source repair: cleared {_state} {_name}")
+                    except FileNotFoundError:
+                        pass
+                    except OSError as e:
+                        logger.warning(
+                            f"source repair: cannot remove {_f}: {e}")
                 else:
                     _other[_state] = _other.get(_state, 0) + 1
         finally:
@@ -6547,31 +6356,21 @@ class BuildSession:
 
         console.print("Source repair:")
         console.print(
-            f"  {len(_restored):5d}  .result restored to PASS "
-            "(binaries present, .result was missing)"
-        )
-        console.print(
-            f"  {len(_cleared):5d}  stale .result cleared "
-            "(binaries gone or patches changed)"
+            f"  {len(_cleared):5d}  stale/interrupted records cleared "
+            "(binaries gone, patches changed, or build was killed mid-flight)"
         )
         for _state in self._SOURCE_STATES:
-            if _state in ('repairable', 'stale_pass'):
+            if _state == 'stale_pass':
                 continue
             _n = _other.get(_state, 0)
             if _n:
                 console.print(f"  {_n:5d}  {_state}  (no action)")
 
-        if _verbose and (_restored or _cleared):
-            if _restored:
-                console.print("")
-                console.print(f"Restored ({len(_restored)}):")
-                for _n in _restored:
-                    console.print(f"  {_n}")
-            if _cleared:
-                console.print("")
-                console.print(f"Cleared ({len(_cleared)}):")
-                for _n in _cleared:
-                    console.print(f"  {_n}")
+        if _verbose and _cleared:
+            console.print("")
+            console.print(f"Cleared ({len(_cleared)}):")
+            for _n in _cleared:
+                console.print(f"  {_n}")
 
     @staticmethod
     def _is_fork_source(src) -> bool:
@@ -6877,26 +6676,28 @@ class BuildSession:
 
         States surfaced:
           ok            — source files synced + binaries present + valid,
-                          .result=PASS, patches unchanged.  Nothing to do.
+                          record=done/PASS, patches unchanged.  Nothing to do.
           needs_sync    — source files missing or .verified sidecar
                           absent → run `source sync <pkg>` (or `source
                           sync` for bulk).
           needs_build   — binaries missing or invalid → run `source build`.
-          stale_pass    — WARN: .result=PASS but state has drifted
+          stale_pass    — WARN: record=PASS but state has drifted
                           (binaries gone OR patches changed since last
                           successful build) → run `source repair` to
                           clear the lie; next `source build` will rebuild.
-          repairable    — WARN: binaries valid but .result missing
-                          (accidental wipe / pre-policy build) → run
-                          `source repair` to write PASS without rebuilding.
-          tunneled      — .result=TUNNELED (third-party pull).  Not built.
+          interrupted   — WARN: record has a non-terminal phase (build
+                          was killed mid-flight) → run `source repair`
+                          to clear the record; next `source build` will
+                          rerun.
+          fail          — record=failed.  Operator marker; no-op.
+          tunneled      — record=tunneled (third-party pull).  Not built.
           no_pkgs       — source declares no main-tier binary in either
                           tree (rare; side-artifact-only sources).
 
         `summary` arg prints only the rebuild-queue count + subset
         breakdown — the operator's "how much work remains" view.
 
-        Read-only by design: never writes .result, never invokes
+        Read-only by design: never writes records, never invokes
         BuildContainer.build, never calls _refresh_patches.  Mutating
         the build state is `source repair`'s job (which uses the same
         classifier).
@@ -7025,20 +6826,20 @@ class BuildSession:
         _total = len(_srcs)
         console.print("Source audit (read-only):")
         console.print(f"  {len(_by_state.get('ok',[])):5d}  ok "
-                      "(synced, built, .result=PASS, patches fresh)")
+                      "(synced, built, record=PASS, patches fresh)")
         console.print(f"  {len(_by_state.get('needs_build',[])):5d}  "
-                      "needs_build (binaries missing/invalid)")
+                      "needs_build (binaries missing/invalid or no record)")
         if _by_state.get('stale_pass'):
             console.print(
                 f"  {len(_by_state['stale_pass']):5d}  "
-                "stale_pass (WARN: .result=PASS but state drifted; "
+                "stale_pass (WARN: record=PASS but state drifted; "
                 "run `source repair`)",
                 tui.COLOR_WARNING,
             )
-        if _by_state.get('repairable'):
+        if _by_state.get('interrupted'):
             console.print(
-                f"  {len(_by_state['repairable']):5d}  "
-                "repairable (binaries valid but .result missing; "
+                f"  {len(_by_state['interrupted']):5d}  "
+                "interrupted (WARN: build was killed mid-flight; "
                 "run `source repair`)",
                 tui.COLOR_WARNING,
             )
@@ -7052,7 +6853,12 @@ class BuildSession:
         if _by_state.get('tunneled'):
             console.print(
                 f"  {len(_by_state['tunneled']):5d}  tunneled "
-                "(.result=TUNNELED, third-party pull)"
+                "(record=TUNNELED, third-party pull)"
+            )
+        if _by_state.get('fail'):
+            console.print(
+                f"  {len(_by_state['fail']):5d}  fail "
+                "(record=FAIL, explicit prior-build failure)"
             )
         if _by_state.get('no_pkgs'):
             console.print(
@@ -7086,7 +6892,7 @@ class BuildSession:
         # actionable state is non-empty.  One line per state, names
         # wrapped to fit terminal width.  `verbose` adds per-name
         # subset annotation.
-        _actionable = ('needs_build', 'stale_pass', 'repairable',
+        _actionable = ('needs_build', 'stale_pass', 'interrupted',
                        'needs_sync')
         _any_actionable = any(_by_state.get(_s) for _s in _actionable)
         if _any_actionable:
@@ -8237,13 +8043,10 @@ class BuildSession:
             'build':    'build sources: source build [force] [pkg | live | installer | recommended | all | <pkg>…] [[profile,…]]',
             'audit':    'READ-ONLY: report build-state of every source — '
                         'ok / needs_sync / needs_build / stale_pass / '
-                        'repairable / tunneled.  Add `summary` for terse '
+                        'interrupted / tunneled.  Add `summary` for terse '
                         'count + subset breakdown.',
-            'repair':   'MUTATOR: align build records with current state. '
-                        'Writes a done/PASS record where binaries are '
-                        'valid but the record is missing; clears '
-                        'stale_pass / interrupted records so next '
-                        'source build rebuilds.',
+            'repair':   'MUTATOR: clear stale_pass / interrupted build '
+                        'records so next `source build` rebuilds.',
             'fork':     'manage fork packages: `source fork <pkg>` '
                         'creates or reloads; `source fork <pkg> '
                         'enabled|disabled` toggles the .disabled marker',

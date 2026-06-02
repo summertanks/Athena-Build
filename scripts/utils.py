@@ -1227,14 +1227,14 @@ def compute_tree_hash(root: str,
 def patch_set_hash(patch_dir: str, patch_files: list) -> str:
     """SHA256 over (filename + NUL + content + NUL) tuples in the given order.
 
-    Used by `_refresh_patches` (build.py) to confirm whether a patch file
-    whose mtime is newer than the corresponding .result actually changed
-    in *content*, or merely had its mtime bumped by a header / comment
-    edit.  Same hash → no rebuild needed (just touch the .result); hash
-    differs → real patch change, invalidate the .result.
+    Used by `_refresh_patches` (build.py) to confirm whether a patch
+    file whose mtime is newer than the corresponding build.json record
+    actually changed in *content*, or merely had its mtime bumped by a
+    header / comment edit.  Same hash → no rebuild needed; hash differs
+    → real patch change, drop the record.
 
-    Also written next to .result on every successful build (in
-    BuildContainer.build) so future refreshes have a stable baseline.
+    Also stamped into the build.json record's patch_set_hash field on
+    every build attempt so future refreshes have a stable baseline.
 
     Returns hex digest.  Empty patch_files → digest of "".
     Missing/unreadable patch files are skipped silently (mirrors

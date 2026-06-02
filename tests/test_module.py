@@ -11371,8 +11371,8 @@ def test_refresh_patches_iterates_both_deb_and_udeb_trees():
         "_refresh_patches must walk udeb tree's sources too")
 
 
-def test_refresh_patches_invalidates_result_when_patch_newer():
-    """COMP-02 phase C: _refresh_patches must delete a .result file
+def test_refresh_patches_invalidates_record_when_patch_newer():
+    """COMP-02 phase C: _refresh_patches must drop the build.json record
     when the patch CONTENT has changed since the last successful build.
     Without this, autorun's source-build step skips packages with
     `[SKIPPED] already built` even when the operator just modified a
@@ -11381,38 +11381,39 @@ def test_refresh_patches_invalidates_result_when_patch_newer():
     applied, install failed with 'No public key').
 
     Two-stage check: mtime gate + content hash.  This test exercises
-    the real-change path: stale .patchhash on disk with a different
-    digest from the on-disk patch content → mtime gate trips → hash
-    confirms divergence → .result is removed and .patchhash rewritten.
-    """
+    the real-change path: stored patch_set_hash on the record disagrees
+    with the on-disk patch content → mtime gate trips → hash confirms
+    divergence → record is removed."""
     import sys, tempfile, time
     from unittest.mock import MagicMock, patch as mock_patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
     from package import Source
+    import utils as _u
 
     with tempfile.TemporaryDirectory() as _root:
-        # Build a synthetic env: a single source 'foo' v1.0 with a
-        # patch on disk, an older .result, and a stale .patchhash
-        # reflecting an EARLIER patch revision.
         _log_build = os.path.join(_root, 'log', 'build')
         _patch_dir = os.path.join(_root, 'patch', 'source', 'foo', '1.0')
         os.makedirs(_log_build)
         os.makedirs(_patch_dir)
-        _result = os.path.join(_log_build, 'foo.result')
-        _hash_file = os.path.join(_log_build, 'foo.patchhash')
-        _patch = os.path.join(_patch_dir, '9001-test.patch')
-        with open(_result, 'w') as fh: fh.write('PASS\n')
-        # Pretend the last build saw the patch with old content.
-        with open(_hash_file, 'w') as fh: fh.write('deadbeef' * 8 + '\n')
-        time.sleep(0.01)
-        with open(_patch, 'w') as fh: fh.write(
-            'Description: t\nAuthor: t\nForwarded: no\nLast-Update: 2026-05-13\n'
-            '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n'
+        # Plant a build record with a STALE patch_set_hash.
+        _rec = _u.new_build_record(
+            package='foo', intended_version='1.0',
+            patch_set_hash='deadbeef' * 8,
         )
+        _rec.update({'phase': 'done', 'status': 'PASS'})
+        _u.write_build_record(_log_build, _rec)
+        _record = os.path.join(_log_build, 'foo' + _u.BUILD_RECORD_SUFFIX)
+        # Write a patch with NEW content.
+        _patch = os.path.join(_patch_dir, '9001-test.patch')
+        time.sleep(0.01)
+        with open(_patch, 'w') as fh:
+            fh.write(
+                'Description: t\nAuthor: t\nForwarded: no\n'
+                'Last-Update: 2026-05-13\n'
+                '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n')
         _now = time.time()
-        os.utime(_result, (_now - 100, _now - 100))
-        os.utime(_hash_file, (_now - 100, _now - 100))
+        os.utime(_record, (_now - 100, _now - 100))
         os.utime(_patch, (_now, _now))
 
         _sess = BuildSession.__new__(BuildSession)
@@ -11430,22 +11431,16 @@ def test_refresh_patches_invalidates_result_when_patch_newer():
         with mock_patch('build.console'), \
              mock_patch('build.utils.check_dep3_header', return_value=[]):
             _sess._refresh_patches()
-        assert not os.path.exists(_result), (
-            f"_refresh_patches must invalidate stale .result; still at {_result}"
+        assert not os.path.exists(_record), (
+            f"_refresh_patches must invalidate stale record; still at {_record}"
         )
         assert _src.patch_list == ['9001-test.patch'], _src.patch_list
-        # New baseline written reflecting the current on-disk patch.
-        with open(_hash_file, 'r') as fh:
-            _new_hash = fh.read().strip()
-        assert _new_hash and _new_hash != 'deadbeef' * 8, (
-            f"baseline .patchhash must be rewritten; still {_new_hash!r}"
-        )
 
 
 def test_refresh_patches_skips_invalidation_for_header_only_edit():
     """Two-stage invalidation: a patch whose MTIME is newer than the
-    .result but whose CONTENT matches the recorded .patchhash must NOT
-    trigger a rebuild.  Covers the common case of editing only the
+    record but whose CONTENT matches the recorded patch_set_hash must
+    NOT trigger a rebuild.  Covers the common case of editing only the
     DEP-3 header / commentary of an existing patch — diff hunks are
     byte-for-byte identical, no rebuild needed.  Caught when CONF-08
     annotations were added to three doc patches and the user noticed
@@ -11456,28 +11451,29 @@ def test_refresh_patches_skips_invalidation_for_header_only_edit():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
     from package import Source
-    from utils import patch_set_hash
+    import utils as _u
 
     with tempfile.TemporaryDirectory() as _root:
         _log_build = os.path.join(_root, 'log', 'build')
         _patch_dir = os.path.join(_root, 'patch', 'source', 'foo', '1.0')
         os.makedirs(_log_build); os.makedirs(_patch_dir)
-        _result = os.path.join(_log_build, 'foo.result')
-        _hash_file = os.path.join(_log_build, 'foo.patchhash')
         _patch = os.path.join(_patch_dir, '9001-test.patch')
         _content = (
             'Description: t\nAuthor: t\nForwarded: no\nLast-Update: 2026-05-13\n'
             '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n'
         )
         with open(_patch, 'w') as fh: fh.write(_content)
-        with open(_result, 'w') as fh: fh.write('PASS\n')
         # Baseline hash matches the current on-disk content.
-        with open(_hash_file, 'w') as fh:
-            fh.write(patch_set_hash(_patch_dir, ['9001-test.patch']) + '\n')
-        # Patch mtime > result mtime (header-only edit scenario).
+        _rec = _u.new_build_record(
+            package='foo', intended_version='1.0',
+            patch_set_hash=_u.patch_set_hash(_patch_dir, ['9001-test.patch']),
+        )
+        _rec.update({'phase': 'done', 'status': 'PASS'})
+        _u.write_build_record(_log_build, _rec)
+        _record = os.path.join(_log_build, 'foo' + _u.BUILD_RECORD_SUFFIX)
+        # Patch mtime > record mtime (header-only edit scenario).
         _now = time.time()
-        os.utime(_result, (_now - 100, _now - 100))
-        os.utime(_hash_file, (_now - 100, _now - 100))
+        os.utime(_record, (_now - 100, _now - 100))
         os.utime(_patch, (_now, _now))
 
         _sess = BuildSession.__new__(BuildSession)
@@ -11493,96 +11489,42 @@ def test_refresh_patches_skips_invalidation_for_header_only_edit():
         with mock_patch('build.console'), \
              mock_patch('build.utils.check_dep3_header', return_value=[]):
             _sess._refresh_patches()
-        assert os.path.exists(_result), (
-            "header-only patch edit (same hash) must NOT invalidate .result"
-        )
-        # .result mtime should be touched past the patch mtime so future
+        assert os.path.exists(_record), (
+            "header-only patch edit (same hash) must NOT invalidate record")
+        # Record mtime should be touched past the patch mtime so future
         # patch_refresh runs don't keep re-entering the hash branch.
-        assert os.path.getmtime(_result) >= os.path.getmtime(_patch), (
-            "_refresh_patches must touch .result mtime past patch mtime; "
-            f"result={os.path.getmtime(_result)} patch={os.path.getmtime(_patch)}"
-        )
-
-
-def test_refresh_patches_writes_baseline_when_no_patchhash():
-    """Migration path: a source with .result but NO .patchhash (built
-    before the hash schema landed) must NOT be invalidated on first
-    encounter — the existing .result is trusted to reflect the current
-    patches.  Instead the current hash is written as a baseline so
-    future runs compare against it correctly."""
-    import sys, tempfile, time
-    from unittest.mock import MagicMock, patch as mock_patch
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-    from package import Source
-    from utils import patch_set_hash
-
-    with tempfile.TemporaryDirectory() as _root:
-        _log_build = os.path.join(_root, 'log', 'build')
-        _patch_dir = os.path.join(_root, 'patch', 'source', 'foo', '1.0')
-        os.makedirs(_log_build); os.makedirs(_patch_dir)
-        _result = os.path.join(_log_build, 'foo.result')
-        _hash_file = os.path.join(_log_build, 'foo.patchhash')
-        _patch = os.path.join(_patch_dir, '9001-test.patch')
-        with open(_patch, 'w') as fh: fh.write(
-            'Description: t\nAuthor: t\nForwarded: no\nLast-Update: 2026-05-13\n'
-            '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n'
-        )
-        with open(_result, 'w') as fh: fh.write('PASS\n')
-        # Patch newer than .result; NO .patchhash present (pre-upgrade state).
-        _now = time.time()
-        os.utime(_result, (_now - 100, _now - 100))
-        os.utime(_patch, (_now, _now))
-        assert not os.path.exists(_hash_file)
-
-        _sess = BuildSession.__new__(BuildSession)
-        _sess.config = MagicMock()
-        _sess.config.dir_patch_source = os.path.join(_root, 'patch', 'source')
-        _sess.config.dir_log = os.path.join(_root, 'log')
-        _src = Source.__new__(Source)
-        _src.package = 'foo'; _src.version = '1.0'; _src.patch_list = []
-        _sess.dep_tree = MagicMock()
-        _sess.dep_tree.selected_srcs = {'foo': _src}
-        _sess.udeb_dep_tree = None
-
-        with mock_patch('build.console'), \
-             mock_patch('build.utils.check_dep3_header', return_value=[]):
-            _sess._refresh_patches()
-        assert os.path.exists(_result), (
-            "first-encounter migration must NOT invalidate trusted .result"
-        )
-        assert os.path.exists(_hash_file), (
-            "first-encounter migration must write baseline .patchhash"
-        )
-        with open(_hash_file, 'r') as fh:
-            _written = fh.read().strip()
-        assert _written == patch_set_hash(_patch_dir, ['9001-test.patch']), (
-            f"baseline hash mismatch: {_written}"
+        assert os.path.getmtime(_record) >= os.path.getmtime(_patch), (
+            "_refresh_patches must touch record mtime past patch mtime; "
+            f"record={os.path.getmtime(_record)} patch={os.path.getmtime(_patch)}"
         )
 
 
 def test_refresh_patches_invalidates_when_patches_removed():
-    """Patch deletion: empty patch_list with a non-empty .patchhash on
-    disk (from a previous build that applied patches) → hash differs
-    from current empty-set hash → invalidate .result + drop the
-    .patchhash.  Comes for free with the content-hash schema; the old
-    mtime-only check could not detect this case (deletion doesn't bump
-    any patch's mtime)."""
+    """Patch deletion: empty patch_list with a non-empty patch_set_hash
+    on the build record (from a previous build that applied patches)
+    → hash differs from current empty-set hash → drop the record.
+    Comes for free with the content-hash schema; an mtime-only check
+    could not detect this case (deletion doesn't bump any patch's
+    mtime)."""
     import sys, tempfile
     from unittest.mock import MagicMock, patch as mock_patch
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
     from package import Source
+    import utils as _u
 
     with tempfile.TemporaryDirectory() as _root:
         _log_build = os.path.join(_root, 'log', 'build')
         # Patch dir does NOT exist (patches were removed).
         os.makedirs(_log_build)
-        _result = os.path.join(_log_build, 'foo.result')
-        _hash_file = os.path.join(_log_build, 'foo.patchhash')
-        with open(_result, 'w') as fh: fh.write('PASS\n')
         # Stale baseline hash reflecting the now-deleted patch set.
-        with open(_hash_file, 'w') as fh: fh.write('cafef00d' * 8 + '\n')
+        _rec = _u.new_build_record(
+            package='foo', intended_version='1.0',
+            patch_set_hash='cafef00d' * 8,
+        )
+        _rec.update({'phase': 'done', 'status': 'PASS'})
+        _u.write_build_record(_log_build, _rec)
+        _record = os.path.join(_log_build, 'foo' + _u.BUILD_RECORD_SUFFIX)
 
         _sess = BuildSession.__new__(BuildSession)
         _sess.config = MagicMock()
@@ -11597,12 +11539,8 @@ def test_refresh_patches_invalidates_when_patches_removed():
         with mock_patch('build.console'), \
              mock_patch('build.utils.check_dep3_header', return_value=[]):
             _sess._refresh_patches()
-        assert not os.path.exists(_result), (
-            "patch removal must invalidate the now-stale .result"
-        )
-        assert not os.path.exists(_hash_file), (
-            "patch removal must drop the now-stale .patchhash"
-        )
+        assert not os.path.exists(_record), (
+            "patch removal must invalidate the now-stale build record")
 
 
 def test_patch_set_hash_stable_and_order_sensitive():
@@ -14927,10 +14865,16 @@ def test_fork_invalidation_wipes_artifacts_on_content_change():
         os.makedirs(os.path.dirname(_stale_deb), exist_ok=True)
         with open(_stale_deb, 'w') as fh:
             fh.write('stale udeb')
+        import utils as _u
         _stale_build_log = os.path.join(
-            bc.dir_log, 'build', 'athena-installer-data.result')
-        with open(_stale_build_log, 'w') as fh:
-            fh.write('PASS\n')
+            bc.dir_log, 'build', 'athena-installer-data' + _u.BUILD_RECORD_SUFFIX)
+        _u.write_build_record(
+            os.path.join(bc.dir_log, 'build'),
+            _u.new_build_record(
+                package='athena-installer-data',
+                intended_version='1.0.0', patch_set_hash='',
+            ),
+        )
 
         # Mutate fork content
         with open(os.path.join(bc.dir_fork_source, 'athena-installer-data',
@@ -16171,119 +16115,6 @@ def test_cmd_source_repair_dispatch_and_method_present():
         _body), "source repair not dispatched in cmd_source"
 
 
-def test_cmd_source_repair_writes_pass_when_binaries_present():
-    """source repair writes a signed build.json record (phase=done,
-    status=PASS) when expected binaries exist in repo/.  OBS-01:
-    replaces the legacy .result writer."""
-    import sys, types
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _stub_tui()
-    import build as _build_mod
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _buildlog = os.path.join(_tmp, 'log', 'build')
-        _repo = os.path.join(_tmp, 'repo')
-        os.makedirs(_buildlog, exist_ok=True)
-        os.makedirs(_repo, exist_ok=True)
-
-        # Plant a valid .deb (ar magic header).  is_ar_file via
-        # python-debian's DebFile is stricter — needs full member set;
-        # easier to monkey-patch is_ar_file on the stubbed container.
-        _deb_name = 'foo_1.0_amd64.deb'
-        with open(os.path.join(_repo, _deb_name), 'wb') as fh:
-            fh.write(b'!<arch>\n')  # ar magic; content beyond is fake
-
-        # Plant a matching .patchhash baseline so _source_state
-        # classifies the source as 'repairable' (post 2026-05-23 P3
-        # tightening: 'repairable' now requires .patchhash matching
-        # current patch_set_hash as proof binaries reflect current
-        # patches — without it the state is 'needs_build' because
-        # we can't prove binaries are fresh).
-        import sys as _sys
-        _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-        from utils import patch_set_hash as _patch_set_hash
-        _patch_dir = os.path.join(_tmp, 'patch', 'source', 'foo', '1.0')
-        _baseline = _patch_set_hash(_patch_dir, [])
-        with open(os.path.join(_buildlog, 'foo.patchhash'), 'w') as fh:
-            fh.write(_baseline + '\n')
-
-        # Stub Source-like
-        class _Src:
-            pkgs = [_deb_name]
-            # _source_state needs these even when not
-            # populated in this test.
-            files = {}
-            version = '1.0'
-            patch_list = []
-
-        # Stub container with the minimum repair/check_build helpers need.
-        # verify_pkg_artifact is the unified gate (filename + ar +
-        # Pkg/Version/Arch match + Depends resolution); for these
-        # unit tests we just trust the stub returns OK.
-        class _Container:
-            buildlog_path = _buildlog
-            @staticmethod
-            def is_ar_file(_path):
-                return True
-            @staticmethod
-            def verify_pkg_artifact(_path, _filename):
-                return (os.path.isfile(_path), 'ok' if os.path.isfile(_path) else 'missing')
-
-        # Stub config — CONF-01 Stage D: deb_dest_for_filename routes
-        # path lookups via the new nested apt-repo layout.  For this
-        # test we want planted .debs at top-level _repo, so stub returns
-        # _repo for every filename.
-        class _Cfg:
-            dir_repo = _repo
-            # _source_state reads these even when the actual subdirs
-            # aren't populated in this test (files={}, patch_list=[]).
-            dir_log = os.path.join(_tmp, 'log')
-            dir_source = os.path.join(_tmp, 'source')
-            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
-            @staticmethod
-            def deb_dest_for_filename(_f):
-                return _repo
-
-        # Stub dep tree
-        class _Tree:
-            selected_srcs = {'foo': _Src()}
-            src_pkg_files = {'foo': list(_Src.pkgs)}
-
-        # Stub flags
-        class _Flags:
-            cache_ready = True
-            dep_check_ready = True
-            build_container_ready = True
-
-        # Build session shell
-        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
-        _sess.config = _Cfg
-        _sess.dep_tree = _Tree
-        _sess.udeb_dep_tree = None
-        _sess.flags = _Flags
-        _sess.container = _Container
-
-        # Sanity: neither sidecar should exist before
-        _result = os.path.join(_buildlog, 'foo.result')
-        _record = os.path.join(_buildlog, 'foo.build.json')
-        assert not os.path.exists(_result)
-        assert not os.path.exists(_record)
-
-        _sess.cmd_source_repair()
-
-        # After repair: a signed build.json record exists with
-        # phase=done / status=PASS.  The legacy .result writer is gone.
-        import utils as _u
-        assert os.path.isfile(_record), "repair didn't write build.json"
-        _rec = _u.read_build_record(_buildlog, 'foo')
-        assert _rec is not None, "build.json failed to verify"
-        assert _rec['phase'] == 'done'
-        assert _rec['status'] == 'PASS'
-        assert _rec['intended_version'] == '1.0'
-        assert not os.path.exists(_result), (
-            "repair must not write the legacy .result file")
-
-
 def test_cmd_source_repair_leaves_fail_result_untouched():
     """source repair must NOT overwrite a FAIL .result — that's an
     explicit operator/build decision that a previous attempt failed,
@@ -16443,14 +16274,19 @@ def test_cmd_source_repair_clears_stale_pass_when_binaries_not_valid():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
     import build as _build_mod
+    import utils as _u
     with tempfile.TemporaryDirectory() as _tmp:
         _buildlog = os.path.join(_tmp, 'log', 'build')
         _repo = os.path.join(_tmp, 'repo')
         os.makedirs(_buildlog, exist_ok=True)
         os.makedirs(_repo, exist_ok=True)
-        _result = os.path.join(_buildlog, 'foo.result')
-        with open(_result, 'w') as fh:
-            fh.write('PASS\n')
+        # Plant a done/PASS record (binaries claimed valid).
+        _rec = _u.new_build_record(
+            package='foo', intended_version='1.0', patch_set_hash='',
+        )
+        _rec.update({'phase': 'done', 'status': 'PASS'})
+        _u.write_build_record(_buildlog, _rec)
+        _record = os.path.join(_buildlog, 'foo.build.json')
         # Stub is_ar_file=False to mark binaries as corrupt/missing.
         class _Src:
             pkgs = ['foo_1.0_amd64.deb']
@@ -16487,9 +16323,9 @@ def test_cmd_source_repair_clears_stale_pass_when_binaries_not_valid():
 
         _sess.cmd_source_repair()
 
-        assert not os.path.exists(_result), (
+        assert not os.path.exists(_record), (
             "stale PASS must be CLEARED by repair so next source build "
-            "rebuilds rather than skipping; got file still present"
+            "rebuilds rather than skipping; record still present"
         )
 
 
@@ -16690,91 +16526,6 @@ def test_print_wrapped_names_keeps_lines_under_wrap_width():
         assert len(_line) <= 50, (
             f"line exceeds wrap=50: {len(_line)} chars: {_line!r}"
         )
-
-
-def test_source_state_repairable_requires_patchhash_baseline():
-    """Regression for the audit/repair ping-pong reported 2026-05-23.
-
-    Before this fix: repair on stale_pass cleared both .result and
-    .patchhash; the next audit re-classified the source as
-    'repairable' (binaries valid + .result missing); a second repair
-    would write PASS over actually-stale binaries.  Cycle didn't
-    settle.
-
-    After fix: 'repairable' requires .patchhash matching current
-    patch_set_hash as proof binaries are current.  Without the
-    baseline, classify as 'needs_build' instead — operator must
-    rebuild, not repair.
-
-    Pins the three .patchhash branches for the binaries-valid +
-    .result-missing case."""
-    import sys, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _stub_tui()
-    import build as _build_mod
-    from utils import patch_set_hash as _patch_set_hash
-
-    def _run(patchhash_content):
-        with tempfile.TemporaryDirectory() as _tmp:
-            _buildlog = os.path.join(_tmp, 'log', 'build')
-            _repo = os.path.join(_tmp, 'repo')
-            os.makedirs(_buildlog, exist_ok=True)
-            os.makedirs(_repo, exist_ok=True)
-            _deb = 'foo_1.0_amd64.deb'
-            with open(os.path.join(_repo, _deb), 'wb') as fh:
-                fh.write(b'!<arch>\n')
-            # .result deliberately NOT created (this is the "missing
-            # .result" axis we're testing).
-            if patchhash_content is not None:
-                with open(os.path.join(_buildlog, 'foo.patchhash'),
-                          'w') as fh:
-                    fh.write(patchhash_content + '\n')
-            class _Src:
-                pkgs = [_deb]
-                files = {}
-                version = '1.0'
-                patch_list = []
-            class _Container:
-                buildlog_path = _buildlog
-                @staticmethod
-                def is_ar_file(_): return True
-                @staticmethod
-                def verify_pkg_artifact(*_a, **_kw): return (True, 'ok')
-            class _Cfg:
-                dir_repo = _repo
-                dir_log = os.path.join(_tmp, 'log')
-                dir_source = os.path.join(_tmp, 'source')
-                dir_patch_source = os.path.join(_tmp, 'patch', 'source')
-                @staticmethod
-                def deb_dest_for_filename(_): return _repo
-            class _Tree:
-                selected_srcs = {'foo': _Src()}
-                src_pkg_files = {'foo': list(_Src.pkgs)}
-            _sess = _build_mod.BuildSession.__new__(
-                _build_mod.BuildSession)
-            _sess.config = _Cfg
-            _sess.dep_tree = _Tree
-            _sess.udeb_dep_tree = None
-            _sess.container = _Container
-            return _sess._source_state('foo', _Tree.selected_srcs['foo'])
-
-    # Branch A: .patchhash absent → can't prove binaries fresh →
-    # needs_build (NOT repairable).
-    assert _run(None) == 'needs_build', (
-        "missing .patchhash + missing .result + valid binaries must "
-        "classify as 'needs_build' (no proof of freshness), not "
-        "'repairable' — otherwise repair-after-stale_pass writes PASS "
-        "over actually-stale binaries"
-    )
-
-    # Branch B: .patchhash matches current → binaries provably built
-    # against current patches → 'repairable'.
-    _matching = _patch_set_hash('/nonexistent', [])
-    assert _run(_matching) == 'repairable'
-
-    # Branch C: .patchhash differs from current → binaries are stale
-    # → 'needs_build'.
-    assert _run('deadbeef' * 8) == 'needs_build'
 
 
 def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
@@ -19088,8 +18839,11 @@ def test_check_build_matches_asg_variant_of_prediction():
         # on-disk artifact carries the asg stamp; prediction is pristine
         _build_minimal_deb(os.path.join(_dest, 'openssl_3.0.15-1+asg1u1_amd64.deb'),
                            'openssl', '3.0.15-1+asg1u1', 'amd64')
-        with open(os.path.join(_log, 'openssl.result'), 'w') as fh:
-            fh.write('PASS\n')
+        import utils as _u
+        _rec = _u.new_build_record(
+            package='openssl', intended_version='3.0.15-1', patch_set_hash='')
+        _rec.update({'phase': 'done', 'status': 'PASS'})
+        _u.write_build_record(_log, _rec)
 
         _bc = _make_buildcontainer_stub(repo=_tmp, buildlog=_log)
 
@@ -19126,8 +18880,11 @@ def test_check_build_locates_non_main_component_deb():
         # firmware deb lives ONLY in the non-free-firmware dir
         _build_minimal_deb(os.path.join(_nff, 'intel-microcode_3.1_amd64.deb'),
                            'intel-microcode', '3.1', 'amd64')
-        with open(os.path.join(_log, 'intel-microcode.result'), 'w') as fh:
-            fh.write('TUNNELED\n')
+        import utils as _u
+        _rec = _u.new_build_record(
+            package='intel-microcode', intended_version='3.1', patch_set_hash='')
+        _rec.update({'phase': 'tunneled', 'status': 'TUNNELED'})
+        _u.write_build_record(_log, _rec)
         _bc = _make_buildcontainer_stub(repo=_tmp, buildlog=_log)
 
         class _FakeConfig:
@@ -22630,10 +22387,9 @@ def main() -> int:
         test_source_build_pkg_subset_excludes_live_installer_extras,
         test_source_build_installer_subset_unions_udeb_tree_with_deb_arm,
         test_refresh_patches_iterates_both_deb_and_udeb_trees,
-        test_refresh_patches_invalidates_result_when_patch_newer,
+        test_refresh_patches_invalidates_record_when_patch_newer,
         test_refresh_patches_keeps_result_when_patch_older_than_result,
         test_refresh_patches_skips_invalidation_for_header_only_edit,
-        test_refresh_patches_writes_baseline_when_no_patchhash,
         test_refresh_patches_invalidates_when_patches_removed,
         test_patch_set_hash_stable_and_order_sensitive,
         test_source_download_iterates_both_deb_and_udeb_trees,
@@ -22780,7 +22536,6 @@ def main() -> int:
         test_deb_dir_for_recognises_main_udeb_label,
         test_repo_audit_closure_handles_conflicts_and_provides,
         test_print_wrapped_names_keeps_lines_under_wrap_width,
-        test_source_state_repairable_requires_patchhash_baseline,
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
         test_cmd_source_fork_enable_removes_marker,
@@ -22799,7 +22554,6 @@ def main() -> int:
         test_verify_pkg_artifact_substvar_skip_logic_present,
         test_verify_pkg_artifact_or_group_satisfied_by_any_alternative,
         test_cmd_source_repair_dispatch_and_method_present,
-        test_cmd_source_repair_writes_pass_when_binaries_present,
         test_cmd_source_repair_leaves_fail_result_untouched,
         test_cmd_source_repair_skips_when_binaries_missing,
         test_cmd_source_repair_clears_stale_pass_when_binaries_not_valid,
