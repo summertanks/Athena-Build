@@ -22235,6 +22235,75 @@ def test_migrate_legacy_records_prune_deletes_legacy_files():
         assert _u.read_build_record(_td, 'foo') is not None
 
 
+def test_cmd_source_migrate_records_accepts_purge_as_alias_for_prune():
+    """Operator-facing arg parser must accept `purge` AND `prune` as
+    equivalent.  Caught 2026-06-02: operator ran `migrate-records purge`
+    expecting legacy files to be deleted; parser only knew `prune` and
+    silently no-op'd the cleanup, leaving 985 .result + .patchhash
+    files on disk after migration.
+
+    Also pins the existing-record + prune path: when a record was
+    written by a previous run, re-invoking with prune must still
+    delete the legacy sidecars for those already-migrated sources."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build as _build_mod
+    import utils as _u
+    from unittest.mock import MagicMock
+
+    for _alias in ('prune', 'purge'):
+        with tempfile.TemporaryDirectory() as _tmp:
+            _buildlog = os.path.join(_tmp, 'log', 'build')
+            os.makedirs(_buildlog, exist_ok=True)
+            # Plant a legacy .result + .patchhash AND a pre-existing
+            # migrated record — mirrors the user's "second invocation"
+            # state (first run migrated; second run with purge should
+            # prune the now-redundant legacy files).
+            with open(os.path.join(_buildlog, 'foo.result'), 'w') as _fh:
+                _fh.write('PASS\n')
+            with open(os.path.join(_buildlog, 'foo.patchhash'), 'w') as _fh:
+                _fh.write('h\n')
+            _u.write_build_record(_buildlog, _u.new_build_record(
+                package='foo', intended_version='1.0', patch_set_hash='h',
+            ))
+
+            class _Src:
+                version = '1.0'
+                pkgs = ['foo_1.0_amd64.deb']
+
+            class _Cfg:
+                dir_log = os.path.join(_tmp, 'log')
+                dir_source = os.path.join(_tmp, 'source')
+                dir_patch_source = os.path.join(_tmp, 'patch', 'source')
+
+            class _Container:
+                buildlog_path = _buildlog
+
+            class _Flags:
+                cache_ready = True
+                dep_check_ready = True
+                build_container_ready = True
+
+            _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+            _sess.config = _Cfg
+            _sess.dep_tree = MagicMock(selected_srcs={'foo': _Src()})
+            _sess.udeb_dep_tree = None
+            _sess.container = _Container
+            _sess.flags = _Flags
+
+            _sess.cmd_source_migrate_records(_alias)
+
+            assert not os.path.exists(os.path.join(_buildlog, 'foo.result')), (
+                f"`{_alias}` should have deleted foo.result")
+            assert not os.path.exists(
+                os.path.join(_buildlog, 'foo.patchhash')), (
+                f"`{_alias}` should have deleted foo.patchhash")
+            # Signed record must survive — only legacy files go.
+            assert _u.read_build_record(_buildlog, 'foo') is not None, (
+                f"`{_alias}` must NOT delete the signed record")
+
+
 def test_cmd_source_migrate_records_accepts_both_dryrun_spellings():
     """Operator-facing arg parser must accept `dryrun` AND `dry-run`.
     Caught 2026-06-02: `dryrun` (no hyphen) silently fell through to a
@@ -23226,6 +23295,7 @@ def main() -> int:
         test_migrate_legacy_records_prune_deletes_legacy_files,
         test_migrate_legacy_records_dry_run_writes_nothing,
         test_cmd_source_migrate_records_accepts_both_dryrun_spellings,
+        test_cmd_source_migrate_records_accepts_purge_as_alias_for_prune,
         test_migrate_legacy_records_idempotent_when_record_already_exists,
         test_migrate_legacy_records_unknown_status_token,
         test_print_build_times_aggregates_elapsed_across_records,
