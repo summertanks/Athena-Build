@@ -1,0 +1,8 @@
+Task: asgard-office
+Section: user
+Description: Office productivity suite
+ Adds LibreOffice Writer / Calc / Impress plus en-US dictionaries
+ on top of the GNOME desktop.  Selecting this task pulls the GNOME
+ desktop set automatically via the asgard-gnome-desktop dependency.
+Key:
+ asgard-office

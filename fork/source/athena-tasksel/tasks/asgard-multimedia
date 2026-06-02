@@ -1,0 +1,12 @@
+Task: asgard-multimedia
+Section: user
+Description: Multimedia playback and capture
+ Adds the GNOME multimedia app stack: totem and rhythmbox for
+ video and music playback, gnome-music as an alternative library
+ browser, gnome-sound-recorder for quick audio capture, shotwell
+ for photo management, cheese for webcam, plus rygel for UPnP /
+ DLNA media serving.  Patent-encumbered codec packages are NOT
+ pulled in — install gstreamer1.0-plugins-ugly separately if
+ needed.  Selecting this task pulls the GNOME desktop set.
+Key:
+ asgard-multimedia

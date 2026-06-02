@@ -10011,20 +10011,48 @@ def test_athena_tasksel_data_binary_stanza_in_fork_control():
     assert 'Replaces: tasksel-data' in body, body
 
 
-def test_athena_tasksel_fork_ships_exactly_six_curated_tasks():
-    """FORK-01 Step 5b: the fork's tasks/ dir contains exactly the
-    six curated tasks chosen 2026-05-17: standard (curated Key:
-    list, NOT Packages: standard), ssh-server, laptop, desktop
-    (kept from Debian), gnome-desktop, development-tools (Athena
-    content mirroring pkg.list groups)."""
+def test_athena_tasksel_fork_ships_curated_task_set():
+    """FORK-01 Step 5b + 2026-06-02 expansion: the fork's tasks/ dir
+    contains exactly the curated set of tasks Asgard chooses to
+    surface in the d-i task selector.
+
+    Original 2026-05-17 set (6): standard, ssh-server, laptop,
+    desktop, gnome-desktop, development-tools.  These mirror
+    config/pkg.list groups and drive the install-time package
+    selection — sync enforced by
+    test_athena_tasksel_task_keys_mirror_pkg_list_groups.
+
+    2026-06-02 addition (8): asgard-office, asgard-pim,
+    asgard-multimedia, asgard-gnome-extras, asgard-accessibility,
+    asgard-network-services, asgard-printing-extras, asgard-games.
+    These are operator-facing subcategory tasks whose Key: list is
+    a single metapackage name (the asgard-<group> metapackage in
+    pool.list).  Each metapackage Depends on asgard-gnome-desktop
+    so selecting any of these tasks pulls the GNOME desktop base
+    automatically via apt's resolver.  These tasks do NOT have a
+    matching pkg.list group — they're pool-only.
+
+    Both sets are pinned here so accidental task additions still
+    surface as a test failure, but deliberate additions are
+    explicitly recorded."""
     _tasks_dir = os.path.join(_ROOT, 'fork', 'source', 'athena-tasksel',
                               'tasks')
     files = {f for f in os.listdir(_tasks_dir)
              if os.path.isfile(os.path.join(_tasks_dir, f))
              and not f.startswith('.')
              and f != 'README'}
-    expected = {'standard', 'ssh-server', 'laptop', 'desktop',
-                'gnome-desktop', 'development-tools'}
+    expected = {
+        # FORK-01 Step 5b — pkg.list-group mirror tasks
+        'standard', 'ssh-server', 'laptop', 'desktop',
+        'gnome-desktop', 'development-tools',
+        # 2026-06-02 — operator-facing subcategory tasks; Key list
+        # points at the asgard-<group> metapackage; metapackage
+        # Depends pulls asgard-gnome-desktop transitively
+        'asgard-office', 'asgard-pim', 'asgard-multimedia',
+        'asgard-gnome-extras', 'asgard-accessibility',
+        'asgard-network-services', 'asgard-printing-extras',
+        'asgard-games',
+    }
     assert files == expected, (
         f"tasks/ mismatch.  Extra (in tree, not expected): "
         f"{files - expected}.  Missing (expected, not in tree): "
@@ -21923,7 +21951,7 @@ def main() -> int:
         test_parse_pkg_list_group_meta_flat_file_returns_base_only,
         # FORK-01 Step 5b: synthetic tasksel-data retired, fork ships it
         test_athena_tasksel_data_binary_stanza_in_fork_control,
-        test_athena_tasksel_fork_ships_exactly_six_curated_tasks,
+        test_athena_tasksel_fork_ships_curated_task_set,
         test_athena_tasksel_standard_task_uses_curated_key_list,
         test_iso_installer_synthetic_tasksel_data_retired,
         test_installer_list_includes_athena_pkgsel,
