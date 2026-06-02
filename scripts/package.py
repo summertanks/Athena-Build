@@ -680,6 +680,16 @@ class Source(Sources):
         original virtual entry, matching how apt itself propagates
         version constraints across a `|` alternation when only one of
         the alternatives carries the constraint.
+
+        Provider order: providers whose name starts with the virtual
+        name (e.g. `imagemagick-6.q16` for virtual `imagemagick`) sort
+        before name-unrelated providers (`graphicsmagick-imagemagick-compat`).
+        Within each tier, alphabetic.  Without the tier, plain alphabetic
+        put `graphicsmagick-imagemagick-compat` first for the `imagemagick`
+        virtual — and the BuildContainer's OR-chain stops at the first
+        success, so apt would install GraphicsMagick's `convert` shim
+        instead of real ImageMagick, breaking fonts-noto-color-emoji's
+        Makefile recipe that uses `convert -size … canvas:none …`.
         """
         if len(group) != 1:
             return group
@@ -689,7 +699,8 @@ class Source(Sources):
         except (KeyError, AttributeError):
             return group
         _providers = sorted({_pkg['Package'] for _pkg in _candidates
-                             if _pkg['Package'] != _name})
+                             if _pkg['Package'] != _name},
+                            key=lambda _p: (not _p.startswith(_name), _p))
         if len(_providers) < 2:
             return group
         return [(_p, _ver, _op) for _p in _providers] + [(_name, _ver, _op)]

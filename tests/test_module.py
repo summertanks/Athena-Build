@@ -474,6 +474,31 @@ def test_build_depends_unknown_name_left_unchanged():
     assert [alt[0] for alt in groups[0]] == ['nonexistent-pkg']
 
 
+def test_build_depends_prefix_matched_provider_sorts_first():
+    """Providers whose name starts with the virtual name (e.g.
+    `imagemagick-6.q16` for virtual `imagemagick`) sort BEFORE
+    name-unrelated providers (`graphicsmagick-imagemagick-compat`).
+    Plain alphabetic order would put graphicsmagick-imagemagick-compat
+    first — the BuildContainer's `||`-chain would stop at the first
+    install success, leaving graphicsmagick's `convert` shim in place
+    of real ImageMagick, breaking fonts-noto-color-emoji's Makefile
+    rule that uses ImageMagick-specific `canvas:none` input."""
+    cache = _StubProviderCache({
+        'imagemagick': [
+            {'Package': 'graphicsmagick-imagemagick-compat'},
+            {'Package': 'imagemagick-6.q16'},
+        ],
+    })
+    src = _src_with_build_depends("imagemagick")
+    groups = src.build_depends('amd64', cache=cache)
+    names = [alt[0] for alt in groups[0]]
+    assert names == [
+        'imagemagick-6.q16',
+        'graphicsmagick-imagemagick-compat',
+        'imagemagick',
+    ], names
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # _compute_install_batches single-pass topo sort
 # ─────────────────────────────────────────────────────────────────────────────
