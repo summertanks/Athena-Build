@@ -10022,9 +10022,9 @@ def test_athena_tasksel_fork_ships_curated_task_set():
     selection — sync enforced by
     test_athena_tasksel_task_keys_mirror_pkg_list_groups.
 
-    2026-06-02 addition (8): asgard-office, asgard-pim,
+    2026-06-02 addition (7): asgard-office, asgard-pim,
     asgard-multimedia, asgard-gnome-extras, asgard-accessibility,
-    asgard-network-services, asgard-printing-extras, asgard-games.
+    asgard-network-services, asgard-printing-extras.
     These are operator-facing subcategory tasks whose Key: list is
     a single metapackage name (the asgard-<group> metapackage in
     pool.list).  Each metapackage Depends on asgard-gnome-desktop
@@ -10034,7 +10034,9 @@ def test_athena_tasksel_fork_ships_curated_task_set():
 
     Both sets are pinned here so accidental task additions still
     surface as a test failure, but deliberate additions are
-    explicitly recorded."""
+    explicitly recorded.  asgard-games was drafted in the initial
+    8-task push but removed 2026-06-02 — operator decision not to
+    ship a games / BitTorrent subcategory."""
     _tasks_dir = os.path.join(_ROOT, 'fork', 'source', 'athena-tasksel',
                               'tasks')
     files = {f for f in os.listdir(_tasks_dir)
@@ -10051,7 +10053,6 @@ def test_athena_tasksel_fork_ships_curated_task_set():
         'asgard-office', 'asgard-pim', 'asgard-multimedia',
         'asgard-gnome-extras', 'asgard-accessibility',
         'asgard-network-services', 'asgard-printing-extras',
-        'asgard-games',
     }
     assert files == expected, (
         f"tasks/ mismatch.  Extra (in tree, not expected): "
