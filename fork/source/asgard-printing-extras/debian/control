@@ -1,0 +1,31 @@
+Source: asgard-printing-extras
+Section: metapackages
+Priority: optional
+Maintainer: Athena Build <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+
+Package: asgard-printing-extras
+Architecture: all
+Multi-Arch: foreign
+Section: metapackages
+Depends:
+ ${misc:Depends},
+ asgard-gnome-desktop,
+ cups,
+ cups-pk-helper,
+ simple-scan
+Description: @DISTRIBUTION@ printing + scanning extras
+ Completes the printing + scanning story.  asgard-gnome-desktop
+ ships system-config-printer-common + system-config-printer-udev
+ (the configuration UI shim and udev hooks), but not the CUPS print
+ server itself or scanner tooling.  This metapackage adds:
+ .
+   * cups               the CUPS printing server (daemon + filters)
+   * cups-pk-helper     PolicyKit elevation helper so the GNOME
+                        printer dialog can add/remove printers
+                        without a separate root prompt
+   * simple-scan        GNOME scanner / OCR-ready capture UI
+ .
+ Selecting this metapackage automatically pulls asgard-gnome-desktop.

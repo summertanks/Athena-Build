@@ -1,0 +1,49 @@
+Source: asgard-gnome-extras
+Section: metapackages
+Priority: optional
+Maintainer: Athena Build <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+
+Package: asgard-gnome-extras
+Architecture: all
+Multi-Arch: foreign
+Section: metapackages
+Depends:
+ ${misc:Depends},
+ asgard-gnome-desktop,
+ gnome-maps,
+ gnome-weather,
+ gnome-characters,
+ gnome-font-viewer,
+ gnome-color-manager,
+ gnome-backgrounds,
+ gnome-bluetooth-sendto,
+ gnome-user-share,
+ gnome-sushi,
+ gnome-initial-setup,
+ gnome-remote-desktop,
+ fonts-cantarell,
+ seahorse,
+ zenity
+Description: @DISTRIBUTION@ full GNOME — maps, weather, more
+ Adds the "full GNOME" app set beyond the core desktop.  Mirrors the
+ delta between the upstream `gnome-core` metapackage (minimal) and
+ `gnome` (full):
+ .
+   * gnome-maps, gnome-weather    location-aware utilities
+   * gnome-characters             Unicode character browser
+   * gnome-font-viewer            font preview / install GUI
+   * gnome-color-manager          ICC color profile management
+   * gnome-backgrounds            extra wallpaper set
+   * gnome-bluetooth-sendto       Bluetooth file send-to integration
+   * gnome-user-share             personal file sharing daemon
+   * gnome-sushi                  Nautilus quick-preview
+   * gnome-initial-setup          first-boot welcome wizard
+   * gnome-remote-desktop         RDP / VNC server
+   * fonts-cantarell              GNOME's default UI font
+   * seahorse                     GNOME keyring + GPG key GUI
+   * zenity                       shell-script dialog helper
+ .
+ Selecting this metapackage automatically pulls asgard-gnome-desktop.

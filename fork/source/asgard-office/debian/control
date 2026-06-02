@@ -1,0 +1,35 @@
+Source: asgard-office
+Section: metapackages
+Priority: optional
+Maintainer: Athena Build <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+
+Package: asgard-office
+Architecture: all
+Multi-Arch: foreign
+Section: metapackages
+Depends:
+ ${misc:Depends},
+ asgard-gnome-desktop,
+ libreoffice-writer,
+ libreoffice-calc,
+ libreoffice-impress,
+ libreoffice-gnome,
+ libreoffice-help-en-us,
+ hunspell-en-us,
+ hyphen-en-us,
+ mythes-en-us
+Description: @DISTRIBUTION@ office productivity suite
+ Adds the LibreOffice office suite (Writer / Calc / Impress) plus
+ GNOME integration shim and en-US dictionaries (Hunspell spell
+ check, Hyphen hyphenation, MyThes thesaurus) to the @DISTRIBUTION@
+ desktop set.
+ .
+ Selecting this metapackage automatically pulls asgard-gnome-desktop
+ so a single `apt install asgard-office` brings up a complete
+ office-ready desktop without separate steps.
+ .
+ Pattern B per docs/branding-methodology.md — operator-facing
+ convenience that coexists with the pkg.list groups and tasksel.

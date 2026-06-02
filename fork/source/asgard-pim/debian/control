@@ -1,0 +1,28 @@
+Source: asgard-pim
+Section: metapackages
+Priority: optional
+Maintainer: Athena Build <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+
+Package: asgard-pim
+Architecture: all
+Multi-Arch: foreign
+Section: metapackages
+Depends:
+ ${misc:Depends},
+ asgard-gnome-desktop,
+ evolution,
+ evolution-plugins
+Description: @DISTRIBUTION@ personal information management
+ Adds the Evolution mail / calendar / address-book client and its
+ plugin set on top of the @DISTRIBUTION@ desktop's existing
+ gnome-calendar + gnome-contacts + gnome-clocks PIM apps.
+ Evolution adds the missing piece: a full IMAP/SMTP/Exchange mail
+ client integrated with the GNOME PIM data services
+ (evolution-data-server, already pulled in by gnome-core).
+ .
+ Selecting this metapackage automatically pulls asgard-gnome-desktop
+ so a single `apt install asgard-pim` brings up the full PIM stack
+ without separate steps.

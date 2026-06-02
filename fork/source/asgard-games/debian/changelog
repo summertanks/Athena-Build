@@ -1,0 +1,8 @@
+asgard-games (1.0.0) thor; urgency=low
+
+  * Initial @DISTRIBUTION@ casual-games + BitTorrent metapackage.
+    Adds gnome-games (mahjong/sudoku/chess/mines/solitaire bundle) +
+    transmission-gtk on top of asgard-gnome-desktop.  Opt-in only —
+    operator chooses whether to install.
+
+ -- Athena Build <athena@local>  Mon, 02 Jun 2026 02:00:00 +0000

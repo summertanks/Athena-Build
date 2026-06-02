@@ -1,0 +1,40 @@
+Source: asgard-network-services
+Section: metapackages
+Priority: optional
+Maintainer: Athena Build <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+
+Package: asgard-network-services
+Architecture: all
+Multi-Arch: foreign
+Section: metapackages
+Depends:
+ ${misc:Depends},
+ asgard-gnome-desktop,
+ avahi-daemon,
+ libnss-mdns,
+ libproxy1-plugin-networkmanager,
+ libproxy1-plugin-gsettings,
+ libproxy1-plugin-webkit
+Description: @DISTRIBUTION@ network discovery + proxy resolution
+ Adds the network-level conveniences that polish desktop network
+ behavior on laptop / mobile use:
+ .
+   * avahi-daemon                       mDNS / Bonjour service
+                                        discovery (.local resolution,
+                                        airprint, chromecast, etc.)
+   * libnss-mdns                        glibc NSS resolver plugin
+                                        wiring .local through avahi
+   * libproxy1-plugin-networkmanager    libproxy NM autodetect plugin
+   * libproxy1-plugin-gsettings         libproxy GSettings autodetect
+   * libproxy1-plugin-webkit            libproxy WebKit autoconfig
+                                        URL evaluator
+ .
+ None of these are required for basic networking (NetworkManager in
+ asgard-gnome-desktop covers that) — they make discovery + proxy
+ handling Just Work without operator config on networks that use
+ mDNS or proxy auto-config.
+ .
+ Selecting this metapackage automatically pulls asgard-gnome-desktop.

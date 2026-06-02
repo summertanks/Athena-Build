@@ -1,0 +1,8 @@
+asgard-accessibility (1.0.0) thor; urgency=low
+
+  * Initial @DISTRIBUTION@ accessibility metapackage.  Adds
+    at-spi2-core (a11y bus) + orca (screen reader).  Pairs with the
+    INST-02 ticket which will add speakup + brltty udebs into the
+    installer ramdisk later.  Depends on asgard-gnome-desktop.
+
+ -- Athena Build <athena@local>  Mon, 02 Jun 2026 02:00:00 +0000

@@ -1,0 +1,32 @@
+Source: asgard-accessibility
+Section: metapackages
+Priority: optional
+Maintainer: Athena Build <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+
+Package: asgard-accessibility
+Architecture: all
+Multi-Arch: foreign
+Section: metapackages
+Depends:
+ ${misc:Depends},
+ asgard-gnome-desktop,
+ at-spi2-core,
+ orca
+Description: @DISTRIBUTION@ desktop accessibility
+ Adds the GNOME accessibility stack on top of the base desktop:
+ .
+   * at-spi2-core    assistive technology service bus (used by orca
+                     and by GTK's assistive interfaces — most GTK
+                     apps will use it when available)
+   * orca            screen reader for blind / low-vision users
+ .
+ Pairs with INST-02 (TODO) which extends accessibility into the
+ installer ramdisk (speakup udeb + brltty udeb for screen reader
+ and braille support during install).  This metapackage covers the
+ installed-system side of accessibility — the installer side is
+ separately tracked.
+ .
+ Selecting this metapackage automatically pulls asgard-gnome-desktop.

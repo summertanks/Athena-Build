@@ -1,0 +1,9 @@
+asgard-pim (1.0.0) thor; urgency=low
+
+  * Initial @DISTRIBUTION@ personal information management metapackage.
+    Adds Evolution + evolution-plugins on top of the GNOME PIM apps
+    already in asgard-gnome-desktop (calendar, contacts, clocks).
+    Depends on asgard-gnome-desktop so selecting this subcategory
+    pulls the GNOME base set automatically.
+
+ -- Athena Build <athena@local>  Mon, 02 Jun 2026 02:00:00 +0000
