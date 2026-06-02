@@ -386,7 +386,7 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
       - fork/source/repo/<src>.tree-hash (stale; rewritten post-regen)
       - source/<src>_* (downloaded copy + .verified sidecar)
       - repo/<bin>_* for each binary in debian/control (.deb / .udeb)
-      - log/build/<src>{,.result,.patchhash} (build log + sidecars)
+      - log/build/<src>{,.result,.patchhash,.build.json} (build log + sidecars)
     """
     _targets: List[str] = []
 
@@ -414,7 +414,7 @@ def _wipe_fork_pkg_outputs(pkg_name: str, binary_names: List[str],
 
     # Build-log sidecars (source-named)
     _build_log_dir = os.path.join(buildconfig.dir_log, 'build')
-    for _suffix in ('', '.result', '.patchhash'):
+    for _suffix in ('', '.result', '.patchhash', utils.BUILD_RECORD_SUFFIX):
         _targets.append(os.path.join(_build_log_dir, pkg_name + _suffix))
 
     _wiped = 0

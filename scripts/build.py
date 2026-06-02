@@ -1363,20 +1363,45 @@ class BuildSession:
         # makes it free.)
         _buildlog = os.path.join(self.config.dir_log, 'build')
         _invalidated = []
+
+        def _remove_build_record(_pkg_name: str) -> None:
+            # OBS-01 migration helper: invalidation must drop the signed
+            # record alongside the legacy sidecars so the new and old
+            # surfaces stay consistent for repo audit.  Best-effort —
+            # absent file is fine (FileNotFoundError swallowed).
+            _rp = os.path.join(_buildlog, _pkg_name + utils.BUILD_RECORD_SUFFIX)
+            try:
+                os.remove(_rp)
+            except FileNotFoundError:
+                pass
+            except OSError as _e:
+                logger.warning(
+                    f"[patch] {_pkg_name}: cannot remove stale {_rp}: {_e}")
+
         for _pkg, _src in _unified_srcs.items():
             _result_file = os.path.join(_buildlog, _pkg + '.result')
-            if not os.path.exists(_result_file):
+            _record_path = os.path.join(
+                _buildlog, _pkg + utils.BUILD_RECORD_SUFFIX)
+            if (not os.path.exists(_result_file)
+                    and not os.path.exists(_record_path)):
                 continue
             _patch_dir = os.path.join(
                 self.config.dir_patch_source, _pkg, utils.version_no_epoch(_src.version),
             )
             _hash_file = os.path.join(_buildlog, _pkg + '.patchhash')
             _stored_hash = None
-            try:
-                with open(_hash_file, 'r') as fh:
-                    _stored_hash = fh.read().strip() or None
-            except OSError:
-                pass
+            # OBS-01: prefer the signed record's hash; fall back to legacy.
+            _record = utils.read_build_record(_buildlog, _pkg)
+            if _record is not None:
+                _rec_hash = _record.get('patch_set_hash')
+                if isinstance(_rec_hash, str) and _rec_hash:
+                    _stored_hash = _rec_hash
+            if _stored_hash is None:
+                try:
+                    with open(_hash_file, 'r') as fh:
+                        _stored_hash = fh.read().strip() or None
+                except OSError:
+                    pass
 
             # Patch removal: no patches now, but a baseline hash exists
             # for a previous non-empty set → invalidate.  (Hash of empty
@@ -1388,8 +1413,11 @@ class BuildSession:
                 if _stored_hash == _current_hash:
                     continue
                 try:
-                    os.remove(_result_file)
-                    os.remove(_hash_file)
+                    if os.path.exists(_result_file):
+                        os.remove(_result_file)
+                    if os.path.exists(_hash_file):
+                        os.remove(_hash_file)
+                    _remove_build_record(_pkg)
                     _invalidated.append(_pkg)
                 except OSError as e:
                     logger.warning(
@@ -1397,8 +1425,13 @@ class BuildSession:
                     )
                 continue
 
+            # mtime gate uses the build.json mtime when present, else
+            # falls back to .result (legacy).  Either reflects "when the
+            # build last wrote state for this pkg".
+            _gate_path = (_record_path if os.path.exists(_record_path)
+                          else _result_file)
             try:
-                _result_mtime = os.path.getmtime(_result_file)
+                _result_mtime = os.path.getmtime(_gate_path)
             except OSError:
                 continue
             _newer = any(
@@ -1434,7 +1467,10 @@ class BuildSession:
                 try:
                     with open(_hash_file, 'w') as fh:
                         fh.write(_current_hash + '\n')
-                    os.utime(_result_file, (_touch_mtime, _touch_mtime))
+                    if os.path.exists(_result_file):
+                        os.utime(_result_file, (_touch_mtime, _touch_mtime))
+                    if os.path.exists(_record_path):
+                        os.utime(_record_path, (_touch_mtime, _touch_mtime))
                 except OSError as e:
                     logger.warning(
                         f"[patch] {_pkg}: cannot write {_hash_file}: {e}"
@@ -1443,16 +1479,21 @@ class BuildSession:
 
             if _stored_hash == _current_hash:
                 # Cosmetic edit (header / comment) — content unchanged.
-                # Touch .result to reset the mtime gate; no rebuild.
+                # Touch .result + .build.json to reset the mtime gate.
                 try:
-                    os.utime(_result_file, (_touch_mtime, _touch_mtime))
+                    if os.path.exists(_result_file):
+                        os.utime(_result_file, (_touch_mtime, _touch_mtime))
+                    if os.path.exists(_record_path):
+                        os.utime(_record_path, (_touch_mtime, _touch_mtime))
                 except OSError:
                     pass
                 continue
 
             # Real content change — invalidate + record new baseline.
             try:
-                os.remove(_result_file)
+                if os.path.exists(_result_file):
+                    os.remove(_result_file)
+                _remove_build_record(_pkg)
                 with open(_hash_file, 'w') as fh:
                     fh.write(_current_hash + '\n')
                 _invalidated.append(_pkg)
@@ -1806,6 +1847,26 @@ class BuildSession:
         _comp = src_pkg._mirror.component or 'main'
         _success = True
 
+        # OBS-01 entry record for the tunneled path.  Tunneled packages
+        # bypass BuildContainer.build() entirely (passthrough copy from
+        # upstream), so they get their own phase=entry → terminal
+        # transition here.  patch_set_hash is empty (tunneled pkgs
+        # never apply our patches).
+        import time as _time
+        assert self.container is not None
+        _t_tunnel_start = _time.monotonic()
+        try:
+            utils.write_build_record(
+                self.container.buildlog_path,
+                utils.new_build_record(
+                    package=src_pkg.package,
+                    intended_version=str(src_pkg.version),
+                    patch_set_hash='',
+                ),
+            )
+        except OSError as _e:
+            logger.warning(f"tunnel {src_pkg.package}: build-record entry: {_e}")
+
         # Caller gates this on build_container_ready, so self.container
         # is non-None by the time we get here.
         assert self.container is not None
@@ -1855,13 +1916,22 @@ class BuildSession:
                 logger.error(f"tunnel {src_pkg.package}: failed to download {_filename}: {_detail or 'unknown'}")
                 _success = False
 
-        # Write a result file so check_build() can skip re-tunneling on the next run.
-        _result_file = os.path.join(self.container.buildlog_path, src_pkg.package + '.result')
+        # OBS-01 terminal record: phase=tunneled on success, failed
+        # otherwise.  built_version == intended_version for tunneled
+        # (no NMU strip; the file we copied IS the upstream binary).
+        # Replaces the prior <pkg>.result writer.
         try:
-            with open(_result_file, 'w') as fh:
-                fh.write('TUNNELED\n' if _success else 'FAIL\n')
-        except OSError as e:
-            logger.error(f"tunnel {src_pkg.package}: cannot write result file: {e}")
+            utils.update_build_record(
+                self.container.buildlog_path, src_pkg.package,
+                phase=('tunneled' if _success else 'failed'),
+                built_version=(str(src_pkg.version) if _success else None),
+                finished=utils._utc_now_iso(),
+                elapsed_seconds=round(_time.monotonic() - _t_tunnel_start, 3),
+                output_count=len(_files),
+                outputs=sorted(_files),
+            )
+        except (OSError, FileNotFoundError) as _e:
+            logger.warning(f"tunnel {src_pkg.package}: build-record terminal: {_e}")
 
         return _success
 
@@ -2187,17 +2257,19 @@ class BuildSession:
 
           needs_build  — binaries missing or invalid (legitimate rebuild)
           needs_sync   — source files missing or .verified absent
-          stale_pass   — .result=PASS but state drifted (patches changed
-                          since the build that wrote .result)
-          repairable   — binaries valid but .result missing
+          stale_pass   — record=PASS but state drifted (patches changed
+                          since the build wrote the record)
+          interrupted  — OBS-01: build process was killed mid-flight;
+                          on-disk artifacts can't be trusted
+          repairable   — binaries valid but record missing
                           (BUT: see below — repairable is treated as
                           soft, not hard)
 
         repairable is SOFT (operator should `source repair` but the
-        chroot build can still succeed — apt + dpkg don't read
-        .result; .result is build-pipeline metadata).  Hard fails
-        are needs_build / needs_sync / stale_pass which would either
-        miss .debs entirely or include stale ones.
+        chroot build can still succeed — apt + dpkg don't read the
+        build record; it's build-pipeline metadata).  Hard fails are
+        needs_build / needs_sync / stale_pass / interrupted which would
+        either miss .debs entirely or include stale ones.
 
         Returns True to proceed, False to abort.  Cheap (~5s) — each
         per-source classify is a few stat() calls.
@@ -2219,7 +2291,7 @@ class BuildSession:
                 if _n not in _srcs:
                     _srcs[_n] = _s
 
-        _hard = ('needs_build', 'needs_sync', 'stale_pass')
+        _hard = ('needs_build', 'needs_sync', 'stale_pass', 'interrupted')
         _soft = ('repairable',)
         _by_state: 'dict[str, list[str]]' = {
             _s: [] for _s in _hard + _soft
@@ -2633,15 +2705,25 @@ class BuildSession:
                     if not _expected:
                         _no_pkgs += 1
                         continue
-                    _result_file = os.path.join(
-                        self.container.buildlog_path, _name + '.result')
-                    try:
-                        with open(_result_file) as fh:
-                            if fh.readline().strip() == 'TUNNELED':
-                                _skipped_tunneled += 1
-                                continue
-                    except OSError:
-                        pass
+                    # OBS-01: prefer the signed record; fall back to .result.
+                    _is_tunneled = False
+                    _record = utils.read_build_record(
+                        self.container.buildlog_path, _name)
+                    if _record is not None:
+                        _is_tunneled = (
+                            utils.classify_build_record(_record) == 'tunneled')
+                    else:
+                        _result_file = os.path.join(
+                            self.container.buildlog_path, _name + '.result')
+                        try:
+                            with open(_result_file) as fh:
+                                _is_tunneled = (
+                                    fh.readline().strip() == 'TUNNELED')
+                        except OSError:
+                            pass
+                    if _is_tunneled:
+                        _skipped_tunneled += 1
+                        continue
                     _any_missing = False
                     _failing = None
                     for _f in _expected:
@@ -6138,28 +6220,33 @@ class BuildSession:
     def _patchhash_status(self, pkg: str, src) -> str:
         """Pure-read patch-baseline status for one source.  Returns:
 
-          'matches'  — .patchhash exists AND equals patch_set_hash of
-                       the current on-disk patch set.  Strongest signal:
-                       binaries produced under this baseline are
-                       provably current.
+          'matches'  — stored patch_set_hash equals current on-disk
+                       patch set.  Strongest signal: binaries produced
+                       under this baseline are provably current.
 
-          'differs'  — .patchhash exists AND disagrees.  Means the
-                       patch set on disk has changed since the build
-                       that wrote .patchhash.  Binaries are stale
-                       w.r.t. the current patch set.
+          'differs'  — stored hash disagrees.  Patches on disk have
+                       changed since the build wrote its record.
 
-          'absent'   — no .patchhash file (pre-baseline-policy build,
-                       or operator wiped log/build/).  We can't prove
-                       binaries are fresh OR stale — caller decides
-                       how to treat this.
+          'absent'   — no record (pre-OBS-01 build, operator wiped
+                       log/build/, or tamper).  Caller decides.
+
+        OBS-01 migration: prefers the signed build.json record's
+        patch_set_hash field; falls back to the legacy <pkg>.patchhash
+        sidecar for pre-rollout builds.  The .patchhash fallback is
+        removed in chunk 5 of the rollout.
         """
         _buildlog = os.path.join(self.config.dir_log, 'build')
-        _hash_file = os.path.join(_buildlog, pkg + '.patchhash')
-        try:
-            with open(_hash_file, 'r') as fh:
-                _stored = fh.read().strip()
-        except OSError:
-            return 'absent'
+        _stored = ''
+        _record = utils.read_build_record(_buildlog, pkg)
+        if _record is not None:
+            _stored = str(_record.get('patch_set_hash') or '')
+        if not _stored:
+            _hash_file = os.path.join(_buildlog, pkg + '.patchhash')
+            try:
+                with open(_hash_file, 'r') as fh:
+                    _stored = fh.read().strip()
+            except OSError:
+                return 'absent'
         if not _stored:
             return 'absent'
         _patch_dir = os.path.join(
@@ -6170,20 +6257,24 @@ class BuildSession:
         return 'matches' if _stored == _current else 'differs'
 
     _SOURCE_STATES = (
-        'ok',             # binaries present + valid, .result=PASS,
+        'ok',             # binaries present + valid, record=done/PASS,
                           # patches unchanged
         'no_pkgs',        # source declares no main-tier binaries
-        'tunneled',       # .result=TUNNELED (third-party pull, not built)
-        'fail',           # .result=FAIL — explicit prior-build failure
+        'tunneled',       # record=tunneled (third-party pull, not built)
+        'fail',           # record=failed — explicit prior-build failure
                           # marker.  Repair LEAVES ALONE (operator
                           # signal: "this is known broken; don't
                           # second-guess").
         'needs_sync',     # source files missing or .verified absent
         'needs_build',    # binaries missing or invalid (legitimate rebuild)
-        'stale_pass',     # .result=PASS but state has drifted (binaries
+        'interrupted',    # OBS-01: record has a non-terminal phase —
+                          # build process was killed mid-flight.  Repair
+                          # CLEARS the record so next build re-runs and
+                          # produces a proper terminal phase.
+        'stale_pass',     # record=PASS but state has drifted (binaries
                           # gone OR patches changed) — repair would CLEAR
-        'repairable',     # binaries present + valid but .result MISSING
-                          # — repair would WRITE PASS
+        'repairable',     # binaries present + valid but record MISSING
+                          # — repair would WRITE done/PASS
     )
 
     def _source_state(self, pkg: str, src) -> str:
@@ -6233,19 +6324,43 @@ class BuildSession:
         if not _expected:
             return 'no_pkgs'
         _buildlog = os.path.join(self.config.dir_log, 'build')
-        _result_file = os.path.join(_buildlog, pkg + '.result')
+
+        # OBS-01: prefer the signed build.json record.  classify_build_record
+        # returns:
+        #   'missing'     — file absent / tampered / corrupt
+        #   'interrupted' — phase != done|failed|tunneled (process killed
+        #                   mid-build).  Triggers rebuild via 'needs_build'
+        #                   below; binaries-present check still runs first.
+        #   'ok' / 'fail' / 'tunneled' — terminal phases.
+        # During migration the legacy .result file is consulted only when
+        # the record is missing (pre-rollout builds).
+        _record = utils.read_build_record(_buildlog, pkg)
         _result_first_line = ''
         _result_exists = False
-        try:
-            with open(_result_file) as fh:
-                _result_first_line = fh.readline().strip()
-                _result_exists = True
-        except OSError:
-            pass
-        if _result_first_line == 'TUNNELED':
-            return 'tunneled'
-        if _result_first_line == 'FAIL':
-            return 'fail'
+        _interrupted = False
+        if _record is not None:
+            _record_state = utils.classify_build_record(_record)
+            _result_exists = True
+            if _record_state == 'tunneled':
+                return 'tunneled'
+            if _record_state == 'fail':
+                return 'fail'
+            if _record_state == 'interrupted':
+                _interrupted = True
+            elif _record_state == 'ok':
+                _result_first_line = 'PASS'
+        else:
+            _result_file = os.path.join(_buildlog, pkg + '.result')
+            try:
+                with open(_result_file) as fh:
+                    _result_first_line = fh.readline().strip()
+                    _result_exists = True
+            except OSError:
+                pass
+            if _result_first_line == 'TUNNELED':
+                return 'tunneled'
+            if _result_first_line == 'FAIL':
+                return 'fail'
 
         # (4) source files — every entry in src.files must exist on
         # disk with a .verified sidecar (download_source's gate).
@@ -6260,6 +6375,16 @@ class BuildSession:
                 break
         if not _sync_ok:
             return 'needs_sync'
+
+        # OBS-01: a non-terminal phase in the record means the build
+        # process was killed mid-flight — segregate, normalize, or
+        # something else didn't finish.  On-disk binaries may be
+        # pre-strip, partial, or missing.  Surface as its own state
+        # so the audit distinguishes "we tried and didn't finish" from
+        # "never tried".  Repair handles by clearing the record;
+        # subsequent build re-runs and writes a proper terminal phase.
+        if _interrupted:
+            return 'interrupted'
 
         # (5) predicted binaries.
         _all_present = True
@@ -6353,28 +6478,54 @@ class BuildSession:
             for _name, _src in sorted(_srcs.items()):
                 _bar.step(1)
                 _state = self._source_state(_name, _src)
-                _result_file = os.path.join(
-                    self.container.buildlog_path, _name + '.result')
                 if _state == 'repairable':
+                    # OBS-01: write a synthetic terminal record so the
+                    # next audit sees phase=done / status=PASS without
+                    # rerunning the build.  patch_set_hash is computed
+                    # from the current on-disk patch set (matches what
+                    # the missing-record state means: "binaries exist
+                    # under the current patches, marker was lost").
+                    _patch_dir = os.path.join(
+                        self.config.dir_patch_source, _name,
+                        utils.version_no_epoch(_src.version),
+                    )
+                    _hash = utils.patch_set_hash(
+                        _patch_dir, _src.patch_list or [])
+                    _now = utils._utc_now_iso()
+                    _rec = utils.new_build_record(
+                        package=_name, intended_version=str(_src.version),
+                        patch_set_hash=_hash, started=_now,
+                    )
+                    _rec.update({
+                        'phase': 'done', 'status': 'PASS',
+                        'built_version': utils.strip_nmu_suffix(
+                            str(_src.version)),
+                        'finished': _now, 'elapsed_seconds': 0.0,
+                        'exit_code': 0,
+                    })
                     try:
-                        with open(_result_file, 'w') as fh:
-                            fh.write('PASS\n')
+                        utils.write_build_record(
+                            self.container.buildlog_path, _rec)
                         _restored.append(_name)
-                        logger.info(f"source repair: restored {_result_file}")
+                        logger.info(f"source repair: restored {_name}")
                     except OSError as e:
                         console.print(
-                            f"ERROR: cannot write {_result_file}: {e}",
+                            f"ERROR: cannot write record for {_name}: {e}",
                             tui.COLOR_ERROR,
                         )
-                elif _state == 'stale_pass':
-                    # Clear .result + .patchhash so next source build
-                    # rebuilds.  Both removals are best-effort; logging
-                    # captures any rmdir-style edge cases.
-                    _hash_file = _result_file.replace(
-                        '.result', '.patchhash',
-                    )
+                elif _state in ('stale_pass', 'interrupted'):
+                    # stale_pass: PASS marker on disk but state has
+                    #   drifted (binaries gone OR patches changed).
+                    # interrupted (OBS-01): build process was killed
+                    #   mid-flight — on-disk artifacts can't be trusted.
+                    # Same action for both: clear all build-marker
+                    # surfaces (signed record + legacy .result /
+                    # .patchhash).  Next source build rebuilds.
                     _removed_any = False
-                    for _f in (_result_file, _hash_file):
+                    for _suffix in (
+                            utils.BUILD_RECORD_SUFFIX, '.result', '.patchhash'):
+                        _f = os.path.join(
+                            self.container.buildlog_path, _name + _suffix)
                         try:
                             os.remove(_f)
                             _removed_any = True
@@ -6387,7 +6538,7 @@ class BuildSession:
                     if _removed_any:
                         _cleared.append(_name)
                         logger.info(
-                            f"source repair: cleared stale {_result_file}"
+                            f"source repair: cleared {_state} {_name}"
                         )
                 else:
                     _other[_state] = _other.get(_state, 0) + 1
@@ -6420,6 +6571,121 @@ class BuildSession:
                 console.print("")
                 console.print(f"Cleared ({len(_cleared)}):")
                 for _n in _cleared:
+                    console.print(f"  {_n}")
+
+    def cmd_source_migrate_records(self, *args):
+        """OBS-01 one-shot migration from .result + .patchhash to the
+        signed build.json record format.
+
+        Usage: source migrate-records [prune] [dry-run] [verbose]
+
+        Walks log/build/, reads each <pkg>.result (+ <pkg>.patchhash if
+        present), synthesizes a signed <pkg>.build.json and writes it
+        via the atomic-replace path.  Status mapping:
+
+          .result=PASS     → phase=done,     status=PASS
+          .result=FAIL     → phase=failed,   status=FAIL
+          .result=TUNNELED → phase=tunneled, status=TUNNELED
+
+        Fields not recoverable from the legacy sidecars are filled
+        conservatively: elapsed_seconds=0, exit_code=0/1, output_count=0,
+        outputs=[].  Started/finished use the .result file's mtime.
+        built_version (PASS/TUNNELED only) is the strip_nmu_suffix of
+        intended_version — what the build would have produced post-strip.
+
+        Sources NOT in the current dep_tree are skipped (no
+        intended_version available).  Operator can drop those by hand
+        if they're truly stale.
+
+        Modes:
+          prune    — delete .result + .patchhash after the new record
+                     verifies via HMAC round-trip.  Default leaves the
+                     legacy files in place so the migration is safely
+                     re-runnable.
+          dry-run  — classify but write nothing to disk.
+          verbose  — list per-pkg outcomes.
+
+        Idempotent: a source that already has a valid build.json is
+        left alone (counted under 'existing').
+        """
+        if not (self.flags.cache_ready and self.flags.dep_check_ready
+                and self.flags.build_container_ready):
+            console.print(
+                "source migrate-records needs cache build + cache parse + "
+                "container init to have run first.",
+                tui.COLOR_ERROR,
+            )
+            return
+
+        _prune   = 'prune'   in args
+        _dryrun  = 'dry-run' in args
+        _verbose = 'verbose' in args
+
+        assert self.dep_tree is not None
+        _srcs = dict(self.dep_tree.selected_srcs)
+        if self.udeb_dep_tree is not None:
+            for _n, _s in self.udeb_dep_tree.selected_srcs.items():
+                if _n not in _srcs:
+                    _srcs[_n] = _s
+
+        def _resolver(_pkg: str) -> 'Optional[str]':
+            _src = _srcs.get(_pkg)
+            return str(_src.version) if _src is not None else None
+
+        _counts = utils.migrate_legacy_records(
+            self.container.buildlog_path, _resolver,
+            prune=_prune, dry_run=_dryrun,
+        )
+
+        _mode = []
+        if _dryrun:
+            _mode.append('dry-run')
+        if _prune:
+            _mode.append('prune')
+        _hdr = (' (' + ', '.join(_mode) + ')') if _mode else ''
+        console.print(f"Source record migration{_hdr}:")
+        console.print(
+            f"  {len(_counts['migrated']):5d}  migrated  "
+            "(legacy .result → signed build.json)"
+        )
+        console.print(
+            f"  {len(_counts['existing']):5d}  existing  "
+            "(build.json already present — idempotent skip)"
+        )
+        if _counts['skipped']:
+            console.print(
+                f"  {len(_counts['skipped']):5d}  skipped   "
+                "(source not in current dep_tree — needs cache parse "
+                "with matching pkg.list, or drop manually)"
+            )
+        if _counts['unknown_status']:
+            console.print(
+                f"  {len(_counts['unknown_status']):5d}  unknown   "
+                "(.result content not PASS/FAIL/TUNNELED — operator review)",
+                tui.COLOR_WARNING,
+            )
+        if _prune:
+            console.print(
+                f"  {len(_counts['pruned']):5d}  pruned    "
+                "(.result + .patchhash deleted)"
+            )
+        if _counts['errors']:
+            console.print(
+                f"  {len(_counts['errors']):5d}  errors    "
+                "(write/prune failures — see log)",
+                tui.COLOR_ERROR,
+            )
+            for _pkg, _err in _counts['errors'][:10]:
+                console.print(f"      {_pkg}: {_err}", tui.COLOR_ERROR)
+
+        if _verbose:
+            for _label in ('migrated', 'skipped', 'unknown_status', 'pruned'):
+                _items = _counts.get(_label, [])
+                if not _items:
+                    continue
+                console.print("")
+                console.print(f"{_label.replace('_', ' ').title()} ({len(_items)}):")
+                for _n in _items:
                     console.print(f"  {_n}")
 
     @staticmethod
@@ -8088,10 +8354,17 @@ class BuildSession:
                         'ok / needs_sync / needs_build / stale_pass / '
                         'repairable / tunneled.  Add `summary` for terse '
                         'count + subset breakdown.',
-            'repair':   'MUTATOR: align .result with current state.  '
-                        'Writes PASS where binaries are valid but .result '
-                        'is missing; clears stale PASS where binaries '
-                        'are gone or patches changed.',
+            'repair':   'MUTATOR: align build records with current state. '
+                        'Writes a done/PASS record where binaries are '
+                        'valid but the record is missing; clears '
+                        'stale_pass / interrupted records so next '
+                        'source build rebuilds.',
+            'migrate-records':
+                        'OBS-01 one-shot: synthesize signed build.json '
+                        'records from legacy .result + .patchhash '
+                        'sidecars.  Add `prune` to delete legacy files '
+                        'after verify, `dry-run` to classify without '
+                        'writing.  Idempotent.',
             'fork':     'manage fork packages: `source fork <pkg>` '
                         'creates or reloads; `source fork <pkg> '
                         'enabled|disabled` toggles the .disabled marker',
@@ -8104,6 +8377,8 @@ class BuildSession:
             return self.cmd_source_audit(*args)
         if action == 'repair':
             return self.cmd_source_repair(*args)
+        if action == 'migrate-records':
+            return self.cmd_source_migrate_records(*args)
         if action == 'fork':
             return self.cmd_source_fork(*args)
         return self._group_help('source', _table, action)
@@ -8766,7 +9041,7 @@ def main(banner: str) -> None:
     tui.register_command('cache',     session.cmd_cache,     'Cache:      cache <build|purge|parse|select|info <pkg>>')
     tui.register_command('clean',     session.cmd_clean,     'Clean:      clean <subcmd> — run `clean` for the list')
     tui.register_command('patch',     session.cmd_patch,     'Patches:    patch refresh')
-    tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|fork>')
+    tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|migrate-records|fork>')
     tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|publish|audit|repair|tunnel|refresh>')
     tui.register_command('snapshot',  session.cmd_snapshot,  'Snapshot:   snapshot <list|advance|workload|base>')
     tui.register_command('container', session.cmd_container, 'Container:  container <init|purge>')

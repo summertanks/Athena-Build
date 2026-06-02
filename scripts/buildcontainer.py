@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 import uuid
 from typing import TYPE_CHECKING, Optional, Tuple
 import utils
@@ -412,6 +413,25 @@ class BuildContainer:
         with self._live_lock:
             self._live.pop(container.short_id, None)
 
+    def _record_phase(self, package: str, *, initial: 'Optional[dict]' = None,
+                      **fields: object) -> None:
+        """OBS-01 phase transition.  Best-effort: a record-write OSError
+        must never mask a build result, so we swallow and log.
+
+        Pass `initial=<dict>` to write the entry-phase record (creates
+        the file).  Subsequent transitions pass only `fields` (read the
+        existing record, merge, re-sign, atomic-replace).
+        """
+        try:
+            if initial is not None:
+                utils.write_build_record(self.buildlog_path, initial)
+            else:
+                utils.update_build_record(self.buildlog_path, package, **fields)
+        except (OSError, FileNotFoundError) as _e:
+            logger.warning(
+                f"build-record write failed for {package} "
+                f"({fields.get('phase', 'initial')}): {_e}")
+
     def reap_all_live(self) -> int:
         """COMP-03 Phase 3: force-remove every container currently in
         the live registry.  Iterates a snapshot of the registry (taken
@@ -637,6 +657,22 @@ class BuildContainer:
             if _live_patch_list else ''
         )
 
+        # OBS-01: compute the patch_set_hash once up front and stamp the
+        # entry-phase record.  The build.json file is the canonical
+        # build state from this point — any crash before the next phase
+        # write leaves the record at phase=entry, which the audit
+        # classifies as 'interrupted' (signal: rebuild me).
+        _patch_set_hash = utils.patch_set_hash(
+            _live_patch_dir, _live_patch_list,
+        )
+        _t_start = time.monotonic()
+        _entry_record = utils.new_build_record(
+            package=src_pkg.package,
+            intended_version=str(src_pkg.version),
+            patch_set_hash=_patch_set_hash,
+        )
+        self._record_phase(src_pkg.package, initial=_entry_record)
+
         # A few packages (notably pam) ship a second quilt-managed patch series
         # at debian/patches-applied/series in addition to debian/patches/series.
         # dpkg-source only applies debian/patches/series during 3.0 (quilt)
@@ -817,15 +853,28 @@ class BuildContainer:
 
             _exit_code = container.wait()['StatusCode']
 
+            # OBS-01: refresh container attrs so OOMKilled is current,
+            # then capture both signals.  Docker exposes the OOM-killed
+            # flag distinctly from exit code 137 — a real cgroup-OOM has
+            # OOMKilled=True; our reap_all_live SIGKILL also produces
+            # 137 but with OOMKilled=False.  Storing both lets OBS-02
+            # history disambiguate retroactively.
+            _oom_killed = False
+            try:
+                container.reload()
+                _oom_killed = bool(
+                    container.attrs.get('State', {}).get('OOMKilled', False))
+            except docker.errors.APIError as _e:
+                logger.warning(
+                    f"container.reload failed for {src_pkg.package}: {_e}")
+
             # COMP-03 Phase 5: exit code 137 = SIGKILL, which docker
             # produces both when the container hits its mem_limit (the
             # cgroup OOM killer fires) and when we force-remove it
             # externally (Phase 3 reap_all_live).  Surface the OOM
-            # hint loudly so the operator knows to raise BuildMemory
-            # — distinguishing this from a generic build failure or a
-            # shutdown-driven kill is hard without OOMKilled flag from
-            # docker; we log the hint either way and let the operator
-            # check log/build/<src> for context.
+            # hint loudly so the operator knows to raise BuildMemory.
+            # OBS-01 captures OOMKilled separately so the audit can
+            # still tell the two apart even when both produce 137.
             if _exit_code == 137:
                 logger.error(
                     f"Build {src_pkg.package} container exited 137 "
@@ -839,34 +888,28 @@ class BuildContainer:
                     tui.COLOR_WARNING)
 
             _build_result = (_exit_code == 0)
-            with open(os.path.join(self.buildlog_path, _filename_prefix + '.result'), 'w') as fh:
-                fh.write('PASS\n' if _build_result else 'FAIL\n')
 
-            # Record the patch-set content hash alongside .result so
-            # `_refresh_patches` (next run) can distinguish header-only
-            # edits (same hash → no rebuild) from real diff changes
-            # (different hash → invalidate).  Written on every build
-            # outcome so deletion-detection works even after a FAIL.
-            _patch_dir_for_hash = os.path.join(
-                self.patch_path, src_pkg.package,
-                version_no_epoch(src_pkg.version),
+            # OBS-01 phase=container_exited: stamp wall-clock and the
+            # container's verdict before any post-processing.  If the
+            # process is killed between here and phase=done, the audit
+            # sees 'interrupted at container_exited' — strictly more
+            # information than today's 'no .result' = 'unknown'.
+            _elapsed = round(time.monotonic() - _t_start, 3)
+            self._record_phase(
+                src_pkg.package, phase='container_exited',
+                exit_code=_exit_code, oom_killed=_oom_killed,
+                finished=utils._utc_now_iso(), elapsed_seconds=_elapsed,
             )
-            _hash_value = utils.patch_set_hash(
-                _patch_dir_for_hash, _live_patch_list,
-            )
-            _hash_file = os.path.join(
-                self.buildlog_path, _filename_prefix + '.patchhash',
-            )
-            try:
-                with open(_hash_file, 'w') as fh:
-                    fh.write(_hash_value + '\n')
-            except OSError as e:
-                logger.warning(f"cannot write {_hash_file}: {e}")
 
             if not _build_result:
                 logger.error(
                     f"Build {src_pkg.package} failed in container "
                     f"{container.short_id} (exit {_exit_code})"
+                )
+                # Terminal phase=failed for FAIL builds — no segregate
+                # or normalize will run.
+                self._record_phase(
+                    src_pkg.package, phase='failed', output_count=0,
                 )
 
             # On successful build: strip NMU/binNMU/backport suffixes
@@ -888,12 +931,29 @@ class BuildContainer:
                 #    we don't rescan the whole repo (STA-19).
                 _emitted = self._segregate_built_artifacts(
                     src_pkg, _scratch_dir)
+                # OBS-01 phase=segregated: outputs are now at their
+                # final paths; record filenames (basenames — full paths
+                # are noise across machines).
+                _output_names = sorted(os.path.basename(_p) for _p in _emitted)
+                self._record_phase(
+                    src_pkg.package, phase='segregated',
+                    output_count=len(_output_names), outputs=_output_names,
+                )
                 # 2. Normalise the emitted .debs (now in their subdirs):
                 #    strip NMU → pristine, then stamp +asg<R>u<N> when this
                 #    is a delta build AND a remote ledger is loaded (UPD-01).
                 #    was_patched feeds the delta decision.
                 _was_patched = (src_patch_path != self.patch_empty)
                 self._normalize_built_artifacts(src_pkg, _emitted, _was_patched)
+                # OBS-01 phase=normalized → done: post-strip pristine
+                # version is the canonical built_version (memory
+                # `feedback_strip_nmu_at_build`).  intended_version vs
+                # built_version drift becomes visible at this point.
+                _built_version = utils.strip_nmu_suffix(str(src_pkg.version))
+                self._record_phase(
+                    src_pkg.package, phase='done',
+                    built_version=_built_version,
+                )
 
             return _build_result
 
@@ -904,6 +964,15 @@ class BuildContainer:
                 f"(container {_cid}): {e}"
             )
             tui.console.print(f"Athena Build Docker: Error {e}")
+            # OBS-01: flush a terminal phase=failed record so the audit
+            # doesn't classify this build as 'interrupted' (which would
+            # trigger a silent rebuild on next session).  exit_code=-1
+            # is the sentinel for "container died before wait()".
+            self._record_phase(
+                src_pkg.package, phase='failed', exit_code=-1,
+                finished=utils._utc_now_iso(),
+                elapsed_seconds=round(time.monotonic() - _t_start, 3),
+            )
             return False
 
         finally:
@@ -1436,13 +1505,23 @@ class BuildContainer:
         if not expected_files:
             return False
 
-        result_file = os.path.join(self.buildlog_path, src_pkg.package + '.result')
-        try:
-            with open(result_file, 'r') as fh:
-                if fh.readline().strip() not in ('PASS', 'TUNNELED'):
-                    return False
-        except OSError:
-            return False
+        # OBS-01: prefer the signed build.json record.  An interrupted
+        # build (non-terminal phase) is treated as "not built" — same as
+        # missing .result was historically.  Falls back to .result for
+        # pre-rollout builds.
+        _record = utils.read_build_record(self.buildlog_path, src_pkg.package)
+        if _record is not None:
+            _state = utils.classify_build_record(_record)
+            if _state not in ('ok', 'tunneled'):
+                return False
+        else:
+            result_file = os.path.join(self.buildlog_path, src_pkg.package + '.result')
+            try:
+                with open(result_file, 'r') as fh:
+                    if fh.readline().strip() not in ('PASS', 'TUNNELED'):
+                        return False
+            except OSError:
+                return False
 
         # Component (from origin mirror) so a non-main package's binaries are
         # located in their component dir — e.g. a TUNNELED firmware package

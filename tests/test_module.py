@@ -16172,9 +16172,9 @@ def test_cmd_source_repair_dispatch_and_method_present():
 
 
 def test_cmd_source_repair_writes_pass_when_binaries_present():
-    """source repair restores .result=PASS when all expected binaries
-    exist in repo/.  Synthesize the minimum state needed and call
-    the method directly via a stubbed BuildSession."""
+    """source repair writes a signed build.json record (phase=done,
+    status=PASS) when expected binaries exist in repo/.  OBS-01:
+    replaces the legacy .result writer."""
     import sys, types
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
@@ -16263,16 +16263,25 @@ def test_cmd_source_repair_writes_pass_when_binaries_present():
         _sess.flags = _Flags
         _sess.container = _Container
 
-        # Sanity: .result must not exist before
+        # Sanity: neither sidecar should exist before
         _result = os.path.join(_buildlog, 'foo.result')
+        _record = os.path.join(_buildlog, 'foo.build.json')
         assert not os.path.exists(_result)
+        assert not os.path.exists(_record)
 
         _sess.cmd_source_repair()
 
-        # After repair: .result should exist + contain PASS
-        assert os.path.isfile(_result), "repair didn't write .result"
-        with open(_result) as fh:
-            assert fh.read().strip() == 'PASS', "wrong .result content"
+        # After repair: a signed build.json record exists with
+        # phase=done / status=PASS.  The legacy .result writer is gone.
+        import utils as _u
+        assert os.path.isfile(_record), "repair didn't write build.json"
+        _rec = _u.read_build_record(_buildlog, 'foo')
+        assert _rec is not None, "build.json failed to verify"
+        assert _rec['phase'] == 'done'
+        assert _rec['status'] == 'PASS'
+        assert _rec['intended_version'] == '1.0'
+        assert not os.path.exists(_result), (
+            "repair must not write the legacy .result file")
 
 
 def test_cmd_source_repair_leaves_fail_result_untouched():
@@ -21630,6 +21639,683 @@ def test_ux04_save_session_called_after_parse_dependency():
         "cmd_parse_dependency must call persistence.save_session at the tail")
 
 
+# ─── OBS-01: canonical signed build record ──────────────────────────────────
+
+
+def _utils_module():
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    return _u
+
+
+def test_build_record_schema_v1_field_set():
+    """Pin the v1 field set — adding a field is a schema bump that must
+    be reflected in the version constant; removing one breaks OBS-02
+    history readers.  This test is the contract."""
+    _u = _utils_module()
+    _rec = _u.new_build_record(
+        package='libwmf', intended_version='0.2.12-5.1',
+        patch_set_hash='abc123', started='2026-06-02T14:00:00Z',
+    )
+    assert _u.BUILD_RECORD_SCHEMA_VERSION == 1
+    assert _rec['schema_version'] == 1
+    _required = {
+        'schema_version', 'package', 'intended_version', 'built_version',
+        'patch_set_hash', 'phase', 'status', 'started', 'finished',
+        'elapsed_seconds', 'exit_code', 'oom_killed', 'output_count', 'outputs',
+    }
+    assert set(_rec.keys()) == _required, (
+        f"v1 schema drift: {set(_rec.keys()) ^ _required}")
+    assert _rec['phase'] == 'entry'
+    assert _rec['status'] is None
+    assert _rec['outputs'] == []
+
+
+def test_build_record_hmac_round_trip():
+    """Sign → verify on the same record returns True.  Tamper any
+    field → verify returns False."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        _rec = _u.new_build_record(
+            package='libwmf', intended_version='0.2.12-5.1',
+            patch_set_hash='abc', started='2026-06-02T14:00:00Z',
+        )
+        _u.write_build_record(_td, _rec)
+        _loaded = _u.read_build_record(_td, 'libwmf')
+        assert _loaded is not None
+        assert _loaded['package'] == 'libwmf'
+        assert _loaded['phase'] == 'entry'
+        assert 'sig' in _loaded
+
+
+def test_build_record_tamper_detection():
+    """Hand-edit the on-disk file → read_build_record returns None."""
+    _u = _utils_module()
+    import json as _json
+    with tempfile.TemporaryDirectory() as _td:
+        _u.write_build_record(_td, _u.new_build_record(
+            package='libwmf', intended_version='0.2.12-5.1',
+            patch_set_hash='abc', started='2026-06-02T14:00:00Z',
+        ))
+        _path = os.path.join(_td, 'libwmf.build.json')
+        with open(_path) as _fh:
+            _data = _json.load(_fh)
+        _data['intended_version'] = '99.99-99'    # tamper
+        with open(_path, 'w') as _fh:
+            _json.dump(_data, _fh)
+        assert _u.read_build_record(_td, 'libwmf') is None, (
+            "tampered record must fail HMAC verify")
+
+
+def test_build_record_hmac_key_mode_0600():
+    """Key file must be mode 0600 — readable only by owner."""
+    _u = _utils_module()
+    import stat as _st
+    with tempfile.TemporaryDirectory() as _td:
+        _u._load_or_create_hmac_key(_td)
+        _kpath = os.path.join(_td, '.metrics.hmac.key')
+        assert os.path.exists(_kpath)
+        _mode = _st.S_IMODE(os.stat(_kpath).st_mode)
+        assert _mode == 0o600, f"key mode is {oct(_mode)}, expected 0o600"
+
+
+def test_build_record_atomic_write_no_temp_left_behind_on_success():
+    """A successful write leaves no .tmp file in the directory."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        _u.write_build_record(_td, _u.new_build_record(
+            package='libwmf', intended_version='0.2.12-5.1',
+            patch_set_hash='abc', started='2026-06-02T14:00:00Z',
+        ))
+        _leftover = [_f for _f in os.listdir(_td) if _f.endswith('.tmp')]
+        assert _leftover == [], f"temp files left behind: {_leftover}"
+
+
+def test_build_record_phase_transition_to_done_sets_status_pass():
+    """update_build_record with phase=done auto-sets status=PASS."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        _u.write_build_record(_td, _u.new_build_record(
+            package='libwmf', intended_version='0.2.12-5.1',
+            patch_set_hash='abc', started='2026-06-02T14:00:00Z',
+        ))
+        _new = _u.update_build_record(
+            _td, 'libwmf', phase='done', built_version='0.2.12-5.1',
+            finished='2026-06-02T14:02:30Z', elapsed_seconds=150.5,
+            exit_code=0, output_count=3,
+            outputs=['a_1_amd64.deb', 'b_1_amd64.deb', 'c_1_amd64.deb'],
+        )
+        assert _new['phase'] == 'done'
+        assert _new['status'] == 'PASS'
+        assert _new['built_version'] == '0.2.12-5.1'
+        assert _new['elapsed_seconds'] == 150.5
+        _reloaded = _u.read_build_record(_td, 'libwmf')
+        assert _reloaded is not None and _reloaded['status'] == 'PASS'
+
+
+def test_build_record_phase_transition_to_failed_sets_status_fail():
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        _u.write_build_record(_td, _u.new_build_record(
+            package='libwmf', intended_version='0.2.12-5.1',
+            patch_set_hash='abc', started='2026-06-02T14:00:00Z',
+        ))
+        _new = _u.update_build_record(
+            _td, 'libwmf', phase='failed', exit_code=137, oom_killed=True,
+            finished='2026-06-02T14:00:45Z', elapsed_seconds=45.0,
+        )
+        assert _new['status'] == 'FAIL'
+        assert _new['exit_code'] == 137
+        assert _new['oom_killed'] is True
+
+
+def test_build_record_phase_tunneled_sets_status_tunneled():
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        _u.write_build_record(_td, _u.new_build_record(
+            package='shim-signed', intended_version='1.40+15.4-7+deb12u1',
+            patch_set_hash='', started='2026-06-02T14:00:00Z',
+        ))
+        _new = _u.update_build_record(
+            _td, 'shim-signed', phase='tunneled',
+            built_version='1.40+15.4-7+deb12u1',
+            finished='2026-06-02T14:00:05Z', elapsed_seconds=5.0,
+            output_count=2, outputs=['shim-signed_1_amd64.deb', 'shim-helpers_1_amd64.deb'],
+        )
+        assert _new['status'] == 'TUNNELED'
+
+
+def test_classify_build_record_full_matrix():
+    """Pin the audit classifier translation for every (record-state)
+    combination that consumers need to disambiguate."""
+    _u = _utils_module()
+    # None → missing (file absent / corrupt / tampered)
+    assert _u.classify_build_record(None) == 'missing'
+
+    def _r(phase, status=None):
+        return {
+            'schema_version': 1, 'package': 'x', 'intended_version': '1',
+            'built_version': None, 'patch_set_hash': '', 'phase': phase,
+            'status': status, 'started': '', 'finished': None,
+            'elapsed_seconds': None, 'exit_code': None, 'oom_killed': False,
+            'output_count': 0, 'outputs': [], 'sig': 'x',
+        }
+    # Terminal phases
+    assert _u.classify_build_record(_r('done', 'PASS')) == 'ok'
+    assert _u.classify_build_record(_r('failed', 'FAIL')) == 'fail'
+    assert _u.classify_build_record(_r('tunneled', 'TUNNELED')) == 'tunneled'
+    # Non-terminal phases all map to 'interrupted' — process was killed
+    # mid-build, file shows the last completed phase.
+    for _ph in ('entry', 'container_exited', 'segregated', 'normalized'):
+        assert _u.classify_build_record(_r(_ph)) == 'interrupted', _ph
+
+
+def test_build_record_intended_vs_built_version_drift_visible():
+    """When intended_version != built_version, both are preserved in
+    the record so the audit can surface the drift.  Foundation for
+    'we asked for X, what shipped is Y' detection."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        _u.write_build_record(_td, _u.new_build_record(
+            package='libfoo', intended_version='1.0-1+deb12u2',
+            patch_set_hash='', started='2026-06-02T14:00:00Z',
+        ))
+        _new = _u.update_build_record(
+            _td, 'libfoo', phase='done', built_version='1.0-1',
+            finished='2026-06-02T14:01:00Z', elapsed_seconds=60.0,
+            exit_code=0, output_count=1, outputs=['libfoo_1.0-1_amd64.deb'],
+        )
+        assert _new['intended_version'] == '1.0-1+deb12u2'
+        assert _new['built_version'] == '1.0-1'
+        assert _new['intended_version'] != _new['built_version']
+
+
+def test_source_state_interrupted_when_record_is_non_terminal():
+    """A build.json at phase=container_exited (process killed before
+    phase=done) must classify as 'interrupted', not silently 'ok' or
+    'needs_build'.  This is the crash-recovery signal."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+        with open(os.path.join(_repo, 'foo_1.0_amd64.deb'), 'wb') as fh:
+            fh.write(b'!<arch>\n')
+
+        _rec = _u.new_build_record(
+            package='foo', intended_version='1.0', patch_set_hash='',
+            started='2026-06-02T14:00:00Z',
+        )
+        _rec.update({
+            'phase': 'container_exited', 'exit_code': 0,
+            'finished': '2026-06-02T14:01:00Z', 'elapsed_seconds': 60.0,
+        })
+        _u.write_build_record(_buildlog, _rec)
+
+        class _Src:
+            pkgs = ['foo_1.0_amd64.deb']
+            files = {}
+            version = '1.0'
+            patch_list = []
+
+        class _Cfg:
+            dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = os.path.join(_tmp, 'source')
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
+
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_p): return True
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = MagicMock(src_pkg_files={'foo': list(_Src.pkgs)})
+        _sess.udeb_dep_tree = None
+        _sess.container = _Container
+        # _predicted_files_for_source uses dep_tree.src_pkg_files
+        _sess.flags = MagicMock(build_container_ready=True)
+
+        _state = _sess._source_state('foo', _Src())
+        assert _state == 'interrupted', (
+            f"non-terminal phase must classify as 'interrupted', got {_state}")
+
+
+def test_cmd_source_repair_clears_interrupted_record():
+    """Repair on an interrupted record must clear all marker files so
+    the next source build re-runs cleanly."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+        with open(os.path.join(_repo, 'foo_1.0_amd64.deb'), 'wb') as fh:
+            fh.write(b'!<arch>\n')
+
+        _rec = _u.new_build_record(
+            package='foo', intended_version='1.0', patch_set_hash='',
+        )
+        _rec['phase'] = 'segregated'
+        _u.write_build_record(_buildlog, _rec)
+        _record_path = os.path.join(_buildlog, 'foo.build.json')
+        assert os.path.exists(_record_path)
+
+        class _Src:
+            pkgs = ['foo_1.0_amd64.deb']
+            files = {}
+            version = '1.0'
+            patch_list = []
+
+        class _Cfg:
+            dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = os.path.join(_tmp, 'source')
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
+
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_p): return True
+
+        class _Flags:
+            cache_ready = True
+            dep_check_ready = True
+            build_container_ready = True
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = MagicMock(
+            selected_srcs={'foo': _Src()},
+            src_pkg_files={'foo': list(_Src.pkgs)},
+        )
+        _sess.udeb_dep_tree = None
+        _sess.container = _Container
+        _sess.flags = _Flags
+
+        _sess.cmd_source_repair()
+
+        assert not os.path.exists(_record_path), (
+            "repair must clear an interrupted build.json record")
+
+
+def test_download_file_retries_on_transient_timeout():
+    """download_file must retry on ConnectTimeout / ReadTimeout /
+    ConnectionError (transient network failure modes) so a single
+    snapshot.debian.org CDN stall doesn't fail the whole cache build.
+
+    Pin behavior: HEAD fails twice with ReadTimeout, succeeds on attempt
+    3.  The whole download_file call should return success (size > 0)
+    not -1.  Without the retry loop, the first ReadTimeout would fail
+    the call."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import utils as _u
+    from unittest.mock import patch as _patch, MagicMock
+    from requests import ReadTimeout
+
+    _calls: 'list[str]' = []
+
+    def _head_then_succeed(url, **kw):
+        _calls.append('head')
+        if _calls.count('head') < 3:
+            raise ReadTimeout('cdn cold cache')
+        _r = MagicMock()
+        _r.headers = {'content-length': '42'}
+        return _r
+
+    def _get_succeed(url, **kw):
+        _calls.append('get')
+        _r = MagicMock()
+        _r.__enter__ = lambda _s: _r
+        _r.__exit__ = lambda _s, *_a: None
+        _r.headers = {'content-length': '42'}
+        _r.iter_content = lambda chunk_size: [b'x' * 42]
+        _r.raise_for_status = lambda: None
+        return _r
+
+    with tempfile.TemporaryDirectory() as _td, \
+            _patch('requests.head', side_effect=_head_then_succeed), \
+            _patch('requests.get',  side_effect=_get_succeed), \
+            _patch('time.sleep'):    # don't actually wait in tests
+        _size, _detail = _u.download_file(
+            'http://example.test/file', os.path.join(_td, 'out'))
+        # Retry succeeded on attempt 3 → bytes returned, not -1.
+        assert _size == 42, f"expected size=42, got {_size}, detail={_detail!r}"
+        # HEAD was called 3 times (2 timeouts + 1 success).
+        assert _calls.count('head') == 3, f"expected 3 HEAD calls, got {_calls}"
+
+
+def test_download_file_does_not_retry_on_http_error():
+    """HTTPError (4xx/5xx) is deterministic — retrying just re-hits the
+    same response.  download_file must NOT retry these.  Pins the
+    classification gate."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import utils as _u
+    from unittest.mock import patch as _patch, MagicMock
+    from requests import HTTPError
+
+    _calls: 'list[str]' = []
+
+    def _head_ok(url, **kw):
+        _calls.append('head')
+        _r = MagicMock()
+        _r.headers = {'content-length': '0'}
+        return _r
+
+    def _get_404(url, **kw):
+        _calls.append('get')
+        _r = MagicMock()
+        _r.__enter__ = lambda _s: _r
+        _r.__exit__ = lambda _s, *_a: None
+        _r.headers = {'content-length': '0'}
+        _err = HTTPError('404 Not Found')
+        _err.response = MagicMock(status_code=404, reason='Not Found')
+        _r.raise_for_status = MagicMock(side_effect=_err)
+        return _r
+
+    with tempfile.TemporaryDirectory() as _td, \
+            _patch('requests.head', side_effect=_head_ok), \
+            _patch('requests.get',  side_effect=_get_404), \
+            _patch('time.sleep'):
+        _size, _detail = _u.download_file(
+            'http://example.test/missing', os.path.join(_td, 'out'))
+        assert _size == -1
+        assert '404' in _detail, f"expected 404 in detail, got {_detail!r}"
+        # Only ONE GET call — HTTPError must NOT trigger a retry.
+        assert _calls.count('get') == 1, (
+            f"HTTPError must not retry; got {_calls.count('get')} GETs")
+
+
+def test_every_outbound_request_carries_user_agent_header():
+    """snapshot.debian.org rate-limits the default python-requests UA so
+    aggressively that our 10s HEAD probes time out routinely (browser /
+    curl / apt sail through unthrottled because they advertise distinct
+    UAs).  Pin the invariant: every requests.{get,head,post,put} call
+    site in scripts/ must pass headers=_HTTP_HEADERS (or carry an
+    explicit User-Agent in its own headers dict).  Greps the source so a
+    new call site that forgets the header is caught by CI, not at the
+    next cache build."""
+    import re as _re
+    _root = os.path.join(_ROOT, 'scripts')
+    _offenders: 'list[str]' = []
+    _call = _re.compile(r'requests\.(get|head|post|put)\s*\(')
+    for _dir, _, _files in os.walk(_root):
+        for _name in _files:
+            if not _name.endswith('.py'):
+                continue
+            _path = os.path.join(_dir, _name)
+            with open(_path) as _fh:
+                _lines = _fh.readlines()
+            # Walk line-by-line: when a `requests.<verb>(` opens, scan
+            # forward until the matching close paren and verify the
+            # call carries User-Agent (either via _HTTP_HEADERS or an
+            # inline headers={'User-Agent': ...}).
+            _i = 0
+            while _i < len(_lines):
+                if not _call.search(_lines[_i]):
+                    _i += 1
+                    continue
+                _depth = 0
+                _buf = ''
+                _j = _i
+                while _j < len(_lines):
+                    _buf += _lines[_j]
+                    _depth += _lines[_j].count('(') - _lines[_j].count(')')
+                    if _depth <= 0 and '(' in _buf:
+                        break
+                    _j += 1
+                if ('_HTTP_HEADERS' not in _buf
+                        and 'User-Agent' not in _buf):
+                    _rel = os.path.relpath(_path, _ROOT)
+                    _offenders.append(f"{_rel}:L{_i + 1}")
+                _i = _j + 1
+    assert not _offenders, (
+        "requests call(s) without User-Agent — snapshot.debian.org will "
+        "throttle these to death:\n  " + "\n  ".join(_offenders))
+
+
+def test_migrate_legacy_records_pass_with_patchhash():
+    """Legacy PASS .result + .patchhash → signed build.json with
+    phase=done, status=PASS, patch_set_hash carried over, built_version
+    = strip_nmu(intended)."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'foo.result'), 'w') as _fh:
+            _fh.write('PASS\n')
+        with open(os.path.join(_td, 'foo.patchhash'), 'w') as _fh:
+            _fh.write('deadbeef' * 8 + '\n')
+        _counts = _u.migrate_legacy_records(
+            _td, lambda _p: '1.0-1+deb12u2' if _p == 'foo' else None,
+        )
+        assert _counts['migrated'] == ['foo'], _counts
+        _rec = _u.read_build_record(_td, 'foo')
+        assert _rec is not None
+        assert _rec['phase'] == 'done'
+        assert _rec['status'] == 'PASS'
+        assert _rec['intended_version'] == '1.0-1+deb12u2'
+        assert _rec['built_version'] == '1.0-1'         # strip_nmu
+        assert _rec['patch_set_hash'] == 'deadbeef' * 8
+        assert _rec['exit_code'] == 0
+
+
+def test_migrate_legacy_records_fail_status():
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'foo.result'), 'w') as _fh:
+            _fh.write('FAIL\n')
+        _u.migrate_legacy_records(_td, lambda _p: '1.0')
+        _rec = _u.read_build_record(_td, 'foo')
+        assert _rec is not None
+        assert _rec['phase'] == 'failed'
+        assert _rec['status'] == 'FAIL'
+        assert _rec['exit_code'] == 1
+        assert _rec['built_version'] is None
+
+
+def test_migrate_legacy_records_tunneled_status():
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'shim-signed.result'), 'w') as _fh:
+            _fh.write('TUNNELED\n')
+        _u.migrate_legacy_records(
+            _td, lambda _p: '1.40+15.4-7+deb12u1',
+        )
+        _rec = _u.read_build_record(_td, 'shim-signed')
+        assert _rec is not None
+        assert _rec['phase'] == 'tunneled'
+        assert _rec['status'] == 'TUNNELED'
+        # Tunneled built_version == intended (no NMU strip).
+        assert _rec['built_version'] == '1.40+15.4-7+deb12u1'
+
+
+def test_migrate_legacy_records_skipped_when_no_version():
+    """Source not in dep_tree (version_resolver returns None) → skipped,
+    not failed.  Legacy file is preserved on disk."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'unknown.result'), 'w') as _fh:
+            _fh.write('PASS\n')
+        _counts = _u.migrate_legacy_records(_td, lambda _p: None)
+        assert _counts['skipped'] == ['unknown']
+        assert _counts['migrated'] == []
+        assert _u.read_build_record(_td, 'unknown') is None
+        # Legacy file untouched.
+        assert os.path.exists(os.path.join(_td, 'unknown.result'))
+
+
+def test_migrate_legacy_records_prune_deletes_legacy_files():
+    """prune=True deletes .result + .patchhash after successful write."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'foo.result'), 'w') as _fh:
+            _fh.write('PASS\n')
+        with open(os.path.join(_td, 'foo.patchhash'), 'w') as _fh:
+            _fh.write('hh\n')
+        _counts = _u.migrate_legacy_records(
+            _td, lambda _p: '1.0', prune=True,
+        )
+        assert _counts['pruned'] == ['foo']
+        assert not os.path.exists(os.path.join(_td, 'foo.result'))
+        assert not os.path.exists(os.path.join(_td, 'foo.patchhash'))
+        assert _u.read_build_record(_td, 'foo') is not None
+
+
+def test_migrate_legacy_records_dry_run_writes_nothing():
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'foo.result'), 'w') as _fh:
+            _fh.write('PASS\n')
+        _counts = _u.migrate_legacy_records(
+            _td, lambda _p: '1.0', dry_run=True, prune=True,
+        )
+        # Migrate count rises but no file is written or deleted.
+        assert _counts['migrated'] == ['foo']
+        assert os.path.exists(os.path.join(_td, 'foo.result'))
+        assert _u.read_build_record(_td, 'foo') is None
+        assert _counts['pruned'] == []
+
+
+def test_migrate_legacy_records_idempotent_when_record_already_exists():
+    """A re-run on an already-migrated source must leave the record
+    alone (counted under 'existing'), not overwrite it."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'foo.result'), 'w') as _fh:
+            _fh.write('PASS\n')
+        # First migration.
+        _u.migrate_legacy_records(_td, lambda _p: '1.0')
+        _rec_first = _u.read_build_record(_td, 'foo')
+        # Tamper-proof check: capture sig + intended_version, re-run,
+        # confirm both unchanged.
+        assert _rec_first is not None
+        _sig_first = _rec_first['sig']
+        _counts = _u.migrate_legacy_records(_td, lambda _p: '9.9-99')
+        assert _counts['existing'] == ['foo'], _counts
+        assert _counts['migrated'] == []
+        _rec_after = _u.read_build_record(_td, 'foo')
+        assert _rec_after is not None
+        assert _rec_after['sig'] == _sig_first
+        assert _rec_after['intended_version'] == '1.0'  # NOT 9.9-99
+
+
+def test_migrate_legacy_records_unknown_status_token():
+    """A .result containing something other than PASS/FAIL/TUNNELED
+    must be flagged for operator review, not silently dropped."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'foo.result'), 'w') as _fh:
+            _fh.write('SOMETHING-ELSE\n')
+        _counts = _u.migrate_legacy_records(_td, lambda _p: '1.0')
+        assert _counts['unknown_status'] == ['foo']
+        assert _u.read_build_record(_td, 'foo') is None
+
+
+def test_print_build_times_aggregates_elapsed_across_records():
+    """`print build-times` reads every <pkg>.build.json under log/build/,
+    sorts by elapsed_seconds, and sums for the snapshot-pivot estimate."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import print_commands as _pc
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        os.makedirs(_buildlog, exist_ok=True)
+        for _pkg, _elapsed in (('libwmf', 156.0), ('libreoffice', 2820.0),
+                                ('alsa-lib', 12.5)):
+            _rec = _u.new_build_record(
+                package=_pkg, intended_version='1.0', patch_set_hash='',
+            )
+            _rec.update({
+                'phase': 'done', 'status': 'PASS', 'built_version': '1.0',
+                'elapsed_seconds': _elapsed,
+            })
+            _u.write_build_record(_buildlog, _rec)
+
+        class _Cfg:
+            dir_log = os.path.join(_tmp, 'log')
+
+        class _Sess:
+            config = _Cfg()
+
+        _records = _pc._iter_build_records(_Sess())
+        _names = {r['package'] for r in _records}
+        assert _names == {'libwmf', 'libreoffice', 'alsa-lib'}, _names
+        _total = sum(r['elapsed_seconds'] for r in _records)
+        assert int(_total) == 2988, f"total elapsed wrong: {_total}"
+
+
+def test_print_build_times_skips_tampered_records():
+    """A tampered build.json must not appear in the build-times view —
+    the audit's tamper-detection cascades through this surface."""
+    import sys, json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import print_commands as _pc
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        os.makedirs(_buildlog, exist_ok=True)
+        _u.write_build_record(_buildlog, _u.new_build_record(
+            package='clean', intended_version='1.0', patch_set_hash='',
+        ))
+        # Tamper one record by post-write edit.
+        _u.write_build_record(_buildlog, _u.new_build_record(
+            package='dirty', intended_version='1.0', patch_set_hash='',
+        ))
+        _path = os.path.join(_buildlog, 'dirty.build.json')
+        with open(_path) as _fh:
+            _d = json.load(_fh)
+        _d['intended_version'] = 'tampered'
+        with open(_path, 'w') as _fh:
+            json.dump(_d, _fh)
+
+        class _Cfg:
+            dir_log = os.path.join(_tmp, 'log')
+
+        class _Sess:
+            config = _Cfg()
+
+        _names = {r['package'] for r in _pc._iter_build_records(_Sess())}
+        assert _names == {'clean'}, (
+            f"tampered record must be skipped; saw {_names}")
+
+
+def test_build_record_canonical_json_stable_across_key_order():
+    """Two records with the same fields in different insertion order
+    produce identical signatures (canonical-JSON serialization)."""
+    _u = _utils_module()
+    _key = b'k' * 32
+    _a = {'package': 'x', 'phase': 'entry', 'schema_version': 1}
+    _b = {'schema_version': 1, 'phase': 'entry', 'package': 'x'}
+    assert _u._sign_record(_a, _key)['sig'] == _u._sign_record(_b, _key)['sig']
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22409,6 +23095,33 @@ def main() -> int:
         # TUI render-failure capture (replaces silent-swallow)
         test_render_failure_one_shot_capture_writes_post_mortem,
         test_render_failure_capture_no_op_on_success,
+        # OBS-01 canonical signed build record
+        test_build_record_schema_v1_field_set,
+        test_build_record_hmac_round_trip,
+        test_build_record_tamper_detection,
+        test_build_record_hmac_key_mode_0600,
+        test_build_record_atomic_write_no_temp_left_behind_on_success,
+        test_build_record_phase_transition_to_done_sets_status_pass,
+        test_build_record_phase_transition_to_failed_sets_status_fail,
+        test_build_record_phase_tunneled_sets_status_tunneled,
+        test_classify_build_record_full_matrix,
+        test_build_record_intended_vs_built_version_drift_visible,
+        test_source_state_interrupted_when_record_is_non_terminal,
+        test_cmd_source_repair_clears_interrupted_record,
+        test_download_file_retries_on_transient_timeout,
+        test_download_file_does_not_retry_on_http_error,
+        test_every_outbound_request_carries_user_agent_header,
+        test_migrate_legacy_records_pass_with_patchhash,
+        test_migrate_legacy_records_fail_status,
+        test_migrate_legacy_records_tunneled_status,
+        test_migrate_legacy_records_skipped_when_no_version,
+        test_migrate_legacy_records_prune_deletes_legacy_files,
+        test_migrate_legacy_records_dry_run_writes_nothing,
+        test_migrate_legacy_records_idempotent_when_record_already_exists,
+        test_migrate_legacy_records_unknown_status_token,
+        test_print_build_times_aggregates_elapsed_across_records,
+        test_print_build_times_skips_tampered_records,
+        test_build_record_canonical_json_stable_across_key_order,
     ]
     failures = 0
     for t in tests:

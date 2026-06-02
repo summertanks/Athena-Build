@@ -611,7 +611,9 @@ def fetch_remote_ledger(config: 'BuildConfig') -> 'Optional[dict]':
     try:
         import requests
         import gzip
-        _resp = requests.get(_pkgs_url, timeout=30)
+        _resp = requests.get(
+            _pkgs_url, timeout=utils._HTTP_TIMEOUT_FAST,
+            headers=utils._HTTP_HEADERS)
         if _resp.status_code == 404:
             # Remote reachable but no Packages yet (fresh archive) → empty.
             logger.info(f"fetch_remote_ledger: {_pkgs_url} 404 — empty ledger")
@@ -647,7 +649,9 @@ def fetch_source_versions_at(config: 'BuildConfig',
         for _ext, _decomp in (('.xz', lzma.decompress), ('.gz', gzip.decompress)):
             _url = f"{_base}/{_snap.sources_path}{_ext}"
             try:
-                _r = requests.get(_url, timeout=60)
+                _r = requests.get(
+                    _url, timeout=utils._HTTP_TIMEOUT_STREAM,
+                    headers=utils._HTTP_HEADERS)
                 if _r.status_code != 200:
                     continue
                 _text = _decomp(_r.content).decode('utf-8', errors='replace')

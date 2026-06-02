@@ -419,6 +419,9 @@ def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
     else:
         tui.console.print(f"  ISO installer  : {_installer_iso_path}  (installer chroot must build first)")
 
+    # OBS-01 build times — slowest-N + aggregate, only when records exist.
+    _summary_build_times_section(session)
+
     # Disk image reuses the verified live chroot (same gate as ISO live).
     _distro     = cfg.build_distribution.strip('"').strip("'")
     _disk_name  = f"{_distro.lower()}-{_version}-{cfg.arch}.qcow2"
@@ -438,6 +441,100 @@ def _print_summary(session, *_extras) -> None:
     """Dispatch handler for ``print summary``.  Operator-invoked, so no
     autorun timing is available — render the state-snapshot variant."""
     summary(session, timing=None)
+
+
+# ─── OBS-01: build-time views ───────────────────────────────────────────────
+
+def _iter_build_records(session) -> 'list[dict]':
+    """Load every `<pkg>.build.json` under log/build/ and verify each
+    via the signed-record path.  Skips records that fail HMAC or are
+    malformed — the audit treats those as missing, same as readers do."""
+    import utils
+    _records: 'list[dict]' = []
+    _log_dir = getattr(getattr(session, 'config', None), 'dir_log', None)
+    if not isinstance(_log_dir, str):
+        return _records
+    _dir = os.path.join(_log_dir, 'build')
+    try:
+        _names = os.listdir(_dir)
+    except OSError:
+        return _records
+    for _f in _names:
+        if not _f.endswith(utils.BUILD_RECORD_SUFFIX):
+            continue
+        _pkg = _f[:-len(utils.BUILD_RECORD_SUFFIX)]
+        _rec = utils.read_build_record(_dir, _pkg)
+        if _rec is None:
+            continue
+        _records.append(_rec)
+    return _records
+
+
+def _print_build_times(session, *_extras) -> None:
+    """All sources sorted by wall-clock elapsed.  Reads the OBS-01
+    build records — covers built (phase=done) and failed (phase=failed)
+    attempts.  Tunneled and interrupted records carry timing too and
+    are surfaced with a status tag.
+
+    The total at the bottom is the upper bound on snapshot-pivot
+    rebuild time: changing the snapshot rebuilds every source with
+    approximately the same per-source cost ± kernel/glibc variation.
+    """
+    _records = _iter_build_records(session)
+    if not _records:
+        tui.console.print(
+            "No build records found "
+            "(run `source build` to populate log/build/)"
+        )
+        return
+    _rows: 'list[tuple[float, str, str, str]]' = []
+    _total = 0.0
+    for _r in _records:
+        _elapsed = _r.get('elapsed_seconds')
+        if not isinstance(_elapsed, (int, float)) or _elapsed < 0:
+            _elapsed = 0.0
+        _pkg = str(_r.get('package') or '?')
+        _status = str(_r.get('status') or _r.get('phase') or '?')
+        _built = str(_r.get('built_version') or _r.get('intended_version') or '')
+        _rows.append((float(_elapsed), _pkg, _status, _built))
+        _total += float(_elapsed)
+    _rows.sort(reverse=True)
+    tui.console.print(
+        f"Build times ({len(_rows)} record(s), "
+        f"total {format_duration(int(_total))}):"
+    )
+    for _e, _p, _s, _v in _rows:
+        tui.console.print(
+            f"  {format_duration(int(_e)):>10}  "
+            f"{_s:<10}  {_p:<32}  {_v}"
+        )
+
+
+def _summary_build_times_section(session) -> None:
+    """Slowest-N + aggregate wall time, slotted into `print summary`.
+    No-op when no records exist (don't clutter the summary on fresh
+    repos)."""
+    _records = _iter_build_records(session)
+    if not _records:
+        return
+    _timed = sorted(
+        (
+            (float(_r.get('elapsed_seconds') or 0.0), str(_r.get('package') or '?'))
+            for _r in _records
+            if isinstance(_r.get('elapsed_seconds'), (int, float))
+        ),
+        reverse=True,
+    )
+    if not _timed:
+        return
+    _total = sum(_e for _e, _ in _timed)
+    tui.console.print("")
+    tui.console.print(
+        f"  Build times    : {len(_timed)} source(s), "
+        f"total {format_duration(int(_total))} wall-clock"
+    )
+    for _e, _p in _timed[:5]:
+        tui.console.print(f"                   {format_duration(int(_e)):>10}  {_p}")
 
 
 # ─── Package list views ─────────────────────────────────────────────────────
@@ -948,6 +1045,7 @@ CATEGORIES: 'dict[str, tuple[Callable[..., None], str, str]]' = {
     'state':     (_print_state,     'Build state',   'pipeline stage progress (which stages are done)'),
     'stats':     (_print_stats,     'Build state',   'high-level counts across cache, dep tree, sources'),
     'summary':   (_print_summary,   'Build state',   'full pipeline summary (counts + chroot + ISO target)'),
+    'build-times': (_print_build_times, 'Build state', 'per-source wall-clock from build records (OBS-01)'),
 
     # Packages
     'required':  (_print_required,  'Packages',      "packages with 'required' priority from APT cache"),
