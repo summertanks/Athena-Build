@@ -1,0 +1,7 @@
+#!/usr/bin/make -f
+# Pure metapackage: no install lines, no binaries.  debhelper handles
+# the empty-payload .deb construction via dh; binary-arch does the
+# work, binary-indep emits the Architecture: all .deb.
+
+%:
+	dh $@

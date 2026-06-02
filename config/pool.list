@@ -214,7 +214,21 @@ xorg
 # fork/source/asgard-<group>/.  Pattern B per docs/branding-
 # methodology.md — coexists with the pkg.list group + tasksel Key
 # list, replaces neither.
+#
+# Hierarchy: asgard-gnome-desktop is the base.  Every subcategory
+# metapackage below Depends on asgard-gnome-desktop so installing
+# any subcategory pulls the full GNOME base automatically — a
+# single `apt install asgard-office` brings up "GNOME + office".
 asgard-gnome-desktop
+# Subcategories — alphabetical
+asgard-accessibility
+asgard-games
+asgard-gnome-extras
+asgard-multimedia
+asgard-network-services
+asgard-office
+asgard-pim
+asgard-printing-extras
 
 # ─── Non-free firmware + CPU microcode (non-free-firmware component) ──
 # Curated subset of Debian's non-free-firmware, TUNNELED (prebuilt binaries,

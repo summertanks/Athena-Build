@@ -1,0 +1,9 @@
+asgard-printing-extras (1.0.0) thor; urgency=low
+
+  * Initial @DISTRIBUTION@ printing + scanning metapackage.  Adds
+    cups (print server) + cups-pk-helper (PolicyKit shim for the
+    GNOME printer dialog) + simple-scan (scanner UI) on top of the
+    system-config-printer-* shipped by asgard-gnome-desktop.
+    Depends on asgard-gnome-desktop.
+
+ -- Athena Build <athena@local>  Mon, 02 Jun 2026 02:00:00 +0000

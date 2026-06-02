@@ -1,0 +1,9 @@
+asgard-multimedia (1.0.0) thor; urgency=low
+
+  * Initial @DISTRIBUTION@ multimedia metapackage.  Bundles totem +
+    rhythmbox + gnome-music + shotwell + cheese + rygel for video /
+    music / photo / webcam / UPnP-DLNA on top of asgard-gnome-desktop.
+    Codec plugin packages (libav, ugly) deliberately excluded —
+    operator installs separately for patent-encumbered codec support.
+
+ -- Athena Build <athena@local>  Mon, 02 Jun 2026 02:00:00 +0000

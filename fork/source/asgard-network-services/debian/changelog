@@ -1,0 +1,9 @@
+asgard-network-services (1.0.0) thor; urgency=low
+
+  * Initial @DISTRIBUTION@ network services metapackage.  Adds avahi
+    (mDNS) + libnss-mdns (NSS plugin) + libproxy plugins for
+    NetworkManager / GSettings / WebKit autoconfig.  Polish layer
+    for laptop / mobile use; not required for basic networking.
+    Depends on asgard-gnome-desktop.
+
+ -- Athena Build <athena@local>  Mon, 02 Jun 2026 02:00:00 +0000

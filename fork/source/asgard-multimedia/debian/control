@@ -1,0 +1,42 @@
+Source: asgard-multimedia
+Section: metapackages
+Priority: optional
+Maintainer: Athena Build <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+
+Package: asgard-multimedia
+Architecture: all
+Multi-Arch: foreign
+Section: metapackages
+Depends:
+ ${misc:Depends},
+ asgard-gnome-desktop,
+ totem,
+ totem-plugins,
+ rhythmbox,
+ rhythmbox-plugins,
+ gnome-music,
+ gnome-sound-recorder,
+ shotwell,
+ cheese,
+ rygel-playbin,
+ rygel-tracker
+Description: @DISTRIBUTION@ multimedia playback + capture
+ Adds the GNOME multimedia app stack on top of the base desktop:
+ .
+   * totem + totem-plugins        video playback
+   * rhythmbox + rhythmbox-plugins music library + playback
+   * gnome-music                   alternative music browser
+   * gnome-sound-recorder          quick audio capture
+   * shotwell                      photo library / editor
+   * cheese                        webcam + photobooth
+   * rygel-playbin + rygel-tracker UPnP/DLNA media server
+ .
+ Codec packages (gstreamer1.0-libav, gstreamer1.0-plugins-ugly) are
+ NOT depended on here — install them separately if you need
+ patent-encumbered codec support (mp3, h264, etc.); they live in
+ contrib / non-free and require explicit operator opt-in via apt.
+ .
+ Selecting this metapackage automatically pulls asgard-gnome-desktop.
