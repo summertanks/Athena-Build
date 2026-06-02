@@ -1,0 +1,100 @@
+asgard-gnome-desktop — operator-facing metapackage for the GNOME group
+======================================================================
+
+What this is
+------------
+
+A metapackage: a .deb with no files, just a `Depends:` list naming the
+packages that make up Asgard's GNOME desktop.  Installing it pulls
+the whole group via apt's dependency resolver.  Removing it (with
+`--autoremove`) cleans the whole group back out.
+
+Why
+---
+
+The same package set is already curated in two places:
+
+  config/pkg.list                                 [gnome-desktop]
+  fork/source/athena-tasksel/tasks/gnome-desktop  Key: list
+
+This metapackage adds a third surface aimed at the operator on a
+booted Asgard system: a single name they can apt-install, apt-pin,
+apt-remove, or query via `apt-cache rdepends`.
+
+Pattern B (per docs/branding-methodology.md) — it does NOT replace
+either pkg.list or the tasksel Key list.  It coexists.
+
+How to build + test
+-------------------
+
+1. cache build / cache parse (fork/ scan + cache index pickup)
+2. source build asgard-gnome-desktop
+3. ls repo/dists/<codename>/main/binary-amd64/asgard-gnome-desktop_1.0.0_all.deb
+
+To test on a running system:
+
+  dpkg -i asgard-gnome-desktop_1.0.0_all.deb     # likely fails — no deps
+  apt -f install                                   # resolves the Depends
+
+Or via the cdrom pool after `iso build installer` ships it:
+
+  apt install asgard-gnome-desktop
+
+Or test the package shape without installing:
+
+  dpkg-deb --info asgard-gnome-desktop_1.0.0_all.deb     # control + Depends
+  dpkg-deb --contents asgard-gnome-desktop_1.0.0_all.deb # near-empty
+
+How to ship (separately, after testing)
+---------------------------------------
+
+This source tree only adds the source pkg to fork/.  To make it
+INSTALLABLE by default on Asgard installs, you'd also:
+
+  1. config/pool.list — add `asgard-gnome-desktop` so it ships in /cdrom/pool
+  2. (optional) config/pkg.list [gnome-desktop] — replace the long Key list
+     with just `asgard-gnome-desktop`, letting apt's resolver expand it
+  3. (optional) fork/source/athena-tasksel/tasks/gnome-desktop — same
+     collapse on the tasksel side
+  4. test_pkg_list_groups_mirror_tasksel_keys — extend to check the
+     metapackage Depends == the pkg.list seeds
+
+Steps 2-4 are Pattern A territory — decide separately after testing
+the Pattern B build round-trip.
+
+Source-tree contents
+--------------------
+
+  debian/changelog                          version + maintainer + date
+  debian/control                            Source + Package + Depends:
+  debian/copyright                          Apache-2.0 boilerplate
+  debian/rules                              one-liner: `%: dh $@`
+  debian/source/format                      3.0 (native) — no tarball
+  debian/asgard-gnome-desktop.install       paths-to-ship list
+  debian/asgard-gnome-desktop.postinst      reload NetworkManager hook
+  conf/10-asgard-managed.conf               NM conf.d drop-in
+  README                                    this file
+
+Why the NetworkManager conf.d drop-in
+-------------------------------------
+
+A debootstrap-based installer leaves /etc/network/interfaces with a
+default `eth0` (or similar) stanza configuring DHCP for the install-
+time interface.  Stock NetworkManager then refuses to manage that
+device — defers to ifupdown — and GNOME Shell sees zero NM-managed
+devices, so the top-bar network indicator never appears.
+
+Our drop-in flips the [ifupdown] managed default to true.  Ships at
+/etc/NetworkManager/conf.d/10-asgard-managed.conf — a higher-priority
+override than NetworkManager.conf, doesn't conflict with the file
+network-manager itself ships.
+
+The postinst runs `systemctl try-reload-or-restart NetworkManager`
+so the drop-in takes effect immediately on `apt install` without
+requiring a reboot.  Idempotent: silent failure when NM isn't
+running yet (e.g. during chroot bring-up) is fine because NM
+re-reads its config on the next start.
+
+dpkg treats the conf.d file as a conffile (it lives under /etc/),
+so operator edits to it survive package upgrades.  apt remove
+--autoremove asgard-gnome-desktop takes the drop-in with it.
