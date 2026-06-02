@@ -6573,131 +6573,6 @@ class BuildSession:
                 for _n in _cleared:
                     console.print(f"  {_n}")
 
-    def cmd_source_migrate_records(self, *args):
-        """OBS-01 one-shot migration from .result + .patchhash to the
-        signed build.json record format.
-
-        Usage: source migrate-records [prune] [dry-run] [verbose]
-
-        Walks log/build/, reads each <pkg>.result (+ <pkg>.patchhash if
-        present), synthesizes a signed <pkg>.build.json and writes it
-        via the atomic-replace path.  Status mapping:
-
-          .result=PASS     → phase=done,     status=PASS
-          .result=FAIL     → phase=failed,   status=FAIL
-          .result=TUNNELED → phase=tunneled, status=TUNNELED
-
-        Fields not recoverable from the legacy sidecars are filled
-        conservatively: elapsed_seconds=0, exit_code=0/1, output_count=0,
-        outputs=[].  Started/finished use the .result file's mtime.
-        built_version (PASS/TUNNELED only) is the strip_nmu_suffix of
-        intended_version — what the build would have produced post-strip.
-
-        Sources NOT in the current dep_tree are skipped (no
-        intended_version available).  Operator can drop those by hand
-        if they're truly stale.
-
-        Modes:
-          prune    — delete .result + .patchhash after the new record
-                     verifies via HMAC round-trip.  Default leaves the
-                     legacy files in place so the migration is safely
-                     re-runnable.  Alias: `purge`.
-          dry-run  — classify but write nothing to disk.  Alias: `dryrun`.
-          verbose  — list per-pkg outcomes.
-
-        Idempotent: a source that already has a valid build.json is
-        left alone (counted under 'existing').
-        """
-        if not (self.flags.cache_ready and self.flags.dep_check_ready
-                and self.flags.build_container_ready):
-            console.print(
-                "source migrate-records needs cache build + cache parse + "
-                "container init to have run first.",
-                tui.COLOR_ERROR,
-            )
-            return
-
-        # Accept `purge` as an alias for `prune` — operators reach for
-        # either word interchangeably (the semantics is "delete the
-        # legacy files after migration"), and silently treating an
-        # unrecognized keyword as "no action" was the same foot-gun
-        # the dry-run alias closed (caught 2026-06-02: operator typed
-        # `purge`, parser saw nothing, .result + .patchhash stayed).
-        _prune   = ('prune' in args) or ('purge' in args)
-        # Accept both `dry-run` and `dryrun` — operators reach for the
-        # un-hyphenated form often enough that silently treating it as
-        # "do the real thing" was a foot-gun (caught 2026-06-02 when an
-        # operator's `dryrun` invocation actually wrote 985 records).
-        _dryrun  = ('dry-run' in args) or ('dryrun' in args)
-        _verbose = 'verbose' in args
-
-        assert self.dep_tree is not None
-        _srcs = dict(self.dep_tree.selected_srcs)
-        if self.udeb_dep_tree is not None:
-            for _n, _s in self.udeb_dep_tree.selected_srcs.items():
-                if _n not in _srcs:
-                    _srcs[_n] = _s
-
-        def _resolver(_pkg: str) -> 'Optional[str]':
-            _src = _srcs.get(_pkg)
-            return str(_src.version) if _src is not None else None
-
-        _counts = utils.migrate_legacy_records(
-            self.container.buildlog_path, _resolver,
-            prune=_prune, dry_run=_dryrun,
-        )
-
-        _mode = []
-        if _dryrun:
-            _mode.append('dry-run')
-        if _prune:
-            _mode.append('prune')
-        _hdr = (' (' + ', '.join(_mode) + ')') if _mode else ''
-        console.print(f"Source record migration{_hdr}:")
-        console.print(
-            f"  {len(_counts['migrated']):5d}  migrated  "
-            "(legacy .result → signed build.json)"
-        )
-        console.print(
-            f"  {len(_counts['existing']):5d}  existing  "
-            "(build.json already present — idempotent skip)"
-        )
-        if _counts['skipped']:
-            console.print(
-                f"  {len(_counts['skipped']):5d}  skipped   "
-                "(source not in current dep_tree — needs cache parse "
-                "with matching pkg.list, or drop manually)"
-            )
-        if _counts['unknown_status']:
-            console.print(
-                f"  {len(_counts['unknown_status']):5d}  unknown   "
-                "(.result content not PASS/FAIL/TUNNELED — operator review)",
-                tui.COLOR_WARNING,
-            )
-        if _prune:
-            console.print(
-                f"  {len(_counts['pruned']):5d}  pruned    "
-                "(.result + .patchhash deleted)"
-            )
-        if _counts['errors']:
-            console.print(
-                f"  {len(_counts['errors']):5d}  errors    "
-                "(write/prune failures — see log)",
-                tui.COLOR_ERROR,
-            )
-            for _pkg, _err in _counts['errors'][:10]:
-                console.print(f"      {_pkg}: {_err}", tui.COLOR_ERROR)
-
-        if _verbose:
-            for _label in ('migrated', 'skipped', 'unknown_status', 'pruned'):
-                _items = _counts.get(_label, [])
-                if not _items:
-                    continue
-                console.print("")
-                console.print(f"{_label.replace('_', ' ').title()} ({len(_items)}):")
-                for _n in _items:
-                    console.print(f"  {_n}")
-
     @staticmethod
     def _is_fork_source(src) -> bool:
         """True if `src` came from our LOCAL fork mirror (cache stamps it with
@@ -8369,12 +8244,6 @@ class BuildSession:
                         'valid but the record is missing; clears '
                         'stale_pass / interrupted records so next '
                         'source build rebuilds.',
-            'migrate-records':
-                        'OBS-01 one-shot: synthesize signed build.json '
-                        'records from legacy .result + .patchhash '
-                        'sidecars.  Add `prune` (alias `purge`) to delete '
-                        'legacy files after verify, `dry-run` (alias '
-                        '`dryrun`) to classify without writing.  Idempotent.',
             'fork':     'manage fork packages: `source fork <pkg>` '
                         'creates or reloads; `source fork <pkg> '
                         'enabled|disabled` toggles the .disabled marker',
@@ -8387,8 +8256,6 @@ class BuildSession:
             return self.cmd_source_audit(*args)
         if action == 'repair':
             return self.cmd_source_repair(*args)
-        if action == 'migrate-records':
-            return self.cmd_source_migrate_records(*args)
         if action == 'fork':
             return self.cmd_source_fork(*args)
         return self._group_help('source', _table, action)
@@ -9051,7 +8918,7 @@ def main(banner: str) -> None:
     tui.register_command('cache',     session.cmd_cache,     'Cache:      cache <build|purge|parse|select|info <pkg>>')
     tui.register_command('clean',     session.cmd_clean,     'Clean:      clean <subcmd> — run `clean` for the list')
     tui.register_command('patch',     session.cmd_patch,     'Patches:    patch refresh')
-    tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|migrate-records|fork>')
+    tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|fork>')
     tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|publish|audit|repair|tunnel|refresh>')
     tui.register_command('snapshot',  session.cmd_snapshot,  'Snapshot:   snapshot <list|advance|workload|base>')
     tui.register_command('container', session.cmd_container, 'Container:  container <init|purge>')
