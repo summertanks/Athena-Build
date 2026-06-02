@@ -6601,8 +6601,8 @@ class BuildSession:
           prune    — delete .result + .patchhash after the new record
                      verifies via HMAC round-trip.  Default leaves the
                      legacy files in place so the migration is safely
-                     re-runnable.
-          dry-run  — classify but write nothing to disk.
+                     re-runnable.  Alias: `purge`.
+          dry-run  — classify but write nothing to disk.  Alias: `dryrun`.
           verbose  — list per-pkg outcomes.
 
         Idempotent: a source that already has a valid build.json is
@@ -6617,7 +6617,13 @@ class BuildSession:
             )
             return
 
-        _prune   = 'prune'   in args
+        # Accept `purge` as an alias for `prune` — operators reach for
+        # either word interchangeably (the semantics is "delete the
+        # legacy files after migration"), and silently treating an
+        # unrecognized keyword as "no action" was the same foot-gun
+        # the dry-run alias closed (caught 2026-06-02: operator typed
+        # `purge`, parser saw nothing, .result + .patchhash stayed).
+        _prune   = ('prune' in args) or ('purge' in args)
         # Accept both `dry-run` and `dryrun` — operators reach for the
         # un-hyphenated form often enough that silently treating it as
         # "do the real thing" was a foot-gun (caught 2026-06-02 when an
@@ -8366,9 +8372,9 @@ class BuildSession:
             'migrate-records':
                         'OBS-01 one-shot: synthesize signed build.json '
                         'records from legacy .result + .patchhash '
-                        'sidecars.  Add `prune` to delete legacy files '
-                        'after verify, `dry-run` to classify without '
-                        'writing.  Idempotent.',
+                        'sidecars.  Add `prune` (alias `purge`) to delete '
+                        'legacy files after verify, `dry-run` (alias '
+                        '`dryrun`) to classify without writing.  Idempotent.',
             'fork':     'manage fork packages: `source fork <pkg>` '
                         'creates or reloads; `source fork <pkg> '
                         'enabled|disabled` toggles the .disabled marker',
