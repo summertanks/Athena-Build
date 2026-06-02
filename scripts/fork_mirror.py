@@ -137,10 +137,10 @@ def generate_fork_mirror(buildconfig: 'utils.BuildConfig') -> bool:
                 f"fork_mirror: {len(_id_findings)} identity-leak(s) — "
                 f"see log", tui.COLOR_ERROR,
             )
-            for _f in _id_findings:
+            for _id_f in _id_findings:
                 logger.error(
-                    f"identity-leak {_f['path']}:{_f['line_no']} "
-                    f"[{_f['token']}]: {_f['line']}"
+                    f"identity-leak {_id_f['path']}:{_id_f['line_no']} "
+                    f"[{_id_f['token']}]: {_id_f['line']}"
                 )
             logger.error(
                 f"fork_mirror: ABORT — {len(_id_findings)} identity "
