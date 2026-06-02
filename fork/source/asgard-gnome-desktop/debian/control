@@ -1,0 +1,92 @@
+Source: asgard-gnome-desktop
+Section: metapackages
+Priority: optional
+Maintainer: Athena Build <athena@local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Rules-Requires-Root: no
+
+Package: asgard-gnome-desktop
+Architecture: all
+Multi-Arch: foreign
+Section: metapackages
+Depends:
+ ${misc:Depends},
+ gnome-shell,
+ gdm3,
+ xserver-xorg-video-all,
+ xserver-xorg-input-all,
+ gnome-terminal,
+ nautilus,
+ gnome-control-center,
+ gnome-text-editor,
+ gnome-system-monitor,
+ gnome-screenshot,
+ gnome-disk-utility,
+ gnome-calculator,
+ eog,
+ evince,
+ firefox-esr,
+ network-manager,
+ network-manager-gnome,
+ fonts-noto-core,
+ fonts-dejavu-core,
+ gnome-session,
+ gnome-settings-daemon,
+ gnome-keyring,
+ libpam-gnome-keyring,
+ gnome-menus,
+ gsettings-desktop-schemas,
+ glib-networking,
+ gnome-online-accounts,
+ gvfs-backends,
+ gvfs-fuse,
+ libatk-adaptor,
+ libcanberra-pulse,
+ libglib2.0-bin,
+ librsvg2-common,
+ sound-theme-freedesktop,
+ xdg-desktop-portal-gnome,
+ pipewire-audio,
+ gstreamer1.0-plugins-base,
+ gstreamer1.0-plugins-good,
+ gnome-shell-extensions,
+ file-roller,
+ baobab,
+ yelp,
+ gnome-tweaks,
+ gnome-themes-extra,
+ gnome-user-docs,
+ gnome-logs,
+ xdg-user-dirs-gtk,
+ gnome-calendar,
+ gnome-contacts,
+ gnome-clocks,
+ gnome-software,
+ synaptic,
+ system-config-printer-common,
+ system-config-printer-udev,
+ athena-branding
+Description: @DISTRIBUTION@ GNOME desktop metapackage
+ Pulls in the GNOME desktop set @DISTRIBUTION@ curates: shell, file
+ manager, terminal, system settings, browser (firefox-esr), common
+ GNOME apps + utilities, PIM stack (calendar/contacts/clocks),
+ software center, admin GUI tools, audio (pipewire), font fallback
+ (Noto + DejaVu).
+ .
+ Also ships /etc/NetworkManager/conf.d/10-asgard-managed.conf so the
+ GNOME Shell network indicator appears correctly on debootstrap-based
+ installs where the installer left a non-loopback stanza in
+ /etc/network/interfaces (NetworkManager would otherwise defer to
+ ifupdown on that device, leave zero managed devices, and hide the
+ indicator).  Postinst restarts NetworkManager so the drop-in takes
+ effect without requiring a reboot.
+ .
+ Mirrors the [gnome-desktop] group in config/pkg.list so the same
+ package set ships at install time (via the tasksel "GNOME Desktop"
+ task) and post-install (via apt install asgard-gnome-desktop).
+ .
+ This is a Pattern B metapackage per docs/branding-methodology.md:
+ operator-facing convenience that does NOT replace tasksel's Key
+ list.  apt remove --autoremove asgard-gnome-desktop cleans up the
+ whole group AND the NetworkManager conf.d drop-in.

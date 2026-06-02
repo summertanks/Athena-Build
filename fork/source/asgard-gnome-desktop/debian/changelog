@@ -1,0 +1,26 @@
+asgard-gnome-desktop (1.0.1) thor; urgency=low
+
+  * Ship /etc/NetworkManager/conf.d/10-asgard-managed.conf carrying
+    `[ifupdown] managed=true`.  Without it, NetworkManager defers to
+    ifupdown on any interface listed in /etc/network/interfaces (the
+    installer leaves a DHCP entry there for the install-time
+    interface), GNOME Shell sees zero NM-managed devices, and the
+    top-bar network indicator never appears.  Postinst restarts NM
+    so the drop-in takes effect immediately on `apt install` without
+    requiring a reboot.
+  * Make network-manager an explicit Depends (was transitive via
+    network-manager-gnome) so the metapackage's dependency graph
+    documents the relationship a reader expects.
+
+ -- Athena Build <athena@local>  Tue, 02 Jun 2026 01:22:00 +0000
+
+asgard-gnome-desktop (1.0.0) thor; urgency=low
+
+  * Initial @DISTRIBUTION@ metapackage for the GNOME desktop group.
+    Mirrors config/pkg.list [gnome-desktop] seed list verbatim so
+    `apt install asgard-gnome-desktop` on a booted system pulls the
+    same closure tasksel's GNOME Desktop task installs at first boot.
+    Pattern B per docs/branding-methodology.md — coexists with the
+    pkg.list group and the tasksel Key list; does not replace either.
+
+ -- Athena Build <athena@local>  Mon, 01 Jun 2026 12:00:00 +0000

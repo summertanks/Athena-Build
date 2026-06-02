@@ -1,0 +1,24 @@
+#!/bin/sh
+# postinst — reload NetworkManager so the conf.d/10-asgard-managed.conf
+# drop-in takes effect without requiring a reboot.
+#
+# Idempotent: a silent failure (NM not installed yet, not running, or
+# systemd absent in a chroot) is fine because NM picks the config up
+# on its next start anyway.  Only the "install on a running system"
+# path needs the reload.
+
+set -e
+
+case "$1" in
+    configure)
+        if [ -d /run/systemd/system ] \
+           && command -v systemctl >/dev/null 2>&1; then
+            systemctl try-reload-or-restart NetworkManager.service \
+                2>/dev/null || :
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
