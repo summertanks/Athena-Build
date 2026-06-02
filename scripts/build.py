@@ -6618,7 +6618,11 @@ class BuildSession:
             return
 
         _prune   = 'prune'   in args
-        _dryrun  = 'dry-run' in args
+        # Accept both `dry-run` and `dryrun` — operators reach for the
+        # un-hyphenated form often enough that silently treating it as
+        # "do the real thing" was a foot-gun (caught 2026-06-02 when an
+        # operator's `dryrun` invocation actually wrote 985 records).
+        _dryrun  = ('dry-run' in args) or ('dryrun' in args)
         _verbose = 'verbose' in args
 
         assert self.dep_tree is not None
