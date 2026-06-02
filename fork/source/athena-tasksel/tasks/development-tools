@@ -1,5 +1,6 @@
 Task: development-tools
 Section: user
+Relevance: 11
 Description: Development tools
  Compiler toolchain, version control, editors, and runtime
  diagnostic helpers for software development on @DISTRIBUTION@.  Mirrors

@@ -1,6 +1,6 @@
 Task: laptop
 Section: user
-Relevance: 9
+Relevance: 10
 Description: Laptop tools
  Power management, Bluetooth, and wireless tooling for laptop
  hardware.  Mirrors the content of config/pkg.list [laptop] —
