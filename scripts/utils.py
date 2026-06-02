@@ -1,16 +1,21 @@
 import dataclasses
+import datetime
 import hashlib
+import hmac
+import json
 import logging
 import os
 import pathlib
 import re
+import secrets
+import tempfile
 import configparser
 import argparse
 
 import requests
 import tui
 from tui import Prompt, Spinner, ProgressBar
-from typing import List, Optional, TYPE_CHECKING
+from typing import Callable, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Forward-reference target for type hints — dependencytree imports utils
@@ -58,6 +63,51 @@ _DEFAULT_SECURITY_KEYRING = '/usr/share/keyrings/debian-archive-keyring.gpg'
 #
 # Each subdir has its own Packages index.  `repo audit` scopes repo/main.
 _REPO_SUBDIRS = ('main', 'doc', 'dbgsym', 'tests')
+
+
+# User-Agent for every outbound HTTP request.  snapshot.debian.org rate-
+# limits aggressively against the default `python-requests/X.Y.Z` UA — to
+# the point of routinely timing out our 10s HEAD probes.  curl / apt /
+# wget never hit this throttle because they advertise distinct UAs;
+# snapshot's docs explicitly ask clients to identify themselves so abuse
+# can be triaged.  Setting this here makes every requests.{get,head}
+# call use the same identifier, so we never re-introduce the throttle
+# by adding a new call site that forgets the header.
+_HTTP_HEADERS = {'User-Agent': 'athena-build/0.1'}
+
+# Outbound HTTP timeouts (seconds).  Single-value (not (connect, read)
+# tuple) on purpose: urllib3 2.x has a real bug where, against
+# snapshot.debian.org's HEAD endpoint, a tuple timeout with connect <
+# read leaves the socket's recv timeout at the CONNECT value, so reads
+# silently use the wrong (smaller) timeout.  Empirically verified:
+# `timeout=60` → 302 in 0.2s; `timeout=(10, 60)` → 16s hang then
+# "read timeout=10" error.  Single value sets connect AND read to the
+# same number, sidestepping the bug.
+#
+# Trade-off: a dead/unreachable mirror takes _HTTP_TIMEOUT_FAST seconds
+# to fail instead of 10s.  Acceptable — cache build runs rarely, and a
+# truly dead mirror is a config problem worth surfacing slowly.
+#
+# Values: 60s for HEAD probes / JSON APIs / small index files,
+# 120s for streamed downloads (matches apt's per-file budget).
+# snapshot.debian.org's CDN can take 30-60s for cold-cache responses;
+# our prior 10s flat tripped on those even when the connection was
+# healthy.
+_HTTP_TIMEOUT_FAST = 60     # HEAD probes, JSON APIs, small files
+_HTTP_TIMEOUT_STREAM = 120  # streamed downloads (InRelease, .deb, …)
+
+# Retry budget for outbound HTTP.  snapshot.debian.org's CDN is
+# intermittently slow on cold-cache files — same URL may return in
+# 300ms or stall past the timeout depending on whether the edge node
+# has the file cached.  A single retry is usually enough; we do 3
+# attempts with exponential backoff (1s, 2s) to cover the rare
+# multi-stall case.  Retries fire on:
+#   - ReadTimeout       (server stalled mid-response)
+#   - ConnectTimeout    (TCP handshake didn't complete in time)
+#   - ConnectionError   (transient network disruption, TLS reset)
+# Retries do NOT fire on HTTPError (4xx/5xx) — those are deterministic
+# and a retry would just hit the same response.
+_HTTP_RETRY_COUNT = 3
 
 
 def classify_repo_subdir(filename: str) -> str:
@@ -1206,6 +1256,501 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
     return _h.hexdigest()
 
 
+# ─── OBS-01: canonical signed build record ──────────────────────────────────
+#
+# `<pkg>.build.json` replaces the older `<pkg>.result` (PASS/FAIL one-liner)
+# and `<pkg>.patchhash` sidecars with a single signed JSON record per source
+# build attempt.  Carries everything the older sidecars did plus:
+#
+#   - intended_version vs built_version  — detect drift (a build was started
+#     for X, what landed on disk for Y?)
+#   - phase state machine                — crash recovery: if process is
+#     killed mid-build, the file shows the last completed phase, so the
+#     next session can classify the source as 'interrupted' instead of
+#     silently re-trying without context.
+#   - elapsed_seconds                    — per-source wall time, summed
+#     across the corpus gives snapshot-pivot effort estimates for free.
+#   - HMAC-SHA256 signature              — local tamper-detection.  Key
+#     lives at cache/.metrics.hmac.key (mode 0600, auto-generated, gitignored).
+#     Threat model is "did this file change since the build wrote it"
+#     (manual edit, partial write, bitflip on shared NFS), NOT adversarial.
+#
+# Writes are staged: every phase transition does read → merge → re-sign →
+# fsync → os.replace.  POSIX rename(2) guarantees readers see either the
+# old valid file or the new valid file, never a torn write.
+
+BUILD_RECORD_SCHEMA_VERSION = 1
+BUILD_RECORD_SUFFIX = '.build.json'
+_BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
+
+# Phase state machine.  Linear progression on the happy path:
+#   entry → container_exited → segregated → normalized → done
+# Terminal alternates:
+#   failed   — any non-zero exit / exception / OOM / operator-decline
+#   tunneled — package was passthrough-copied from upstream, no container
+# A phase string not in {done, failed, tunneled} means the build was
+# interrupted mid-flight; the record's `status` will be None.
+BUILD_PHASES = (
+    'entry',
+    'container_exited',
+    'segregated',
+    'normalized',
+    'done',
+    'failed',
+    'tunneled',
+)
+_TERMINAL_PHASES = frozenset({'done', 'failed', 'tunneled'})
+_PHASE_TO_STATUS = {
+    'done':     'PASS',
+    'failed':   'FAIL',
+    'tunneled': 'TUNNELED',
+}
+
+# Status values surfaced to consumers (repo audit, print summary, etc.).
+# INTERRUPTED is *derived* — never written by build(); it's what the
+# classifier returns when it reads a non-terminal phase across a session
+# boundary (i.e. the process that wrote the record didn't finish).
+BUILD_STATUSES = frozenset({'PASS', 'FAIL', 'TUNNELED', 'INTERRUPTED'})
+
+
+def _build_record_path(buildlog_dir: str, package: str) -> str:
+    """Absolute path to a package's build.json record."""
+    return os.path.join(buildlog_dir, package + BUILD_RECORD_SUFFIX)
+
+
+def _hmac_key_path(buildlog_dir: str) -> str:
+    """Key file path.  Co-located with the records it signs so the
+    threat model (local tamper detection) is clear from layout."""
+    return os.path.join(buildlog_dir, _BUILD_RECORD_HMAC_KEY_BASENAME)
+
+
+def _load_or_create_hmac_key(buildlog_dir: str) -> bytes:
+    """Return the HMAC key for this build root, bootstrapping if absent.
+
+    Generates 32 random bytes on first call, writes mode 0600.  Repeat
+    callers re-read the existing file.  Concurrent first-build workers
+    race here but it's idempotent — last writer wins, both end up
+    verifying records they wrote against the same final key.  (A worker
+    that wrote a record under key K1 and then re-reads under K2 will
+    see a sig-verification failure; that's the intended signal — the
+    audit treats verify-failure as 'missing', triggering rebuild.)
+
+    Key is bytes; do not log or expose.
+    """
+    _path = _hmac_key_path(buildlog_dir)
+    try:
+        with open(_path, 'rb') as _fh:
+            _data = _fh.read()
+        if len(_data) >= 32:
+            return _data
+    except FileNotFoundError:
+        pass
+    except OSError as _e:
+        logger.warning(f"build-record HMAC key read failed ({_path}): {_e}")
+    _new = secrets.token_bytes(32)
+    # Write with 0600 from the start — open(O_CREAT|O_EXCL|O_WRONLY, 0o600)
+    # via os.open keeps the mode atomic with creation, avoiding the
+    # umask race that plain open() has.
+    try:
+        _fd = os.open(_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            os.write(_fd, _new)
+            os.fsync(_fd)
+        finally:
+            os.close(_fd)
+        os.chmod(_path, 0o600)
+    except OSError as _e:
+        logger.warning(f"build-record HMAC key bootstrap failed ({_path}): {_e}")
+    return _new
+
+
+def _canonical_record_bytes(record: dict) -> bytes:
+    """Serialize a record (minus the `sig` field) to canonical JSON bytes
+    suitable for HMAC.  sort_keys + ASCII-safe + no whitespace variance
+    means two semantically-identical records hash identically across
+    Python versions and locales."""
+    _payload = {_k: _v for _k, _v in record.items() if _k != 'sig'}
+    return json.dumps(
+        _payload, sort_keys=True, ensure_ascii=True, separators=(',', ':'),
+    ).encode('utf-8')
+
+
+def _sign_record(record: dict, key: bytes) -> dict:
+    """Return `record` with its `sig` field set to HMAC-SHA256 hex digest
+    over the canonical-JSON encoding of every other field.  Pure: caller
+    owns the dict, we return a copy with `sig` added."""
+    _out = dict(record)
+    _out.pop('sig', None)
+    _mac = hmac.new(key, _canonical_record_bytes(_out), hashlib.sha256)
+    _out['sig'] = _mac.hexdigest()
+    return _out
+
+
+def _verify_record(record: dict, key: bytes) -> bool:
+    """True iff `record['sig']` matches HMAC-SHA256 over the rest.
+    Uses hmac.compare_digest for constant-time comparison."""
+    _sig = record.get('sig')
+    if not isinstance(_sig, str):
+        return False
+    _expected = hmac.new(
+        key, _canonical_record_bytes(record), hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(_sig, _expected)
+
+
+def _atomic_write_bytes(path: str, data: bytes) -> None:
+    """Write `data` to `path` via temp-file + fsync + os.replace so a
+    crash mid-write leaves the prior file intact (POSIX rename(2)
+    atomicity).  fsync the data before rename so an OS crash post-rename
+    can't surface an empty file."""
+    _dir = os.path.dirname(path) or '.'
+    _fd, _tmp = tempfile.mkstemp(
+        prefix='.' + os.path.basename(path) + '.', suffix='.tmp', dir=_dir,
+    )
+    try:
+        with os.fdopen(_fd, 'wb') as _fh:
+            _fh.write(data)
+            _fh.flush()
+            os.fsync(_fh.fileno())
+        os.chmod(_tmp, 0o644)
+        os.replace(_tmp, path)
+    except OSError:
+        try:
+            os.unlink(_tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _utc_now_iso() -> str:
+    """UTC ISO-8601 with second resolution, trailing 'Z'.  Stable across
+    locales; sortable lexicographically; safe to grep."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        '%Y-%m-%dT%H:%M:%SZ',
+    )
+
+
+def new_build_record(*, package: str,
+                     intended_version: str,
+                     patch_set_hash: str,
+                     started: 'Optional[str]' = None) -> dict:
+    """Construct an initial phase=entry record.  Caller passes it to
+    write_build_record to materialize on disk.
+
+    `started` defaults to now-UTC if omitted; passed explicitly by tests
+    that need deterministic timestamps.
+    """
+    return {
+        'schema_version':   BUILD_RECORD_SCHEMA_VERSION,
+        'package':          package,
+        'intended_version': intended_version,
+        'built_version':    None,
+        'patch_set_hash':   patch_set_hash,
+        'phase':            'entry',
+        'status':           None,
+        'started':          started or _utc_now_iso(),
+        'finished':         None,
+        'elapsed_seconds':  None,
+        'exit_code':        None,
+        'oom_killed':       False,
+        'output_count':     0,
+        'outputs':          [],
+    }
+
+
+def write_build_record(buildlog_dir: str, record: dict) -> None:
+    """Sign + atomic-write a record.  Overwrites any prior file for the
+    same package.  Caller responsible for record shape (use
+    new_build_record / update_build_record to avoid drift)."""
+    _key = _load_or_create_hmac_key(buildlog_dir)
+    _signed = _sign_record(record, _key)
+    _path = _build_record_path(buildlog_dir, record['package'])
+    _atomic_write_bytes(
+        _path, json.dumps(_signed, sort_keys=True, indent=2).encode('utf-8'),
+    )
+
+
+def read_build_record(buildlog_dir: str, package: str) -> 'Optional[dict]':
+    """Load and verify a record.  Returns the dict on success, None on:
+
+      - file missing
+      - JSON decode error
+      - HMAC verify failure  (logged as warning — indicates tamper or
+        partial write that somehow survived os.replace, neither of
+        which should happen in normal operation)
+
+    Consumers should treat None as 'no record' — equivalent to today's
+    'no .result file' semantics, which already drives rebuild in the
+    audit classifier.
+    """
+    _path = _build_record_path(buildlog_dir, package)
+    try:
+        with open(_path, 'rb') as _fh:
+            _record = json.loads(_fh.read())
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as _e:
+        logger.warning(f"build-record read failed ({_path}): {_e}")
+        return None
+    if not isinstance(_record, dict):
+        logger.warning(f"build-record not a JSON object: {_path}")
+        return None
+    _key = _load_or_create_hmac_key(buildlog_dir)
+    if not _verify_record(_record, _key):
+        logger.warning(f"build-record HMAC verify failed: {_path}")
+        return None
+    return _record
+
+
+def update_build_record(buildlog_dir: str, package: str,
+                        **fields: object) -> dict:
+    """Read-merge-sign-write convenience.  Loads the current record (or
+    raises FileNotFoundError if absent), applies `fields` as an overlay,
+    re-signs, atomically writes, returns the new record.
+
+    Phase transitions go through here.  Caller passes the new phase
+    explicitly (no auto-progression) so the call site documents the
+    transition in source.
+
+    When phase reaches a terminal value, the matching status is set
+    automatically if not provided explicitly.
+    """
+    _current = read_build_record(buildlog_dir, package)
+    if _current is None:
+        raise FileNotFoundError(
+            f"no build record to update for {package} in {buildlog_dir}",
+        )
+    _current.update(fields)
+    _phase = _current.get('phase')
+    if (_phase in _TERMINAL_PHASES
+            and _current.get('status') is None
+            and _phase in _PHASE_TO_STATUS):
+        _current['status'] = _PHASE_TO_STATUS[_phase]
+    write_build_record(buildlog_dir, _current)
+    return _current
+
+
+def classify_build_record(record: 'Optional[dict]') -> str:
+    """Translate a loaded record into the audit-classifier vocabulary.
+
+    Returns one of:
+      'missing'      — record is None (never built, or tampered/corrupt)
+      'interrupted'  — record exists but phase is non-terminal (the
+                       process that wrote it didn't finish)
+      'ok'           — phase=done, status=PASS
+      'fail'         — phase=failed (status=FAIL)
+      'tunneled'     — phase=tunneled (status=TUNNELED)
+
+    The existing classifier in build.py overlays patch_set_hash drift
+    on top of this to produce stale_pass / needs_build refinements; that
+    logic stays in build.py, this helper just maps the record state.
+    """
+    if record is None:
+        return 'missing'
+    _phase = record.get('phase')
+    if _phase not in _TERMINAL_PHASES:
+        return 'interrupted'
+    _status = record.get('status')
+    if _status == 'PASS':
+        return 'ok'
+    if _status == 'TUNNELED':
+        return 'tunneled'
+    return 'fail'
+
+
+# ─── OBS-01: one-shot migration from .result + .patchhash ───────────────────
+#
+# Operator runs `source migrate-records` once after upgrading.  Walks
+# log/build/, synthesizes a signed build.json from each <pkg>.result
+# (+ <pkg>.patchhash if present).  Legacy files left in place by default
+# so the migration is safely re-runnable; pass prune=True to delete them
+# after the synthesized record verifies.
+#
+# Sources not present in the dep_tree (foreign legacy files from a prior
+# build with a different selection) are skipped — `version_resolver`
+# returns None for unknown names and we can't synthesize an
+# intended_version without it.  Operator can decide to drop those by
+# hand.
+#
+# This is a transitional helper.  Once the corpus is migrated, the
+# legacy-fallback paths in the readers (build.py / buildcontainer.py)
+# become dead code that the next chunk can remove.
+
+_LEGACY_STATUS_TO_PHASE = {
+    'PASS':     'done',
+    'TUNNELED': 'tunneled',
+    'FAIL':     'failed',
+}
+
+
+def _read_legacy_result(buildlog_dir: str, package: str) -> 'Optional[str]':
+    """Return the trimmed first line of <pkg>.result, or None if absent
+    or empty.  Returns the raw token — caller maps to phase/status."""
+    _path = os.path.join(buildlog_dir, package + '.result')
+    try:
+        with open(_path, 'r') as _fh:
+            _line = _fh.readline().strip()
+    except OSError:
+        return None
+    return _line or None
+
+
+def _read_legacy_patchhash(buildlog_dir: str, package: str) -> str:
+    """Return the trimmed content of <pkg>.patchhash, or '' if absent."""
+    _path = os.path.join(buildlog_dir, package + '.patchhash')
+    try:
+        with open(_path, 'r') as _fh:
+            return _fh.read().strip()
+    except OSError:
+        return ''
+
+
+def _legacy_result_mtime_iso(buildlog_dir: str, package: str) -> 'Optional[str]':
+    """ISO-8601 UTC mtime of <pkg>.result, or None if the file is gone."""
+    _path = os.path.join(buildlog_dir, package + '.result')
+    try:
+        _ts = os.path.getmtime(_path)
+    except OSError:
+        return None
+    return datetime.datetime.fromtimestamp(
+        _ts, tz=datetime.timezone.utc,
+    ).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def migrate_legacy_records(buildlog_dir: str,
+                           version_resolver: 'Callable[[str], Optional[str]]',
+                           *,
+                           prune: bool = False,
+                           dry_run: bool = False) -> dict:
+    """One-shot migration: synthesize <pkg>.build.json from legacy
+    <pkg>.result + <pkg>.patchhash sidecars.
+
+    version_resolver(pkg: str) -> Optional[str] resolves the package's
+    intended version (typically from BuildSession.dep_tree.selected_srcs).
+    Unresolvable names are skipped — we can't synthesize the record
+    without a version, and faking one would defeat the drift-detection
+    field's purpose.
+
+    Returns a counts dict:
+      'migrated' — pkgs successfully written
+      'skipped'  — pkgs whose .result existed but version_resolver
+                   returned None (foreign / pre-selection sources)
+      'existing' — pkgs that already had a valid build.json
+                   (idempotent re-run)
+      'pruned'   — pkgs whose legacy .result + .patchhash were deleted
+                   after successful migration
+      'errors'   — list of (pkg, message) for write / read failures
+      'unknown_status' — list of pkgs whose .result content was
+                   unrecognized (not PASS / FAIL / TUNNELED)
+
+    `dry_run=True`: classify but don't write or delete anything.
+    `prune=True`:   delete <pkg>.result + <pkg>.patchhash after the
+                    new record verifies.  No-op when dry_run=True.
+    """
+    _result: dict = {
+        'migrated': [], 'skipped': [], 'existing': [],
+        'pruned': [], 'errors': [], 'unknown_status': [],
+    }
+    try:
+        _names = os.listdir(buildlog_dir)
+    except OSError as _e:
+        _result['errors'].append(('<dir>', str(_e)))
+        return _result
+    # Build the working set: every basename minus '.result' that has a
+    # .result file.  Skip everything else (.patchhash without .result is
+    # an orphan; deliberate not to migrate).
+    _pkgs = sorted({
+        _f[:-len('.result')] for _f in _names if _f.endswith('.result')
+    })
+    for _pkg in _pkgs:
+        # Skip when a valid signed record already exists — re-runs are
+        # idempotent and don't overwrite freshly-written records.
+        if read_build_record(buildlog_dir, _pkg) is not None:
+            _result['existing'].append(_pkg)
+            if prune and not dry_run:
+                _pruned = False
+                for _suffix in ('.result', '.patchhash'):
+                    try:
+                        os.remove(os.path.join(buildlog_dir, _pkg + _suffix))
+                        _pruned = True
+                    except FileNotFoundError:
+                        pass
+                    except OSError as _e:
+                        _result['errors'].append((_pkg, f'prune: {_e}'))
+                if _pruned:
+                    _result['pruned'].append(_pkg)
+            continue
+
+        _status_token = _read_legacy_result(buildlog_dir, _pkg)
+        if _status_token is None:
+            # .result disappeared between listdir and open — race; skip.
+            continue
+        _phase = _LEGACY_STATUS_TO_PHASE.get(_status_token)
+        if _phase is None:
+            _result['unknown_status'].append(_pkg)
+            continue
+
+        _intended = version_resolver(_pkg)
+        if _intended is None:
+            _result['skipped'].append(_pkg)
+            continue
+
+        _hash = _read_legacy_patchhash(buildlog_dir, _pkg)
+        _mtime_iso = _legacy_result_mtime_iso(buildlog_dir, _pkg)
+        _now = _mtime_iso or _utc_now_iso()
+
+        _rec = new_build_record(
+            package=_pkg, intended_version=str(_intended),
+            patch_set_hash=_hash, started=_now,
+        )
+        _rec['finished'] = _now
+        _rec['elapsed_seconds'] = 0.0
+        _rec['phase'] = _phase
+        if _phase == 'done':
+            _rec['status'] = 'PASS'
+            _rec['exit_code'] = 0
+            _rec['built_version'] = strip_nmu_suffix(str(_intended))
+        elif _phase == 'tunneled':
+            _rec['status'] = 'TUNNELED'
+            _rec['exit_code'] = 0
+            _rec['built_version'] = str(_intended)
+        else:  # failed
+            _rec['status'] = 'FAIL'
+            _rec['exit_code'] = 1
+
+        if dry_run:
+            _result['migrated'].append(_pkg)
+            continue
+
+        try:
+            write_build_record(buildlog_dir, _rec)
+        except OSError as _e:
+            _result['errors'].append((_pkg, f'write: {_e}'))
+            continue
+
+        # Verify the round-trip before deleting legacy files — paranoia
+        # for the prune path (a corrupt write must not lose data).
+        if read_build_record(buildlog_dir, _pkg) is None:
+            _result['errors'].append((_pkg, 'verify-after-write failed'))
+            continue
+        _result['migrated'].append(_pkg)
+
+        if prune:
+            _pruned = False
+            for _suffix in ('.result', '.patchhash'):
+                try:
+                    os.remove(os.path.join(buildlog_dir, _pkg + _suffix))
+                    _pruned = True
+                except FileNotFoundError:
+                    pass
+                except OSError as _e:
+                    _result['errors'].append((_pkg, f'prune: {_e}'))
+            if _pruned:
+                _result['pruned'].append(_pkg)
+
+    return _result
+
+
 def _query_snapshot_latest(api_url: str, archive_keys: 'List[str]') -> str:
     """Fetch the latest snapshot timestamp covering every archive in
     `archive_keys` (typically `['debian', 'debian-security']`).
@@ -1225,7 +1770,8 @@ def _query_snapshot_latest(api_url: str, archive_keys: 'List[str]') -> str:
     snapshot mirror can configure them without code changes.
     """
     try:
-        resp = requests.get(api_url, timeout=30)
+        resp = requests.get(
+            api_url, timeout=_HTTP_TIMEOUT_FAST, headers=_HTTP_HEADERS)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -1264,7 +1810,9 @@ def list_snapshots_between(config: 'BuildConfig', after_ts: str,
     `snapshot select`'s "advance current → one of these" picker.  Returns []
     on query failure or when there are no snapshots in range."""
     try:
-        resp = requests.get(config.snapshot_timestamp_api, timeout=30)
+        resp = requests.get(
+            config.snapshot_timestamp_api, timeout=_HTTP_TIMEOUT_FAST,
+            headers=_HTTP_HEADERS)
         resp.raise_for_status()
         result = resp.json()['result']
     except Exception as e:
@@ -1299,7 +1847,9 @@ def _validate_snapshot_timestamp(
         snap = m.with_snapshot(ts, baseurl=snapshot_baseurl)
         url  = snap.dist_url + 'InRelease'
         try:
-            resp = requests.head(url, timeout=15, allow_redirects=True)
+            resp = requests.head(
+                url, timeout=_HTTP_TIMEOUT_FAST,
+                allow_redirects=True, headers=_HTTP_HEADERS)
         except Exception as e:
             logger.error(f"snapshot validate: HEAD {url} failed: {e}")
             return False
@@ -2234,7 +2784,10 @@ def download_file(url: str, filename: str) -> tuple:
         rather than a generic "download failed".
     """
     from urllib.parse import urlsplit, unquote
-    from requests import Timeout, TooManyRedirects, HTTPError, RequestException
+    from requests import (
+        Timeout, TooManyRedirects, HTTPError, RequestException,
+        ConnectTimeout, ReadTimeout,
+    )
 
     # file:// fast-path: local copy via shutil.copy, no HTTP, no progress
     # bar (transfers are small + instant).  Returns same (size, detail)
@@ -2254,46 +2807,76 @@ def download_file(url: str, filename: str) -> tuple:
             logger.error(f"download_file({url}): {_detail}")
             return -1, _detail
 
+    import time as _time
+
     try:
         name_strip: str = urlsplit(url).path.split('/')[-1].ljust(15, ' ')
 
-        # Probe size via HEAD first (kept per memory note: pre-`f1cf373`
-        # GET-only path returned 0 for some Debian mirrors and crashed the
-        # bar with maxvalue=0).  Take the larger of HEAD / GET content-length
-        # so whichever one knows wins, and fall back to a 1 MB seed if both
-        # are 0 — the bar will expand dynamically as bytes arrive.
-        head = requests.head(url, timeout=10)
-        head_size = int(head.headers.get('content-length', 0))
+        # Retry loop for transient network failures.  snapshot.debian.org's
+        # CDN routinely stalls on cold-cache files for the entire timeout
+        # budget, then serves the same URL in milliseconds on the next
+        # attempt (different edge node, or cold fetch completed during
+        # backoff).  Retries are gated to the three exception classes that
+        # actually represent transient failures; HTTPError / OSError /
+        # ValueError propagate to the outer except blocks unchanged.
+        for _attempt in range(_HTTP_RETRY_COUNT):
+            try:
+                # Probe size via HEAD first (kept per memory note: pre-`f1cf373`
+                # GET-only path returned 0 for some Debian mirrors and crashed the
+                # bar with maxvalue=0).  Take the larger of HEAD / GET content-length
+                # so whichever one knows wins, and fall back to a 1 MB seed if both
+                # are 0 — the bar will expand dynamically as bytes arrive.
+                head = requests.head(
+                    url, timeout=_HTTP_TIMEOUT_FAST, headers=_HTTP_HEADERS)
+                head_size = int(head.headers.get('content-length', 0))
 
-        with requests.get(url, stream=True, timeout=10) as response:
-            response.raise_for_status()
-            get_size = int(response.headers.get('content-length', 0))
-            expected_size = max(head_size, get_size) or (1 << 20)
-            current_max  = expected_size
+                with requests.get(
+                        url, stream=True, timeout=_HTTP_TIMEOUT_STREAM,
+                        headers=_HTTP_HEADERS) as response:
+                    response.raise_for_status()
+                    get_size = int(response.headers.get('content-length', 0))
+                    expected_size = max(head_size, get_size) or (1 << 20)
+                    current_max  = expected_size
 
-            progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s',
-                                           maxvalue=expected_size)
+                    progress_bar = tui.ProgressBar(label=name_strip, itr_label='B/s',
+                                                   maxvalue=expected_size)
 
-            bytes_written = 0
-            with open(filename, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        bytes_written += len(chunk)
-                        # If the stream out-runs the size hint (HEAD/GET
-                        # under-reported, or both were 0), grow the max so
-                        # the bar keeps animating instead of freezing at
-                        # 100% partway through.
-                        if bytes_written > current_max:
-                            current_max = int(bytes_written * 1.25)
-                            progress_bar.set_max(current_max)
-                        progress_bar.step(len(chunk))
+                    bytes_written = 0
+                    with open(filename, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                bytes_written += len(chunk)
+                                # If the stream out-runs the size hint (HEAD/GET
+                                # under-reported, or both were 0), grow the max so
+                                # the bar keeps animating instead of freezing at
+                                # 100% partway through.
+                                if bytes_written > current_max:
+                                    current_max = int(bytes_written * 1.25)
+                                    progress_bar.set_max(current_max)
+                                progress_bar.step(len(chunk))
 
-            # Final correction so the persisted display matches reality
-            # (in case the size hint over-reported and the bar stopped short).
-            progress_bar.set_max(bytes_written)
-            progress_bar.close()
-            return bytes_written, ''
+                    # Final correction so the persisted display matches reality
+                    # (in case the size hint over-reported and the bar stopped short).
+                    progress_bar.set_max(bytes_written)
+                    progress_bar.close()
+                    return bytes_written, ''
+
+            except (ConnectTimeout, ReadTimeout, ConnectionError) as e:
+                if _attempt < _HTTP_RETRY_COUNT - 1:
+                    _backoff = 2 ** _attempt   # 1s, 2s
+                    logger.warning(
+                        f"download_file({url}): "
+                        f"{type(e).__name__} on attempt {_attempt + 1}/"
+                        f"{_HTTP_RETRY_COUNT}, retrying after {_backoff}s")
+                    tui.console.print(
+                        f"  retry {_attempt + 1}/{_HTTP_RETRY_COUNT - 1} after "
+                        f"{_backoff}s ({type(e).__name__})")
+                    _time.sleep(_backoff)
+                    continue
+                # Last attempt failed — propagate to the outer except
+                # so the operator sees the right error classification.
+                raise
 
     except HTTPError as e:
         # raise_for_status path — preserve the HTTP status line so the
@@ -2305,6 +2888,29 @@ def download_file(url: str, filename: str) -> tuple:
         else:
             _detail = f"HTTPError: {e}"
         tui.console.print(f"ERROR: {_detail} for {url}")
+        logger.error(f"download_file({url}): {_detail}")
+        return -1, _detail
+    except ConnectTimeout as e:
+        # TCP handshake didn't complete within the connect timeout —
+        # mirror is unreachable from this host (firewall, dead route,
+        # DNS lying).  Distinct from ReadTimeout: bumping the read
+        # timeout won't help; fix the network or change the mirror.
+        _detail = (
+            f"connect timeout (TCP handshake failed in "
+            f"{_HTTP_TIMEOUT_FAST}s — mirror unreachable from this host): {e}"
+        )
+        tui.console.print(f"ERROR: connect timeout for {url}")
+        logger.error(f"download_file({url}): {_detail}")
+        return -1, _detail
+    except ReadTimeout as e:
+        # Connection established but server stopped sending bytes
+        # before the read timeout.  snapshot.debian.org does this for
+        # cold-cache files; raise [Snapshot] timeouts or retry.
+        _detail = (
+            f"read timeout (server stalled mid-response — "
+            f"raise the read timeout if this is snapshot.debian.org): {e}"
+        )
+        tui.console.print(f"ERROR: read timeout for {url}")
         logger.error(f"download_file({url}): {_detail}")
         return -1, _detail
     except (ConnectionError, Timeout, TooManyRedirects, RequestException) as e:
@@ -2327,6 +2933,11 @@ def download_file(url: str, filename: str) -> tuple:
         tui.console.print(f"ERROR: unexpected failure downloading {url}")
         logger.error(f"download_file({url}): {_detail}")
         return -1, _detail
+    # Defensive: the retry loop above either returns (success) or
+    # raises into one of the except blocks (failure).  mypy can't see
+    # that, so we add an unreachable fallback so the function's return
+    # contract is provably satisfied.
+    return -1, 'retry loop exited without return — unreachable'
 
 
 def download_source(dependency_tree: 'dependencytree.DependencyTree',
@@ -2403,7 +3014,9 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
                 # the prior bug where a HEAD that returned 0 still produced
                 # `_downloaded_size += 0` while the GET silently 404ed.
                 try:
-                    with requests.get(_url, stream=True, timeout=30) as response:
+                    with requests.get(
+                            _url, stream=True, timeout=_HTTP_TIMEOUT_STREAM,
+                            headers=_HTTP_HEADERS) as response:
                         # raise_for_status surfaces 4xx/5xx as HTTPError so the
                         # existing requests-exception handler logs a clear
                         # "HTTP <status>" message instead of the prior cryptic
