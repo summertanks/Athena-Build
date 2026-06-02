@@ -1,6 +1,7 @@
 Task: asgard-accessibility
 Section: user
-Description: Desktop accessibility
+Relevance: 8
+Description: GNOME / Desktop accessibility
  Adds the GNOME accessibility stack on top of the base desktop:
  at-spi2-core for the assistive technology service bus plus orca
  for screen reader support.  Pairs with installer-side a11y work

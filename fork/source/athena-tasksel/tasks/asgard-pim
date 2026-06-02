@@ -1,6 +1,7 @@
 Task: asgard-pim
 Section: user
-Description: Mail and personal information
+Relevance: 4
+Description: GNOME / Mail and personal information
  Adds the Evolution mail / calendar / address-book client and its
  plugin set on top of the GNOME PIM apps already shipped by
  asgard-gnome-desktop.  Selecting this task pulls the GNOME desktop

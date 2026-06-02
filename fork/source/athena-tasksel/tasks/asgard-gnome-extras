@@ -1,6 +1,7 @@
 Task: asgard-gnome-extras
 Section: user
-Description: GNOME extras and apps
+Relevance: 5
+Description: GNOME / Extras and apps
  Adds the full GNOME app set beyond the desktop core: maps,
  weather, characters, font viewer, color manager, backgrounds,
  Bluetooth send-to, user-share, sushi preview, initial-setup

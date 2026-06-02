@@ -1,6 +1,7 @@
 Task: asgard-printing-extras
 Section: user
-Description: Printing and scanning
+Relevance: 7
+Description: GNOME / Printing and scanning
  Completes the print and scan story.  asgard-gnome-desktop ships
  the system-config-printer UI shim but not the CUPS print server
  itself or scanner tools.  This task adds cups for the print

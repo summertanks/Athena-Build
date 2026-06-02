@@ -1,6 +1,7 @@
 Task: asgard-multimedia
 Section: user
-Description: Multimedia playback and capture
+Relevance: 3
+Description: GNOME / Multimedia playback and capture
  Adds the GNOME multimedia app stack: totem and rhythmbox for
  video and music playback, gnome-music as an alternative library
  browser, gnome-sound-recorder for quick audio capture, shotwell

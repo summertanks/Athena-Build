@@ -1,6 +1,6 @@
 Task: desktop
 Section: user
-Relevance: 1
+Relevance: 9
 Description: Desktop environment
  Common desktop infrastructure — Xorg, audio (ALSA), printing
  (CUPS), network discovery (Avahi/mDNS), font fallback for emoji
