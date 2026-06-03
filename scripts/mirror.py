@@ -257,6 +257,212 @@ def add_mirror(
     return True, f"mirror {name!r} registered ({_norm}, type={_type})"
 
 
+def all_mirror_urls(config) -> 'list[str]':
+    """Return the canonical URL set across every configured mirror.
+    Used as the SOURCE OF TRUTH for the federation `neighbours` list."""
+    _out: 'list[str]' = []
+    for _n in list_mirrors(config):
+        _st = read_mirror_state(config, _n)
+        if _st and _st.get('url'):
+            _out.append(_st['url'])
+    return _out
+
+
+def rsync_spec_for_url(url: str) -> 'tuple[str, Optional[str]]':
+    """Convert our stored URL to (rsync_spec, ssh_host_or_None).
+
+    rsync's native syntax:
+      ssh://user@host/path     → user@host:/path  (ssh)
+      user@host:/path          → user@host:/path  (ssh; already native)
+      file:///abs/path         → /abs/path        (local fs)
+      /abs/path                → /abs/path        (local fs)
+
+    Returns the rsync-ready spec PLUS the ssh-host portion (for flock
+    acquisition) or None for local-fs mirrors.
+    """
+    if isinstance(url, str) and url.startswith('ssh://'):
+        _path = url[len('ssh://'):]
+        if '/' in _path:
+            _host, _rest = _path.split('/', 1)
+            return (f"{_host}:/{_rest}", _host)
+        return (_path, _path)
+    if isinstance(url, str) and url.startswith('file://'):
+        return (url[len('file://'):], None)
+    if isinstance(url, str) and '@' in url and ':' in url and not url.startswith('/'):
+        # user@host:/path shorthand
+        _host = url.split(':', 1)[0]
+        return (url, _host)
+    return (url, None)
+
+
+def reconcile_neighbours(
+    config, *, signing_homedir: str,
+    target_name: 'Optional[str]' = None,
+    flock_timeout: int = 60,
+) -> 'tuple[bool, str, list[dict]]':
+    """MIRROR-01 Phase 2: re-propagate the canonical neighbours list to
+    every peer's coord-head.
+
+    For each registered mirror (or just `target_name` when given):
+      1. Acquire remote flock (ssh mirrors only; local-fs skips)
+      2. Pull coord-head + sig to cache/mirror/<name>/staging/
+      3. tier-1 GPG verify; abort the peer's update on verify-fail
+      4. Compare existing neighbours vs desired (`all_mirror_urls`)
+      5. If different: rewrite neighbours, re-sign locally via tier-1
+         GPG, push back to the remote
+      6. Release flock
+
+    Returns (overall_ok, summary, results).
+      results[i] = {
+        name, url, reachable: bool, changed: bool,
+        ok: bool, detail: str,
+      }
+
+    Fail-loud: an unreachable peer counts as overall failure.  The
+    operator must retry once peer connectivity is restored before any
+    publish can succeed (federation-gate at publish time blocks until
+    every peer's neighbours match local config).
+
+    First-contact mirrors (no coord-head on the remote yet) are
+    skipped with a friendly "no head yet" detail — first publish
+    will initialise neighbours from local config.
+    """
+    import os
+    import coord.head as _head_mod
+    import coord.schema as _schema
+    import coord.transport as _transport
+
+    _desired = _schema.canonicalize_neighbours(all_mirror_urls(config))
+    if target_name is not None:
+        if read_mirror_state(config, target_name) is None:
+            return False, f"unknown mirror {target_name!r}", []
+        _targets = [target_name]
+    else:
+        _targets = list_mirrors(config)
+    if not _targets:
+        return True, "no mirrors configured — nothing to reconcile", []
+
+    _results: 'list[dict]' = []
+    _stage_root = os.path.join(config.dir_cache, 'mirror')
+    for _name in _targets:
+        _st = read_mirror_state(config, _name)
+        if _st is None:
+            _results.append({
+                'name': _name, 'url': '', 'reachable': False,
+                'changed': False, 'ok': False,
+                'detail': 'state file vanished mid-run',
+            })
+            continue
+        _url = _st.get('url', '')
+        _ssh_key = _st.get('ssh_key') or None
+        _spec, _ssh_host = rsync_spec_for_url(_url)
+        _stage = os.path.join(_stage_root, _name, 'staging')
+        try:
+            os.makedirs(_stage, mode=0o755, exist_ok=True)
+        except OSError as _e:
+            _results.append({
+                'name': _name, 'url': _url, 'reachable': False,
+                'changed': False, 'ok': False,
+                'detail': f"could not create staging dir: {_e}",
+            })
+            continue
+        # 1. Optional flock acquire — ssh mirrors only
+        _lock_proc = None
+        if _ssh_host:
+            _lock_proc = _transport.remote_flock_acquire(
+                ssh_host=_ssh_host,
+                lock_path='/var/lock/repo-coord.lock',
+                timeout_sec=flock_timeout,
+                ssh_key=_ssh_key,
+            )
+            if _lock_proc is None:
+                _results.append({
+                    'name': _name, 'url': _url, 'reachable': False,
+                    'changed': False, 'ok': False,
+                    'detail': f"flock acquire failed for {_ssh_host}",
+                })
+                continue
+        try:
+            # 2. Pull coord-head + sig
+            _ok, _detail = _transport.pull_remote_coord(
+                local_dest=_stage, remote_spec=_spec, ssh_key=_ssh_key,
+            )
+            if not _ok:
+                _results.append({
+                    'name': _name, 'url': _url, 'reachable': False,
+                    'changed': False, 'ok': False,
+                    'detail': f"pull failed: {_detail}",
+                })
+                continue
+            _head = _head_mod.read_coord_head(_stage, signing_homedir)
+            if _head is None:
+                # No head present on the remote (or verify failed).  Treat
+                # as a NOOP for reconcile — first-publish bootstraps it.
+                _results.append({
+                    'name': _name, 'url': _url, 'reachable': True,
+                    'changed': False, 'ok': True,
+                    'detail': ('no coord-head on remote (first publish '
+                               'will initialise neighbours)'),
+                })
+                continue
+            _have = _schema.canonicalize_neighbours(_head.get('neighbours') or [])
+            if _have == _desired:
+                _results.append({
+                    'name': _name, 'url': _url, 'reachable': True,
+                    'changed': False, 'ok': True,
+                    'detail': 'already in sync',
+                })
+                continue
+            # 5. Rewrite + re-sign locally.  Deep-copy the fetched head so
+            # this peer's mutation can't leak into the next peer's read
+            # (matters mostly under test isolation but also defends
+            # against any future caller passing a shared reference).
+            import copy as _copy
+            _new = _copy.deepcopy(_head)
+            _new['neighbours'] = _desired
+            _ok = _head_mod.write_coord_head(_stage, _new, signing_homedir)
+            if not _ok:
+                _results.append({
+                    'name': _name, 'url': _url, 'reachable': True,
+                    'changed': False, 'ok': False,
+                    'detail': 'tier-1 re-sign failed (see log)',
+                })
+                continue
+            # 6. Push back
+            _ok, _detail = _transport.push_coord_head(
+                local_coord_dir=_stage,
+                remote_dir_spec=_spec.rstrip('/') + '/',
+                ssh_key=_ssh_key,
+            )
+            if not _ok:
+                _results.append({
+                    'name': _name, 'url': _url, 'reachable': True,
+                    'changed': False, 'ok': False,
+                    'detail': f"push failed: {_detail}",
+                })
+                continue
+            _results.append({
+                'name': _name, 'url': _url, 'reachable': True,
+                'changed': True, 'ok': True,
+                'detail': (f"neighbours updated: {len(_have)} → "
+                           f"{len(_desired)}"),
+            })
+        finally:
+            if _lock_proc is not None:
+                _transport.remote_flock_release(_lock_proc)
+
+    _overall_ok = all(_r['ok'] for _r in _results)
+    _changed = sum(1 for _r in _results if _r.get('changed'))
+    _bad = sum(1 for _r in _results if not _r['ok'])
+    if _bad:
+        _summary = f"{_bad}/{len(_results)} peer(s) FAILED reconcile"
+    elif _changed:
+        _summary = f"{_changed}/{len(_results)} peer(s) updated"
+    else:
+        _summary = f"{len(_results)} peer(s) already in sync"
+    return _overall_ok, _summary, _results
+
+
 def remove_mirror(config, *, url_or_name: str) -> 'tuple[bool, str]':
     """Unregister a mirror by URL or by name.  Returns (ok, detail).
 

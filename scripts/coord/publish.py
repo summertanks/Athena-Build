@@ -458,11 +458,16 @@ def remote_publish(
             published=str(_state.get('published') or snapshot_pin),
             external=bool(_state.get('external', True)),
         )
+        # MIRROR-01 Phase 2: preserve neighbours from the fetched head.
+        # Publish itself never adds or removes peers — that's a separate
+        # `mirror add` / `mirror remove` / `mirror reconcile-neighbours`
+        # operator action.  Pre-publish federation gate runs in Phase 3.
         _new_head = _schema.new_coord_head(
             inrelease_sha256=_ir_sha,
             snapshot=_ss,
             last_seqs=_last_seqs,
             head_time=_utc_now(),
+            neighbours=(_head_dict or {}).get('neighbours') or [],
             revoked_builders=(_head_dict or {}).get('revoked_builders'),
         )
         _ok = _head.write_coord_head(

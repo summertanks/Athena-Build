@@ -450,6 +450,57 @@ def audit_repo(
     return Report.make('repo', _findings)
 
 
+def check_federation_consistency(
+    local_mirror_urls: 'List[str]', head: 'Optional[dict]',
+) -> 'List[Finding]':
+    """MIRROR-01 Phase 2 — compare local config's mirror URL set against
+    coord-head.neighbours.  Returns empty list iff they match (under
+    canonical normalisation: trailing-slash + case + sort + dedup).
+
+    A non-empty result = federation drift; the publish path SHOULD treat
+    any CRITICAL finding as BLOCK and direct the operator at
+    `mirror reconcile-neighbours`.
+
+    Three modes:
+      - Both sides canonicalize identically                  → []
+      - Local has URLs the coord-head doesn't                → CRITICAL
+        (missing_on_remote — peer's neighbours not propagated)
+      - Coord-head has URLs the local config doesn't         → CRITICAL
+        (extra_on_remote — local removed without propagation, OR a
+        peer added something we never registered)
+
+    `head=None` is treated as "no coord-head yet" (first-publish case)
+    and returns []: the publish bootstrap initialises neighbours from
+    local config.
+    """
+    if head is None:
+        return []
+    _expected = set(_schema.canonicalize_neighbours(local_mirror_urls))
+    _actual = set(_schema.canonicalize_neighbours(
+        head.get('neighbours') or []))
+    _findings: 'List[Finding]' = []
+    _missing = _expected - _actual
+    _extra = _actual - _expected
+    if _missing:
+        _findings.append(Finding(
+            severity='CRITICAL', kind='federation_missing_neighbour',
+            message=(
+                f"coord-head.neighbours is missing {len(_missing)} mirror(s) "
+                f"that the local config has: {sorted(_missing)}.  "
+                "Run `mirror reconcile-neighbours` to re-propagate."),
+        ))
+    if _extra:
+        _findings.append(Finding(
+            severity='CRITICAL', kind='federation_extra_neighbour',
+            message=(
+                f"coord-head.neighbours has {len(_extra)} mirror(s) that "
+                f"the local config doesn't: {sorted(_extra)}.  Either "
+                "`mirror add` to register them, or "
+                "`mirror reconcile-neighbours` after `mirror remove`."),
+        ))
+    return _findings
+
+
 def write_publish_halt(
     coord_dir: str, reason: str,
 ) -> None:

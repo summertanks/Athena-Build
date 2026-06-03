@@ -22931,14 +22931,15 @@ def test_mirror_update_state_merges_fields():
 
 
 def test_cmd_mirror_dispatch_routes_subcommands():
-    """`cmd_mirror` routes add/remove/list/summary/status to their handlers."""
+    """`cmd_mirror` routes add/remove/list/summary/status/reconcile-neighbours."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
         _body = fh.read()
     assert 'def cmd_mirror(' in _body
     for _sub in ('cmd_mirror_add', 'cmd_mirror_remove', 'cmd_mirror_list',
-                 'cmd_mirror_summary', 'cmd_mirror_status'):
+                 'cmd_mirror_summary', 'cmd_mirror_status',
+                 'cmd_mirror_reconcile_neighbours'):
         assert f'def {_sub}(' in _body, f"{_sub} missing"
     assert "register_command('mirror'" in _body, "mirror not registered"
     assert re.search(
@@ -22946,6 +22947,326 @@ def test_cmd_mirror_dispatch_routes_subcommands():
     assert re.search(
         r"if action == 'remove' or action == 'delete':\s*\n\s+"
         r"return self\.cmd_mirror_remove", _body)
+    assert re.search(
+        r"if action == 'reconcile-neighbours':\s*\n\s+"
+        r"return self\.cmd_mirror_reconcile_neighbours", _body)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MIRROR-01 Phase 2 — coord-head neighbours + federation gate + reconcile
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _coord_schema_v2_modules():
+    """Lazy import of coord modules for Phase 2 tests."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.schema as _s
+    import coord.reconcile as _r
+    return _s, _r
+
+
+def test_canonicalize_neighbours_lowercases_strips_slash_sorts_dedups():
+    """Canonical form: lowercase + trailing-slash-strip + sort + dedup.
+    Used by both sides of the federation gate so trivial differences
+    (case, slash, order) don't cause false BLOCK signals."""
+    _s, _ = _coord_schema_v2_modules()
+    _got = _s.canonicalize_neighbours([
+        'SSH://USER@HOST/path/',
+        'file:///srv/asgard',
+        'ssh://user@host/path',       # dup after lowercase + slash strip
+        'file:///srv/asgard/',         # dup after slash strip
+        '',                            # dropped
+        42,                            # not a str — dropped
+    ])
+    assert _got == [
+        'file:///srv/asgard',
+        'ssh://user@host/path',
+    ], _got
+
+
+def test_new_coord_head_includes_neighbours_field():
+    """new_coord_head always produces a `neighbours` key (empty list when
+    not passed), in canonicalised form."""
+    _s, _ = _coord_schema_v2_modules()
+    _head = _s.new_coord_head(
+        inrelease_sha256='a' * 64,
+        snapshot={}, last_seqs={}, head_time='T',
+        neighbours=['SSH://A/x/', 'file:///srv'],
+    )
+    assert _head['v'] == 2
+    assert 'neighbours' in _head
+    assert _head['neighbours'] == ['file:///srv', 'ssh://a/x']
+    # Omitted → []
+    _h2 = _s.new_coord_head(
+        inrelease_sha256='a' * 64,
+        snapshot={}, last_seqs={}, head_time='T',
+    )
+    assert _h2['neighbours'] == []
+
+
+def test_check_federation_consistency_match_returns_no_findings():
+    """Local URL set == coord-head.neighbours (after canonicalisation)
+    → empty findings."""
+    _s, _r = _coord_schema_v2_modules()
+    _head = _s.new_coord_head(
+        inrelease_sha256='a' * 64,
+        snapshot={}, last_seqs={}, head_time='T',
+        neighbours=['ssh://h/p', 'file:///srv/a'],
+    )
+    _findings = _r.check_federation_consistency(
+        ['ssh://H/p/', 'file:///srv/a'], _head)
+    assert _findings == [], _findings
+
+
+def test_check_federation_consistency_missing_on_remote_is_critical():
+    """Local has 2, coord-head has 1 → CRITICAL missing_on_remote."""
+    _s, _r = _coord_schema_v2_modules()
+    _head = _s.new_coord_head(
+        inrelease_sha256='a' * 64,
+        snapshot={}, last_seqs={}, head_time='T',
+        neighbours=['ssh://h1/p'],
+    )
+    _f = _r.check_federation_consistency(
+        ['ssh://h1/p', 'ssh://h2/p'], _head)
+    assert len(_f) == 1
+    assert _f[0].severity == 'CRITICAL'
+    assert _f[0].kind == 'federation_missing_neighbour'
+    assert 'ssh://h2/p' in _f[0].message
+
+
+def test_check_federation_consistency_extra_on_remote_is_critical():
+    """Coord-head has 2, local has 1 → CRITICAL extra_on_remote."""
+    _s, _r = _coord_schema_v2_modules()
+    _head = _s.new_coord_head(
+        inrelease_sha256='a' * 64,
+        snapshot={}, last_seqs={}, head_time='T',
+        neighbours=['ssh://h1/p', 'ssh://h2/p'],
+    )
+    _f = _r.check_federation_consistency(['ssh://h1/p'], _head)
+    assert len(_f) == 1
+    assert _f[0].severity == 'CRITICAL'
+    assert _f[0].kind == 'federation_extra_neighbour'
+    assert 'ssh://h2/p' in _f[0].message
+
+
+def test_check_federation_consistency_both_directions_emits_two_findings():
+    """Bidirectional drift → both missing and extra findings."""
+    _s, _r = _coord_schema_v2_modules()
+    _head = _s.new_coord_head(
+        inrelease_sha256='a' * 64,
+        snapshot={}, last_seqs={}, head_time='T',
+        neighbours=['ssh://h1/p', 'ssh://h2/p'],
+    )
+    _f = _r.check_federation_consistency(
+        ['ssh://h1/p', 'ssh://h3/p'], _head)
+    _kinds = sorted(_x.kind for _x in _f)
+    assert _kinds == ['federation_extra_neighbour',
+                      'federation_missing_neighbour'], _kinds
+
+
+def test_check_federation_consistency_none_head_returns_no_findings():
+    """No coord-head yet (first publish) → empty findings; publish path
+    initialises neighbours from local config."""
+    _s, _r = _coord_schema_v2_modules()
+    _f = _r.check_federation_consistency(['ssh://a', 'ssh://b'], None)
+    assert _f == []
+
+
+def test_rsync_spec_for_url_handles_every_form():
+    """ssh:// / file:// / user@host: shorthand / bare path → correct
+    rsync-native (spec, ssh_host) tuples."""
+    _m = _mirror_module()
+    _cases = [
+        ('ssh://ubuntu@host/srv/asgard', ('ubuntu@host:/srv/asgard', 'ubuntu@host')),
+        ('file:///srv/asgard',           ('/srv/asgard', None)),
+        ('ubuntu@host:/srv/asgard',      ('ubuntu@host:/srv/asgard', 'ubuntu@host')),
+        ('/srv/asgard',                  ('/srv/asgard', None)),
+    ]
+    for _url, _want in _cases:
+        _got = _m.rsync_spec_for_url(_url)
+        assert _got == _want, f"{_url}: got {_got}, want {_want}"
+
+
+def test_all_mirror_urls_returns_every_registered_url():
+    """all_mirror_urls walks every config/mirror.<name>.state and returns
+    the URL field; the result is the SOURCE OF TRUTH for the federation
+    neighbours list."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='ssh://a/p', seed_pin='')
+        _m.add_mirror(_cfg, name='beta', url='file:///srv/b', seed_pin='')
+        _urls = _m.all_mirror_urls(_cfg)
+        assert set(_urls) == {'ssh://a/p', 'file:///srv/b'}
+
+
+def test_reconcile_neighbours_no_op_when_already_in_sync():
+    """When the fetched coord-head's neighbours already match local config,
+    reconcile reports `already in sync` and pushes nothing."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+            dir_cache = os.path.join(_td, 'cache')
+        os.makedirs(_Cfg.dir_cache)
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='file:///srv/a', seed_pin='')
+        _m.add_mirror(_cfg, name='beta',  url='file:///srv/b', seed_pin='')
+
+        # Mock the transport + head modules — reconcile uses lazy imports.
+        import sys
+        sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+        import coord.transport as _t
+        import coord.head as _h
+        from unittest.mock import patch
+
+        _desired = ['file:///srv/a', 'file:///srv/b']
+        # Each peer's fetched head already has the right neighbours
+        with patch.object(_t, 'pull_remote_coord', return_value=(True, '')), \
+             patch.object(_h, 'read_coord_head',
+                          return_value={'v': 2, 'neighbours': _desired}), \
+             patch.object(_h, 'write_coord_head') as _w, \
+             patch.object(_t, 'push_coord_head') as _p:
+            _ok, _summary, _results = _m.reconcile_neighbours(
+                _cfg, signing_homedir='/fake/gpg')
+        assert _ok, _results
+        assert _w.call_count == 0
+        assert _p.call_count == 0
+        assert all(_r['detail'] == 'already in sync' for _r in _results)
+        assert all(not _r['changed'] for _r in _results)
+
+
+def test_reconcile_neighbours_rewrites_when_diff():
+    """When the fetched head's neighbours differ from local config, reconcile
+    updates the head in-place, re-signs locally, pushes back."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+            dir_cache = os.path.join(_td, 'cache')
+        os.makedirs(_Cfg.dir_cache)
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='file:///srv/a', seed_pin='')
+        _m.add_mirror(_cfg, name='beta',  url='file:///srv/b', seed_pin='')
+
+        import sys
+        sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+        import coord.transport as _t
+        import coord.head as _h
+        from unittest.mock import patch
+
+        # Each peer's fetched head has STALE neighbours (just one URL)
+        _stale = {'v': 2, 'neighbours': ['file:///srv/a']}
+        with patch.object(_t, 'pull_remote_coord', return_value=(True, '')), \
+             patch.object(_h, 'read_coord_head', return_value=_stale), \
+             patch.object(_h, 'write_coord_head', return_value=True) as _w, \
+             patch.object(_t, 'push_coord_head', return_value=(True, '')) as _p:
+            _ok, _summary, _results = _m.reconcile_neighbours(
+                _cfg, signing_homedir='/fake/gpg')
+        assert _ok, _results
+        # Two peers, each got a rewrite + push
+        assert _w.call_count == 2
+        assert _p.call_count == 2
+        assert all(_r['changed'] for _r in _results)
+        # The head passed to write_coord_head must carry the desired
+        # neighbours (both URLs), canonicalised.
+        for _call in _w.call_args_list:
+            _passed_head = _call.args[1]
+            assert set(_passed_head['neighbours']) == {
+                'file:///srv/a', 'file:///srv/b'}
+
+
+def test_reconcile_neighbours_first_contact_skipped_friendly():
+    """A peer with no coord-head yet (e.g., never published to) returns
+    `no coord-head on remote (first publish will initialise neighbours)`;
+    no write, no push, overall ok."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+            dir_cache = os.path.join(_td, 'cache')
+        os.makedirs(_Cfg.dir_cache)
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='file:///srv/a', seed_pin='')
+
+        import sys
+        sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+        import coord.transport as _t
+        import coord.head as _h
+        from unittest.mock import patch
+
+        # Pull "succeeds" but no head present → read_coord_head returns None
+        with patch.object(_t, 'pull_remote_coord', return_value=(True, '')), \
+             patch.object(_h, 'read_coord_head', return_value=None), \
+             patch.object(_h, 'write_coord_head') as _w, \
+             patch.object(_t, 'push_coord_head') as _p:
+            _ok, _summary, _results = _m.reconcile_neighbours(
+                _cfg, signing_homedir='/fake/gpg')
+        assert _ok
+        assert _w.call_count == 0
+        assert _p.call_count == 0
+        assert _results[0]['detail'].startswith('no coord-head on remote')
+
+
+def test_reconcile_neighbours_unreachable_peer_is_critical_failure():
+    """pull_remote_coord failure → reachable=False, ok=False, overall ok=False."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+            dir_cache = os.path.join(_td, 'cache')
+        os.makedirs(_Cfg.dir_cache)
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='file:///srv/a', seed_pin='')
+
+        import sys
+        sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+        import coord.transport as _t
+        from unittest.mock import patch
+
+        with patch.object(_t, 'pull_remote_coord',
+                          return_value=(False, 'connection refused')):
+            _ok, _summary, _results = _m.reconcile_neighbours(
+                _cfg, signing_homedir='/fake/gpg')
+        assert not _ok
+        assert not _results[0]['ok']
+        assert not _results[0]['reachable']
+        assert 'connection refused' in _results[0]['detail']
+
+
+def test_reconcile_neighbours_target_name_unknown_fails():
+    """`target_name` referring to an unregistered mirror fails clean."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+            dir_cache = os.path.join(_td, 'cache')
+        os.makedirs(_Cfg.dir_cache)
+        _cfg = _Cfg()
+        _ok, _detail, _results = _m.reconcile_neighbours(
+            _cfg, signing_homedir='/fake/gpg', target_name='ghost')
+        assert not _ok
+        assert 'unknown mirror' in _detail
+        assert _results == []
+
+
+def test_reconcile_neighbours_no_mirrors_is_trivial_ok():
+    """No mirrors configured → trivially ok, no work."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+            dir_cache = os.path.join(_td, 'cache')
+        os.makedirs(_Cfg.dir_cache)
+        _cfg = _Cfg()
+        _ok, _detail, _results = _m.reconcile_neighbours(
+            _cfg, signing_homedir='/fake/gpg')
+        assert _ok
+        assert 'no mirrors configured' in _detail
+        assert _results == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -23783,6 +24104,22 @@ def main() -> int:
         test_mirror_remove_by_url,
         test_mirror_update_state_merges_fields,
         test_cmd_mirror_dispatch_routes_subcommands,
+        # MIRROR-01 Phase 2 — federation neighbours + reconcile
+        test_canonicalize_neighbours_lowercases_strips_slash_sorts_dedups,
+        test_new_coord_head_includes_neighbours_field,
+        test_check_federation_consistency_match_returns_no_findings,
+        test_check_federation_consistency_missing_on_remote_is_critical,
+        test_check_federation_consistency_extra_on_remote_is_critical,
+        test_check_federation_consistency_both_directions_emits_two_findings,
+        test_check_federation_consistency_none_head_returns_no_findings,
+        test_rsync_spec_for_url_handles_every_form,
+        test_all_mirror_urls_returns_every_registered_url,
+        test_reconcile_neighbours_no_op_when_already_in_sync,
+        test_reconcile_neighbours_rewrites_when_diff,
+        test_reconcile_neighbours_first_contact_skipped_friendly,
+        test_reconcile_neighbours_unreachable_peer_is_critical_failure,
+        test_reconcile_neighbours_target_name_unknown_fails,
+        test_reconcile_neighbours_no_mirrors_is_trivial_ok,
     ]
     failures = 0
     for t in tests:
