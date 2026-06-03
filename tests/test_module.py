@@ -19448,8 +19448,12 @@ def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
 
 def test_snapshot_and_refresh_commands_wired():
     """`snapshot` is registered and dispatches its sub-actions; bare snapshot →
-    overview; advance → select current; `repo refresh` routes to
-    cmd_repo_refresh."""
+    overview; advance → select (with the same ts arg); `repo refresh` routes to
+    cmd_repo_refresh.
+
+    MIRROR-01 Phase 1: `_cmd_snapshot_base` removed; `_cmd_snapshot_history`
+    added; `advance` is now an alias passing the same args, not prefixing
+    `'current'`."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
@@ -19457,14 +19461,17 @@ def test_snapshot_and_refresh_commands_wired():
     assert 'def cmd_snapshot(' in _body
     for _sub in ('_cmd_snapshot_overview', '_cmd_snapshot_list',
                  '_cmd_snapshot_select', '_cmd_snapshot_workload',
-                 '_cmd_snapshot_base'):
+                 '_cmd_snapshot_history'):
         assert f'def {_sub}(' in _body, f"{_sub} missing"
+    # snapshot base must be GONE (it's removed in Phase 1)
+    assert 'def _cmd_snapshot_base(' not in _body, (
+        "_cmd_snapshot_base removed in MIRROR-01 Phase 1")
     # bare `snapshot` → overview
     assert re.search(r"if action in \('', 'status'\):\s*\n\s+"
                      r"return self\._cmd_snapshot_overview", _body)
-    # advance is shorthand for `select current`
+    # advance forwards verbatim to select
     assert re.search(r"if action == 'advance':\s*\n\s+"
-                     r"return self\._cmd_snapshot_select\('current'", _body)
+                     r"return self\._cmd_snapshot_select\(\*args\)", _body)
     assert "register_command('snapshot'" in _body, "snapshot not registered"
     assert re.search(
         r"if action == 'refresh':\s*\n\s+return self\.cmd_repo_refresh",
@@ -19505,53 +19512,31 @@ def test_snapshot_state_roundtrip_and_resolve_precedence():
         assert os.path.exists(os.path.join(_cfg_dir, 'snapshot.state'))
 
 
-def test_snapshot_base_show_and_forward_only():
-    """`snapshot base show` (and bare) display the pin from config/snapshot.state;
-    a lower timestamp is REFUSED (base is forward-only) before any prompt/write."""
+def test_snapshot_base_subcommand_fully_removed():
+    """MIRROR-01 Phase 1: `snapshot base` was removed without a compat
+    redirect (we're still in beta — clean cut).  `cmd_snapshot('base')`
+    falls through to the unknown-action help table.  The legacy
+    `_cmd_snapshot_base` method is gone."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
-    import utils
     from build import BuildSession
-
-    def _cap(fn):
-        # Patch build.console directly (robust to suite-wide tui.console
-        # rebinding by other tests).
-        _lines = []
-        _orig = build.console.print
-        build.console.print = lambda *a, **k: _lines.append(
-            ' '.join(str(x) for x in a))
-        try:
-            fn()
-        finally:
-            build.console.print = _orig
-        return '\n'.join(_lines)
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _cfg_dir = os.path.join(_tmp, 'config')
-        os.makedirs(_cfg_dir)
-        _sess = BuildSession.__new__(BuildSession)
-
-        class _Cfg:
-            dir_config = _cfg_dir
-            dir_cache = _tmp
-            apt_source_url = ''          # → fetch_remote_ledger returns None
-            build_codename = 'thor'
-            arch = 'amd64'
-            snapshot_enabled = True
-            snapshot_timestamp_config = '20260514T083402Z'
-
-        _sess.config = _Cfg()
-        utils._SNAPSHOT_TS_CACHE.clear()
-        utils.write_snapshot_state(_sess.config, base='20260601T000000Z')
-
-        # `show` displays the pin (not parsed as a timestamp)
-        _out = _cap(lambda: _sess._cmd_snapshot_base('show'))
-        assert 'snapshot base pin: 20260601T000000Z' in _out, _out
-        # an EARLIER timestamp is refused (forward-only), before prompt/write
-        _out = _cap(lambda: _sess._cmd_snapshot_base('20260101T000000Z'))
-        assert 'REFUSED' in _out and 'forward-only' in _out, _out
-        assert utils.read_snapshot_state(_sess.config)['base'] == '20260601T000000Z', (
-            "a refused (backward) base set must not change the pin")
+    _sess = BuildSession.__new__(BuildSession)
+    assert not hasattr(_sess, '_cmd_snapshot_base'), (
+        "_cmd_snapshot_base method must be removed in MIRROR-01 Phase 1")
+    _lines = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _sess.cmd_snapshot('base')
+    finally:
+        build.console.print = _orig
+    _joined = '\n'.join(_lines)
+    # _group_help signature: "Unknown <group> action: '<arg>'"
+    assert "Unknown snapshot action: 'base'" in _joined, _joined
+    # And the help table must NOT advertise 'base' anywhere as a subcommand
+    assert ' base ' not in _joined.replace('base-', 'BASEHYPHEN_'), (
+        "the snapshot help table must not advertise a 'base' subcommand")
 
 
 def test_list_snapshots_between_filters_range_and_unions_keys():
@@ -19633,8 +19618,9 @@ def test_snapshot_select_interactive_sets_chosen_current():
 
 
 def test_snapshot_select_current_is_forward_only():
-    """`snapshot select current <older>` is REFUSED — current only moves
-    forward (must be above the present current)."""
+    """`snapshot select <older>` is REFUSED — current only moves forward.
+    MIRROR-01 Phase 1: `_set_snapshot_pin` takes one positional arg (the new
+    current); the legacy two-arg `(which, target)` shape was removed."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
     import utils
@@ -19661,14 +19647,125 @@ def test_snapshot_select_current_is_forward_only():
 
         _sess.config = _Cfg()
         _sess._snapshot_current = lambda: '20260514T083402Z'
-        _out = _cap(lambda: _sess._set_snapshot_pin('current', '20260101T000000Z'))
+        _out = _cap(lambda: _sess._set_snapshot_pin('20260101T000000Z'))
         assert 'REFUSED' in _out and 'forward' in _out, _out
         assert utils.read_snapshot_state(_sess.config) == {}, "no pin written"
 
 
+def test_snapshot_select_force_accepts_backtrack():
+    """`snapshot select force` prompts free-form and accepts an OLDER
+    timestamp (bypassing forward-only).  Writes current + appends history."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    from build import BuildSession, BuildFlags
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.flags = BuildFlags()
+        class _Cfg:
+            dir_config = _cfg_dir
+        _sess.config = _Cfg()
+        # Pretend we're currently at June 2 and want to backtrack to May 14
+        _sess._snapshot_current = lambda: '20260602T173733Z'
+        _answers = iter(['20260514T083402Z', 'y'])  # ts, confirm
+        class _FakePrompt:
+            def __init__(self, _t, _m, options=None):
+                pass
+            def get_response(self):
+                return next(_answers)
+        _sp, _sc = build.Prompt, build.console.print
+        build.Prompt = _FakePrompt
+        build.console.print = lambda *a, **k: None
+        try:
+            _sess.cmd_snapshot('select', 'force')
+        finally:
+            build.Prompt, build.console.print = _sp, _sc
+        _st = utils.read_snapshot_state(_sess.config)
+        assert _st['current'] == '20260514T083402Z', _st
+        _h = utils.read_snapshot_history(_sess.config)
+        assert _h == ['20260514T083402Z'], _h
+        # Cache flags invalidated so the operator must re-resolve.
+        assert _sess.flags.cache_ready is False
+        assert _sess.flags.dep_check_ready is False
+
+
+def test_snapshot_select_force_cancels_on_empty_or_no():
+    """Empty timestamp OR 'n' confirmation → no write."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    from build import BuildSession, BuildFlags
+
+    def _run(answers):
+        with tempfile.TemporaryDirectory() as _tmp:
+            _cfg_dir = os.path.join(_tmp, 'config')
+            os.makedirs(_cfg_dir)
+            _sess = BuildSession.__new__(BuildSession)
+            _sess.flags = BuildFlags()
+            class _Cfg:
+                dir_config = _cfg_dir
+            _sess.config = _Cfg()
+            _sess._snapshot_current = lambda: '20260602T173733Z'
+            _it = iter(answers)
+            class _FakePrompt:
+                def __init__(self, _t, _m, options=None):
+                    pass
+                def get_response(self):
+                    return next(_it)
+            _sp, _sc = build.Prompt, build.console.print
+            build.Prompt = _FakePrompt
+            build.console.print = lambda *a, **k: None
+            try:
+                _sess.cmd_snapshot('select', 'force')
+            finally:
+                build.Prompt, build.console.print = _sp, _sc
+            return utils.read_snapshot_state(_sess.config)
+    # Empty input cancels
+    assert _run(['', 'y']) == {}
+    # Operator says n to the y/n cancels
+    assert _run(['20260514T083402Z', 'n']) == {}
+
+
+def test_snapshot_select_force_rejects_malformed_timestamp():
+    """force prompt validates YYYYMMDDTHHMMSSZ shape; garbage input → no write."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils
+    from build import BuildSession, BuildFlags
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.flags = BuildFlags()
+        class _Cfg:
+            dir_config = _cfg_dir
+        _sess.config = _Cfg()
+        _sess._snapshot_current = lambda: '20260602T173733Z'
+        _answers = iter(['not-a-timestamp'])
+        class _FakePrompt:
+            def __init__(self, _t, _m, options=None):
+                pass
+            def get_response(self):
+                return next(_answers)
+        _sp, _sc = build.Prompt, build.console.print
+        build.Prompt = _FakePrompt
+        build.console.print = lambda *a, **k: None
+        try:
+            _sess.cmd_snapshot('select', 'force')
+        finally:
+            build.Prompt, build.console.print = _sp, _sc
+        assert utils.read_snapshot_state(_sess.config) == {}
+
+
 def test_ensure_snapshot_pins_prompts_and_writes_when_unset():
-    """A fresh system (no config/snapshot.state) prompts for current + base on
-    cache build; accepting the defaults writes both pins."""
+    """A fresh system (no config/snapshot.state) prompts for current ONLY on
+    cache build; accepting the default writes the pin AND appends history.
+
+    MIRROR-01 Phase 1: archive-floor `base` was removed (moves to per-mirror
+    state in Phase 4); only `current` is prompted."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
     import utils
@@ -19687,7 +19784,7 @@ def test_ensure_snapshot_pins_prompts_and_writes_when_unset():
         _sess.config = _Cfg()
         utils._SNAPSHOT_TS_CACHE.clear()
 
-        _answers = iter(['', ''])      # accept default current, default base
+        _answers = iter([''])      # accept default current; no base prompt
 
         class _FakePrompt:
             def __init__(self, _t, _m, options=None):
@@ -19704,8 +19801,11 @@ def test_ensure_snapshot_pins_prompts_and_writes_when_unset():
         finally:
             build.Prompt, build.console.print = _sp, _sc
         _st = utils.read_snapshot_state(_sess.config)
-        assert _st['current'] == '20260514T083402Z', _st     # default applied
-        assert _st['base'] == '20260514T083402Z', _st
+        assert _st['current'] == '20260514T083402Z', _st
+        assert 'base' not in _st, "MIRROR-01: base must NOT be written"
+        # snapshot.history populated with the just-set ts
+        _h = utils.read_snapshot_history(_sess.config)
+        assert _h == ['20260514T083402Z'], _h
         # already pinned → no prompt, returns True (would StopIteration if it asked)
         assert _sess._ensure_snapshot_pins() is True
 
@@ -22634,6 +22734,221 @@ def test_coord_publish_generate_pending_skips_already_claimed():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MIRROR-01 Phase 1 — snapshot history + mirror state CRUD
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_snapshot_history_ring_append_and_cap():
+    """append_snapshot_history pushes onto the head and caps at 20."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        assert _u.read_snapshot_history(_cfg) == []
+        # Append 25 ts; ring stays at 20 newest-first
+        for _i in range(25):
+            _u.append_snapshot_history(_cfg, f"2026{_i:02d}01T000000Z")
+        _h = _u.read_snapshot_history(_cfg)
+        assert len(_h) == _u.SNAPSHOT_HISTORY_MAX == 20
+        # Newest first
+        assert _h[0] == '20262401T000000Z'
+        # Oldest still in ring
+        assert _h[-1] == '20260501T000000Z'
+        # Older entries fell off (entry 0..4 dropped)
+        assert '20260001T000000Z' not in _h
+
+
+def test_snapshot_history_dedups_promoted_to_head():
+    """Re-selecting a timestamp already in history doesn't duplicate it —
+    the existing entry is removed and the new one inserted at the head."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        for _ts in ('20260101T000000Z', '20260201T000000Z',
+                    '20260301T000000Z', '20260101T000000Z'):
+            _u.append_snapshot_history(_cfg, _ts)
+        _h = _u.read_snapshot_history(_cfg)
+        assert _h == [
+            '20260101T000000Z',   # promoted to head
+            '20260301T000000Z',
+            '20260201T000000Z',
+        ]
+
+
+def test_snapshot_history_ignores_malformed_file():
+    """A corrupt history file → silent empty return; helper does NOT raise."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _path = _u.snapshot_history_path(_Cfg())
+        with open(_path, 'w') as _fh:
+            _fh.write('not valid json')
+        assert _u.read_snapshot_history(_Cfg()) == []
+
+
+def test_snapshot_history_rejects_non_ts_strings():
+    """Entries that don't match YYYYMMDDTHHMMSSZ are silently dropped on read
+    so a hand-edited file with garbage doesn't poison the ring."""
+    _u = _utils_module()
+    import json as _json
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _path = _u.snapshot_history_path(_Cfg())
+        with open(_path, 'w') as _fh:
+            _json.dump(['20260101T000000Z', 'oops', '', 42,
+                        '20260201T000000Z'], _fh)
+        assert _u.read_snapshot_history(_Cfg()) == [
+            '20260101T000000Z', '20260201T000000Z',
+        ]
+        # append still works against the cleaned ring
+        _u.append_snapshot_history(_Cfg(), '20260301T000000Z')
+        assert _u.read_snapshot_history(_Cfg()) == [
+            '20260301T000000Z', '20260101T000000Z', '20260201T000000Z',
+        ]
+
+
+def _mirror_module():
+    """Lazy import of scripts/mirror.py."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror
+    return mirror
+
+
+def test_mirror_add_remove_round_trip():
+    """add_mirror writes the state file; list_mirrors finds it; remove
+    deletes it."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        assert _m.list_mirrors(_cfg) == []
+        _ok, _detail = _m.add_mirror(
+            _cfg, name='alpha', url='ubuntu@host:/srv/asgard',
+            ssh_key='config/asgard.key', seed_pin='20260601T000000Z',
+        )
+        assert _ok, _detail
+        assert _m.list_mirrors(_cfg) == ['alpha']
+        _st = _m.read_mirror_state(_cfg, 'alpha')
+        assert _st['name'] == 'alpha'
+        assert _st['url'] == 'ubuntu@host:/srv/asgard'
+        assert _st['type'] == 'ssh'
+        assert _st['ssh_key'] == 'config/asgard.key'
+        assert _st['base'] == '20260601T000000Z'
+        assert _st['current'] == '20260601T000000Z'
+        assert _st['last_publish_at'] == ''
+        assert _st['neighbours_known'] == []
+        # Remove by name
+        _ok, _ = _m.remove_mirror(_cfg, url_or_name='alpha')
+        assert _ok
+        assert _m.list_mirrors(_cfg) == []
+
+
+def test_mirror_add_rejects_duplicate_name_and_url():
+    """Same name OR same URL twice → second add fails (atomically; first
+    state survives)."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='ssh://h/p', seed_pin='T')
+        _ok, _ = _m.add_mirror(_cfg, name='alpha', url='ssh://h2/p2', seed_pin='T')
+        assert not _ok
+        _ok, _ = _m.add_mirror(_cfg, name='beta', url='ssh://h/p', seed_pin='T')
+        assert not _ok
+        assert _m.list_mirrors(_cfg) == ['alpha']
+
+
+def test_mirror_add_rejects_invalid_name_and_url():
+    """Invalid name (slash, dot-dot, spaces, empty) and invalid URL refused."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        for _bad in ('', 'has space', 'has/slash', '..', 'a' * 65):
+            _ok, _ = _m.add_mirror(_cfg, name=_bad, url='ssh://h/p', seed_pin='')
+            assert not _ok, f"name {_bad!r} must be rejected"
+        for _bad in ('', '   ', 'not-a-url', 'gopher://x'):
+            _ok, _ = _m.add_mirror(_cfg, name='alpha', url=_bad, seed_pin='')
+            assert not _ok, f"url {_bad!r} must be rejected"
+
+
+def test_mirror_url_normalisation_and_lookup():
+    """Bare paths become file://; lookup by URL finds the mirror name."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='local-fs', url='/srv/asgard', seed_pin='')
+        _st = _m.read_mirror_state(_cfg, 'local-fs')
+        assert _st['url'] == 'file:///srv/asgard'
+        assert _st['type'] == 'local'
+        # Lookup via either form
+        assert _m.find_mirror_by_url(_cfg, '/srv/asgard') == 'local-fs'
+        assert _m.find_mirror_by_url(_cfg, 'file:///srv/asgard') == 'local-fs'
+
+
+def test_mirror_remove_by_url():
+    """`remove_mirror(url_or_name=<url>)` finds the state file by URL match."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='ssh://h/p', seed_pin='')
+        _ok, _detail = _m.remove_mirror(_cfg, url_or_name='ssh://h/p')
+        assert _ok, _detail
+        assert _m.list_mirrors(_cfg) == []
+
+
+def test_mirror_update_state_merges_fields():
+    """update_mirror_state read-merge-writes; missing mirror returns False."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='ssh://h/p',
+                      seed_pin='20260101T000000Z')
+        assert _m.update_mirror_state(
+            _cfg, 'alpha', current='20260601T000000Z',
+            last_publish_at='2026-06-01T00:00:00Z') is True
+        _st = _m.read_mirror_state(_cfg, 'alpha')
+        assert _st['current'] == '20260601T000000Z'
+        assert _st['base'] == '20260101T000000Z'  # untouched
+        assert _st['last_publish_at'] == '2026-06-01T00:00:00Z'
+        # Unknown mirror
+        assert _m.update_mirror_state(_cfg, 'ghost', current='T') is False
+
+
+def test_cmd_mirror_dispatch_routes_subcommands():
+    """`cmd_mirror` routes add/remove/list/summary/status to their handlers."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    assert 'def cmd_mirror(' in _body
+    for _sub in ('cmd_mirror_add', 'cmd_mirror_remove', 'cmd_mirror_list',
+                 'cmd_mirror_summary', 'cmd_mirror_status'):
+        assert f'def {_sub}(' in _body, f"{_sub} missing"
+    assert "register_command('mirror'" in _body, "mirror not registered"
+    assert re.search(
+        r"if action == 'add':\s*\n\s+return self\.cmd_mirror_add", _body)
+    assert re.search(
+        r"if action == 'remove' or action == 'delete':\s*\n\s+"
+        r"return self\.cmd_mirror_remove", _body)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -23331,10 +23646,13 @@ def main() -> int:
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator
         test_snapshot_and_refresh_commands_wired,
         test_snapshot_state_roundtrip_and_resolve_precedence,
-        test_snapshot_base_show_and_forward_only,
+        test_snapshot_base_subcommand_fully_removed,
         test_list_snapshots_between_filters_range_and_unions_keys,
         test_snapshot_select_interactive_sets_chosen_current,
         test_snapshot_select_current_is_forward_only,
+        test_snapshot_select_force_accepts_backtrack,
+        test_snapshot_select_force_cancels_on_empty_or_no,
+        test_snapshot_select_force_rejects_malformed_timestamp,
         test_ensure_snapshot_pins_prompts_and_writes_when_unset,
         test_ensure_snapshot_pins_aborts_when_no_selection,
         test_cache_build_gates_on_snapshot_pins,
@@ -23453,6 +23771,18 @@ def main() -> int:
         test_coord_publish_retract_and_re_audit_collapses,
         test_coord_publish_local_skips_when_halt_set,
         test_coord_publish_generate_pending_skips_already_claimed,
+        # MIRROR-01 Phase 1
+        test_snapshot_history_ring_append_and_cap,
+        test_snapshot_history_dedups_promoted_to_head,
+        test_snapshot_history_ignores_malformed_file,
+        test_snapshot_history_rejects_non_ts_strings,
+        test_mirror_add_remove_round_trip,
+        test_mirror_add_rejects_duplicate_name_and_url,
+        test_mirror_add_rejects_invalid_name_and_url,
+        test_mirror_url_normalisation_and_lookup,
+        test_mirror_remove_by_url,
+        test_mirror_update_state_merges_fields,
+        test_cmd_mirror_dispatch_routes_subcommands,
     ]
     failures = 0
     for t in tests:

@@ -4157,6 +4157,175 @@ class BuildSession:
         return self._group_help('repo external', _table, action)
 
     # ─────────────────────────────────────────────────────────────────────
+    # MIRROR-01 — remote-endpoint umbrella (federated publish targets)
+    # Phase 1: add / remove / list / summary / status (operator-state CRUD).
+    # Phase 3 will land publish / pull / audit / query / reconcile-neighbours.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def cmd_mirror(self, action: str = '', *args):
+        """Manage configured publish-target mirrors and their state.
+
+        Phase 1 (this commit): operator-state CRUD only.  Network commands
+        (publish / pull / audit) land in later phases.
+
+        Subcommands:
+          add <name> <url> [--ssh-key PATH] [--type ssh|local]
+                                 register a new mirror; seeds base+current
+                                 from local snapshot.current
+          remove <name|url>      unregister; Phase 3 will also propagate
+                                 removal to peer coord-head.neighbours
+          list                   one-line-per-mirror inventory
+          summary [<name>]       full per-mirror state
+          status [<name>]        health overview (reachability tests are
+                                 Phase 3 — Phase 1 shows on-disk state only)
+
+        State lives at config/mirror.<name>.state (one file per mirror,
+        durable, gitignored).  See scripts/mirror.py for the schema."""
+        if action == 'add':
+            return self.cmd_mirror_add(*args)
+        if action == 'remove' or action == 'delete':
+            return self.cmd_mirror_remove(*args)
+        if action == 'list':
+            return self.cmd_mirror_list(*args)
+        if action == 'summary':
+            return self.cmd_mirror_summary(*args)
+        if action == 'status':
+            return self.cmd_mirror_status(*args)
+        _table = {
+            'add <name> <url>':  'register a mirror; seeds base+current',
+            'remove <name|url>': 'unregister a mirror',
+            'list':              'one-line-per-mirror inventory',
+            'summary [<name>]':  'full per-mirror state',
+            'status [<name>]':   'on-disk health overview (Phase 1 shape)',
+        }
+        return self._group_help('mirror', _table, action)
+
+    def cmd_mirror_add(self, *args):
+        """mirror add <name> <url> [--ssh-key PATH] [--type ssh|local]
+
+        Seeds base + current from the local snapshot.current pin so the
+        new mirror starts at parity with this builder."""
+        import mirror as _mirror
+        if len(args) < 2:
+            console.print(
+                "Usage: mirror add <name> <url> [--ssh-key PATH] [--type ssh|local]",
+                tui.COLOR_ERROR)
+            return False
+        _name, _url = args[0], args[1]
+        _ssh_key: 'Optional[str]' = None
+        _type: 'Optional[str]' = None
+        _i = 2
+        while _i < len(args):
+            _a = args[_i]
+            if _a == '--ssh-key' and _i + 1 < len(args):
+                _ssh_key = args[_i + 1]
+                _i += 2
+            elif _a == '--type' and _i + 1 < len(args):
+                _type = args[_i + 1]
+                _i += 2
+            else:
+                _i += 1
+        _seed = self._snapshot_current() or ''
+        _ok, _detail = _mirror.add_mirror(
+            self.config, name=_name, url=_url, type=_type,
+            ssh_key=_ssh_key, seed_pin=_seed,
+        )
+        console.print(
+            f"mirror add: {_detail}",
+            tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+        if _ok:
+            console.print(
+                "  (Phase 3 will also propagate the new URL to all peer "
+                "mirrors' coord-head.neighbours under flock.)")
+        return _ok
+
+    def cmd_mirror_remove(self, *args):
+        """mirror remove <name|url> — unregister.  Phase 3 will also
+        propagate the removal to every peer mirror's neighbours list."""
+        import mirror as _mirror
+        if not args:
+            console.print(
+                "Usage: mirror remove <name|url>", tui.COLOR_ERROR)
+            return False
+        _ok, _detail = _mirror.remove_mirror(self.config, url_or_name=args[0])
+        console.print(
+            f"mirror remove: {_detail}",
+            tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+        if _ok:
+            console.print(
+                "  (Phase 3 will also propagate the removal to all peer "
+                "mirrors' coord-head.neighbours under flock.)")
+        return _ok
+
+    def cmd_mirror_list(self, *args):
+        """One-line-per-mirror inventory: name, url, type."""
+        del args
+        import mirror as _mirror
+        _names = _mirror.list_mirrors(self.config)
+        if not _names:
+            console.print("mirror list: no mirrors configured.")
+            return True
+        console.print(f"Mirrors ({len(_names)}):")
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n) or {}
+            _url = _st.get('url') or '?'
+            _type = _st.get('type') or '?'
+            console.print(f"  {_n:<24s}  [{_type:<6s}]  {_url}")
+        return True
+
+    def cmd_mirror_summary(self, *args):
+        """Full per-mirror state dump."""
+        import mirror as _mirror
+        _names = ([args[0]] if args
+                  else _mirror.list_mirrors(self.config))
+        if not _names:
+            console.print("mirror summary: no mirrors configured.")
+            return True
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            if _st is None:
+                console.print(
+                    f"mirror summary: {_n!r} not registered.",
+                    tui.COLOR_ERROR)
+                continue
+            console.print(f"[{_n}]")
+            console.print(f"  url:              {_st.get('url', '')}")
+            console.print(f"  type:             {_st.get('type', '')}")
+            console.print(f"  ssh_key:          {_st.get('ssh_key', '') or '(unset)'}")
+            console.print(f"  base:             {_st.get('base', '') or '(unset)'}")
+            console.print(f"  current:          {_st.get('current', '') or '(unset)'}")
+            console.print(f"  last_publish_at:  {_st.get('last_publish_at', '') or '(never)'}")
+            _nb = _st.get('neighbours_known') or []
+            if _nb:
+                console.print(f"  neighbours_known: {len(_nb)} peer(s)")
+                for _u in _nb:
+                    console.print(f"    - {_u}")
+            else:
+                console.print("  neighbours_known: (none — Phase 3 populates on publish)")
+        return True
+
+    def cmd_mirror_status(self, *args):
+        """On-disk health overview.  Phase 1 surfaces what state is durable;
+        network reachability + last-publish freshness land in Phase 3."""
+        import mirror as _mirror
+        _names = ([args[0]] if args
+                  else _mirror.list_mirrors(self.config))
+        if not _names:
+            console.print("mirror status: no mirrors configured.")
+            return True
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            if _st is None:
+                console.print(
+                    f"{_n}: NOT REGISTERED", tui.COLOR_ERROR)
+                continue
+            _published = bool(_st.get('last_publish_at'))
+            _tag = 'PUBLISHED' if _published else 'NEVER PUBLISHED'
+            console.print(
+                f"{_n}: {_tag}  current={_st.get('current', '') or '(unset)'}")
+        return True
+
+    # ─────────────────────────────────────────────────────────────────────
     # COORD-01 — multi-builder repo coordination (sidecar claims layer)
     # ─────────────────────────────────────────────────────────────────────
 
@@ -4781,34 +4950,36 @@ class BuildSession:
     # ─────────────────────────────────────────────────────────────────────
 
     def cmd_snapshot(self, action: str = '', *args):
-        """Manage the upstream snapshot pins (base + current) and inspect the
-        update workload.  Pins persist in config/snapshot.state (durable —
-        survives `clean cache`) and take precedence over [Snapshot] Timestamp.
+        """Manage the upstream `current` snapshot pin and inspect the update
+        workload.  The pin persists in config/snapshot.state (durable —
+        survives `clean cache`) and takes precedence over [Snapshot] Timestamp.
 
         Usage:
-          snapshot                          — status overview (base/current/latest)
-          snapshot list                     — base, current, and the snapshots
-                                              between current and latest
+          snapshot                          — status overview (current/latest)
+          snapshot list                     — current + the snapshots between
+                                              current and latest
           snapshot workload [<ts>|latest]   — sources changed current → target
           snapshot select                   — interactive picker: choose the next
                                               current from the in-between snapshots
-          snapshot select base|current <ts|latest>  — set a pin explicitly
-          snapshot advance <ts|latest>      — shorthand for `select current …`
-          snapshot base [show|<ts>]         — show/set the base-archive pin
+          snapshot select <ts|latest>       — set current explicitly (forward-only)
+          snapshot select force             — prompt for ANY ts (backtrack OK)
+          snapshot advance <ts|latest>      — alias for `select <ts|latest>`
+          snapshot history                  — last 20 selected current pins
 
-        Pins are explicit YYYYMMDDTHHMMSSZ timestamps or `latest` — no implicit
-        "next".  `base` is FORWARD-ONLY (it marks what's archivable on the
-        remote; moving it back would un-archive).  Changing a pin affects what
-        the next build/publish ships — production-impacting, so setters
-        confirm first."""
+        MIRROR-01: forward-only by default.  `select force` is the documented
+        backtrack path.  The legacy `base` pin (archive floor) was removed in
+        MIRROR-01 Phase 1 — it lives in per-mirror state now (Phase 4).
+        """
         _table = {
-            'list':     'base, current + the snapshots between current and latest',
-            'workload': 'sources changed current → target: snapshot workload [<ts>|latest]',
-            'select':   'pick the next current interactively (no args), or set a '
-                        'pin: snapshot select base|current <ts|latest>',
-            'advance':  'shorthand for `select current`: snapshot advance <ts|latest>',
-            'base':     'show/set the base-archive pin: snapshot base [show|<ts>]',
-            'status':   'status overview (also the bare `snapshot`)',
+            'list':         'current + the snapshots between current and latest',
+            'workload':     'sources changed current → target: snapshot workload [<ts>|latest]',
+            'select':       'pick the next current interactively (no args), or '
+                            'explicitly: snapshot select <ts|latest>',
+            'select force': 'backtrack / arbitrary set: prompt for any timestamp '
+                            '(bypasses forward-only; cautioned)',
+            'advance':      'alias for `select <ts|latest>`',
+            'history':      'last 20 selected current pins (newest first)',
+            'status':       'status overview (also the bare `snapshot`)',
         }
         if action in ('', 'status'):
             return self._cmd_snapshot_overview()
@@ -4819,9 +4990,9 @@ class BuildSession:
         if action == 'select':
             return self._cmd_snapshot_select(*args)
         if action == 'advance':
-            return self._cmd_snapshot_select('current', *args)
-        if action == 'base':
-            return self._cmd_snapshot_base(*args)
+            return self._cmd_snapshot_select(*args)
+        if action == 'history':
+            return self._cmd_snapshot_history(*args)
         return self._group_help('snapshot', _table, action)
 
     def _snapshot_current(self):
@@ -4833,22 +5004,28 @@ class BuildSession:
             return None
 
     def _snapshot_base_ts(self):
-        """Base pin from config/snapshot.state; defaults to current when unset
-        (base == current initially)."""
+        """DEPRECATED (MIRROR-01 Phase 1): archive-floor pin moved to per-mirror
+        state.  Compat shim: returns the legacy `base` from snapshot.state if
+        still present (existing operators), else defaults to current.  Removed
+        in Phase 5 once UPD-01 fully rewires through mirror state."""
         _b = utils.read_snapshot_state(self.config).get('base', '')
         return _b or self._snapshot_current()
 
     def _snapshot_published(self):
-        """The snapshot the REMOTE (or local manifest, external-off) currently
-        reflects (config/snapshot.state 'published'); defaults to base when
-        unset.  This is the floor `repo refresh` diffs FROM — so each refresh
-        rebuilds only what changed between the last publish and current."""
+        """DEPRECATED (MIRROR-01 Phase 1): `published` is a per-mirror property
+        now.  Compat shim: returns the legacy `published` from snapshot.state
+        if still present (preserves UPD-01 for existing operators in transition),
+        else falls back to base/current.  Removed in Phase 4 when
+        `_update_build_pending` reads per-mirror state directly."""
         _p = utils.read_snapshot_state(self.config).get('published', '')
         return _p or self._snapshot_base_ts()
 
     def _external_enabled(self) -> bool:
-        """Runtime external-repo flag: config/snapshot.state 'external' overrides
-        the [Repo] ExternalEnabled default."""
+        """DEPRECATED (MIRROR-01 Phase 1): a single bool can't express
+        multi-mirror enabled/disabled state.  Compat shim: returns legacy
+        `external` from snapshot.state if present, else falls back to [Repo]
+        ExternalEnabled config.  Removed in Phase 5 alongside [Repo]
+        ExternalEnabled and the `cmd_repo_external` family."""
         _st = utils.read_snapshot_state(self.config)
         if 'external' in _st:
             return bool(_st['external'])
@@ -4893,13 +5070,13 @@ class BuildSession:
         return ''
 
     def _ensure_snapshot_pins(self) -> bool:
-        """Before cache build: ensure a durable CURRENT pin (and BASE) exist in
+        """Before cache build: ensure a durable CURRENT pin exists in
         config/snapshot.state.  On a fresh system (the state file is gitignored,
-        so a new checkout has none) PROMPT the operator to select both — cache
+        so a new checkout has none) PROMPT the operator to select one — cache
         build depends on the snapshot.  Returns True to proceed, False to abort.
 
-        No-op when snapshots are disabled or a current pin already exists
-        (base defaults to current when unset)."""
+        MIRROR-01 Phase 1: only `current` is local state.  Archive-floor `base`
+        moved to per-mirror state (Phase 4)."""
         if not self.config.snapshot_enabled:
             return True
         if utils.read_snapshot_state(self.config).get('current'):
@@ -4907,8 +5084,8 @@ class BuildSession:
 
         console.print(
             "No snapshot pin defined (config/snapshot.state is empty).  cache "
-            "build needs a CURRENT pin (the build snapshot) and a BASE pin (the "
-            "archive floor) — select both now.", tui.COLOR_WARNING)
+            "build needs a CURRENT pin (the build snapshot) — select now.",
+            tui.COLOR_WARNING)
         _cfg_ts = str(self.config.snapshot_timestamp_config).strip()
         _default_cur = (_cfg_ts if re.match(r'^\d{8}T\d{6}Z$', _cfg_ts)
                         else 'latest')
@@ -4919,22 +5096,11 @@ class BuildSession:
             console.print("cache build aborted — no current snapshot selected.",
                           tui.COLOR_ERROR)
             return False
-        _base = self._prompt_for_timestamp(
-            f"base snapshot / archive floor (default = current {_current})",
-            _current, allow_latest=False)
-        if not _base:
-            console.print("cache build aborted — no base snapshot selected.",
-                          tui.COLOR_ERROR)
-            return False
-        if _base > _current:
-            console.print(
-                f"base ({_base}) is AFTER current ({_current}) — clamping base "
-                f"to current.", tui.COLOR_WARNING)
-            _base = _current
-        utils.write_snapshot_state(self.config, base=_base, current=_current)
+        utils.write_snapshot_state(self.config, current=_current)
+        utils.append_snapshot_history(self.config, _current)
         console.print(
-            f"snapshot pins set — base={_base}, current={_current} "
-            f"(config/snapshot.state)", tui.COLOR_HIGHLIGHT)
+            f"snapshot pin set — current={_current} (config/snapshot.state)",
+            tui.COLOR_HIGHLIGHT)
         return True
 
     def _cmd_snapshot_overview(self):
@@ -5004,84 +5170,123 @@ class BuildSession:
             "  → `snapshot select` opens an interactive picker to set one of "
             "these as the new current")
 
-    def _cmd_snapshot_select(self, which: str = '', *rest):
-        """Set a snapshot pin.  No args → interactive picker (choose the next
-        current from the snapshots between current and latest, like
-        `cache select`).  Explicit: `snapshot select base|current <ts|latest>`.
-        Durable (config/snapshot.state); cautioned; base AND current are
-        forward-only."""
-        if not which:
+    def _cmd_snapshot_select(self, *args):
+        """Set the `current` snapshot pin.
+
+        Forms:
+          snapshot select               — interactive picker (forward-only
+                                          candidates between current and latest)
+          snapshot select <ts|latest>   — explicit; forward-only
+          snapshot select force         — prompt for ANY timestamp (including
+                                          older than current); cautioned +
+                                          confirmed; intended for backtrack /
+                                          operator-driven recovery only.
+
+        Forward-only is the default rule because UPD-01's `+asg uN` ledger and
+        the per-mirror federation state would otherwise drift.  `force` is the
+        escape hatch — no list, no candidate filter, just a free-form prompt.
+        """
+        _target = args[0] if args else ''
+        if not _target:
             return self._snapshot_select_interactive()
-        _target = rest[0] if rest else ''
-        if which not in ('base', 'current') or not _target:
-            console.print("Usage: snapshot select [base|current <ts|latest>]  "
-                          "(no args → interactive picker)")
-            return
+        if _target == 'force':
+            return self._snapshot_select_force()
         if _target == 'latest':
-            if which == 'base':
-                console.print(
-                    "snapshot select base: a concrete timestamp is required "
-                    "(not `latest`)", tui.COLOR_ERROR)
-                return
-            _target = self._snapshot_latest()
-            if not _target:
+            _resolved = self._snapshot_latest()
+            if not _resolved:
                 console.print("snapshot select: could not resolve `latest`",
                               tui.COLOR_ERROR)
                 return
-        self._set_snapshot_pin(which, _target)
+            _target = _resolved
+        self._set_snapshot_pin(_target)
 
-    def _set_snapshot_pin(self, which: str, target: str) -> bool:
-        """Validate (forward-only) + caution + write a base/current pin.
-        Returns True if the pin was set."""
+    def _snapshot_select_force(self):
+        """Backtrack / arbitrary set: prompt for a timestamp, accept it
+        regardless of direction.  Bypasses the forward-only rule but keeps
+        the y/n caution + history append + cache-flag invalidation."""
+        _cur = self._snapshot_current() or ''
+        console.print(
+            "snapshot select force: bypasses forward-only.  Backtracking "
+            "current invalidates the +asg uN ledger expectations for the "
+            "delta between current and the new pin — only use when you "
+            "know what you're doing.", tui.COLOR_WARNING)
+        _ans = Prompt(
+            PROMPT_INPUT,
+            f"New current (YYYYMMDDTHHMMSSZ; default {_cur or '(unset)'}):"
+        ).get_response().strip()
+        if not _ans:
+            console.print("  cancelled — pin unchanged")
+            return
+        if not re.match(r'^\d{8}T\d{6}Z$', _ans):
+            console.print(
+                f"snapshot select force: '{_ans}' is not a YYYYMMDDTHHMMSSZ "
+                f"timestamp", tui.COLOR_ERROR)
+            return
+        if Prompt(PROMPT_YESNO,
+                  f"Set current pin to {_ans} (override forward-only)?"
+                  ).get_response().lower() not in ('y', 'yes'):
+            console.print("  aborted — pin unchanged")
+            return
+        if _cur:
+            _direction = ('BACKTRACK' if _ans < _cur
+                          else 'forward' if _ans > _cur else 'unchanged')
+            console.print(
+                f"  {_direction}: {_cur} → {_ans}", tui.COLOR_WARNING)
+        utils.write_snapshot_state(self.config, current=_ans)
+        utils.append_snapshot_history(self.config, _ans)
+        console.print(
+            f"snapshot select force: current pin set to {_ans} "
+            f"(config/snapshot.state; appended to config/snapshot.history)")
+        self.flags.cache_ready = False
+        self.flags.dep_check_ready = False
+        console.print(
+            "  cache invalidated — run `cache build` + `cache parse` to "
+            "resolve the dep tree at the new pin")
+
+    def _set_snapshot_pin(self, target: str) -> bool:
+        """Validate (forward-only) + caution + write the `current` pin.
+        Appends to config/snapshot.history on success.  Returns True iff set."""
         if not re.match(r'^\d{8}T\d{6}Z$', target):
             console.print(f"snapshot select: '{target}' is not a "
                           f"YYYYMMDDTHHMMSSZ timestamp", tui.COLOR_ERROR)
             return False
-        _old = (self._snapshot_base_ts() if which == 'base'
-                else self._snapshot_current())
+        _old = self._snapshot_current()
         if _old and target < _old:
-            _why = ("base is forward-only; moving it back would un-archive "
-                    "already-archivable versions"
-                    if which == 'base'
-                    else "current can only move forward")
             console.print(
-                f"snapshot select {which}: REFUSED — {_why} "
-                f"({target} < {_old}).", tui.COLOR_ERROR)
+                f"snapshot select: REFUSED — current can only move forward "
+                f"({target} < {_old}).  To backtrack, edit "
+                f"config/snapshot.state directly (documented manual override).",
+                tui.COLOR_ERROR)
             return False
-        console.print(f"snapshot select {which}: {_old or '(unset)'} → {target}",
+        console.print(f"snapshot select: {_old or '(unset)'} → {target}",
                       tui.COLOR_WARNING)
         console.print(
-            "  PRODUCTION IMPACT: changes what the next build/publish ships "
-            "(current) or what becomes archivable (base).")
-        if which == 'current':
-            _pub = self._snapshot_published()
-            if _old and _pub and apt_pkg.version_compare(_old, _pub) > 0:
-                console.print(
-                    f"  WARNING: current ({_old}) is AHEAD of published ({_pub}) "
-                    f"— that delta is UNPUBLISHED.  Advancing to {target} leaves "
-                    f"it unpublished (bump numbers stay correct via the manifest, "
-                    f"but the intermediate versions won't be published).",
-                    tui.COLOR_WARNING)
+            "  PRODUCTION IMPACT: changes what the next build/publish ships.")
+        _pub = self._snapshot_published()
+        if _old and _pub and apt_pkg.version_compare(_old, _pub) > 0:
+            console.print(
+                f"  WARNING: current ({_old}) is AHEAD of published ({_pub}) "
+                f"— that delta is UNPUBLISHED.  Advancing to {target} leaves "
+                f"it unpublished (bump numbers stay correct via the manifest, "
+                f"but the intermediate versions won't be published).",
+                tui.COLOR_WARNING)
         if Prompt(PROMPT_YESNO,
-                  f"Set {which} pin to {target}?").get_response().lower() \
+                  f"Set current pin to {target}?").get_response().lower() \
                 not in ('y', 'yes'):
             console.print("  aborted — pin unchanged")
             return False
-        if which == 'base':
-            utils.write_snapshot_state(self.config, base=target)
-        else:
-            utils.write_snapshot_state(self.config, current=target)
+        utils.write_snapshot_state(self.config, current=target)
+        utils.append_snapshot_history(self.config, target)
         console.print(
-            f"snapshot select: {which} pin set to {target} "
-            f"(config/snapshot.state)")
-        if which == 'current':
-            # The resolved pin changed → the in-memory cache is now stale; force
-            # the operator to re-resolve at the new pin before building.
-            self.flags.cache_ready = False
-            self.flags.dep_check_ready = False
-            console.print(
-                "  cache invalidated — run `cache build` + `cache parse` to "
-                "resolve the dep tree at the new pin, then `repo refresh`")
+            f"snapshot select: current pin set to {target} "
+            f"(config/snapshot.state; appended to config/snapshot.history)")
+        # The resolved pin changed → the in-memory cache is now stale; force
+        # the operator to re-resolve at the new pin before building.
+        self.flags.cache_ready = False
+        self.flags.dep_check_ready = False
+        console.print(
+            "  cache invalidated — run `cache build` + `cache parse` to "
+            "resolve the dep tree at the new pin, then `repo refresh`")
         return True
 
     def _snapshot_select_interactive(self):
@@ -5130,30 +5335,28 @@ class BuildSession:
             console.print(f"  {_idx} out of range (1-{len(_cands)})",
                           tui.COLOR_ERROR)
             return
-        self._set_snapshot_pin('current', _cands[_idx - 1])
+        self._set_snapshot_pin(_cands[_idx - 1])
 
-    def _cmd_snapshot_base(self, *args):
-        """Show or set the base-archive pin (forward-only; config/snapshot.state).
-
-        Usage: snapshot base [show|<ts>]   (no arg / `show` → show; <ts> → set)
-
-        Archive STORAGE is deferred — the pin only records which versions are
-        archivable; nothing is deleted."""
-        _arg = args[0] if args else ''
-        if _arg and _arg != 'show':
-            return self._cmd_snapshot_select('base', _arg)
-        _base = self._snapshot_base_ts()
-        console.print(f"snapshot base pin: {_base or '(unset)'}")
-        _ledger = repo_audit.fetch_remote_ledger(self.config)
-        if _ledger:
-            _multi = {p: vs for p, vs in _ledger.items() if len(set(vs)) > 1}
-            _tot = sum(len(set(vs)) for vs in _ledger.values())
+    def _cmd_snapshot_history(self, *args):
+        """READ-ONLY: print the last 20 selected current pins (newest first)
+        from config/snapshot.history.  Operator-facing only — never
+        load-bearing.
+        """
+        del args
+        _h = utils.read_snapshot_history(self.config)
+        if not _h:
             console.print(
-                f"  remote retention: {len(_ledger)} package(s), {_tot} "
-                f"version(s); {len(_multi)} with >1 retained")
+                "snapshot history: empty (no `snapshot select` has run yet "
+                "since MIRROR-01).")
+            return
+        console.print(
+            f"Snapshot history (last {len(_h)} selected; newest first):")
+        _current = self._snapshot_current()
+        for _i, _ts in enumerate(_h, 1):
+            _mark = '  ← current' if _ts == _current else ''
             console.print(
-                "  (versions from snapshots older than base are archivable; "
-                "archive STORAGE is deferred — nothing is deleted)")
+                f"  {_i:3d}  {_ts}  "
+                f"({utils.format_snapshot_timestamp(_ts)}){_mark}")
 
     def _cmd_snapshot_workload(self, *args):
         """READ-ONLY: sources that change from the CURRENT pin to the TARGET
@@ -9538,6 +9741,7 @@ def main(banner: str) -> None:
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
     tui.register_command('coord',     session.cmd_coord,     'Coord:      coord <init|builders|audit|status>')
+    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <add|remove|list|summary|status>')
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
