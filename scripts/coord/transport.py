@@ -78,6 +78,34 @@ def pull_remote_coord(
     return True, ''
 
 
+def pull_single_file(
+    *, remote_spec: str, local_path: str,
+    ssh_key: 'Optional[str]' = None,
+) -> Tuple[bool, str]:
+    """Rsync one remote file → `local_path`.  `remote_spec` MUST point to
+    the source FILE (with filename), not a directory.
+
+    Used by MIRROR-01 Phase 3 `mirror pull` for per-`.deb` downloads:
+    one rsync invocation per file so progress can be ticked, individual
+    file failures can be surfaced precisely, and a hash mismatch on
+    one file aborts only that file (not the whole batch).
+    """
+    _argv = list(_RSYNC_BASE)
+    _ssh = _ssh_arg(ssh_key)
+    if _ssh is not None:
+        _argv += _ssh
+    _argv += [remote_spec, local_path]
+    os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
+    _r = subprocess.run(_argv, capture_output=True, text=True)
+    if _r.returncode != 0:
+        _tail = (_r.stderr or _r.stdout or '').strip().splitlines()[-5:]
+        _detail = ' | '.join(_tail)
+        logger.error(
+            f"coord.transport.pull_single_file: rc={_r.returncode}: {_detail}")
+        return False, _detail
+    return True, ''
+
+
 def push_jsonl(
     *, local_path: str, remote_spec: str, ssh_key: 'Optional[str]' = None,
 ) -> Tuple[bool, str]:

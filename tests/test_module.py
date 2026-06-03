@@ -23270,6 +23270,242 @@ def test_reconcile_neighbours_no_mirrors_is_trivial_ok():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MIRROR-01 Phase 3 — federation-gated publish, first-publish bootstrap, pull
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cmd_mirror_dispatch_routes_publish_and_pull():
+    """`cmd_mirror` routes publish + pull subcommands."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    for _sub in ('cmd_mirror_publish', 'cmd_mirror_pull'):
+        assert f'def {_sub}(' in _body, f"{_sub} missing"
+    assert re.search(
+        r"if action == 'publish':\s*\n\s+return self\.cmd_mirror_publish",
+        _body)
+    assert re.search(
+        r"if action == 'pull':\s*\n\s+return self\.cmd_mirror_pull",
+        _body)
+
+
+def test_remote_publish_blocks_on_federation_drift():
+    """When `local_mirror_urls` differs from the fetched head's neighbours,
+    remote_publish refuses to proceed (federation gate)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.store as _store
+    import coord.identity as _identity
+    import coord.reconcile as _reconcile
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_coord = _td
+            dir_coord_fetched = os.path.join(_td, 'fetched')
+            dir_coord_claims = os.path.join(_td, 'claims')
+            dir_log = _td
+            dir_repo = _td
+            dir_gnupg = _td  # signing.signing_home() walks this
+        os.makedirs(_Cfg.dir_coord_fetched)
+        os.makedirs(_Cfg.dir_coord_claims)
+
+        # Mock the network/sign primitives.  The fetched head has only
+        # one neighbour but local config has two → federation mismatch.
+        _existing_head = {
+            'v': 2,
+            'inrelease_sha256': 'a' * 64,
+            'snapshot': {}, 'last_seqs': {}, 'head_time': 'T',
+            'neighbours': ['ssh://a/p'],
+        }
+        _lock = object()  # any non-None sentinel
+        with patch.object(_transport, 'remote_flock_acquire',
+                          return_value=_lock), \
+             patch.object(_transport, 'remote_flock_release'), \
+             patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=_existing_head), \
+             patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims', return_value={}), \
+             patch.object(_reconcile, 'publish_halt_reason',
+                          return_value=None):
+            _ok, _detail = _publish.remote_publish(
+                builder_id='alice', config=_Cfg(),
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='20260601T000000Z',
+                remote_coord_spec='user@h:/asgard',
+                inrelease_local_path='/fake/InRelease',
+                read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+                local_mirror_urls=['ssh://a/p', 'ssh://b/p'],  # 2; remote has 1
+                ssh_host='user@h',
+            )
+        assert not _ok
+        assert 'federation gate BLOCK' in _detail
+        assert 'reconcile-neighbours' in _detail
+
+
+def test_remote_publish_bootstrap_uploads_pubkey_when_no_head():
+    """When the remote has no coord-head (first publish), remote_publish
+    uploads our pubkey to keyring/builders/<id>.pub before writing claims,
+    and initialises the new head's neighbours from local_mirror_urls."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.store as _store
+    import coord.identity as _identity
+    import coord.reconcile as _reconcile
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        # Build a complete fake config dir
+        class _Cfg:
+            dir_coord = _td
+            dir_coord_fetched = os.path.join(_td, 'fetched')
+            dir_coord_claims = os.path.join(_td, 'claims')
+            dir_log = _td
+            dir_repo = _td
+            dir_config = _td
+            dir_gnupg = _td
+        os.makedirs(_Cfg.dir_coord_fetched)
+        os.makedirs(_Cfg.dir_coord_claims)
+        # Fake InRelease with a sha
+        _inrelease = os.path.join(_td, 'InRelease')
+        with open(_inrelease, 'wb') as _fh:
+            _fh.write(b'Date: 2026-06-01\nFake: contents\n')
+
+        # Capture push_jsonl calls + the head dict passed to write_coord_head
+        _pushed: 'list[dict]' = []
+        def _fake_push(*, local_path, remote_spec, ssh_key=None):
+            _pushed.append({'local': local_path, 'remote': remote_spec})
+            return True, ''
+        _written_head: 'list[dict]' = []
+        def _fake_write_head(coord_dir, head, signing_home):
+            _written_head.append(head)
+            return True
+        _lock = object()
+        with patch.object(_transport, 'remote_flock_acquire',
+                          return_value=_lock), \
+             patch.object(_transport, 'remote_flock_release'), \
+             patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=None), \
+             patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims', return_value={}), \
+             patch.object(_store, 'max_seq', return_value=0), \
+             patch.object(_reconcile, 'publish_halt_reason',
+                          return_value=None), \
+             patch.object(_transport, 'push_jsonl', side_effect=_fake_push), \
+             patch.object(_head_mod, 'write_coord_head',
+                          side_effect=_fake_write_head), \
+             patch.object(_transport, 'push_coord_head',
+                          return_value=(True, '')), \
+             patch.object(_publish, 'generate_pending_claims',
+                          return_value=[]):
+            _ok, _detail = _publish.remote_publish(
+                builder_id='alice', config=_Cfg(),
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='20260601T000000Z',
+                remote_coord_spec='user@h:/asgard',
+                inrelease_local_path=_inrelease,
+                read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+                local_mirror_urls=['ssh://a/p', 'ssh://b/p'],
+                ssh_host='user@h',
+            )
+        assert _ok, _detail
+        # Pubkey upload must hit keyring/builders/alice.pub
+        _pubkey_pushes = [_p for _p in _pushed
+                          if _p['remote'].endswith('/keyring/builders/alice.pub')]
+        assert len(_pubkey_pushes) == 1, _pushed
+        # The new head must carry the bootstrap neighbours (canonicalised)
+        assert _written_head, "write_coord_head never called"
+        _new_head = _written_head[-1]
+        assert _new_head['neighbours'] == ['ssh://a/p', 'ssh://b/p']
+
+
+def test_cmd_mirror_pull_no_mirrors_is_friendly():
+    """`mirror pull` with no mirrors configured surfaces a friendly warning
+    and exits without touching the network."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache = _tmp
+            dir_coord_identity = os.path.join(_tmp, 'identity')
+            dir_coord = os.path.join(_tmp, 'coord')
+            build_codename = 'thor'
+        os.makedirs(_Cfg.dir_coord_identity)
+        os.makedirs(_Cfg.dir_coord)
+        # Plant a builder id + pubkey so _coord_self_keys passes
+        with open(os.path.join(_Cfg.dir_coord, 'BUILDER_ID'), 'w') as _fh:
+            _fh.write('alice\n')
+        with open(os.path.join(_Cfg.dir_coord_identity, 'alice.pem'), 'w') as _fh:
+            _fh.write('')
+        with open(os.path.join(_Cfg.dir_coord_identity, 'alice.pub'), 'w') as _fh:
+            _fh.write('')
+        _sess.config = _Cfg()
+        _lines = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _ok = _sess.cmd_mirror_pull()
+        finally:
+            build.console.print = _orig
+        assert _ok is False
+        _joined = '\n'.join(_lines)
+        assert 'no mirrors configured' in _joined, _joined
+
+
+def test_repo_publish_prints_deprecation_notice():
+    """`repo publish` (any args) prints the MIRROR-01 deprecation hint
+    before any work."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    # The deprecation message must be inside cmd_repo_publish, AND must
+    # appear before the argument-parsing branches.
+    _idx = _body.find('def cmd_repo_publish(')
+    assert _idx >= 0
+    _slice = _body[_idx:_idx + 4000]
+    assert 'DEPRECATED' in _slice
+    assert 'mirror publish' in _slice
+    # The legacy local_path / kind parsing must STILL run after.
+    assert re.search(r"_kind = args\[0\]", _slice)
+
+
+def test_transport_pull_single_file_primitive_exists():
+    """coord.transport.pull_single_file is wired (used by mirror pull)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _t
+    assert hasattr(_t, 'pull_single_file')
+    # Negative path: rsync invocation against a non-existent source fails
+    # cleanly without raising.
+    with tempfile.TemporaryDirectory() as _td:
+        _ok, _detail = _t.pull_single_file(
+            remote_spec=os.path.join(_td, 'nonexistent'),
+            local_path=os.path.join(_td, 'dest', 'file.deb'),
+        )
+        assert not _ok
+        assert _detail  # rsync stderr tail surfaced
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -24120,6 +24356,13 @@ def main() -> int:
         test_reconcile_neighbours_unreachable_peer_is_critical_failure,
         test_reconcile_neighbours_target_name_unknown_fails,
         test_reconcile_neighbours_no_mirrors_is_trivial_ok,
+        # MIRROR-01 Phase 3 — federation-gated publish + pull
+        test_cmd_mirror_dispatch_routes_publish_and_pull,
+        test_remote_publish_blocks_on_federation_drift,
+        test_remote_publish_bootstrap_uploads_pubkey_when_no_head,
+        test_cmd_mirror_pull_no_mirrors_is_friendly,
+        test_repo_publish_prints_deprecation_notice,
+        test_transport_pull_single_file_primitive_exists,
     ]
     failures = 0
     for t in tests:
