@@ -14,6 +14,7 @@ __pycache__/
 # is a legitimate part of an upstream-derived fork).
 /buildroot/
 /cache/
+/coord/
 /download/
 /gnupg/
 /image/

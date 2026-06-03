@@ -193,6 +193,15 @@ def audit_local(
             filename=_fn,
         ))
 
+    # Always emit a summary INFO so silent success still surfaces
+    # the operator's "what was checked" signal.
+    _findings.append(Finding(
+        severity='INFO', kind='summary',
+        message=(
+            f"audit_local: pool={len(_pool)} files, "
+            f"live_claims={len(_live)}, "
+            f"claimed_pool_files={sum(1 for _f in _pool if _f in _claimed_filenames)}"),
+    ))
     return Report.make('local', _findings)
 
 
@@ -232,6 +241,9 @@ def audit_cross(
             _claim_by_fn[_fn] = _c
 
     # Walk build.json records
+    _record_count = 0
+    _done_count = 0
+    _output_count = 0
     try:
         _entries = sorted(_os.listdir(buildlog_dir))
     except OSError as _e:
@@ -245,13 +257,16 @@ def audit_cross(
         _rec = read_build_record(buildlog_dir, _pkg)
         if _rec is None:
             continue
+        _record_count += 1
         _phase = _rec.get('phase')
         if _phase != 'done':
             # tunneled records have their own claim path; failed
             # records have no outputs to track.
             continue
+        _done_count += 1
         _outputs = _rec.get('outputs') or []
         _hashes = _rec.get('output_hashes') or {}
+        _output_count += len(_outputs)
         for _out_fn in _outputs:
             _claim = _claim_by_fn.get(_out_fn)
             if _claim is None:
@@ -278,6 +293,14 @@ def audit_cross(
                     package=_pkg, filename=_out_fn, builder=builder_id,
                 ))
 
+    # Summary INFO so silent success surfaces the scan totals.
+    _findings.append(Finding(
+        severity='INFO', kind='summary',
+        message=(
+            f"audit_cross: build.json records={_record_count} "
+            f"(phase=done {_done_count}), outputs in done={_output_count}, "
+            f"claims_by_filename={len(_claim_by_fn)}"),
+    ))
     return Report.make('cross', _findings)
 
 
