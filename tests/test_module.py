@@ -12312,9 +12312,11 @@ def test_install_signing_keyring_warns_on_cp_failure():
 
 # ─── CONF-02: network apt source (sources.list.d/athena.list) ────────────────
 
-def _stub_chroot_mixin_for_apt_source(*, apt_source_url, build_codename='thor'):
-    """_ChrootMixin wired only enough to exercise _write_athena_apt_source:
-    a _config carrying apt_source_url + build_codename, and a recording
+def _stub_chroot_mixin_for_apt_source(*, apt_source_url, build_codename='thor',
+                                       dir_config=None):
+    """_ChrootMixin wired only enough to exercise _write_athena_apt_sources:
+    a _config carrying apt_source_url + build_codename (and dir_config so
+    the MIRROR-01 mirror lookup can find state files), and a recording
     stub in place of _write_chroot_file."""
     import chroot
     class _Cfg:
@@ -12322,6 +12324,10 @@ def _stub_chroot_mixin_for_apt_source(*, apt_source_url, build_codename='thor'):
     cfg = _Cfg()
     cfg.apt_source_url = apt_source_url
     cfg.build_codename = build_codename
+    # MIRROR-01 Phase 5: mirror.list_mirrors walks config.dir_config for
+    # mirror.<name>.state files.  Default to a fresh tmpdir so tests that
+    # opt out of mirrors see an empty mirror set.
+    cfg.dir_config = dir_config or tempfile.mkdtemp(prefix='_chroot_cfg_')
     inst = chroot._ChrootMixin.__new__(chroot._ChrootMixin)
     inst._config = cfg
     inst._dir_chroot = '/tmp/fake-chroot'
@@ -12342,12 +12348,14 @@ def test_write_athena_apt_source_noop_when_url_empty():
 def test_write_athena_apt_source_writes_signed_by_when_url_set():
     """A configured URL → /etc/apt/sources.list.d/athena.list with a
     [signed-by=...athena-archive-keyring.gpg] pin, the URL, the release
-    codename, and the main component."""
+    codename, and the main component.
+
+    Legacy (no mirrors registered) path."""
     inst, writes = _stub_chroot_mixin_for_apt_source(
         apt_source_url='https://repo.example.org/athena',
         build_codename='thor',
     )
-    inst._write_athena_apt_source()
+    inst._write_athena_apt_source()  # alias preserves old name
     assert len(writes) == 1, f"expected one write, got {writes}"
     _path, _content = writes[0]
     assert _path == '/etc/apt/sources.list.d/athena.list', _path
@@ -12355,6 +12363,97 @@ def test_write_athena_apt_source_writes_signed_by_when_url_set():
     assert '/usr/share/keyrings/athena-archive-keyring.gpg]' in _content, _content
     assert 'https://repo.example.org/athena thor main' in _content, _content
     assert _content.endswith('\n'), "apt source line must be newline-terminated"
+
+
+def test_write_athena_apt_sources_emits_one_file_per_mirror():
+    """MIRROR-01 Phase 5: with two mirrors registered, the chroot gets
+    one /etc/apt/sources.list.d/athena-<name>.list per mirror, signed-by
+    the project keyring, AND the legacy /etc/apt/sources.list.d/athena.list
+    is NOT written."""
+    import mirror as _mirror
+    with tempfile.TemporaryDirectory() as _cfg_dir:
+        inst, writes = _stub_chroot_mixin_for_apt_source(
+            apt_source_url='https://legacy.example.org/asgard',  # ignored
+            build_codename='thor',
+            dir_config=_cfg_dir,
+        )
+        _mirror.add_mirror(
+            inst._config, name='alpha',
+            url='https://mirror-a.example.org/asgard', seed_pin='')
+        _mirror.add_mirror(
+            inst._config, name='beta',
+            url='https://mirror-b.example.org/asgard', seed_pin='')
+        inst._write_athena_apt_sources()
+        _paths = [_p for _p, _ in writes]
+        assert sorted(_paths) == [
+            '/etc/apt/sources.list.d/athena-alpha.list',
+            '/etc/apt/sources.list.d/athena-beta.list',
+        ], _paths
+        # Legacy single file is NOT produced when mirrors are registered.
+        assert '/etc/apt/sources.list.d/athena.list' not in _paths
+        # Each line carries the signed-by pin + URL + codename + main.
+        for _path, _content in writes:
+            assert 'signed-by=/usr/share/keyrings/athena-archive-keyring.gpg' \
+                in _content, _content
+            assert ' thor main\n' in _content, _content
+
+
+def test_write_athena_apt_sources_skips_ssh_url_with_warning():
+    """ssh:// URLs aren't dereferenceable by apt on the installed system;
+    they're SKIPPED (the warning channel surfaces it).  An adjacent
+    HTTPS mirror is still written."""
+    import mirror as _mirror
+    with tempfile.TemporaryDirectory() as _cfg_dir:
+        inst, writes = _stub_chroot_mixin_for_apt_source(
+            apt_source_url='', build_codename='thor', dir_config=_cfg_dir)
+        _mirror.add_mirror(
+            inst._config, name='shell',
+            url='ssh://ubuntu@host/srv/asgard', seed_pin='')
+        _mirror.add_mirror(
+            inst._config, name='https',
+            url='https://web.example.org/asgard', seed_pin='')
+        inst._write_athena_apt_sources()
+        _paths = [_p for _p, _ in writes]
+        # ssh mirror skipped; https mirror still written.
+        assert _paths == ['/etc/apt/sources.list.d/athena-https.list'], _paths
+
+
+def test_write_athena_apt_sources_accepts_file_scheme():
+    """`file://` URLs ARE supported by apt — for offline local-fs
+    federation mirrors, write the source line."""
+    import mirror as _mirror
+    with tempfile.TemporaryDirectory() as _cfg_dir:
+        inst, writes = _stub_chroot_mixin_for_apt_source(
+            apt_source_url='', build_codename='thor', dir_config=_cfg_dir)
+        _mirror.add_mirror(
+            inst._config, name='local',
+            url='file:///srv/asgard', seed_pin='')
+        inst._write_athena_apt_sources()
+        _paths = [_p for _p, _ in writes]
+        assert _paths == ['/etc/apt/sources.list.d/athena-local.list']
+        assert 'file:///srv/asgard thor main' in writes[0][1]
+
+
+def test_write_athena_apt_sources_falls_back_to_legacy_when_no_mirrors():
+    """No mirrors registered AND [Repo] AptSourceURL set → legacy single
+    athena.list (preserves existing operator configs verbatim until they
+    migrate to `mirror add`)."""
+    inst, writes = _stub_chroot_mixin_for_apt_source(
+        apt_source_url='https://repo.example.org/athena',
+        build_codename='thor')
+    inst._write_athena_apt_sources()
+    _paths = [_p for _p, _ in writes]
+    assert _paths == ['/etc/apt/sources.list.d/athena.list']
+    assert 'https://repo.example.org/athena thor main' in writes[0][1]
+
+
+def test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url():
+    """No mirrors AND no AptSourceURL → no apt source file (target relies
+    on /cdrom/pool added at install time)."""
+    inst, writes = _stub_chroot_mixin_for_apt_source(
+        apt_source_url='', build_codename='thor')
+    inst._write_athena_apt_sources()
+    assert writes == []
 
 
 def test_live_chroot_sources_list_is_self_contained():
@@ -24381,6 +24480,12 @@ def main() -> int:
         test_install_signing_keyring_warns_on_cp_failure,
         test_write_athena_apt_source_noop_when_url_empty,
         test_write_athena_apt_source_writes_signed_by_when_url_set,
+        # MIRROR-01 Phase 5
+        test_write_athena_apt_sources_emits_one_file_per_mirror,
+        test_write_athena_apt_sources_skips_ssh_url_with_warning,
+        test_write_athena_apt_sources_accepts_file_scheme,
+        test_write_athena_apt_sources_falls_back_to_legacy_when_no_mirrors,
+        test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url,
         test_live_chroot_sources_list_is_self_contained,
         # UX-05 Path B: headless CLI backend
         test_cli_print_writes_to_stdout,
