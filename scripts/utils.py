@@ -1812,8 +1812,70 @@ def snapshot_state_path(config: 'BuildConfig') -> str:
     """Path to the durable snapshot-pin state (config/snapshot.state).
 
     Lives under config/ (NOT cache/) so `clean cache` can't wipe the
-    operator-set base + current pins — these have production impact."""
+    operator-set current pin — has production impact.
+
+    MIRROR-01 Phase 1: schema reduced to `{current}`.  Legacy fields
+    `base`, `published`, `external` are READ-tolerantly (compat shims
+    in build.py) but no longer WRITTEN — they move to per-mirror
+    state in Phase 4."""
     return os.path.join(config.dir_config, 'snapshot.state')
+
+
+def snapshot_history_path(config: 'BuildConfig') -> str:
+    """Path to the snapshot-pin history ring (config/snapshot.history).
+
+    JSON list of YYYYMMDDTHHMMSSZ timestamps, MOST RECENT FIRST, capped
+    at SNAPSHOT_HISTORY_MAX entries.  Written by `snapshot select` on
+    every successful pin change; read by `snapshot history`.
+
+    Lives next to snapshot.state — same durability rationale
+    (operator-set, production-impacting, survives `clean cache`)."""
+    return os.path.join(config.dir_config, 'snapshot.history')
+
+
+SNAPSHOT_HISTORY_MAX = 20
+
+
+def read_snapshot_history(config: 'BuildConfig') -> 'list[str]':
+    """Return last 20 selected `current` timestamps, most recent first.
+    Empty list on missing / malformed file (silent fallback — history
+    is operator-facing only, never load-bearing)."""
+    import json
+    try:
+        with open(snapshot_history_path(config)) as fh:
+            _h = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(_h, list):
+        return []
+    return [_ts for _ts in _h if isinstance(_ts, str) and _SNAPSHOT_TS_RE.match(_ts)]
+
+
+def append_snapshot_history(config: 'BuildConfig', ts: str) -> None:
+    """Push `ts` onto the head of snapshot.history; cap at
+    SNAPSHOT_HISTORY_MAX.  If `ts` already appears in the history,
+    promote it to head (no duplicate entries — the same operator
+    re-selecting a recent timestamp shouldn't fill the ring with
+    duplicates).
+
+    Best-effort: any write failure is logged + swallowed (history is
+    informational; failure mustn't block the underlying snapshot
+    select)."""
+    import json
+    if not isinstance(ts, str) or not _SNAPSHOT_TS_RE.match(ts):
+        return
+    _h = read_snapshot_history(config)
+    _h = [_t for _t in _h if _t != ts]
+    _h.insert(0, ts)
+    _h = _h[:SNAPSHOT_HISTORY_MAX]
+    _path = snapshot_history_path(config)
+    try:
+        os.makedirs(os.path.dirname(_path), exist_ok=True)
+        _atomic_write_bytes(
+            _path, (json.dumps(_h, indent=2) + '\n').encode('utf-8'),
+        )
+    except OSError as e:
+        logger.warning(f"append_snapshot_history: {_path}: {e}")
 
 
 def read_snapshot_state(config: 'BuildConfig') -> dict:
