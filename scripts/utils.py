@@ -1314,8 +1314,13 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
 # fsync → os.replace.  POSIX rename(2) guarantees readers see either the
 # old valid file or the new valid file, never a torn write.
 
-BUILD_RECORD_SCHEMA_VERSION = 1
+BUILD_RECORD_SCHEMA_VERSION = 2
 BUILD_RECORD_SUFFIX = '.build.json'
+# v1 → v2 (COORD-01): adds output_hashes {filename: sha256_hex}, the
+# per-emitted-binary digest that the coord layer pins into its claim
+# records.  v1 records survive unchanged (no field = empty hash dict);
+# the backfill_output_hashes() helper upgrades them in place when run.
+_BUILD_RECORD_LEGACY_VERSIONS = frozenset({1})
 _BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
 
 # Phase state machine.  Linear progression on the happy path:
@@ -1490,6 +1495,7 @@ def new_build_record(*, package: str,
         'oom_killed':       False,
         'output_count':     0,
         'outputs':          [],
+        'output_hashes':    {},
     }
 
 
@@ -1591,6 +1597,75 @@ def classify_build_record(record: 'Optional[dict]') -> str:
     if _status == 'TUNNELED':
         return 'tunneled'
     return 'fail'
+
+
+def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
+    """Upgrade build.json records to schema v2 by hashing emitted .debs.
+
+    For every <pkg>.build.json under `buildlog_dir`:
+      - if schema_version is already v2 AND every output in `outputs`
+        has a hash in `output_hashes`, skip;
+      - otherwise look up each output by basename under `repo_root`
+        (one os.walk builds the filename→path index), hash via the
+        cached get_sha256 (size+mtime sidecar), populate `output_hashes`,
+        bump `schema_version`, re-sign + atomic-replace.
+
+    Returns {scanned, upgraded, skipped, missing_files}.  Idempotent
+    — a second invocation reports 0 upgraded.
+
+    Failed records (phase=failed) and entries whose `outputs` list is
+    empty get their schema bumped but no hashes (nothing to hash).
+    """
+    _index: 'dict[str, str]' = {}
+    for _root, _dirs, _files in os.walk(repo_root):
+        for _f in _files:
+            if _f.endswith(('.deb', '.udeb')):
+                _index[_f] = os.path.join(_root, _f)
+
+    _stats = {'scanned': 0, 'upgraded': 0, 'skipped': 0, 'missing_files': 0}
+    try:
+        _entries = sorted(os.listdir(buildlog_dir))
+    except OSError:
+        return _stats
+    for _entry in _entries:
+        if not _entry.endswith(BUILD_RECORD_SUFFIX):
+            continue
+        _stats['scanned'] += 1
+        _pkg = _entry[:-len(BUILD_RECORD_SUFFIX)]
+        _rec = read_build_record(buildlog_dir, _pkg)
+        if _rec is None:
+            continue
+        _outputs = _rec.get('outputs') or []
+        _existing = _rec.get('output_hashes') or {}
+        _current_version = _rec.get('schema_version', 1)
+        if (_current_version >= BUILD_RECORD_SCHEMA_VERSION
+                and all(_o in _existing for _o in _outputs)):
+            _stats['skipped'] += 1
+            continue
+        _new_hashes = dict(_existing)
+        _missing = False
+        for _o in _outputs:
+            if _o in _new_hashes:
+                continue
+            _path = _index.get(_o)
+            if _path is None:
+                _missing = True
+                continue
+            _h = get_sha256(_path)
+            if _h:
+                _new_hashes[_o] = _h
+            else:
+                _missing = True
+        if _missing:
+            _stats['missing_files'] += 1
+        _rec['output_hashes'] = _new_hashes
+        _rec['schema_version'] = BUILD_RECORD_SCHEMA_VERSION
+        try:
+            write_build_record(buildlog_dir, _rec)
+            _stats['upgraded'] += 1
+        except OSError as _e:
+            logger.warning(f"backfill_output_hashes {_pkg}: write failed: {_e}")
+    return _stats
 
 
 def _query_snapshot_latest(api_url: str, archive_keys: 'List[str]') -> str:
@@ -2371,6 +2446,18 @@ class BuildConfig:
             # and `repo publish local <path> minimal` as the staged source.
             self.dir_publish = os.path.join(self.working_dir, 'publish')
 
+            # COORD-01: per-builder coordination tree.  Holds Ed25519
+            # claim keypair (identity/), this builder's append-only
+            # claim journal (claims/), and a fetched/ cache of the
+            # remote repo-coord/ tree (P2+).  Sibling of dir_publish;
+            # never served over HTTP (unlike dir_repo).  Derived path —
+            # no [Directories] entry — so existing deployments don't
+            # need a config-file edit before coord features land.
+            self.dir_coord = os.path.join(self.working_dir, 'coord')
+            self.dir_coord_identity = os.path.join(self.dir_coord, 'identity')
+            self.dir_coord_claims = os.path.join(self.dir_coord, 'claims')
+            self.dir_coord_fetched = os.path.join(self.dir_coord, 'fetched')
+
             # Athena-owned Debian source packages discovered + built
             # from local trees under <dir_fork_source>/<pkg>/ instead
             # of via `apt-get source <pkg>`.  Walked at cache-build
@@ -2463,6 +2550,17 @@ class BuildConfig:
 
             pathlib.Path(self.dir_image).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_publish).mkdir(parents=True, exist_ok=True)
+            # COORD-01: create coord/ + substructure.  identity/ is
+            # mode 0700 so the private claim key isn't world-readable
+            # (mirrors dir_gnupg's 0700 discipline).
+            pathlib.Path(self.dir_coord).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_coord_identity).mkdir(
+                parents=True, mode=0o700, exist_ok=True)
+            os.chmod(self.dir_coord_identity, 0o700)
+            pathlib.Path(self.dir_coord_claims).mkdir(
+                parents=True, exist_ok=True)
+            pathlib.Path(self.dir_coord_fetched).mkdir(
+                parents=True, exist_ok=True)
             pathlib.Path(self.dir_buildroot).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot_installer).mkdir(parents=True, exist_ok=True)
@@ -2482,6 +2580,8 @@ class BuildConfig:
                 self.dir_fork, self.dir_fork_source, self.dir_fork_source_repo,
                 self.dir_image, self.dir_publish, self.dir_buildroot, self.dir_chroot,
                 self.dir_chroot_installer, self.dir_gnupg,
+                self.dir_coord, self.dir_coord_identity,
+                self.dir_coord_claims, self.dir_coord_fetched,
             ):
                 if not os.access(_dir, os.W_OK):
                     raise PermissionError(f'Build directory is not writable: {_dir}')
