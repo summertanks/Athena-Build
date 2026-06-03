@@ -4447,7 +4447,7 @@ class BuildSession:
         return self._group_help('coord sync', _table, mode)
 
     def cmd_coord_sync_pull(self, *args):
-        """coord sync pull <remote-spec> — fetch + verify.
+        """coord sync pull <remote-spec> [--ssh-key path] — fetch + verify.
 
         Steps:
           1. rsync <remote-spec>/  →  coord/fetched/
@@ -4458,9 +4458,18 @@ class BuildSession:
         """
         if not args:
             console.print(
-                "Usage: coord sync pull <remote-spec>", tui.COLOR_ERROR)
+                "Usage: coord sync pull <remote-spec> [--ssh-key path]",
+                tui.COLOR_ERROR)
             return False
         _remote = args[0]
+        _ssh_key = None
+        _i = 1
+        while _i < len(args):
+            if args[_i] == '--ssh-key' and _i + 1 < len(args):
+                _ssh_key = args[_i + 1]
+                _i += 2
+            else:
+                _i += 1
         import coord.transport as _transport
         import coord.head as _head
         import coord.identity as _id
@@ -4470,7 +4479,7 @@ class BuildSession:
         _local = self.config.dir_coord_fetched
         console.print(f"coord sync pull: rsync {_remote}/ → {_local}/")
         _ok, _detail = _transport.pull_remote_coord(
-            local_dest=_local, remote_spec=_remote)
+            local_dest=_local, remote_spec=_remote, ssh_key=_ssh_key)
         if not _ok:
             console.print(
                 f"coord sync pull: rsync failed: {_detail}", tui.COLOR_ERROR)
@@ -4605,6 +4614,17 @@ class BuildSession:
                 f"coord publish local: created={_created} skipped={_skipped}",
                 tui.COLOR_HIGHLIGHT if _skipped == 0 else tui.COLOR_WARNING)
             return _skipped == 0
+        if mode == 'bootstrap':
+            _created, _skipped = _publish.bootstrap_claims_from_pool(
+                builder_id=_bid, config=self.config,
+                private_key_path=_priv, public_key_path=_pub,
+                snapshot_pin=_snapshot,
+                get_sha256=utils.get_sha256,
+            )
+            console.print(
+                f"coord publish bootstrap: created={_created} skipped={_skipped}",
+                tui.COLOR_HIGHLIGHT if _created > 0 else tui.COLOR_WARNING)
+            return True
         if mode == 'remote':
             if len(args) < 2:
                 console.print(
@@ -4638,6 +4658,7 @@ class BuildSession:
             return _ok
         _table = {
             'local':                 'sign pending claims into local jsonl',
+            'bootstrap':             'one-shot: claim every .deb in repo/ (recovery for legacy corpus)',
             'remote <spec> <IR>':    'full transaction (flock + sync + push)',
         }
         return self._group_help('coord publish', _table, mode)
@@ -7555,6 +7576,149 @@ class BuildSession:
                     self._print_wrapped_names(
                         f"  {_state} ({len(_names)})", _names,
                     )
+
+        # Next-run rebuild queue (matches `source build all`).  The static
+        # classifier above (needs_build / stale_pass) misses the UPD-01
+        # bump-target predicate that fires for NMU-suffixed sources whose
+        # current-generation +asg<R>u<N> file isn't yet on disk; those
+        # rebuild even though check_build returns True for the pristine.
+        # We compute the same workload _do_update_build does so the count
+        # reported here matches what `source build all` actually runs.
+        if self.container is not None:
+            self._print_next_run_build_queue(
+                _srcs, _rebuild_candidates, _verbose)
+
+        # Obsolete patch detection.  patch/source/<pkg>/<ver>/ holds version-
+        # pinned patches; when the cached source version moves past <ver>
+        # (and no <new_ver>/ dir exists), the patches are NEVER applied —
+        # silently — and the operator's intent is lost.  Surface so they
+        # can move/refresh the patches before the next build.
+        self._print_obsolete_patch_warning(_srcs)
+
+    def _print_next_run_build_queue(
+        self, _srcs: dict, _rebuild_candidates: 'list[str]', _verbose: bool,
+    ) -> None:
+        """Compute the rebuild list the next `source build all` will run
+        and print it.  Mirrors `_do_update_build`'s decision logic so the
+        count here matches the actual build."""
+        console.print("")
+        console.print("Next-run build (`source build all`):")
+        if not self._update_build_pending():
+            console.print(
+                "  Mode: NORMAL (no snapshot delta pending)",
+                tui.COLOR_INFO)
+            console.print(
+                f"  {len(_rebuild_candidates):5d}  total to (re)build "
+                f"(matches `Rebuild queue by subset` above)")
+            return
+        _published = self._snapshot_published()
+        _current = self._snapshot_current()
+        console.print(
+            f"  Mode: UPDATE — published {_published} → current {_current}",
+            tui.COLOR_INFO)
+        _workload, _err = self._workload_since_snapshot(_published)
+        if _err:
+            console.print(
+                f"  WARN: cannot compute snapshot delta — {_err}",
+                tui.COLOR_WARNING)
+            return
+        _ledger = repo_audit.published_ledger(self.config)
+        try:
+            _release = int(
+                str(self.config.build_version).strip('"').strip("'"))
+        except (TypeError, ValueError):
+            _release = None
+        _wset = set(_workload or [])
+        _delta_to_build: 'list[str]' = []
+        _bump_targets: 'list[str]' = []
+        for _n in _workload or []:
+            _s = _srcs.get(_n)
+            if _s is None:
+                _delta_to_build.append(_n)
+                continue
+            _is_bump = (
+                _release is not None
+                and self._needs_bump_build(
+                    _n, _s, _ledger, _release))
+            if _is_bump:
+                _bump_targets.append(_n)
+                _delta_to_build.append(_n)
+                continue
+            _expected = self._predicted_files_for_source(_n)
+            assert self.container is not None
+            if not self.container.check_build(_s, _expected):
+                _delta_to_build.append(_n)
+        _extras = sorted([
+            _n for _n, _s in _srcs.items()
+            if _n not in _wset
+            and self._source_state(_n, _s) in ('needs_build', 'stale_pass')
+        ])
+        _all_next = sorted(set(_delta_to_build) | set(_extras))
+        console.print(f"  {len(_all_next):5d}  total to (re)build")
+        if _bump_targets:
+            console.print(
+                f"  {len(_bump_targets):5d}  bump-target "
+                "(UPD-01 +asg<R>u<N> stamp pending for current generation)")
+        _delta_non_bump = sorted(set(_delta_to_build) - set(_bump_targets))
+        if _delta_non_bump:
+            console.print(
+                f"  {len(_delta_non_bump):5d}  delta-rebuild "
+                "(in workload, binaries invalid/missing)")
+        if _extras:
+            console.print(
+                f"  {len(_extras):5d}  extra (needs_build/stale_pass, not in workload)")
+        if _verbose and _all_next:
+            self._print_wrapped_names("  pkgs", _all_next)
+
+    def _print_obsolete_patch_warning(self, _srcs: dict) -> None:
+        """Scan patch/source/<pkg>/ for version subdirs whose <ver> is
+        OLDER than the source's current cache version.  Patches in such
+        dirs are silently NOT applied (the build-time discovery in
+        _refresh_patches keys on version_no_epoch(current_src.version),
+        so the entire old dir is invisible).  WARN so the operator can
+        move/refresh them before they ship an unpatched build.
+        """
+        _obsolete: 'list[tuple[str, list[str], str]]' = []
+        for _n, _src in sorted(_srcs.items()):
+            _current_ver = utils.version_no_epoch(str(_src.version))
+            _pkg_dir = os.path.join(self.config.dir_patch_source, _n)
+            try:
+                _subdirs = [
+                    _d for _d in os.listdir(_pkg_dir)
+                    if os.path.isdir(os.path.join(_pkg_dir, _d))]
+            except OSError:
+                continue
+            _stale = []
+            for _ver in _subdirs:
+                if _ver == _current_ver:
+                    continue
+                try:
+                    _patches = [
+                        _p for _p in os.listdir(
+                            os.path.join(_pkg_dir, _ver))
+                        if _p.endswith('.patch')]
+                except OSError:
+                    continue
+                if not _patches:
+                    continue
+                # Only WARN when current is strictly newer (patches are
+                # for a past version).  Future-version dirs (rare) get
+                # surfaced as INFO in _verbose only — they're not stale.
+                if apt_pkg.version_compare(_current_ver, _ver) > 0:
+                    _stale.append(_ver)
+            if _stale:
+                _obsolete.append((_n, sorted(_stale), _current_ver))
+        if not _obsolete:
+            return
+        console.print("")
+        console.print(
+            f"WARN: obsolete patches ({len(_obsolete)} pkg(s) — source "
+            "advanced past the patch dir; patches silently NOT applied):",
+            tui.COLOR_WARNING)
+        for _n, _stale, _cur in _obsolete:
+            console.print(
+                f"  {_n}: {', '.join(_stale)}  (current: {_cur})",
+                tui.COLOR_WARNING)
 
     @staticmethod
     def _print_wrapped_names(label: str, names: 'list[str]',
