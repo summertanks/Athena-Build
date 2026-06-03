@@ -35,7 +35,13 @@ from typing import Any, Dict, Optional
 # unknown future keys (preserve in dict; ignore semantics they don't
 # know).  Removing a key is a v2.
 CLAIM_RECORD_SCHEMA_VERSION = 1
-COORD_HEAD_SCHEMA_VERSION = 1
+COORD_HEAD_SCHEMA_VERSION = 2
+# v1 → v2 (MIRROR-01 Phase 2): adds `neighbours: list[str]` — the
+# federation membership list (every mirror's coord-head carries the
+# canonical URL set, signed by tier-1 GPG).  v1 readers tolerate a
+# missing field as an empty list; the federation-gate at publish time
+# treats empty-from-v1 as "no peers known" and uses the local config
+# as the source of truth on first contact.
 SNAPSHOT_STATE_SCHEMA_VERSION = 1
 
 # Lifecycle states a claim can be in.  `pending` is the post-rsync,
@@ -208,10 +214,11 @@ def new_coord_head(
     snapshot: dict,
     last_seqs: 'Dict[str, int]',
     head_time: str,
+    neighbours: 'Optional[list]' = None,
     revoked_builders: 'Optional[Dict[str, str]]' = None,
 ) -> dict:
     """The signed canonical state snapshot.  GPG-clearsigned by the
-    tier-1 (InRelease) signing key, stored at repo-coord/coord-head.asc.
+    tier-1 (InRelease) signing key, stored at <mirror-root>/coord-head.json.
 
     - inrelease_sha256: sha256 of the dists/<suite>/InRelease this head
       pins.  Builders refuse a coord-head whose InRelease sha doesn't
@@ -221,6 +228,12 @@ def new_coord_head(
       detected by reading a max(seq) lower than this.
     - head_time: ISO8601 UTC.  Compared against InRelease `Date:` —
       a head older than InRelease is refused.
+    - neighbours: MIRROR-01 Phase 2.  Canonical federation membership
+      list — every mirror's coord-head carries the same URL set,
+      signed by tier-1 GPG.  Publish gates on local-config-vs-head
+      diff (`check_federation_consistency`); split-brain federations
+      are detected by pair-wise inequality in `mirror audit` (Phase 4).
+      Stored sorted + lower-cased for stable comparison.
     - revoked_builders: optional {builder_id: revoked_at_iso} for
       tier-2 key revocation propagation.
     """
@@ -230,7 +243,29 @@ def new_coord_head(
         'snapshot':         snapshot,
         'last_seqs':        dict(last_seqs),
         'head_time':        head_time,
+        'neighbours':       canonicalize_neighbours(neighbours or []),
     }
     if revoked_builders:
         _head['revoked_builders'] = dict(revoked_builders)
     return _head
+
+
+def canonicalize_neighbours(urls: 'list') -> 'list':
+    """Normalise a neighbours list to its canonical comparable form:
+    lower-cased, trailing-slash-stripped, sorted, deduped.
+
+    The federation gate compares head.neighbours against local-config
+    mirror URLs after both go through this normaliser, so trivial
+    differences (case, sort order, trailing slash) don't cause false
+    BLOCK signals."""
+    _out: 'list[str]' = []
+    _seen: 'set[str]' = set()
+    for _u in urls:
+        if not isinstance(_u, str):
+            continue
+        _norm = _u.strip().rstrip('/').lower()
+        if not _norm or _norm in _seen:
+            continue
+        _seen.add(_norm)
+        _out.append(_norm)
+    return sorted(_out)

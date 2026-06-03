@@ -4191,12 +4191,17 @@ class BuildSession:
             return self.cmd_mirror_summary(*args)
         if action == 'status':
             return self.cmd_mirror_status(*args)
+        if action == 'reconcile-neighbours':
+            return self.cmd_mirror_reconcile_neighbours(*args)
         _table = {
-            'add <name> <url>':  'register a mirror; seeds base+current',
-            'remove <name|url>': 'unregister a mirror',
-            'list':              'one-line-per-mirror inventory',
-            'summary [<name>]':  'full per-mirror state',
-            'status [<name>]':   'on-disk health overview (Phase 1 shape)',
+            'add <name> <url>':            'register a mirror; seeds base+current',
+            'remove <name|url>':           'unregister a mirror',
+            'list':                        'one-line-per-mirror inventory',
+            'summary [<name>]':            'full per-mirror state',
+            'status [<name>]':             'on-disk health overview (Phase 1)',
+            'reconcile-neighbours [<n>]':  'fan-out: align every peer\'s '
+                                           'coord-head.neighbours with local '
+                                           'config; re-sign + push (Phase 2)',
         }
         return self._group_help('mirror', _table, action)
 
@@ -4303,6 +4308,42 @@ class BuildSession:
             else:
                 console.print("  neighbours_known: (none — Phase 3 populates on publish)")
         return True
+
+    def cmd_mirror_reconcile_neighbours(self, *args):
+        """mirror reconcile-neighbours [<name>] — re-propagate the canonical
+        federation membership to every peer (or just <name>).
+
+        Pulls each peer's coord-head, compares its `neighbours` field to the
+        local config's mirror URL set, and re-signs + pushes back if they
+        differ.  Per-peer flock; tier-1 GPG signing happens locally (key
+        never leaves the host).  Fail-loud on any unreachable peer.
+
+        Typical operator triggers:
+          - just after `mirror add <name> <url>` (the new peer's neighbours
+            need to include every existing peer; existing peers need to
+            include the newcomer)
+          - just after `mirror remove <url>` (every remaining peer needs
+            their neighbours updated to drop the removed URL)
+          - federation-gate WARN/CRITICAL surfaced by `mirror audit`
+        """
+        import mirror as _mirror
+        import signing as _signing
+        _target = args[0] if args else None
+        _ok, _summary, _results = _mirror.reconcile_neighbours(
+            self.config,
+            signing_homedir=_signing.signing_home(self.config),
+            target_name=_target,
+        )
+        console.print(
+            f"mirror reconcile-neighbours: {_summary}",
+            tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+        for _r in _results:
+            _color = (tui.COLOR_NORMAL if _r['ok'] and not _r['changed']
+                      else tui.COLOR_HIGHLIGHT if _r['ok']
+                      else tui.COLOR_ERROR)
+            console.print(
+                f"  {_r['name']:<24s}  {_r['detail']}", _color)
+        return _ok
 
     def cmd_mirror_status(self, *args):
         """On-disk health overview.  Phase 1 surfaces what state is durable;
@@ -9741,7 +9782,7 @@ def main(banner: str) -> None:
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
     tui.register_command('coord',     session.cmd_coord,     'Coord:      coord <init|builders|audit|status>')
-    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <add|remove|list|summary|status>')
+    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <add|remove|list|summary|status|reconcile-neighbours>')
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
