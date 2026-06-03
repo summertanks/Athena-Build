@@ -311,6 +311,7 @@ def remote_publish(
     inrelease_local_path: str,
     read_build_record: Callable,
     get_sha256: Callable,
+    local_mirror_urls: 'Optional[list]' = None,
     ssh_host: 'Optional[str]' = None,
     flock_path: str = '/var/lock/repo-coord.lock',
     flock_timeout: int = 60,
@@ -323,6 +324,14 @@ def remote_publish(
     that's published at the remote — typically rsync'd in the same
     operator step as `repo publish ssh`.  Used to compute the
     sha256 that the new coord-head pins.
+
+    `local_mirror_urls` (MIRROR-01 Phase 3): the canonical federation
+    URL set the local builder has configured.  When `None`, federation
+    gate is BYPASSED (legacy path).  When provided:
+      - if remote already has a coord-head → compare neighbours; BLOCK on diff
+      - if remote has no coord-head (first publish) → BOOTSTRAP:
+        upload our pubkey to <root>/keyring/builders/<id>.pub and
+        initialise the new coord-head with neighbours = local_mirror_urls
 
     `ssh_host` is the host portion of the remote spec; defaulted from
     `remote_coord_spec` if not given (parses the `user@host:/path`
@@ -368,6 +377,41 @@ def remote_publish(
         _revoked = (_head_dict or {}).get('revoked_builders') or {}
         _by_builder = _store.read_all_claims(
             os.path.join(_fetched, 'claims'), _keyring, _revoked)
+
+        # Step 3b — MIRROR-01 Phase 3: federation gate.
+        # If remote head exists, its neighbours must match local config's
+        # mirror URL set.  Diff → BLOCK, surface findings, release flock.
+        _is_bootstrap = (_head_dict is None)
+        if local_mirror_urls is not None and not _is_bootstrap:
+            _fed_findings = _reconcile.check_federation_consistency(
+                local_mirror_urls, _head_dict)
+            _fed_crit = [
+                _f for _f in _fed_findings if _f.severity == 'CRITICAL']
+            if _fed_crit:
+                _msgs = '; '.join(_f.message for _f in _fed_crit)
+                return False, (
+                    f"federation gate BLOCK: {_msgs}.  Run "
+                    "`mirror reconcile-neighbours` to align peers, "
+                    "then retry publish.")
+
+        # Step 3c — MIRROR-01 Phase 3: first-publish bootstrap.
+        # When the remote has no coord-head yet (a freshly-prepared mirror
+        # endpoint), upload our builder pubkey to <root>/keyring/builders/
+        # so subsequent verify steps on this and every other peer can
+        # validate our claims.  Subsequent steps then write the new
+        # coord-head with neighbours = local_mirror_urls.
+        if _is_bootstrap and local_mirror_urls is not None:
+            _remote_pub = (
+                remote_coord_spec.rstrip('/')
+                + f'/keyring/builders/{builder_id}.pub')
+            _ok_pub, _detail_pub = _transport.push_jsonl(
+                local_path=public_key_path,
+                remote_spec=_remote_pub,
+                ssh_key=ssh_key,
+            )
+            if not _ok_pub:
+                return False, (
+                    f"first-publish: pubkey upload failed: {_detail_pub}")
 
         # Step 4 — hash conflict detection
         _conf = _reconcile.detect_hash_conflicts(_by_builder)
@@ -458,16 +502,22 @@ def remote_publish(
             published=str(_state.get('published') or snapshot_pin),
             external=bool(_state.get('external', True)),
         )
-        # MIRROR-01 Phase 2: preserve neighbours from the fetched head.
-        # Publish itself never adds or removes peers — that's a separate
+        # MIRROR-01 Phase 2/3: neighbours sourcing.
+        #   - bootstrap (first publish, no prior head) → from local config
+        #   - subsequent publishes → preserve from the fetched head
+        # Publish itself never adds or removes peers in steady state;
         # `mirror add` / `mirror remove` / `mirror reconcile-neighbours`
-        # operator action.  Pre-publish federation gate runs in Phase 3.
+        # is the operator-driven membership-change path.
+        if _is_bootstrap and local_mirror_urls is not None:
+            _neighbours = local_mirror_urls
+        else:
+            _neighbours = (_head_dict or {}).get('neighbours') or []
         _new_head = _schema.new_coord_head(
             inrelease_sha256=_ir_sha,
             snapshot=_ss,
             last_seqs=_last_seqs,
             head_time=_utc_now(),
-            neighbours=(_head_dict or {}).get('neighbours') or [],
+            neighbours=_neighbours,
             revoked_builders=(_head_dict or {}).get('revoked_builders'),
         )
         _ok = _head.write_coord_head(

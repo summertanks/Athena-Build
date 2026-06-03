@@ -3452,8 +3452,19 @@ class BuildSession:
             console.print(f"    remote-only:   {_pv}")
 
     def cmd_repo_publish(self, *args):
-        """UPD-02 + COMP-02: publish the repo, then rebuild the index at the
-        destination.
+        """DEPRECATED (MIRROR-01 Phase 3): `repo publish` is the legacy
+        single-target publish.  It still ships the .deb pool + reindexes
+        + signs InRelease, but the SIDECAR layer (signed claim records +
+        coord-head with federation neighbours) is owned by `mirror publish`
+        now.  Operator workflow on a freshly-restructured tree:
+
+          1. `mirror add <name> <url>` — register your target as a mirror
+          2. `repo publish ssh full` — still ships .debs + reindex + InRelease
+          3. `mirror publish <name>` — signs + pushes the sidecar layer
+
+        Phase 5 will fold step 2 into `mirror publish`, removing this
+        command entirely.  For now both steps run; `repo publish` prints
+        this notice and proceeds.
 
         Usage:
           repo publish ssh [full|minimal]              (default scope: full)
@@ -3485,6 +3496,25 @@ class BuildSession:
         locally into the signed manifest (the +asg bump authority), no
         transport.  Both `ssh` and `local` transports respect this gate.
         """
+        # MIRROR-01 Phase 3 deprecation notice.  Print every time so the
+        # operator is reminded to follow up with `mirror publish`; the
+        # legacy .deb-pool + reindex flow still runs below.
+        import mirror as _mirror_mod
+        _configured = _mirror_mod.list_mirrors(self.config)
+        if _configured:
+            console.print(
+                "repo publish: DEPRECATED — sidecar layer is owned by "
+                "`mirror publish` now.  After this command lands the .deb "
+                "pool + InRelease, run `mirror publish` to sign + push the "
+                "claims + coord-head.  Phase 5 will fold both into one "
+                "command.", tui.COLOR_WARNING)
+        else:
+            console.print(
+                "repo publish: DEPRECATED.  Migrate by running `mirror add "
+                "<name> <url>` for your publish target, then this command "
+                "for the .deb pool + InRelease, and finally "
+                "`mirror publish <name>` for the sidecar layer.",
+                tui.COLOR_WARNING)
         _kind = args[0] if len(args) > 0 else ''
         if _kind == 'local':
             _local_path = args[1] if len(args) > 1 else ''
@@ -4193,6 +4223,10 @@ class BuildSession:
             return self.cmd_mirror_status(*args)
         if action == 'reconcile-neighbours':
             return self.cmd_mirror_reconcile_neighbours(*args)
+        if action == 'publish':
+            return self.cmd_mirror_publish(*args)
+        if action == 'pull':
+            return self.cmd_mirror_pull(*args)
         _table = {
             'add <name> <url>':            'register a mirror; seeds base+current',
             'remove <name|url>':           'unregister a mirror',
@@ -4202,6 +4236,12 @@ class BuildSession:
             'reconcile-neighbours [<n>]':  'fan-out: align every peer\'s '
                                            'coord-head.neighbours with local '
                                            'config; re-sign + push (Phase 2)',
+            'publish [<name>]':            'sign + push claims + re-sign '
+                                           'coord-head (federation-gated; '
+                                           'first-publish bootstrap)',
+            'pull [<name>]':               'fetch + verify peer sidecar, then '
+                                           'download claim .debs missing locally '
+                                           '(skip-own; SHA-256 verified)',
         }
         return self._group_help('mirror', _table, action)
 
@@ -4308,6 +4348,252 @@ class BuildSession:
             else:
                 console.print("  neighbours_known: (none — Phase 3 populates on publish)")
         return True
+
+    def cmd_mirror_publish(self, *args):
+        """mirror publish [<name>] — publish to one mirror, or all when no name.
+
+        Per mirror:
+          1. Pull peer's coord-head, keyring, claims (under remote flock)
+          2. Federation gate: peer's coord-head.neighbours must match local
+             config (or peer has no head yet → first-publish bootstrap)
+          3. Hash-conflict scan (CRITICAL → PUBLISH_HALT)
+          4. Sign + append claims for every new build.json output_hashes
+          5. Push jsonl + re-sign coord-head pinning current InRelease sha
+          6. Update local config/mirror.<name>.state (current,
+             last_publish_at, neighbours_known)
+
+        Publish-time .deb pool sync: NOT yet integrated (Phase 3 ships the
+        sidecar layer end-to-end; per-file .deb push with progress lands
+        in Phase 3b).  For now run `repo publish ssh full` first to land
+        the .debs, then `mirror publish` for the sidecar.
+
+        First-publish bootstrap: on a fresh empty mirror endpoint, this
+        command uploads our pubkey to keyring/builders/ AND initialises
+        the coord-head with neighbours = local config's mirror URL set.
+        """
+        import mirror as _mirror
+        import signing
+        import coord.publish as _publish
+        # Resolve identity
+        _keys = self._coord_self_keys()
+        if _keys is None:
+            return False
+        _bid, _priv, _pub = _keys
+        # Resolve InRelease (local copy is the one we just signed)
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _inrelease = os.path.join(
+            self.config.dir_repo, 'dists', _codename, 'InRelease')
+        if not os.path.isfile(_inrelease):
+            console.print(
+                f"mirror publish: local InRelease missing at {_inrelease} — "
+                "run `repo index full` (or `repo publish ssh full`) first to "
+                "produce a signed InRelease.", tui.COLOR_ERROR)
+            return False
+        # Resolve snapshot pin
+        _snapshot_pin = self._snapshot_current() or ''
+        # Resolve federation membership
+        _local_urls = _mirror.all_mirror_urls(self.config)
+        # Target selection
+        _target = args[0] if args else None
+        if _target is not None:
+            if _mirror.read_mirror_state(self.config, _target) is None:
+                console.print(
+                    f"mirror publish: unknown mirror {_target!r}",
+                    tui.COLOR_ERROR)
+                return False
+            _names = [_target]
+        else:
+            _names = _mirror.list_mirrors(self.config)
+        if not _names:
+            console.print(
+                "mirror publish: no mirrors configured (use `mirror add`)",
+                tui.COLOR_WARNING)
+            return False
+        # Sequential per-mirror publish.  Per-mirror flock isolates
+        # concurrent peers from each other (multiple parallel publishes
+        # to different mirrors would conflict locally on the staging
+        # dir; serial keeps the semantics simple in this phase).
+        _all_ok = True
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            assert _st is not None  # checked above / by list_mirrors
+            _url = _st.get('url', '')
+            _ssh_key = _st.get('ssh_key') or None
+            _spec, _ssh_host = _mirror.rsync_spec_for_url(_url)
+            console.print(
+                f"mirror publish {_n}: → {_url}", tui.COLOR_HIGHLIGHT)
+            _ok, _detail = _publish.remote_publish(
+                builder_id=_bid, config=self.config,
+                private_key_path=_priv, public_key_path=_pub,
+                snapshot_pin=_snapshot_pin,
+                remote_coord_spec=_spec,
+                inrelease_local_path=_inrelease,
+                read_build_record=utils.read_build_record,
+                get_sha256=utils.get_sha256,
+                local_mirror_urls=_local_urls,
+                ssh_host=_ssh_host,
+                ssh_key=_ssh_key,
+            )
+            console.print(
+                f"  {_detail}",
+                tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+            if not _ok:
+                _all_ok = False
+                continue
+            # Success → bump mirror state
+            import coord.schema as _schema
+            _mirror.update_mirror_state(
+                self.config, _n,
+                current=_snapshot_pin,
+                last_publish_at=_publish._utc_now(),
+                neighbours_known=_schema.canonicalize_neighbours(_local_urls),
+            )
+        return _all_ok
+
+    def cmd_mirror_pull(self, *args):
+        """mirror pull [<name>] — fetch from one mirror, or all when no name.
+
+        Per mirror:
+          1. Fetch coord-head + keyring + claims to cache/mirror/<n>/fetched
+          2. tier-1 verify coord-head; Ed25519-verify every claim sig
+          3. Walk verified claims of OUR current snapshot pin:
+               - skip if claim.builder == our builder-id (skip-own security
+                 rule — we can't legitimately accept a peer's claim that
+                 it's the file we built)
+               - skip if local repo already has the file
+               - else download .deb to its predicted local path; verify
+                 SHA-256 against the claim; abort that file on mismatch
+          4. Report counts (downloaded, skipped-own, skipped-present,
+             verify-mismatch).
+
+        This is the read-only / forward-only side of the federation: we
+        pull-back what peers have published.  It does NOT touch the
+        remote (no flock, no push).
+        """
+        import mirror as _mirror
+        import signing
+        import coord.head as _head_mod
+        import coord.identity as _id
+        import coord.store as _store
+        import coord.transport as _transport
+        _keys = self._coord_self_keys()
+        if _keys is None:
+            return False
+        _bid, _, _pub = _keys
+        _target = args[0] if args else None
+        if _target is not None:
+            if _mirror.read_mirror_state(self.config, _target) is None:
+                console.print(
+                    f"mirror pull: unknown mirror {_target!r}",
+                    tui.COLOR_ERROR)
+                return False
+            _names = [_target]
+        else:
+            _names = _mirror.list_mirrors(self.config)
+        if not _names:
+            console.print(
+                "mirror pull: no mirrors configured (use `mirror add`)",
+                tui.COLOR_WARNING)
+            return False
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _signing_home = signing.signing_home(self.config)
+        _snap = self._snapshot_current() or ''
+        _all_ok = True
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            assert _st is not None
+            _url = _st.get('url', '')
+            _ssh_key = _st.get('ssh_key') or None
+            _spec, _ssh_host = _mirror.rsync_spec_for_url(_url)
+            console.print(
+                f"mirror pull {_n}: ← {_url}", tui.COLOR_HIGHLIGHT)
+            _fetched = os.path.join(
+                self.config.dir_cache, 'mirror', _n, 'fetched')
+            os.makedirs(_fetched, exist_ok=True)
+            # 1. Fetch coord tree
+            _ok, _detail = _transport.pull_remote_coord(
+                local_dest=_fetched, remote_spec=_spec, ssh_key=_ssh_key,
+            )
+            if not _ok:
+                console.print(
+                    f"  pull coord tree failed: {_detail}", tui.COLOR_ERROR)
+                _all_ok = False
+                continue
+            # 2. Verify head + claims
+            _head = _head_mod.read_coord_head(_fetched, _signing_home)
+            if _head is None:
+                console.print(
+                    "  coord-head verify failed or absent — refusing to "
+                    "trust the fetched tree.", tui.COLOR_ERROR)
+                _all_ok = False
+                continue
+            _keyring = _id.load_keyring(
+                os.path.join(_fetched, 'keyring', 'builders'))
+            _revoked = _head.get('revoked_builders') or {}
+            _by_builder = _store.read_all_claims(
+                os.path.join(_fetched, 'claims'), _keyring, _revoked)
+            _total = sum(len(_v) for _v in _by_builder.values())
+            console.print(
+                f"  verified: {_total} claim(s) across "
+                f"{len(_by_builder)} builder(s)")
+            # 3. Walk claims; download per-file for our current snapshot
+            _dl = _skip_own = _skip_present = _mismatch = _failed = 0
+            for _builder, _claims in _by_builder.items():
+                for _c in _claims:
+                    if _c.get('claim_state') == 'retracted':
+                        continue
+                    if _c.get('builder') == _bid:
+                        _skip_own += 1
+                        continue
+                    # Filter to current snapshot only (our build pin)
+                    if _snap and _c.get('snapshot') and _c['snapshot'] != _snap:
+                        continue
+                    _fn = _c.get('filename')
+                    if not isinstance(_fn, str) or not _fn:
+                        continue
+                    # Predict local target path via the existing helper
+                    _comp = 'main'  # default; non-main mirrored by directory layout below
+                    _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
+                    _local_path = os.path.join(_dst_dir, _fn)
+                    if os.path.isfile(_local_path):
+                        _skip_present += 1
+                        continue
+                    # Source path on the mirror = same relative layout
+                    # under <mirror_root>/dists/<codename>/<comp>/...
+                    _rel = os.path.relpath(_local_path, self.config.dir_repo)
+                    _remote_file = _spec.rstrip('/') + '/' + _rel
+                    _ok, _detail = _transport.pull_single_file(
+                        remote_spec=_remote_file, local_path=_local_path,
+                        ssh_key=_ssh_key,
+                    )
+                    if not _ok:
+                        console.print(
+                            f"  {_fn}: download failed — {_detail}",
+                            tui.COLOR_ERROR)
+                        _failed += 1
+                        continue
+                    _h = utils.get_sha256(_local_path, use_cache=False)
+                    if _h != _c.get('sha256'):
+                        console.print(
+                            f"  {_fn}: SHA-256 mismatch (claim "
+                            f"{(_c.get('sha256') or '')[:12]} vs disk "
+                            f"{_h[:12]}) — removing.", tui.COLOR_ERROR)
+                        try:
+                            os.unlink(_local_path)
+                        except OSError:
+                            pass
+                        _mismatch += 1
+                        continue
+                    _dl += 1
+            console.print(
+                f"  downloaded={_dl} skipped_own={_skip_own} "
+                f"skipped_present={_skip_present} "
+                f"verify_mismatch={_mismatch} failed={_failed}",
+                tui.COLOR_HIGHLIGHT if (_mismatch + _failed) == 0
+                else tui.COLOR_ERROR)
+            if _mismatch or _failed:
+                _all_ok = False
+        return _all_ok
 
     def cmd_mirror_reconcile_neighbours(self, *args):
         """mirror reconcile-neighbours [<name>] — re-propagate the canonical
@@ -9782,7 +10068,7 @@ def main(banner: str) -> None:
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
     tui.register_command('coord',     session.cmd_coord,     'Coord:      coord <init|builders|audit|status>')
-    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <add|remove|list|summary|status|reconcile-neighbours>')
+    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <add|remove|list|summary|status|publish|pull|reconcile-neighbours>')
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
