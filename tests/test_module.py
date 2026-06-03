@@ -23506,6 +23506,279 @@ def test_transport_pull_single_file_primitive_exists():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MIRROR-01 Phase 3b — per-file .deb push + progress + coord/pool split
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_coord_root_for_appends_suffix_to_last_path_component():
+    """coord_root_for: pool URL → sidecar URL via `-coord` suffix.
+    Strips trailing slash first to avoid `<x>/-coord`."""
+    _m = _mirror_module()
+    _cases = [
+        ('ssh://user@host/srv/asgard',  'ssh://user@host/srv/asgard-coord'),
+        ('file:///srv/asgard',          'file:///srv/asgard-coord'),
+        ('file:///srv/asgard/',         'file:///srv/asgard-coord'),
+        ('user@host:/srv/asgard/',      'user@host:/srv/asgard-coord'),
+        ('/srv/asgard',                 '/srv/asgard-coord'),
+        ('',                            '-coord'),
+    ]
+    for _pool, _want in _cases:
+        _got = _m.coord_root_for(_pool)
+        assert _got == _want, f"{_pool!r}: got {_got!r}, want {_want!r}"
+
+
+def test_transport_push_single_deb_primitive_exists():
+    """coord.transport.push_single_deb is wired (used by remote_publish's
+    per-file push)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _t
+    assert hasattr(_t, 'push_single_deb')
+    # Missing local file fails cleanly without raising.
+    with tempfile.TemporaryDirectory() as _td:
+        _ok, _detail = _t.push_single_deb(
+            local_path=os.path.join(_td, 'nope.deb'),
+            remote_spec=os.path.join(_td, 'dest', 'nope.deb'),
+        )
+        assert not _ok
+        assert 'missing' in _detail
+
+
+def test_transport_push_single_deb_roundtrip_with_local_fs():
+    """push_single_deb to a local-fs destination succeeds; the file lands
+    at the predicted path with matching contents."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _t
+    with tempfile.TemporaryDirectory() as _td:
+        _src = os.path.join(_td, 'source.deb')
+        _dst = os.path.join(_td, 'dest_dir', 'pushed.deb')
+        with open(_src, 'wb') as _fh:
+            _fh.write(b'fake-deb-bytes')
+        os.makedirs(os.path.dirname(_dst), exist_ok=True)
+        _ok, _detail = _t.push_single_deb(
+            local_path=_src, remote_spec=_dst)
+        assert _ok, _detail
+        with open(_dst, 'rb') as _fh:
+            assert _fh.read() == b'fake-deb-bytes'
+
+
+def test_remote_publish_pushes_debs_per_file_and_calls_progress():
+    """When `pool_remote_spec` is given, remote_publish pushes each
+    pending claim's .deb via transport.push_single_deb and invokes
+    on_progress per attempt."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.store as _store
+    import coord.identity as _identity
+    import coord.reconcile as _reconcile
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_coord = _td
+            dir_coord_fetched = os.path.join(_td, 'fetched')
+            dir_coord_claims = os.path.join(_td, 'claims')
+            dir_log = _td
+            dir_repo = os.path.join(_td, 'repo')
+            dir_gnupg = _td
+        for _d in (_Cfg.dir_coord_fetched, _Cfg.dir_coord_claims,
+                   os.path.join(_Cfg.dir_repo, 'dists/thor/main/binary-amd64')):
+            os.makedirs(_d)
+        # Plant 3 fake .debs in the local pool
+        _pool_files = {}
+        for _name in ('foo_1.0_amd64.deb', 'bar_2.0_amd64.deb',
+                      'baz_3.0_amd64.deb'):
+            _path = os.path.join(_Cfg.dir_repo,
+                                 'dists/thor/main/binary-amd64', _name)
+            with open(_path, 'wb') as _fh:
+                _fh.write(_name.encode())
+            _pool_files[_name] = _path
+        # InRelease stub
+        _inrelease = os.path.join(_td, 'InRelease')
+        with open(_inrelease, 'wb') as _fh:
+            _fh.write(b'Date: 2026-06-01\nFake: contents\n')
+
+        _existing_head = {
+            'v': 2,
+            'inrelease_sha256': 'a' * 64,
+            'snapshot': {}, 'last_seqs': {}, 'head_time': 'T',
+            'neighbours': ['file:///srv/m1'],
+        }
+        # Pending claims for all three files
+        _pending = [
+            {'builder': 'alice', 'package': _n.split('_')[0],
+             'intended_version': '1', 'built_version': '1',
+             'filename': _n, 'sha256': 'x' * 64, 'size': 0,
+             'snapshot': 'S', 'built_at': 'T',
+             'claim_state': 'pending', 'seq': 0, 'v': 1}
+            for _n in _pool_files.keys()
+        ]
+        # Track push calls + progress callback observations
+        _pushed: 'list[str]' = []
+        _progress_events: 'list[tuple]' = []
+        def _fake_push(*, local_path, remote_spec, ssh_key=None):
+            _pushed.append(remote_spec)
+            return True, ''
+        def _fake_write_head(coord_dir, head, signing_home):
+            return True
+        def _capture_progress(current, total, fn, ok):
+            _progress_events.append((current, total, fn, ok))
+        _lock = object()
+        with patch.object(_transport, 'remote_flock_acquire',
+                          return_value=_lock), \
+             patch.object(_transport, 'remote_flock_release'), \
+             patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=_existing_head), \
+             patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims', return_value={}), \
+             patch.object(_store, 'max_seq', return_value=0), \
+             patch.object(_store, 'append_claim'), \
+             patch.object(_reconcile, 'publish_halt_reason',
+                          return_value=None), \
+             patch.object(_transport, 'push_single_deb',
+                          side_effect=_fake_push), \
+             patch.object(_transport, 'push_jsonl',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'write_coord_head',
+                          side_effect=_fake_write_head), \
+             patch.object(_transport, 'push_coord_head',
+                          return_value=(True, '')), \
+             patch.object(_publish, 'generate_pending_claims',
+                          return_value=_pending):
+            _ok, _detail = _publish.remote_publish(
+                builder_id='alice', config=_Cfg(),
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='20260601T000000Z',
+                remote_coord_spec='file:///srv/m1-coord',
+                pool_remote_spec='file:///srv/m1',
+                inrelease_local_path=_inrelease,
+                read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+                local_mirror_urls=['file:///srv/m1'],
+                ssh_host=None,  # local-fs needs no host
+                on_progress=_capture_progress,
+            )
+        assert _ok, _detail
+        # Three .debs pushed; their remote_spec paths preserve the
+        # `dists/thor/main/binary-amd64/<filename>` relative shape.
+        assert len(_pushed) == 3, _pushed
+        for _name in _pool_files:
+            assert any(_name in _p for _p in _pushed), (_name, _pushed)
+        # Three progress events, all ok=True; total==3 for all
+        assert len(_progress_events) == 3
+        for _ev in _progress_events:
+            assert _ev[1] == 3  # total
+            assert _ev[3] is True  # ok
+        # Success detail surfaces the push count
+        assert 'pushed 3 .deb' in _detail
+
+
+def test_remote_publish_drops_claim_when_push_fails():
+    """A failed push for one .deb drops that claim from the publish set;
+    the others land normally."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.store as _store
+    import coord.identity as _identity
+    import coord.reconcile as _reconcile
+    from unittest.mock import patch, MagicMock
+
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_coord = _td
+            dir_coord_fetched = os.path.join(_td, 'fetched')
+            dir_coord_claims = os.path.join(_td, 'claims')
+            dir_log = _td
+            dir_repo = os.path.join(_td, 'repo')
+            dir_gnupg = _td
+        for _d in (_Cfg.dir_coord_fetched, _Cfg.dir_coord_claims,
+                   os.path.join(_Cfg.dir_repo, 'dists/thor/main/binary-amd64')):
+            os.makedirs(_d)
+        # Two fake .debs locally; one will "push ok", one will "push fail"
+        _names = ['ok_1.0_amd64.deb', 'bad_2.0_amd64.deb']
+        for _n in _names:
+            with open(os.path.join(
+                _Cfg.dir_repo, 'dists/thor/main/binary-amd64', _n),
+                    'wb') as _fh:
+                _fh.write(_n.encode())
+        _inrelease = os.path.join(_td, 'InRelease')
+        with open(_inrelease, 'wb') as _fh:
+            _fh.write(b'Date: 2026-06-01\nFake: contents\n')
+
+        _existing_head = {
+            'v': 2, 'inrelease_sha256': 'a' * 64,
+            'snapshot': {}, 'last_seqs': {}, 'head_time': 'T',
+            'neighbours': ['file:///srv/m1'],
+        }
+        _pending = [
+            {'builder': 'alice', 'package': _n.split('_')[0],
+             'intended_version': '1', 'built_version': '1',
+             'filename': _n, 'sha256': 'x' * 64, 'size': 0,
+             'snapshot': 'S', 'built_at': 'T',
+             'claim_state': 'pending', 'seq': 0, 'v': 1}
+            for _n in _names
+        ]
+        def _fake_push(*, local_path, remote_spec, ssh_key=None):
+            if 'bad' in remote_spec:
+                return False, 'simulated rsync failure'
+            return True, ''
+        # Track append_claim calls to see which claims actually landed.
+        _appended_filenames: 'list[str]' = []
+        def _fake_append(claims_dir, builder_id, claim, priv):
+            _appended_filenames.append(claim.get('filename', ''))
+            return claim.get('seq', 0)
+        _lock = object()
+        with patch.object(_transport, 'remote_flock_acquire',
+                          return_value=_lock), \
+             patch.object(_transport, 'remote_flock_release'), \
+             patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=_existing_head), \
+             patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims', return_value={}), \
+             patch.object(_store, 'max_seq', return_value=0), \
+             patch.object(_store, 'append_claim',
+                          side_effect=_fake_append), \
+             patch.object(_reconcile, 'publish_halt_reason',
+                          return_value=None), \
+             patch.object(_transport, 'push_single_deb',
+                          side_effect=_fake_push), \
+             patch.object(_transport, 'push_jsonl',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'write_coord_head', return_value=True), \
+             patch.object(_transport, 'push_coord_head',
+                          return_value=(True, '')), \
+             patch.object(_publish, 'generate_pending_claims',
+                          return_value=_pending):
+            _ok, _detail = _publish.remote_publish(
+                builder_id='alice', config=_Cfg(),
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='20260601T000000Z',
+                remote_coord_spec='file:///srv/m1-coord',
+                pool_remote_spec='file:///srv/m1',
+                inrelease_local_path=_inrelease,
+                read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+                local_mirror_urls=['file:///srv/m1'],
+                ssh_host=None,
+            )
+        assert _ok, _detail
+        # Only the OK file got a claim appended
+        assert _appended_filenames == ['ok_1.0_amd64.deb'], _appended_filenames
+        # Success detail surfaces the partial: 1 pushed, 1 failed
+        assert 'pushed 1 .deb' in _detail
+        assert '1 failed' in _detail
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -24363,6 +24636,12 @@ def main() -> int:
         test_cmd_mirror_pull_no_mirrors_is_friendly,
         test_repo_publish_prints_deprecation_notice,
         test_transport_pull_single_file_primitive_exists,
+        # MIRROR-01 Phase 3b — per-file .deb push + coord/pool split
+        test_coord_root_for_appends_suffix_to_last_path_component,
+        test_transport_push_single_deb_primitive_exists,
+        test_transport_push_single_deb_roundtrip_with_local_fs,
+        test_remote_publish_pushes_debs_per_file_and_calls_progress,
+        test_remote_publish_drops_claim_when_push_fails,
     ]
     failures = 0
     for t in tests:

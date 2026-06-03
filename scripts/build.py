@@ -4419,21 +4419,47 @@ class BuildSession:
             assert _st is not None  # checked above / by list_mirrors
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
-            _spec, _ssh_host = _mirror.rsync_spec_for_url(_url)
+            # MIRROR-01 Phase 3b: derive pool + coord specs from the
+            # operator-registered POOL URL.  Pool serves apt clients;
+            # sidecar is the sibling `-coord` tree.
+            _pool_spec, _ssh_host = _mirror.rsync_spec_for_url(_url)
+            _coord_url = _mirror.coord_root_for(_url)
+            _coord_spec, _coord_ssh_host = _mirror.rsync_spec_for_url(
+                _coord_url)
+            # ssh_host derived from EITHER (they should agree); coord
+            # tree is preferred since flock lives there.
+            _ssh_host = _coord_ssh_host or _ssh_host
             console.print(
                 f"mirror publish {_n}: → {_url}", tui.COLOR_HIGHLIGHT)
-            _ok, _detail = _publish.remote_publish(
-                builder_id=_bid, config=self.config,
-                private_key_path=_priv, public_key_path=_pub,
-                snapshot_pin=_snapshot_pin,
-                remote_coord_spec=_spec,
-                inrelease_local_path=_inrelease,
-                read_build_record=utils.read_build_record,
-                get_sha256=utils.get_sha256,
-                local_mirror_urls=_local_urls,
-                ssh_host=_ssh_host,
-                ssh_key=_ssh_key,
-            )
+            # ProgressBar wired through on_progress.  Total updates
+            # dynamically as we learn the count after step 5; until
+            # then the bar shows 0/0.
+            _bar = ProgressBar(
+                label=f"publish .debs → {_n}", itr_label='',
+                maxvalue=1, show_rate=False, label_width=34)
+            def _progress(current, total, _filename, _ok, *,
+                          _bar_ref=_bar):
+                # Lazy-update maxvalue once we see the true total.
+                if total and _bar_ref.maxvalue != total:
+                    _bar_ref.maxvalue = total
+                _bar_ref.step(1)
+            try:
+                _ok, _detail = _publish.remote_publish(
+                    builder_id=_bid, config=self.config,
+                    private_key_path=_priv, public_key_path=_pub,
+                    snapshot_pin=_snapshot_pin,
+                    remote_coord_spec=_coord_spec,
+                    inrelease_local_path=_inrelease,
+                    read_build_record=utils.read_build_record,
+                    get_sha256=utils.get_sha256,
+                    local_mirror_urls=_local_urls,
+                    ssh_host=_ssh_host,
+                    ssh_key=_ssh_key,
+                    pool_remote_spec=_pool_spec,
+                    on_progress=_progress,
+                )
+            finally:
+                _bar.close()
             console.print(
                 f"  {_detail}",
                 tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
@@ -4504,15 +4530,20 @@ class BuildSession:
             assert _st is not None
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
-            _spec, _ssh_host = _mirror.rsync_spec_for_url(_url)
+            # Pool spec for downloading .debs; coord spec for fetching
+            # the sidecar tree.  Pool is the operator-registered URL;
+            # coord is the `-coord` sibling.
+            _pool_spec, _ = _mirror.rsync_spec_for_url(_url)
+            _coord_url = _mirror.coord_root_for(_url)
+            _coord_spec, _ = _mirror.rsync_spec_for_url(_coord_url)
             console.print(
                 f"mirror pull {_n}: ← {_url}", tui.COLOR_HIGHLIGHT)
             _fetched = os.path.join(
                 self.config.dir_cache, 'mirror', _n, 'fetched')
             os.makedirs(_fetched, exist_ok=True)
-            # 1. Fetch coord tree
+            # 1. Fetch coord tree (sidecar, not pool)
             _ok, _detail = _transport.pull_remote_coord(
-                local_dest=_fetched, remote_spec=_spec, ssh_key=_ssh_key,
+                local_dest=_fetched, remote_spec=_coord_spec, ssh_key=_ssh_key,
             )
             if not _ok:
                 console.print(
@@ -4559,9 +4590,9 @@ class BuildSession:
                         _skip_present += 1
                         continue
                     # Source path on the mirror = same relative layout
-                    # under <mirror_root>/dists/<codename>/<comp>/...
+                    # under <pool_root>/dists/<codename>/<comp>/...
                     _rel = os.path.relpath(_local_path, self.config.dir_repo)
-                    _remote_file = _spec.rstrip('/') + '/' + _rel
+                    _remote_file = _pool_spec.rstrip('/') + '/' + _rel
                     _ok, _detail = _transport.pull_single_file(
                         remote_spec=_remote_file, local_path=_local_path,
                         ssh_key=_ssh_key,
