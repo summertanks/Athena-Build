@@ -4227,6 +4227,10 @@ class BuildSession:
             return self.cmd_mirror_publish(*args)
         if action == 'pull':
             return self.cmd_mirror_pull(*args)
+        if action == 'audit':
+            return self.cmd_mirror_audit(*args)
+        if action == 'query':
+            return self.cmd_mirror_query(*args)
         _table = {
             'add <name> <url>':            'register a mirror; seeds base+current',
             'remove <name|url>':           'unregister a mirror',
@@ -4242,6 +4246,10 @@ class BuildSession:
             'pull [<name>]':               'fetch + verify peer sidecar, then '
                                            'download claim .debs missing locally '
                                            '(skip-own; SHA-256 verified)',
+            'audit [<name>]':              'federation consistency, claim sigs, '
+                                           'hash conflicts, cross-mirror pool drift',
+            'query <pkg> [<name>]':        'show claims matching <pkg> from '
+                                           'the last fetched view of each mirror',
         }
         return self._group_help('mirror', _table, action)
 
@@ -4625,6 +4633,206 @@ class BuildSession:
             if _mismatch or _failed:
                 _all_ok = False
         return _all_ok
+
+    def cmd_mirror_audit(self, *args):
+        """mirror audit [<name>] — federation consistency + signature integrity.
+
+        Per mirror (or just <name>):
+          1. Fetch coord-head + keyring + claims from the peer
+          2. tier-1 verify coord-head; Ed25519-verify every claim line
+          3. Federation neighbours match local config (CRITICAL on diff)
+          4. Hash-conflict scan across builders (CRITICAL → operator
+             must run `coord conflict resolve`)
+          5. Cross-mirror pool-SHA consistency (when 2+ mirrors and
+             they overlap on the same filename, fail if SHAs disagree)
+
+        Read-only; never writes to any mirror.  When more than one mirror
+        is present, cross-mirror checks run AFTER per-mirror checks so
+        per-mirror anomalies are surfaced first.
+        """
+        import mirror as _mirror
+        import signing
+        import coord.head as _head_mod
+        import coord.identity as _id
+        import coord.store as _store
+        import coord.transport as _transport
+        import coord.reconcile as _reconcile
+
+        _target = args[0] if args else None
+        if _target is not None:
+            if _mirror.read_mirror_state(self.config, _target) is None:
+                console.print(
+                    f"mirror audit: unknown mirror {_target!r}",
+                    tui.COLOR_ERROR)
+                return False
+            _names = [_target]
+        else:
+            _names = _mirror.list_mirrors(self.config)
+        if not _names:
+            console.print("mirror audit: no mirrors configured.",
+                          tui.COLOR_WARNING)
+            return True
+        _local_urls = _mirror.all_mirror_urls(self.config)
+        _signing_home = signing.signing_home(self.config)
+        # Per-mirror collection so cross-mirror checks can compare.
+        _per_mirror: 'list[dict]' = []
+        _all_ok = True
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            assert _st is not None
+            _url = _st.get('url', '')
+            _ssh_key = _st.get('ssh_key') or None
+            _coord_url = _mirror.coord_root_for(_url)
+            _coord_spec, _ = _mirror.rsync_spec_for_url(_coord_url)
+            console.print(f"[{_n}] {_url}", tui.COLOR_HIGHLIGHT)
+            _fetched = os.path.join(
+                self.config.dir_cache, 'mirror', _n, 'fetched')
+            os.makedirs(_fetched, exist_ok=True)
+            _ok, _detail = _transport.pull_remote_coord(
+                local_dest=_fetched, remote_spec=_coord_spec,
+                ssh_key=_ssh_key,
+            )
+            if not _ok:
+                console.print(
+                    f"  CRITICAL  unreachable: {_detail}",
+                    tui.COLOR_ERROR)
+                _all_ok = False
+                _per_mirror.append({'name': _n, 'head': None,
+                                    'by_builder': {}})
+                continue
+            _head = _head_mod.read_coord_head(_fetched, _signing_home)
+            if _head is None:
+                console.print(
+                    "  CRITICAL  coord-head verify failed or absent",
+                    tui.COLOR_ERROR)
+                _all_ok = False
+                _per_mirror.append({'name': _n, 'head': None,
+                                    'by_builder': {}})
+                continue
+            _keyring = _id.load_keyring(
+                os.path.join(_fetched, 'keyring', 'builders'))
+            _revoked = _head.get('revoked_builders') or {}
+            _by_builder = _store.read_all_claims(
+                os.path.join(_fetched, 'claims'), _keyring, _revoked)
+            _per_mirror.append({'name': _n, 'head': _head,
+                                'by_builder': _by_builder})
+            # Federation gate
+            _fed = _reconcile.check_federation_consistency(_local_urls, _head)
+            _fed_crit = [_f for _f in _fed if _f.severity == 'CRITICAL']
+            if _fed_crit:
+                for _f in _fed_crit:
+                    console.print(
+                        f"  {_f.severity:8s}  {_f.kind}: {_f.message}",
+                        tui.COLOR_ERROR)
+                _all_ok = False
+            # Hash conflict scan
+            _conf = _reconcile.detect_hash_conflicts(_by_builder)
+            _conf_crit = [_f for _f in _conf if _f.severity == 'CRITICAL']
+            for _f in _conf_crit:
+                console.print(
+                    f"  {_f.severity:8s}  {_f.kind}: {_f.message}",
+                    tui.COLOR_ERROR)
+                _all_ok = False
+            _total = sum(len(_v) for _v in _by_builder.values())
+            if not _fed_crit and not _conf_crit:
+                console.print(
+                    f"  ok        {_total} claim(s) across "
+                    f"{len(_by_builder)} builder(s); neighbours match")
+        # Cross-mirror pool-SHA consistency
+        if len(_per_mirror) > 1:
+            console.print("\ncross-mirror pool-SHA consistency:",
+                          tui.COLOR_HIGHLIGHT)
+            _seen: 'dict[str, list[tuple]]' = {}
+            for _m in _per_mirror:
+                for _bid, _claims in _m['by_builder'].items():
+                    for _c in _claims:
+                        if _c.get('claim_state') == 'retracted':
+                            continue
+                        _fn = _c.get('filename')
+                        _sha = _c.get('sha256') or ''
+                        if isinstance(_fn, str) and _fn:
+                            _seen.setdefault(_fn, []).append(
+                                (_m['name'], _sha))
+            _drift = 0
+            for _fn, _entries in _seen.items():
+                _shas = {_s for _, _s in _entries}
+                if len(_shas) > 1:
+                    _drift += 1
+                    _per = ', '.join(f"{_m}={_s[:12]}" for _m, _s in _entries)
+                    console.print(
+                        f"  CRITICAL  cross_mirror_pool_drift {_fn}: {_per}",
+                        tui.COLOR_ERROR)
+                    _all_ok = False
+            if _drift == 0:
+                console.print(
+                    f"  ok        {len(_seen)} filename(s) consistent "
+                    "across mirrors")
+        return _all_ok
+
+    def cmd_mirror_query(self, *args):
+        """mirror query <pkg> [<name>] — show every claim matching <pkg>.
+
+        Walks cache/mirror/<name>/fetched/claims/ for each configured mirror
+        (or just <name>); for each claim whose `package` field equals <pkg>,
+        prints: filename, built_version, builder, snapshot, built_at, mirror.
+
+        Read-only against the LAST fetched state.  Run `mirror pull <name>`
+        (or `mirror audit`) first to refresh the local snapshot of remote
+        sidecars before querying.
+        """
+        if not args:
+            console.print(
+                "Usage: mirror query <pkg> [<mirror-name>]",
+                tui.COLOR_ERROR)
+            return False
+        _pkg = args[0]
+        _name_filter = args[1] if len(args) > 1 else None
+        import mirror as _mirror
+        import coord.identity as _id
+        import coord.store as _store
+        _names = _mirror.list_mirrors(self.config)
+        if _name_filter:
+            if _name_filter not in _names:
+                console.print(
+                    f"mirror query: unknown mirror {_name_filter!r}",
+                    tui.COLOR_ERROR)
+                return False
+            _names = [_name_filter]
+        _hits = 0
+        for _n in _names:
+            _fetched = os.path.join(
+                self.config.dir_cache, 'mirror', _n, 'fetched')
+            _keyring_dir = os.path.join(_fetched, 'keyring', 'builders')
+            _claims_dir = os.path.join(_fetched, 'claims')
+            if not os.path.isdir(_claims_dir):
+                continue
+            _keyring = _id.load_keyring(_keyring_dir)
+            _by_builder = _store.read_all_claims(_claims_dir, _keyring, {})
+            for _bid, _claims in _by_builder.items():
+                for _c in _claims:
+                    if _c.get('package') != _pkg:
+                        continue
+                    if _c.get('claim_state') == 'retracted':
+                        continue
+                    if _hits == 0:
+                        console.print(
+                            f"{'mirror':<16s} {'builder':<16s} "
+                            f"{'version':<24s} {'snapshot':<18s} "
+                            f"{'built_at':<22s} filename",
+                            tui.COLOR_INFO)
+                    _hits += 1
+                    console.print(
+                        f"{_n:<16s} {_bid:<16s} "
+                        f"{_c.get('built_version', ''):<24s} "
+                        f"{_c.get('snapshot', ''):<18s} "
+                        f"{_c.get('built_at', ''):<22s} "
+                        f"{_c.get('filename', '')}")
+        if _hits == 0:
+            console.print(
+                f"mirror query: no claim for package {_pkg!r} across "
+                f"{len(_names)} mirror(s).  Run `mirror pull` to refresh "
+                "the local view of remote sidecars.")
+        return True
 
     def cmd_mirror_reconcile_neighbours(self, *args):
         """mirror reconcile-neighbours [<name>] — re-propagate the canonical
@@ -5759,21 +5967,22 @@ class BuildSession:
                 console.print(f"    {_f}: {_why}")
 
     def cmd_repo_refresh(self, *args):
-        """UPD-01: thin convenience for the day-2 update cycle — runs
-        `source sync` → `source build all` → `repo publish ssh full`.
+        """UPD-01 / MIRROR-01 Phase 4: day-2 update cycle convenience.
 
-        Pick the destination first with `snapshot select` (or `snapshot select
-        current <ts>`), then `cache build` + `cache parse`, then `repo refresh`.
-        Each step is update-aware AND runnable on its own — refresh just chains
-        them: `source build all` auto-detects the published→current delta and
-        stamps +asg<R>u<N>; `repo publish ssh full` merges with the prior
-        manifest, rsyncs additively (when external is enabled), prunes, and
-        records published = current.  No target — the destination is the
-        current pin."""
+        Workflow:
+          1. `source sync`     — update source/ to current pin
+          2. `source build all` — auto-detects update mode + +asg<R>u<N> stamps
+          3. publish step:
+               * mirrors configured → `mirror publish` (all enabled);
+                 federation-gated, per-file .deb push, signs + pushes sidecar
+               * no mirrors → legacy `repo publish ssh full`
+
+        Pre-flight gates: dep_check_ready, and at least one publish target
+        behind local current (otherwise nothing to refresh)."""
         if args:
             console.print(
                 "repo refresh takes no target — set the destination with "
-                "`snapshot select current <ts>`, then `cache build` + `cache "
+                "`snapshot select <ts>`, then `cache build` + `cache "
                 "parse`, then `repo refresh`.", tui.COLOR_WARNING)
             return
         if not self.flags.dep_check_ready:
@@ -5782,20 +5991,32 @@ class BuildSession:
                 "selected current pin (`snapshot select` invalidates the cache).",
                 tui.COLOR_ERROR)
             return
-        _cur = self._snapshot_current()
-        _pub = self._snapshot_published()
-        if _cur and _pub and apt_pkg.version_compare(_cur, _pub) <= 0:
+        # Update-pending gate uses the per-mirror floor (Phase 4
+        # `_update_build_pending`).  When no mirrors are configured, falls
+        # back to the legacy snapshot.state.published check.
+        if not self._update_build_pending():
             console.print(
-                f"repo refresh: current ({_cur}) is not ahead of published "
-                f"({_pub}) — nothing to refresh.  Pick a newer destination with "
-                f"`snapshot select`.", tui.COLOR_INFO)
+                "repo refresh: current pin is not ahead of any publish "
+                "target — nothing to refresh.  Pick a newer destination "
+                "with `snapshot select`.", tui.COLOR_INFO)
             return
-        console.print(
-            "repo refresh: source sync → source build all → repo publish ssh "
-            "full", tui.COLOR_HIGHLIGHT)
-        self.cmd_source_sync()
-        self.cmd_source_build('all')          # auto-detects update mode + stamps
-        self.cmd_repo_publish('ssh', 'full')  # merge + publish + prune + record
+        import mirror as _mirror_mod
+        _has_mirrors = bool(_mirror_mod.list_mirrors(self.config))
+        if _has_mirrors:
+            console.print(
+                "repo refresh: source sync → source build all → mirror "
+                "publish (all enabled)", tui.COLOR_HIGHLIGHT)
+            self.cmd_source_sync()
+            self.cmd_source_build('all')   # auto-detects update mode + stamps
+            self.cmd_mirror_publish()       # publish to every configured mirror
+        else:
+            console.print(
+                "repo refresh: source sync → source build all → repo "
+                "publish ssh full (no mirrors configured; legacy path)",
+                tui.COLOR_HIGHLIGHT)
+            self.cmd_source_sync()
+            self.cmd_source_build('all')
+            self.cmd_repo_publish('ssh', 'full')
 
     def _refresh_merge_index(self) -> bool:
         """Build the suite index as the UNION of the local single-snapshot pool
@@ -7708,15 +7929,50 @@ class BuildSession:
         return sorted(_out), None
 
     def _update_build_pending(self) -> bool:
-        """True when `source build` should run in UPDATE mode: a published base
-        exists (local manifest non-empty) and current is ahead of published."""
+        """True when `source build` should run in UPDATE mode: at least one
+        publish target is behind the local current snapshot.
+
+        MIRROR-01 Phase 4: when mirrors are configured, the floor is
+        `min(mirror.<each>.state.current)` — any laggard mirror means
+        there's an unpublished delta and UPDATE mode is the right path.
+        When no mirrors are configured (legacy), fall back to
+        snapshot.state.published.
+
+        Requires dep_check_ready AND a non-empty local published.manifest
+        (the +asg uN ledger; without it we have no version-stamping
+        authority and a clean build is needed first).
+        """
         if not self.flags.dep_check_ready:
             return False
         if not repo_audit.published_ledger(self.config):
             return False
-        _pub = self._snapshot_published()
         _cur = self._snapshot_current()
-        return bool(_cur and _pub and apt_pkg.version_compare(_cur, _pub) > 0)
+        if not _cur:
+            return False
+        import mirror as _mirror_mod
+        _names = _mirror_mod.list_mirrors(self.config)
+        if _names:
+            _min_current = None
+            for _n in _names:
+                _st = _mirror_mod.read_mirror_state(self.config, _n)
+                if _st is None:
+                    continue
+                _mc = _st.get('current') or ''
+                if not _mc:
+                    # An un-published mirror is by definition behind any
+                    # current pin — schedule the publish.
+                    return True
+                if _min_current is None or _mc < _min_current:
+                    _min_current = _mc
+            if _min_current is None:
+                # All mirror state files are unreadable — fall through to
+                # legacy below rather than silently returning False.
+                pass
+            else:
+                return apt_pkg.version_compare(_cur, _min_current) > 0
+        # Legacy fallback (no mirrors configured)
+        _pub = self._snapshot_published()
+        return bool(_pub and apt_pkg.version_compare(_cur, _pub) > 0)
 
     def _needs_bump_build(self, name: str, src, ledger: dict,
                           release: int) -> bool:
@@ -10099,7 +10355,7 @@ def main(banner: str) -> None:
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
     tui.register_command('coord',     session.cmd_coord,     'Coord:      coord <init|builders|audit|status>')
-    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <add|remove|list|summary|status|publish|pull|reconcile-neighbours>')
+    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <add|remove|list|summary|status|publish|pull|audit|query|reconcile-neighbours>')
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')

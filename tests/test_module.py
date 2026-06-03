@@ -19863,9 +19863,15 @@ def test_cache_build_gates_on_snapshot_pins():
 
 
 def test_repo_refresh_is_thin_wrapper():
-    """After decomposition, repo refresh just chains the (update-aware) steps —
-    source sync → source build all → repo publish ssh full — takes no target,
-    and short-circuits when current is not ahead of published."""
+    """repo refresh chains the update-aware steps and routes the publish
+    leg to whichever target shape is configured:
+
+      source sync → source build all → mirror publish (when mirrors set)
+                                     → repo publish ssh full (legacy)
+
+    Pre-flight gates on `_update_build_pending` (MIRROR-01 Phase 4),
+    which itself reads per-mirror state OR falls back to the legacy
+    snapshot.state.published when no mirrors are configured."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
@@ -19877,10 +19883,18 @@ def test_repo_refresh_is_thin_wrapper():
     assert 'takes no target' in _b, "repo refresh must reject a target arg"
     assert 'cmd_source_sync(' in _b, "must run source sync"
     assert "cmd_source_build('all')" in _b, "must run source build all"
-    assert "cmd_repo_publish('ssh', 'full')" in _b, "must run repo publish ssh full"
+    # BOTH publish paths must be present (mirror-aware + legacy fallback)
+    assert 'cmd_mirror_publish(' in _b, "must dispatch to mirror publish"
+    assert "cmd_repo_publish('ssh', 'full')" in _b, (
+        "must keep legacy repo publish ssh full as the no-mirrors fallback")
+    assert _b.index('cmd_source_build(') < _b.index('cmd_mirror_publish('), (
+        "build must precede mirror publish")
     assert _b.index('cmd_source_build(') < _b.index('cmd_repo_publish('), (
-        "build must precede publish")
-    assert '_snapshot_published(' in _b, "must short-circuit on current<=published"
+        "build must precede repo publish (legacy fallback)")
+    # Update-pending is the unified short-circuit gate now
+    assert '_update_build_pending(' in _b, (
+        "must short-circuit via _update_build_pending (replaces the legacy "
+        "_snapshot_published direct check)")
 
 
 def test_publish_full_folds_index_merge_prune_and_gates_rsync():
@@ -20567,7 +20581,8 @@ def test_repo_external_disable_and_enable_empty_rebaselines():
 
 
 def test_update_build_pending_logic():
-    """_update_build_pending: True only when a base is published AND current is
+    """_update_build_pending: legacy single-target path (no mirrors
+    configured).  True only when a base is published AND current is
     ahead of published."""
     import shutil as _sh
     if not _sh.which('dpkg'):
@@ -20576,23 +20591,73 @@ def test_update_build_pending_logic():
     import build  # noqa: F401
     import repo_audit
     from build import BuildSession, BuildFlags
-    _sess = BuildSession.__new__(BuildSession)
-    _sess.flags = BuildFlags()
-    _sess.flags.dep_check_ready = True
-    _sess.config = object()
-    _sess._snapshot_current = lambda: '20260520T000000Z'
-    _sess._snapshot_published = lambda: '20260514T083402Z'
-    _saved = repo_audit.published_ledger
-    try:
-        repo_audit.published_ledger = lambda _c: {'openssl': ['3.0.15-1']}
-        assert _sess._update_build_pending() is True
-        repo_audit.published_ledger = lambda _c: {}          # nothing published
-        assert _sess._update_build_pending() is False
-        repo_audit.published_ledger = lambda _c: {'x': ['1']}
-        _sess._snapshot_published = lambda: '20260520T000000Z'   # == current
-        assert _sess._update_build_pending() is False
-    finally:
-        repo_audit.published_ledger = _saved
+
+    with tempfile.TemporaryDirectory() as _td:
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.flags = BuildFlags()
+        _sess.flags.dep_check_ready = True
+        class _Cfg:
+            dir_config = _td  # no mirror.<name>.state files → legacy path
+        _sess.config = _Cfg()
+        _sess._snapshot_current = lambda: '20260520T000000Z'
+        _sess._snapshot_published = lambda: '20260514T083402Z'
+        _saved = repo_audit.published_ledger
+        try:
+            repo_audit.published_ledger = lambda _c: {'openssl': ['3.0.15-1']}
+            assert _sess._update_build_pending() is True
+            repo_audit.published_ledger = lambda _c: {}      # nothing published
+            assert _sess._update_build_pending() is False
+            repo_audit.published_ledger = lambda _c: {'x': ['1']}
+            _sess._snapshot_published = lambda: '20260520T000000Z'  # == current
+            assert _sess._update_build_pending() is False
+        finally:
+            repo_audit.published_ledger = _saved
+
+
+def test_update_build_pending_per_mirror_path():
+    """MIRROR-01 Phase 4: when mirrors are configured, the floor is
+    min(mirror.<each>.state.current); ANY laggard mirror = UPDATE pending."""
+    import shutil as _sh
+    if not _sh.which('dpkg'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build  # noqa: F401
+    import repo_audit
+    import mirror as _mirror
+    from build import BuildSession, BuildFlags
+
+    with tempfile.TemporaryDirectory() as _td:
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.flags = BuildFlags()
+        _sess.flags.dep_check_ready = True
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        _sess.config = _cfg
+        _sess._snapshot_current = lambda: '20260520T000000Z'
+        _sess._snapshot_published = lambda: '20260514T083402Z'
+        _saved = repo_audit.published_ledger
+        try:
+            repo_audit.published_ledger = lambda _c: {'openssl': ['3.0.15-1']}
+            # Plant two mirrors at different timestamps
+            _mirror.add_mirror(_cfg, name='a', url='ssh://h1/p',
+                               seed_pin='20260520T000000Z')  # at current
+            _mirror.add_mirror(_cfg, name='b', url='ssh://h2/p',
+                               seed_pin='20260514T083402Z')  # behind
+            # min(current_a, current_b) = b's pin (behind local current)
+            #   → UPDATE pending
+            assert _sess._update_build_pending() is True
+            # Catch b up to current; both now at current; min(_) == current
+            #   → no UPDATE
+            _mirror.update_mirror_state(
+                _cfg, 'b', current='20260520T000000Z')
+            assert _sess._update_build_pending() is False
+            # An unpublished mirror (empty current) = unconditionally laggard
+            _mirror.add_mirror(_cfg, name='fresh', url='ssh://h3/p',
+                               seed_pin='')
+            assert _sess._update_build_pending() is True
+        finally:
+            repo_audit.published_ledger = _saved
 
 
 def test_external_and_audit_ssh_and_published_ledger_wired():
@@ -23677,6 +23742,100 @@ def test_remote_publish_pushes_debs_per_file_and_calls_progress():
         assert 'pushed 3 .deb' in _detail
 
 
+def test_cmd_mirror_dispatch_routes_audit_and_query():
+    """`cmd_mirror` routes audit + query subcommands; both handlers exist."""
+    import re
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    for _sub in ('cmd_mirror_audit', 'cmd_mirror_query'):
+        assert f'def {_sub}(' in _body, f"{_sub} missing"
+    assert re.search(
+        r"if action == 'audit':\s*\n\s+return self\.cmd_mirror_audit",
+        _body)
+    assert re.search(
+        r"if action == 'query':\s*\n\s+return self\.cmd_mirror_query",
+        _body)
+
+
+def test_cmd_mirror_query_reports_no_match():
+    """`mirror query <pkg>` with no claims for that package across any
+    mirror surfaces the no-match guidance message."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache = _tmp
+        _sess.config = _Cfg()
+        # Register two mirrors but never fetch — empty cache state
+        import mirror as _mirror
+        _mirror.add_mirror(_Cfg(), name='alpha', url='ssh://h/a',
+                           seed_pin='')
+        _mirror.add_mirror(_Cfg(), name='beta', url='ssh://h/b',
+                           seed_pin='')
+        _lines = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _ok = _sess.cmd_mirror_query('libfoo')
+        finally:
+            build.console.print = _orig
+        assert _ok is True
+        _joined = '\n'.join(_lines)
+        assert 'no claim for package' in _joined
+        assert "'libfoo'" in _joined
+        assert '2 mirror(s)' in _joined
+
+
+def test_cmd_mirror_query_requires_pkg_arg():
+    """Missing <pkg> arg → Usage hint, returns False."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _lines = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _ok = _sess.cmd_mirror_query()
+    finally:
+        build.console.print = _orig
+    assert _ok is False
+    assert 'Usage: mirror query' in '\n'.join(_lines)
+
+
+def test_cmd_mirror_audit_no_mirrors_reports_warning():
+    """`mirror audit` with no mirrors configured surfaces a friendly warning
+    and exits without touching the network."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+        _sess = BuildSession.__new__(BuildSession)
+        class _Cfg:
+            dir_config = _cfg_dir
+        _sess.config = _Cfg()
+        _lines = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _ok = _sess.cmd_mirror_audit()
+        finally:
+            build.console.print = _orig
+        assert _ok is True
+        assert 'no mirrors configured' in '\n'.join(_lines)
+
+
 def test_remote_publish_drops_claim_when_push_fails():
     """A failed push for one .deb drops that claim from the publish set;
     the others land normally."""
@@ -24513,6 +24672,7 @@ def main() -> int:
         test_manifest_vs_remote_discrepancies,
         test_repo_external_disable_and_enable_empty_rebaselines,
         test_update_build_pending_logic,
+        test_update_build_pending_per_mirror_path,
         test_external_and_audit_ssh_and_published_ledger_wired,
         # UPD-02: index on the remote
         test_remote_scan_packages_builds_ssh_argv,
@@ -24642,6 +24802,11 @@ def main() -> int:
         test_transport_push_single_deb_roundtrip_with_local_fs,
         test_remote_publish_pushes_debs_per_file_and_calls_progress,
         test_remote_publish_drops_claim_when_push_fails,
+        # MIRROR-01 Phase 4 — audit + query + multi-mirror UPD-01 wiring
+        test_cmd_mirror_dispatch_routes_audit_and_query,
+        test_cmd_mirror_query_reports_no_match,
+        test_cmd_mirror_query_requires_pkg_arg,
+        test_cmd_mirror_audit_no_mirrors_reports_warning,
     ]
     failures = 0
     for t in tests:
