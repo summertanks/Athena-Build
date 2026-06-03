@@ -1,0 +1,467 @@
+"""COORD-01 publish transaction — sign + push the claim layer.
+
+Two entry points:
+
+  local_publish    sign pending claims into the local jsonl + bump
+                   the local coord-head (offline / single-host).
+
+  remote_publish   acquire remote flock → fetch remote coord state →
+                   sanity-check (hash conflict, PUBLISH_HALT) →
+                   sign+append pending claims → push jsonl → re-sign
+                   coord-head with updated last_seqs → push coord-head
+                   → release flock.
+
+`remote_publish` does NOT push the .deb pool itself.  The operator
+runs `repo publish ssh` (or `repo publish local`) — both already
+exist — to land binaries.  This split lets coord/publish stay
+focused on the sidecar tracking and the existing publish paths stay
+backwards-compatible for non-coord operators.
+
+The 11-step state machine called out in the plan lives here in
+remote_publish().  Each step is a single function call; if any
+returns failure, we log + release lock + report.  Crash recovery
+is forward-only: re-running publish picks up where we left off
+because claim writes are idempotent (same seq + same canonical
+bytes = same line).
+"""
+
+import logging
+import os
+from typing import Callable, List, Optional, Tuple
+
+from . import head as _head
+from . import identity as _identity
+from . import reconcile as _reconcile
+from . import schema as _schema
+from . import store as _store
+from . import transport as _transport
+
+logger = logging.getLogger('athena')
+
+
+# ───────────────────────── pending-claim discovery ─────────────────────────
+
+
+def generate_pending_claims(
+    *,
+    builder_id: str,
+    buildlog_dir: str,
+    claims_dir: str,
+    public_key_path: str,
+    snapshot_pin: str,
+    read_build_record: Callable[[str, str], 'Optional[dict]'],
+) -> List[dict]:
+    """Walk build.json records; for each phase=done / phase=tunneled
+    output whose filename isn't already in this builder's live jsonl,
+    create an UNSIGNED pending claim dict.
+
+    Returns the list in stable order (sorted by package + filename)
+    so a re-run before any append produces the same ordering.
+
+    The caller signs each claim, appends to the jsonl, and decides
+    when to flip to claim_state='published'.
+    """
+    _existing = _store.read_builder_claims(
+        claims_dir, builder_id, public_key_path)
+    _known: set = {
+        _c.get('filename') for _c in _existing
+        if isinstance(_c.get('filename'), str)
+        and _c.get('claim_state') != _schema.CLAIM_STATE_RETRACTED
+    }
+    _pending: List[dict] = []
+    try:
+        _entries = sorted(os.listdir(buildlog_dir))
+    except OSError:
+        return _pending
+    for _entry in _entries:
+        if not _entry.endswith('.build.json'):
+            continue
+        _pkg = _entry[:-len('.build.json')]
+        _rec = read_build_record(buildlog_dir, _pkg)
+        if _rec is None:
+            continue
+        _phase = _rec.get('phase')
+        if _phase not in ('done', 'tunneled'):
+            continue
+        _outputs = _rec.get('outputs') or []
+        _hashes = _rec.get('output_hashes') or {}
+        for _fn in _outputs:
+            if _fn in _known:
+                continue
+            _sha = _hashes.get(_fn)
+            if not isinstance(_sha, str) or not _sha:
+                # Pre-coord legacy or skipped backfill — skip.  The
+                # operator runs `repo repair backfill-hashes` first.
+                continue
+            _pending.append(_schema.new_claim(
+                builder=builder_id,
+                seq=0,  # caller assigns before signing
+                package=_pkg,
+                intended_version=str(_rec.get('intended_version', '')),
+                built_version=str(_rec.get('built_version', '')),
+                filename=_fn,
+                sha256=_sha,
+                size=0,  # filled in below by stat'ing pool path
+                snapshot=snapshot_pin,
+                built_at=str(_rec.get('finished') or _rec.get('started') or ''),
+                claim_state=_schema.CLAIM_STATE_PENDING,
+                republished_from=None,
+            ))
+    _pending.sort(key=lambda _c: (_c['package'], _c['filename']))
+    return _pending
+
+
+def fill_sizes_from_pool(claims: List[dict], pool_index: dict) -> None:
+    """In-place: populate `size` for each claim by stat'ing the pool
+    file.  Missing files get size=0; reconcile.audit_local catches
+    those as orphan warnings."""
+    for _c in claims:
+        _fn = _c.get('filename')
+        if not isinstance(_fn, str):
+            continue
+        _path = pool_index.get(_fn)
+        if _path is None:
+            continue
+        try:
+            _c['size'] = os.path.getsize(_path)
+        except OSError:
+            _c['size'] = 0
+
+
+# ───────────────────────── local publish ─────────────────────────
+
+
+def local_publish(
+    *,
+    builder_id: str,
+    config,
+    private_key_path: str,
+    public_key_path: str,
+    snapshot_pin: str,
+    read_build_record: Callable,
+    get_sha256: Callable,
+) -> Tuple[int, int]:
+    """Single-host publish: sign + append every pending claim to the
+    local jsonl, mark them published immediately (no remote round
+    trip).  Returns (created, skipped).
+
+    Used for offline development / first-builder bootstrap.  Does NOT
+    update or write coord-head — that's a remote_publish concern.
+
+    Pre-flight: if PUBLISH_HALT is set, refuse (operator must
+    `coord conflict resolve` first).
+    """
+    _halt = _reconcile.publish_halt_reason(config.dir_coord)
+    if _halt is not None:
+        logger.error(
+            f"coord.publish.local_publish: PUBLISH_HALT set ({_halt}); "
+            f"refusing to publish")
+        return (0, 0)
+    _buildlog = os.path.join(config.dir_log, 'build')
+    _pool = _reconcile.scan_pool_files(config.dir_repo)
+    _pending = generate_pending_claims(
+        builder_id=builder_id,
+        buildlog_dir=_buildlog,
+        claims_dir=config.dir_coord_claims,
+        public_key_path=public_key_path,
+        snapshot_pin=snapshot_pin,
+        read_build_record=read_build_record,
+    )
+    fill_sizes_from_pool(_pending, _pool)
+    if not _pending:
+        return (0, 0)
+    _created = 0
+    _skipped = 0
+    _seq = _store.max_seq(config.dir_coord_claims, builder_id)
+    for _claim in _pending:
+        _seq += 1
+        _claim['seq'] = _seq
+        # local_publish flips straight to published — no remote handoff
+        _claim['claim_state'] = _schema.CLAIM_STATE_PUBLISHED
+        try:
+            _store.append_claim(
+                config.dir_coord_claims, builder_id, _claim,
+                private_key_path,
+            )
+            _created += 1
+        except (OSError, ValueError) as _e:
+            logger.warning(
+                f"coord.publish.local_publish: append failed for "
+                f"{_claim.get('package')}/{_claim.get('filename')}: {_e}")
+            _skipped += 1
+    return (_created, _skipped)
+
+
+# ───────────────────────── remote publish ─────────────────────────
+
+
+def _read_inrelease_sha256_and_date(inrelease_path: str) -> Tuple[str, str]:
+    """Return (sha256_hex, 'Date: ...' value) of a local InRelease
+    file copy.  Empty strings on missing/unreadable.  Caller pulls
+    this BEFORE running publish so the new coord-head pins the
+    current apt-side metadata.
+    """
+    import hashlib
+    _sha = ''
+    _date = ''
+    try:
+        with open(inrelease_path, 'rb') as _fh:
+            _bytes = _fh.read()
+        _sha = hashlib.sha256(_bytes).hexdigest()
+        for _line in _bytes.decode('utf-8', errors='replace').splitlines():
+            if _line.startswith('Date:'):
+                _date = _line.split(':', 1)[1].strip()
+                break
+    except OSError:
+        pass
+    return _sha, _date
+
+
+def remote_publish(
+    *,
+    builder_id: str,
+    config,
+    private_key_path: str,
+    public_key_path: str,
+    snapshot_pin: str,
+    remote_coord_spec: str,
+    inrelease_local_path: str,
+    read_build_record: Callable,
+    get_sha256: Callable,
+    ssh_host: 'Optional[str]' = None,
+    flock_path: str = '/var/lock/repo-coord.lock',
+    flock_timeout: int = 60,
+    ssh_key: 'Optional[str]' = None,
+) -> Tuple[bool, str]:
+    """11-step publish transaction (see module docstring).  Returns
+    (ok, detail).  On failure detail explains the step that aborted.
+
+    `inrelease_local_path` MUST be a local copy of the same InRelease
+    that's published at the remote — typically rsync'd in the same
+    operator step as `repo publish ssh`.  Used to compute the
+    sha256 that the new coord-head pins.
+
+    `ssh_host` is the host portion of the remote spec; defaulted from
+    `remote_coord_spec` if not given (parses the `user@host:/path`
+    form).  Required for flock acquisition.
+    """
+    # Step 0 — pre-flight: PUBLISH_HALT check
+    _halt = _reconcile.publish_halt_reason(config.dir_coord)
+    if _halt is not None:
+        return False, f"PUBLISH_HALT set: {_halt}"
+
+    if ssh_host is None:
+        if ':' in remote_coord_spec and '@' in remote_coord_spec.split(':', 1)[0]:
+            ssh_host = remote_coord_spec.split(':', 1)[0]
+        else:
+            return False, (
+                f"remote_publish: ssh_host needed for flock; cannot derive "
+                f"from spec {remote_coord_spec!r} (give explicit user@host)")
+
+    # Step 1 — acquire remote flock
+    _lock_proc = _transport.remote_flock_acquire(
+        ssh_host=ssh_host, lock_path=flock_path,
+        timeout_sec=flock_timeout, ssh_key=ssh_key,
+    )
+    if _lock_proc is None:
+        return False, f"failed to spawn flock SSH for {ssh_host}"
+
+    try:
+        # Step 2 — fetch remote coord tree (under lock)
+        _fetched = config.dir_coord_fetched
+        _ok, _detail = _transport.pull_remote_coord(
+            local_dest=_fetched, remote_spec=remote_coord_spec,
+            ssh_key=ssh_key,
+        )
+        if not _ok:
+            return False, f"pull failed: {_detail}"
+
+        # Step 3 — verify coord-head, build keyring + claim view
+        import signing
+        _signing_home = signing.signing_home(config)
+        _head_dict = _head.read_coord_head(_fetched, _signing_home)
+        _keyring_dir = os.path.join(_fetched, 'keyring', 'builders')
+        _keyring = _identity.load_keyring(_keyring_dir)
+        _revoked = (_head_dict or {}).get('revoked_builders') or {}
+        _by_builder = _store.read_all_claims(
+            os.path.join(_fetched, 'claims'), _keyring, _revoked)
+
+        # Step 4 — hash conflict detection
+        _conf = _reconcile.detect_hash_conflicts(_by_builder)
+        _crit = [_f for _f in _conf if _f.severity == 'CRITICAL']
+        if _crit:
+            _reconcile.write_publish_halt(
+                config.dir_coord,
+                f"hash conflict during publish: {_crit[0].message}")
+            return False, (
+                f"hash conflict detected; PUBLISH_HALT written; "
+                f"first conflict: {_crit[0].message}")
+
+        # Step 5 — generate pending claims from this builder's
+        # build.json that aren't already in the remote view
+        _buildlog = os.path.join(config.dir_log, 'build')
+        _pool = _reconcile.scan_pool_files(config.dir_repo)
+        _remote_self_claims = _by_builder.get(builder_id, [])
+        _remote_known = {
+            _c.get('filename') for _c in _remote_self_claims
+            if isinstance(_c.get('filename'), str)
+            and _c.get('claim_state') != _schema.CLAIM_STATE_RETRACTED
+        }
+        _pending = generate_pending_claims(
+            builder_id=builder_id,
+            buildlog_dir=_buildlog,
+            claims_dir=config.dir_coord_claims,
+            public_key_path=public_key_path,
+            snapshot_pin=snapshot_pin,
+            read_build_record=read_build_record,
+        )
+        _pending = [_p for _p in _pending if _p['filename'] not in _remote_known]
+        fill_sizes_from_pool(_pending, _pool)
+
+        # Step 6 — sign + append every pending claim to the LOCAL jsonl
+        # (state=published, since the .deb is already in the remote
+        # pool per operator's prior `repo publish` step)
+        _seq = _store.max_seq(config.dir_coord_claims, builder_id)
+        _appended = 0
+        for _claim in _pending:
+            _seq += 1
+            _claim['seq'] = _seq
+            _claim['claim_state'] = _schema.CLAIM_STATE_PUBLISHED
+            try:
+                _store.append_claim(
+                    config.dir_coord_claims, builder_id, _claim,
+                    private_key_path,
+                )
+                _appended += 1
+            except (OSError, ValueError) as _e:
+                logger.warning(
+                    f"coord.publish: local append failed for "
+                    f"{_claim.get('package')}: {_e}")
+
+        # Step 7 — push the updated jsonl to the remote
+        _local_jsonl = _store.claims_path(
+            config.dir_coord_claims, builder_id)
+        if os.path.isfile(_local_jsonl):
+            _remote_jsonl = (
+                remote_coord_spec.rstrip('/') + f'/claims/{builder_id}.jsonl')
+            _ok, _detail = _transport.push_jsonl(
+                local_path=_local_jsonl,
+                remote_spec=_remote_jsonl,
+                ssh_key=ssh_key,
+            )
+            if not _ok:
+                return False, f"push jsonl failed: {_detail}"
+
+        # Step 8 — re-sign coord-head with our updated last_seq
+        _ir_sha, _ir_date = _read_inrelease_sha256_and_date(
+            inrelease_local_path)
+        if not _ir_sha:
+            return False, (
+                f"InRelease at {inrelease_local_path} missing/unreadable "
+                "— cannot pin coord-head")
+        _last_seqs = dict((_head_dict or {}).get('last_seqs') or {})
+        _last_seqs[builder_id] = _seq
+        # Snapshot pin tuple — read from local state if available;
+        # falls back to the snapshot_pin arg in degenerate cases (e.g.
+        # snapshot.state missing, fresh init).
+        try:
+            import utils as _utils
+            _state = _utils.read_snapshot_state(config)
+        except Exception:
+            _state = {}
+        _ss = _schema.new_snapshot_state(
+            base=str(_state.get('base') or snapshot_pin),
+            current=str(_state.get('current') or snapshot_pin),
+            published=str(_state.get('published') or snapshot_pin),
+            external=bool(_state.get('external', True)),
+        )
+        _new_head = _schema.new_coord_head(
+            inrelease_sha256=_ir_sha,
+            snapshot=_ss,
+            last_seqs=_last_seqs,
+            head_time=_utc_now(),
+            revoked_builders=(_head_dict or {}).get('revoked_builders'),
+        )
+        _ok = _head.write_coord_head(
+            config.dir_coord, _new_head, _signing_home)
+        if not _ok:
+            return False, "coord-head write/sign failed"
+
+        # Step 9 — push the new coord-head to the remote
+        _ok, _detail = _transport.push_coord_head(
+            local_coord_dir=config.dir_coord,
+            remote_dir_spec=remote_coord_spec.rstrip('/') + '/',
+            ssh_key=ssh_key,
+        )
+        if not _ok:
+            return False, f"push coord-head failed: {_detail}"
+
+        return True, (
+            f"published {_appended} claim(s); coord-head re-signed "
+            f"@ seq={_seq}")
+    finally:
+        _transport.remote_flock_release(_lock_proc)
+
+
+def _utc_now() -> str:
+    """Plain UTC now — bridge to utils._utc_now_iso without a circular
+    import (coord/ doesn't import utils to keep the dep direction
+    clean; this helper is local)."""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        '%Y-%m-%dT%H:%M:%SZ')
+
+
+# ───────────────────────── conflict resolution ─────────────────────────
+
+
+def retract_claim(
+    *,
+    builder_id: str,
+    config,
+    private_key_path: str,
+    public_key_path: str,
+    package: str,
+    target_seq: 'Optional[int]' = None,
+) -> Tuple[bool, str]:
+    """Write a signed retraction line for one of our own claims.
+
+    If `target_seq` is None, retract the highest live (non-retracted)
+    seq for `package` in our local jsonl.  Returns (ok, detail).
+    """
+    _claims = _store.read_builder_claims(
+        config.dir_coord_claims, builder_id, public_key_path)
+    _live = [
+        _c for _c in _claims
+        if _c.get('claim_state') != _schema.CLAIM_STATE_RETRACTED
+        and _c.get('package') == package
+    ]
+    if not _live:
+        return False, f"no live claim for {package!r} by {builder_id!r}"
+    if target_seq is None:
+        _live.sort(key=lambda _c: int(_c.get('seq', 0)))
+        _target = _live[-1]
+    else:
+        _matching = [_c for _c in _live if int(_c.get('seq', 0)) == target_seq]
+        if not _matching:
+            return False, f"no claim seq={target_seq} for {package!r}"
+        _target = _matching[0]
+    _next_seq = _store.max_seq(config.dir_coord_claims, builder_id) + 1
+    _retraction = _schema.new_retraction(
+        builder=builder_id,
+        seq=_next_seq,
+        package=package,
+        retracts_seq=int(_target.get('seq', 0)),
+        filename=str(_target.get('filename', '')),
+        snapshot=str(_target.get('snapshot', '')),
+        built_at=_utc_now(),
+    )
+    try:
+        _store.append_claim(
+            config.dir_coord_claims, builder_id, _retraction,
+            private_key_path)
+    except (OSError, ValueError) as _e:
+        return False, f"append retraction failed: {_e}"
+    return True, (
+        f"retracted {package}@seq={_target.get('seq')} "
+        f"with retraction seq={_next_seq}")

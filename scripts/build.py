@@ -1785,9 +1785,14 @@ class BuildSession:
         # Caller gates this on build_container_ready, so self.container
         # is non-None by the time we get here.
         assert self.container is not None
+        # COORD-01: track per-output destination so we can hash after
+        # downloads complete and pin the digests into the tunneled
+        # terminal record.
+        _output_paths: 'dict[str, str]' = {}
         for _filename in _files:
             _dst_dir = self.config.deb_dest_for_filename(_filename, _comp)
             _dest = os.path.join(_dst_dir, _filename)
+            _output_paths[_filename] = _dest
 
             # Wipe ANY same-binary .deb in the destination that doesn't match
             # the current expected upstream filename.  A prior run with the
@@ -1835,6 +1840,16 @@ class BuildSession:
         # otherwise.  built_version == intended_version for tunneled
         # (no NMU strip; the file we copied IS the upstream binary).
         # Replaces the prior <pkg>.result writer.
+        # COORD-01: hash each downloaded .deb (or already-present .deb
+        # we skipped re-downloading) for the coord claim layer.  Skip
+        # files that didn't land on disk — the audit will surface the
+        # missing output as a record/pool mismatch on its own.
+        _output_hashes: 'dict[str, str]' = {}
+        if _success:
+            for _fn, _dst in _output_paths.items():
+                _h = utils.get_sha256(_dst)
+                if _h:
+                    _output_hashes[_fn] = _h
         try:
             utils.update_build_record(
                 self.container.buildlog_path, src_pkg.package,
@@ -1844,6 +1859,7 @@ class BuildSession:
                 elapsed_seconds=round(_time.monotonic() - _t_tunnel_start, 3),
                 output_count=len(_files),
                 outputs=sorted(_files),
+                output_hashes=_output_hashes,
             )
         except (OSError, FileNotFoundError) as _e:
             logger.warning(f"tunnel {src_pkg.package}: build-record terminal: {_e}")
@@ -4141,6 +4157,605 @@ class BuildSession:
         return self._group_help('repo external', _table, action)
 
     # ─────────────────────────────────────────────────────────────────────
+    # COORD-01 — multi-builder repo coordination (sidecar claims layer)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def cmd_coord(self, action: str = '', *args):
+        """Multi-builder coordination — sidecar claim record management.
+
+        Each builder owns an Ed25519 keypair (identity), an append-only
+        JSONL of signed claims for every .deb it ships, and views all
+        registered builders' claims through a 3-way audit (local pool ↔
+        own claims; local build.json ↔ claims).
+
+        Subcommands:
+          init <builder-id>  — generate Ed25519 keypair under coord/
+                               identity/, persist builder-id to
+                               coord/BUILDER_ID; print the public key
+                               for the operator to register on the
+                               repo host (out-of-band).
+          builders           — list registered builders (local identity
+                               + everyone in coord/fetched/keyring/).
+          audit local        — pool ↔ this builder's claims.
+          audit cross        — build.json ↔ this builder's claims.
+          status             — report current builder-id + claim count
+                               + last seq + PUBLISH_HALT presence.
+
+        Sync/publish (P2/P3) land in later commits.
+        """
+        if action == 'init':
+            return self.cmd_coord_init(*args)
+        if action == 'builders':
+            return self.cmd_coord_builders(*args)
+        if action == 'audit':
+            return self.cmd_coord_audit(*args)
+        if action == 'status':
+            return self.cmd_coord_status(*args)
+        if action == 'sync':
+            return self.cmd_coord_sync(*args)
+        if action == 'publish':
+            return self.cmd_coord_publish(*args)
+        if action == 'conflict':
+            return self.cmd_coord_conflict(*args)
+        _table = {
+            'init <id>':                  'generate Ed25519 claim key + persist builder-id',
+            'builders':                   'list registered builders (local + remote keyring)',
+            'audit local':                'pool ↔ this-builder claims',
+            'audit cross':                'build.json ↔ this-builder claims',
+            'audit repo':                 'remote pool + keyring (P2 fetch-and-verify)',
+            'sync pull <spec>':           'rsync remote repo-coord/ to coord/fetched/ + verify',
+            'publish local':              'sign pending claims into local jsonl (no remote)',
+            'publish remote <spec> <IR>': 'full transaction: flock + sync + sign + push (P3)',
+            'conflict resolve <pkg>':     'retract our claim for <pkg>; clear PUBLISH_HALT',
+            'status':                     'show builder-id, claim count, last seq, halt state',
+        }
+        return self._group_help('coord', _table, action)
+
+    def _coord_builder_id(self) -> 'Optional[str]':
+        """Read the persisted builder-id from coord/BUILDER_ID.  Returns
+        None if not yet initialized.  Trimmed of trailing whitespace."""
+        _path = os.path.join(self.config.dir_coord, 'BUILDER_ID')
+        try:
+            with open(_path, 'r', encoding='utf-8') as _fh:
+                _bid = _fh.read().strip()
+        except (OSError, FileNotFoundError):
+            return None
+        return _bid or None
+
+    def cmd_coord_init(self, *args):
+        """Initialize this builder's coord identity.
+
+        Usage: coord init <builder-id>
+
+        Builder-id is operator-chosen, ASCII (no spaces, slashes, '..').
+        Constructs an Ed25519 keypair at:
+          coord/identity/<id>.pem  (private, mode 0600)
+          coord/identity/<id>.pub  (public, mode 0644)
+
+        Refuses to clobber an existing keypair — rotate via
+        `coord init <id> force` (P4-deferred).  Writes builder-id to
+        coord/BUILDER_ID so future commands resolve it automatically.
+
+        Prints the public key path so the operator can scp it to the
+        repo host's repo-coord/keyring/builders/ directory.
+        """
+        import coord.identity as _id
+        if not args:
+            console.print("Usage: coord init <builder-id>",
+                          tui.COLOR_ERROR)
+            return False
+        _bid = args[0]
+        if (not _bid or '/' in _bid or '..' in _bid
+                or _bid != _bid.strip()
+                or any(_c.isspace() for _c in _bid)):
+            console.print(
+                f"coord init: invalid builder-id {_bid!r} — "
+                "use ASCII without spaces, slashes, '..'",
+                tui.COLOR_ERROR)
+            return False
+        _existing = self._coord_builder_id()
+        if _existing and _existing != _bid:
+            console.print(
+                f"coord init: BUILDER_ID already set to {_existing!r}; "
+                f"refusing to switch to {_bid!r}.  Delete coord/BUILDER_ID "
+                "explicitly if rotation is intended.",
+                tui.COLOR_ERROR)
+            return False
+        try:
+            _priv, _pub = _id.generate_keypair(
+                self.config.dir_coord_identity, _bid)
+        except OSError as _e:
+            console.print(f"coord init: keypair generation failed: {_e}",
+                          tui.COLOR_ERROR)
+            return False
+        _bid_path = os.path.join(self.config.dir_coord, 'BUILDER_ID')
+        try:
+            utils._atomic_write_bytes(
+                _bid_path, (_bid + '\n').encode('utf-8'))
+        except OSError as _e:
+            console.print(f"coord init: persist BUILDER_ID: {_e}",
+                          tui.COLOR_ERROR)
+            return False
+        console.print(
+            f"coord init: builder-id = {_bid}", tui.COLOR_HIGHLIGHT)
+        console.print(f"  private:  {_priv}")
+        console.print(f"  public:   {_pub}")
+        console.print(
+            "\nNext step: register the public key on the repo host:")
+        console.print(
+            f"  scp {_pub} <repo-host>:repo-coord/keyring/builders/{_bid}.pub")
+        return True
+
+    def cmd_coord_builders(self, *args):
+        """List registered builders.
+
+        Usage: coord builders
+
+        Shows:
+          - the local builder (per coord/BUILDER_ID) with its pubkey path
+          - every <id>.pub in coord/fetched/keyring/builders/ (P2 populated)
+        """
+        del args
+        import coord.identity as _id
+        _self = self._coord_builder_id()
+        if _self:
+            console.print(f"local builder: {_self}", tui.COLOR_HIGHLIGHT)
+            _pub = _id.builder_pub_path(self.config.dir_coord_identity, _self)
+            if os.path.isfile(_pub):
+                console.print(f"  pubkey: {_pub}")
+            else:
+                console.print(
+                    f"  WARNING: pubkey missing at {_pub} — re-run "
+                    "coord init",
+                    tui.COLOR_WARNING)
+        else:
+            console.print(
+                "local builder: <not initialized> — run `coord init <id>`",
+                tui.COLOR_WARNING)
+        _keyring_dir = os.path.join(
+            self.config.dir_coord_fetched, 'keyring', 'builders')
+        _ring = _id.load_keyring(_keyring_dir)
+        if _ring:
+            console.print(
+                f"\nregistered (from {_keyring_dir}):", tui.COLOR_HIGHLIGHT)
+            for _bid, _path in sorted(_ring.items()):
+                _marker = ' (self)' if _bid == _self else ''
+                console.print(f"  {_bid}{_marker}  {_path}")
+        else:
+            console.print(
+                f"\nno registered remote builders at {_keyring_dir}")
+        return True
+
+    def cmd_coord_audit(self, mode: str = '', *args):
+        """Run a coord audit.
+
+        Usage:
+          coord audit local   — pool ↔ own claims (P1)
+          coord audit cross   — build.json ↔ own claims (P1)
+          coord audit repo    — remote pool + keyring (P3, not yet implemented)
+        """
+        del args
+        import coord.identity as _id
+        import coord.reconcile as _reconcile
+        _self = self._coord_builder_id()
+        if not _self:
+            console.print(
+                "coord audit: builder not initialized — run `coord init <id>`",
+                tui.COLOR_ERROR)
+            return False
+        _pub = _id.builder_pub_path(self.config.dir_coord_identity, _self)
+        if not os.path.isfile(_pub):
+            console.print(
+                f"coord audit: pubkey missing at {_pub} — re-run coord init",
+                tui.COLOR_ERROR)
+            return False
+        if mode == 'local':
+            _report = _reconcile.audit_local(
+                repo_root=self.config.dir_repo,
+                claims_dir=self.config.dir_coord_claims,
+                builder_id=_self,
+                public_key_path=_pub,
+                get_sha256=utils.get_sha256,
+            )
+        elif mode == 'cross':
+            _buildlog = (
+                self.container.buildlog_path
+                if self.container is not None
+                else os.path.join(self.config.dir_log, 'build'))
+            _report = _reconcile.audit_cross(
+                buildlog_dir=_buildlog,
+                claims_dir=self.config.dir_coord_claims,
+                builder_id=_self,
+                public_key_path=_pub,
+                read_build_record=utils.read_build_record,
+            )
+        elif mode == 'repo':
+            import coord.head as _head_mod
+            import coord.store as _store
+            import signing as _signing
+            _fetched = self.config.dir_coord_fetched
+            _signing_home = _signing.signing_home(self.config)
+            _head = _head_mod.read_coord_head(_fetched, _signing_home)
+            _keyring_dir = os.path.join(_fetched, 'keyring', 'builders')
+            _keyring = _id.load_keyring(_keyring_dir)
+            _revoked = (_head or {}).get('revoked_builders') or {}
+            _by_builder = _store.read_all_claims(
+                os.path.join(_fetched, 'claims'), _keyring, _revoked)
+            _report = _reconcile.audit_repo(
+                fetched_dir=_fetched, by_builder=_by_builder,
+                keyring=_keyring, head=_head,
+            )
+            # If a hash conflict was detected, write the halt sentinel.
+            if any(_f.kind == 'hash_conflict' and _f.severity == 'CRITICAL'
+                   for _f in _report.findings):
+                _reconcile.write_publish_halt(
+                    self.config.dir_coord,
+                    "hash conflict detected by coord audit repo")
+        else:
+            _table = {
+                'local': 'pool ↔ this-builder claims',
+                'cross': 'build.json ↔ this-builder claims',
+                'repo':  'remote pool + keyring (P3 — not implemented)',
+            }
+            return self._group_help('coord audit', _table, mode)
+        # Print findings grouped by severity
+        _by_sev = {'CRITICAL': [], 'WARN': [], 'INFO': []}
+        for _f in _report.findings:
+            _by_sev.setdefault(_f.severity, []).append(_f)
+        console.print(
+            f"coord audit {mode}: "
+            f"CRITICAL={_report.critical} "
+            f"WARN={_report.warn} "
+            f"INFO={_report.info}",
+            tui.COLOR_HIGHLIGHT if _report.critical == 0 else tui.COLOR_ERROR)
+        for _sev in ('CRITICAL', 'WARN', 'INFO'):
+            for _f in _by_sev[_sev]:
+                _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                          else tui.COLOR_WARNING if _sev == 'WARN'
+                          else tui.COLOR_NORMAL)
+                _tag = f"[{_sev}] {_f.kind}"
+                if _f.package:
+                    _tag += f" {_f.package}"
+                console.print(f"  {_tag}: {_f.message}", _color)
+        return _report.critical == 0
+
+    def cmd_coord_sync(self, mode: str = '', *args):
+        """coord sync — fetch/push the remote coord tree.
+
+        Usage:
+          coord sync pull <remote-spec>   (P2)  rsync remote → coord/fetched/
+                                                + tier-1 verify + per-claim
+                                                signature verify + delta report
+          coord sync push <remote-spec>   (P3)  rsync local jsonl + coord-head
+                                                to remote (under remote flock).
+                                                Lands with cmd_coord_publish.
+
+        Remote-spec is rsync-native: `user@host:/srv/repo-coord` or
+        `/local/path/to/repo-coord`.  No trailing slash needed.
+        """
+        if mode == 'pull':
+            return self.cmd_coord_sync_pull(*args)
+        if mode == 'push':
+            console.print(
+                "coord sync push: integrated into `coord publish` (P3)",
+                tui.COLOR_WARNING)
+            return False
+        _table = {
+            'pull <spec>': 'rsync remote repo-coord/ to coord/fetched/ + verify',
+            'push <spec>': 'integrated into `coord publish` (P3)',
+        }
+        return self._group_help('coord sync', _table, mode)
+
+    def cmd_coord_sync_pull(self, *args):
+        """coord sync pull <remote-spec> — fetch + verify.
+
+        Steps:
+          1. rsync <remote-spec>/  →  coord/fetched/
+          2. read + verify coord-head.json.sig (tier-1 GPG key)
+          3. load keyring/builders/*.pub
+          4. fold per-builder jsonls; verify each line's Ed25519 sig
+          5. report: keyring count, claims by builder, conflicts, halt
+        """
+        if not args:
+            console.print(
+                "Usage: coord sync pull <remote-spec>", tui.COLOR_ERROR)
+            return False
+        _remote = args[0]
+        import coord.transport as _transport
+        import coord.head as _head
+        import coord.identity as _id
+        import coord.store as _store
+        import coord.reconcile as _reconcile
+        import signing as _signing
+        _local = self.config.dir_coord_fetched
+        console.print(f"coord sync pull: rsync {_remote}/ → {_local}/")
+        _ok, _detail = _transport.pull_remote_coord(
+            local_dest=_local, remote_spec=_remote)
+        if not _ok:
+            console.print(
+                f"coord sync pull: rsync failed: {_detail}", tui.COLOR_ERROR)
+            return False
+        # tier-1 verify of coord-head
+        _signing_home = _signing.signing_home(self.config)
+        _head_dict = _head.read_coord_head(_local, _signing_home)
+        if _head_dict is None:
+            console.print(
+                "coord sync pull: coord-head.json verify FAILED or absent "
+                "— remote tree is untrusted; refusing to proceed",
+                tui.COLOR_ERROR)
+            return False
+        console.print(
+            f"  coord-head OK: head_time={_head_dict.get('head_time')} "
+            f"inrelease_sha256={(_head_dict.get('inrelease_sha256') or '')[:12]}",
+            tui.COLOR_HIGHLIGHT)
+        # keyring + per-line verify
+        _keyring_dir = os.path.join(_local, 'keyring', 'builders')
+        _keyring = _id.load_keyring(_keyring_dir)
+        console.print(f"  keyring: {len(_keyring)} registered builder(s)")
+        _claims_dir = os.path.join(_local, 'claims')
+        _revoked = _head_dict.get('revoked_builders') or {}
+        _by_builder = _store.read_all_claims(
+            _claims_dir, _keyring, _revoked)
+        _total = sum(len(_v) for _v in _by_builder.values())
+        console.print(
+            f"  claims verified: {_total} across "
+            f"{len(_by_builder)} builder(s)")
+        for _bid, _claims in sorted(_by_builder.items()):
+            _live = sum(1 for _c in _claims
+                        if _c.get('claim_state') != 'retracted')
+            console.print(f"    {_bid}: {len(_claims)} total, {_live} live")
+        # hash-conflict scan (the BLOCK trigger)
+        _conf = _reconcile.detect_hash_conflicts(_by_builder)
+        _crit = [_f for _f in _conf if _f.severity == 'CRITICAL']
+        if _crit:
+            for _f in _crit:
+                console.print(f"  CRITICAL: {_f.message}", tui.COLOR_ERROR)
+            _reconcile.write_publish_halt(
+                self.config.dir_coord,
+                f"hash conflict at sync pull from {_remote}")
+            console.print(
+                f"  PUBLISH_HALT written to "
+                f"{os.path.join(self.config.dir_coord, 'PUBLISH_HALT')}",
+                tui.COLOR_ERROR)
+            return False
+        _info = [_f for _f in _conf if _f.severity == 'INFO']
+        if _info:
+            console.print(
+                f"  {len(_info)} reproducible duplicate(s) "
+                "(multi-builder, same hash)")
+        # delta vs local jsonl
+        _self = self._coord_builder_id()
+        if _self:
+            _local_seq = _store.max_seq(self.config.dir_coord_claims, _self)
+            _remote_seqs = _head_dict.get('last_seqs') or {}
+            _remote_self_seq = int(_remote_seqs.get(_self, 0))
+            if _remote_self_seq > _local_seq:
+                console.print(
+                    f"  WARN: remote coord-head reports {_self}@"
+                    f"seq={_remote_self_seq} but local last seq is "
+                    f"{_local_seq} — local jsonl is behind remote",
+                    tui.COLOR_WARNING)
+            elif _local_seq > _remote_self_seq:
+                console.print(
+                    f"  local {_self}@seq={_local_seq} is ahead of remote "
+                    f"head ({_remote_self_seq}) — push pending")
+            else:
+                console.print(f"  local {_self}@seq={_local_seq} = remote")
+        return True
+
+    def _coord_self_keys(self) -> 'Optional[tuple[str, str, str]]':
+        """(builder_id, private_path, public_path) for this builder, or
+        None if not yet initialized.  All three present + readable on
+        success; one missing → None + warning."""
+        import coord.identity as _id
+        _bid = self._coord_builder_id()
+        if not _bid:
+            console.print(
+                "coord: builder not initialized — run `coord init <id>`",
+                tui.COLOR_ERROR)
+            return None
+        _priv = _id.builder_priv_path(self.config.dir_coord_identity, _bid)
+        _pub = _id.builder_pub_path(self.config.dir_coord_identity, _bid)
+        if not (os.path.isfile(_priv) and os.path.isfile(_pub)):
+            console.print(
+                f"coord: keypair missing at {_priv} / {_pub} — re-run coord init",
+                tui.COLOR_ERROR)
+            return None
+        return _bid, _priv, _pub
+
+    def cmd_coord_publish(self, mode: str = '', *args):
+        """coord publish — sign + push the claim layer.
+
+        Usage:
+          coord publish local
+              Sign pending claims (build.json phase=done not yet
+              in jsonl) and append them to coord/claims/<id>.jsonl
+              with state=published.  No remote IO.  For dev /
+              single-host.
+
+          coord publish remote <coord-spec> <inrelease-path> [--ssh-key path]
+              Full transaction: acquire remote flock, fetch remote
+              coord tree, hash-conflict scan, sign + append pending
+              claims, push jsonl, re-sign coord-head, push coord-head,
+              release lock.  Pre-flight aborts if PUBLISH_HALT is
+              set; resolve via `coord conflict resolve`.
+
+              <coord-spec>      rsync target for remote repo-coord/
+                                (e.g. user@host:/srv/repo-coord)
+              <inrelease-path>  local copy of the InRelease whose sha
+                                the new coord-head pins
+              --ssh-key PATH    optional SSH key for rsync + flock
+        """
+        import coord.publish as _publish
+        _keys = self._coord_self_keys()
+        if _keys is None:
+            return False
+        _bid, _priv, _pub = _keys
+        _snapshot = utils.read_snapshot_state(self.config).get(
+            'current', '') or ''
+        if mode == 'local':
+            _created, _skipped = _publish.local_publish(
+                builder_id=_bid, config=self.config,
+                private_key_path=_priv, public_key_path=_pub,
+                snapshot_pin=_snapshot,
+                read_build_record=utils.read_build_record,
+                get_sha256=utils.get_sha256,
+            )
+            console.print(
+                f"coord publish local: created={_created} skipped={_skipped}",
+                tui.COLOR_HIGHLIGHT if _skipped == 0 else tui.COLOR_WARNING)
+            return _skipped == 0
+        if mode == 'remote':
+            if len(args) < 2:
+                console.print(
+                    "Usage: coord publish remote <coord-spec> <inrelease-path>"
+                    " [--ssh-key path]",
+                    tui.COLOR_ERROR)
+                return False
+            _spec = args[0]
+            _inrelease = args[1]
+            _ssh_key = None
+            _i = 2
+            while _i < len(args):
+                if args[_i] == '--ssh-key' and _i + 1 < len(args):
+                    _ssh_key = args[_i + 1]
+                    _i += 2
+                else:
+                    _i += 1
+            _ok, _detail = _publish.remote_publish(
+                builder_id=_bid, config=self.config,
+                private_key_path=_priv, public_key_path=_pub,
+                snapshot_pin=_snapshot,
+                remote_coord_spec=_spec,
+                inrelease_local_path=_inrelease,
+                read_build_record=utils.read_build_record,
+                get_sha256=utils.get_sha256,
+                ssh_key=_ssh_key,
+            )
+            console.print(
+                f"coord publish remote: {_detail}",
+                tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+            return _ok
+        _table = {
+            'local':                 'sign pending claims into local jsonl',
+            'remote <spec> <IR>':    'full transaction (flock + sync + push)',
+        }
+        return self._group_help('coord publish', _table, mode)
+
+    def cmd_coord_conflict(self, action: str = '', *args):
+        """coord conflict — operator-only conflict resolution.
+
+        Usage:
+          coord conflict resolve <pkg> [--keep <builder-id>]
+              Retract our local claim for <pkg> if --keep names a
+              different builder (we lose).  If --keep names us (or is
+              omitted), no retraction; only PUBLISH_HALT is cleared.
+              The kept builder's claim survives; the loser's claim
+              is replaced with a signed retraction line.
+        """
+        if action == 'resolve':
+            return self.cmd_coord_conflict_resolve(*args)
+        _table = {
+            'resolve <pkg>': 'retract our claim for pkg; clear PUBLISH_HALT',
+        }
+        return self._group_help('coord conflict', _table, action)
+
+    def cmd_coord_conflict_resolve(self, *args):
+        """Operator-driven: retract our claim for `pkg` if --keep
+        identifies a different builder; otherwise just clear the halt
+        sentinel.
+
+        Usage: coord conflict resolve <pkg> [--keep <builder-id>]
+        """
+        import coord.publish as _publish
+        if not args:
+            console.print(
+                "Usage: coord conflict resolve <pkg> [--keep <builder-id>]",
+                tui.COLOR_ERROR)
+            return False
+        _pkg = args[0]
+        _keep = None
+        _i = 1
+        while _i < len(args):
+            if args[_i] == '--keep' and _i + 1 < len(args):
+                _keep = args[_i + 1]
+                _i += 2
+            else:
+                _i += 1
+        _keys = self._coord_self_keys()
+        if _keys is None:
+            return False
+        _bid, _priv, _pub = _keys
+        if _keep is not None and _keep != _bid:
+            _ok, _detail = _publish.retract_claim(
+                builder_id=_bid, config=self.config,
+                private_key_path=_priv, public_key_path=_pub,
+                package=_pkg, target_seq=None,
+            )
+            console.print(
+                f"coord conflict resolve: {_detail}",
+                tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+            if not _ok:
+                return False
+        else:
+            console.print(
+                f"coord conflict resolve: keep={_keep or _bid} (us); "
+                "no retraction needed")
+        # Clear PUBLISH_HALT — operator has triaged
+        _halt_path = os.path.join(
+            self.config.dir_coord,
+            'PUBLISH_HALT',
+        )
+        try:
+            os.unlink(_halt_path)
+            console.print(f"  PUBLISH_HALT cleared at {_halt_path}",
+                          tui.COLOR_HIGHLIGHT)
+        except FileNotFoundError:
+            console.print("  PUBLISH_HALT was already clear")
+        except OSError as _e:
+            console.print(f"  WARN: could not remove {_halt_path}: {_e}",
+                          tui.COLOR_WARNING)
+        return True
+
+    def cmd_coord_status(self, *args):
+        """Print current coord state — builder-id, claim count, last
+        seq, PUBLISH_HALT presence.
+
+        Usage: coord status
+        """
+        del args
+        import coord.reconcile as _reconcile
+        import coord.store as _store
+        _self = self._coord_builder_id()
+        if not _self:
+            console.print(
+                "coord status: <uninitialized> — run `coord init <id>`",
+                tui.COLOR_WARNING)
+            return False
+        console.print(f"coord builder-id: {_self}", tui.COLOR_HIGHLIGHT)
+        _claims_path = _store.claims_path(
+            self.config.dir_coord_claims, _self)
+        if os.path.isfile(_claims_path):
+            try:
+                with open(_claims_path, 'rb') as _fh:
+                    _lines = sum(1 for _ in _fh)
+            except OSError:
+                _lines = 0
+            _seq = _store.max_seq(self.config.dir_coord_claims, _self)
+            console.print(f"  claims jsonl: {_claims_path}")
+            console.print(f"  lines: {_lines}    last seq: {_seq}")
+        else:
+            console.print(
+                f"  claims jsonl: <none at {_claims_path}>")
+        _halt = _reconcile.publish_halt_reason(self.config.dir_coord)
+        if _halt is not None:
+            console.print(
+                f"  PUBLISH_HALT: {_halt}", tui.COLOR_ERROR)
+        else:
+            console.print("  PUBLISH_HALT: clear")
+        return True
+
+    # ─────────────────────────────────────────────────────────────────────
     # UPD-01 — snapshot management + the refresh orchestrator
     # ─────────────────────────────────────────────────────────────────────
 
@@ -4662,15 +5277,45 @@ class BuildSession:
                     drift).  Dry-run by default; pass `force` to delete.
         """
         _table = {
-            'strip':   'NMU-suffix backfill across repo/',
-            'cleanup': 'delete obsolete .debs/.udebs (dry-run by default; '
-                       'pass `force` to actually delete)',
+            'strip':           'NMU-suffix backfill across repo/',
+            'cleanup':         'delete obsolete .debs/.udebs (dry-run by default; '
+                               'pass `force` to actually delete)',
+            'backfill-hashes': 'COORD-01: walk build.json records, hash any '
+                               'emitted .deb/.udeb missing output_hashes, bump '
+                               'schema_version v1→v2.  Idempotent.',
         }
         if action == 'strip':
             return self.cmd_strip_repo(*args)
         if action == 'cleanup':
             return self.cmd_package_cleanup(*args)
+        if action == 'backfill-hashes':
+            return self.cmd_repo_backfill_hashes(*args)
         return self._group_help('repo repair', _table, action)
+
+    def cmd_repo_backfill_hashes(self, *args):
+        """COORD-01 one-shot: walk cache/log/build/*.build.json and add
+        output_hashes (SHA-256 over each emitted .deb/.udeb basename
+        located under repo/) for records still on schema v1.
+
+        Usage: repo repair backfill-hashes
+
+        Idempotent — already-v2 records with hashes for every output
+        are skipped.  Files referenced by an output but absent from
+        repo/ are reported in stats; the record's schema is still
+        bumped so a future read doesn't keep retrying.
+        """
+        del args
+        _stats = utils.backfill_output_hashes(
+            self.container.buildlog_path
+            if self.container is not None
+            else os.path.join(self.config.dir_log, 'build'),
+            self.config.dir_repo,
+        )
+        console.print(
+            f"backfill-hashes: scanned={_stats['scanned']} "
+            f"upgraded={_stats['upgraded']} skipped={_stats['skipped']} "
+            f"missing_files={_stats['missing_files']}")
+        return True
 
     def cmd_strip_repo(self, *args):
         """One-time backfill: strip NMU suffix from every .deb/.udeb
@@ -8728,6 +9373,7 @@ def main(banner: str) -> None:
     tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
+    tui.register_command('coord',     session.cmd_coord,     'Coord:      coord <init|builders|audit|status>')
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')

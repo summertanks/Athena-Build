@@ -950,9 +950,21 @@ class BuildContainer:
                 # `feedback_strip_nmu_at_build`).  intended_version vs
                 # built_version drift becomes visible at this point.
                 _built_version = utils.strip_nmu_suffix(str(src_pkg.version))
+                # COORD-01: hash every output AFTER normalize.  Normalize
+                # rewrites the .deb in place (NMU strip + asg-stamp), so
+                # the published bytes — and thus the digest the coord
+                # claim record pins — are only stable here.  use_cache=
+                # False because the file was just written; we don't want
+                # a stale (size, mtime) sidecar to lie about content.
+                _output_hashes = {}
+                for _p in _emitted:
+                    _h = utils.get_sha256(_p, use_cache=False)
+                    if _h:
+                        _output_hashes[os.path.basename(_p)] = _h
                 self._record_phase(
                     src_pkg.package, phase='done',
                     built_version=_built_version,
+                    output_hashes=_output_hashes,
                 )
 
             return _build_result

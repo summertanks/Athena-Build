@@ -21413,27 +21413,33 @@ def _utils_module():
     return _u
 
 
-def test_build_record_schema_v1_field_set():
-    """Pin the v1 field set — adding a field is a schema bump that must
+def test_build_record_schema_v2_field_set():
+    """Pin the v2 field set — adding a field is a schema bump that must
     be reflected in the version constant; removing one breaks OBS-02
-    history readers.  This test is the contract."""
+    history readers.  This test is the contract.
+
+    v1→v2 (COORD-01): added `output_hashes` ({filename: sha256_hex}) so
+    the coord-layer claim records have a stable per-binary digest to
+    pin without re-hashing every read."""
     _u = _utils_module()
     _rec = _u.new_build_record(
         package='libwmf', intended_version='0.2.12-5.1',
         patch_set_hash='abc123', started='2026-06-02T14:00:00Z',
     )
-    assert _u.BUILD_RECORD_SCHEMA_VERSION == 1
-    assert _rec['schema_version'] == 1
+    assert _u.BUILD_RECORD_SCHEMA_VERSION == 2
+    assert _rec['schema_version'] == 2
     _required = {
         'schema_version', 'package', 'intended_version', 'built_version',
         'patch_set_hash', 'phase', 'status', 'started', 'finished',
         'elapsed_seconds', 'exit_code', 'oom_killed', 'output_count', 'outputs',
+        'output_hashes',
     }
     assert set(_rec.keys()) == _required, (
-        f"v1 schema drift: {set(_rec.keys()) ^ _required}")
+        f"v2 schema drift: {set(_rec.keys()) ^ _required}")
     assert _rec['phase'] == 'entry'
     assert _rec['status'] is None
     assert _rec['outputs'] == []
+    assert _rec['output_hashes'] == {}
 
 
 def test_build_record_hmac_round_trip():
@@ -21559,11 +21565,12 @@ def test_classify_build_record_full_matrix():
 
     def _r(phase, status=None):
         return {
-            'schema_version': 1, 'package': 'x', 'intended_version': '1',
+            'schema_version': 2, 'package': 'x', 'intended_version': '1',
             'built_version': None, 'patch_set_hash': '', 'phase': phase,
             'status': status, 'started': '', 'finished': None,
             'elapsed_seconds': None, 'exit_code': None, 'oom_killed': False,
-            'output_count': 0, 'outputs': [], 'sig': 'x',
+            'output_count': 0, 'outputs': [], 'output_hashes': {},
+            'sig': 'x',
         }
     # Terminal phases
     assert _u.classify_build_record(_r('done', 'PASS')) == 'ok'
@@ -22000,9 +22007,630 @@ def test_build_record_canonical_json_stable_across_key_order():
     produce identical signatures (canonical-JSON serialization)."""
     _u = _utils_module()
     _key = b'k' * 32
-    _a = {'package': 'x', 'phase': 'entry', 'schema_version': 1}
-    _b = {'schema_version': 1, 'phase': 'entry', 'package': 'x'}
+    _a = {'package': 'x', 'phase': 'entry', 'schema_version': 2}
+    _b = {'schema_version': 2, 'phase': 'entry', 'package': 'x'}
     assert _u._sign_record(_a, _key)['sig'] == _u._sign_record(_b, _key)['sig']
+
+
+def test_build_record_output_hashes_round_trip():
+    """COORD-01: output_hashes populated on phase=done survive read +
+    HMAC verify intact; populated from update_build_record kwargs."""
+    _u = _utils_module()
+    with tempfile.TemporaryDirectory() as _td:
+        _u.write_build_record(_td, _u.new_build_record(
+            package='libwmf', intended_version='0.2.12-5.1',
+            patch_set_hash='abc', started='2026-06-02T14:00:00Z',
+        ))
+        _hashes = {
+            'libwmf_0.2.12-5.1_amd64.deb': 'a' * 64,
+            'libwmf-dev_0.2.12-5.1_amd64.deb': 'b' * 64,
+        }
+        _new = _u.update_build_record(
+            _td, 'libwmf', phase='done', built_version='0.2.12-5.1',
+            finished='2026-06-02T14:02:30Z', elapsed_seconds=150.5,
+            exit_code=0, output_count=2,
+            outputs=sorted(_hashes.keys()),
+            output_hashes=_hashes,
+        )
+        assert _new['output_hashes'] == _hashes
+        _reloaded = _u.read_build_record(_td, 'libwmf')
+        assert _reloaded is not None
+        assert _reloaded['output_hashes'] == _hashes
+
+
+def test_build_record_v1_legacy_record_reads_tolerantly():
+    """A v1 record on disk (written before COORD-01 added output_hashes)
+    must still load.  HMAC verifies on the v1 canonical bytes (which
+    have no output_hashes field).  Consumers treat absent
+    output_hashes as {} — the backfill helper migrates them on demand."""
+    _u = _utils_module()
+    import hmac as _hmac
+    import hashlib as _hashlib
+    import json as _json
+    with tempfile.TemporaryDirectory() as _td:
+        # Hand-write a v1 record (no output_hashes field).
+        _legacy = {
+            'schema_version': 1,
+            'package': 'legacy',
+            'intended_version': '1.0-1',
+            'built_version': '1.0-1',
+            'patch_set_hash': 'h',
+            'phase': 'done',
+            'status': 'PASS',
+            'started': '2026-06-02T14:00:00Z',
+            'finished': '2026-06-02T14:01:00Z',
+            'elapsed_seconds': 60.0,
+            'exit_code': 0,
+            'oom_killed': False,
+            'output_count': 1,
+            'outputs': ['legacy_1.0-1_amd64.deb'],
+        }
+        _key = _u._load_or_create_hmac_key(_td)
+        _signed = _u._sign_record(_legacy, _key)
+        _path = _u._build_record_path(_td, 'legacy')
+        with open(_path, 'wb') as _fh:
+            _fh.write(_json.dumps(
+                _signed, sort_keys=True, indent=2).encode('utf-8'))
+        # Reader accepts it.
+        _loaded = _u.read_build_record(_td, 'legacy')
+        assert _loaded is not None
+        assert _loaded['schema_version'] == 1
+        assert 'output_hashes' not in _loaded
+        # Classifier still maps correctly.
+        assert _u.classify_build_record(_loaded) == 'ok'
+
+
+def test_backfill_output_hashes_upgrades_v1_record():
+    """backfill_output_hashes walks build.json files, locates outputs
+    under repo_root, hashes them, sets output_hashes, bumps schema_version
+    to 2, and re-signs."""
+    _u = _utils_module()
+    import json as _json
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        _repo = os.path.join(_td, 'repo')
+        _pool = os.path.join(_repo, 'dists/thor/main/binary-amd64')
+        os.makedirs(_log)
+        os.makedirs(_pool)
+        # Plant a real .deb-named file (content arbitrary; we just need
+        # a stable sha256).  Two outputs to confirm the walker picks
+        # both.
+        _f1 = os.path.join(_pool, 'libfoo_1.0-1_amd64.deb')
+        _f2 = os.path.join(_pool, 'libfoo-dev_1.0-1_amd64.deb')
+        with open(_f1, 'wb') as _fh:
+            _fh.write(b'fake-deb-1')
+        with open(_f2, 'wb') as _fh:
+            _fh.write(b'fake-deb-2')
+        # Plant a v1 record (no output_hashes) on disk.
+        _legacy = {
+            'schema_version': 1, 'package': 'libfoo',
+            'intended_version': '1.0-1', 'built_version': '1.0-1',
+            'patch_set_hash': 'h', 'phase': 'done', 'status': 'PASS',
+            'started': '2026-06-02T14:00:00Z',
+            'finished': '2026-06-02T14:01:00Z',
+            'elapsed_seconds': 60.0, 'exit_code': 0, 'oom_killed': False,
+            'output_count': 2,
+            'outputs': [
+                'libfoo-dev_1.0-1_amd64.deb',
+                'libfoo_1.0-1_amd64.deb',
+            ],
+        }
+        _key = _u._load_or_create_hmac_key(_log)
+        _signed = _u._sign_record(_legacy, _key)
+        with open(_u._build_record_path(_log, 'libfoo'), 'wb') as _fh:
+            _fh.write(_json.dumps(_signed, sort_keys=True, indent=2).encode())
+        # First backfill: should upgrade.
+        _stats = _u.backfill_output_hashes(_log, _repo)
+        assert _stats['scanned'] == 1
+        assert _stats['upgraded'] == 1
+        assert _stats['skipped'] == 0
+        assert _stats['missing_files'] == 0
+        # Verify the upgraded record.
+        _rec = _u.read_build_record(_log, 'libfoo')
+        assert _rec is not None
+        assert _rec['schema_version'] == 2
+        import hashlib as _hashlib
+        _h1 = _hashlib.sha256(b'fake-deb-1').hexdigest()
+        _h2 = _hashlib.sha256(b'fake-deb-2').hexdigest()
+        assert _rec['output_hashes'] == {
+            'libfoo_1.0-1_amd64.deb': _h1,
+            'libfoo-dev_1.0-1_amd64.deb': _h2,
+        }
+        # Second backfill: idempotent — nothing to upgrade.
+        _stats2 = _u.backfill_output_hashes(_log, _repo)
+        assert _stats2['scanned'] == 1
+        assert _stats2['upgraded'] == 0
+        assert _stats2['skipped'] == 1
+
+
+def test_backfill_output_hashes_reports_missing_files():
+    """When a record's output is absent from repo_root, the helper still
+    bumps schema_version (so consumers don't keep retrying) but flags
+    the missing file in stats."""
+    _u = _utils_module()
+    import json as _json
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        _repo = os.path.join(_td, 'repo')
+        os.makedirs(_log)
+        os.makedirs(_repo)
+        _legacy = {
+            'schema_version': 1, 'package': 'ghost',
+            'intended_version': '1.0', 'built_version': '1.0',
+            'patch_set_hash': '', 'phase': 'done', 'status': 'PASS',
+            'started': 's', 'finished': 'f', 'elapsed_seconds': 1.0,
+            'exit_code': 0, 'oom_killed': False, 'output_count': 1,
+            'outputs': ['ghost_1.0_amd64.deb'],
+        }
+        _key = _u._load_or_create_hmac_key(_log)
+        with open(_u._build_record_path(_log, 'ghost'), 'wb') as _fh:
+            _fh.write(_json.dumps(_u._sign_record(_legacy, _key),
+                                  sort_keys=True, indent=2).encode())
+        _stats = _u.backfill_output_hashes(_log, _repo)
+        assert _stats['missing_files'] == 1
+        assert _stats['upgraded'] == 1
+        _rec = _u.read_build_record(_log, 'ghost')
+        assert _rec is not None
+        assert _rec['schema_version'] == 2
+        assert _rec['output_hashes'] == {}  # nothing on disk to hash
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COORD-01 — multi-builder coord modules
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _coord_modules():
+    """Lazy import of coord submodules.  Returns (schema, identity,
+    store, policy, head, reconcile, transport, publish).  Tests skip
+    cleanly if openssl is unavailable (Ed25519-backed identity)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.schema as _s
+    import coord.identity as _i
+    import coord.store as _st
+    import coord.policy as _p
+    import coord.head as _h
+    import coord.reconcile as _r
+    import coord.transport as _t
+    import coord.publish as _pub
+    return _s, _i, _st, _p, _h, _r, _t, _pub
+
+
+def _openssl_available() -> bool:
+    """True iff openssl Ed25519 is functional on this host.  Cached
+    after first call so test runs don't spawn N subprocesses."""
+    import shutil
+    import subprocess
+    if shutil.which('openssl') is None:
+        return False
+    _r = subprocess.run(
+        ['openssl', 'list', '-public-key-algorithms'],
+        capture_output=True, text=True)
+    return _r.returncode == 0 and 'ED25519' in (_r.stdout or '').upper()
+
+
+def test_coord_schema_canonical_bytes_stable_across_key_order():
+    """schema.canonical_bytes is sort-keys'd → two dicts with the same
+    fields in different insertion order produce identical bytes."""
+    _s, *_ = _coord_modules()
+    _a = {'package': 'x', 'v': 1, 'seq': 7}
+    _b = {'seq': 7, 'v': 1, 'package': 'x'}
+    assert _s.canonical_bytes(_a) == _s.canonical_bytes(_b)
+
+
+def test_coord_schema_canonical_bytes_excludes_sig():
+    """schema.canonical_bytes drops the `sig` field so a signed record's
+    canonical bytes match what was originally signed."""
+    _s, *_ = _coord_modules()
+    _rec = {'v': 1, 'package': 'x', 'sig': 'deadbeef'}
+    _bytes = _s.canonical_bytes(_rec)
+    assert b'sig' not in _bytes
+    assert b'deadbeef' not in _bytes
+
+
+def test_coord_claim_to_jsonl_round_trip():
+    """claim → jsonl line → parsed claim."""
+    _s, *_ = _coord_modules()
+    _claim = _s.new_claim(
+        builder='alice', seq=1, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo_1.0_amd64.deb',
+        sha256='a' * 64, size=1024,
+        snapshot='20260601T000000Z',
+        built_at='2026-06-01T00:00:00Z',
+    )
+    _claim['sig'] = 'b' * 128
+    _line = _s.claim_to_jsonl(_claim)
+    assert _line.endswith(b'\n')
+    _parsed = _s.claim_from_jsonl(_line)
+    assert _parsed == _claim
+
+
+def test_coord_claim_from_jsonl_rejects_missing_required():
+    """Lines lacking required fields parse to None."""
+    _s, *_ = _coord_modules()
+    assert _s.claim_from_jsonl(b'{"v": 1, "builder": "alice"}\n') is None
+    assert _s.claim_from_jsonl(b'not json\n') is None
+    assert _s.claim_from_jsonl(b'') is None
+
+
+def test_coord_identity_keypair_and_sign_verify():
+    """End-to-end: generate Ed25519 keypair, sign a claim, verify; tamper
+    → verify fails."""
+    if not _openssl_available():
+        return
+    _s, _i, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _priv, _pub = _i.generate_keypair(_td, 'alice')
+        assert os.path.isfile(_priv)
+        assert os.path.isfile(_pub)
+        # Private key must be 0600
+        import stat
+        _mode = stat.S_IMODE(os.stat(_priv).st_mode)
+        assert _mode == 0o600, f"private key mode {oct(_mode)} != 0o600"
+        # Sign + verify
+        _claim = _s.new_claim(
+            builder='alice', seq=1, package='foo',
+            intended_version='1.0', built_version='1.0',
+            filename='foo.deb', sha256='a' * 64, size=1,
+            snapshot='S', built_at='T',
+        )
+        _signed = _i.sign_claim(_claim, _priv)
+        assert isinstance(_signed.get('sig'), str)
+        assert len(_signed['sig']) == 128  # 64 bytes hex
+        assert _i.verify_claim(_signed, _pub) is True
+        # Tamper detection
+        _tampered = dict(_signed)
+        _tampered['built_version'] = '99.0'
+        assert _i.verify_claim(_tampered, _pub) is False
+
+
+def test_coord_identity_refuses_clobber_without_overwrite():
+    """generate_keypair refuses to clobber an existing private key
+    unless overwrite=True."""
+    if not _openssl_available():
+        return
+    _s, _i, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _i.generate_keypair(_td, 'alice')
+        try:
+            _i.generate_keypair(_td, 'alice')
+        except OSError as _e:
+            assert 'already exists' in str(_e)
+        else:
+            raise AssertionError(
+                "generate_keypair must refuse to clobber without overwrite")
+
+
+def test_coord_identity_load_keyring():
+    """Keyring loader picks up only .pub files; returns {id: path}."""
+    _s, _i, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, 'alice.pub'), 'w') as _fh:
+            _fh.write('dummy')
+        with open(os.path.join(_td, 'bob.pub'), 'w') as _fh:
+            _fh.write('dummy')
+        with open(os.path.join(_td, 'README.txt'), 'w') as _fh:
+            _fh.write('skip me')
+        _r = _i.load_keyring(_td)
+        assert set(_r.keys()) == {'alice', 'bob'}
+        assert all(_p.endswith('.pub') for _p in _r.values())
+
+
+def test_coord_store_append_and_max_seq():
+    """append_claim writes a signed line; max_seq returns the high seq."""
+    if not _openssl_available():
+        return
+    _s, _i, _st, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _id_dir = os.path.join(_td, 'identity')
+        _claims_dir = os.path.join(_td, 'claims')
+        os.makedirs(_id_dir)
+        _priv, _pub = _i.generate_keypair(_id_dir, 'alice')
+        for _seq in (1, 2, 5):
+            _claim = _s.new_claim(
+                builder='alice', seq=_seq, package=f'pkg{_seq}',
+                intended_version='1.0', built_version='1.0',
+                filename=f'pkg{_seq}.deb',
+                sha256='a' * 64, size=10, snapshot='S',
+                built_at='T',
+            )
+            _ret_seq = _st.append_claim(_claims_dir, 'alice', _claim, _priv)
+            assert _ret_seq == _seq
+        assert _st.max_seq(_claims_dir, 'alice') == 5
+        _back = _st.read_builder_claims(_claims_dir, 'alice', _pub)
+        assert [_c['seq'] for _c in _back] == [1, 2, 5]
+
+
+def test_coord_store_rejects_builder_mismatch():
+    """append_claim refuses to write a claim whose builder field
+    doesn't match the target file."""
+    if not _openssl_available():
+        return
+    _s, _i, _st, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _priv, _ = _i.generate_keypair(_td, 'alice')
+        _claim = _s.new_claim(
+            builder='bob',  # wrong
+            seq=1, package='x', intended_version='1',
+            built_version='1', filename='x.deb', sha256='a' * 64,
+            size=1, snapshot='S', built_at='T',
+        )
+        try:
+            _st.append_claim(_td, 'alice', _claim, _priv)
+        except ValueError as _e:
+            assert 'builder' in str(_e)
+        else:
+            raise AssertionError(
+                "append_claim must reject mismatched builder")
+
+
+def test_coord_store_tamper_drops_line_on_read():
+    """A jsonl line whose canonical bytes were modified post-sign
+    fails verify and is dropped silently (logged)."""
+    if not _openssl_available():
+        return
+    _s, _i, _st, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _id_dir = os.path.join(_td, 'identity')
+        os.makedirs(_id_dir)
+        _priv, _pub = _i.generate_keypair(_id_dir, 'alice')
+        _claims_dir = os.path.join(_td, 'claims')
+        _claim = _s.new_claim(
+            builder='alice', seq=1, package='x',
+            intended_version='1', built_version='1',
+            filename='x.deb', sha256='a' * 64, size=1,
+            snapshot='S', built_at='T',
+        )
+        _st.append_claim(_claims_dir, 'alice', _claim, _priv)
+        # Tamper the on-disk line
+        _path = _st.claims_path(_claims_dir, 'alice')
+        with open(_path, 'rb') as _fh:
+            _bytes = _fh.read()
+        _tampered = _bytes.replace(b'"x.deb"', b'"evil.deb"')
+        with open(_path, 'wb') as _fh:
+            _fh.write(_tampered)
+        # Verified read drops the tampered line
+        _verified = _st.read_builder_claims(_claims_dir, 'alice', _pub)
+        assert _verified == [], (
+            f"tampered claim must be dropped on verified read; got {_verified}")
+
+
+def test_coord_store_project_live_claims_collapses_retraction():
+    """A retraction line for seq=N erases that claim from the live
+    projection."""
+    _s, _i, _st, *_ = _coord_modules()
+    _c1 = _s.new_claim(
+        builder='alice', seq=1, package='x', intended_version='1',
+        built_version='1', filename='x.deb', sha256='a' * 64,
+        size=1, snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _r1 = _s.new_retraction(
+        builder='alice', seq=2, package='x',
+        retracts_seq=1, filename='x.deb', snapshot='S', built_at='T',
+    )
+    _proj = _st.project_live_claims({'alice': [_c1, _r1]})
+    assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
+
+
+def test_coord_reconcile_detect_hash_conflicts_critical_and_info():
+    """Same (pkg, ver), different hash → CRITICAL; same hash → INFO."""
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    _ca = _s.new_claim(
+        builder='alice', seq=1, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _cb_diff = _s.new_claim(
+        builder='bob', seq=1, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='b' * 64, size=1,
+        snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _findings = _r.detect_hash_conflicts({'alice': [_ca], 'bob': [_cb_diff]})
+    _crits = [_f for _f in _findings if _f.severity == 'CRITICAL']
+    assert len(_crits) == 1
+    assert 'hash conflict' in _crits[0].message
+    # Same hash → INFO (reproducible)
+    _cb_same = _s.new_claim(
+        builder='bob', seq=1, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _findings2 = _r.detect_hash_conflicts({'alice': [_ca], 'bob': [_cb_same]})
+    _infos = [_f for _f in _findings2 if _f.severity == 'INFO']
+    assert len(_infos) == 1
+    assert 'reproducible' in _infos[0].kind
+
+
+def test_coord_reconcile_publish_halt_round_trip():
+    """write + read_publish_halt round-trips reason text."""
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        assert _r.publish_halt_reason(_td) is None
+        _r.write_publish_halt(_td, 'test conflict: alpha vs beta')
+        _back = _r.publish_halt_reason(_td)
+        assert _back == 'test conflict: alpha vs beta'
+
+
+def test_coord_reconcile_audit_local_orphan_detection():
+    """A claim for a file absent from the pool surfaces as a WARN
+    orphan finding."""
+    if not _openssl_available():
+        return
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _id_dir = os.path.join(_td, 'identity')
+        _claims_dir = os.path.join(_td, 'claims')
+        _pool = os.path.join(_td, 'repo')
+        os.makedirs(_id_dir)
+        os.makedirs(_pool)
+        _priv, _pub = _i.generate_keypair(_id_dir, 'alice')
+        # Claim for a file we never put in the pool
+        _claim = _s.new_claim(
+            builder='alice', seq=1, package='ghost',
+            intended_version='1.0', built_version='1.0',
+            filename='ghost.deb', sha256='a' * 64, size=1,
+            snapshot='S', built_at='T',
+            claim_state=_s.CLAIM_STATE_PUBLISHED,
+        )
+        _st.append_claim(_claims_dir, 'alice', _claim, _priv)
+        _report = _r.audit_local(
+            repo_root=_pool, claims_dir=_claims_dir,
+            builder_id='alice', public_key_path=_pub,
+            get_sha256=lambda _p: '',
+        )
+        assert _report.warn >= 1
+        assert any(_f.kind == 'orphan' for _f in _report.findings)
+
+
+def test_coord_reconcile_audit_local_hash_mismatch_critical():
+    """Claim hash != on-disk hash → CRITICAL finding."""
+    if not _openssl_available():
+        return
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _id_dir = os.path.join(_td, 'identity')
+        _claims_dir = os.path.join(_td, 'claims')
+        _pool = os.path.join(_td, 'repo/main')
+        os.makedirs(_id_dir)
+        os.makedirs(_pool)
+        _priv, _pub = _i.generate_keypair(_id_dir, 'alice')
+        # Plant a fake .deb on disk
+        _path = os.path.join(_pool, 'x.deb')
+        with open(_path, 'wb') as _fh:
+            _fh.write(b'on-disk')
+        _claim = _s.new_claim(
+            builder='alice', seq=1, package='x',
+            intended_version='1', built_version='1',
+            filename='x.deb', sha256='z' * 64, size=7,
+            snapshot='S', built_at='T',
+            claim_state=_s.CLAIM_STATE_PUBLISHED,
+        )
+        _st.append_claim(_claims_dir, 'alice', _claim, _priv)
+        # Stub get_sha256 to return a different hash than the claim
+        _report = _r.audit_local(
+            repo_root=os.path.join(_td, 'repo'),
+            claims_dir=_claims_dir,
+            builder_id='alice', public_key_path=_pub,
+            get_sha256=lambda _p: 'a' * 64,  # not 'z'*64
+        )
+        assert _report.critical >= 1
+        assert any(_f.kind == 'hash_mismatch' for _f in _report.findings)
+
+
+def test_coord_publish_retract_and_re_audit_collapses():
+    """After retracting a claim, the live projection no longer carries
+    it; reconcile shows no orphan for that filename."""
+    if not _openssl_available():
+        return
+    _s, _i, _st, _p, _h, _r, *_, _pub_mod = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _id_dir = os.path.join(_td, 'identity')
+        _claims_dir = os.path.join(_td, 'claims')
+        _coord = _td
+        os.makedirs(_id_dir)
+        _priv, _pub = _i.generate_keypair(_id_dir, 'alice')
+
+        class _FakeConfig:
+            dir_coord = _coord
+            dir_coord_identity = _id_dir
+            dir_coord_claims = _claims_dir
+        _cfg = _FakeConfig()
+        # Plant a claim
+        _claim = _s.new_claim(
+            builder='alice', seq=1, package='ghost',
+            intended_version='1', built_version='1',
+            filename='ghost.deb', sha256='a' * 64, size=1,
+            snapshot='S', built_at='T',
+            claim_state=_s.CLAIM_STATE_PUBLISHED,
+        )
+        _st.append_claim(_claims_dir, 'alice', _claim, _priv)
+        # Retract it
+        _ok, _detail = _pub_mod.retract_claim(
+            builder_id='alice', config=_cfg,
+            private_key_path=_priv, public_key_path=_pub,
+            package='ghost',
+        )
+        assert _ok, _detail
+        # Re-read; live projection is empty for ghost
+        _claims = _st.read_builder_claims(_claims_dir, 'alice', _pub)
+        _live = _st.project_live_claims({'alice': _claims})
+        assert _live == {}, f"retracted claim must vanish; got {_live}"
+
+
+def test_coord_publish_local_skips_when_halt_set():
+    """local_publish refuses when PUBLISH_HALT sentinel exists."""
+    _s, _i, _st, _p, _h, _r, *_, _pub_mod = _coord_modules()
+    with tempfile.TemporaryDirectory() as _td:
+        _r.write_publish_halt(_td, 'mocked conflict')
+
+        class _FakeConfig:
+            dir_coord = _td
+            dir_log = _td  # buildlog walk will find nothing — irrelevant
+            dir_repo = _td
+            dir_coord_claims = os.path.join(_td, 'claims')
+
+        _created, _skipped = _pub_mod.local_publish(
+            builder_id='alice', config=_FakeConfig(),
+            private_key_path='/dev/null', public_key_path='/dev/null',
+            snapshot_pin='S', read_build_record=lambda *_a: None,
+            get_sha256=lambda *_a: '',
+        )
+        assert (_created, _skipped) == (0, 0)
+
+
+def test_coord_publish_generate_pending_skips_already_claimed():
+    """generate_pending_claims excludes outputs already in the local
+    jsonl (so re-running publish is idempotent)."""
+    if not _openssl_available():
+        return
+    _s, _i, _st, _p, _h, _r, *_, _pub_mod = _coord_modules()
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _td:
+        _id_dir = os.path.join(_td, 'identity')
+        _claims_dir = os.path.join(_td, 'claims')
+        _log = os.path.join(_td, 'log/build')
+        os.makedirs(_id_dir)
+        os.makedirs(_log)
+        _priv, _pub = _i.generate_keypair(_id_dir, 'alice')
+        # Plant a phase=done build.json with one output + its hash
+        _rec = _u.new_build_record(
+            package='libfoo', intended_version='1.0',
+            patch_set_hash='', started='T',
+        )
+        _u.write_build_record(_log, _rec)
+        _u.update_build_record(
+            _log, 'libfoo', phase='done', built_version='1.0',
+            finished='T', elapsed_seconds=1.0, exit_code=0,
+            output_count=1, outputs=['libfoo_1.0.deb'],
+            output_hashes={'libfoo_1.0.deb': 'a' * 64},
+        )
+        # First call: returns one pending claim
+        _pending = _pub_mod.generate_pending_claims(
+            builder_id='alice', buildlog_dir=_log,
+            claims_dir=_claims_dir, public_key_path=_pub,
+            snapshot_pin='S', read_build_record=_u.read_build_record,
+        )
+        assert len(_pending) == 1
+        # Plant the corresponding claim
+        _pending[0]['seq'] = 1
+        _pending[0]['claim_state'] = _s.CLAIM_STATE_PUBLISHED
+        _st.append_claim(_claims_dir, 'alice', _pending[0], _priv)
+        # Second call: nothing pending
+        _again = _pub_mod.generate_pending_claims(
+            builder_id='alice', buildlog_dir=_log,
+            claims_dir=_claims_dir, public_key_path=_pub,
+            snapshot_pin='S', read_build_record=_u.read_build_record,
+        )
+        assert _again == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22782,7 +23410,7 @@ def main() -> int:
         test_render_failure_one_shot_capture_writes_post_mortem,
         test_render_failure_capture_no_op_on_success,
         # OBS-01 canonical signed build record
-        test_build_record_schema_v1_field_set,
+        test_build_record_schema_v2_field_set,
         test_build_record_hmac_round_trip,
         test_build_record_tamper_detection,
         test_build_record_hmac_key_mode_0600,
@@ -22802,6 +23430,29 @@ def main() -> int:
         test_print_build_times_aggregates_elapsed_across_records,
         test_print_build_times_skips_tampered_records,
         test_build_record_canonical_json_stable_across_key_order,
+        test_build_record_output_hashes_round_trip,
+        test_build_record_v1_legacy_record_reads_tolerantly,
+        test_backfill_output_hashes_upgrades_v1_record,
+        test_backfill_output_hashes_reports_missing_files,
+        # COORD-01
+        test_coord_schema_canonical_bytes_stable_across_key_order,
+        test_coord_schema_canonical_bytes_excludes_sig,
+        test_coord_claim_to_jsonl_round_trip,
+        test_coord_claim_from_jsonl_rejects_missing_required,
+        test_coord_identity_keypair_and_sign_verify,
+        test_coord_identity_refuses_clobber_without_overwrite,
+        test_coord_identity_load_keyring,
+        test_coord_store_append_and_max_seq,
+        test_coord_store_rejects_builder_mismatch,
+        test_coord_store_tamper_drops_line_on_read,
+        test_coord_store_project_live_claims_collapses_retraction,
+        test_coord_reconcile_detect_hash_conflicts_critical_and_info,
+        test_coord_reconcile_publish_halt_round_trip,
+        test_coord_reconcile_audit_local_orphan_detection,
+        test_coord_reconcile_audit_local_hash_mismatch_critical,
+        test_coord_publish_retract_and_re_audit_collapses,
+        test_coord_publish_local_skips_when_halt_set,
+        test_coord_publish_generate_pending_skips_already_claimed,
     ]
     failures = 0
     for t in tests:
