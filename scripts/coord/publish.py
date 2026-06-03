@@ -316,6 +316,8 @@ def remote_publish(
     flock_path: str = '/var/lock/repo-coord.lock',
     flock_timeout: int = 60,
     ssh_key: 'Optional[str]' = None,
+    pool_remote_spec: 'Optional[str]' = None,
+    on_progress: 'Optional[Callable]' = None,
 ) -> Tuple[bool, str]:
     """11-step publish transaction (see module docstring).  Returns
     (ok, detail).  On failure detail explains the step that aborted.
@@ -333,6 +335,18 @@ def remote_publish(
         upload our pubkey to <root>/keyring/builders/<id>.pub and
         initialise the new coord-head with neighbours = local_mirror_urls
 
+    `pool_remote_spec` (MIRROR-01 Phase 3b): when set, the rsync target
+    for the apt POOL root (sibling of the coord root on the mirror
+    host).  For each pending claim whose .deb is on the local pool,
+    push that .deb per-file BEFORE writing its claim.  Files that fail
+    to push are dropped from the claim set — partial publishes converge
+    on retry.  When `None`, the .deb-pool sync is skipped (legacy path:
+    operator runs `repo publish ssh full` for the .debs out-of-band).
+
+    `on_progress` callback (MIRROR-01 Phase 3b): invoked once per .deb
+    push attempt as `on_progress(current, total, filename, ok)`.  Caller
+    drives a tui.ProgressBar from this.  Optional; no-op when omitted.
+
     `ssh_host` is the host portion of the remote spec; defaulted from
     `remote_coord_spec` if not given (parses the `user@host:/path`
     form).  Required for flock acquisition.
@@ -342,21 +356,23 @@ def remote_publish(
     if _halt is not None:
         return False, f"PUBLISH_HALT set: {_halt}"
 
-    if ssh_host is None:
+    if ssh_host is None and remote_coord_spec:
         if ':' in remote_coord_spec and '@' in remote_coord_spec.split(':', 1)[0]:
             ssh_host = remote_coord_spec.split(':', 1)[0]
-        else:
-            return False, (
-                f"remote_publish: ssh_host needed for flock; cannot derive "
-                f"from spec {remote_coord_spec!r} (give explicit user@host)")
+        # MIRROR-01 Phase 3b: local-fs mirrors (file://, /abs/path) have
+        # no ssh_host — flock-over-ssh is N/A.  Skip the lock step and
+        # proceed; local-fs mirrors are dev/single-host workflows where
+        # cross-host concurrency isn't a concern.
 
-    # Step 1 — acquire remote flock
-    _lock_proc = _transport.remote_flock_acquire(
-        ssh_host=ssh_host, lock_path=flock_path,
-        timeout_sec=flock_timeout, ssh_key=ssh_key,
-    )
-    if _lock_proc is None:
-        return False, f"failed to spawn flock SSH for {ssh_host}"
+    # Step 1 — acquire remote flock (skipped when local-fs)
+    _lock_proc = None
+    if ssh_host:
+        _lock_proc = _transport.remote_flock_acquire(
+            ssh_host=ssh_host, lock_path=flock_path,
+            timeout_sec=flock_timeout, ssh_key=ssh_key,
+        )
+        if _lock_proc is None:
+            return False, f"failed to spawn flock SSH for {ssh_host}"
 
     try:
         # Step 2 — fetch remote coord tree (under lock)
@@ -445,9 +461,51 @@ def remote_publish(
         _pending = [_p for _p in _pending if _p['filename'] not in _remote_known]
         fill_sizes_from_pool(_pending, _pool)
 
+        # Step 5b — MIRROR-01 Phase 3b: per-file .deb push.  For each
+        # pending claim, rsync the .deb from local pool → remote pool
+        # (sibling tree of the coord root).  A push failure drops the
+        # claim from the publish set (partial = converge on retry; we
+        # never claim a file we didn't successfully ship).
+        # `--ignore-existing` (in push_single_deb) makes the re-publish
+        # cheap: unchanged files skip transfer entirely.
+        _pushed_count = 0
+        _push_fail_count = 0
+        if pool_remote_spec is not None:
+            _total_to_push = len(_pending)
+            _kept_pending: list = []
+            for _i, _claim in enumerate(_pending, start=1):
+                _fn = _claim.get('filename')
+                _local_path = _pool.get(_fn) if isinstance(_fn, str) else None
+                if _local_path is None:
+                    # File listed in build.json's outputs but absent from
+                    # the local pool — almost certainly an audit gap; we
+                    # can't ship what we don't have.
+                    if on_progress is not None:
+                        on_progress(_i, _total_to_push, _fn or '?', False)
+                    _push_fail_count += 1
+                    continue
+                _rel = os.path.relpath(_local_path, config.dir_repo)
+                _remote_file = (
+                    pool_remote_spec.rstrip('/') + '/' + _rel)
+                _ok_push, _detail_push = _transport.push_single_deb(
+                    local_path=_local_path, remote_spec=_remote_file,
+                    ssh_key=ssh_key,
+                )
+                if on_progress is not None:
+                    on_progress(_i, _total_to_push, _fn, _ok_push)
+                if _ok_push:
+                    _kept_pending.append(_claim)
+                    _pushed_count += 1
+                else:
+                    logger.error(
+                        f"coord.publish: push {_fn} failed: {_detail_push}")
+                    _push_fail_count += 1
+            _pending = _kept_pending
+
         # Step 6 — sign + append every pending claim to the LOCAL jsonl
-        # (state=published, since the .deb is already in the remote
-        # pool per operator's prior `repo publish` step)
+        # (state=published; the .deb is now on the remote pool either
+        # because step 5b just pushed it or the operator ran the legacy
+        # `repo publish ssh full` before this command)
         _seq = _store.max_seq(config.dir_coord_claims, builder_id)
         _appended = 0
         for _claim in _pending:
@@ -534,11 +592,16 @@ def remote_publish(
         if not _ok:
             return False, f"push coord-head failed: {_detail}"
 
+        _push_summary = (
+            f"; pushed {_pushed_count} .deb(s)"
+            + (f" ({_push_fail_count} failed)" if _push_fail_count else "")
+            if pool_remote_spec is not None else "")
         return True, (
-            f"published {_appended} claim(s); coord-head re-signed "
-            f"@ seq={_seq}")
+            f"published {_appended} claim(s){_push_summary}; "
+            f"coord-head re-signed @ seq={_seq}")
     finally:
-        _transport.remote_flock_release(_lock_proc)
+        if _lock_proc is not None:
+            _transport.remote_flock_release(_lock_proc)
 
 
 def _utc_now() -> str:

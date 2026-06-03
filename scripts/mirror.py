@@ -268,6 +268,25 @@ def all_mirror_urls(config) -> 'list[str]':
     return _out
 
 
+def coord_root_for(pool_url: str) -> str:
+    """Derive the sidecar (coord-tree) root URL from the apt-pool URL.
+
+    Convention: append `-coord` to the LAST path component.  The pool
+    is what apt clients reach for; the sidecar is operator-facing only
+    and lives at a sibling path on the same host.
+
+    Examples:
+      ssh://user@host/srv/asgard           → ssh://user@host/srv/asgard-coord
+      file:///srv/asgard                   → file:///srv/asgard-coord
+      user@host:/srv/asgard/               → user@host:/srv/asgard-coord
+      /srv/asgard                          → /srv/asgard-coord
+
+    Trailing slashes are stripped before appending so we never produce
+    a `<x>/-coord` form.
+    """
+    return (pool_url or '').rstrip('/') + '-coord'
+
+
 def rsync_spec_for_url(url: str) -> 'tuple[str, Optional[str]]':
     """Convert our stored URL to (rsync_spec, ssh_host_or_None).
 
@@ -355,7 +374,10 @@ def reconcile_neighbours(
             continue
         _url = _st.get('url', '')
         _ssh_key = _st.get('ssh_key') or None
-        _spec, _ssh_host = rsync_spec_for_url(_url)
+        # reconcile-neighbours operates on the SIDECAR tree (coord root),
+        # not the apt pool — that's where coord-head lives.
+        _coord_url = coord_root_for(_url)
+        _spec, _ssh_host = rsync_spec_for_url(_coord_url)
         _stage = os.path.join(_stage_root, _name, 'staging')
         try:
             os.makedirs(_stage, mode=0o755, exist_ok=True)

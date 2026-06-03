@@ -78,6 +78,37 @@ def pull_remote_coord(
     return True, ''
 
 
+def push_single_deb(
+    *, local_path: str, remote_spec: str,
+    ssh_key: 'Optional[str]' = None,
+) -> Tuple[bool, str]:
+    """Rsync one local `.deb` (or `.udeb`) → `remote_spec` (a remote FILE
+    path, not a directory).
+
+    Uses `--ignore-existing` so a re-publish never re-uploads an
+    unchanged file by name — .deb filenames are immutable per (pkg,
+    version, arch), so name-match is the right key.  Single-file
+    semantics so MIRROR-01 Phase 3b can tick a ProgressBar one notch
+    per .deb and report failures precisely.
+    """
+    if not os.path.isfile(local_path):
+        return False, f"local file missing: {local_path}"
+    _argv = list(_RSYNC_BASE)
+    _argv += ['--ignore-existing']
+    _ssh = _ssh_arg(ssh_key)
+    if _ssh is not None:
+        _argv += _ssh
+    _argv += [local_path, remote_spec]
+    _r = subprocess.run(_argv, capture_output=True, text=True)
+    if _r.returncode != 0:
+        _tail = (_r.stderr or _r.stdout or '').strip().splitlines()[-5:]
+        _detail = ' | '.join(_tail)
+        logger.error(
+            f"coord.transport.push_single_deb: rc={_r.returncode}: {_detail}")
+        return False, _detail
+    return True, ''
+
+
 def pull_single_file(
     *, remote_spec: str, local_path: str,
     ssh_key: 'Optional[str]' = None,
