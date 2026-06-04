@@ -2797,60 +2797,43 @@ class BuildSession:
             # Whole-repo fallback path.
             console.print(
                 f"\n=== DEP GATE (whole repo, "
-                f"{len(_state.packages)} pkgs) ==="
-            )
-            console.print(
-                f"  UNRESOLVED Depends/Pre-Depends: {len(_unresolved)}"
-                + (f"\n  WEAK (Recommends unresolved):   {len(_weak)}"
-                   if _strict else '')
-            )
+                f"{len(_state.packages)} pkgs) ===")
+            console.print(f"  unresolved: {len(_unresolved)}"
+                          + (f"  weak: {len(_weak)}" if _strict else ''))
             self._report_unresolved(_unresolved, _weak, _state,
                                     verbose=_verbose, strict=_strict)
         else:
             for _label, _consumer_set, _u, _w in _per_cohort:
                 console.print(
-                    f"\n=== DEP GATE ({_label} cohort, "
-                    f"{len(_consumer_set)} consumers; "
-                    f"resolution = whole repo) ==="
-                )
-                console.print(
-                    f"  UNRESOLVED Depends/Pre-Depends: {len(_u)}"
-                    + (f"\n  WEAK (Recommends unresolved):   {len(_w)}"
-                       if _strict else '')
-                )
+                    f"\n=== DEP GATE ({_label}, "
+                    f"{len(_consumer_set)} consumers) ===")
+                console.print(f"  unresolved: {len(_u)}"
+                              + (f"  weak: {len(_w)}" if _strict else ''))
                 self._report_unresolved(_u, _w, _state,
                                         verbose=_verbose, strict=_strict)
 
         if _live is None:
             console.print(
-                "\n=== LIVE CONFLICTS ===\n  skipped — dep_tree not built; "
-                "run `cache parse` first"
-            )
+                "\n=== LIVE CONFLICTS === skipped (run `cache parse`)")
         else:
             _live_conflicts = _dedupe_bidirectional_conflicts(
                 repo_audit.audit_conflict_cohort(_state, _live)
             )
             console.print(
-                f"\n=== LIVE CONFLICTS (cohort = "
-                f"{len(_live)} pkgs in live chroot) ===\n"
-                f"  CONFLICTS: {len(_live_conflicts)}"
-            )
+                f"\n=== LIVE CONFLICTS ({len(_live)} pkgs) ==="
+                f"  conflicts: {len(_live_conflicts)}")
             self._report_conflicts(_live_conflicts, verbose=_verbose)
 
         if _installer is None:
             console.print(
-                "\n=== INSTALLER CONFLICTS ===\n  skipped — udeb_dep_tree "
-                "not built; run `cache parse` first"
-            )
+                "\n=== INSTALLER CONFLICTS === skipped (run `cache parse`)")
         else:
             _inst_conflicts = _dedupe_bidirectional_conflicts(
                 repo_audit.audit_conflict_cohort(_state, _installer)
             )
             console.print(
-                f"\n=== INSTALLER CONFLICTS (cohort = "
-                f"{len(_installer)} udebs in d-i ramdisk) ===\n"
-                f"  CONFLICTS: {len(_inst_conflicts)}"
-            )
+                f"\n=== INSTALLER CONFLICTS ({len(_installer)} udebs) ==="
+                f"  conflicts: {len(_inst_conflicts)}")
             self._report_conflicts(_inst_conflicts, verbose=_verbose)
 
         # Soft-warn section.  Doesn't gate the audit — these aren't broken
@@ -3192,13 +3175,13 @@ class BuildSession:
         when dep_tree + cache are available (formerly `audit_gap`)."""
         _show = len(unresolved) if verbose else min(30, len(unresolved))
         if _show:
-            console.print(f"  First {_show} UNRESOLVED:")
+            console.print(f"  first {_show}:")
             for _pkg, _field, _rel, _why in unresolved[:_show]:
                 console.print(f"    {_pkg}  {_field}: {_rel}  — {_why}")
         if strict:
             _show = len(weak) if verbose else min(30, len(weak))
             if _show:
-                console.print(f"  First {_show} WEAK Recommends:")
+                console.print(f"  weak Recommends ({_show}):")
                 for _pkg, _field, _rel in weak[:_show]:
                     console.print(f"    {_pkg}  {_field}: {_rel}")
 
@@ -3229,7 +3212,7 @@ class BuildSession:
         """Detailed report for a conflict-cohort result."""
         _show = len(conflicts) if verbose else min(30, len(conflicts))
         if _show:
-            console.print(f"  First {_show}:")
+            console.print(f"  first {_show}:")
             for _pkg, _field, _other, _rel in conflicts[:_show]:
                 console.print(
                     f"    {_pkg}  {_field}: {_rel}  → {_other}"
@@ -3286,26 +3269,22 @@ class BuildSession:
         def _ref_count(lst):
             return sum(len(_consumers_by_target[_t]) for _t in lst)
 
+        _buckets = [
+            ('build_failed',    'not in repo',         _build_failed),
+            ('missed_by_parse', 'not in dep_tree',     _missed_by_parse),
+            ('transitional',    'not in upstream',     _transitional),
+            ('other',           'version-skew',        _other),
+        ]
+        _nonzero = [(_n, _t, _l) for _n, _t, _l in _buckets if _l]
         console.print(
-            f"\nGap classification: {len(_consumers_by_target)} distinct "
-            f"missing targets across {len(unresolved)} unresolved refs."
+            f"\nGap: {len(_consumers_by_target)} target(s), "
+            f"{len(unresolved)} ref(s)"
         )
-        console.print(
-            f"  build_failed    : {len(_build_failed):4d} targets "
-            f"({_ref_count(_build_failed)} refs) — in dep_tree, not in repo"
-        )
-        console.print(
-            f"  missed_by_parse : {len(_missed_by_parse):4d} targets "
-            f"({_ref_count(_missed_by_parse)} refs) — in upstream, not in dep_tree"
-        )
-        console.print(
-            f"  transitional    : {len(_transitional):4d} targets "
-            f"({_ref_count(_transitional)} refs) — not in upstream cache"
-        )
-        console.print(
-            f"  other           : {len(_other):4d} targets "
-            f"({_ref_count(_other)} refs) — likely version-skew"
-        )
+        for _name, _tag, _lst in _nonzero:
+            console.print(
+                f"  {_name:<16} {len(_lst):4d}  "
+                f"({_ref_count(_lst)} refs, {_tag})"
+            )
 
         def _show_category(name: str, targets: list, n: int = 30):
             if not targets:
@@ -3315,29 +3294,18 @@ class BuildSession:
                 key=lambda t: (-len(_consumers_by_target[t]), t),
             )
             _limit = len(_ranked) if verbose else min(n, len(_ranked))
-            console.print(f"\n== {name} (top {_limit} by ref count) ==")
+            console.print(f"\n  {name}:")
             for _t in _ranked[:_limit]:
                 _consumers = _consumers_by_target[_t]
                 _sample = ', '.join(sorted(set(_consumers))[:3])
                 if len(set(_consumers)) > 3:
                     _sample += f', … (+{len(set(_consumers)) - 3})'
                 console.print(
-                    f"  {len(_consumers):4d}× {_t:42s} ← {_sample}"
+                    f"    {len(_consumers):4d}× {_t:42s} ← {_sample}"
                 )
 
-        _show_category('build_failed', _build_failed)
-        _show_category('missed_by_parse', _missed_by_parse)
-        _show_category('transitional', _transitional)
-        _show_category('other (likely version skew)', _other)
-
-        console.print(
-            "\nNext steps by category:\n"
-            "  build_failed     → check log/build/<name>.result; rebuild\n"
-            "  missed_by_parse  → add target to pkg.list / live.list / pool.list\n"
-            "  transitional     → update consumer pkg (upstream dropped target)\n"
-            "  other            → `repo audit_nmu` first; then drill in"
-            " with `repo audit <target>`"
-        )
+        for _name, _tag, _lst in _nonzero:
+            _show_category(_name, _lst)
 
     def _audit_gap_drill_in(self, state, unresolved, target: str) -> None:
         """Per-target diagnostic for `repo audit_gap <name>`.
