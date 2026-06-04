@@ -724,6 +724,100 @@ def all_mirror_urls(config) -> 'list[str]':
     return _out
 
 
+def project_post_publish_state(local_state, remote_by_builder: dict):
+    # Return type is `repo_audit.RepoState` — import lives inside the
+    # body to keep the cross-module dep lazy (repo_audit doesn't always
+    # import cleanly in trivial test harnesses).
+    """MIRROR-02 chunk 11: project the post-publish union state of the
+    mirror.  Combines the LOCAL repo's RepoState (which carries full
+    Depends/Provides info per pkg) with the REMOTE claim ledger
+    (filenames + versions only — no Depends; remote pkgs satisfy
+    consumer deps but cannot themselves be audited as consumers).
+
+    Returns a `repo_audit.RepoState`-shape dataclass with `.packages`
+    keyed by package name, multi-version-aware: when the same package
+    name appears at multiple versions across builders, the highest
+    version is retained.  This matches what apt would resolve a
+    versioned `Depends:` against on the mirror's apt clients.
+
+    Caller passes the result to `repo_audit.audit_dep_closure` with
+    `consumer_set` = the package names of our pending claims, so the
+    closure walk is bounded to what we're about to push.
+    """
+    import dataclasses as _dc
+    import repo_audit as _repo_audit
+    # Build a mutable copy of local packages, then layer in remote-only
+    # entries.  Local entries have the rich control data (Depends,
+    # Provides etc.) so they participate fully in audit_dep_closure;
+    # remote-only entries are satisfier-only stubs.
+    _packages: 'dict[str, dict]' = {}
+    if local_state is not None and getattr(local_state, 'packages', None):
+        _packages.update(local_state.packages)
+    for _bid, _claims in (remote_by_builder or {}).items():
+        for _c in _claims:
+            if _c.get('claim_state') == 'retracted':
+                continue
+            _pkg = str(_c.get('package') or '')
+            _ver = str(_c.get('built_version') or '')
+            if not _pkg or not _ver:
+                continue
+            _existing = _packages.get(_pkg)
+            if _existing is not None:
+                # Local entry wins on version compare; remote satisfies
+                # only if its version is strictly higher than the local
+                # one (mirror has a newer pkg we haven't built yet).
+                import apt_pkg as _apt_pkg
+                try:
+                    _cmp = _apt_pkg.version_compare(
+                        _ver, str(_existing.get('Version', '')))
+                except (SystemError, TypeError):
+                    _cmp = 0
+                if _cmp <= 0:
+                    continue
+            # Stub entry — no Depends, just identity so it satisfies
+            # name lookups during the audit.
+            _packages[_pkg] = {
+                'Package': _pkg,
+                'Version': _ver,
+            }
+    # Provides index: keep local's (remote-only entries don't carry
+    # Provides info).
+    _provides = (getattr(local_state, 'provides_index', {}) or {}
+                 if local_state is not None else {})
+    return _repo_audit.RepoState(
+        packages=_packages,
+        provides_index=_provides,
+        packages_file=getattr(local_state, 'packages_file', '')
+            if local_state is not None else '',
+        repo_mtime=getattr(local_state, 'repo_mtime', 0.0)
+            if local_state is not None else 0.0,
+    )
+
+
+def find_publish_closure_breaks(
+    local_state, remote_by_builder: dict,
+    our_pending_pkg_names: 'frozenset[str]',
+) -> 'list[tuple]':
+    """MIRROR-02 chunk 11: the publish-time installability gate.
+
+    Walks `audit_dep_closure` over the projected post-publish state,
+    bounded to OUR pending packages as the consumer set.  Returns
+    the unresolved hard-Depends findings; each is
+    `(pkg, field, relation_str, why)` matching repo_audit's
+    convention.
+
+    Empty list = our publish does not break the mirror.  Non-empty
+    list = at least one of our pending packages depends on something
+    that won't be on the mirror after this publish; caller refuses
+    with the per-finding detail.
+    """
+    import repo_audit as _repo_audit
+    _state = project_post_publish_state(local_state, remote_by_builder)
+    _unresolved, _weak = _repo_audit.audit_dep_closure(
+        _state, consumer_set=our_pending_pkg_names)
+    return _unresolved
+
+
 def all_mirror_neighbour_records(config) -> 'list[dict]':
     """v3 source-of-truth for ``coord-head.neighbours``: a record per
     configured mirror carrying its publish URL plus the apt-readable

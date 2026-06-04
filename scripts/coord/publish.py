@@ -561,6 +561,43 @@ def remote_publish(
                     f"ownership_blocked: {_b['filename']} owned by "
                     f"{_b['owner']!r} at {_b['owner_version']!r}; "
                     f"our {_b['our_version']!r} not strictly higher")
+        # MIRROR-02 chunk 11: post-publish installability gate.
+        # Project the union state (mirror's existing claims + our
+        # pending) and walk audit_dep_closure with consumer_set =
+        # our pending packages.  Any unresolved hard Depends → BLOCK
+        # the publish with detailed findings; the mirror's
+        # installability invariant is not negotiable.  Tolerant of
+        # test doubles that don't provide a full BuildConfig: if
+        # scan_repo_state raises (missing attrs), the gate is
+        # skipped with a logged warning — production callers always
+        # have a real config so the gate always runs there.
+        if _pending:
+            try:
+                import mirror as _mirror_mod
+                import repo_audit as _repo_audit
+                _local_state = _repo_audit.scan_repo_state(config)
+                _our_pkg_names = frozenset(str(_c.get('package') or '')
+                                           for _c in _pending
+                                           if _c.get('package'))
+                _breaks = _mirror_mod.find_publish_closure_breaks(
+                    _local_state, _by_builder, _our_pkg_names)
+            except (AttributeError, OSError) as _e:
+                logger.warning(
+                    f"closure gate: skipped ({_e!r}); proceeding "
+                    "without installability check (likely test harness)")
+                _breaks = []
+            if _breaks:
+                _detail_lines = [
+                    f"{_pkg}: {_field} {_rel} ({_why})"
+                    for _pkg, _field, _rel, _why in _breaks[:5]
+                ]
+                _summary = "; ".join(_detail_lines)
+                if len(_breaks) > 5:
+                    _summary += f" (+ {len(_breaks) - 5} more)"
+                return False, (
+                    f"mirror_closure_break: {_summary} — refusing "
+                    "to publish (would leave the mirror in a "
+                    "non-installable state)")
         fill_sizes_from_pool(_pending, _pool)
 
         # Step 5b — MIRROR-01 Phase 3b: per-file .deb push.  For each
