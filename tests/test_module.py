@@ -278,6 +278,71 @@ def test_buildconfig_mode_rejects_unknown_value():
         assert 'banana' in cfg.error_str
 
 
+def test_chroot_iso_builds_refuse_in_individual_mode():
+    """MIRROR-02 chunk 3: every chroot/ISO entry point refuses cleanly
+    when [Build] Mode = individual.  Verified for all five commands:
+    chroot build live/installer, iso build live/installer/disk.  Each
+    prints an actionable hint pointing at the mode setting and
+    returns without proceeding."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    class _Cfg:
+        build_mode = 'individual'
+
+    _commands = [
+        ('cmd_build_chroot_live',       'chroot build live'),
+        ('cmd_build_chroot_installer',  'chroot build installer'),
+        ('cmd_build_iso_live',          'iso build live'),
+        ('cmd_build_iso_installer',     'iso build installer'),
+        ('cmd_build_iso_disk',          'iso build disk'),
+    ]
+    for _method_name, _label in _commands:
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        # Late-binding guard: bind _lines as a default arg so each
+        # loop iteration's lambda points at its own capture.
+        build.console.print = lambda *a, _buf=_lines, **k: _buf.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _r = getattr(_sess, _method_name)()
+        finally:
+            build.console.print = _orig
+        _joined = '\n'.join(_lines)
+        assert _label in _joined, (_method_name, _joined)
+        assert 'N/A in individual mode' in _joined, (_method_name, _joined)
+        assert '[Build] Mode' in _joined, (_method_name, _joined)
+        # None / False both signal "did not proceed"
+        assert _r in (None, False), (_method_name, _r)
+
+
+def test_refuse_in_individual_mode_is_a_no_op_in_distribution():
+    """The gate helper is silent + returns False when mode is
+    distribution — distribution-mode chroot/ISO must work unchanged."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    class _Cfg:
+        build_mode = 'distribution'
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.config = _Cfg()
+    _lines: 'list[str]' = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _refused = _sess._refuse_in_individual_mode('chroot build live')
+    finally:
+        build.console.print = _orig
+    assert _refused is False
+    assert _lines == [], _lines
+
+
 def test_cache_parse_individual_mode_resolves_named_pkgs_only():
     """MIRROR-02 chunk 2: in individual mode, cache parse populates
     selected_pkgs directly from indl.list lookups (no transitive
@@ -25028,6 +25093,8 @@ def main() -> int:
         test_buildconfig_mode_individual_parses,
         test_buildconfig_mode_rejects_unknown_value,
         test_parse_indl_list_strips_comments_dedups_preserves_order,
+        test_chroot_iso_builds_refuse_in_individual_mode,
+        test_refuse_in_individual_mode_is_a_no_op_in_distribution,
         test_cache_parse_individual_mode_resolves_named_pkgs_only,
         test_cache_parse_individual_mode_warns_on_missing_pkg,
         test_cache_parse_individual_mode_empty_indl_returns_false,
