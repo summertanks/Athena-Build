@@ -1841,40 +1841,30 @@ class BuildSession:
     # --------------------------Internal helper: tunnel download------------------
 
     def _do_tunnel(self, src_pkg) -> bool:
-        """Download prebuilt binary .deb files for src_pkg from the base Debian repo.
+        """Download upstream's prebuilt .deb files for src_pkg, then run
+        the same post-build normalisation a from-source build would: strip
+        NMU layers to pristine version + filename, and (when this is a
+        delta and an asg ledger is loaded) stamp `+asg<R>u<N>`.
 
-        Used when building a package from source is being to stubborn
+        Net effect: a tunneled binary is, on disk and in repo audit, a
+        legitimately-built binary — pristine-named or +asg-stamped, byte-
+        for-byte rebuilt by us.  The ONLY artefact preserved from the
+        upstream form is `republished_from = {url, upstream_sha256}` on
+        the build record (and the federation claim), which the mirror
+        sidecar uses to mark the claim as "no owner" — the federation's
+        ownership projection sees tunneled packages as un-owned without
+        affecting any apt / repo-audit / source-audit interpretation.
 
-        The result file written at the end uses the 'TUNNELED' tag (rather than
-        'PASS') so that check_build() can distinguish tunneled packages from
-        locally built ones if needed.
-
-        Args:
-            src_pkg: Source package object — uses .directory (pool path)
-                     and .package (source name).  The list of binary
-                     filenames to download is resolved via the per-tree
-                     src_pkg_files maps (see _predicted_files_for_source).
-
-        Returns:
-            True if every binary package was downloaded successfully, False otherwise.
+        Returns True iff every output landed and normalised successfully.
         """
-        # Tunneled = pristine Debian binary passthrough.  The filename on
-        # disk MUST match the .deb's internal Version (else verify_pkg_artifact
-        # flags a filename↔control mismatch), and the URL must match what
-        # snapshot.debian.org actually serves — both are the upstream Filename
-        # from the cache (carries any ~debNuN / +debNuN suffix), NOT the
-        # strip_nmu pristine prediction.  _predicted_files_for_source returns
-        # the pristine names (right for BUILT packages whose strip rewrites
-        # both control + filename); for tunnel we resolve back to the upstream
-        # filename via dep_tree.selected_pkgs[bin].get('Filename').
-        _files = self._tunnel_filenames_for_source(src_pkg.package)
-        if not _files:
+        # Upstream Filename: required for the snapshot.debian.org URL —
+        # the pristine prediction names don't exist on the server.  We
+        # rename after download.
+        _upstream_files = self._tunnel_filenames_for_source(src_pkg.package)
+        if not _upstream_files:
             logger.error(f"tunnel {src_pkg.package}: no binary packages known (run parse_dependency first)")
             return False
 
-        # Construct the pool base URL from the source's origin mirror.  This
-        # matters for sources in bookworm-security, whose pool lives at a
-        # different baseid than main.
         if src_pkg._mirror is None:
             logger.error(f"tunnel {src_pkg.package}: source has no _mirror — cache ingest bug")
             return False
@@ -1886,11 +1876,6 @@ class BuildSession:
         _comp = src_pkg._mirror.component or 'main'
         _success = True
 
-        # OBS-01 entry record for the tunneled path.  Tunneled packages
-        # bypass BuildContainer.build() entirely (passthrough copy from
-        # upstream), so they get their own phase=entry → terminal
-        # transition here.  patch_set_hash is empty (tunneled pkgs
-        # never apply our patches).
         import time as _time
         _buildlog_path = os.path.join(self.config.dir_log, 'build')
         _t_tunnel_start = _time.monotonic()
@@ -1905,42 +1890,41 @@ class BuildSession:
             )
         except OSError as _e:
             logger.warning(f"tunnel {src_pkg.package}: build-record entry: {_e}")
-        # COORD-01: track per-output destination so we can hash after
-        # downloads complete and pin the digests into the tunneled
-        # terminal record.
-        # MIRROR-02: also record the upstream URL per file so the
-        # claim layer can populate `republished_from` (the
-        # "no-owner" marker on the mirror) — without this the
-        # mirror's ownership projection would see us as the owner
-        # of a tunneled package.
-        _output_paths: 'dict[str, str]' = {}
-        _output_urls: 'dict[str, str]' = {}
-        for _filename in _files:
+
+        # Download phase: pull every upstream-named .deb to its routed
+        # pool dir.  Hash each freshly-downloaded file BEFORE strip so
+        # we can record the upstream SHA-256 (federation provenance).
+        _upstream_paths: 'dict[str, str]' = {}
+        _upstream_urls: 'dict[str, str]' = {}
+        _upstream_sha256s: 'dict[str, str]' = {}
+        for _filename in _upstream_files:
             _dst_dir = self.config.deb_dest_for_filename(_filename, _comp)
             _dest = os.path.join(_dst_dir, _filename)
-            _output_paths[_filename] = _dest
 
-            # Wipe ANY same-binary .deb in the destination that doesn't match
-            # the current expected upstream filename.  A prior run with the
-            # strip_nmu-pristine bug could have left a wrong-version .deb here
-            # (e.g. amd64-microcode_3.x_amd64.deb when the snapshot's actual
-            # bookworm-security file is amd64-microcode_3.x~deb12u1_amd64.deb).
-            # Without this, both would coexist in repo/ and dpkg-scanpackages
-            # would publish both — apt would prefer the unsuffixed one (~deb
-            # sorts BEFORE the base), installing the wrong (unstable) binary.
+            # Stale-file wipe: same binary basename but a DIFFERENT pristine
+            # version (e.g. a prior tunnel of an older upstream).  Files
+            # whose pristine base matches the target's pristine base
+            # (post-strip target, or +asg variant of it) are KEPT — they
+            # are the legitimate skip-gate target downstream.
             _bin_name = _filename.split('_', 1)[0]
+            _target_ver = _filename.split('_')[1]
+            _target_pristine = utils.strip_nmu_suffix(_target_ver)
             try:
                 for _existing in os.listdir(_dst_dir):
-                    if not (_existing.endswith(('.deb', '.udeb'))):
+                    if not _existing.endswith(('.deb', '.udeb')):
                         continue
                     if _existing.split('_', 1)[0] != _bin_name:
                         continue
                     if _existing == _filename:
                         continue
+                    _ex_ver = _existing.split('_')[1]
+                    if utils.pristine_base(_ex_ver) == _target_pristine:
+                        continue
                     _stale = os.path.join(_dst_dir, _existing)
                     logger.info(
                         f"tunnel {src_pkg.package}: removing stale "
-                        f"non-matching {_existing} (expected {_filename})")
+                        f"non-matching {_existing} (target pristine "
+                        f"{_target_pristine})")
                     try:
                         os.remove(_stale)
                     except OSError as _e:
@@ -1949,63 +1933,189 @@ class BuildSession:
             except OSError:
                 pass
 
-            # Skip files already on disk — no integrity check here; the repo
-            # directory is trusted to contain only valid packages.
             if os.path.isfile(_dest):
                 logger.info(f"tunnel {src_pkg.package}: {_filename} already present, skipping download")
+                _upstream_paths[_filename] = _dest
+                _upstream_urls[_filename] = (
+                    f"{_base}/{src_pkg.directory}/{_filename}")
+                _h = utils.get_sha256(_dest, use_cache=False)
+                if _h:
+                    _upstream_sha256s[_filename] = _h
                 continue
 
             _url = f"{_base}/{src_pkg.directory}/{_filename}"
-            _output_urls[_filename] = _url
+            _upstream_urls[_filename] = _url
             logger.info(f"tunnel {src_pkg.package}: downloading {_url}")
             _bytes, _detail = utils.download_file(_url, _dest)
             if _bytes < 0:
                 logger.error(f"tunnel {src_pkg.package}: failed to download {_filename}: {_detail or 'unknown'}")
                 _success = False
+                continue
+            _upstream_paths[_filename] = _dest
+            _h = utils.get_sha256(_dest, use_cache=False)
+            if _h:
+                _upstream_sha256s[_filename] = _h
 
-        # OBS-01 terminal record: phase=tunneled on success, failed
-        # otherwise.  built_version == intended_version for tunneled
-        # (no NMU strip; the file we copied IS the upstream binary).
-        # Replaces the prior <pkg>.result writer.
-        # COORD-01: hash each downloaded .deb (or already-present .deb
-        # we skipped re-downloading) for the coord claim layer.  Skip
-        # files that didn't land on disk — the audit will surface the
-        # missing output as a record/pool mismatch on its own.
+        # Normalisation phase: strip NMU + asg-stamp, mirroring
+        # BuildContainer._normalize_built_artifacts on the tunnel path.
+        # final_paths is keyed by the FINAL on-disk filename; final_to_upstream
+        # remembers which upstream filename each post-normalize file came
+        # from so we can attach `republished_from` provenance.
+        _final_paths: 'dict[str, str]' = {}
+        _final_to_upstream: 'dict[str, str]' = {}
+        _strips_count = 0
+        _stamps_count = 0
+        if _success and _upstream_paths:
+            _post_strip: 'list[tuple[str, str]]' = []   # (path, upstream_fn)
+            _any_stripped = False
+            for _ups_fn, _ups_path in _upstream_paths.items():
+                try:
+                    _r = utils.strip_nmu_from_deb(_ups_path)
+                except Exception as _e:
+                    logger.warning(
+                        f"tunnel strip_nmu: {os.path.basename(_ups_path)} "
+                        f"failed: {_e}")
+                    _post_strip.append((_ups_path, _ups_fn))
+                    continue
+                _new_path = _r.get('new_path', _ups_path)
+                if _r.get('status') == 'rewritten':
+                    _any_stripped = True
+                    _strips_count += 1
+                    if _new_path != _ups_path:
+                        logger.info(
+                            f"tunnel strip_nmu: {os.path.basename(_ups_path)}"
+                            f" → {os.path.basename(_new_path)}")
+                _post_strip.append((_new_path, _ups_fn))
+
+            _ledger = (getattr(self.container, 'asg_ledger', None)
+                       if self.container is not None else None)
+            _src_is_delta = (
+                utils.strip_nmu_suffix(str(src_pkg.version))
+                != str(src_pkg.version))
+            _was_delta = _any_stripped or _src_is_delta
+            _current = _post_strip
+            if _was_delta and _ledger is not None:
+                try:
+                    _release = int(
+                        str(self.config.build_version).strip('"').strip("'"))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"tunnel asg-stamp: [Build] VERSION not an integer "
+                        f"({self.config.build_version!r}) — skipping stamp "
+                        f"for {src_pkg.package}")
+                    _release = None
+                if _release is not None:
+                    _stamped: 'list[tuple[str, str]]' = []
+                    for _path, _ups_fn in _post_strip:
+                        _b = os.path.basename(_path)
+                        _name, _ext = os.path.splitext(_b)
+                        _parts = _name.split('_')
+                        if len(_parts) != 3:
+                            _stamped.append((_path, _ups_fn))
+                            continue
+                        _pkg_n, _ver, _arch = _parts
+                        _base_ver = utils.pristine_base(_ver)
+                        _n = utils.asg_next_n(
+                            _ledger.get(_pkg_n, []), _base_ver, _release)
+                        try:
+                            _r = utils.restamp_asg_deb(_path, _release, _n)
+                        except Exception as _e:
+                            logger.warning(
+                                f"tunnel asg-stamp: {_b} failed: {_e}")
+                            _stamped.append((_path, _ups_fn))
+                            continue
+                        _new_path = _r.get('new_path', _path)
+                        if _r.get('status') == 'rewritten':
+                            _stamps_count += 1
+                            logger.info(
+                                f"tunnel asg-stamp: {_b} → "
+                                f"{os.path.basename(_new_path)} "
+                                f"(+asg{_release}u{_n})")
+                        _stamped.append((_new_path, _ups_fn))
+                    _current = _stamped
+
+            for _final_path, _ups_fn in _current:
+                _final_fn = os.path.basename(_final_path)
+                _final_paths[_final_fn] = _final_path
+                _final_to_upstream[_final_fn] = _ups_fn
+
+        # Build-record terminal: outputs/output_hashes are FINAL
+        # post-normalize names + SHA-256 of the rewritten on-disk file.
+        # republished_from provenance keys by FINAL name → upstream URL +
+        # upstream SHA-256 (pre-strip — the actual hash at the remote URL).
         _output_hashes: 'dict[str, str]' = {}
         if _success:
-            for _fn, _dst in _output_paths.items():
-                _h = utils.get_sha256(_dst)
+            for _fn, _dst in _final_paths.items():
+                _h = utils.get_sha256(_dst, use_cache=False)
                 if _h:
                     _output_hashes[_fn] = _h
-        # MIRROR-02: per-file upstream provenance.  For tunneled
-        # passthrough, upstream_sha256 == our downloaded SHA-256
-        # (the file IS upstream's binary verbatim — no NMU strip
-        # or version mangling).  The mirror uses this to mark the
-        # package as "no owner" (tunneled in the federation sense).
         _republished_from: 'dict[str, dict]' = {}
         if _success:
-            for _fn, _url in _output_urls.items():
-                _output_h = _output_hashes.get(_fn)
-                if not _output_h:
+            for _final_fn, _ups_fn in _final_to_upstream.items():
+                _ups_url = _upstream_urls.get(_ups_fn)
+                _ups_sha = _upstream_sha256s.get(_ups_fn)
+                if not _ups_url or not _ups_sha:
                     continue
-                _republished_from[_fn] = {
-                    'url':             _url,
-                    'upstream_sha256': _output_h,
+                _republished_from[_final_fn] = {
+                    'url':             _ups_url,
+                    'upstream_sha256': _ups_sha,
                 }
+
+        _outputs_sorted = sorted(_final_paths.keys()) if _final_paths \
+            else sorted(_upstream_files)
         try:
             utils.update_build_record(
                 _buildlog_path, src_pkg.package,
                 phase=('tunneled' if _success else 'failed'),
-                built_version=(str(src_pkg.version) if _success else None),
+                built_version=(
+                    utils.strip_nmu_suffix(str(src_pkg.version))
+                    if _success else None),
                 finished=utils._utc_now_iso(),
                 elapsed_seconds=round(_time.monotonic() - _t_tunnel_start, 3),
-                output_count=len(_files),
-                outputs=sorted(_files),
+                output_count=len(_outputs_sorted),
+                outputs=_outputs_sorted,
                 output_hashes=_output_hashes,
                 republished_from=_republished_from,
             )
         except (OSError, FileNotFoundError) as _e:
             logger.warning(f"tunnel {src_pkg.package}: build-record terminal: {_e}")
+
+        if _success:
+            _upstream_ver = str(src_pkg.version)
+            _pristine_ver = utils.strip_nmu_suffix(_upstream_ver)
+            _total_bytes = 0
+            for _dst in _final_paths.values():
+                try:
+                    _total_bytes += os.path.getsize(_dst)
+                except OSError:
+                    pass
+            _size_kb = _total_bytes // 1024
+            console.print(
+                f"  {src_pkg.package}: tunneled  upstream={_upstream_ver}  "
+                f"on-disk={_pristine_ver}  "
+                f"({len(_outputs_sorted)} file(s), {_size_kb} KiB, "
+                f"{_strips_count} stripped, {_stamps_count} asg-stamped)")
+            if _pristine_ver == _upstream_ver and _stamps_count == 0:
+                console.print(
+                    "    (pristine upstream — no NMU/binNMU/backport "
+                    "suffix; on-disk artifact identical to a "
+                    "from-source build at this snapshot)")
+            else:
+                console.print(
+                    f"    upstream {_upstream_ver} → pristine "
+                    f"{_pristine_ver}; on-disk artifact normalised "
+                    f"(strip + asg-stamp) so repo audit / source audit "
+                    f"see it as a legitimately-built binary.  "
+                    f"Federation claim carries republished_from → mirror "
+                    f"records this as 'no owner' (tunneled provenance).")
+            for _fn in _outputs_sorted:
+                _dst = _final_paths.get(_fn, '')
+                _rel = os.path.relpath(_dst, self.config.dir_repo) \
+                    if _dst else _fn
+                console.print(f"    + {_rel}")
+            if _upstream_urls:
+                _origin = sorted(_upstream_urls.values())[0].rsplit('/', 1)[0]
+                console.print(f"    origin: {_origin}/")
 
         return _success
 
@@ -2041,6 +2151,7 @@ class BuildSession:
             packages.append(src)
 
         _success = _failed = 0
+        _failed_names: 'list[str]' = []
         progress_bar = ProgressBar(label='Tunnel', maxvalue=len(packages), show_rate=False)
 
         for _src_pkg in packages:
@@ -2051,10 +2162,17 @@ class BuildSession:
             else:
                 logger.error(f"Tunnel {_src_pkg.package} [FAIL]")
                 _failed += 1
+                _failed_names.append(_src_pkg.package)
             progress_bar.step(1)
         progress_bar.close()
 
-        console.print(f"Tunnel complete: {_success} tunneled, {_failed} failed")
+        console.print(
+            f"Tunnel complete: {_success} tunneled, {_failed} failed "
+            f"(of {len(packages)} requested)")
+        if _failed_names:
+            console.print(
+                f"  failed: {', '.join(_failed_names)}  "
+                f"(see log/build/<pkg> for details)")
 
 
     # ------------------------------------Command: build_bootable------------
@@ -5576,9 +5694,9 @@ class BuildSession:
                 f"  → at least one publish target is behind {_cur} — "
                 f"`refresh` to build + publish the delta")
         if _cur and _latest and _latest > _cur:
-            console.print(
-                "  → latest is AHEAD of current — `snapshot workload latest` to "
-                "see the delta, `snapshot select latest` + `refresh` to roll forward")
+            console.print("  → latest is AHEAD of current ", tui.COLOR_INFO)
+            console.print("  — `snapshot workload latest` to see the delta\n"
+                          "  - `snapshot select latest` to roll forward")
 
     def _cmd_snapshot_list(self):
         """READ-ONLY: current + every snapshot BETWEEN current and latest
@@ -7424,9 +7542,9 @@ class BuildSession:
           | ok          | matches    | ok          |
           | ok          | differs    | stale_pass  ← patches drifted
           | ok          | absent     | ok           (no patches declared)
+          | tunneled    | any        | tunneled
           | missing     | any        | needs_build ← no record = rebuild
           | fail        | any        | fail         (operator marker; no-op)
-          | tunneled    | any        | tunneled
           | interrupted | any        | interrupted  (rebuild required)
 
         Missing record always routes to 'needs_build' — without a
@@ -7435,13 +7553,25 @@ class BuildSession:
 
         Resolution order (short-circuits):
           1. no predicted binaries → 'no_pkgs'
-          2. record=tunneled → 'tunneled'
-          3. record=fail → 'fail'
-          4. any source file missing on disk OR .verified absent → 'needs_sync'
-          5. record=interrupted → 'interrupted'
-          6. any predicted binary missing/not-ar → 'stale_pass' (if ok)
-             else 'needs_build'
-          7. classify via the table above
+          2. record=fail → 'fail'  (operator marker, leave alone)
+          3. any source file missing on disk OR .verified absent → 'needs_sync'
+          4. record=interrupted → 'interrupted'
+          5. predicted-binaries disk check — `find_matching_artifact` +
+             `is_ar_file` (the SAME accept-pristine-or-+asg gate
+             check_build uses, so audit and build agree).  Any binary
+             missing or not-ar →
+                'stale_pass'   if record=ok or record=tunneled
+                'needs_build'  otherwise (missing record)
+          6. binaries valid → classify via the table above.
+
+        Step 5 is critical for record=tunneled: a tunneled record claims
+        binaries are present, but if `_do_tunnel` was interrupted or a
+        post-tunnel run wiped the pool, the binaries can be gone or in
+        a wrong (upstream-suffixed, non-normalised) shape.  Without the
+        disk check audit would silently green-light the package while
+        `source build` (using the same `find_matching_artifact` gate)
+        re-attempts the tunnel.  Routing to 'stale_pass' surfaces it
+        and `source repair` clears the record for re-tunnel.
         """
         _expected = self._predicted_files_for_source(pkg)
         if not _expected:
@@ -7458,14 +7588,18 @@ class BuildSession:
         #   'ok' / 'fail' / 'tunneled' — terminal phases.
         _record = utils.read_build_record(_buildlog, pkg)
         _record_state = utils.classify_build_record(_record)
-        if _record_state == 'tunneled':
-            return 'tunneled'
+        # 'fail' is an explicit operator marker — leave the on-disk
+        # state alone (repair won't touch it; the operator must
+        # `source build force <pkg>` to retry).  All other terminal
+        # states fall through to the disk-verification path so audit
+        # and `source build`'s check_build gate stay in lock-step.
         if _record_state == 'fail':
             return 'fail'
         _interrupted = (_record_state == 'interrupted')
         _record_ok = (_record_state == 'ok')
+        _record_tunneled = (_record_state == 'tunneled')
 
-        # (4) source files — every entry in src.files must exist on
+        # (3) source files — every entry in src.files must exist on
         # disk with a .verified sidecar (download_source's gate).
         _sync_ok = True
         for _fname in src.files:
@@ -7492,11 +7626,11 @@ class BuildSession:
         # (5) predicted binaries.  `is_ar_file` is a staticmethod so we
         # don't need a live container instance — read-only callers
         # (source audit / source repair) work without `container init`.
+        # MUST match check_build's accept criteria (pristine or +asg
+        # via find_matching_artifact) so audit and the build's
+        # skip-rebuild gate never disagree.
         _all_present = True
         for _f in _expected:
-            # UPD-01: accept the predicted pristine name OR a +asg<R>u<N>
-            # stamped variant (find_matching_artifact) — same reconciliation
-            # check_build uses, so a stamped delta isn't seen as "missing".
             _dst_dir = self.config.deb_dest_for_filename(_f)
             _match = utils.find_matching_artifact(_dst_dir, _f)
             if _match is None:
@@ -7507,20 +7641,86 @@ class BuildSession:
                 break
 
         if not _all_present:
-            return 'stale_pass' if _record_ok else 'needs_build'
+            # record=ok or record=tunneled with missing binaries: the
+            # record claims success but disk disagrees.  Same state in
+            # both cases — `source repair` clears the record; next
+            # build re-tunnels (record was tunneled) or re-builds
+            # (record was ok).
+            if _record_ok or _record_tunneled:
+                return 'stale_pass'
+            return 'needs_build'
 
         # (6) binaries valid; classify via record × patch_set_hash.
+        if _record_tunneled:
+            # Tunneled packages don't carry our patch set, so
+            # patch_set_hash drift doesn't apply.  Binaries present in
+            # normalised form → the record is honest.
+            return 'tunneled'
         _patchhash = self._patchhash_status(pkg, src)
         if _record_ok:
             # PASS row.  Matches OR absent (no patches declared) → ok.
             # Differs → stale_pass.
             return 'stale_pass' if _patchhash == 'differs' else 'ok'
 
-        # No record (fail / interrupted / tunneled handled above).
-        # Without a record we have no proof binaries reflect current
-        # patches — rebuild is the only safe action.
+        # No record (fail / interrupted handled above).  Without a
+        # record we have no proof binaries reflect current patches —
+        # rebuild is the only safe action.
         return 'needs_build'
 
+
+    _AUDIT_HARD_STATES = (
+        'needs_build', 'stale_pass', 'interrupted', 'needs_sync')
+
+    def _detect_build_audit_divergence(
+            self, packages) -> 'list[tuple[str, str, str]]':
+        """Sanity-check that source build and source audit agree about
+        which sources are done.  For each source in `packages` (the
+        in-scope set the build pass operated on):
+
+          - Query `_source_state` (audit's classifier).
+          - Query the build record's classifier.
+          - If audit says a hard state (needs_build / stale_pass /
+            interrupted / needs_sync) AND the build record does NOT
+            say 'fail' (which would be a consistent declared failure),
+            emit a (pkg, audit_state, record_state) finding.
+
+        Skip-src packages (`cache.skip_src`) are excluded — they're
+        the operator's declared "leave alone" set; audit can flag them
+        without it being a divergence.
+
+        The empty list means audit and build are in lock-step.  Any
+        non-empty list means an on-disk shape the skip-gate accepts is
+        different from what the audit classifier accepts (which is
+        exactly the firefox-esr bug class: build's `check_build` saw a
+        missing/wrong-shaped file and returned False, while audit's
+        `_source_state` early-returned `tunneled` based on the record
+        alone).  Surface to `cmd_source_build` as a gate that refuses
+        to set `source_build_ready` until investigated.
+
+        Pure read-only — no mutation, safe to invoke from any
+        post-build path.
+        """
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        _findings: 'list[tuple[str, str, str]]' = []
+        for _p in packages:
+            if (self.cache is not None
+                    and _p.package in self.cache.skip_src):
+                continue
+            try:
+                _audit_state = self._source_state(_p.package, _p)
+            except Exception as _e:
+                logger.warning(
+                    f"divergence gate: _source_state({_p.package}) "
+                    f"raised {type(_e).__name__}: {_e}")
+                continue
+            if _audit_state not in self._AUDIT_HARD_STATES:
+                continue
+            _record = utils.read_build_record(_buildlog, _p.package)
+            _record_state = utils.classify_build_record(_record)
+            if _record_state == 'fail':
+                continue
+            _findings.append((_p.package, _audit_state, _record_state))
+        return _findings
 
     def cmd_source_repair(self, *args):
         """Align build records with current source state.  MUTATOR.
@@ -8597,17 +8797,24 @@ class BuildSession:
             return ('skipped', 0)
 
         # Predicted artefacts (union across both dep_trees) — used by
-        # both check_build (skip-rebuild gate) and _do_tunnel.
+        # both check_build (skip-rebuild gate) and _do_tunnel.  These
+        # are PRISTINE strip-NMU names: tunneled .debs are normalised
+        # (strip + asg-stamp) on download so on-disk they look identical
+        # to from-source-built .debs.  The check_build gate is the same
+        # for both paths; only the WAY we acquire the file differs.
         _expected_files = self._predicted_files_for_source(_src_pkg.package)
 
-        # Tunneled packages: download Debian's pristine binary instead
-        # of building locally.  check_build accepts 'TUNNELED' as a
-        # valid result so we can skip packages already tunneled in a
-        # previous run.  Pass UPSTREAM filenames (Filename: from cache).
+        # Tunneled packages: download Debian's prebuilt binary and run
+        # it through the same strip + asg-stamp normalisation a source
+        # build would.  check_build uses the SAME pristine prediction
+        # for both paths — once a tunneled .deb has been normalised it
+        # is, to every other subsystem (repo audit, source audit,
+        # check_build, find_matching_artifact), a legitimately-built
+        # binary.  The only place the difference surfaces is the
+        # federation sidecar, where the claim's `republished_from`
+        # field marks the package as "no owner" (tunneled provenance).
         if _src_pkg.package in self.config.tunnel_packages:
-            _tunnel_expected = self._tunnel_filenames_for_source(
-                _src_pkg.package)
-            if self.container.check_build(_src_pkg, _tunnel_expected):
+            if self.container.check_build(_src_pkg, _expected_files):
                 logger.warning(
                     f"Package {_src_pkg.package} already tunneled [SKIPPED]")
                 return ('skipped', 0)
@@ -9139,6 +9346,45 @@ class BuildSession:
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 return
+
+        # Audit-vs-build divergence gate.  After every source build the
+        # in-scope set should now classify (per `_source_state`) as ok /
+        # tunneled / no_pkgs / fail — the legitimate terminal states.
+        # If any classify as needs_build / stale_pass / interrupted /
+        # needs_sync while the build record DOESN'T say 'fail', the
+        # build's check_build skip-gate and audit's classifier
+        # disagree about whether the source is done.  That's the bug
+        # class behind the firefox-esr "audit clean, build re-fires"
+        # incident; this gate makes any future drift loud.
+        _divergences = self._detect_build_audit_divergence(packages)
+        if _divergences:
+            logger.error(
+                f"source build / audit divergence: {len(_divergences)} "
+                f"source(s) where build claimed done but audit says "
+                f"rebuild needed")
+            console.print(
+                f"AUDIT DIVERGENCE: {len(_divergences)} source(s) where "
+                f"the build pass thought it was done but `source audit` "
+                f"disagrees.  The skip-gate (check_build / "
+                f"find_matching_artifact) and the audit classifier "
+                f"(_source_state) are out of sync, OR an on-disk file "
+                f"was wiped between build and the gate.  First 10:",
+                tui.COLOR_ERROR)
+            for _pkg_n, _audit_said, _record_said in _divergences[:10]:
+                console.print(
+                    f"  {_pkg_n}: audit={_audit_said}  "
+                    f"record={_record_said}",
+                    tui.COLOR_ERROR)
+            if len(_divergences) > 10:
+                console.print(
+                    f"  ... and {len(_divergences) - 10} more — run "
+                    f"`source audit verbose` for the full list",
+                    tui.COLOR_ERROR)
+            console.print(
+                "  source_build_ready is NOT set; investigate via "
+                "`source audit` + `source repair` before chroot/iso build.",
+                tui.COLOR_ERROR)
+            return
 
         self.flags.source_build_ready = True
         # UX-04: refresh the session pickle so last_source_build_counts
@@ -10192,6 +10438,18 @@ def main(banner: str) -> None:
     if hasattr(tui_inst, 'one_shot_cmds'):
         tui_inst.one_shot_cmds = list(_one_shot_cmds)
 
+    # Persistent mode indicator on the TUI footer banner.  In individual
+    # mode the operator must never confuse a partial pipeline for a
+    # broken dist build; the footer carries `[indl]` for every screen.
+    if (not _headless
+            and getattr(config, 'build_mode', 'distribution') == 'individual'
+            and hasattr(tui_inst, 'dispatcher')):
+        try:
+            tui_inst.dispatcher.state.banner = (
+                f"{banner} [indl]")[:50]
+        except AttributeError:
+            pass
+
     # Attach a timestamped FileHandler to the 'athena' logger after the
     # Tui is constructed.  Tui.__init__ calls setup_logging() to (re)bind
     # the tab handlers; setup_logging is careful to leave non-tab
@@ -10233,6 +10491,17 @@ def main(banner: str) -> None:
     console.print(f"\tArch\t\t\t{config.arch}")
     console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
     console.print(f"\tBuild Distribution\t{config.build_distribution} {config.build_version} ({config.build_codename})")
+    _mode = getattr(config, 'build_mode', 'distribution')
+    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'individual'
+                   else tui.COLOR_INFO)
+    if _mode == 'individual':
+        _indl_names = utils.parse_indl_list(
+            getattr(config, 'indllist_path', '') or '')
+        console.print(
+            f"\tMode\t\t\tindividual  [{len(_indl_names)} pkg(s) in indl.list]",
+            _mode_color)
+    else:
+        console.print("\tMode\t\t\tdistribution", _mode_color)
 
     # UX-04: announce persisted-flag state across restarts so the
     # operator knows prior session left something behind without needing
