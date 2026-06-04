@@ -3597,9 +3597,11 @@ class BuildSession:
         # ── Step 5: reachability + ssh + permissions + http probes ──
         _signing_homedir = signing.signing_home(self.config)
         if _is_ssh and not _parsed['no_probe']:
+            _ssh_user = _mirror._extract_user_from_ssh_url(_normalised) or ''
+            _pool_path = _mirror._extract_path_from_ssh_url(_normalised) or ''
             _ok = self._mirror_add_run_ssh_probes(
-                host=_host, ssh_key=_parsed['ssh_key'],
-                pool_path=_normalised[len('ssh://'):].split('/', 1)[-1],
+                host=_host, user=_ssh_user, ssh_key=_parsed['ssh_key'],
+                pool_path=_pool_path,
                 public_url=_public_url, proto=_proto or 'http',
             )
             if not _ok:
@@ -3742,22 +3744,20 @@ class BuildSession:
         return True
 
     def _mirror_add_run_ssh_probes(
-        self, *, host: str, ssh_key: 'Optional[str]',
+        self, *, host: str, user: str, ssh_key: 'Optional[str]',
         pool_path: str, public_url: str, proto: str,
     ) -> bool:
-        """Per-step probe runner (DNS/TCP → SSH → permissions → HTTP).
-        Returns True iff every step ok; prints a progress line per
-        step.  Extracted from cmd_mirror_add for readability."""
+        """Per-step probe runner (DNS/TCP → SSH auth → write perms →
+        HTTP InRelease).  Returns True iff every step ok; prints a
+        progress line per step.  Extracted from cmd_mirror_add for
+        readability.
+
+        `user` and `pool_path` are extracted from the operator-supplied
+        ssh URL upstream (`_extract_user_from_ssh_url` /
+        `_extract_path_from_ssh_url`).  Without a user we'd default to
+        the LOCAL invocation's username, which is almost never the
+        publish-target's account."""
         import mirror as _mirror
-        _user = ''
-        # Pull user@host from the URL stored in pool_path's parent — but
-        # we only have the path here.  Operator-supplied user came from
-        # the URL; re-extract from public_url-style if needed.  Simplest:
-        # SSH probes pass the raw host and let ssh/SSH config pick the user.
-        # If operator's ssh_config carries `User ubuntu` for the host,
-        # this just works.  For explicit-user scenarios the operator's
-        # ssh_key argument is what authenticates.
-        del pool_path  # currently informational
 
         # 5a — DNS + TCP probe on ssh port
         _ok, _det = _mirror.probe_dns_and_tcp(host, 22)
@@ -3767,25 +3767,26 @@ class BuildSession:
         if not _ok:
             return False
 
-        # 5b — SSH auth probe
-        _ok, _det = _mirror.probe_ssh_auth(host, _user, ssh_key)
+        # 5b — SSH auth probe (BatchMode=yes, echo round-trip)
+        _ok, _det = _mirror.probe_ssh_auth(host, user, ssh_key)
         console.print(
-            f"  ssh auth: {_det}",
+            f"  ssh auth ({user or '(local-user)'}@{host}): {_det}",
             tui.COLOR_INFO if _ok else tui.COLOR_ERROR)
         if not _ok:
             return False
 
-        # 5c — Remote write probe (pool + coord)
-        # Re-extract the absolute path on the remote
-        # — that's what the rsync target points at.  Operator's URL is
-        # `ssh://user@host/abs/path`, so the path is after the first
-        # slash after the host.  We already stripped the scheme upstream;
-        # the orchestrator passes the pool_path arg for clarity.
-        # (We use shlex.quote on the remote side, so paths with spaces
-        # are handled.)
-        # NOTE: we re-derive from the URL inside probe_remote_writable
-        # for now; if user wants pool_path drilling down later we can
-        # plumb it through.
+        # 5c — Remote write probe: ensure pool + coord dirs exist and
+        # are writable by the ssh user.  No-op when pool_path couldn't
+        # be derived (operator gave a userless ssh URL or similar);
+        # the next ssh-probe failure will surface the same issue.
+        if pool_path:
+            _ok, _det = _mirror.probe_remote_writable(
+                host, user, ssh_key, pool_path)
+            console.print(
+                f"  remote write ({pool_path} + -coord): {_det}",
+                tui.COLOR_INFO if _ok else tui.COLOR_ERROR)
+            if not _ok:
+                return False
 
         # 5d — HTTP probe on public_url
         _codename = str(self.config.build_codename).strip('"').strip("'")
