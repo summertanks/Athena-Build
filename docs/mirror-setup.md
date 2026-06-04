@@ -44,57 +44,107 @@ ssh -i config/repo_asgard.key ubuntu@140.245.198.222 echo ok
 
 ## URL forms accepted
 
-| Form | Example | Inferred type |
+Publish-target URLs are restricted to two schemes — the apt-readable
+URL the chroot writes into `sources.list.d` is **derived** from the
+publish URL, not handed in.
+
+| Form | Example | Use |
 |---|---|---|
-| `ssh://user@host/abs/path` | `ssh://deploy@mirror.example/srv/asgard` | `ssh` |
-| `user@host:/abs/path` (rsync shorthand) | `deploy@mirror.example:/srv/asgard` | `ssh` |
-| `file:///abs/path` | `file:///srv/asgard` | `local` |
-| `/abs/path` (absolute, no scheme) | `/srv/asgard` | `local` |
+| `ssh://user@host/abs/path` | `ssh://deploy@mirror.example/srv/asgard` | remote publish (rsync over SSH) |
+| `file:///abs/path` | `file:///srv/asgard` | offline / local-fs publish |
 
-Pass `--type ssh|local` to override inference.  Bare `user@host`
-(no path) is rejected — the path was implicit at `~/<dist-id>/` under
-the legacy `[Repo] PublishSshTarget` key; MIRROR-01 requires an explicit
-path so URLs are unambiguous for federation propagation.
+`http://` and `https://` URLs are **rejected** as publish targets —
+they're the *read* surface, not the *push* surface.  Pass the read
+protocol via `--proto`; the chroot writer will compute
+`<proto>://<host>/<dist-id-lowercased>` and use that for the apt source
+line.
 
-## Adding a mirror
+## Adding a mirror (the new shape)
 
 ```
-mirror add <name> <url> [--ssh-key PATH] [--type ssh|local]
+mirror add <ip|fqdn|local> <url> [--ssh-key PATH] [--proto http|https]
+                                 [--name NAME] [--no-probe] [--yes]
 ```
 
-- **`<name>`** — ASCII alphanumerics + `-` / `_`, 1–64 chars.  Becomes
-  the filename component of `config/mirror.<name>.state`.  Must be
-  unique locally; URLs must also be unique across all configured mirrors.
-- **`<url>`** — the **pool** URL (see forms above).
-- **`--ssh-key`** — private key for rsync/ssh transport (ssh mirrors).
+- **`<ip|fqdn|local>`** — REQUIRED keyword classifying the host portion
+  of the URL.  `ip` requires an IPv4 or IPv6 literal; `fqdn` requires a
+  DNS hostname; `local` requires a `file://` URL.  A mismatch is rejected
+  loudly.
+- **`<url>`** — the publish URL (ssh:// or file:///).
+- **`--ssh-key PATH`** — private key for rsync/ssh (required for ssh:// URLs).
+- **`--proto http|https`** — REQUIRED for ssh:// URLs.  The chroot writes
+  `<proto>://<host>/<dist-id>` into `sources.list.d/athena-<name>.list`.
+  Single-dash `-proto` is also accepted.
+- **`--name NAME`** — override the auto-derived name.  Default name is
+  the host with `.` and `:` mapped to `-` (e.g. `140-245-198-222`,
+  `mirror-example-com`).  For `local` mirrors the name comes from the
+  path tail.
+- **`--no-probe`** — skip the DNS / TCP / SSH / HTTP probes (dev /
+  offline scenarios).  Sidecar discovery still runs if reachable.
+- **`--yes`** — accept the federation-join summary without prompting.
+  Refusal gates (signing-key verify, key-mismatch on peer's coord-head)
+  are **never** bypassed by `--yes`.
 
-What `add` does:
+What the new `mirror add` actually does (10-step pipeline, each step
+prints a progress line):
 
-- Writes `config/mirror.<name>.state` with
-  `base = current = <local snapshot.current>` so the mirror starts at
-  parity with this builder.
-- **Does not** touch the remote: no SSH probe, no rsync, no coord-head
-  write.
-- **Does not** auto-propagate the new URL to existing peers' signed
-  `neighbours` list — that's `mirror reconcile-neighbours`.
+1. **Signing-key gate.**  `signing.verify_key()` must succeed.
+   Refused otherwise — there's no published `coord-head` we could sign
+   without it.
+2. **Sanity.**  Host-type keyword × URL shape.
+3. **Proto requirement.**  `--proto` mandatory for ssh, forbidden for
+   file.
+4. **Derive.**  Name (from host), `public_url` (`<proto>://<host>/<dist-id>`),
+   host fields.
+5. **Dedup early.**  Refuse if name or URL is already registered locally.
+6. **Probes** (unless `--no-probe`):
+   * DNS resolve + TCP 22 reachability
+   * SSH `BatchMode=yes echo ok` (key + host + auth verified)
+   * HTTP HEAD on `<public_url>/dists/<codename>/InRelease`:
+     200 = mirror has a published Release;
+     404 = empty mirror (first-publish bootstrap is fine);
+     anything else = warn.
+7. **Sidecar probe.**  Pull peer's `coord-head.json[.sig]` from
+   `<pool>-coord/`.  If it's present, **GPG-verify with our local
+   tier-1 keyring** — if verify fails, **ABORT**: the peer's federation
+   isn't in our trust domain (operator must import the federation's
+   public key out-of-band first).  If verify succeeds, render summary
+   (head-time / inrelease-sha / per-builder seqs / neighbours list).
+8. **Federation discovery.**  For each peer in the verified head's
+   `neighbours` list, recursively probe their sidecar.  Classify each
+   as `reachable+verified` / `reachable+bootstrap-pending` / `unreachable`.
+9. **Dedup + drop policy.**  Intersect discovered peers with the local
+   mirror set; the overlap is dedup'd.  Unreachable peers are
+   **dropped** (take-control-and-drop default) — the new federation
+   joins without them, and `mirror reconcile-neighbours` propagates the
+   shrunk membership to the remaining reachable peers.
+10. **Sources.list preview + confirm.**  Render every
+    `/etc/apt/sources.list.d/athena-<name>.list` line the next
+    `chroot build` would emit (existing + primary + every net-new peer).
+    Prompt YESNO to accept (skip with `--yes`).  On accept: write state
+    files for the primary + every net-new reachable peer; trigger
+    `mirror reconcile-neighbours` to propagate.
 
 ## First-time setup (fresh remote)
 
-Create the sidecar tree on the remote.  The apt pool dir (e.g.
-`~ubuntu/asgard`) may already exist from prior use; the new piece is
-its `-coord` sibling:
+Create the apt-pool dir + its `-coord` sidekick on the remote.  The
+probe step in `mirror add` `mkdir -p`s the latter for you when the
+operator's ssh user has permission, but for clarity:
 
 ```
-ssh -i config/repo_asgard.key ubuntu@140.245.198.222 mkdir -p asgard asgard-coord
+ssh -i config/repo_asgard.key ubuntu@140.245.198.222 \
+    mkdir -p /home/ubuntu/asgard /home/ubuntu/asgard-coord
 ```
 
 Register and publish:
 
 ```
-mirror add primary ssh://ubuntu@140.245.198.222/home/ubuntu/asgard \
-                   --ssh-key config/repo_asgard.key
-mirror publish primary
+mirror add ip ssh://ubuntu@140.245.198.222/home/ubuntu/asgard \
+              --ssh-key config/repo_asgard.key --proto http
+mirror publish 140-245-198-222
 ```
+
+(Or `mirror publish` with no name to push to every configured mirror.)
 
 Because the remote has no `coord-head.json` yet, this triggers the
 **first-publish bootstrap path**:
@@ -114,10 +164,77 @@ Because the remote has no `coord-head.json` yet, this triggers the
 Verify:
 
 ```
-mirror list             # expect: primary  [ssh   ]  in-sync   ssh://...
-mirror status primary   # expect: PUBLISHED  current=<your snapshot.current>
-mirror audit primary    # expect: no CRITICAL findings
+mirror list             # expect: 140-245-198-222  [ssh   ]  in-sync   ssh://...
+mirror status 140-245-198-222
+mirror audit 140-245-198-222
 ```
+
+## Joining an existing federation
+
+If the peer already has a published `coord-head` listing other
+neighbours, `mirror add` will fetch + verify it, recursively probe each
+neighbour, and propose **adding all reachable peers** in one bundle.
+
+```
+mirror add fqdn ssh://ubuntu@mirror-a.example/srv/asgard \
+                --ssh-key config/asgard.key --proto https
+```
+
+Output sketch:
+
+```
+signing key ok: mock-key-verified
+derived: name=mirror-a-example  url=ssh://...  host=mirror-a.example  public_url=https://mirror-a.example/asgard
+  ssh reachability (mirror-a.example:22): reachable
+  ssh auth: ssh auth + echo round-trip ok
+  apt URL (https://mirror-a.example): InRelease present at https://...
+sidecar: coord-head verified
+
+existing coord-head on this peer:
+  head_time:       2026-06-01T00:00:00Z
+  inrelease_sha:   a1b2c3d4e5f6a7b8…
+  builders/seqs:   athena-a=14, athena-b=3
+  neighbours (3):
+    - ssh://ubuntu@mirror-a.example/srv/asgard
+    - ssh://ubuntu@mirror-b.example/srv/asgard
+    - ssh://ubuntu@mirror-c.example/srv/asgard
+
+proposed sources.list (after add):
++ athena-mirror-a-example.list: deb [signed-by=…] https://mirror-a.example/asgard thor main
++ athena-mirror-b-example.list: deb [signed-by=…] https://mirror-b.example/asgard thor main
++ athena-mirror-c-example.list: deb [signed-by=…] https://mirror-c.example/asgard thor main
+
+Register 'mirror-a-example' + 2 discovered peer(s)? [y/n]:
+```
+
+If any peer in the list is unreachable when probed, it's shown in a
+**DROPPING** block and excluded from the federation join (the default
+"take-control-and-drop" policy):
+
+```
+DROPPING 1 unreachable peer(s) from the federation (default policy):
+  - ssh://ubuntu@mirror-c.example/srv/asgard: TCP connect failed
+  `mirror reconcile-neighbours` will propagate the shrunk membership to all remaining reachable peers.
+```
+
+## Signing-key mismatch (the federation trust gate)
+
+The peer's `coord-head.json` is GPG-signed with the federation's tier-1
+key.  If our local keyring can't verify it, `mirror add` aborts with:
+
+```
+sidecar: coord-head present but GPG verify FAILED against local tier-1
+keyring — either the federation's signing key is missing from your
+keyring (import it out-of-band) or this peer was signed by a key you
+don't trust
+```
+
+Fix: get the federation's tier-1 public key from an operator who
+already has it, `gpg --import` it into your signing keyring, re-run
+`mirror add`.  There is no flag to override this — joining a
+federation whose key you don't have means signing `coord-head` updates
+with a key the rest of the federation can't verify, which would
+poison the next reconcile.
 
 ## Migrating from the legacy `[Repo]` keys
 
@@ -140,9 +257,9 @@ A typical migration:
 
 | Legacy key | New equivalent |
 |---|---|
-| `PublishSshTarget = ubuntu@host` (path implicit at `~/asgard`) | `mirror add primary ssh://ubuntu@host/home/ubuntu/asgard` |
+| `PublishSshTarget = ubuntu@host` (path implicit at `~/asgard`) | `mirror add ip ssh://ubuntu@<host>/home/ubuntu/asgard --ssh-key … --proto http` |
 | `PublishSshKey = config/repo_asgard.key` | `--ssh-key config/repo_asgard.key` on `mirror add` |
-| `AptSourceURL = http://host/asgard/` | Set in each installed-system `sources.list.d/athena-<name>.list` automatically; nothing to do |
+| `AptSourceURL = http://host/asgard/` | Derived as `<proto>://<host>/<dist-id>`; written automatically |
 | `ExternalEnabled = true/false` | Removed — every configured mirror is enabled; un-register with `mirror remove` to disable |
 
 ## Redoing a mirror (wipe + start over)
@@ -157,8 +274,8 @@ rm -rf cache/mirror/<name>                 # clears staging cache
 ssh ... 'rm -rf <pool>-coord/coord-head.json* \
                 <pool>-coord/keyring \
                 <pool>-coord/claims'
-mirror add <name> <url> --ssh-key ...      # re-register clean
-mirror publish <name>                      # re-bootstraps
+mirror add <ip|fqdn> <url> --ssh-key … --proto …   # re-register clean
+mirror publish <name>                       # re-bootstraps
 ```
 
 `mirror remove` is intentionally **local-only**: it removes the local
@@ -195,7 +312,8 @@ reconcile.  For multiple peers:
 
 ```
 mirror init <id>                generate Ed25519 builder identity + persist BUILDER_ID
-mirror add <name> <url>         register a mirror; seeds base+current from snapshot.current
+mirror add <ip|fqdn|local> <url> [--ssh-key PATH] [--proto http|https] [--name N] [--no-probe] [--yes]
+                                register a mirror — probes, sidecar, federation discovery, preview, confirm
 mirror remove <name|url>        unregister LOCALLY (no remote/peer changes)
 mirror list                     name, type, federation-consistency tag, url
 mirror summary [<name>]         full per-mirror state dump

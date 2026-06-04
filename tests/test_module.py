@@ -22639,6 +22639,405 @@ def test_discover_federation_peers_classifies_each_neighbour():
     assert _b['reachable'] and not _b['verified']
 
 
+def _cmd_mirror_add_session(tmp_dir, codename='thor', distribution='Asgard',
+                             base_pin='20260602T000000Z'):
+    """Build a minimal BuildSession + monkey-patch console.print so
+    cmd_mirror_add tests can capture output without curses.  Returns
+    (sess, restore_fn).  `restore_fn()` puts console.print back."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build as _build
+    _sess = _build.BuildSession.__new__(_build.BuildSession)
+    _cfg_dir = os.path.join(tmp_dir, 'config')
+    _cache_dir = os.path.join(tmp_dir, 'cache')
+    _log_dir = os.path.join(tmp_dir, 'log')
+    os.makedirs(_cfg_dir, exist_ok=True)
+    os.makedirs(_cache_dir, exist_ok=True)
+    os.makedirs(_log_dir, exist_ok=True)
+
+    class _Cfg:
+        dir_config = _cfg_dir
+        dir_cache = _cache_dir
+        dir_log = _log_dir
+        dir_gnupg = os.path.join(tmp_dir, 'gnupg')
+        dir_coord = os.path.join(tmp_dir, 'coord')
+        dir_repo = os.path.join(tmp_dir, 'repo')
+        build_codename = codename
+        build_distribution = distribution
+        build_base_id = distribution.lower()
+    _sess.config = _Cfg()
+    _sess._snapshot_current = lambda: base_pin     # type: ignore[method-assign]
+    # Stub the reconcile-neighbours fan-out so tests don't reach for
+    # network primitives; record the call for assertion.
+    _sess._reconcile_called = 0
+    def _stub_reconcile(*_a, **_kw):
+        _sess._reconcile_called += 1
+        return True
+    _sess.cmd_mirror_reconcile_neighbours = _stub_reconcile  # type: ignore[method-assign]
+
+    _sess.lines: 'list[str]' = []
+    _orig = _build.console.print
+    _build.console.print = lambda *a, **k: _sess.lines.append(
+        ' '.join(str(x) for x in a))
+    return _sess, lambda: setattr(_build.console, 'print', _orig)
+
+
+def _patch_mirror_add_primitives(*, sidecar_head_return,
+                                  discover_peers_return=None):
+    """unittest.mock.patch context-manager bundle that stubs every
+    network/sign primitive cmd_mirror_add reaches for.  Yields when
+    every patch is active."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    import signing as _signing
+    from unittest.mock import patch
+    from contextlib import ExitStack
+    _stack = ExitStack()
+    _stack.enter_context(patch.object(
+        _signing, 'verify_key',
+        return_value=(True, 'mock-key-verified')))
+    _stack.enter_context(patch.object(
+        _signing, 'signing_home',
+        return_value='/fake/gpg'))
+    _stack.enter_context(patch.object(
+        _mirror, 'probe_dns_and_tcp',
+        return_value=(True, 'mock-reachable')))
+    _stack.enter_context(patch.object(
+        _mirror, 'probe_ssh_auth',
+        return_value=(True, 'mock-ssh-auth-ok')))
+    _stack.enter_context(patch.object(
+        _mirror, 'probe_http_inrelease',
+        return_value=(True, 'mock-http-ok')))
+    _stack.enter_context(patch.object(
+        _mirror, 'probe_sidecar_head',
+        return_value=sidecar_head_return))
+    if discover_peers_return is not None:
+        _stack.enter_context(patch.object(
+            _mirror, 'discover_federation_peers',
+            return_value=discover_peers_return))
+    return _stack
+
+
+def test_cmd_mirror_add_new_mirror_empty_config():
+    """Scenario 1 — adding a brand-new ssh mirror to a build host
+    with no mirrors configured.  Fresh remote (no coord-head yet);
+    one state file written; reconcile fan-out triggered."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        try:
+            _stack = _patch_mirror_add_primitives(
+                sidecar_head_return=(True, 'no head yet', None),
+                discover_peers_return=[])
+            with _stack:
+                _ok = _sess.cmd_mirror_add(
+                    'ip',
+                    'ssh://ubuntu@140.245.198.222/home/ubuntu/asgard',
+                    '--ssh-key', 'config/repo.key',
+                    '--proto', 'http',
+                    '--yes',
+                )
+        finally:
+            _restore()
+        assert _ok is True, '\n'.join(_sess.lines)
+        # Single mirror written, name auto-derived from IP
+        _names = _mirror.list_mirrors(_sess.config)
+        assert _names == ['140-245-198-222'], _names
+        _st = _mirror.read_mirror_state(_sess.config, '140-245-198-222')
+        assert _st is not None
+        assert _st['url'] == 'ssh://ubuntu@140.245.198.222/home/ubuntu/asgard'
+        assert _st['public_url'] == 'http://140.245.198.222/asgard'
+        assert _st['public_proto'] == 'http'
+        assert _st['host'] == '140.245.198.222'
+        assert _st['host_type'] == 'ip'
+        # Reconcile fan-out fired once (would propagate to peers if any)
+        assert _sess._reconcile_called == 1
+
+
+def test_cmd_mirror_add_old_mirror_no_neighbours_empty_config():
+    """Scenario 2 — adding a mirror that already has a published
+    coord-head but lists NO neighbours (single-host federation).
+    Empty local config.  Head summary printed; one mirror written."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    _peer_head = {
+        'v': 2,
+        'inrelease_sha256': 'a' * 64,
+        'snapshot': {},
+        'last_seqs': {'builder-x': 7},
+        'head_time': '2026-06-01T00:00:00Z',
+        'neighbours': ['ssh://ubuntu@host.example.com/home/ubuntu/asgard'],
+    }
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        try:
+            _stack = _patch_mirror_add_primitives(
+                sidecar_head_return=(True, 'coord-head verified', _peer_head),
+                discover_peers_return=[])
+            with _stack:
+                _ok = _sess.cmd_mirror_add(
+                    'fqdn',
+                    'ssh://ubuntu@host.example.com/home/ubuntu/asgard',
+                    '--ssh-key', 'config/repo.key',
+                    '--proto', 'http',
+                    '--yes',
+                )
+        finally:
+            _restore()
+        assert _ok is True, '\n'.join(_sess.lines)
+        _names = _mirror.list_mirrors(_sess.config)
+        assert _names == ['host-example-com'], _names
+        # Head summary surfaced
+        _joined = '\n'.join(_sess.lines)
+        assert 'existing coord-head on this peer' in _joined
+        assert 'builder-x=7' in _joined
+
+
+def test_cmd_mirror_add_old_mirror_with_neighbours_empty_config():
+    """Scenario 3 — adding a mirror in an existing federation.  Peer's
+    coord-head lists two other peers; both reachable+verified; we
+    inherit them.  Three mirror state files written."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    _primary_url = 'ssh://ubuntu@host-a.example/home/ubuntu/asgard'
+    _peer1_url = 'ssh://ubuntu@host-b.example/home/ubuntu/asgard'
+    _peer2_url = 'ssh://ubuntu@host-c.example/home/ubuntu/asgard'
+    _peer_head = {
+        'v': 2, 'neighbours': [_primary_url, _peer1_url, _peer2_url],
+    }
+    _discovered = [
+        {'url': _primary_url, 'reachable': True, 'verified': True,
+         'head': None, 'detail': 'self'},
+        {'url': _peer1_url, 'reachable': True, 'verified': True,
+         'head': None, 'detail': 'verified'},
+        {'url': _peer2_url, 'reachable': True, 'verified': True,
+         'head': None, 'detail': 'verified'},
+    ]
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        try:
+            with _patch_mirror_add_primitives(
+                sidecar_head_return=(True, 'verified', _peer_head),
+                discover_peers_return=_discovered,
+            ):
+                _ok = _sess.cmd_mirror_add(
+                    'fqdn', _primary_url,
+                    '--ssh-key', 'config/repo.key',
+                    '--proto', 'https', '--yes',
+                )
+        finally:
+            _restore()
+        assert _ok is True, '\n'.join(_sess.lines)
+        _names = sorted(_mirror.list_mirrors(_sess.config))
+        # primary + peer1 + peer2 all registered
+        assert _names == ['host-a-example', 'host-b-example',
+                          'host-c-example'], _names
+        # The two discovered peers carry the same --proto + ssh_key
+        _b = _mirror.read_mirror_state(_sess.config, 'host-b-example')
+        assert _b['public_proto'] == 'https'
+        assert _b['ssh_key'] == 'config/repo.key'
+
+
+def test_cmd_mirror_add_new_mirror_to_existing_config():
+    """Scenario 4 — local already has 2 mirrors; adding a third with
+    no neighbours.  Existing 2 persist; new mirror written; reconcile
+    fires to propagate the new membership to the existing peers."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        try:
+            # Pre-populate two mirrors
+            _mirror.add_mirror(
+                _sess.config, name='alpha',
+                url='ssh://ubuntu@alpha.example/home/ubuntu/asgard',
+                seed_pin='')
+            _mirror.add_mirror(
+                _sess.config, name='beta',
+                url='ssh://ubuntu@beta.example/home/ubuntu/asgard',
+                seed_pin='')
+            with _patch_mirror_add_primitives(
+                sidecar_head_return=(True, 'no head yet', None),
+                discover_peers_return=[],
+            ):
+                _ok = _sess.cmd_mirror_add(
+                    'fqdn',
+                    'ssh://ubuntu@gamma.example/home/ubuntu/asgard',
+                    '--ssh-key', 'config/repo.key',
+                    '--proto', 'http', '--yes',
+                )
+        finally:
+            _restore()
+        assert _ok is True, '\n'.join(_sess.lines)
+        _names = sorted(_mirror.list_mirrors(_sess.config))
+        assert _names == ['alpha', 'beta', 'gamma-example'], _names
+        assert _sess._reconcile_called == 1
+
+
+def test_cmd_mirror_add_overlap_with_existing_neighbours():
+    """Scenario 5 — adding a federation peer that shares one neighbour
+    with our existing config.  The overlapping URL is dedup'd; only
+    the net-new ones are added."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    _alpha_url = 'ssh://ubuntu@alpha.example/home/ubuntu/asgard'
+    _new_url = 'ssh://ubuntu@new.example/home/ubuntu/asgard'
+    _peer_extra = 'ssh://ubuntu@extra.example/home/ubuntu/asgard'
+    _peer_head = {
+        'v': 2, 'neighbours': [_new_url, _alpha_url, _peer_extra],
+    }
+    _discovered = [
+        {'url': _new_url,   'reachable': True, 'verified': True,
+         'head': None, 'detail': 'self'},
+        {'url': _alpha_url, 'reachable': True, 'verified': True,
+         'head': None, 'detail': 'verified'},
+        {'url': _peer_extra,'reachable': True, 'verified': True,
+         'head': None, 'detail': 'verified'},
+    ]
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        try:
+            _mirror.add_mirror(_sess.config, name='alpha', url=_alpha_url,
+                               seed_pin='')
+            with _patch_mirror_add_primitives(
+                sidecar_head_return=(True, 'verified', _peer_head),
+                discover_peers_return=_discovered,
+            ):
+                _ok = _sess.cmd_mirror_add(
+                    'fqdn', _new_url,
+                    '--ssh-key', 'config/repo.key',
+                    '--proto', 'http', '--yes',
+                )
+        finally:
+            _restore()
+        assert _ok is True, '\n'.join(_sess.lines)
+        _names = sorted(_mirror.list_mirrors(_sess.config))
+        # alpha (pre-existing) + new.example (primary) + extra.example
+        # (net-new discovered).  alpha overlap dedup'd; no double-add.
+        assert _names == ['alpha', 'extra-example', 'new-example'], _names
+
+
+def test_cmd_mirror_add_rejects_malformed_inputs():
+    """Scenario 6 — robustness: every malformed shape produces a clean
+    error + non-zero exit, no state file written."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    _cases = [
+        # (args, expected substring of error log)
+        (('banana', 'ssh://ubuntu@h.example/srv/a',
+          '--ssh-key', 'k', '--proto', 'http', '--yes'),
+         'unknown host type'),
+        (('ip', 'ssh://ubuntu@h.example/srv/a',
+          '--ssh-key', 'k', '--proto', 'http', '--yes'),
+         'not a valid IPv4 or IPv6'),
+        (('fqdn', 'ssh://ubuntu@140.245.198.222/srv/a',
+          '--ssh-key', 'k', '--proto', 'http', '--yes'),
+         'looks like an IP literal'),
+        (('fqdn', 'ssh://ubuntu@h.example/srv/a',
+          '--ssh-key', 'k', '--yes'),                  # missing --proto
+         'require --proto'),
+        (('fqdn', 'http://web.example/asgard',
+          '--ssh-key', 'k', '--proto', 'http', '--yes'),
+         'invalid URL'),
+    ]
+    for _argv, _expected in _cases:
+        with tempfile.TemporaryDirectory() as _td:
+            _sess, _restore = _cmd_mirror_add_session(_td)
+            try:
+                with _patch_mirror_add_primitives(
+                    sidecar_head_return=(True, 'no head yet', None),
+                    discover_peers_return=[],
+                ):
+                    _ok = _sess.cmd_mirror_add(*_argv)
+            finally:
+                _restore()
+            assert _ok is False, f"{_argv} should have failed"
+            _joined = '\n'.join(_sess.lines)
+            assert _expected in _joined, (
+                f"{_argv}: expected {_expected!r} in:\n{_joined}")
+            # No mirror state file leaked
+            assert _mirror.list_mirrors(_sess.config) == [], _argv
+
+
+def test_cmd_mirror_add_drops_unreachable_neighbour():
+    """Scenario 7 — peer's coord-head lists a neighbour that's
+    unreachable when we probe it.  Default policy (take-control-and-drop)
+    drops it from the federation join; remaining reachable peers are
+    added; warning surfaces the dropped URL."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    _primary = 'ssh://ubuntu@primary.example/home/ubuntu/asgard'
+    _live = 'ssh://ubuntu@live.example/home/ubuntu/asgard'
+    _dead = 'ssh://ubuntu@dead.example/home/ubuntu/asgard'
+    _peer_head = {
+        'v': 2, 'neighbours': [_primary, _live, _dead],
+    }
+    _discovered = [
+        {'url': _primary, 'reachable': True, 'verified': True,
+         'head': None, 'detail': 'self'},
+        {'url': _live, 'reachable': True, 'verified': True,
+         'head': None, 'detail': 'verified'},
+        {'url': _dead, 'reachable': False, 'verified': False,
+         'head': None, 'detail': 'TCP connect failed: no route'},
+    ]
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        try:
+            with _patch_mirror_add_primitives(
+                sidecar_head_return=(True, 'verified', _peer_head),
+                discover_peers_return=_discovered,
+            ):
+                _ok = _sess.cmd_mirror_add(
+                    'fqdn', _primary,
+                    '--ssh-key', 'config/repo.key',
+                    '--proto', 'http', '--yes',
+                )
+        finally:
+            _restore()
+        assert _ok is True, '\n'.join(_sess.lines)
+        _names = sorted(_mirror.list_mirrors(_sess.config))
+        # primary + live; dead.example dropped per take-control-and-drop
+        assert _names == ['live-example', 'primary-example'], _names
+        _joined = '\n'.join(_sess.lines)
+        assert 'DROPPING 1 unreachable peer' in _joined
+        assert _dead in _joined
+
+
+def test_cmd_mirror_add_signing_key_gate_blocks():
+    """No tier-1 signing key → REFUSED before any probe.  Key
+    verification gate is the first thing cmd_mirror_add does."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    import signing as _signing
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        try:
+            with patch.object(_signing, 'verify_key',
+                              return_value=(False, 'no key generated')):
+                _ok = _sess.cmd_mirror_add(
+                    'ip', 'ssh://ubuntu@140.245.198.222/srv/a',
+                    '--ssh-key', 'k', '--proto', 'http', '--yes',
+                )
+        finally:
+            _restore()
+        assert _ok is False
+        _joined = '\n'.join(_sess.lines)
+        assert 'REFUSED' in _joined
+        assert 'key generate' in _joined
+        assert _mirror.list_mirrors(_sess.config) == []
+
+
 def test_mirror_add_remove_round_trip():
     """add_mirror writes the state file; list_mirrors finds it; remove
     deletes it."""
@@ -24536,6 +24935,14 @@ def main() -> int:
         test_probe_http_inrelease_handles_200_404_and_error,
         test_probe_sidecar_head_no_head_verified_and_fail,
         test_discover_federation_peers_classifies_each_neighbour,
+        test_cmd_mirror_add_new_mirror_empty_config,
+        test_cmd_mirror_add_old_mirror_no_neighbours_empty_config,
+        test_cmd_mirror_add_old_mirror_with_neighbours_empty_config,
+        test_cmd_mirror_add_new_mirror_to_existing_config,
+        test_cmd_mirror_add_overlap_with_existing_neighbours,
+        test_cmd_mirror_add_rejects_malformed_inputs,
+        test_cmd_mirror_add_drops_unreachable_neighbour,
+        test_cmd_mirror_add_signing_key_gate_blocks,
         test_mirror_add_remove_round_trip,
         test_mirror_add_rejects_duplicate_name_and_url,
         test_mirror_add_rejects_invalid_name_and_url,
