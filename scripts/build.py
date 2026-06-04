@@ -234,6 +234,42 @@ def _dedupe_bidirectional_conflicts(conflicts):
     return _out
 
 
+def _safe_filesize(path: str) -> int:
+    """os.path.getsize that returns 0 instead of raising on missing /
+    permission errors.  Used by status/summary printers that want to
+    sum a list of paths without partial failures interrupting output."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _humansize(n: int) -> str:
+    """Render a byte count as B / KiB / MiB / GiB with 1 decimal."""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KiB"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MiB"
+    return f"{n / (1024 * 1024 * 1024):.1f} GiB"
+
+
+def _shorten_origin(url: str, max_len: int = 70) -> str:
+    """Compact a long pool URL: keep the host and the last 5 path
+    components, drop the middle.  No-op when under max_len."""
+    if len(url) <= max_len:
+        return url
+    if '://' not in url:
+        return url
+    _scheme, _rest = url.split('://', 1)
+    _host, _, _path = _rest.partition('/')
+    _parts = [_p for _p in _path.split('/') if _p]
+    if len(_parts) <= 5:
+        return url
+    return f"{_host}/.../{'/'.join(_parts[-5:])}"
+
+
 class BuildSession:
     """Owns the full pipeline state and the cmd_* command handlers the TUI
     registers.  Replaces the prior module-level globals (build_config,
@@ -2084,39 +2120,32 @@ class BuildSession:
         if _success:
             _upstream_ver = str(src_pkg.version)
             _pristine_ver = utils.strip_nmu_suffix(_upstream_ver)
-            _total_bytes = 0
-            for _dst in _final_paths.values():
-                try:
-                    _total_bytes += os.path.getsize(_dst)
-                except OSError:
-                    pass
-            _size_kb = _total_bytes // 1024
-            console.print(
-                f"  {src_pkg.package}: tunneled  upstream={_upstream_ver}  "
-                f"on-disk={_pristine_ver}  "
-                f"({len(_outputs_sorted)} file(s), {_size_kb} KiB, "
-                f"{_strips_count} stripped, {_stamps_count} asg-stamped)")
+            _total_bytes = sum(
+                _safe_filesize(_dst) for _dst in _final_paths.values())
             if _pristine_ver == _upstream_ver and _stamps_count == 0:
-                console.print(
-                    "    (pristine upstream — no NMU/binNMU/backport "
-                    "suffix; on-disk artifact identical to a "
-                    "from-source build at this snapshot)")
+                _ver_line = f"{_pristine_ver} (pristine)"
             else:
-                console.print(
-                    f"    upstream {_upstream_ver} → pristine "
-                    f"{_pristine_ver}; on-disk artifact normalised "
-                    f"(strip + asg-stamp) so repo audit / source audit "
-                    f"see it as a legitimately-built binary.  "
-                    f"Federation claim carries republished_from → mirror "
-                    f"records this as 'no owner' (tunneled provenance).")
+                _ver_line = f"{_upstream_ver} → {_pristine_ver}"
+            console.print(
+                f"  {src_pkg.package}  TUNNELED  {_ver_line}")
+            console.print(
+                f"    files     {len(_outputs_sorted)}  "
+                f"({_humansize(_total_bytes)}, "
+                f"{_strips_count} stripped, "
+                f"{_stamps_count} asg-stamped)")
+            _pool_dir: 'Optional[str]' = None
             for _fn in _outputs_sorted:
                 _dst = _final_paths.get(_fn, '')
                 _rel = os.path.relpath(_dst, self.config.dir_repo) \
                     if _dst else _fn
-                console.print(f"    + {_rel}")
+                _dir_part, _base = os.path.split(_rel)
+                if _pool_dir is None:
+                    _pool_dir = _dir_part
+                    console.print(f"    pool      {_pool_dir}/")
+                console.print(f"            + {_base}")
             if _upstream_urls:
                 _origin = sorted(_upstream_urls.values())[0].rsplit('/', 1)[0]
-                console.print(f"    origin: {_origin}/")
+                console.print(f"    origin    {_shorten_origin(_origin)}/")
 
         return _success
 
