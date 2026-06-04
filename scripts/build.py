@@ -2915,6 +2915,14 @@ class BuildSession:
                         continue
                     _any_missing = False
                     _failing = None
+                    # Component from the source's origin mirror — without
+                    # this, non-main packages (contrib / non-free /
+                    # non-free-firmware) would be looked up under main/
+                    # and silently miscounted as missing.  Mirrors
+                    # check_build (buildcontainer.py:1537) and
+                    # _source_state.
+                    _src_comp = getattr(
+                        getattr(_src, '_mirror', None), 'component', '') or 'main'
                     for _f in _expected:
                         # The predicted filename `_f` is the PRISTINE name; the
                         # on-disk artifact may carry a +asg<R>u<N> stamp.
@@ -2922,7 +2930,7 @@ class BuildSession:
                         # the ACTUAL file under its ACTUAL name so the internal
                         # control-version-vs-filename check matches.
                         _path = utils.find_matching_artifact(
-                            self.config.deb_dest_for_filename(_f), _f)
+                            self.config.deb_dest_for_filename(_f, _src_comp), _f)
                         if _path is None:
                             _any_missing = True
                             break
@@ -7947,6 +7955,13 @@ class BuildSession:
         """
         if utils.strip_nmu_suffix(str(src.version)) == str(src.version):
             return False                      # clean new base — not a re-spin
+        # Component from origin mirror so non-main packages (contrib /
+        # non-free / non-free-firmware) look up the correct dir.
+        # Without this, every non-main re-spin would report "bump
+        # missing" on every run (file IS there, just under the right
+        # component) and force a needless rebuild loop.  Mirrors
+        # check_build / _source_state.
+        _comp = getattr(getattr(src, '_mirror', None), 'component', '') or 'main'
         for _f in self._predicted_files_for_source(name):
             if not (_f.endswith(('.deb', '.udeb'))):
                 continue
@@ -7959,7 +7974,7 @@ class BuildSession:
             _n = utils.asg_next_n(
                 ledger.get(_bin, []), utils.pristine_base(_ver), release)
             _expected = utils.asg_filename(_f, release, _n)
-            _dst = self.config.deb_dest_for_filename(_f)
+            _dst = self.config.deb_dest_for_filename(_f, _comp)
             if not os.path.isfile(os.path.join(_dst, _expected)):
                 return True                   # this file's current-gen bump missing
         return False
