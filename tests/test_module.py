@@ -22747,6 +22747,169 @@ def test_coord_store_project_live_claims_collapses_retraction():
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
 
 
+def _new_pending_claim(builder: str, package: str, filename: str,
+                       version: str, sha: str = 'f' * 64) -> dict:
+    """Compact builder for filter_pending_by_ownership tests."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.schema as _schema
+    return _schema.new_claim(
+        builder=builder, seq=0, package=package,
+        intended_version=version, built_version=version,
+        filename=filename, sha256=sha, size=1,
+        snapshot='S', built_at='T',
+        claim_state=_schema.CLAIM_STATE_PENDING,
+    )
+
+
+def test_filter_pending_by_ownership_no_existing_owner_keeps():
+    """Decision matrix row 1: no claim → KEEP (we become owner)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    _c = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_c], existing_owners={})
+    assert _kept == [_c]
+    assert _blocked == []
+
+
+def test_filter_pending_by_ownership_own_claim_keeps():
+    """Decision matrix row 2: we already own → KEEP."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    _c = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
+    _existing = {
+        'foo.deb': {
+            'builder': 'alice', 'version': '1.0', 'sha256': 'a' * 64,
+            'claim_state': 'published', 'seq': 5,
+            'republished_from': None, 'claim': {},
+        }
+    }
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_c], existing_owners=_existing)
+    assert _kept == [_c]
+    assert _blocked == []
+
+
+def test_filter_pending_by_ownership_tunneled_keeps_takes_ownership():
+    """Decision matrix row 3: tunneled (no owner) → KEEP, take
+    ownership.  Our claim ships without republished_from, which means
+    on next read project_owners will see us as the owner."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    _c = _new_pending_claim('alice', 'vlc', 'vlc.deb', '3.0-1')
+    _existing = {
+        'vlc.deb': {
+            'builder': None,            # tunneled
+            'version': '3.0-1',
+            'sha256': 'b' * 64,
+            'claim_state': 'published',
+            'seq': 2,
+            'republished_from': {'url': 'http://x', 'upstream_sha256': 'b' * 64},
+            'claim': {},
+        }
+    }
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_c], existing_owners=_existing)
+    assert _kept == [_c]
+    assert _blocked == []
+
+
+def test_filter_pending_by_ownership_higher_version_transfers_ownership():
+    """Decision matrix row 4: owned by other, our version strictly
+    higher → KEEP, ownership transfers."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    _c = _new_pending_claim('alice', 'foo', 'foo.deb', '2.0')
+    _existing = {
+        'foo.deb': {
+            'builder': 'bob', 'version': '1.0', 'sha256': 'b' * 64,
+            'claim_state': 'published', 'seq': 3,
+            'republished_from': None, 'claim': {},
+        }
+    }
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_c], existing_owners=_existing)
+    assert _kept == [_c]
+    assert _blocked == []
+
+
+def test_filter_pending_by_ownership_same_version_other_owner_blocks():
+    """Decision matrix row 5: owned by other, same version → BLOCK
+    with ownership_blocked finding."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    _c = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
+    _existing = {
+        'foo.deb': {
+            'builder': 'bob', 'version': '1.0', 'sha256': 'b' * 64,
+            'claim_state': 'published', 'seq': 3,
+            'republished_from': None, 'claim': {},
+        }
+    }
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_c], existing_owners=_existing)
+    assert _kept == []
+    assert len(_blocked) == 1
+    _b = _blocked[0]
+    assert _b['filename'] == 'foo.deb'
+    assert _b['owner'] == 'bob'
+    assert _b['our_version'] == '1.0'
+    assert _b['owner_version'] == '1.0'
+    assert 'not strictly higher' in _b['reason']
+
+
+def test_filter_pending_by_ownership_lower_version_blocks():
+    """Decision matrix row 6: owned by other, our version is LOWER →
+    BLOCK (don't downgrade their pkg)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    _c = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
+    _existing = {
+        'foo.deb': {
+            'builder': 'bob', 'version': '2.0', 'sha256': 'b' * 64,
+            'claim_state': 'published', 'seq': 3,
+            'republished_from': None, 'claim': {},
+        }
+    }
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_c], existing_owners=_existing)
+    assert _kept == []
+    assert len(_blocked) == 1
+
+
+def test_filter_pending_by_ownership_partial_publish_continues():
+    """Mixed bag: 3 candidates, 1 owned-by-other-same-version (blocked),
+    2 OK.  Blocked candidate doesn't abort the others — partial-success
+    is the design."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    _c1 = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
+    _c2 = _new_pending_claim('alice', 'bar', 'bar.deb', '1.0')
+    _c3 = _new_pending_claim('alice', 'baz', 'baz.deb', '1.0')
+    _existing = {
+        'bar.deb': {
+            'builder': 'bob', 'version': '1.0', 'sha256': 'b' * 64,
+            'claim_state': 'published', 'seq': 3,
+            'republished_from': None, 'claim': {},
+        }
+        # foo.deb + baz.deb have no claim → KEEP
+    }
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_c1, _c2, _c3], existing_owners=_existing)
+    _kept_fns = {_k['filename'] for _k in _kept}
+    assert _kept_fns == {'foo.deb', 'baz.deb'}
+    assert len(_blocked) == 1
+    assert _blocked[0]['filename'] == 'bar.deb'
+
+
 def test_coord_store_project_owners_single_owner_per_filename():
     """MIRROR-02 chunk 7: project_owners picks the latest claim per
     filename across all builders and sets `builder` correctly."""
@@ -26218,6 +26381,13 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_filter_pending_by_ownership_no_existing_owner_keeps,
+        test_filter_pending_by_ownership_own_claim_keeps,
+        test_filter_pending_by_ownership_tunneled_keeps_takes_ownership,
+        test_filter_pending_by_ownership_higher_version_transfers_ownership,
+        test_filter_pending_by_ownership_same_version_other_owner_blocks,
+        test_filter_pending_by_ownership_lower_version_blocks,
+        test_filter_pending_by_ownership_partial_publish_continues,
         test_coord_store_project_owners_single_owner_per_filename,
         test_coord_store_project_owners_tunneled_has_no_owner,
         test_coord_store_project_owners_picks_latest_by_seq,
