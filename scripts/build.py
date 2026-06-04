@@ -1886,6 +1886,7 @@ class BuildSession:
                     package=src_pkg.package,
                     intended_version=str(src_pkg.version),
                     patch_set_hash='',
+                    component=_comp,
                 ),
             )
         except OSError as _e:
@@ -4737,8 +4738,14 @@ class BuildSession:
                     _fn = _c.get('filename')
                     if not isinstance(_fn, str) or not _fn:
                         continue
-                    # Predict local target path via the existing helper
-                    _comp = 'main'  # default; non-main mirrored by directory layout below
+                    # Component pinned on the claim (publisher writes
+                    # it from src._mirror.component); defaults to 'main'
+                    # for pre-component claims (whose publishers only
+                    # ever shipped main anyway).  Without this, a
+                    # non-free-firmware pull lands at main/binary-arch/
+                    # and the remote URL (derived from local path
+                    # below) 404s.
+                    _comp = str(_c.get('component') or 'main')
                     _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
                     _local_path = os.path.join(_dst_dir, _fn)
                     if os.path.isfile(_local_path):
@@ -4962,6 +4969,15 @@ class BuildSession:
             # (if any) is overwritten — the .deb on disk is the
             # authoritative artefact; the build.json is a derived
             # description of it.
+            # Component from the first claim that carries it; defaults
+            # to 'main' for pre-component peer claims.  All claims for
+            # one source share a component.
+            _comp = 'main'
+            for _c in _claims:
+                _claim_comp = str(_c.get('component') or '')
+                if _claim_comp:
+                    _comp = _claim_comp
+                    break
             _existing = utils.read_build_record(_buildlog, _pkg_name)
             if _existing is not None:
                 _rec = dict(_existing)
@@ -4971,6 +4987,7 @@ class BuildSession:
                     intended_version=_intended_version,
                     patch_set_hash='',  # we didn't build it
                     started=_now,
+                    component=_comp,
                 )
             _rec.update({
                 'package':          _pkg_name,
@@ -4990,6 +5007,7 @@ class BuildSession:
                     'mirror_name':    mirror_name,
                     'owner_builder':  _owner_builder,
                 }),
+                'component':        _comp,
             })
             try:
                 utils.write_build_record(_buildlog, _rec)

@@ -1485,12 +1485,19 @@ def _utc_now_iso() -> str:
 def new_build_record(*, package: str,
                      intended_version: str,
                      patch_set_hash: str,
-                     started: 'Optional[str]' = None) -> dict:
+                     started: 'Optional[str]' = None,
+                     component: str = 'main') -> dict:
     """Construct an initial phase=entry record.  Caller passes it to
     write_build_record to materialize on disk.
 
     `started` defaults to now-UTC if omitted; passed explicitly by tests
     that need deterministic timestamps.
+
+    `component` is the apt component (main / contrib / non-free /
+    non-free-firmware) of the source's origin mirror.  Pinned on the
+    build record so downstream consumers (federation claims, `mirror
+    pull`, audit) don't have to re-derive it from the dep tree.
+    Defaults to 'main' to keep existing callers working unchanged.
     """
     return {
         'schema_version':   BUILD_RECORD_SCHEMA_VERSION,
@@ -1508,17 +1515,20 @@ def new_build_record(*, package: str,
         'output_count':     0,
         'outputs':          [],
         'output_hashes':    {},
-        # MIRROR-02: per-output upstream provenance for tunneled
-        # packages.  Shape: {filename: {url, upstream_sha256}}.
-        # Empty for normally-built records; populated by
-        # cmd_tunnel_package and (read-side) by mirror pull.
+        # Per-output upstream provenance for tunneled packages.
+        # Shape: {filename: {url, upstream_sha256}}.  Empty for
+        # normally-built records; populated by cmd_tunnel_package
+        # and (read-side) by mirror pull.
         'republished_from': {},
-        # MIRROR-02: provenance marker for mirror-pulled records
-        # (chunk 10).  Shape: {mirror_name, owner_builder} when set,
-        # None for locally-built or locally-tunneled records.  Lets
-        # `source audit` distinguish "we built it" from "we pulled it"
-        # without losing the on-disk record.
+        # Provenance marker for mirror-pulled records.  Shape:
+        # {mirror_name, owner_builder} when set, None for locally-
+        # built or locally-tunneled records.  Lets `source audit`
+        # distinguish "we built it" from "we pulled it" without
+        # losing the on-disk record.
         'pulled_from':      None,
+        # Apt component for the source's binaries on disk —
+        # determines repo/dists/<codename>/<comp>/binary-<arch>/.
+        'component':        component,
     }
 
 
@@ -1666,7 +1676,8 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         _existing = _rec.get('output_hashes') or {}
         _current_version = _rec.get('schema_version', 1)
         _has_v3_fields = ('republished_from' in _rec
-                          and 'pulled_from' in _rec)
+                          and 'pulled_from' in _rec
+                          and 'component' in _rec)
         if (_current_version >= BUILD_RECORD_SCHEMA_VERSION
                 and all(_o in _existing for _o in _outputs)
                 and _has_v3_fields):
@@ -1697,6 +1708,11 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
             _rec['republished_from'] = {}
         if 'pulled_from' not in _rec:
             _rec['pulled_from'] = None
+        # Component defaults to 'main' on backfill — older records all
+        # pre-date non-main publish.  Going forward new_build_record
+        # writes the source's actual component.
+        if 'component' not in _rec:
+            _rec['component'] = 'main'
         try:
             write_build_record(buildlog_dir, _rec)
             _stats['upgraded'] += 1

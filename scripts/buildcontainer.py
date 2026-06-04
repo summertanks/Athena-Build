@@ -666,10 +666,13 @@ class BuildContainer:
             _live_patch_dir, _live_patch_list,
         )
         _t_start = time.monotonic()
+        _comp = getattr(
+            getattr(src_pkg, '_mirror', None), 'component', '') or 'main'
         _entry_record = utils.new_build_record(
             package=src_pkg.package,
             intended_version=str(src_pkg.version),
             patch_set_hash=_patch_set_hash,
+            component=_comp,
         )
         self._record_phase(src_pkg.package, initial=_entry_record)
 
