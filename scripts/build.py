@@ -792,6 +792,26 @@ class BuildSession:
 
     # --------------------------------------Command: parse_dependency-------------------------------------
 
+    def _refuse_in_individual_mode(self, what: str) -> bool:
+        """MIRROR-02 gate: chroot/ISO commands are N/A in individual
+        mode (a single-package builder doesn't assemble the target
+        system).  Returns True iff the command should refuse +
+        operator-visible reason printed.
+
+        Tolerant of a missing `config` attr (defensive against
+        test doubles that don't construct a full BuildConfig).
+        """
+        _mode = getattr(getattr(self, 'config', None), 'build_mode',
+                        'distribution')
+        if _mode == 'individual':
+            console.print(
+                f"{what}: N/A in individual mode — `[Build] Mode = "
+                "individual` skips chroot/ISO assembly.  Run on a "
+                "dist-mode host, or change config/build.conf.",
+                tui.COLOR_WARNING)
+            return True
+        return False
+
     def _canonical_select_count(self, tree) -> int:
         """Count canonical-name keys in selected_pkgs (excludes Provides
         aliases).  Used by indl-mode summary so the operator sees the
@@ -6271,6 +6291,8 @@ class BuildSession:
         front via _ensure_signing_key_verified — see CONF-02 phase 3 for why).
         The sudo password is collected interactively at the start of this command.
         """
+        if self._refuse_in_individual_mode("chroot build live"):
+            return
         if not self.flags.source_build_ready:
             console.print("Run 'source build' first")
             return
@@ -6374,6 +6396,8 @@ class BuildSession:
 
         On success sets self.flags.chroot_installer_ready.
         """
+        if self._refuse_in_individual_mode("chroot build installer"):
+            return
         if not self.flags.dep_check_ready:
             console.print("Run 'cache parse' first")
             return
@@ -6497,6 +6521,8 @@ class BuildSession:
         Prerequisites: chroot must be built AND verified (chroot_verified
         flag), unless `force` is given in which case verify is re-run.
         """
+        if self._refuse_in_individual_mode("iso build live"):
+            return
         _force = 'force' in args
         if not _force and not self.flags.chroot_verified:
             if self.flags.chroot_ready:
@@ -6572,6 +6598,8 @@ class BuildSession:
         Collects sudo password — initrd cpio reads root-owned chroot
         content, pool copy preserves ownership.
         """
+        if self._refuse_in_individual_mode("iso build installer"):
+            return
         if not self.flags.chroot_installer_ready:
             console.print(
                 "Run 'chroot build installer' first (need "
@@ -6936,6 +6964,8 @@ class BuildSession:
         GRUB version (analogous to pre-COMP-14 ISO leakage).  Follow-
         up will move grub-install into the build container.
         """
+        if self._refuse_in_individual_mode("iso build disk"):
+            return
         import disk_image
 
         _force = 'force' in args
