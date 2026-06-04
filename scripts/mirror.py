@@ -147,6 +147,30 @@ def _extract_host_from_ssh_url(url: str) -> Optional[str]:
     return _host or None
 
 
+def _extract_user_from_ssh_url(url: str) -> Optional[str]:
+    """`ssh://ubuntu@140.245.198.222/srv/asgard` → `'ubuntu'`.
+    Returns None if URL isn't ssh:// or the user@ prefix is absent
+    (caller's ssh-config / default username applies)."""
+    if not isinstance(url, str) or not url.startswith('ssh://'):
+        return None
+    _m = _SSH_URL_RE.match(url)
+    if not _m:
+        return None
+    return _m.group('user') or None
+
+
+def _extract_path_from_ssh_url(url: str) -> Optional[str]:
+    """`ssh://ubuntu@140.245.198.222/home/ubuntu/asgard` →
+    `'/home/ubuntu/asgard'`.  Returns None if URL isn't ssh:// or
+    the path is empty."""
+    if not isinstance(url, str) or not url.startswith('ssh://'):
+        return None
+    _m = _SSH_URL_RE.match(url)
+    if not _m:
+        return None
+    return _m.group('path') or None
+
+
 def _is_valid_ip(host: str) -> bool:
     """True for any well-formed IPv4 or IPv6 literal."""
     if not isinstance(host, str) or not host:

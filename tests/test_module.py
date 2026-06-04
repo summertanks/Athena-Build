@@ -22369,6 +22369,31 @@ def _mirror_module():
     return mirror
 
 
+def test_extract_user_and_path_from_ssh_url():
+    """The probe pipeline plumbs user + remote path from the ssh URL
+    so `ssh -i <key> <user>@<host>` runs as the publish account, not
+    the local invoker."""
+    _m = _mirror_module()
+    assert _m._extract_user_from_ssh_url(
+        'ssh://ubuntu@140.245.198.222/home/ubuntu/asgard') == 'ubuntu'
+    assert _m._extract_path_from_ssh_url(
+        'ssh://ubuntu@140.245.198.222/home/ubuntu/asgard') \
+        == '/home/ubuntu/asgard'
+    # Userless ssh URL — caller's ssh-config defaults apply
+    assert _m._extract_user_from_ssh_url(
+        'ssh://mirror.example.com/srv/asgard') is None
+    assert _m._extract_path_from_ssh_url(
+        'ssh://mirror.example.com/srv/asgard') == '/srv/asgard'
+    # IPv6 + port
+    assert _m._extract_user_from_ssh_url(
+        'ssh://op@[2001:db8::1]:2222/srv/asgard') == 'op'
+    assert _m._extract_path_from_ssh_url(
+        'ssh://op@[2001:db8::1]:2222/srv/asgard') == '/srv/asgard'
+    # Non-ssh schemes return None
+    assert _m._extract_user_from_ssh_url('file:///srv/asgard') is None
+    assert _m._extract_path_from_ssh_url('file:///srv/asgard') is None
+
+
 def test_validate_host_for_type_classifies_ip_fqdn_local():
     """MIRROR-01 Phase 6: the `ip`/`fqdn`/`local` keyword the operator
     types at `mirror add` time must agree with the URL shape."""
@@ -22706,6 +22731,9 @@ def _patch_mirror_add_primitives(*, sidecar_head_return,
     _stack.enter_context(patch.object(
         _mirror, 'probe_ssh_auth',
         return_value=(True, 'mock-ssh-auth-ok')))
+    _stack.enter_context(patch.object(
+        _mirror, 'probe_remote_writable',
+        return_value=(True, 'mock-writable-ok')))
     _stack.enter_context(patch.object(
         _mirror, 'probe_http_inrelease',
         return_value=(True, 'mock-http-ok')))
@@ -25210,6 +25238,7 @@ def main() -> int:
         test_snapshot_history_dedups_promoted_to_head,
         test_snapshot_history_ignores_malformed_file,
         test_snapshot_history_rejects_non_ts_strings,
+        test_extract_user_and_path_from_ssh_url,
         test_validate_host_for_type_classifies_ip_fqdn_local,
         test_derive_name_from_url_maps_ip_fqdn_local,
         test_derive_public_url_constructs_proto_host_dist,
