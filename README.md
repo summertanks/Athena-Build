@@ -197,6 +197,48 @@ From there:
 
 The final ISO appears under `image/` named `athena-<version>-amd64.iso`. A sidecar `<iso>.user` file next to it carries the per-build random username for the live boot (see SEC-04).
 
+### Build modes — distribution vs individual (MIRROR-02)
+
+A build host has one of two modes:
+
+- **`distribution`** (the default; sometimes written "dist") — owns
+  the full corpus.  Walks `pkg.list` / `pool.list` etc, builds chroot
+  + ISO, runs the full repo closure audit.  Use this for the
+  "I'm building the whole derivative distro" workflow.
+- **`individual`** — owns a subset of packages listed in
+  `config/indl.list` (flat list of names, `#` comments allowed).
+  Cache parse skips runtime closure walk; chroot + ISO are refused.
+  Source build, `mirror add`, `mirror publish`, `mirror pull` all
+  work as normal.  Use this when a teammate needs to take over one
+  or a few packages (e.g. `firefox-esr` because of OOMs on the main
+  build host) without setting up a full dist-mode environment.
+
+```ini
+# config/build.conf
+[Build]
+Mode = individual
+```
+
+```text
+# config/indl.list
+firefox-esr
+libreoffice
+```
+
+Mode is shown on every operator surface (`print state` top line,
+autorun startup banner, `mirror publish` per-mirror header) so an
+indl-mode 5-step pipeline is never confused with a broken dist-mode
+chain.
+
+`autorun individual` runs the indl-mode pipeline (cache build →
+cache parse → source sync → container init → source build
+individual; no chroot, no ISO).  Bare `autorun` in indl mode routes
+there automatically.
+
+See [`docs/mirror-setup.md`](docs/mirror-setup.md) "MIRROR-02: build
+modes, ownership, installability" for the full ownership /
+installability / pull behaviour.
+
 ### Working with the package set
 
 The shipped pipeline already handles two distinct flavours of "package":
