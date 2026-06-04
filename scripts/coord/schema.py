@@ -35,13 +35,23 @@ from typing import Any, Dict, Optional
 # unknown future keys (preserve in dict; ignore semantics they don't
 # know).  Removing a key is a v2.
 CLAIM_RECORD_SCHEMA_VERSION = 1
-COORD_HEAD_SCHEMA_VERSION = 2
+COORD_HEAD_SCHEMA_VERSION = 3
 # v1 → v2 (MIRROR-01 Phase 2): adds `neighbours: list[str]` — the
 # federation membership list (every mirror's coord-head carries the
 # canonical URL set, signed by tier-1 GPG).  v1 readers tolerate a
 # missing field as an empty list; the federation-gate at publish time
 # treats empty-from-v1 as "no peers known" and uses the local config
 # as the source of truth on first contact.
+# v2 → v3 (MIRROR-01 Phase 7): `neighbours` becomes a list of
+# per-peer records: ``[{url, public_url, public_proto}, ...]``.  Lets a
+# heterogeneous federation (peer A serves https, peer B serves http;
+# peers under different DNS shapes) round-trip the apt-readable URL
+# per peer instead of every joiner inheriting the operator's --proto.
+# Read-compat: v2 ``list[str]`` is auto-promoted to records with empty
+# ``public_url`` / ``public_proto`` (which `cmd_mirror_add` falls back
+# on by inheriting the operator's --proto).  Per-peer ssh keys are NOT
+# in the schema today — federations assume a single operator-supplied
+# ssh key for all peers.
 SNAPSHOT_STATE_SCHEMA_VERSION = 1
 
 # Lifecycle states a claim can be in.  `pending` is the post-rsync,
@@ -228,12 +238,16 @@ def new_coord_head(
       detected by reading a max(seq) lower than this.
     - head_time: ISO8601 UTC.  Compared against InRelease `Date:` —
       a head older than InRelease is refused.
-    - neighbours: MIRROR-01 Phase 2.  Canonical federation membership
-      list — every mirror's coord-head carries the same URL set,
-      signed by tier-1 GPG.  Publish gates on local-config-vs-head
-      diff (`check_federation_consistency`); split-brain federations
-      are detected by pair-wise inequality in `mirror audit` (Phase 4).
-      Stored sorted + lower-cased for stable comparison.
+    - neighbours: MIRROR-01 Phase 7.  Canonical federation membership
+      records — every mirror's coord-head carries the same
+      ``list[{url, public_url, public_proto}]`` set, signed by tier-1
+      GPG.  Accepts either a list of URL strings (auto-promoted to
+      records with empty meta — v2 input shape) or a list of dicts
+      already in record form.  Publish gates on local-config-vs-head
+      URL-set diff (`check_federation_consistency`); split-brain
+      federations are detected by pair-wise inequality in `mirror
+      audit`.  Records are sorted by url + lower-cased for stable
+      comparison.
     - revoked_builders: optional {builder_id: revoked_at_iso} for
       tier-2 key revocation propagation.
     """
@@ -243,29 +257,69 @@ def new_coord_head(
         'snapshot':         snapshot,
         'last_seqs':        dict(last_seqs),
         'head_time':        head_time,
-        'neighbours':       canonicalize_neighbours(neighbours or []),
+        'neighbours':       canonicalize_neighbour_records(neighbours or []),
     }
     if revoked_builders:
         _head['revoked_builders'] = dict(revoked_builders)
     return _head
 
 
-def canonicalize_neighbours(urls: 'list') -> 'list':
-    """Normalise a neighbours list to its canonical comparable form:
-    lower-cased, trailing-slash-stripped, sorted, deduped.
+def canonicalize_neighbour_records(items: 'list') -> 'list':
+    """v3 canonical form: a sorted+deduped list of dicts, each carrying
+    ``url`` (the ssh:// publish URL) plus ``public_url`` and
+    ``public_proto`` (the apt-readable URL the chroot writes into
+    sources.list.d, and which protocol scheme it uses).
 
-    The federation gate compares head.neighbours against local-config
-    mirror URLs after both go through this normaliser, so trivial
-    differences (case, sort order, trailing slash) don't cause false
-    BLOCK signals."""
-    _out: 'list[str]' = []
+    Read-tolerant — accepts both v2-shaped input (``list[str]`` of bare
+    URLs) and v3 input (``list[dict]``).  Mixed lists work too.  v2
+    entries are promoted to records with empty ``public_url`` /
+    ``public_proto``, which downstream consumers (`cmd_mirror_add`)
+    interpret as "inherit operator's --proto flag".
+
+    Output rules:
+      - dedup by canonical url (lowercased, trailing-slash stripped)
+      - sort ascending by url for stable JSON diff
+      - empty / non-string urls dropped silently
+    """
+    _out: 'list[Dict[str, str]]' = []
     _seen: 'set[str]' = set()
-    for _u in urls:
-        if not isinstance(_u, str):
+    for _it in items:
+        if isinstance(_it, str):
+            _u = _it.strip().rstrip('/').lower()
+            _pub_url = ''
+            _pub_proto = ''
+        elif isinstance(_it, dict):
+            _raw = _it.get('url')
+            _u = (_raw or '').strip().rstrip('/').lower() if isinstance(_raw, str) else ''
+            _pub_url = (_it.get('public_url') or '').strip() if isinstance(_it.get('public_url'), str) else ''
+            _pub_proto = (_it.get('public_proto') or '').strip().lower() if isinstance(_it.get('public_proto'), str) else ''
+        else:
             continue
-        _norm = _u.strip().rstrip('/').lower()
-        if not _norm or _norm in _seen:
+        if not _u or _u in _seen:
             continue
-        _seen.add(_norm)
-        _out.append(_norm)
-    return sorted(_out)
+        _seen.add(_u)
+        _out.append({
+            'url':           _u,
+            'public_url':    _pub_url,
+            'public_proto':  _pub_proto,
+        })
+    _out.sort(key=lambda _r: _r['url'])
+    return _out
+
+
+def neighbour_urls(items: 'list') -> 'list':
+    """Project canonical neighbours to a flat sorted ``list[str]`` of
+    URLs.  The federation gate uses this for set comparison against
+    local config's mirror URLs."""
+    return [_r['url'] for _r in canonicalize_neighbour_records(items)]
+
+
+def canonicalize_neighbours(urls: 'list') -> 'list':
+    """Back-compat alias — v2 callers that expect a ``list[str]``
+    canonical URL list keep working unchanged.  Internally just the
+    URL projection of `canonicalize_neighbour_records`.
+
+    New code should call `canonicalize_neighbour_records` (when it
+    needs the full dict shape) or `neighbour_urls` (when it just needs
+    the URL set, e.g. federation-gate set-diff)."""
+    return neighbour_urls(urls)
