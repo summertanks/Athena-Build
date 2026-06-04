@@ -4,9 +4,9 @@ How to register, redo, and verify a publish-target mirror under the
 MIRROR-01 federation surface (`mirror add` / `publish` / `pull` /
 `reconcile-neighbours` / `audit`).
 
-This supersedes the older `repo publish ssh` flow described in
-[`docs/repo-publish-vm-setup.md`](repo-publish-vm-setup.md) — that command
-group was removed in commit `8cc803b`.
+Supersedes the pre-MIRROR-01 `repo publish ssh` / `repo publish local`
+command group, which was removed in commit `8cc803b` along with its
+operator doc.
 
 ## What a "mirror" is here
 

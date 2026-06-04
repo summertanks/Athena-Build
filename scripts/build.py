@@ -3246,18 +3246,19 @@ class BuildSession:
     def cmd_index_repo_minimal(self, *args):
         """UPD-02: STAGE the minimal (runtime) subset into publish/ in the SAME
         nested layout as the full repo — so full and minimal are structurally
-        identical and the one shared remote-scan index (`repo publish`) handles
-        both with no clobber.
+        identical and a single destination-side `dpkg-scanpackages` pass
+        handles both with no clobber.
 
         Minimal = the main-component binary .debs a booted system apt-installs,
         MINUS debug/source (apt_repo.deb_excluded_from_minimal); no udebs,
-        source, or debug suite.  NO index/sign here — `repo publish` rebuilds
-        the index ON THE REMOTE (dpkg-scanpackages on the VM).
+        source, or debug suite.  NO index/sign here — `mirror publish`
+        rebuilds the index ON THE REMOTE (dpkg-scanpackages run over the
+        landed pool).
 
           publish/dists/<codename>/main/binary-<arch>/<subset>.deb
 
-        Returns True on success.  Called standalone or by `repo publish ssh
-        minimal`.
+        Returns True on success.  Standalone command; staging for a
+        minimal publish workflow.
         """
         del args
         import apt_repo
@@ -3298,7 +3299,7 @@ class BuildSession:
     def _print_publish_size_summary(self) -> None:
         """Summarise publish/ (the local staging dir for `repo index minimal`).
         File count + total size — useful for a quick "what am I about to
-        ship?" before invoking `repo publish ssh|local minimal`."""
+        ship?" before invoking `mirror publish` on the minimal staging."""
         _root = self.config.dir_publish
         _total = 0
         _n = 0
@@ -3583,8 +3584,8 @@ class BuildSession:
         if not os.path.isfile(_inrelease):
             console.print(
                 f"mirror publish: local InRelease missing at {_inrelease} — "
-                "run `repo index full` (or `repo publish ssh full`) first to "
-                "produce a signed InRelease.", tui.COLOR_ERROR)
+                "run `repo index full` first to produce a signed "
+                "InRelease.", tui.COLOR_ERROR)
             return False
         # Resolve snapshot pin
         _snapshot_pin = self._snapshot_current() or ''
@@ -4666,7 +4667,8 @@ class BuildSession:
         self.flags.dep_check_ready = False
         console.print(
             "  cache invalidated — run `cache build` + `cache parse` to "
-            "resolve the dep tree at the new pin, then `repo refresh`")
+            "resolve the dep tree at the new pin, then walk "
+            "`source sync → source build all → mirror publish`")
         return True
 
     def _snapshot_select_interactive(self):
@@ -6543,7 +6545,8 @@ class BuildSession:
     def _workload_current_to_target(self, target_ts: str):
         """Sources whose upstream SOURCE version at `target_ts` is NEWER than
         the current pin's selected source version — what you'd rebuild
-        advancing current → target (UPD-01 `snapshot workload` / `repo refresh`).
+        advancing current → target (UPD-01 `snapshot workload` driving
+        `source build all` + `mirror publish`).
 
         Detection is by FULL source version (epoch-stripped, NMU-INTACT), NOT
         the pristine base: the Sources index IS the source-change ledger, so a
@@ -6577,11 +6580,12 @@ class BuildSession:
 
     def _workload_since_snapshot(self, from_ts: str):
         """Sources whose CURRENT-pin source version is NEWER than at `from_ts`
-        — i.e. what changed between the published snapshot and current.  This
-        is the `repo refresh` rebuild set (floor = published, destination =
-        current).  Full source-version compare (catches +debNuN; ignores
-        binNMU).  A source absent from `from_ts` (new since) also counts.
-        Returns (sorted_names, None) or (None, error)."""
+        — i.e. what changed between the mirror floor and current.  This is
+        the update rebuild set (floor = min(mirror.current across enabled
+        mirrors), destination = local snapshot.current).  Full source-
+        version compare (catches +debNuN; ignores binNMU).  A source absent
+        from `from_ts` (new since) also counts.  Returns (sorted_names, None)
+        or (None, error)."""
         _from = repo_audit.fetch_source_versions_at(self.config, from_ts)
         if _from is None:
             return None, (f"could not fetch the published snapshot ({from_ts}) "
@@ -6701,11 +6705,11 @@ class BuildSession:
             console.print(f"source build (update): {_err}", tui.COLOR_ERROR)
             return
         # N authority = the PUBLISHED manifest only.  N is a published-generation
-        # counter (advances on `repo publish`, not per build): the next-to-mint is
-        # one past the highest PUBLISHED uN; local rebuilds of the still-pending
-        # update keep the same N.  (A build-ledger union was tried + reverted —
-        # recording locally-built uN made asg_next_n overshoot by 1, turning every
-        # same-base delta into a perpetual bump-target.)
+        # counter (advances on `mirror publish`, not per build): the next-to-mint
+        # is one past the highest PUBLISHED uN; local rebuilds of the still-
+        # pending update keep the same N.  (A build-ledger union was tried +
+        # reverted — recording locally-built uN made asg_next_n overshoot by 1,
+        # turning every same-base delta into a perpetual bump-target.)
         _ledger = repo_audit.published_ledger(self.config)
         if self.container is not None:
             self.container.asg_ledger = _ledger

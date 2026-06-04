@@ -5,7 +5,7 @@ published Asgard release that an installed system can `apt update` from".
 This is the operator runbook; see [`docs/architecture.md`](architecture.md)
 for what the pipeline does at each step.
 
-Most of the moving parts (snapshot pin, signing key, repo publish,
+Most of the moving parts (snapshot pin, signing key, mirror publish,
 manifest discipline) have their own files — this doc is the **sequence
 + checklist**, not a re-derivation.
 
@@ -167,28 +167,28 @@ manually move the tree to wherever they need it.
 
 ## 7. Publish
 
-Two transports (S3 was scoped out; see done.md COMP-02 + memory
-`project_comp02_s3_publish_dropped`):
+Publishing runs through the **MIRROR-01 federation surface** — every
+configured publish target gets the same `.deb`s additively, with
+Ed25519-signed claim records and a tier-1 GPG-signed `coord-head`.
+S3 was scoped out (see done.md COMP-02 + memory
+`project_comp02_s3_publish_dropped`).
 
 ```
-repo publish ssh full                       # rsync + reindex-on-VM
-repo publish local /mnt/usb/asgard full     # local-fs copy + in-process reindex
+mirror list                              # confirm peer set (and per-peer drift state)
+mirror publish                           # push to every configured mirror
+mirror publish primary                   # or push to one mirror by name
 ```
 
-Both: ADDITIVE upload, reindex at destination, sign locally, refresh local
-manifest, publish-before-prune.  Full operator guide:
-[`docs/repo-publish-vm-setup.md`](repo-publish-vm-setup.md).
+`mirror publish` is per-file ADDITIVE under remote flock: pushes new
+`.deb`s, signs each as a claim, re-signs the destination's `coord-head`
+with the current `InRelease` SHA, and (on a fresh peer) bootstraps the
+federation by uploading our pubkey + initialising `neighbours` from the
+local mirror set.  Full operator guide:
+[`docs/mirror-setup.md`](mirror-setup.md).
 
-After publish, point the installed system at it:
-
-```ini
-# config/build.conf
-[Repo]
-AptSourceURL = http://your.repo.example/asgard/
-```
-
-On the next `chroot build`, the installed system gets
-`/etc/apt/sources.list.d/athena.list`:
+The installed system reads its `/etc/apt/sources.list.d/athena-<name>.list`
+file per configured mirror, populated from each `config/mirror.<name>.state`
+during `chroot build`:
 
 ```
 deb [signed-by=/usr/share/keyrings/athena-archive-keyring.gpg] \
@@ -198,15 +198,18 @@ deb [signed-by=/usr/share/keyrings/athena-archive-keyring.gpg] \
 ## 8. Verify the published repo
 
 ```
-repo audit external                              # over HTTP via AptSourceURL
-repo audit external ssh                          # reconcile manifest vs remote
-repo summary ssh                                 # files / sig / date / pins
-repo summary local /mnt/usb/asgard               # same for local destinations
+mirror audit                                     # federation consistency + claim sigs + hash conflicts
+mirror audit primary                             # drill in to one mirror
+mirror summary                                   # per-mirror state dump
+mirror query <pkg>                               # show claims matching <pkg> across mirrors
+mirror status                                    # builder identity + halt sentinel + per-mirror status
 ```
 
-`repo audit external` is the "what apt clients actually see" check; it
-fetches `InRelease`, verifies the signature against our pubkey, and
-checks every index in the signed SHA256 block.
+`mirror audit` is the "what apt clients actually see" check; it fetches
+each peer's `InRelease`, verifies the signature against the project key,
+checks every index against the signed SHA256 block, and cross-checks
+that every peer's `coord-head.neighbours` matches the local mirror set
+(federation gate).
 
 ## 9. Tag and record
 
@@ -230,7 +233,7 @@ release boundary.  Memory: `project_upd01_update_architecture`.
 |---|---|---|
 | Trigger | New `[Build] VERSION` or major scope change | Snapshot advance with security/NMU uplift |
 | Snapshot | New pin (possibly `latest` → resolved + frozen) | `snapshot select current <new-ts>` |
-| Driver | Operator-driven manual walk | `repo refresh` (thin wrapper: source sync → source build all → repo publish ssh full) |
+| Driver | Operator-driven manual walk | `source sync → source build all → mirror publish` (no thin wrapper today; per-stage so the operator sees each gate) |
 | Version stamping | Pristine upstream + reset to `+asg<R>u1` per binary | `+asg<R>uN`, N = manifest's max + 1 per binary |
 | ISO | Re-cut | Not produced — update flows through apt-only |
 | Consumer impact | Fresh install / re-install | `apt update && apt upgrade` |
@@ -244,18 +247,20 @@ the append-only / publish-before-prune / per-file N derivation rules.
 | Symptom | Likely cause / fix |
 |---|---|
 | `cache build` re-runs after snapshot change | Expected — snapshot pin changed, cache is invalidated.  Force is unnecessary. |
-| `repo audit external` flags signature failure | Pubkey on the consuming side is stale.  Re-roll the chroot (`chroot build` re-installs current keyring) or copy the keyring out manually. |
+| `mirror audit` flags signature failure | Pubkey on the consuming side is stale.  Re-roll the chroot (`chroot build` re-installs current keyring) or copy the keyring out manually. |
 | `source build` rebuilds the same package every run | Stale `.result` from a prior force; or pristine filename matches a previously-stamped `+asg uN` (see `find_matching_artifact`).  `package strip` + `package audit_nmu` confirms repo state. |
 | Update mode lists more packages than `source audit` does | Expected — `source audit` reports needs_build via filename match; update mode adds bump-targets whose pristine filename collides with a prior build.  See `docs/pseudocode.md` "source audit vs source build all". |
-| `repo publish` fails at "remote re-index" | `dpkg-dev` not installed on the VM.  `sudo apt-get install -y dpkg-dev`. |
+| `mirror publish` fails at the remote re-index step | `dpkg-dev` not installed on the mirror host.  `sudo apt-get install -y dpkg-dev`. |
+| `mirror publish` BLOCKs with "federation gate" | A peer's `coord-head.neighbours` differs from local config.  Run `mirror reconcile-neighbours` to align peers, then retry. |
 | Real-hardware install fails where VMware succeeds | Firmware (microcode / wifi / video).  Check `installer/finish-install/` ordering and `pool.list` firmware entries; COMP-01h is the umbrella ticket. |
 
 ## Cross-references
 
 - [`docs/architecture.md`](architecture.md) — pipeline stages + BuildFlags.
 - [`docs/patching.md`](patching.md) — patch tree conventions.
-- [`docs/repo-publish-vm-setup.md`](repo-publish-vm-setup.md) — operator
-  guide for ssh + local publish + `repo summary`.
+- [`docs/mirror-setup.md`](mirror-setup.md) — operator guide for
+  registering / first-publish / wipe-and-redo on a publish-target
+  mirror (MIRROR-01 federation surface).
 - [`docs/branding-methodology.md`](branding-methodology.md) — identity
   override mechanisms.
 - [`docs/security.md`](security.md) — what's signed, what's verified, what isn't.

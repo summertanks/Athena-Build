@@ -1115,14 +1115,15 @@ or module writes it), and the consumer (what depends on it).
 
 | Path | Format | Producer | Consumer | Notes |
 |------|--------|----------|----------|-------|
-| `config/build.conf` | INI | operator | `utils.BuildConfig.__init__` | The canonical input. Defines mirrors, snapshot, [Build] identity, [Repo] knobs. |
+| `config/build.conf` | INI | operator | `utils.BuildConfig.__init__` | The canonical input. Defines upstream mirrors, snapshot, [Build] identity, signing-key uid. |
 | `config/pkg.list` | INI-groups | operator | `cmd_parse_dependency` Pass III | Drives the pkg-tier corpus. |
 | `config/live.list` | flat | operator | Pass IV | Live ISO extras. |
 | `config/installer.list` | flat | operator | Pass V + Pass VI | Mixed deb / udeb installer corpus. |
 | `config/pool.list` | flat | operator | Pass VII | Conflicts-skip pool extras. |
-| `config/snapshot.state` | JSON | `snapshot select/advance/base`, `repo external enable/disable` | `utils.resolve_snapshot_timestamp`, `repo_audit.published_ledger` | Operator pins, durable across `clean cache`. Fields: base, current, published, external. |
-| `config/published.manifest` (+ `.sig`) | Packages text + ASCII-armored gpg detached sig | `cmd_repo_publish` via `repo_audit._write_signed_manifest` | `repo_audit.published_ledger` → `utils.highest_asg_update` | Authority for +asg uN bump-N derivation. Read by every subsequent publish to pick the next N. |
-| `config/repo_*.key` | OpenSSH private key | operator out-of-band | `cmd_repo_publish ssh` (configured via [Repo] PublishSshKey) | gitignored. |
+| `config/snapshot.state` | JSON | `snapshot select`, `snapshot advance` | `utils.resolve_snapshot_timestamp`, `repo_audit.published_ledger` | Operator pin, durable across `clean cache`. Single field today: `current`. |
+| `config/mirror.<name>.state` | JSON | `mirror add`, `mirror remove`, `mirror publish` (last_publish_at, neighbours_known) | `mirror.read_mirror_state`, `cmd_mirror_publish`, `cmd_mirror_audit` | Per-mirror durable state — one file per configured publish target. Fields: url, type, ssh_key, base, current, last_publish_at, neighbours_known. |
+| `config/published.manifest` (+ `.sig`) | Packages text + ASCII-armored gpg detached sig | `mirror publish` via `repo_audit._write_signed_manifest` (union of all enabled mirrors' Packages) | `repo_audit.published_ledger` → `utils.highest_asg_update` | Authority for +asg uN bump-N derivation. Read by every subsequent publish to pick the next N. |
+| `config/repo_*.key` | OpenSSH private key | operator out-of-band | `mirror publish` (per-mirror `--ssh-key` at `mirror add` time) | gitignored. |
 | `cache/snapshot.timestamp` | one-line UTC TS | `utils.resolve_snapshot_timestamp` when 'latest' resolves | self (reproducibility on subsequent runs) | Volatile: `clean cache` wipes. Re-resolved on next run. |
 | `cache/<uri>` | Packages / Sources / Release | `Cache.__get_files` | `Cache.__build_cache` | Per-mirror, named by `apt_pkg.uri_to_filename` so multi-mirror don't collide. |
 | `source/<pkg>_<ver>.{dsc,tar.*}` | upstream Debian source | `cmd_source_sync` → `utils.download_source` | `BuildContainer.build` | SHA256-verified against the InRelease-signed Sources index. |
@@ -1211,9 +1212,10 @@ snapshot and the CURRENT snapshot, which sources need a
 `+asg<R>u<N>`-stamped rebuild so the next publish advertises the
 security delta?*
 
-- Triggered automatically by `_update_build_pending()` when
-  `snapshot.state` says `published != current` (i.e. the operator has
-  advanced the pin since the last `repo publish`).
+- Triggered automatically by `_update_build_pending()` when any
+  enabled mirror's recorded `current` lags behind `snapshot.state.current`
+  (i.e. the operator has advanced the pin since the last
+  `mirror publish` to at least one peer).
 - `_workload_since_snapshot()` compares the source version at the
   published snapshot to the source version at the current snapshot.
   ANY move — including pure `+deb12u14 → +deb12u15` security bumps

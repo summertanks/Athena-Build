@@ -655,8 +655,8 @@ def manifest_vs_remote_discrepancies(
     local_ledger: dict, remote_ledger: dict,
 ) -> 'Tuple[set, set]':
     """Compare two {package: [version,...]} ledgers (local signed manifest vs
-    remote Packages); return (only_local, only_remote) as sets of 'pkg=version'
-    — the integrity reconciliation behind `repo audit external ssh`."""
+    a peer mirror's Packages); return (only_local, only_remote) as sets of
+    'pkg=version' — the integrity reconciliation behind `mirror audit`."""
     _l = {f"{_p}={_v}" for _p, _vs in local_ledger.items() for _v in _vs}
     _r = {f"{_p}={_v}" for _p, _vs in remote_ledger.items() for _v in _vs}
     return (_l - _r, _r - _l)
