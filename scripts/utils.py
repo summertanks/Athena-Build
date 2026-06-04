@@ -1314,13 +1314,18 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
 # fsync → os.replace.  POSIX rename(2) guarantees readers see either the
 # old valid file or the new valid file, never a torn write.
 
-BUILD_RECORD_SCHEMA_VERSION = 2
+BUILD_RECORD_SCHEMA_VERSION = 3
 BUILD_RECORD_SUFFIX = '.build.json'
 # v1 → v2 (COORD-01): adds output_hashes {filename: sha256_hex}, the
 # per-emitted-binary digest that the coord layer pins into its claim
 # records.  v1 records survive unchanged (no field = empty hash dict);
 # the backfill_output_hashes() helper upgrades them in place when run.
-_BUILD_RECORD_LEGACY_VERSIONS = frozenset({1})
+# v2 → v3 (MIRROR-02): adds republished_from
+# {filename: {url, upstream_sha256}}, populated by cmd_tunnel_package
+# (and chunk 10 mirror pull).  Threads through to the
+# claim's republished_from field so the federation can mark tunneled
+# packages as no-owner.  v2 records survive unchanged (empty dict).
+_BUILD_RECORD_LEGACY_VERSIONS = frozenset({1, 2})
 _BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
 
 # Phase state machine.  Linear progression on the happy path:
@@ -1496,6 +1501,11 @@ def new_build_record(*, package: str,
         'output_count':     0,
         'outputs':          [],
         'output_hashes':    {},
+        # MIRROR-02: per-output upstream provenance for tunneled
+        # packages.  Shape: {filename: {url, upstream_sha256}}.
+        # Empty for normally-built records; populated by
+        # cmd_tunnel_package and (read-side) by mirror pull.
+        'republished_from': {},
     }
 
 
@@ -1600,21 +1610,25 @@ def classify_build_record(record: 'Optional[dict]') -> str:
 
 
 def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
-    """Upgrade build.json records to schema v2 by hashing emitted .debs.
+    """Upgrade build.json records to current schema by hashing emitted
+    .debs + initialising any new v3 fields.
 
     For every <pkg>.build.json under `buildlog_dir`:
-      - if schema_version is already v2 AND every output in `outputs`
-        has a hash in `output_hashes`, skip;
+      - if schema_version is already current AND every output in `outputs`
+        has a hash in `output_hashes` AND v3 fields are present, skip;
       - otherwise look up each output by basename under `repo_root`
         (one os.walk builds the filename→path index), hash via the
         cached get_sha256 (size+mtime sidecar), populate `output_hashes`,
-        bump `schema_version`, re-sign + atomic-replace.
+        bump `schema_version`, initialise v3 fields if absent, re-sign
+        + atomic-replace.
 
     Returns {scanned, upgraded, skipped, missing_files}.  Idempotent
     — a second invocation reports 0 upgraded.
 
     Failed records (phase=failed) and entries whose `outputs` list is
     empty get their schema bumped but no hashes (nothing to hash).
+    v3-only fields like `republished_from` default to {} for non-tunneled
+    backfilled records.
     """
     _index: 'dict[str, str]' = {}
     for _root, _dirs, _files in os.walk(repo_root):
@@ -1638,8 +1652,10 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         _outputs = _rec.get('outputs') or []
         _existing = _rec.get('output_hashes') or {}
         _current_version = _rec.get('schema_version', 1)
+        _has_v3_fields = 'republished_from' in _rec
         if (_current_version >= BUILD_RECORD_SCHEMA_VERSION
-                and all(_o in _existing for _o in _outputs)):
+                and all(_o in _existing for _o in _outputs)
+                and _has_v3_fields):
             _stats['skipped'] += 1
             continue
         _new_hashes = dict(_existing)
@@ -1660,6 +1676,11 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
             _stats['missing_files'] += 1
         _rec['output_hashes'] = _new_hashes
         _rec['schema_version'] = BUILD_RECORD_SCHEMA_VERSION
+        # MIRROR-02 v3 fields — initialise if absent.
+        # republished_from stays empty for normally-built backfilled
+        # records (only cmd_tunnel_package populates it at write time).
+        if 'republished_from' not in _rec:
+            _rec['republished_from'] = {}
         try:
             write_build_record(buildlog_dir, _rec)
             _stats['upgraded'] += 1
