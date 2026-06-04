@@ -8166,9 +8166,24 @@ class BuildSession:
     # remain on cmd_<old_name> methods unchanged — these are thin forwarders.
 
     def _group_help(self, group: str, table: dict, unknown: str = '') -> None:
-        if unknown:
-            console.print(f"Unknown {group} action: '{unknown}'")
-        console.print(f"{group}: {' | '.join(table.keys())}")
+        """Print the action table for a command group.
+
+        `unknown` is whatever the operator typed as the subcommand: empty
+        when they ran the bare group, a recognised help token (`help`,
+        `?`, `-h`, `--help`) when they asked for help explicitly, or an
+        actual mis-typed action when they got it wrong.  Only the third
+        case emits the "Unknown action" warning.
+
+        The action table is printed one row per action; the previous
+        single-line summary (`group: a | b | c | ...`) was dropped after
+        it started hard-wrapping mid-token on wide command groups like
+        `mirror` (12 actions).  The per-row table is the canonical
+        reference; nothing is lost.
+        """
+        _help_tokens = {'', 'help', '?', '-h', '--help'}
+        if unknown and unknown not in _help_tokens:
+            console.print(f"Unknown {group} action: {unknown!r}")
+        console.print(f"{group} — actions:")
         for _action, _desc in table.items():
             console.print(f"  {group} {_action}\t{_desc}")
 
