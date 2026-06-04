@@ -470,19 +470,27 @@ def discover_federation_peers(
     """For every URL in ``head['neighbours']``, probe its sidecar and
     classify.  Returns a list of dicts, one per neighbour:
 
-      {url, reachable: bool, verified: bool, head: dict|None, detail: str}
+      {url, reachable, verified, head, detail,
+       public_url, public_proto}
 
     A neighbour is ``reachable`` iff `probe_sidecar_head` returned ok;
-    ``verified`` iff the peer's coord-head GPG-verified with our keyring
-    (a peer with no coord-head yet is reachable but not verified).  Used
-    by `cmd_mirror_add` to render the federation join summary; the
-    'take-control-and-drop unreachable' default uses ``reachable=False``
-    as the drop criterion.
+    ``verified`` iff the peer's coord-head GPG-verified with our
+    keyring (a peer with no coord-head yet is reachable but not
+    verified).
+
+    ``public_url`` and ``public_proto`` come from the UPSTREAM head's
+    v3 per-peer record (the federation's signed source of truth for
+    each peer's apt-readable URL).  v2-shaped peers (URL-only strings
+    in `neighbours`) surface empty strings — `cmd_mirror_add` falls
+    back to the operator's `--proto` flag for those.
     """
-    _neighbours = head.get('neighbours') or []
+    import coord.schema as _schema
+    _records = _schema.canonicalize_neighbour_records(
+        head.get('neighbours') or [])
     _out: 'list[dict]' = []
-    for _idx, _url in enumerate(_neighbours):
-        if not isinstance(_url, str) or not _url:
+    for _idx, _rec in enumerate(_records):
+        _url = _rec.get('url') or ''
+        if not _url:
             continue
         _coord = coord_root_for(_url)
         _stage = os.path.join(stage_root, f"probe-{_idx:02d}")
@@ -490,11 +498,13 @@ def discover_federation_peers(
             _coord, signing_homedir=signing_homedir, stage_dir=_stage,
             ssh_key=ssh_key)
         _out.append({
-            'url':       _url,
-            'reachable': _ok,
-            'verified':  _peer_head is not None,
-            'head':      _peer_head,
-            'detail':    _det,
+            'url':           _url,
+            'reachable':     _ok,
+            'verified':      _peer_head is not None,
+            'head':          _peer_head,
+            'detail':        _det,
+            'public_url':    _rec.get('public_url') or '',
+            'public_proto':  _rec.get('public_proto') or '',
         })
     return _out
 
@@ -679,12 +689,43 @@ def add_mirror(
 
 def all_mirror_urls(config) -> 'list[str]':
     """Return the canonical URL set across every configured mirror.
-    Used as the SOURCE OF TRUTH for the federation `neighbours` list."""
+    Used as the SOURCE OF TRUTH for the federation `neighbours` list
+    when the URL-only projection is sufficient (federation-gate
+    set-comparison, federation-drift detection)."""
     _out: 'list[str]' = []
     for _n in list_mirrors(config):
         _st = read_mirror_state(config, _n)
         if _st and _st.get('url'):
             _out.append(_st['url'])
+    return _out
+
+
+def all_mirror_neighbour_records(config) -> 'list[dict]':
+    """v3 source-of-truth for ``coord-head.neighbours``: a record per
+    configured mirror carrying its publish URL plus the apt-readable
+    ``public_url`` + ``public_proto`` recorded in the per-mirror state
+    file.  Used by the publish path and `mirror reconcile-neighbours`
+    so peers in a heterogeneous federation (mixed http / https) sign
+    their actual apt URL into the federation's shared head instead of
+    every joiner having to inherit the operator's ``--proto`` flag.
+
+    File:// mirrors keep empty ``public_url`` — there's no
+    network-readable apt URL to record; a joining builder falls back
+    to its own ``--proto`` for them (which is N/A for file:// anyway).
+    """
+    _out: 'list[dict]' = []
+    for _n in list_mirrors(config):
+        _st = read_mirror_state(config, _n)
+        if not _st:
+            continue
+        _url = _st.get('url') or ''
+        if not _url:
+            continue
+        _out.append({
+            'url':           _url,
+            'public_url':    _st.get('public_url') or '',
+            'public_proto':  _st.get('public_proto') or '',
+        })
     return _out
 
 
@@ -803,7 +844,16 @@ def reconcile_neighbours(
     import coord.schema as _schema
     import coord.transport as _transport
 
-    _desired = _schema.canonicalize_neighbours(all_mirror_urls(config))
+    # v3 records — what we'd WRITE into each peer's coord-head.  The
+    # URL-only projection (`_desired_urls`) is what we COMPARE against
+    # the peer's existing head for the change-detection gate;
+    # per-peer public_url/public_proto churn is tolerated silently here
+    # (the next `mirror publish` from each builder rewrites its own
+    # per-peer fields anyway, so noise-free reconcile only fires on
+    # genuine federation-membership diff).
+    _desired_records = _schema.canonicalize_neighbour_records(
+        all_mirror_neighbour_records(config))
+    _desired = _schema.neighbour_urls(_desired_records)
     if target_name is not None:
         if read_mirror_state(config, target_name) is None:
             return False, f"unknown mirror {target_name!r}", []
@@ -893,7 +943,7 @@ def reconcile_neighbours(
             # against any future caller passing a shared reference).
             import copy as _copy
             _new = _copy.deepcopy(_head)
-            _new['neighbours'] = _desired
+            _new['neighbours'] = _desired_records
             _ok = _head_mod.write_coord_head(_stage, _new, signing_homedir)
             if not _ok:
                 _results.append({

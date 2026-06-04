@@ -330,13 +330,18 @@ def remote_publish(
     transaction.  Used to compute the sha256 that the new coord-head
     pins.
 
-    `local_mirror_urls` (MIRROR-01 Phase 3): the canonical federation
-    URL set the local builder has configured.  When `None`, federation
+    `local_mirror_urls` — accepts either the v2 `list[str]` of canonical
+    federation URLs OR the v3 `list[dict]` per-peer records
+    (`{url, public_url, public_proto}` from
+    `mirror.all_mirror_neighbour_records`).  When `None`, federation
     gate is BYPASSED (legacy path).  When provided:
-      - if remote already has a coord-head → compare neighbours; BLOCK on diff
+      - if remote already has a coord-head → compare neighbour URLs
+        (`canonicalize_neighbours` projection); BLOCK on diff
       - if remote has no coord-head (first publish) → BOOTSTRAP:
         upload our pubkey to <root>/keyring/builders/<id>.pub and
-        initialise the new coord-head with neighbours = local_mirror_urls
+        initialise the new coord-head with the local records (v3 form
+        is preserved verbatim so heterogeneous-proto peers round-trip;
+        v2 strings auto-promote to records with empty meta)
 
     `pool_remote_spec` (MIRROR-01 Phase 3b): when set, the rsync target
     for the apt POOL root (sibling of the coord root on the mirror

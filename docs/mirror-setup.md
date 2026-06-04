@@ -236,6 +236,59 @@ federation whose key you don't have means signing `coord-head` updates
 with a key the rest of the federation can't verify, which would
 poison the next reconcile.
 
+## Heterogeneous federations (mixed http / https peers)
+
+`coord-head.json`'s schema is v3 as of MIRROR-01 Phase 7 (commit
+`0776fa7`).  `neighbours` is a list of per-peer records — each carries
+the apt-readable URL the chroot writes into `sources.list.d`:
+
+```json
+"neighbours": [
+  {"url": "ssh://ubuntu@a.example/srv/asgard",
+   "public_url":   "http://a.example/asgard",
+   "public_proto": "http"},
+  {"url": "ssh://ubuntu@b.example/srv/asgard",
+   "public_url":   "https://b.example/asgard",
+   "public_proto": "https"}
+]
+```
+
+Per-peer records mean a federation can mix http and https peers
+freely — each builder records its own apt-readable URL into the
+signed federation head at `mirror publish` time, and a joining
+builder reads those records verbatim instead of having to inherit
+the operator's `--proto` flag.
+
+What happens when you `mirror add` joins an existing v3 federation:
+
+1. The orchestrator's federation-discovery step reads the peer's
+   `coord-head.neighbours` records.
+2. For each discovered peer, the locally-written
+   `config/mirror.<name>.state` carries the **upstream's** `public_url`
+   and `public_proto` — not whatever `--proto` you passed.
+3. The operator's `--proto` flag is still honoured for: (a) the
+   primary mirror you're explicitly adding, and (b) any v2-shaped
+   peers whose records have empty `public_url` (the back-compat path
+   for federations still running pre-Phase-7 publishers).
+
+When you publish back, your builder's per-peer view of each peer's
+apt URL is what lands in the signed coord-head for that
+publish-target.  Two builders that disagree on `peer-X.public_proto`
+will see each other's view round-trip until both are aligned;
+operator can resolve by running a manual `mirror remove peer-X` +
+`mirror add` with the desired protocol on whichever builder is wrong.
+
+SSH keys stay homogeneous across the federation — Phase 7 keeps the
+operator's `--ssh-key` flag as the source of truth for every peer.
+Heterogeneous ssh keys would need a separate schema bump and an
+out-of-band key-distribution story.
+
+Read-compat: v2 coord-heads (`neighbours: list[str]`) are still
+readable; their per-peer records auto-promote to empty
+`public_url` / `public_proto` and `mirror add` falls back to the
+operator's `--proto`.  v1 coord-heads (no `neighbours` field at all)
+read as empty.
+
 ## Migrating from the legacy `[Repo]` keys
 
 If `config/build.conf` still carries the pre-MIRROR-01 keys, they're
