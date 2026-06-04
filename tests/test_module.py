@@ -231,6 +231,80 @@ _BASE_CONF_BODY = """
     """
 
 
+_MINIMAL_MIRROR_BLOCK = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+
+
+def test_buildconfig_mode_defaults_to_distribution():
+    """MIRROR-02: `[Build] Mode` defaults to 'distribution' when absent.
+    Existing configs (and the shipped build.conf) keep working unchanged."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        assert cfg.build_mode == 'distribution', cfg.build_mode
+
+
+def test_buildconfig_mode_individual_parses():
+    """MIRROR-02: `[Build] Mode = individual` accepted; case + whitespace
+    tolerant."""
+    _body = _BASE_CONF_BODY.replace(
+        'MaxParallelBuilds = 1',
+        'MaxParallelBuilds = 1\n    Mode = Individual')
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _body.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
+        assert cfg.build_mode == 'individual'
+
+
+def test_buildconfig_mode_rejects_unknown_value():
+    """MIRROR-02: typo in [Build] Mode → BuildConfig invalid + actionable
+    error_str pointing at the allowed values."""
+    _body = _BASE_CONF_BODY.replace(
+        'MaxParallelBuilds = 1',
+        'MaxParallelBuilds = 1\n    Mode = banana')
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _body.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert not cfg.is_valid
+        assert "'distribution' or 'individual'" in cfg.error_str
+        assert 'banana' in cfg.error_str
+
+
+def test_parse_indl_list_strips_comments_dedups_preserves_order():
+    """MIRROR-02: `config/indl.list` parser — flat list, `#` comments and
+    blank lines stripped, inline comments allowed, dedup preserves
+    first-seen order, missing file → empty list."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as _td:
+        _path = os.path.join(_td, 'indl.list')
+        with open(_path, 'w') as _fh:
+            _fh.write(
+                '# operator notes\n'
+                'firefox-esr\n'
+                '\n'
+                'libreoffice  # OOMs on host A\n'
+                '# blank section follows\n'
+                '\n'
+                'thunderbird\n'
+                'firefox-esr\n'   # dup — dropped
+                '   # whitespace-only comment\n'
+            )
+        _got = utils.parse_indl_list(_path)
+        assert _got == ['firefox-esr', 'libreoffice', 'thunderbird'], _got
+        # Missing file → []
+        _missing = os.path.join(_td, 'nonexistent.list')
+        assert utils.parse_indl_list(_missing) == []
+
+
 def test_buildconfig_parses_three_mirrors():
     mirror_block = """
     [Mirror.main]
@@ -24737,6 +24811,10 @@ def main() -> int:
         test_mirror_rejects_baseurl_without_scheme,
         test_mirror_rejects_suffix_without_leading_dash,
         test_mirror_with_snapshot_returns_new_instance_untouched_original,
+        test_buildconfig_mode_defaults_to_distribution,
+        test_buildconfig_mode_individual_parses,
+        test_buildconfig_mode_rejects_unknown_value,
+        test_parse_indl_list_strips_comments_dedups_preserves_order,
         test_buildconfig_parses_three_mirrors,
         test_deb_dest_for_filename_routes_by_component,
         test_buildconfig_rejects_no_mirrors,
