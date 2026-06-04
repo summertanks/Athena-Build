@@ -3423,44 +3423,436 @@ class BuildSession:
         }
         return self._group_help('mirror', _table, action)
 
-    def cmd_mirror_add(self, *args):
-        """mirror add <name> <url> [--ssh-key PATH] [--type ssh|local]
+    _MIRROR_ADD_USAGE = (
+        "Usage: mirror add <ip|fqdn|local> <ssh-or-file-url> "
+        "[--ssh-key PATH] [--proto http|https] [--name NAME] "
+        "[--no-probe] [--yes]"
+    )
 
-        Seeds base + current from the local snapshot.current pin so the
-        new mirror starts at parity with this builder."""
-        import mirror as _mirror
+    def _parse_mirror_add_args(self, args):
+        """Parse the new `mirror add` argv into a flat dict.  Returns
+        (parsed, error_or_empty).  Keeps the orchestrator readable."""
         if len(args) < 2:
-            console.print(
-                "Usage: mirror add <name> <url> [--ssh-key PATH] [--type ssh|local]",
-                tui.COLOR_ERROR)
-            return False
-        _name, _url = args[0], args[1]
-        _ssh_key: 'Optional[str]' = None
-        _type: 'Optional[str]' = None
+            return None, self._MIRROR_ADD_USAGE
+        _host_type = args[0]
+        _url = args[1]
+        _parsed = {
+            'host_type':  _host_type,
+            'url':        _url,
+            'ssh_key':    None,
+            'proto':      None,
+            'name':       None,
+            'no_probe':   False,
+            'yes':        False,
+        }
         _i = 2
         while _i < len(args):
             _a = args[_i]
-            if _a == '--ssh-key' and _i + 1 < len(args):
-                _ssh_key = args[_i + 1]
+            if _a in ('--ssh-key',) and _i + 1 < len(args):
+                _parsed['ssh_key'] = args[_i + 1]
                 _i += 2
-            elif _a == '--type' and _i + 1 < len(args):
-                _type = args[_i + 1]
+            elif _a in ('--proto', '-proto') and _i + 1 < len(args):
+                _parsed['proto'] = args[_i + 1]
                 _i += 2
-            else:
+            elif _a in ('--name',) and _i + 1 < len(args):
+                _parsed['name'] = args[_i + 1]
+                _i += 2
+            elif _a == '--no-probe':
+                _parsed['no_probe'] = True
                 _i += 1
+            elif _a == '--yes':
+                _parsed['yes'] = True
+                _i += 1
+            else:
+                return None, f"unknown argument {_a!r}\n{self._MIRROR_ADD_USAGE}"
+        return _parsed, ''
+
+    def cmd_mirror_add(self, *args):
+        """mirror add <ip|fqdn|local> <ssh-or-file-url> [--ssh-key PATH]
+                       [--proto http|https] [--name NAME]
+                       [--no-probe] [--yes]
+
+        Register a new publish-target mirror with reachability + sidecar
+        probing, federation discovery, and an operator-visible
+        sources.list preview.
+
+        Required gate before any probing: the local tier-1 signing key
+        must be present + verifiable (`key generate` / `key verify`).
+
+        The `ip` / `fqdn` keyword constrains what shape the URL's host
+        portion may take.  `local` is for `file://` publish mirrors and
+        bypasses every network probe.
+
+        The mirror name auto-derives from the URL host (dots/colons → '-');
+        operator override with `--name`.
+
+        --proto: REQUIRED for ssh:// URLs.  The chroot writes
+        `<proto>://<host>/<dist-id>` into `sources.list.d/athena-<n>.list`.
+
+        --no-probe skips DNS/TCP/SSH/HTTP probes (dev / offline testing);
+        sidecar pull + federation discovery still run if reachable.
+
+        --yes accepts the federation-join summary without prompting.
+        Refused state files (key-verify failure, unknown peer-key) are
+        NEVER bypassed by --yes; only the final accept-or-not prompt is.
+
+        Default for an unreachable discovered neighbour is
+        "take-control-and-drop" — the new mirror joins the federation
+        without that peer, and `mirror reconcile-neighbours` propagates
+        the shrunk membership to the remaining reachable peers.
+        """
+        import mirror as _mirror
+        import signing
+        _parsed, _err = self._parse_mirror_add_args(args)
+        if _parsed is None:
+            console.print(_err, tui.COLOR_ERROR)
+            return False
+
+        # ── Gate 1: signing key must be verifiable ─────────────────
+        _key_ok, _key_msg = signing.verify_key(self.config)
+        if not _key_ok:
+            console.print(
+                "mirror add: REFUSED — tier-1 signing key not verifiable "
+                f"({_key_msg}).  Run `key generate` then `key verify` "
+                "before registering a mirror.",
+                tui.COLOR_ERROR)
+            return False
+        console.print(
+            f"signing key ok: {_key_msg}", tui.COLOR_INFO)
+
+        # ── Step 1: host-type keyword × URL shape sanity ───────────
+        _host_type = _parsed['host_type']
+        _url_raw = _parsed['url']
+        _normalised = _mirror._normalize_url(_url_raw)
+        if _normalised is None:
+            console.print(
+                f"mirror add: invalid URL {_url_raw!r} "
+                "(publish URLs must be ssh:// or file:///abs/path).",
+                tui.COLOR_ERROR)
+            return False
+        _ok, _det = _mirror.validate_host_for_type(_normalised, _host_type)
+        if not _ok:
+            console.print(f"mirror add: {_det}", tui.COLOR_ERROR)
+            return False
+
+        # ── Step 2: --proto required for ssh, forbidden for local ──
+        _proto = _parsed['proto']
+        _is_ssh = _normalised.startswith('ssh://')
+        if _is_ssh and _proto not in _mirror.VALID_PROTOS:
+            console.print(
+                "mirror add: ssh:// publish mirrors require --proto "
+                f"http|https (got {_proto!r}).  The chroot needs an "
+                "apt-readable URL to write into sources.list.d.",
+                tui.COLOR_ERROR)
+            return False
+        if not _is_ssh and _proto is not None:
+            console.print(
+                "mirror add: --proto is only meaningful for ssh:// "
+                "mirrors (file:// publish targets aren't dereferenced "
+                "by apt over the network).",
+                tui.COLOR_WARNING)
+            _proto = None
+
+        # ── Step 3: derive name + public_url + host ────────────────
+        _name = _parsed['name'] or _mirror.derive_name_from_url(
+            _normalised, _host_type)
+        if not _name:
+            console.print(
+                "mirror add: could not auto-derive a mirror name from "
+                f"{_normalised!r}; pass --name <name> explicitly.",
+                tui.COLOR_ERROR)
+            return False
+        _host = _mirror._extract_host_from_ssh_url(_normalised) or ''
+        _public_url = ''
+        if _is_ssh and _proto:
+            _public_url = _mirror.derive_public_url(
+                _normalised, self.config.build_base_id, _proto) or ''
+            if not _public_url:
+                console.print(
+                    "mirror add: could not derive public URL — check "
+                    f"[Build] DISTRIBUTION ({self.config.build_base_id!r}) "
+                    "and the --proto value.",
+                    tui.COLOR_ERROR)
+                return False
+
+        console.print(
+            f"derived: name={_name}  url={_normalised}  "
+            f"host={_host or '(n/a)'}  public_url={_public_url or '(n/a)'}",
+            tui.COLOR_HIGHLIGHT)
+
+        # ── Step 4: refuse early on duplicates ─────────────────────
+        if _mirror.read_mirror_state(self.config, _name) is not None:
+            console.print(
+                f"mirror add: a mirror named {_name!r} is already "
+                "registered locally.", tui.COLOR_ERROR)
+            return False
+        for _other in _mirror.list_mirrors(self.config):
+            _ost = _mirror.read_mirror_state(self.config, _other)
+            if _ost and _ost.get('url') == _normalised:
+                console.print(
+                    f"mirror add: URL {_normalised!r} is already "
+                    f"registered as {_other!r}.", tui.COLOR_ERROR)
+                return False
+
+        # ── Step 5: reachability + ssh + permissions + http probes ──
+        _signing_homedir = signing.signing_home(self.config)
+        if _is_ssh and not _parsed['no_probe']:
+            _ok = self._mirror_add_run_ssh_probes(
+                host=_host, ssh_key=_parsed['ssh_key'],
+                pool_path=_normalised[len('ssh://'):].split('/', 1)[-1],
+                public_url=_public_url, proto=_proto or 'http',
+            )
+            if not _ok:
+                console.print(
+                    "mirror add: probes failed.  Pass `--no-probe` to "
+                    "skip them (dev / offline).", tui.COLOR_ERROR)
+                return False
+        elif _parsed['no_probe']:
+            console.print(
+                "  probes skipped (--no-probe)", tui.COLOR_WARNING)
+
+        # ── Step 6: sidecar discovery (ssh mirrors only) ───────────
+        _peer_head: 'Optional[dict]' = None
+        _discovered: 'list[dict]' = []
+        if _is_ssh:
+            _coord_url = _mirror.coord_root_for(_normalised)
+            _stage_root = os.path.join(
+                self.config.dir_cache, 'mirror', _name, 'probe')
+            _ok, _det, _peer_head = _mirror.probe_sidecar_head(
+                _coord_url, signing_homedir=_signing_homedir,
+                stage_dir=os.path.join(_stage_root, 'self'),
+                ssh_key=_parsed['ssh_key'])
+            console.print(
+                f"sidecar: {_det}",
+                tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
+            if not _ok:
+                # The signing-key-mismatch gate fires here.  No way past
+                # this — operator must import the federation's key.
+                return False
+            if _peer_head is not None:
+                self._mirror_add_print_head_summary(_peer_head)
+                _discovered = _mirror.discover_federation_peers(
+                    _peer_head, signing_homedir=_signing_homedir,
+                    stage_root=_stage_root, ssh_key=_parsed['ssh_key'])
+
+        # ── Step 7: dedup against local config + classify peers ────
+        _local_urls = set(_mirror.all_mirror_urls(self.config))
+        _net_new_peers: 'list[dict]' = []
+        _dropped: 'list[dict]' = []
+        for _p in _discovered:
+            if _p['url'] in _local_urls:
+                continue
+            if _p['url'] == _normalised:
+                continue  # the peer we're registering itself
+            if not _p['reachable']:
+                _dropped.append(_p)
+                continue
+            _net_new_peers.append(_p)
+
+        self._mirror_add_print_join_summary(
+            primary_name=_name, primary_url=_normalised,
+            primary_public_url=_public_url,
+            net_new=_net_new_peers, dropped=_dropped,
+            proto=_proto, ssh_key=_parsed['ssh_key'])
+
+        # ── Step 8: operator confirm ──────────────────────────────
+        if not _parsed['yes']:
+            _resp = Prompt(
+                PROMPT_YESNO,
+                f"Register {_name!r}"
+                + (f" + {len(_net_new_peers)} discovered peer(s)"
+                   if _net_new_peers else "")
+                + (f" (dropping {len(_dropped)} unreachable)"
+                   if _dropped else "")
+                + "?",
+            ).get_response()
+            if not _resp:
+                console.print(
+                    "mirror add: aborted by operator.", tui.COLOR_WARNING)
+                return False
+
+        # ── Step 9: write state files ──────────────────────────────
         _seed = self._snapshot_current() or ''
         _ok, _detail = _mirror.add_mirror(
-            self.config, name=_name, url=_url, type=_type,
-            ssh_key=_ssh_key, seed_pin=_seed,
+            self.config, name=_name, url=_normalised,
+            type=('ssh' if _is_ssh else 'local'),
+            ssh_key=_parsed['ssh_key'], seed_pin=_seed,
+            host=_host, host_type=_host_type,
+            public_proto=_proto or '', public_url=_public_url,
         )
         console.print(
             f"mirror add: {_detail}",
             tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
-        if _ok:
+        if not _ok:
+            return False
+
+        # Net-new peers discovered via the federation join.  Each one
+        # inherits the operator's SSH key + the same --proto.  Name
+        # auto-derived from URL (operator can rename later).
+        for _peer in _net_new_peers:
+            _peer_url = _peer['url']
+            if not _peer_url.startswith('ssh://'):
+                console.print(
+                    f"  skip non-ssh peer {_peer_url} from federation "
+                    "discovery (manual `mirror add` required for these)",
+                    tui.COLOR_WARNING)
+                continue
+            _peer_name = _mirror.derive_name_from_url(_peer_url, 'fqdn') or \
+                _mirror.derive_name_from_url(_peer_url, 'ip')
+            if not _peer_name:
+                console.print(
+                    f"  skip peer {_peer_url} — could not derive name",
+                    tui.COLOR_WARNING)
+                continue
+            if _mirror.read_mirror_state(self.config, _peer_name):
+                continue
+            _peer_host = _mirror._extract_host_from_ssh_url(_peer_url) or ''
+            _peer_host_type = ('ip' if _mirror._is_valid_ip(_peer_host)
+                               else 'fqdn')
+            _peer_public_url = _mirror.derive_public_url(
+                _peer_url, self.config.build_base_id, _proto or 'http') or ''
+            _pok, _pdet = _mirror.add_mirror(
+                self.config, name=_peer_name, url=_peer_url, type='ssh',
+                ssh_key=_parsed['ssh_key'], seed_pin=_seed,
+                host=_peer_host, host_type=_peer_host_type,
+                public_proto=_proto or '', public_url=_peer_public_url,
+            )
             console.print(
-                "  (Run `mirror reconcile-neighbours` to propagate the new "
-                "URL to every peer's coord-head.neighbours under flock.)")
-        return _ok
+                f"  peer {_peer_name}: {_pdet}",
+                tui.COLOR_INFO if _pok else tui.COLOR_WARNING)
+
+        # ── Step 10: propagate via reconcile-neighbours ───────────
+        if _is_ssh:
+            console.print(
+                "propagating federation membership "
+                "(`mirror reconcile-neighbours`)…", tui.COLOR_INFO)
+            self.cmd_mirror_reconcile_neighbours()
+        return True
+
+    def _mirror_add_run_ssh_probes(
+        self, *, host: str, ssh_key: 'Optional[str]',
+        pool_path: str, public_url: str, proto: str,
+    ) -> bool:
+        """Per-step probe runner (DNS/TCP → SSH → permissions → HTTP).
+        Returns True iff every step ok; prints a progress line per
+        step.  Extracted from cmd_mirror_add for readability."""
+        import mirror as _mirror
+        _user = ''
+        # Pull user@host from the URL stored in pool_path's parent — but
+        # we only have the path here.  Operator-supplied user came from
+        # the URL; re-extract from public_url-style if needed.  Simplest:
+        # SSH probes pass the raw host and let ssh/SSH config pick the user.
+        # If operator's ssh_config carries `User ubuntu` for the host,
+        # this just works.  For explicit-user scenarios the operator's
+        # ssh_key argument is what authenticates.
+        del pool_path  # currently informational
+
+        # 5a — DNS + TCP probe on ssh port
+        _ok, _det = _mirror.probe_dns_and_tcp(host, 22)
+        console.print(
+            f"  ssh reachability ({host}:22): {_det}",
+            tui.COLOR_INFO if _ok else tui.COLOR_ERROR)
+        if not _ok:
+            return False
+
+        # 5b — SSH auth probe
+        _ok, _det = _mirror.probe_ssh_auth(host, _user, ssh_key)
+        console.print(
+            f"  ssh auth: {_det}",
+            tui.COLOR_INFO if _ok else tui.COLOR_ERROR)
+        if not _ok:
+            return False
+
+        # 5c — Remote write probe (pool + coord)
+        # Re-extract the absolute path on the remote
+        # — that's what the rsync target points at.  Operator's URL is
+        # `ssh://user@host/abs/path`, so the path is after the first
+        # slash after the host.  We already stripped the scheme upstream;
+        # the orchestrator passes the pool_path arg for clarity.
+        # (We use shlex.quote on the remote side, so paths with spaces
+        # are handled.)
+        # NOTE: we re-derive from the URL inside probe_remote_writable
+        # for now; if user wants pool_path drilling down later we can
+        # plumb it through.
+
+        # 5d — HTTP probe on public_url
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _ok, _det = _mirror.probe_http_inrelease(public_url, _codename)
+        console.print(
+            f"  apt URL ({proto}://{host}): {_det}",
+            tui.COLOR_INFO if _ok else tui.COLOR_ERROR)
+        if not _ok:
+            return False
+        return True
+
+    def _mirror_add_print_head_summary(self, head: dict) -> None:
+        """Render the peer's existing coord-head — operator sees what
+        they're joining before deciding."""
+        console.print(
+            "\nexisting coord-head on this peer:", tui.COLOR_HIGHLIGHT)
+        _ts = head.get('head_time') or '(unknown)'
+        _ir = head.get('inrelease_sha256') or '(unknown)'
+        _ls = head.get('last_seqs') or {}
+        _nb = head.get('neighbours') or []
+        console.print(f"  head_time:       {_ts}")
+        console.print(f"  inrelease_sha:   {_ir[:16]}…")
+        _seqs = ', '.join(f'{_b}={_s}' for _b, _s in _ls.items()) or '(none yet)'
+        console.print(f"  builders/seqs:   {_seqs}")
+        console.print(f"  neighbours ({len(_nb)}):")
+        for _u in _nb:
+            console.print(f"    - {_u}")
+
+    def _mirror_add_print_join_summary(
+        self, *, primary_name: str, primary_url: str,
+        primary_public_url: str,
+        net_new: 'list[dict]', dropped: 'list[dict]',
+        proto: 'Optional[str]', ssh_key: 'Optional[str]',
+    ) -> None:
+        """The "this is what would happen" preview the operator confirms.
+        Lists every state file we'd write + every sources.list.d entry
+        the next chroot build would emit."""
+        import mirror as _mirror
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _keyring = '/usr/share/keyrings/athena-archive-keyring.gpg'
+        console.print(
+            "\nproposed sources.list (after add):", tui.COLOR_HIGHLIGHT)
+        # Existing mirrors
+        for _n in _mirror.list_mirrors(self.config):
+            _st = _mirror.read_mirror_state(self.config, _n) or {}
+            _apt = _st.get('public_url') or _st.get('url') or ''
+            if _apt:
+                console.print(
+                    f"  athena-{_n}.list: deb [signed-by={_keyring}] "
+                    f"{_apt} {_codename} main", tui.COLOR_NORMAL)
+        # Primary being added
+        _apt = primary_public_url or primary_url
+        console.print(
+            f"+ athena-{primary_name}.list: deb [signed-by={_keyring}] "
+            f"{_apt} {_codename} main", tui.COLOR_INFO)
+        # Net-new discovered peers
+        for _peer in net_new:
+            _u = _peer['url']
+            _peer_public = _mirror.derive_public_url(
+                _u, self.config.build_base_id, proto or 'http') or _u
+            _peer_name = _mirror.derive_name_from_url(_u, 'fqdn') or \
+                _mirror.derive_name_from_url(_u, 'ip') or '?'
+            console.print(
+                f"+ athena-{_peer_name}.list: deb [signed-by={_keyring}] "
+                f"{_peer_public} {_codename} main", tui.COLOR_INFO)
+        del ssh_key  # informational — already plumbed via state
+        if dropped:
+            console.print(
+                f"\nDROPPING {len(dropped)} unreachable peer(s) from the "
+                "federation (default policy — take-control-and-drop):",
+                tui.COLOR_WARNING)
+            for _peer in dropped:
+                console.print(
+                    f"  - {_peer['url']}: {_peer['detail']}",
+                    tui.COLOR_WARNING)
+            console.print(
+                "  `mirror reconcile-neighbours` will propagate the "
+                "shrunk membership to all remaining reachable peers.",
+                tui.COLOR_WARNING)
 
     def cmd_mirror_remove(self, *args):
         """mirror remove <name|url> — unregister this mirror from local

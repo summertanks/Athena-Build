@@ -271,6 +271,234 @@ def derive_public_url(
     return f"{proto}://{_host}/{_dist}"
 
 
+# ─────────────────────────── probe pipeline ────────────────────────────
+#
+# Each probe returns ``(ok: bool, detail: str)``.  Higher-level orchestration
+# (`cmd_mirror_add`) calls them in sequence and surfaces a per-step progress
+# line.  Probes are mock-friendly: tests patch `subprocess.run` or the
+# `urllib` opener rather than monkey-patching mirror.py internals.
+
+
+def probe_dns_and_tcp(
+    host: str, port: int, timeout_s: float = 5.0,
+) -> 'tuple[bool, str]':
+    """Resolve ``host`` and open a TCP socket to ``host:port`` — the
+    cheapest "host is alive on this port" check.  Used for SSH (22) and
+    HTTP/HTTPS (80/443) preflight."""
+    import socket
+    try:
+        _addrs = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as _e:
+        return False, f"DNS resolution failed: {_e}"
+    if not _addrs:
+        return False, "DNS returned no addresses"
+    _last_err = ''
+    for _af, _socktype, _proto_, _canon, _sa in _addrs:
+        try:
+            with socket.socket(_af, _socktype, _proto_) as _s:
+                _s.settimeout(timeout_s)
+                _s.connect(_sa)
+                return True, f"reachable at {_sa[0]}:{port}"
+        except OSError as _e:
+            _last_err = str(_e)
+            continue
+    return False, f"TCP connect failed: {_last_err}"
+
+
+def probe_ssh_auth(
+    host: str, user: str, key_path: Optional[str],
+    timeout_s: int = 10,
+) -> 'tuple[bool, str]':
+    """Non-interactive SSH auth probe.  Returns (ok, detail).  Uses
+    BatchMode=yes so a missing-key / wrong-key path fails fast rather
+    than prompting for a password."""
+    import subprocess
+    _argv = [
+        'ssh', '-o', 'BatchMode=yes',
+        '-o', f'ConnectTimeout={timeout_s}',
+        '-o', 'StrictHostKeyChecking=accept-new',
+    ]
+    if key_path:
+        _argv += ['-i', key_path]
+    _target = f"{user}@{host}" if user else host
+    _argv += [_target, 'echo', 'ssh-ok']
+    try:
+        _r = subprocess.run(
+            _argv, capture_output=True, text=True, timeout=timeout_s + 5)
+    except subprocess.TimeoutExpired:
+        return False, f"ssh timed out after {timeout_s}s"
+    except OSError as _e:
+        return False, f"ssh spawn failed: {_e}"
+    if _r.returncode != 0:
+        return False, (
+            f"ssh exit={_r.returncode}: {_r.stderr.strip()[:200] or 'no stderr'}")
+    if 'ssh-ok' not in (_r.stdout or ''):
+        return False, f"ssh succeeded but no expected output: {_r.stdout!r}"
+    return True, "ssh auth + echo round-trip ok"
+
+
+def probe_remote_writable(
+    host: str, user: str, key_path: Optional[str],
+    remote_pool_path: str, timeout_s: int = 15,
+) -> 'tuple[bool, str]':
+    """Verify the remote ssh user can mkdir + write under both
+    ``<remote_pool_path>`` (apt pool) and ``<remote_pool_path>-coord``
+    (sidecar tree).  Run as one ssh call so the operator sees a single
+    consistent verdict.
+
+    Returns (ok, detail).  Failure usually means the operator's ssh user
+    lacks write permission on the parent dir — fix on the remote, retry.
+    """
+    import shlex
+    import subprocess
+    _pool = remote_pool_path.rstrip('/')
+    _coord = _pool + '-coord'
+    _remote_cmd = (
+        f"mkdir -p {shlex.quote(_pool)} {shlex.quote(_coord)} && "
+        f"test -w {shlex.quote(_pool)} && test -w {shlex.quote(_coord)} && "
+        "echo writable-ok"
+    )
+    _argv = [
+        'ssh', '-o', 'BatchMode=yes',
+        '-o', f'ConnectTimeout={timeout_s}',
+        '-o', 'StrictHostKeyChecking=accept-new',
+    ]
+    if key_path:
+        _argv += ['-i', key_path]
+    _target = f"{user}@{host}" if user else host
+    _argv += [_target, _remote_cmd]
+    try:
+        _r = subprocess.run(
+            _argv, capture_output=True, text=True, timeout=timeout_s + 5)
+    except subprocess.TimeoutExpired:
+        return False, f"ssh timed out after {timeout_s}s"
+    except OSError as _e:
+        return False, f"ssh spawn failed: {_e}"
+    if _r.returncode != 0:
+        return False, (
+            f"remote write probe exit={_r.returncode}: "
+            f"{_r.stderr.strip()[:200] or 'no stderr'}")
+    if 'writable-ok' not in (_r.stdout or ''):
+        return False, (
+            f"remote probe returned no verdict — pool={_pool} coord={_coord}; "
+            f"stdout={_r.stdout!r}")
+    return True, f"{_pool} + {_coord} both mkdir-able + writable"
+
+
+def probe_http_inrelease(
+    public_url: str, codename: str, timeout_s: int = 10,
+) -> 'tuple[bool, str]':
+    """HEAD-style probe of the apt-readable InRelease at
+    ``<public_url>/dists/<codename>/InRelease``.  Returns (True,
+    detail) on HTTP 200; (True, 'no-release-yet') on 404 (= fresh
+    mirror, first publish bootstraps it); (False, detail) otherwise.
+    """
+    import urllib.error
+    import urllib.request
+    _target = (
+        public_url.rstrip('/')
+        + f'/dists/{codename}/InRelease'
+    )
+    _req = urllib.request.Request(_target, method='HEAD')
+    try:
+        with urllib.request.urlopen(_req, timeout=timeout_s) as _resp:
+            _code = getattr(_resp, 'status', None) or _resp.getcode()
+            if _code == 200:
+                return True, f"InRelease present at {_target}"
+            return False, f"unexpected HTTP {_code} from {_target}"
+    except urllib.error.HTTPError as _e:
+        if _e.code == 404:
+            return True, (
+                f"no InRelease yet at {_target} (HTTP 404) — fresh "
+                "mirror, first publish will bootstrap it")
+        return False, f"HTTP {_e.code} from {_target}: {_e.reason}"
+    except (urllib.error.URLError, TimeoutError, OSError) as _e:
+        return False, f"HTTP probe failed for {_target}: {_e}"
+
+
+def probe_sidecar_head(
+    coord_url: str, *,
+    signing_homedir: str, stage_dir: str,
+    ssh_key: Optional[str] = None,
+) -> 'tuple[bool, str, Optional[dict]]':
+    """Pull the peer's coord-head + sig into ``stage_dir`` and GPG-verify
+    against ``signing_homedir`` (the local tier-1 keyring).  Returns
+    ``(ok, detail, parsed_head_or_None)``.
+
+    Three outcomes:
+
+      - Peer has NO coord-head yet (fresh remote, first publish will
+        bootstrap): ``(True, "no head yet", None)``.
+      - Peer has a coord-head AND verify succeeds: ``(True, "verified",
+        head_dict)``.  Caller reads ``head_dict['neighbours']`` etc. for
+        the federation summary.
+      - Peer has a coord-head but verify FAILS: ``(False, "sig
+        verify failed: ...", None)``.  This is the "federation signing
+        key not in our keyring" gate — operator must import the
+        federation's tier-1 pubkey out-of-band before `mirror add` will
+        succeed.
+    """
+    import coord.head as _head_mod
+    import coord.transport as _transport
+    try:
+        os.makedirs(stage_dir, mode=0o755, exist_ok=True)
+    except OSError as _e:
+        return False, f"could not prepare staging dir {stage_dir}: {_e}", None
+    _spec, _ssh_host = rsync_spec_for_url(coord_url)
+    _ok, _detail = _transport.pull_remote_coord(
+        local_dest=stage_dir, remote_spec=_spec, ssh_key=ssh_key)
+    if not _ok:
+        return False, f"sidecar pull failed: {_detail}", None
+    _head_path = os.path.join(stage_dir, 'coord-head.json')
+    if not os.path.isfile(_head_path):
+        return True, "no head yet (peer hasn't been published to)", None
+    _head = _head_mod.read_coord_head(stage_dir, signing_homedir)
+    if _head is None:
+        return False, (
+            "coord-head present but GPG verify FAILED against local "
+            "tier-1 keyring — either the federation's signing key is "
+            "missing from your keyring (import it out-of-band) or this "
+            "peer was signed by a key you don't trust"), None
+    return True, "coord-head verified", _head
+
+
+def discover_federation_peers(
+    head: dict, *,
+    signing_homedir: str, stage_root: str,
+    ssh_key: Optional[str] = None,
+) -> 'list[dict]':
+    """For every URL in ``head['neighbours']``, probe its sidecar and
+    classify.  Returns a list of dicts, one per neighbour:
+
+      {url, reachable: bool, verified: bool, head: dict|None, detail: str}
+
+    A neighbour is ``reachable`` iff `probe_sidecar_head` returned ok;
+    ``verified`` iff the peer's coord-head GPG-verified with our keyring
+    (a peer with no coord-head yet is reachable but not verified).  Used
+    by `cmd_mirror_add` to render the federation join summary; the
+    'take-control-and-drop unreachable' default uses ``reachable=False``
+    as the drop criterion.
+    """
+    _neighbours = head.get('neighbours') or []
+    _out: 'list[dict]' = []
+    for _idx, _url in enumerate(_neighbours):
+        if not isinstance(_url, str) or not _url:
+            continue
+        _coord = coord_root_for(_url)
+        _stage = os.path.join(stage_root, f"probe-{_idx:02d}")
+        _ok, _det, _peer_head = probe_sidecar_head(
+            _coord, signing_homedir=signing_homedir, stage_dir=_stage,
+            ssh_key=ssh_key)
+        _out.append({
+            'url':       _url,
+            'reachable': _ok,
+            'verified':  _peer_head is not None,
+            'head':      _peer_head,
+            'detail':    _det,
+        })
+    return _out
+
+
 # ─────────────────────────── state IO ──────────────────────────
 
 
