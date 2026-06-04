@@ -450,7 +450,7 @@ def merge_remote_index(
     signed LOCALLY (the key never leaves this host).  UPD-01 §5 step 8.
 
     `remote_packages_path` is the Packages file fetched from the remote
-    (repo_audit.fetch_remote_ledger caches it); '' / missing → local-only
+    (operator-supplied); '' / missing → local-only
     (first publish to an empty remote).  Only `main` is append-only MERGED here
     (it accumulates +asg deltas across snapshots, so old versions must be
     preserved from the remote).  Non-main components (contrib / non-free /

@@ -5767,164 +5767,10 @@ def test_generate_apt_repo_tolerates_empty_udeb_component():
         "main deb scan must stay strict (allow_empty defaults False)")
 
 
-def test_buildconfig_publish_dir_and_apt_source_default():
-    """dir_publish is created under working_dir, and [Repo] AptSourceURL
-    defaults to empty."""
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg_path = _write_test_config(tmp, _BASE_CONF_BODY.format(mirror_block="""
-    [Mirror.main]
-    BASEID = debian
-    Suffix =
-    Component = main
-    """))
-        cfg = _build_config_from(tmp, cfg_path)
-        assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
-        assert cfg.apt_source_url == ''
-        assert cfg.publish_ssh_target == ''
-        assert cfg.publish_ssh_key == ''
-        assert cfg.dir_publish == os.path.join(tmp, 'publish')
-        assert os.path.isdir(cfg.dir_publish)
 
 
-def test_repo_publish_dispatch():
-    """`repo publish ssh full` / `repo publish ssh minimal` forward to
-    cmd_repo_publish('ssh', <scope>)."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-
-    _sess = BuildSession.__new__(BuildSession)
-    _calls = []
-    _sess.cmd_repo_publish = lambda *a, **kw: _calls.append(a)
-    _sess.cmd_repo('publish', 'ssh', 'full')
-    assert _calls == [('ssh', 'full')], _calls
-    _calls.clear()
-    _sess.cmd_repo('publish', 'ssh', 'minimal')
-    assert _calls == [('ssh', 'minimal')], _calls
 
 
-def test_rsync_streamed_argv_ignore_existing_and_filters():
-    """_rsync_streamed: -aH + --info=progress2, ADDITIVE (no --delete); with
-    ignore_existing=True it adds --ignore-existing + the given filters; a plain
-    call adds neither.  (The immutable-.deb pool pass uses the former; the
-    metadata pass uses the latter.)"""
-    import sys, io
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
-    from build import BuildSession
-    _sess = BuildSession.__new__(BuildSession)
-    _popen = []
-
-    class _FakeProc:
-        def __init__(self):
-            self.stdout = io.StringIO("100%\n")
-            self.returncode = 0
-
-        def wait(self):
-            return 0
-
-    def _fake_popen(argv, **kw):
-        _popen.append(list(argv))
-        return _FakeProc()
-
-    _saved = build.subprocess.Popen
-    build.subprocess.Popen = _fake_popen
-    try:
-        _capture_console_print(lambda: _sess._rsync_streamed(
-            'debs', '/src', 'host:/dst', ['ssh', '-i', 'k'],
-            ignore_existing=True,
-            filters=['--include=*/', '--include=*.deb', '--exclude=*']))
-        _argv = _popen[0]
-        assert _argv[0] == 'rsync' and '-aH' in _argv and '--info=progress2' in _argv
-        assert '--delete' not in _argv, _argv
-        assert '--ignore-existing' in _argv, _argv
-        assert '--include=*.deb' in _argv and '--exclude=*' in _argv, _argv
-        _e = _argv.index('-e')
-        assert _argv[_e + 1] == 'ssh -i k'
-        assert _argv[-2] == '/src/' and _argv[-1] == 'host:/dst'
-        # plain call: no --ignore-existing / no filters
-        _popen.clear()
-        _capture_console_print(lambda: _sess._rsync_streamed(
-            'meta', '/s', 'h:/d', ['ssh']))
-        assert '--ignore-existing' not in _popen[0]
-        assert not any(a.startswith('--include') for a in _popen[0])
-    finally:
-        build.subprocess.Popen = _saved
-
-
-def test_publish_full_remote_scan_flow_wiring():
-    """`repo publish` (external on): push only .debs immutably
-    (--ignore-existing + deb filter) → rebuild the index ON THE REMOTE
-    (remote_reindex_and_sign) → upload metadata → refresh manifest → prune +
-    record published.  External off → local merge, no rsync.
-
-    Post-COMP-02-local refactor: the ssh flow moved into `_publish_via_ssh`
-    and the manifest/prune tail into `_publish_finalize`; cmd_repo_publish
-    is now the dispatcher.  Each invariant pins where it lives."""
-    import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
-    _disp = re.search(
-        r'def cmd_repo_publish\(self.*?(?=\n    def )', _body, re.DOTALL)
-    _ssh = re.search(
-        r'def _publish_via_ssh\(self.*?(?=\n    def )', _body, re.DOTALL)
-    _fin = re.search(
-        r'def _publish_finalize\(self.*?(?=\n    def )', _body, re.DOTALL)
-    assert _disp and _ssh and _fin, "publish dispatcher/ssh/finalize missing"
-    _d, _s, _f = _disp.group(0), _ssh.group(0), _fin.group(0)
-    # Dispatcher: external gate + local-only fallback.
-    assert '_external_enabled()' in _d, "must gate on the external flag"
-    assert '_refresh_merge_index()' in _d, "external-off path indexes locally"
-    # ssh arm: immutable .deb push + remote reindex + metadata push.
-    assert 'ignore_existing=True' in _s and 'filters=_debfilter' in _s, (
-        "the .deb pool pass must be immutable (--ignore-existing + deb filter)")
-    assert 'remote_reindex_and_sign(' in _s, "must rebuild the index on the remote"
-    # ordering inside the ssh arm: deb push BEFORE remote re-index BEFORE metadata push.
-    assert (_s.index('ignore_existing=True') < _s.index('remote_reindex_and_sign(')
-            < _s.index('rsync index')), "deb push → remote reindex → metadata push"
-    # Finalize: manifest refresh + prune + record-published.
-    assert 'write_published_manifest(' in _f, "must refresh the local manifest"
-    assert 'cmd_package_cleanup' in _f and \
-        'published=self._snapshot_current()' in _f, "full prunes + records published"
-
-
-def test_repo_audit_external_dispatch():
-    """`repo audit external` → cmd_audit_external; `repo audit <pkg>` still
-    routes to cmd_audit (drill-in), and bare `repo audit` too."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-
-    _sess = BuildSession.__new__(BuildSession)
-    _calls = []
-    _sess.cmd_audit          = lambda *a, **kw: _calls.append(('audit', a))
-    _sess.cmd_audit_external = lambda *a, **kw: _calls.append(('external', a))
-
-    _sess.cmd_repo('audit', 'external')
-    assert _calls == [('external', ())], _calls
-    _calls.clear()
-    _sess.cmd_repo('audit', 'lsb-base')      # drill-in target, NOT external
-    assert _calls == [('audit', ('lsb-base',))], _calls
-    _calls.clear()
-    _sess.cmd_repo('audit')                  # full local audit
-    assert _calls == [('audit', ())], _calls
-
-
-def test_cmd_audit_external_requires_apt_source_url():
-    """audit external bails (no network) when AptSourceURL is unset."""
-    import sys
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-
-    _sess = BuildSession.__new__(BuildSession)
-
-    class _Cfg:
-        apt_source_url = ''
-    _sess.config = _Cfg()
-    out = _capture_console_print(lambda: _sess.cmd_audit_external())
-    assert 'AptSourceURL' in out, out
 
 
 def test_cmd_iso_build_live_forwards_to_cmd_build_iso_live():
@@ -12337,32 +12183,6 @@ def _stub_chroot_mixin_for_apt_source(*, apt_source_url, build_codename='thor',
     return inst, _writes
 
 
-def test_write_athena_apt_source_noop_when_url_empty():
-    """Empty [Repo] AptSourceURL → no file written (target relies on the
-    /cdrom/pool source added at install time)."""
-    inst, writes = _stub_chroot_mixin_for_apt_source(apt_source_url='')
-    inst._write_athena_apt_source()
-    assert writes == [], f"empty URL must write nothing, got {writes}"
-
-
-def test_write_athena_apt_source_writes_signed_by_when_url_set():
-    """A configured URL → /etc/apt/sources.list.d/athena.list with a
-    [signed-by=...athena-archive-keyring.gpg] pin, the URL, the release
-    codename, and the main component.
-
-    Legacy (no mirrors registered) path."""
-    inst, writes = _stub_chroot_mixin_for_apt_source(
-        apt_source_url='https://repo.example.org/athena',
-        build_codename='thor',
-    )
-    inst._write_athena_apt_source()  # alias preserves old name
-    assert len(writes) == 1, f"expected one write, got {writes}"
-    _path, _content = writes[0]
-    assert _path == '/etc/apt/sources.list.d/athena.list', _path
-    assert _content.startswith('deb [signed-by='), _content
-    assert '/usr/share/keyrings/athena-archive-keyring.gpg]' in _content, _content
-    assert 'https://repo.example.org/athena thor main' in _content, _content
-    assert _content.endswith('\n'), "apt source line must be newline-terminated"
 
 
 def test_write_athena_apt_sources_emits_one_file_per_mirror():
@@ -12433,18 +12253,6 @@ def test_write_athena_apt_sources_accepts_file_scheme():
         assert _paths == ['/etc/apt/sources.list.d/athena-local.list']
         assert 'file:///srv/asgard thor main' in writes[0][1]
 
-
-def test_write_athena_apt_sources_falls_back_to_legacy_when_no_mirrors():
-    """No mirrors registered AND [Repo] AptSourceURL set → legacy single
-    athena.list (preserves existing operator configs verbatim until they
-    migrate to `mirror add`)."""
-    inst, writes = _stub_chroot_mixin_for_apt_source(
-        apt_source_url='https://repo.example.org/athena',
-        build_codename='thor')
-    inst._write_athena_apt_sources()
-    _paths = [_p for _p, _ in writes]
-    assert _paths == ['/etc/apt/sources.list.d/athena.list']
-    assert 'https://repo.example.org/athena thor main' in writes[0][1]
 
 
 def test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url():
@@ -17958,32 +17766,6 @@ def test_restamp_asg_deb_bumps_version_and_intra_source_deps():
 # UPD-01 step 2 — append-only enforcement (additive publish + segregate)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_publish_rsync_is_additive_no_delete():
-    """The publish rsync must be ADDITIVE: _rsync_streamed defaults to no
-    --delete, adds it only under `if delete:`, and cmd_repo_publish never
-    requests delete=True.  A --delete publish would erase remote versions
-    absent from the local single-snapshot tree — destroying the append-only
-    archive."""
-    import re as _re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
-    assert _re.search(
-        r'def _rsync_streamed\(self, label, src, dest, ssh_cmd, delete=False',
-        _body), "_rsync_streamed must default delete=False (additive)"
-    _m = _re.search(r'def _rsync_streamed\(.*?return _proc\.returncode',
-                    _body, _re.DOTALL)
-    assert _m, "_rsync_streamed body not found"
-    _fn = _m.group(0)
-    assert 'if delete:' in _fn and "_argv.append('--delete')" in _fn, (
-        "--delete must be conditional on the delete flag")
-    assert "'rsync', '-aH', '--delete'" not in _fn, (
-        "rsync base argv still hard-codes --delete")
-    _pm = _re.search(r'def cmd_repo_publish\(self.*?(?=\n    def )',
-                     _body, _re.DOTALL)
-    assert _pm and 'delete=True' not in _pm.group(0), (
-        "cmd_repo_publish must not request a destructive --delete publish")
-
 
 def test_segregate_never_deletes_existing_published_deb():
     """An exact-name collision in a published dir KEEPs the existing artifact
@@ -19414,52 +19196,10 @@ def test_merge_remote_index_signs_locally_and_merges():
         "top Release must list the populated component set, not just main"
 
 
-def test_publish_suites_spec_includes_nonfree_components():
-    """Both the `repo index` and `repo publish` (full scope) suites_spec must
-    list the non-main components so generate_repo_indexes emits them (empty
-    ones auto-skip).  Minimal-scope publish stays main-only by design."""
-    import re
-    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as fh:
-        _body = fh.read()
-    _specs = re.findall(r"_codename:\s*\[([^\]]*?)\]", _body, re.DOTALL)
-    _multi = [s for s in _specs if 'doc' in s]
-    assert len(_multi) >= 2, _multi
-    for _s in _multi:
-        for _c in ('contrib', 'non-free', 'non-free-firmware'):
-            assert f"'{_c}'" in _s, (_c, _s)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPD-01 step 6 — workload (change-detection) + Guard A preflight
 # ─────────────────────────────────────────────────────────────────────────────
-
-def test_workload_since_published_picks_only_advanced_bases():
-    """_workload_since_published returns sources whose pristine base advanced
-    beyond the published ledger (or unpublished) — the genuine refresh
-    workload."""
-    import shutil as _sh
-    if not _sh.which('dpkg'):
-        return
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build  # noqa: F401
-    from build import BuildSession
-    _sess = BuildSession.__new__(BuildSession)
-
-    class _Tree:
-        selected_srcs = {'openssl': object(), 'libc6': object()}
-
-    _sess.dep_tree = _Tree()
-    _sess.udeb_dep_tree = None
-    _pred = {
-        'openssl': ['openssl_3.0.16-1_amd64.deb'],   # advanced
-        'libc6': ['libc6_2.36-9_amd64.deb'],         # unchanged
-    }
-    _sess._predicted_files_for_source = lambda n: _pred.get(n, [])
-
-    _ledger = {'openssl': ['3.0.15-1'], 'libc6': ['2.36-9']}
-    assert _sess._workload_since_published(_ledger) == {'openssl'}
-    # nothing published → everything is workload
-    assert _sess._workload_since_published({}) == {'openssl', 'libc6'}
 
 
 def test_needs_bump_build_per_file_exact_un():
@@ -19544,37 +19284,6 @@ def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
 # ─────────────────────────────────────────────────────────────────────────────
 # UPD-01 steps 7-8 — snapshot command family + repo refresh orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
-
-def test_snapshot_and_refresh_commands_wired():
-    """`snapshot` is registered and dispatches its sub-actions; bare snapshot →
-    overview; advance → select (with the same ts arg); `repo refresh` routes to
-    cmd_repo_refresh.
-
-    MIRROR-01 Phase 1: `_cmd_snapshot_base` removed; `_cmd_snapshot_history`
-    added; `advance` is now an alias passing the same args, not prefixing
-    `'current'`."""
-    import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
-    assert 'def cmd_snapshot(' in _body
-    for _sub in ('_cmd_snapshot_overview', '_cmd_snapshot_list',
-                 '_cmd_snapshot_select', '_cmd_snapshot_workload',
-                 '_cmd_snapshot_history'):
-        assert f'def {_sub}(' in _body, f"{_sub} missing"
-    # snapshot base must be GONE (it's removed in Phase 1)
-    assert 'def _cmd_snapshot_base(' not in _body, (
-        "_cmd_snapshot_base removed in MIRROR-01 Phase 1")
-    # bare `snapshot` → overview
-    assert re.search(r"if action in \('', 'status'\):\s*\n\s+"
-                     r"return self\._cmd_snapshot_overview", _body)
-    # advance forwards verbatim to select
-    assert re.search(r"if action == 'advance':\s*\n\s+"
-                     r"return self\._cmd_snapshot_select\(\*args\)", _body)
-    assert "register_command('snapshot'" in _body, "snapshot not registered"
-    assert re.search(
-        r"if action == 'refresh':\s*\n\s+return self\.cmd_repo_refresh",
-        _body), "repo refresh not routed to cmd_repo_refresh"
 
 
 def test_snapshot_state_roundtrip_and_resolve_precedence():
@@ -19961,63 +19670,6 @@ def test_cache_build_gates_on_snapshot_pins():
                      _m.group(0)), "cache build must gate on _ensure_snapshot_pins"
 
 
-def test_refresh_top_level_chains_steps():
-    """MIRROR-01 cleanup: `refresh` lives at the top level (alongside
-    `autorun`).  It chains source sync → build all → publish:
-      * mirrors configured → cmd_mirror_publish (federation-gated)
-      * no mirrors → cmd_repo_publish('ssh', 'full') (legacy fallback)
-    Pre-flight gates on `_update_build_pending` (Phase 4 multi-mirror)."""
-    import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
-    _m = re.search(r'def cmd_refresh\(self.*?(?=\n    def )',
-                   _body, re.DOTALL)
-    assert _m, "cmd_refresh not found"
-    _b = _m.group(0)
-    assert 'takes no target' in _b, "refresh must reject a target arg"
-    assert 'cmd_source_sync(' in _b, "must run source sync"
-    assert "cmd_source_build('all')" in _b, "must run source build all"
-    # BOTH publish paths must be present (mirror-aware + legacy fallback)
-    assert 'cmd_mirror_publish(' in _b, "must dispatch to mirror publish"
-    assert "cmd_repo_publish('ssh', 'full')" in _b, (
-        "must keep legacy repo publish ssh full as the no-mirrors fallback")
-    assert _b.index('cmd_source_build(') < _b.index('cmd_mirror_publish('), (
-        "build must precede mirror publish")
-    assert _b.index('cmd_source_build(') < _b.index('cmd_repo_publish('), (
-        "build must precede repo publish (legacy fallback)")
-    # Update-pending is the unified short-circuit gate now
-    assert '_update_build_pending(' in _b, (
-        "must short-circuit via _update_build_pending (replaces the legacy "
-        "_snapshot_published direct check)")
-    # Top-level registration
-    assert "register_command('refresh'" in _body, (
-        "refresh must be registered at the top level")
-    # `repo refresh` survives ONLY as a deprecation forwarder
-    _r = re.search(r'def cmd_repo_refresh\(self.*?(?=\n    def )',
-                   _body, re.DOTALL)
-    assert _r, "cmd_repo_refresh deprecation stub missing"
-    _rb = _r.group(0)
-    assert 'DEPRECATED' in _rb, "repo refresh must print deprecation notice"
-    assert 'self.cmd_refresh(' in _rb, "repo refresh must forward to cmd_refresh"
-
-
-def test_publish_full_folds_index_merge_prune_and_gates_rsync():
-    """`repo publish ssh full` builds the merged index + manifest, gates the
-    rsync on the external flag, prunes, and records published = current."""
-    import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
-    _m = re.search(r'def cmd_repo_publish\(self.*?(?=\n    def )', _body, re.DOTALL)
-    _b = _m.group(0)
-    assert '_refresh_merge_index()' in _b, "full publish must build the merged index"
-    assert '_external_enabled()' in _b, "rsync must be gated on the external flag"
-    assert 'cmd_package_cleanup' in _b, "publish must prune (publish-before-prune)"
-    assert 'published=self._snapshot_current()' in _b, (
-        "publish must record published = current")
-    assert _b.index('_refresh_merge_index()') < _b.index('cmd_package_cleanup'), (
-        "merge/index before prune")
 
 
 def test_source_build_autodetects_update_mode():
@@ -20258,32 +19910,6 @@ def test_workload_excludes_forks_from_snapshot_diff():
     finally:
         repo_audit.fetch_source_versions_at = _saved
 
-
-def test_snapshot_published_defaults_to_base_then_tracks():
-    """`published` defaults to base when unset, and is read back once set."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build  # noqa: F401
-    import utils
-    from build import BuildSession
-    with tempfile.TemporaryDirectory() as _tmp:
-        _cfg_dir = os.path.join(_tmp, 'config')
-        os.makedirs(_cfg_dir)
-        _sess = BuildSession.__new__(BuildSession)
-
-        class _Cfg:
-            dir_config = _cfg_dir
-            snapshot_enabled = True
-            snapshot_timestamp_config = '20260514T083402Z'
-
-        _sess.config = _Cfg()
-        utils._SNAPSHOT_TS_CACHE.clear()
-        utils.write_snapshot_state(_sess.config, base='20260514T083402Z',
-                                   current='20260514T083402Z')
-        # published unset → defaults to base
-        assert _sess._snapshot_published() == '20260514T083402Z'
-        # after a refresh records it, it tracks the new value
-        utils.write_snapshot_state(_sess.config, published='20260520T000000Z')
-        assert _sess._snapshot_published() == '20260520T000000Z'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -20612,22 +20238,6 @@ def test_sta22_run_dpkg_scan_honours_allow_empty():
         assert _ok_relaxed is True, "allow_empty=True must accept empty"
 
 
-def test_cmd_repo_publish_surfaces_sign_failure():
-    """STA-21: build.py's repo-publish handler must surface the
-    write_published_manifest False return as an operator-facing ERROR
-    rather than silently proceeding."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _b = fh.read()
-    # Both publish paths (ssh-driven + repo_refresh) must gate on the bool
-    assert 'if not repo_audit.write_published_manifest(' in _b, (
-        "cmd_repo_publish must check the bool return of "
-        "write_published_manifest and bail on False (STA-21 fail-closed).")
-    assert '+asg uN' in _b, (
-        "operator-facing error must explain the +asg uN impact so the "
-        "fix path (key generate / verify) is obvious.")
-
 
 def test_manifest_vs_remote_discrepancies():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -20639,84 +20249,6 @@ def test_manifest_vs_remote_discrepancies():
     assert _orr == {'curl=8.0-1'}, _orr
 
 
-def test_repo_external_disable_and_enable_empty_rebaselines():
-    """`repo external disable` flips to local-only; `repo external enable` onto
-    an EMPTY remote rebaselines current = base = published (boundary-D)."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
-    import utils
-    import repo_audit
-    from build import BuildSession, BuildFlags
-
-    def _cap(fn):
-        _orig = build.console.print
-        build.console.print = lambda *a, **k: None
-        try:
-            fn()
-        finally:
-            build.console.print = _orig
-
-    with tempfile.TemporaryDirectory() as _tmp:
-        _cfgdir = os.path.join(_tmp, 'config')
-        os.makedirs(_cfgdir)
-        _sess = BuildSession.__new__(BuildSession)
-        _sess.flags = BuildFlags()
-
-        class _Cfg:
-            dir_config = _cfgdir
-            external_enabled = True
-
-        _sess.config = _Cfg()
-        utils._SNAPSHOT_TS_CACHE.clear()
-        assert _sess._external_enabled() is True             # config default
-        _cap(lambda: _sess.cmd_repo_external('disable'))
-        assert _sess._external_enabled() is False
-        # enable onto an empty remote → rebaseline current=base
-        utils.write_snapshot_state(_sess.config, base='20260514T083402Z')
-        _saved = repo_audit.fetch_remote_ledger
-        repo_audit.fetch_remote_ledger = lambda _c: {}       # reachable, empty
-        try:
-            _cap(lambda: _sess.cmd_repo_external('enable'))
-        finally:
-            repo_audit.fetch_remote_ledger = _saved
-        _st = utils.read_snapshot_state(_sess.config)
-        assert _st['external'] is True
-        assert _st['current'] == '20260514T083402Z', _st      # rebaselined
-        assert _st['published'] == '20260514T083402Z', _st
-
-
-def test_update_build_pending_logic():
-    """_update_build_pending: legacy single-target path (no mirrors
-    configured).  True only when a base is published AND current is
-    ahead of published."""
-    import shutil as _sh
-    if not _sh.which('dpkg'):
-        return
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build  # noqa: F401
-    import repo_audit
-    from build import BuildSession, BuildFlags
-
-    with tempfile.TemporaryDirectory() as _td:
-        _sess = BuildSession.__new__(BuildSession)
-        _sess.flags = BuildFlags()
-        _sess.flags.dep_check_ready = True
-        class _Cfg:
-            dir_config = _td  # no mirror.<name>.state files → legacy path
-        _sess.config = _Cfg()
-        _sess._snapshot_current = lambda: '20260520T000000Z'
-        _sess._snapshot_published = lambda: '20260514T083402Z'
-        _saved = repo_audit.published_ledger
-        try:
-            repo_audit.published_ledger = lambda _c: {'openssl': ['3.0.15-1']}
-            assert _sess._update_build_pending() is True
-            repo_audit.published_ledger = lambda _c: {}      # nothing published
-            assert _sess._update_build_pending() is False
-            repo_audit.published_ledger = lambda _c: {'x': ['1']}
-            _sess._snapshot_published = lambda: '20260520T000000Z'  # == current
-            assert _sess._update_build_pending() is False
-        finally:
-            repo_audit.published_ledger = _saved
 
 
 def test_update_build_pending_per_mirror_path():
@@ -20764,21 +20296,6 @@ def test_update_build_pending_per_mirror_path():
         finally:
             repo_audit.published_ledger = _saved
 
-
-def test_external_and_audit_ssh_and_published_ledger_wired():
-    import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _bb = fh.read()
-    assert "if action == 'external':" in _bb and 'def cmd_repo_external(' in _bb
-    assert re.search(r"if args and args\[0\] == 'ssh':", _bb) and \
-        'def _audit_external_vs_manifest(' in _bb
-    _ra = os.path.join(_ROOT, 'scripts', 'repo_audit.py')
-    with open(_ra) as fh:
-        _rb = fh.read()
-    for _fn in ('def published_ledger(', 'def write_published_manifest(',
-                'def read_published_manifest(', 'def local_manifest_path('):
-        assert _fn in _rb, f"{_fn} missing from repo_audit"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -20901,165 +20418,8 @@ def test_local_scan_packages_argv_no_ssh():
         f"cwd must be the dest root, got {_kw.get('cwd')}")
 
 
-def test_cmd_repo_publish_dispatch_arg_parsing():
-    """`repo publish` accepts `ssh [full|minimal]` AND
-    `local <path> [full|minimal]`.  Bad usage prints both lines."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _b = fh.read()
-    import re
-    _m = re.search(r'def cmd_repo_publish\(self.*?(?=\n    def )', _b, re.DOTALL)
-    assert _m, "cmd_repo_publish not found"
-    _fn = _m.group(0)
-    # Both transport arms exist + the dispatcher routes to them.
-    assert '_kind == \'local\'' in _fn
-    assert '_kind == \'ssh\'' in _fn
-    assert '_publish_via_ssh(' in _fn
-    assert '_publish_via_local(' in _fn
-    # Usage hints cover both transports.
-    assert 'repo publish ssh' in _fn
-    assert 'repo publish local' in _fn
 
 
-def test_cmd_repo_summary_dispatch():
-    """`repo summary ssh` → _summary_via_ssh; `repo summary local <path>`
-    → _summary_via_local; bad usage prints both lines without raising."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-    _sess = BuildSession.__new__(BuildSession)
-    _calls = []
-    _sess._summary_via_ssh = lambda *a, **kw: _calls.append(('ssh', a, kw))
-    _sess._summary_via_local = (
-        lambda *a, **kw: _calls.append(('local', a, kw)))
-
-    _sess.cmd_repo_summary('ssh')
-    assert _calls == [('ssh', (), {})], _calls
-    _calls.clear()
-
-    _sess.cmd_repo_summary('local', '/mnt/usb/asgard')
-    assert _calls == [('local', ('/mnt/usb/asgard',), {})], _calls
-    _calls.clear()
-
-    # No path → no dispatch.
-    _sess.cmd_repo_summary('local')
-    assert _calls == [], _calls
-
-    # Bad kind → no dispatch.
-    _sess.cmd_repo_summary('wat')
-    assert _calls == [], _calls
-
-
-def test_summary_via_local_reports_missing_dest():
-    """`repo summary local <missing-path>` errors clearly without touching the
-    fs."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
-    from build import BuildSession
-    _sess = BuildSession.__new__(BuildSession)
-    _captured = []
-    _orig = build.console.print
-    build.console.print = (
-        lambda *a, **kw: _captured.append(' '.join(str(x) for x in a)))
-    try:
-        with tempfile.TemporaryDirectory() as _tmp:
-            _missing = os.path.join(_tmp, 'never-existed')
-            _sess._summary_via_local(_missing)
-            _path_was_created = os.path.isdir(_missing)
-    finally:
-        build.console.print = _orig
-    _out = '\n'.join(_captured)
-    assert 'not found' in _out, _out
-    assert not _path_was_created, "summary must NOT create the missing dest"
-
-
-def test_summarize_destination_skips_pubkey_check_when_missing():
-    """When the signing pubkey doesn't exist (`key generate` not yet run),
-    `_summarize_destination` reports it as such instead of crashing."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build
-    from build import BuildSession
-    _sess = BuildSession.__new__(BuildSession)
-
-    class _Cfg:
-        build_codename = 'thor'
-        # signing.signing_pubkey_path reads dir_gnupg; point at /nonexistent
-        dir_gnupg = '/nonexistent/path'
-        # repo_audit.published_ledger reads config/published.manifest
-        dir_config = '/nonexistent/config'
-        working_dir = '/nonexistent/work'
-    _sess.config = _Cfg()
-    # Make read_snapshot_state + published_ledger return safe defaults.
-    import utils as _utils
-    import repo_audit as _ra
-    _orig_state = _utils.read_snapshot_state
-    _orig_ledger = _ra.published_ledger
-    _utils.read_snapshot_state = lambda _c: {
-        'base': 'X', 'current': 'Y', 'published': 'Z'}
-    _ra.published_ledger = lambda _c: {}
-    _captured = []
-    _orig_print = build.console.print
-    build.console.print = (
-        lambda *a, **kw: _captured.append(' '.join(str(x) for x in a)))
-    try:
-        _sess._summarize_destination(
-            'TESTLABEL',
-            has_inrelease=lambda _s: True,
-            read_inrelease=lambda _s: (
-                "Origin: Athena\nDate: Fri, 28 May 2026 14:32:17 UTC\n"),
-            walk_files=lambda: (123, 1024 * 1024 * 50))
-    finally:
-        build.console.print = _orig_print
-        _utils.read_snapshot_state = _orig_state
-        _ra.published_ledger = _orig_ledger
-    _out = '\n'.join(_captured)
-    assert 'TESTLABEL' in _out, _out
-    assert '123 file(s)' in _out, _out
-    assert '50 MB' in _out, _out
-    assert 'no pubkey' in _out, (
-        f"missing pubkey should surface, not crash; got {_out!r}")
-    assert 'Snapshot pins' in _out, _out
-    assert 'base      X' in _out, _out
-    assert 'current   Y' in _out, _out
-    assert 'published Z' in _out, _out
-
-
-def test_publish_via_local_prompts_for_mkdir_and_aborts_on_no():
-    """`repo publish local <path>` prompts to mkdir -p when <path> is
-    missing.  Operator answer != y → no .deb copy attempted."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-    _sess = BuildSession.__new__(BuildSession)
-
-    class _Cfg:
-        def __init__(_self, _tmp):
-            _self.build_codename = 'thor'
-            _self.dir_temp = _tmp
-    with tempfile.TemporaryDirectory() as _tmp:
-        _sess.config = _Cfg(_tmp)
-        _calls = []
-        _sess._rsync_streamed = (
-            lambda *a, **kw: _calls.append(('rsync', a, kw)) or 0)
-        # Patch Prompt to refuse mkdir.
-        import build as _build_mod
-        _orig_prompt = _build_mod.Prompt
-        class _RefuseMkdir:
-            def __init__(_self, _kind, _msg):
-                pass
-            def get_response(_self):
-                return 'n'
-        _build_mod.Prompt = _RefuseMkdir
-        try:
-            _missing = os.path.join(_tmp, 'does-not-exist')
-            _sess._publish_via_local(
-                'full', _missing, deb_dists='/ignored', suites_spec={})
-        finally:
-            _build_mod.Prompt = _orig_prompt
-        # rsync should NOT have been called.
-        assert not _calls, (
-            f"refusing mkdir must abort before rsync; got {_calls}")
-        # Path should not have been created.
-        assert not os.path.isdir(_missing), (
-            "refusing mkdir must NOT create the dir")
 
 
 def test_index_minimal_stages_nested_subset():
@@ -23641,23 +23001,6 @@ def test_cmd_mirror_pull_no_mirrors_is_friendly():
         assert 'no mirrors configured' in _joined, _joined
 
 
-def test_repo_publish_prints_deprecation_notice():
-    """`repo publish` (any args) prints the MIRROR-01 deprecation hint
-    before any work."""
-    import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
-    # The deprecation message must be inside cmd_repo_publish, AND must
-    # appear before the argument-parsing branches.
-    _idx = _body.find('def cmd_repo_publish(')
-    assert _idx >= 0
-    _slice = _body[_idx:_idx + 4000]
-    assert 'DEPRECATED' in _slice
-    assert 'mirror publish' in _slice
-    # The legacy local_path / kind parsing must STILL run after.
-    assert re.search(r"_kind = args\[0\]", _slice)
-
 
 def test_transport_pull_single_file_primitive_exists():
     """coord.transport.pull_single_file is wired (used by mirror pull)."""
@@ -24146,12 +23489,6 @@ def main() -> int:
         test_repo_index_dispatch,
         test_deb_excluded_from_minimal,
         test_generate_apt_repo_tolerates_empty_udeb_component,
-        test_buildconfig_publish_dir_and_apt_source_default,
-        test_repo_publish_dispatch,
-        test_rsync_streamed_argv_ignore_existing_and_filters,
-        test_publish_full_remote_scan_flow_wiring,
-        test_repo_audit_external_dispatch,
-        test_cmd_audit_external_requires_apt_source_url,
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
         test_cmd_iso_build_installer_forwards_to_cmd_build_iso_installer,
         test_cmd_iso_build_unknown_subaction_calls_neither_handler,
@@ -24484,13 +23821,10 @@ def main() -> int:
         test_install_signing_keyring_skips_when_no_key_generated,
         test_install_signing_keyring_invokes_cp_when_key_present,
         test_install_signing_keyring_warns_on_cp_failure,
-        test_write_athena_apt_source_noop_when_url_empty,
-        test_write_athena_apt_source_writes_signed_by_when_url_set,
         # MIRROR-01 Phase 5
         test_write_athena_apt_sources_emits_one_file_per_mirror,
         test_write_athena_apt_sources_skips_ssh_url_with_warning,
         test_write_athena_apt_sources_accepts_file_scheme,
-        test_write_athena_apt_sources_falls_back_to_legacy_when_no_mirrors,
         test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url,
         test_live_chroot_sources_list_is_self_contained,
         # UX-05 Path B: headless CLI backend
@@ -24672,7 +24006,6 @@ def main() -> int:
         test_match_pristine_base_reconciles_stamped_artifact,
         test_restamp_asg_deb_bumps_version_and_intra_source_deps,
         # UPD-01 step 2: append-only enforcement
-        test_publish_rsync_is_additive_no_delete,
         test_segregate_never_deletes_existing_published_deb,
         # COMP-03 Phase 1: per-worker scratch repo dir + segregate refactor
         test_comp03_segregate_signature_takes_source_dir,
@@ -24738,13 +24071,10 @@ def main() -> int:
         test_generate_top_release_subprocess_text_mode_consistency,
         test_generate_top_release_avoids_self_reference_via_tempfile,
         test_merge_remote_index_signs_locally_and_merges,
-        test_publish_suites_spec_includes_nonfree_components,
         # UPD-01 step 6: workload + Guard A preflight
-        test_workload_since_published_picks_only_advanced_bases,
         test_needs_bump_build_per_file_exact_un,
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator
-        test_snapshot_and_refresh_commands_wired,
         test_snapshot_state_roundtrip_and_resolve_precedence,
         test_snapshot_base_subcommand_fully_removed,
         test_list_snapshots_between_filters_range_and_unions_keys,
@@ -24756,15 +24086,12 @@ def main() -> int:
         test_ensure_snapshot_pins_prompts_and_writes_when_unset,
         test_ensure_snapshot_pins_aborts_when_no_selection,
         test_cache_build_gates_on_snapshot_pins,
-        test_refresh_top_level_chains_steps,
-        test_publish_full_folds_index_merge_prune_and_gates_rsync,
         test_source_build_autodetects_update_mode,
         test_do_update_build_sets_source_build_ready_on_nothing_to_build,
         test_workload_current_to_target_diffs_against_target_snapshot,
         test_workload_detects_debNuN_source_change_ignores_unchanged,
         test_workload_since_snapshot_diffs_published_to_current,
         test_workload_excludes_forks_from_snapshot_diff,
-        test_snapshot_published_defaults_to_base_then_tracks,
         # UPD-01: snapshot tag in ISO identity
         test_snapshot_iso_tag_reflects_resolved_pin,
         test_stage_disk_info_writes_snapshot_marker_and_substitutes,
@@ -24779,22 +24106,13 @@ def main() -> int:
         test_sta22_shared_dpkg_scan_helper_exists_and_is_consumed,
         test_sta22_run_dpkg_scan_writes_via_tempfile,
         test_sta22_run_dpkg_scan_honours_allow_empty,
-        test_cmd_repo_publish_surfaces_sign_failure,
         test_manifest_vs_remote_discrepancies,
-        test_repo_external_disable_and_enable_empty_rebaselines,
-        test_update_build_pending_logic,
         test_update_build_pending_per_mirror_path,
-        test_external_and_audit_ssh_and_published_ledger_wired,
         # UPD-02: index on the remote
         test_remote_scan_packages_builds_ssh_argv,
         test_remote_reindex_wiring,
         test_local_reindex_wiring,
         test_local_scan_packages_argv_no_ssh,
-        test_cmd_repo_publish_dispatch_arg_parsing,
-        test_publish_via_local_prompts_for_mkdir_and_aborts_on_no,
-        test_cmd_repo_summary_dispatch,
-        test_summary_via_local_reports_missing_dest,
-        test_summarize_destination_skips_pubkey_check_when_missing,
         test_index_minimal_stages_nested_subset,
         # UX-04 persistence
         test_ux04_sha256_sidecar_round_trip,
@@ -24905,7 +24223,6 @@ def main() -> int:
         test_remote_publish_blocks_on_federation_drift,
         test_remote_publish_bootstrap_uploads_pubkey_when_no_head,
         test_cmd_mirror_pull_no_mirrors_is_friendly,
-        test_repo_publish_prints_deprecation_notice,
         test_transport_pull_single_file_primitive_exists,
         # MIRROR-01 Phase 3b — per-file .deb push + coord/pool split
         test_coord_root_for_appends_suffix_to_last_path_component,
