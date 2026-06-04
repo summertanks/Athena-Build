@@ -143,10 +143,13 @@ ledger reflects), `external` (runtime override of [Repo] ExternalEnabled).
 Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
 
 ### `BuildConfig`
-- Validates argv (working dir + paths to build.conf and the four .list files).
+- Validates argv (working dir + paths to build.conf and the FIVE .list
+  files: pkg, live, installer, pool, indl).  `--indl-list` defaults
+  to `config/indl.list`; only consumed when `[Build] Mode = individual`.
 - Parses build.conf via configparser. Reads `[Build]`, `[Base]`,
   every `[Mirror.*]` (constructing Mirror instances), `[Snapshot]`,
-  `[Source]`, `[Repo]`, `[Security]`, and `[Directories]`.
+  `[Source]`, `[Security]`, and `[Directories]`.  The only `[Repo]`
+  key still parsed is `SigningKeyUid`.
 - Computes the working tree layout: `dir_download`, `dir_log`,
   `dir_cache`, `dir_temp`, `dir_source`, `dir_repo` and its nested
   per-component subdirs (`dir_repo_main`, `dir_repo_main_udeb`,
@@ -155,16 +158,19 @@ Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
   `dir_repo_non_free_firmware`), `dir_image`, `dir_buildroot` and its
   two sibling chroots (`dir_chroot` for live, `dir_chroot_installer`
   for d-i), `dir_patch` and its children, `dir_fork` and its source
-  and built-output children, `dir_gnupg` (mode 0700), and `dir_publish`.
+  and built-output children, `dir_gnupg` (mode 0700), `dir_coord` (the
+  signed-sidecar tree for federation claims), and `dir_publish`.
 - mkdir+writability-checks every directory it owns. Auto-cleans empty
   pre-Stage-D dirs at the repo root.
-- Three-layer identity: `build_distribution` (display name), `build_base_id`
-  (lowercase distribution ID), `build_codename` (release codename, used
-  for the apt suite name).
-- `[Repo]` knobs: `SigningKeyUid`, `AptSourceURL`, `PublishSshTarget`,
-  `PublishSshKey`, `ExternalEnabled` (runtime override via snapshot.state).
+- Three-layer identity: `build_distribution` (display name),
+  `build_base_id` (lowercase distribution ID), `build_codename`
+  (release codename, used for the apt suite name).
+- `[Build]` knobs include `DISTRIBUTION`, `CODENAME`, `VERSION`,
+  `IncludeRecommends`, `MaxParallelBuilds`, `DiskImageSizeGB`, and
+  `Mode` (`'distribution'` or `'individual'`; default `distribution`;
+  unknown values rejected with a clear `error_str`).
 - `[Source]` knobs: `SkipTest`, `Tunneled` (comma-separated source
-  names), `BuildProfiles`, `BuildOptions`, `MaxParallelBuilds`.
+  names), `BuildProfiles`, `BuildOptions`.
 - `[Security]` knobs: `Keyring` (defaults to host debian-archive-keyring),
   `Disabled`.
 - `[Snapshot]` knobs: `Enabled`, `Timestamp`, `BaseUrl`, `TimestampApi`,
@@ -185,6 +191,54 @@ Read an INI-style pkg.list (legacy flat list also supported as an
 implicit `[base]` group). Returns dict-of-lists in declaration order;
 also extracts `## Description: ...` lines under each `[group]` header as
 group metadata used by tasksel `.desc` generation.
+
+### `parse_indl_list(path)`
+Read `config/indl.list` — flat list of binary package names, one per
+line, `#` comments and blank lines tolerated, inline comments allowed
+(`firefox-esr # OOMs on host A`). Dedups while preserving first-seen
+order. Missing file → empty list (caller checks `[Build] Mode ==
+'individual'` separately to decide whether empty is fatal).
+
+### `new_build_record(*, package, intended_version, patch_set_hash, started=None)` and the build-record family
+Local-side sidecar that records every source build attempt.  Schema is
+versioned in `BUILD_RECORD_SCHEMA_VERSION` (= 3).
+
+Fields (the entry-phase shape):
+
+- `schema_version`, `package`, `intended_version`, `built_version`,
+  `patch_set_hash`, `phase` (`entry` → `container_exited` →
+  `segregated` → `normalized` → `done | failed | tunneled`), `status`,
+  `started`, `finished`, `elapsed_seconds`, `exit_code`, `oom_killed`,
+  `output_count`, `outputs` (list of `.deb`/`.udeb` filenames),
+  `output_hashes` ({filename: sha256_hex}).
+- `republished_from` ({filename: {url, upstream_sha256}}) — populated
+  by `cmd_tunnel_package` for tunneled passthrough.  Threads through
+  `coord.publish.generate_pending_claims` into the claim's
+  `republished_from` field so the federation marks tunneled packages
+  as no-owner.
+- `pulled_from` ({mirror_name, owner_builder} | None) — populated by
+  `cmd_mirror_pull` for `.deb`s pulled from a peer's mirror.
+  Distinguishes "we built it" from "we pulled it" without losing the
+  record.
+
+`write_build_record(buildlog_dir, record)`: HMAC-signs with a
+session-local key under `log/build/.metrics.hmac.key`, then atomic
+write (tempfile + fsync + os.replace) so a crash mid-write leaves the
+prior valid file intact.
+
+`read_build_record(buildlog_dir, package)`: HMAC-verify; returns
+`None` on any verify failure (treated as missing → forces rebuild via
+the existing classifier).
+
+`update_build_record(buildlog_dir, package, **fields)`: read-merge-sign-
+write convenience.  Phase transitions go through here; auto-fills
+status when phase reaches a terminal value.
+
+`backfill_output_hashes(buildlog_dir, repo_root)`: idempotent
+walker that upgrades older records to current schema, hashing
+emitted `.deb`s under `repo_root` via `get_sha256`'s cached digest
+and initialising the federation fields (`republished_from={}`,
+`pulled_from=None`).
 
 ---
 
@@ -428,6 +482,259 @@ never tunnels fork packages.
 
 ---
 
+## mirror.py — publish-target umbrella + federation primitives
+
+**Purpose:** per-mirror durable state (one `config/mirror.<name>.state`
+file per configured publish target) and the non-network helpers behind
+the `mirror` command umbrella.  Owns the federation-record shape
+(per-peer apt URLs in `coord-head.neighbours`) and the ownership,
+installability, and `mirror.base` advance plumbing.
+
+State-file shape (`config/mirror.<name>.state`, JSON):
+
+```
+{
+  "name", "url", "type" ("ssh"|"local"), "ssh_key",
+  "host", "host_type" ("ip"|"fqdn"|"local"),
+  "public_proto", "public_url",
+  "base", "current", "last_publish_at",
+  "neighbours_known": [...]
+}
+```
+
+### `add_mirror(config, *, name, url, type, ssh_key, seed_pin, host, host_type, public_proto, public_url)`
+Atomic write of one `config/mirror.<name>.state` file.  Refuses
+duplicate names or URLs across the local set.  Normalises the publish
+URL via `_normalize_url` (ssh:// + file:// only; any other scheme is
+rejected).  Seeds `base` and `current` from the operator-supplied
+snapshot pin so a new mirror starts at parity.
+
+### `_normalize_url(url)`, `_extract_host_from_ssh_url(url)`, `_extract_user_from_ssh_url(url)`, `_extract_path_from_ssh_url(url)`
+URL-parsing primitives.  IPv6 brackets are stripped from the extracted
+host so `ipaddress.ip_address` accepts it; `derive_public_url` re-
+brackets per RFC 3986 §3.2.2 when building the apt URL.
+
+### `validate_host_for_type(url, host_type)`, `derive_name_from_url(url, host_type)`, `derive_public_url(url, dist_id, proto)`
+The `mirror add ip|fqdn|local <url>` user-typed surface.  Cross-checks
+the host portion against the operator-supplied keyword, derives a
+filename-safe name (dots / colons → dashes), composes the apt-readable
+URL as `<proto>://<host>/<dist-id-lowercased>`.
+
+### `read_mirror_state` / `write_mirror_state` / `update_mirror_state`
+JSON read-merge-write with `utils._atomic_write_bytes` so a crash
+mid-write leaves the prior file intact.
+
+### `list_mirrors(config)`, `find_mirror_by_url(config, url)`, `remove_mirror(config, *, url_or_name)`, `delete_mirror_state(config, name)`
+Inventory + lookup + LOCAL-only removal helpers.  `mirror remove` does
+not touch the remote — federation propagation is via
+`reconcile_neighbours`.
+
+### `all_mirror_urls(config)` and `all_mirror_neighbour_records(config)`
+URL-only projection (federation-gate / drift detection) vs. v3 record
+projection ({url, public_url, public_proto} per peer; publish writers).
+
+### `neighbours_drift(config, name)`
+Compares a mirror's last-seen `neighbours_known` against the local
+config's mirror URL set; returns `(tag, missing_on_peer, extra_on_peer)`
+where tag is `unpublished` / `in-sync` / `drift`.  Surfaced inline by
+`mirror list`.
+
+### Probe pipeline (used by `cmd_mirror_add`)
+- `probe_dns_and_tcp(host, port, timeout_s)` — DNS resolve + TCP
+  connect.
+- `probe_ssh_auth(host, user, ssh_key, timeout_s)` — non-interactive
+  `ssh -o BatchMode=yes echo ok` against the publish account.
+- `probe_remote_writable(host, user, ssh_key, remote_pool_path)` —
+  single-call `mkdir -p` + `test -w` on pool + `-coord` sibling.
+- `probe_http_inrelease(public_url, codename, timeout_s)` — HEAD on
+  `<public_url>/dists/<codename>/InRelease`; 200 = mirror has a
+  published Release, 404 = empty (first-publish bootstrap is fine).
+- `probe_sidecar_head(coord_url, signing_homedir, stage_dir, ssh_key)`
+  — pull peer's `coord-head.json[.sig]`, GPG-verify against local
+  tier-1 keyring; three outcomes (no head yet / verified / verify-
+  failed).  Verify-failed is the federation key-mismatch gate.
+- `discover_federation_peers(head, signing_homedir, stage_root, ssh_key)`
+  — recurse `probe_sidecar_head` over every URL in the peer's
+  `coord-head.neighbours`; classify reachable/verified/bootstrap-
+  pending/unreachable; surfaces upstream's per-peer `public_url` /
+  `public_proto` records to `cmd_mirror_add`.
+
+### `reconcile_neighbours(config, *, signing_homedir, target_name, flock_timeout)`
+Fan-out: for every peer in the local config, pull their coord-head,
+compare neighbours against local set, rewrite + re-sign + push back
+under remote flock.  Returns `(overall_ok, summary, results)`.
+Unreachable peer = overall failure (operator retries when network is
+back).
+
+### `project_post_publish_state(local_state, remote_by_builder)`
+Returns a `repo_audit.RepoState`-shaped projection of the mirror's
+post-publish state.  Starts from the LOCAL repo's RepoState (which
+carries full Depends/Provides), layers in remote claims as satisfier-
+only entries (no Depends — they can't be consumers but they CAN
+satisfy other pkgs' deps).  Multi-version-aware: when the same package
+appears at local 1.0 and remote 2.0, the higher version wins (matches
+what apt resolves a versioned `Depends:` against).
+
+### `find_publish_closure_breaks(local_state, remote_by_builder, our_pending_pkg_names)`
+The publish-time installability gate.  Wraps `repo_audit.audit_dep_closure`
+with `consumer_set` = our pending packages, so the closure walk is
+bounded to what we're about to push.  Returns a list of
+`(pkg, field, relation_str, why)` findings; empty = our publish does
+not break the mirror.  Wired into `coord.publish.remote_publish`
+between the ownership filter and pool push; non-empty list → REFUSE
+with up to 5 detail lines inlined.
+
+---
+
+## scripts/coord/ — federation sidecar (8 modules)
+
+**Purpose:** the on-the-wire signed sidecar layer of the mirror
+federation: per-builder claim records (`<root>/claims/<id>.jsonl`,
+Ed25519-signed per line), tier-1 GPG-signed coord-head pinning the
+canonical state, federation-consistency reconciliation, transport
+primitives (rsync + ssh flock), and the 11-step publish state machine.
+
+### `coord/schema.py`
+- `new_claim(*, builder, seq, package, ...)` — per-`.deb` claim record.
+  Fields: `v`, `builder`, `seq`, `package`, `intended_version`,
+  `built_version`, `filename`, `sha256`, `size`, `snapshot`,
+  `built_at`, `claim_state` (`pending` / `published` / `retracted`),
+  `republished_from` (optional dict {url, upstream_sha256} for
+  tunneled passthrough — federation treats it as "no owner"), `sig`
+  (Ed25519, filled in by signer).
+- `new_retraction(*, builder, seq, package, retracts_seq, …)` —
+  builder-signed tombstone referencing the seq of the claim being
+  withdrawn.
+- `new_coord_head(*, inrelease_sha256, snapshot, last_seqs, head_time, neighbours, revoked_builders)`
+  — the federation's canonical signed state.  `neighbours` is
+  `list[dict]` of `{url, public_url, public_proto}` per peer.
+- `canonicalize_neighbour_records(items)` — normaliser; accepts either
+  bare URL strings or full dicts; emits sorted list[dict]; dedups by
+  canonical url.
+- `neighbour_urls(items)` — flat list[str] projection for federation-
+  gate set-comparison (dicts aren't hashable).
+- `canonicalize_neighbours(urls)` — alias for `neighbour_urls`; the
+  legacy name federation-gate callers use.
+
+### `coord/identity.py`
+Ed25519 keypair management for the per-builder claim signer.  Creates
+`coord/identity/<builder-id>.{pem,pub}` (0600 / 0644).  Loads the
+peer keyring (`<root>/keyring/builders/<id>.pub`) for verifying
+fetched claims.
+
+### `coord/store.py`
+- `append_claim_line(claims_dir, builder_id, claim)` — JSONL append
+  with per-builder file lock.
+- `max_seq(claims_dir, builder_id)` — highest seq in our local jsonl;
+  used to assign the next claim's seq.
+- `read_builder_claims(claims_dir, builder_id, public_key_path)` —
+  verify + load one builder's claims.
+- `read_all_claims(claims_dir, keyring, revoked)` — verify + load
+  every peer's claims; respects revocation.
+- `iter_live_claims_by_filename(by_builder)` — generator over
+  non-retracted claims; same-builder pending-vs-published collisions
+  resolved.
+- `project_live_claims(by_builder)` — collapse to `{(pkg, ver): claim}`
+  with cross-builder hash conflicts keyed by `(pkg, ver+'!'+builder)`.
+- `project_owners(by_builder)` — per-filename ownership view:
+  `{filename: {builder|None, version, sha256, claim_state, seq,
+  republished_from, claim}}`.  Picks the latest non-retracted claim
+  per filename via (`-seq`, `builder`) sort; `builder=None` ⇔ claim
+  has `republished_from` set (tunneled).  Hash conflicts NOT resolved
+  here — that's `detect_hash_conflicts`'s job; this projection trusts
+  the gate ran upstream.
+
+### `coord/policy.py`
+Constants: `HASH_CONFLICT_POLICY = 'BLOCK'`, `COORD_HEAD_MAX_AGE_SECONDS`,
+`PUBLISH_HALT` file convention.
+
+### `coord/head.py`
+- `read_coord_head(coord_dir, signing_homedir)` — fetch + verify
+  `coord-head.json[.sig]` against the tier-1 GPG keyring; returns the
+  parsed dict on success, `None` on any verify failure (the federation
+  key-mismatch gate fires here).
+- `write_coord_head(coord_dir, head, signing_homedir)` — canonical
+  JSON write + tier-1 GPG-clearsign; removes any prior `.sig` and
+  refuses to leave an unsigned manifest on signing failure
+  (fail-closed).
+- `is_fresh(head, inrelease_sha256, inrelease_date_iso)` — refuse
+  rollback (head pins a different InRelease) and stale head (older
+  than InRelease Date or beyond `COORD_HEAD_MAX_AGE_SECONDS`).
+
+### `coord/reconcile.py`
+- `audit_local(...)` — pool ↔ this-builder claims (orphans, hash
+  drift, missing-on-disk).
+- `audit_cross(...)` — `build.json` ↔ all-builder jsonl audit.
+- `detect_hash_conflicts(by_builder)` — fires on same `(pkg, ver)`,
+  different SHA across builders; `CRITICAL` writes `PUBLISH_HALT`.
+  Same SHA across builders = `INFO reproducible_duplicate`.
+- `check_federation_consistency(local_mirror_urls, head)` — compares
+  the URL projection of `head.neighbours` against local config; any
+  diff = `CRITICAL` (publish-time BLOCK; operator runs
+  `mirror reconcile-neighbours`).
+- `publish_halt_reason` / `write_publish_halt` — sentinel file
+  read/write at `<coord-dir>/PUBLISH_HALT`.
+
+### `coord/transport.py`
+Rsync + ssh flock primitives for the publish/pull/reconcile paths:
+- `pull_remote_coord(local_dest, remote_spec, ssh_key)` — rsync the
+  sidecar tree (`coord-head.json[.sig]`, `keyring/`, `claims/`) down
+  to a local staging dir.
+- `push_jsonl(local_path, remote_spec, ssh_key)` — single-file rsync
+  for jsonl append + per-builder pubkey upload.
+- `push_single_deb(local_path, remote_dir_spec, ssh_key)` — per-`.deb`
+  push for the publish pool step.
+- `push_coord_head(local_coord_dir, remote_dir_spec, ssh_key)` — push
+  the freshly-signed head back.
+- `remote_flock_acquire(ssh_host, lock_path, timeout_sec, ssh_key)` /
+  `remote_flock_release(lock_proc)` — wraps `ssh <host> flock -w …`
+  so the publish/reconcile transaction is single-writer on the remote
+  side.
+
+### `coord/publish.py`
+11-step publish transaction (the read-side of all the above modules):
+
+1. Pre-flight `PUBLISH_HALT` check.
+2. Remote flock acquire (ssh mirrors only; local-fs skips).
+3. Pull remote coord tree.
+4. Tier-1 verify coord-head; load keyring; read all claims.
+5. Hash-conflict scan (`detect_hash_conflicts`); CRITICAL writes
+   `PUBLISH_HALT` and aborts.
+   - Ownership filter: `project_owners` →
+     `filter_pending_by_ownership` applies the ownership decision
+     matrix.  Per-filename: no-owner / us / tunneled → KEEP;
+     other-owner higher-version → KEEP+transfer; other-owner
+     same-or-lower → BLOCK with `ownership_blocked` finding.
+   - Installability gate: `mirror.find_publish_closure_breaks` walks
+     the post-publish state; any unresolved hard Depends → ABORT with
+     `mirror_closure_break: <detail>` (up to 5 findings inlined).
+6. Per-file `.deb` push — only pkgs that passed both ownership + the
+   closure gate above.
+7. Sign + append every pending claim to LOCAL jsonl with state
+   `published`.
+8. Push jsonl + pubkey to remote.
+9. Re-sign coord-head pinning current InRelease sha + updated
+   `last_seqs[builder]` + unchanged neighbours.
+10. Push coord-head + flock release.
+11. Local mirror state update: write `current`, `last_publish_at`,
+    `neighbours_known`, and recompute `base` to the oldest snapshot ts
+    across the post-publish claim ledger (per-builder retraction folds
+    are applied first so a retracted-then-republished entry doesn't
+    drag the floor back).
+
+`generate_pending_claims(*, builder_id, buildlog_dir, claims_dir, public_key_path, snapshot_pin, read_build_record)`
+— walk every `<pkg>.build.json` whose phase is `done` or `tunneled`,
+emit one unsigned claim per output filename that isn't already in this
+builder's live jsonl.  Reads `build.json.republished_from` per output
+and passes the matching entry to `schema.new_claim`, so tunneled
+outputs round-trip through the federation as "no owner".
+
+`filter_pending_by_ownership(builder_id, candidates, existing_owners)`:
+returns `(kept_pending, blocked_findings)` applying the ownership
+decision matrix.  Version compare via `apt_pkg.version_compare`.
+
+---
+
 ## buildcontainer.py — Docker-isolated source builds + post-build NMU strip + asg stamp
 
 **Purpose:** wrap `dpkg-buildpackage` in a per-package Docker container
@@ -492,8 +799,8 @@ build, segregate outputs to component dirs, strip NMU and stamp
   (defaulting to 'main' for forks / locally-discovered).
 - Route each file via `config.deb_dest_for_filename(filename, component)`
   to its nested dir (main → dists/<codename>/main/binary-<arch>/, etc.).
-- UPD-01 append-only invariant: if a same-name file already exists at
-  the destination, KEEP the existing artifact and drop the rebuilt
+- Append-only invariant: if a same-name file already exists at the
+  destination, KEEP the existing artifact and drop the rebuilt
   duplicate at repo root (byte-identical rebuild on a published file).
 - Return absolute post-move paths so the normaliser only touches the
   just-emitted set, not the whole repo.
@@ -967,18 +1274,20 @@ success and gates on prerequisites.
 - The 60+ cmd_* methods — dispatched via group helpers (cmd_cache,
   cmd_source, etc.) into the concrete handlers.
 
-### Top-level commands (12), each with `_group_help` tables
+### Top-level commands (13), each with `_group_help` tables
 - cache: build / purge / parse / select / info
 - clean: cache / source / repo / buildroot / image / download / container / all
 - patch: refresh
-- source: sync / build / audit / repair / fork
-- repo: index / publish / audit / repair / tunnel / refresh / external
+- source: sync / build / audit / repair / fork / tunnel
+- repo: index / publish / audit / repair / refresh / external
 - snapshot: list / advance / workload / base
 - container: init / purge
 - chroot: build (live | installer) / verify
 - iso: build (live | installer | disk)
 - key: generate / verify
-- autorun: live / installer / disk
+- autorun: live / installer / disk / individual
+- mirror: add / list / remove / publish / pull / audit / summary /
+          reconcile-neighbours / show
 - print: state / config / packages / sources / extras / live / installer /
          pool / build / tunneled / fork / container / snapshot / mirrors /
          signing / repo / stats / help
@@ -1008,6 +1317,24 @@ success and gates on prerequisites.
   parse_sources for both trees, derive_extras_src_names,
   derive_subset_exclusive_src_names, set dep_check_ready.
 
+**cmd_parse_dependency — individual mode:**
+When `config.build_mode == 'individual'`, Passes III–VII are SKIPPED.
+The flow is:
+- Pass I/II remain (required + important — they're harmless and the
+  source builder still needs core build-deps).
+- `selected_pkgs` is populated directly from `parse_indl_list(indl_path)`:
+  each binary is looked up in `cache.package_hashtable` (latest version
+  picked) and inserted into `dep_tree.selected_pkgs`; NO recursive
+  `Depends:` walk. The build host's job is to build the named packages;
+  runtime closure is the mirror's invariant (gated at publish), not
+  the build host's.
+- `selected_srcs` derives 1:1 from `selected_pkgs` via `Package.source`
+  / fallback to name; then `parse_sources` walks each source's
+  `Build-Depends` so the BuildContainer has its build deps.
+- `dep_tree.indl_src_names` is just an alias for `selected_srcs.keys()`.
+- `validate_selection` and the extras/exclusive projections are SKIPPED
+  in indl mode (they presuppose a full closure).
+
 **cmd_source_sync:**
 Iterate over both trees' selected_srcs; `utils.download_source` for the
 union. Sets download_ready.
@@ -1019,6 +1346,10 @@ hash drift). Sets build_container_ready.
 
 **cmd_source_build [force] [subset|<names>] [[profiles]]:**
 - Parse args via the static `_parse_source_build_args` helper.
+- In individual mode, the legal scopes shrink to `all` (== everything
+  in `indl.list`) and explicit names; `pkg` / `live` / `installer` /
+  `recommended` raise an eager arg-validation error pointing at the
+  mode.
 - Auto-detect update-mode: when a published base exists and current
   snapshot is ahead, rebuild the delta with `+asg<R>u<N>` stamping.
 - Pick the package set per subset (pkg / live / installer / recommended /
@@ -1035,6 +1366,9 @@ hash drift). Sets build_container_ready.
 - Record counts on session.last_source_build_counts. Set source_build_ready.
 
 **cmd_build_chroot_live:**
+- `_refuse_in_individual_mode('chroot build live')` early-return if
+  `config.build_mode == 'individual'` — single-package builds don't
+  produce a closed runtime set.
 - Gate on source_build_ready + signing key verified.
 - Pre-flight: `_preflight_audit_source` (build state of every selected
   source — gates on hard findings, soft findings just warn); 
@@ -1045,13 +1379,14 @@ hash drift). Sets build_container_ready.
   chroot_verified on success.
 
 **cmd_build_chroot_installer:**
-Parallel but against udeb_dep_tree and `build_installer_chroot`. No
-verify_chroot equivalent (the installer doesn't have a configured-state
-to verify). Sets chroot_installer_ready.
+Parallel but against udeb_dep_tree and `build_installer_chroot`. Same
+indl-mode refuse at the top. No verify_chroot equivalent (the installer
+doesn't have a configured-state to verify). Sets chroot_installer_ready.
 
 **cmd_build_iso_live / cmd_build_iso_installer / cmd_build_iso_disk:**
 Drive `iso.build_live_iso`, `iso_installer.build_installer_iso`,
-`disk_image.build_disk_image` respectively. Sets the corresponding flag.
+`disk_image.build_disk_image` respectively. All three start with the
+indl-mode refuse. Sets the corresponding flag.
 
 **cmd_audit [verbose|strict|refresh|quick|<target>]:**
 Six sections in order: DEP GATE / LIVE CONFLICTS / INSTALLER CONFLICTS /
@@ -1077,12 +1412,83 @@ suites_spec. `minimal` produces a runtime-only subset (excludes `-dbg`,
 - `workload [since <ts>]`: diff current → target snapshot and report
   the source set that would rebuild.
 
-**autorun (live | installer | disk):**
+**autorun (live | installer | disk | individual):**
 Walk the shared early stages (cache → cache parse → source sync →
 container init → source build pkg → subset-specific source build),
 then the divergent terminal stages (chroot build {live|installer} →
 chroot verify if live → iso build {live|installer|disk}). Bails on
 first failure. Emits the autorun summary at the end.
+
+`autorun individual` is the indl-mode variant: chain is cache →
+cache parse (indl branch) → source sync → container init → source
+build (defaulting to everything in `indl.list`). Stops at
+`source_build_ready` — no chroot/ISO stages. Operator typically chains
+into `mirror publish` separately once `source audit` is clean.
+
+### `cmd_mirror_*` family
+
+The `mirror` command umbrella drives the federation: peer-config CRUD,
+publish, pull, audit, federation reconciliation.
+
+- `cmd_mirror_add ssh|local <url> [name=…] [host=ip|fqdn|local] [public_proto=…]`
+  Probe pipeline (DNS+TCP → SSH auth → remote writable → InRelease HEAD
+  → coord-head verify → federation discovery), persists a new
+  `config/mirror.<name>.state`. First add against a fresh remote seeds
+  `base`/`current` from the operator's snapshot pin; subsequent adds
+  fetch the existing coord-head and adopt its `last_publish_at` as the
+  starting `current`.
+
+- `cmd_mirror_list` — JSON-like inventory; per-mirror state with
+  `neighbours_drift` tag (unpublished / in-sync / drift).
+
+- `cmd_mirror_remove <url|name>` — LOCAL-only state-file removal; does
+  not touch the peer.
+
+- `cmd_mirror_publish [<name>]` — orchestrator over
+  `coord.publish.remote_publish`. Pre-loop:
+  - Mode banner (`MODE: distribution|individual`).
+  - First-publish gate: refuses indl-mode publish to a mirror whose
+    remote has no `coord-head.json` yet.
+  - Loops over local config; per-mirror runs federation-gate
+    (`check_federation_consistency`) and then the 11-step publish
+    transaction. Failure-tolerant across peers (one peer failure does
+    not abort the others).
+
+- `cmd_mirror_pull [<name>] [<pkg>...]` — rsync the delta of `pool/`
+  + any new claims from the named mirror; for every newly-arrived
+  `.deb` writes a local `build.json` record:
+  - tunneled-on-mirror (claim has `republished_from`) →
+    `phase='tunneled'`, copy `republished_from`.
+  - owned-by-other → `phase='done'` + `pulled_from = {mirror_name,
+    owner_builder, upstream_sha256}`.
+  - Our own claims are SKIPPED (we built it; rebuilding by pull would
+    drop our ownership).
+
+- `cmd_mirror_audit [<name>]` — pull peer's coord tree + claims, run
+  `coord.reconcile.audit_cross`, then closure-projection of the
+  mirror's post-publish state and report unresolved hard `Depends:`.
+  Read-only command — does NOT write to `PUBLISH_HALT`.
+
+- `cmd_mirror_summary [<name>]` — counts: total claims; per-builder
+  claim counts; ownership breakdown (`we_own`, `they_own`, `tunneled`);
+  hash-conflict / closure-break totals.
+
+- `cmd_mirror_reconcile_neighbours [<name>]` — calls
+  `mirror.reconcile_neighbours`; fans out per peer to push the local
+  neighbour set into their coord-head. Used after `mirror add` /
+  `mirror remove` to propagate federation membership.
+
+- `cmd_mirror_show <name>` — pretty-print the per-mirror state file +
+  the last-pulled coord-head snapshot (federation membership +
+  `last_seqs` per builder + freshness check).
+
+### `cmd_tunnel_package` (`source tunnel <pkg>`)
+
+Writes the local `build.json` record with `phase='tunneled'` and
+`republished_from = {url, upstream_sha256}`. The claim emitter in
+`coord.publish.generate_pending_claims` reads that field per-output
+and propagates it onto the federation claim — so tunneled-locally
+becomes tunneled-on-mirror (no-owner) without losing provenance.
 
 ### `main(banner)`
 - Detect `--headless`; strip from argv before BuildConfig sees it.
@@ -1127,7 +1533,7 @@ or module writes it), and the consumer (what depends on it).
 | `cache/snapshot.timestamp` | one-line UTC TS | `utils.resolve_snapshot_timestamp` when 'latest' resolves | self (reproducibility on subsequent runs) | Volatile: `clean cache` wipes. Re-resolved on next run. |
 | `cache/<uri>` | Packages / Sources / Release | `Cache.__get_files` | `Cache.__build_cache` | Per-mirror, named by `apt_pkg.uri_to_filename` so multi-mirror don't collide. |
 | `source/<pkg>_<ver>.{dsc,tar.*}` | upstream Debian source | `cmd_source_sync` → `utils.download_source` | `BuildContainer.build` | SHA256-verified against the InRelease-signed Sources index. |
-| `repo/dists/<codename>/main/binary-<arch>/*.deb` | binary pkg | `BuildContainer.build` → `_segregate_built_artifacts` (or tunnel) | live chroot + installer pool + apt clients | UPD-01 append-only invariant: existing wins on collision. |
+| `repo/dists/<codename>/main/binary-<arch>/*.deb` | binary pkg | `BuildContainer.build` → `_segregate_built_artifacts` (or tunnel) | live chroot + installer pool + apt clients | Append-only invariant: existing wins on collision. |
 | `repo/dists/<codename>/main/debian-installer/binary-<arch>/*.udeb` | installer pkg | same | installer chroot | Parallel udeb namespace. |
 | `repo/dists/<codename>/main/source/*.{dsc,tar.*}` | source | `cmd_source_sync` copies; not recompiled in repo | network publish | |
 | `repo/dists/<codename>/{doc,tests}/binary-<arch>/*.deb` | side artifact | same | apt clients on demand | Not pre-installed anywhere. |

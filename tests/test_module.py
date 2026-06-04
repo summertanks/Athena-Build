@@ -19079,11 +19079,16 @@ def test_comp03_phase4_build_one_source_skip_src_returns_skipped():
     import build
     _sess = build.BuildSession.__new__(build.BuildSession)
 
+    import shutil
+
     class _FakeCache:
         skip_src = {'skipped-pkg'}
 
+    _tmp = tempfile.mkdtemp(prefix='skip-src-build-one-')
+
     class _FakeConfig:
         tunnel_packages = []
+        dir_log = _tmp
 
     class _FakeContainer:
         # Present so the assert-non-None at the top of _build_one_source
@@ -19097,8 +19102,11 @@ def test_comp03_phase4_build_one_source_skip_src_returns_skipped():
         package = 'skipped-pkg'
         version = '1.0'
 
-    _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
-    assert _result == 'skipped', _result
+    try:
+        _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
+        assert _result == 'skipped', _result
+    finally:
+        shutil.rmtree(_tmp, ignore_errors=True)
 
 
 def test_comp03_phase4_build_one_source_tunneled_calls_do_tunnel():
@@ -19107,13 +19115,17 @@ def test_comp03_phase4_build_one_source_tunneled_calls_do_tunnel():
     and ('failed', 0) on tunnel failure — NOT ('built', 0).  Mocked."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    import shutil
     _sess = build.BuildSession.__new__(build.BuildSession)
 
     class _FakeCache:
         skip_src = set()
 
+    _tmp = tempfile.mkdtemp(prefix='tunneled-build-one-')
+
     class _FakeConfig:
         tunnel_packages = ['tunnel-me']
+        dir_log = _tmp
 
     class _FakeContainer:
         asg_ledger = None
@@ -19132,12 +19144,80 @@ def test_comp03_phase4_build_one_source_tunneled_calls_do_tunnel():
         package = 'tunnel-me'
         version = '1.0'
 
-    _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
-    assert _result == 'tunneled', _result
+    try:
+        _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
+        assert _result == 'tunneled', _result
 
-    _sess._do_tunnel = lambda _src: False  # tunnel fails
-    _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
-    assert _result == 'failed', _result
+        _sess._do_tunnel = lambda _src: False  # tunnel fails
+        _result, _ = _sess._build_one_source(_Src(), False, False, None, None)
+        assert _result == 'failed', _result
+    finally:
+        shutil.rmtree(_tmp, ignore_errors=True)
+
+
+def test_build_one_source_tunneled_branch_uses_pristine_for_check_build():
+    """Tunneled packages must be normalised post-download (strip + asg-
+    stamp) so they land on disk at pristine / +asg-stamped names — the
+    SAME names a from-source build would produce.  Therefore the skip
+    gate in _build_one_source's tunnel branch passes the PRISTINE
+    prediction (`_predicted_files_for_source`) to check_build, NOT the
+    upstream-suffixed filenames.  Without that, a previously-tunneled
+    pkg whose on-disk file is pristine-named would re-trigger _do_tunnel
+    every run.
+    """
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import shutil
+    _sess = build.BuildSession.__new__(build.BuildSession)
+
+    _tmp = tempfile.mkdtemp(prefix='tunnel-pristine-')
+
+    class _FakeCache:
+        skip_src = set()
+
+    class _FakeConfig:
+        tunnel_packages = ['firefox-esr']
+        dir_log = _tmp
+
+    _check_calls: 'list[list[str]]' = []
+
+    class _FakeContainer:
+        asg_ledger = None
+
+        def check_build(self, _src, _expected):
+            _check_calls.append(list(_expected))
+            return True  # pristine-named file already on disk → skip
+
+    _sess.cache = _FakeCache()
+    _sess.config = _FakeConfig()
+    _sess.container = _FakeContainer()
+    # Distinguishable lists so we can assert which one reached check_build.
+    _sess._predicted_files_for_source = lambda _n: [
+        'firefox-esr_140.10.2esr-1_amd64.deb']           # pristine
+    _sess._tunnel_filenames_for_source = lambda _n: [
+        'firefox-esr_140.10.2esr-1~deb12u1_amd64.deb']   # upstream
+    _do_tunnel_calls: 'list[str]' = []
+    _sess._do_tunnel = lambda _src: (
+        _do_tunnel_calls.append(_src.package) or True)
+
+    class _Src:
+        package = 'firefox-esr'
+        version = '140.10.2esr-1~deb12u1'
+
+    try:
+        _result, _ = _sess._build_one_source(
+            _Src(), False, False, None, None)
+        assert _result == 'skipped', f"expected 'skipped', got {_result!r}"
+        assert _check_calls, "check_build was never called"
+        assert _check_calls[0] == [
+            'firefox-esr_140.10.2esr-1_amd64.deb'], (
+            f"check_build got {_check_calls[0]!r} — should be PRISTINE "
+            "(strip-NMU pristine name), not upstream-suffixed")
+        assert not _do_tunnel_calls, (
+            f"_do_tunnel was called {_do_tunnel_calls!r}; should have "
+            "skipped because the pristine file is already on disk")
+    finally:
+        shutil.rmtree(_tmp, ignore_errors=True)
 
 
 def test_comp03_phase5_resource_kwargs_empty_when_uncapped():
@@ -22000,6 +22080,312 @@ def test_source_state_interrupted_when_record_is_non_terminal():
         _state = _sess._source_state('foo', _Src())
         assert _state == 'interrupted', (
             f"non-terminal phase must classify as 'interrupted', got {_state}")
+
+
+def test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass():
+    """Regression: a build.json at phase=tunneled where the predicted
+    pristine binary is NOT on disk must classify as 'stale_pass', not
+    'tunneled'.  Audit-and-build asymmetry was the root cause of
+    `source audit` giving a clean chit while `source build all`
+    re-attempted the tunnel — audit's early-return on
+    record_state=='tunneled' skipped the disk check that
+    check_build/find_matching_artifact perform on the build side.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        _src_dir = os.path.join(_tmp, 'source')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+        os.makedirs(_src_dir, exist_ok=True)
+        # Deliberately DO NOT plant the pristine binary in _repo.
+
+        _rec = _u.new_build_record(
+            package='firefox-esr',
+            intended_version='140.10.2esr-1~deb12u1',
+            patch_set_hash='',
+        )
+        _rec.update({
+            'phase':           'tunneled',
+            'status':          'TUNNELED',
+            'built_version':   '140.10.2esr-1',
+            'finished':        _u._utc_now_iso(),
+            'elapsed_seconds': 5.0,
+            'outputs':         ['firefox-esr_140.10.2esr-1_amd64.deb'],
+        })
+        _u.write_build_record(_buildlog, _rec)
+
+        class _Src:
+            pkgs = ['firefox-esr_140.10.2esr-1_amd64.deb']
+            files = {}
+            version = '140.10.2esr-1~deb12u1'
+            patch_list = []
+
+        class _Cfg:
+            dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = _src_dir
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
+
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_p): return True
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = MagicMock(src_pkg_files={
+            'firefox-esr': list(_Src.pkgs)})
+        _sess.udeb_dep_tree = None
+        _sess.container = _Container
+        _sess.flags = MagicMock(build_container_ready=True)
+
+        _state = _sess._source_state('firefox-esr', _Src())
+        assert _state == 'stale_pass', (
+            f"tunneled record with no on-disk binary must be 'stale_pass' "
+            f"(matching what check_build sees), got {_state!r}")
+
+
+def test_source_state_tunneled_record_with_pristine_binary_returns_tunneled():
+    """Mirror case: a build.json at phase=tunneled AND the predicted
+    pristine binary IS on disk (the post-strip on-disk form) → audit
+    correctly returns 'tunneled', not 'stale_pass'.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+    import buildcontainer as _bc
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        _src_dir = os.path.join(_tmp, 'source')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_repo, exist_ok=True)
+        os.makedirs(_src_dir, exist_ok=True)
+        # Plant the pristine binary (what _do_tunnel lands after strip).
+        with open(os.path.join(_repo, 'firefox-esr_140.10.2esr-1_amd64.deb'),
+                  'wb') as _fh:
+            _fh.write(b'!<arch>\n')
+
+        _rec = _u.new_build_record(
+            package='firefox-esr',
+            intended_version='140.10.2esr-1~deb12u1',
+            patch_set_hash='',
+        )
+        _rec.update({
+            'phase':           'tunneled',
+            'status':          'TUNNELED',
+            'built_version':   '140.10.2esr-1',
+            'finished':        _u._utc_now_iso(),
+            'elapsed_seconds': 5.0,
+            'outputs':         ['firefox-esr_140.10.2esr-1_amd64.deb'],
+        })
+        _u.write_build_record(_buildlog, _rec)
+
+        class _Src:
+            pkgs = ['firefox-esr_140.10.2esr-1_amd64.deb']
+            files = {}
+            version = '140.10.2esr-1~deb12u1'
+            patch_list = []
+
+        class _Cfg:
+            dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = _src_dir
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
+            @staticmethod
+            def deb_dest_for_filename(_f): return _repo
+
+        class _Container:
+            buildlog_path = _buildlog
+            @staticmethod
+            def is_ar_file(_p): return True
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = MagicMock(src_pkg_files={
+            'firefox-esr': list(_Src.pkgs)})
+        _sess.udeb_dep_tree = None
+        _sess.container = _Container
+        _sess.flags = MagicMock(build_container_ready=True)
+
+        # _source_state calls buildcontainer.BuildContainer.is_ar_file
+        # directly (staticmethod, no instance) — that reads the file with
+        # python-debian's DebFile, which our dummy ar-header doesn't
+        # satisfy.  Patch for the duration of this test.
+        _orig_is_ar = _bc.BuildContainer.is_ar_file
+        _bc.BuildContainer.is_ar_file = staticmethod(lambda _p: True)
+        try:
+            _state = _sess._source_state('firefox-esr', _Src())
+        finally:
+            _bc.BuildContainer.is_ar_file = _orig_is_ar
+        assert _state == 'tunneled', (
+            f"tunneled record with pristine binary on disk should classify "
+            f"as 'tunneled', got {_state!r}")
+
+
+def test_detect_build_audit_divergence_flags_missing_binary_with_no_fail_record():
+    """Gate: when audit classifies a source as 'needs_build' (binary
+    missing on disk) but the build record does NOT say 'fail' — i.e.
+    no explicit declared failure — that's a divergence between the
+    skip-gate (check_build) and the audit classifier (_source_state),
+    and `_detect_build_audit_divergence` must surface it as a finding.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+
+    _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+    _sess.cache = MagicMock(skip_src=set())
+    _sess.config = MagicMock(dir_log='/tmp/divergence-test-irrelevant')
+    # Stub _source_state to return 'needs_build' for foo, and
+    # utils.read_build_record to return None (no record).
+    _sess._source_state = lambda _n, _s: 'needs_build'  # type: ignore
+
+    class _Pkg:
+        package = 'foo'
+
+    import utils as _u
+    _orig_read = _u.read_build_record
+    _u.read_build_record = lambda _bl, _n: None
+    try:
+        _findings = _sess._detect_build_audit_divergence([_Pkg()])
+    finally:
+        _u.read_build_record = _orig_read
+
+    assert len(_findings) == 1, _findings
+    assert _findings[0] == ('foo', 'needs_build', 'missing'), _findings[0]
+
+
+def test_detect_build_audit_divergence_silent_when_record_says_fail():
+    """A source the build declared as failed (record phase=failed) is
+    EXPECTED to fail audit too — that's consistent, not a divergence.
+    The gate must NOT flag it.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+    import utils as _u
+
+    _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+    _sess.cache = MagicMock(skip_src=set())
+    _sess.config = MagicMock(dir_log='/tmp/divergence-test-irrelevant')
+    _sess._source_state = lambda _n, _s: 'fail'  # type: ignore
+
+    class _Pkg:
+        package = 'foo'
+
+    _orig_read = _u.read_build_record
+    _u.read_build_record = lambda _bl, _n: {
+        'phase':  'failed',
+        'status': 'FAIL',
+    }
+    try:
+        _findings = _sess._detect_build_audit_divergence([_Pkg()])
+    finally:
+        _u.read_build_record = _orig_read
+
+    assert _findings == [], (
+        f"record=fail must not be a divergence finding; got {_findings!r}")
+
+
+def test_detect_build_audit_divergence_silent_on_clean_state():
+    """When every source audits as 'ok' or 'tunneled', the gate
+    returns an empty list — the happy path.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+
+    _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+    _sess.cache = MagicMock(skip_src=set())
+    _sess.config = MagicMock(dir_log='/tmp/divergence-test-irrelevant')
+    _sess._source_state = lambda _n, _s: (   # type: ignore
+        'ok' if _n == 'a' else 'tunneled')
+
+    class _Pkg:
+        def __init__(self, name): self.package = name
+
+    _findings = _sess._detect_build_audit_divergence([_Pkg('a'), _Pkg('b')])
+    assert _findings == [], _findings
+
+
+def test_detect_build_audit_divergence_excludes_skip_src():
+    """skip_src packages are the operator's declared "leave alone" set.
+    Audit may flag them as needs_build (they're unbuilt by design); the
+    divergence gate must NOT count that as a build/audit disagreement.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+
+    _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+    _sess.cache = MagicMock(skip_src={'opt-out'})
+    _sess.config = MagicMock(dir_log='/tmp/divergence-test-irrelevant')
+    _sess._source_state = lambda _n, _s: 'needs_build'  # type: ignore
+
+    class _Pkg:
+        def __init__(self, name): self.package = name
+
+    _findings = _sess._detect_build_audit_divergence([_Pkg('opt-out')])
+    assert _findings == [], (
+        f"skip_src package must be excluded; got {_findings!r}")
+
+
+def test_detect_build_audit_divergence_flags_stale_pass_tunneled_record():
+    """The exact bug class this gate exists for: build record says
+    `phase=tunneled` but the on-disk file is missing/wrong-shape so
+    audit classifies as 'stale_pass'.  Before the audit fix, audit
+    would have said 'tunneled' and the divergence would have gone
+    unnoticed; the gate is the safety net for any future regression.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+    import utils as _u
+
+    _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+    _sess.cache = MagicMock(skip_src=set())
+    _sess.config = MagicMock(dir_log='/tmp/divergence-test-irrelevant')
+    _sess._source_state = lambda _n, _s: 'stale_pass'  # type: ignore
+
+    class _Pkg:
+        package = 'firefox-esr'
+
+    _orig_read = _u.read_build_record
+    _u.read_build_record = lambda _bl, _n: {
+        'phase':  'tunneled',
+        'status': 'TUNNELED',
+    }
+    try:
+        _findings = _sess._detect_build_audit_divergence([_Pkg()])
+    finally:
+        _u.read_build_record = _orig_read
+
+    assert _findings == [('firefox-esr', 'stale_pass', 'tunneled')], _findings
 
 
 def test_cmd_source_repair_clears_interrupted_record():
@@ -26851,6 +27237,7 @@ def main() -> int:
         test_comp03_phase4_tunnel_sub_phase_runs_serial_before_parallel,
         test_comp03_phase4_build_one_source_skip_src_returns_skipped,
         test_comp03_phase4_build_one_source_tunneled_calls_do_tunnel,
+        test_build_one_source_tunneled_branch_uses_pristine_for_check_build,
         # COMP-03 Phase 5: per-container resource caps + 137 detection
         test_comp03_phase5_resource_kwargs_empty_when_uncapped,
         test_comp03_phase5_resource_kwargs_translates_build_cpus_to_nano_cpus,
@@ -26972,6 +27359,13 @@ def main() -> int:
         test_classify_build_record_full_matrix,
         test_build_record_intended_vs_built_version_drift_visible,
         test_source_state_interrupted_when_record_is_non_terminal,
+        test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass,
+        test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
+        test_detect_build_audit_divergence_flags_missing_binary_with_no_fail_record,
+        test_detect_build_audit_divergence_silent_when_record_says_fail,
+        test_detect_build_audit_divergence_silent_on_clean_state,
+        test_detect_build_audit_divergence_excludes_skip_src,
+        test_detect_build_audit_divergence_flags_stale_pass_tunneled_record,
         test_cmd_source_repair_clears_interrupted_record,
         test_download_file_retries_on_transient_timeout,
         test_download_file_retries_on_requests_connection_error,

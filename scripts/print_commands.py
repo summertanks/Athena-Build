@@ -97,6 +97,18 @@ def _print_config(session, *_extras) -> None:
     """Overall build configuration.  Calls out to mirrors / snapshot / paths
     sub-views for the nested sections to keep this digestible."""
     cfg = session.config
+    _mode = getattr(cfg, 'build_mode', 'distribution')
+    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'individual'
+                   else tui.COLOR_INFO)
+    if _mode == 'individual':
+        import utils as _utils
+        _indl_path = getattr(cfg, 'indllist_path', '')
+        _names = _utils.parse_indl_list(_indl_path) if _indl_path else []
+        tui.console.print(
+            f"MODE: individual  [{len(_names)} pkg(s) in indl.list]",
+            _mode_color)
+
+    tui.console.print("")
     tui.console.print("Build Configuration:")
     tui.console.print(f"    Arch                : {cfg.arch}")
     tui.console.print(f"    Release             : {cfg.release}")
@@ -105,6 +117,7 @@ def _print_config(session, *_extras) -> None:
     tui.console.print(f"    Distribution        : {cfg.build_distribution}")
     tui.console.print(f"    Build codename      : {cfg.build_codename}")
     tui.console.print(f"    Build version       : {cfg.build_version}")
+    tui.console.print(f"    Mode                : {_mode}  ([Build] Mode)", _mode_color)
     tui.console.print(
         f"    Recommends in repo  : "
         f"{getattr(cfg, 'include_recommends', False)}  "
@@ -115,13 +128,13 @@ def _print_config(session, *_extras) -> None:
     if getattr(cfg, 'build_options', None):
         tui.console.print(f"    Build options       : {', '.join(sorted(cfg.build_options))}")
     tui.console.print("")
-    tui.console.print(f"  Mirrors             : {len(cfg.mirrors)}  (use `print mirrors` for detail)")
+    tui.console.print(f"  Mirrors             : {len(cfg.mirrors)}")
     if cfg.snapshot_enabled:
-        tui.console.print("  Snapshot            : enabled    (use `print snapshot` for detail)")
+        tui.console.print("  Snapshot            : enabled")
     else:
         tui.console.print("  Snapshot            : disabled (live mirrors)")
-    tui.console.print(f"  Tunneled packages   : {len(getattr(cfg, 'tunnel_packages', []))}  (use `print tunneled`)")
-    tui.console.print(f"  Paths               : working dir {cfg.working_dir}  (use `print paths`)")
+    tui.console.print(f"  Tunneled packages   : {len(getattr(cfg, 'tunnel_packages', []))}")
+    tui.console.print(f"  Paths               : working dir {cfg.working_dir}")
 
 
 def _print_mirrors(session, *_extras) -> None:
@@ -214,9 +227,8 @@ def _print_state(session, *_extras) -> None:
         _mark = '✓' if _ok else '·'
         tui.console.print(f"  [{_mark}] {label}  {desc}")
 
-    # MIRROR-02: mode is the first thing on the screen so the
-    # operator can never confuse a partial indl pipeline for a
-    # broken dist build.
+    # Mode is the first thing on the screen so the operator can never
+    # confuse a partial indl pipeline for a broken dist build.
     _mode = getattr(getattr(session, 'config', None), 'build_mode',
                     'distribution')
     _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'individual'
