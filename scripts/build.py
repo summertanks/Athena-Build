@@ -726,7 +726,7 @@ class BuildSession:
 
     def cmd_clean_download(self, *args):
         """Wipe tunneled .deb downloads.  These are re-fetched on
-        demand by `repo tunnel` so cleaning is safe."""
+        demand by `source tunnel` so cleaning is safe."""
         self._wipe_dir_contents(
             'download', self.config.dir_download,
             sudo=False, skip_prompt='force' in args)
@@ -3320,12 +3320,14 @@ class BuildSession:
         """Dispatcher for `repo <action>` — LOCAL .deb pool lifecycle.
 
         Remote-endpoint state (publish, audit-remote, federation
-        membership) lives under `mirror`.  `repo` covers the
-        chroot/ISO-facing pool on this host: audit + repair + indexing.
+        membership) lives under `mirror`.  Source-producing operations
+        (sync, build, tunnel) live under `source` — `tunnel` migrated
+        from `repo` to `source` in MIRROR-01 Phase 8 because its
+        endpoint is a built .deb (same artefact shape as `source build`).
+        `repo` now covers the chroot/ISO-facing pool on this host:
+        audit + repair + indexing.
         """
         _table = {
-            'tunnel':         'pull prebuilt .debs from upstream Debian repo '
-                              '(repo tunnel [pkg…])',
             'audit':          'pre-ship gate: dep + conflict + stale-files + '
                               'content integrity + NMU residue.  Pass `quick` '
                               'to skip the slow (~30s) integrity scan.  Pass '
@@ -3339,7 +3341,12 @@ class BuildSession:
                               'into publish/',
         }
         if action == 'tunnel':
-            return self.cmd_tunnel_package(*args)
+            console.print(
+                "`repo tunnel` moved to `source tunnel` in MIRROR-01 "
+                "Phase 8 (tunnel's endpoint is a built .deb — same "
+                "shape as source build).  Use `source tunnel [pkg…]`.",
+                tui.COLOR_WARNING)
+            return False
         if action == 'audit':
             return self.cmd_audit(*args)
         if action == 'repair':
@@ -8772,10 +8779,16 @@ class BuildSession:
             'sync':     'fetch source tarballs: `source sync` (bulk) or '
                         '`source sync <pkg> [force]` (per-pkg)',
             'build':    'build sources: source build [force] [pkg | live | installer | recommended | all | <pkg>…] [[profile,…]]',
+            'tunnel':   'pull prebuilt .debs from upstream Debian repo '
+                        'for packages we do NOT build from source: '
+                        '`source tunnel [pkg…]`.  Records a tunneled '
+                        'build.json claim so the package round-trips '
+                        'through `mirror publish` like any built .deb.',
             'audit':    'READ-ONLY: report build-state of every source — '
                         'ok / needs_sync / needs_build / stale_pass / '
                         'interrupted / tunneled.  Add `summary` for terse '
-                        'count + subset breakdown.',
+                        'count + subset breakdown.  Add `verbose` to list '
+                        'names in tunneled / fail / no_pkgs buckets too.',
             'repair':   'MUTATOR: clear stale_pass / interrupted build '
                         'records so next `source build` rebuilds.',
             'fork':     'manage fork packages: `source fork <pkg>` '
@@ -8786,6 +8799,8 @@ class BuildSession:
             return self.cmd_source_sync(*args)
         if action == 'build':
             return self.cmd_source_build(*args)
+        if action == 'tunnel':
+            return self.cmd_tunnel_package(*args)
         if action == 'audit':
             return self.cmd_source_audit(*args)
         if action == 'repair':

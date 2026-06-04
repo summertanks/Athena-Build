@@ -2020,10 +2020,14 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_patch',     'refresh',  'cmd_patch_refresh'),
         ('cmd_source',    'sync',     'cmd_source_sync'),
         ('cmd_source',    'build',    'cmd_source_build'),
-        ('cmd_repo',      'tunnel',   'cmd_tunnel_package'),
         # 'reload' removed from cmd_repo in P4 (2026-05-23) — fork
         # operations live under cmd_source now.
         ('cmd_source',    'fork',     'cmd_source_fork'),
+        # 'tunnel' moved from cmd_repo → cmd_source in MIRROR-01
+        # Phase 8 (2026-06-04) — endpoint is a built .deb, same
+        # artefact shape as source build.  `repo tunnel` now prints
+        # a deprecation hint and returns False.
+        ('cmd_source',    'tunnel',   'cmd_tunnel_package'),
         ('cmd_repo',      'audit',    'cmd_audit'),
         ('cmd_repo',      'repair',   'cmd_repo_repair'),
         # cmd_repo 'index' is now multi-token ('index full' / 'index
@@ -13122,7 +13126,9 @@ def test_repo_dispatcher_advertises_merged_package_actions():
     )
     assert _m, "cmd_repo dispatcher not found"
     _disp = _m.group(0)
-    for _action in ('tunnel', 'reload', 'audit', 'repair', 'index'):
+    # 'tunnel' MOVED to cmd_source in MIRROR-01 Phase 8 — cmd_repo
+    # still carries the deprecation hint, no longer the working dispatch
+    for _action in ('audit', 'repair', 'index'):
         assert f"'{_action}'" in _disp, (
             f"cmd_repo dispatcher missing action {_action!r}"
         )
@@ -19337,9 +19343,12 @@ def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
 
 
 def test_snapshot_state_roundtrip_and_resolve_precedence():
-    """The durable pins live in config/snapshot.state (NOT cache), and
-    resolve_snapshot_timestamp prefers state.current over [Snapshot] Timestamp
-    — so the pin survives `clean cache` and the operator override wins."""
+    """The durable pin lives in config/snapshot.state (NOT cache), and
+    resolve_snapshot_timestamp prefers state.current over [Snapshot]
+    Timestamp — so the pin survives `clean cache` and the operator
+    override wins.  MIRROR-01 Phase 8: only `current` survives; legacy
+    base/published/external kwargs are accepted (signature compat) but
+    silently dropped at write time."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import utils
     with tempfile.TemporaryDirectory() as _tmp:
@@ -19358,16 +19367,56 @@ def test_snapshot_state_roundtrip_and_resolve_precedence():
         utils._SNAPSHOT_TS_CACHE.clear()
         # set a durable current override
         utils.write_snapshot_state(_cfg, current='20260601T000000Z')
-        assert utils.read_snapshot_state(_cfg)['current'] == '20260601T000000Z'
+        assert utils.read_snapshot_state(_cfg) == {
+            'current': '20260601T000000Z'}
         # state.current wins over the explicit [Snapshot] Timestamp
         assert utils.resolve_snapshot_timestamp(_cfg) == '20260601T000000Z'
-        # base set independently; both retained
-        utils.write_snapshot_state(_cfg, base='20260514T083402Z')
+        # Legacy kwargs accepted for signature compat but DROPPED on
+        # write — only `current` persists; base/published/external
+        # don't drive live code anymore (per-mirror state files own
+        # publish-target pins).
+        utils.write_snapshot_state(_cfg, base='20260514T083402Z',
+                                   published='20260301T000000Z',
+                                   external=True)
         _st = utils.read_snapshot_state(_cfg)
-        assert _st['base'] == '20260514T083402Z'
-        assert _st['current'] == '20260601T000000Z'
+        assert _st == {'current': '20260601T000000Z'}, _st
         # the state file is under config/, not cache/
         assert os.path.exists(os.path.join(_cfg_dir, 'snapshot.state'))
+
+
+def test_snapshot_state_writer_drops_legacy_fields_from_old_files():
+    """A pre-MIRROR-01 snapshot.state file carrying base/published/
+    external is auto-cleaned on the next write — the writer reads,
+    rewrites just `current`, drops everything else."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import json as _json
+    import utils
+    with tempfile.TemporaryDirectory() as _tmp:
+        _cfg_dir = os.path.join(_tmp, 'config')
+        os.makedirs(_cfg_dir)
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache = _tmp
+            snapshot_enabled = True
+            snapshot_timestamp_config = ''
+        _cfg = _Cfg()
+        # Hand-write a pre-Phase-8 file with the four-field shape
+        _path = utils.snapshot_state_path(_cfg)
+        with open(_path, 'w') as _fh:
+            _json.dump({
+                'current':   '20260601T000000Z',
+                'base':      '20260514T083402Z',
+                'published': '20260301T000000Z',
+                'external':  True,
+            }, _fh)
+        # Reader tolerates the legacy shape (returns all four)
+        _read_legacy = utils.read_snapshot_state(_cfg)
+        assert 'base' in _read_legacy and 'published' in _read_legacy
+        # Next write (advancing the pin) drops legacy fields entirely
+        utils.write_snapshot_state(_cfg, current='20260615T000000Z')
+        _read_clean = utils.read_snapshot_state(_cfg)
+        assert _read_clean == {'current': '20260615T000000Z'}, _read_clean
 
 
 def test_snapshot_base_subcommand_fully_removed():
@@ -25151,6 +25200,7 @@ def main() -> int:
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator
         test_snapshot_state_roundtrip_and_resolve_precedence,
+        test_snapshot_state_writer_drops_legacy_fields_from_old_files,
         test_snapshot_base_subcommand_fully_removed,
         test_list_snapshots_between_filters_range_and_unions_keys,
         test_snapshot_select_interactive_sets_chosen_current,
