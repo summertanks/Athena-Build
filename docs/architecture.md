@@ -86,8 +86,9 @@ The state machine is rendered in [`docs/diagrams/build-fsm.png`](diagrams/build-
 
 ## Module overview
 
-The toolchain is 21 Python modules under `scripts/` plus an 11-file `tui/`
-package.  Grouped by role:
+The toolchain is 25 top-level Python modules under `scripts/`, plus a
+9-file `scripts/coord/` MIRROR-01 federation-sidecar package and an
+11-file `scripts/tui/` curses package.  Grouped by role:
 
 ### Foundation
 - **`utils.py`** — `BuildConfig` (the canonical config the rest of the
@@ -115,9 +116,26 @@ package.  Grouped by role:
 - **`build.py`** — `BuildSession` owns the full pipeline state and the
   `cmd_*` handlers the TUI dispatches.  Hosts `BuildFlags`, the autorun
   chains (`cmd_auto_run_live`/`_installer`/`_disk`), `_build_one_source`
-  (COMP-03 worker), and the publish dispatcher (`cmd_repo_publish` →
-  `_publish_via_ssh` / `_publish_via_local`).  ~8k LOC; biggest module
-  by far.
+  (COMP-03 worker), the `cmd_mirror_*` umbrella (MIRROR-01 federation:
+  `add`/`remove`/`list`/`summary`/`status`/`publish`/`pull`/`audit`/
+  `query`/`reconcile-neighbours`/`builders`/`conflict`), and `cmd_repo_*`
+  (LOCAL pool lifecycle: `tunnel`/`audit`/`repair`/`index`).  ~9k LOC;
+  biggest module by far.
+- **`mirror.py`** — per-mirror durable state CRUD and the non-network
+  helpers behind the `mirror` umbrella: `add_mirror` / `remove_mirror` /
+  `read_mirror_state` / `update_mirror_state` (one
+  `config/mirror.<name>.state` per peer), `all_mirror_urls` (canonical
+  federation source-of-truth), `neighbours_drift` (consistency tag for
+  `mirror list`), `reconcile_neighbours` (fan-out federation propagation).
+- **`scripts/coord/`** — MIRROR-01 federation sidecar (9 modules):
+  `schema` (claim + coord-head schemas, `canonicalize_neighbours`),
+  `identity` (Ed25519 keypair + keyring), `store` (per-builder JSONL
+  claim ledger), `policy` (BLOCK on hash conflict, PUBLISH_HALT
+  sentinel), `head` (read/write tier-1-signed `coord-head.json`),
+  `reconcile` (audit_local + audit_cross + `check_federation_consistency`
+  + `detect_hash_conflicts`), `transport` (rsync + ssh flock primitives),
+  `publish` (11-step `remote_publish` state machine with federation gate
+  + first-publish bootstrap + per-file `.deb` push).
 
 ### Build execution
 - **`buildcontainer.py`** — `BuildContainer.build(src)` runs
@@ -145,24 +163,42 @@ package.  Grouped by role:
 - **`disk_image.py`** — `build_disk_image` produces a sparse qcow2 of
   a pre-installed Asgard system (COMP-09).
 - **`apt_repo.py`** — `dpkg-scanpackages` orchestration; `apt-ftparchive
-  release`; sign helpers; `remote_reindex_and_sign` / `local_reindex_and_sign`
-  (COMP-02 publish twins, closing over `_reindex_and_sign_via`).
+  release`; sign helpers; `remote_reindex_and_sign` /
+  `local_reindex_and_sign` close over `_reindex_and_sign_via` and feed
+  `mirror publish` (ssh and local-fs transports respectively).
 - **`repo_audit.py`** — `published_ledger` (the `+asg uN` bump authority);
   `_write_signed_manifest` / `_read_signed_manifest` (fail-closed, STA-21);
   cross-mirror manifest reconciliation (consumed by `mirror audit`).
 - **`fork_mirror.py`** — local fork tree mirror generator (the `file://`
   flat-shaped mirror cache reads alongside snapshot mirrors).
+- **`sbom.py`** — CycloneDX 1.5 JSON SBOM per build, one component per
+  source with PURL + patch-set-hash + Athena-namespaced provenance
+  properties (CONF-07).
+- **`identity_scan.py`** — three-stage residue audit
+  (`audit_identity` over fork content / chroot hooks / staged ISO) with
+  word-boundary token regex and operator-reviewable allow-list at
+  `audit/identity-allowlist` (CONF-10).
 
 ### Operator surface
-- **`cli.py`** — headless launcher (`--headless`); registers Cli as
-  `tui.tui_instance` so the curses-only paths fall through cleanly.
+- **`cli.py`** — headless launcher (`--headless` / `--cmd`); registers
+  Cli as `tui.tui_instance` so the curses-only paths fall through cleanly.
+  ANSI colour on TTY, `--yes`-respecting prompts, ATHENA_SUDO_PASSWORD
+  env-var pickup (UX-05 a–g).
 - **`tui/`** — 11-file curses package: `tui.py` (event loop),
   `widgets.py` (ProgressBar, Spinner), `render.py`, `dispatcher.py`,
   `facade.py` (console_mark / console_trim_to surface), state, theme,
   geometry, footer, prompt, history.
 - **`print_commands.py`** — `print state` / `print mirrors` / `print
-  recommended` / etc.  Pulls from `BuildSession.flags`,
-  `BuildConfig`, `DependencyTree`.
+  extras` / `print build-times` / `print signing` / etc.  Pulls from
+  `BuildSession.flags`, `BuildConfig`, `DependencyTree`.
+- **`persistence.py`** — `save_session` / `restore_session` round-trip
+  the parsed `Cache` + `DependencyTree` via pickle protocol 5 + gzip
+  under `<dir_cache>/`; fingerprint-gated (config + mirror InReleases +
+  fork tree-hashes + patch-set hashes + snapshot + arch + profiles)
+  so a `cache parse`-invalidating change refuses restore.  Drives
+  `cmd_resume` and `--resume` (UX-04).
+- **`select_packages.py`** — curses-only interactive package picker
+  behind `cache select`.
 
 ## Process invariants
 
