@@ -278,6 +278,63 @@ def test_buildconfig_mode_rejects_unknown_value():
         assert 'banana' in cfg.error_str
 
 
+def test_source_audit_naturally_scopes_to_indl_in_individual_mode():
+    """MIRROR-02 chunk 4: cmd_source_audit walks dep_tree.selected_srcs.
+    Chunk 2 populates selected_srcs directly from indl.list in
+    individual mode (no closure walk).  So source audit naturally
+    scopes to the indl subset — no explicit per-mode filter needed.
+    Test stubs a BuildSession where selected_srcs has just one
+    source, runs cmd_source_audit, asserts the per-state counts add
+    up to 1 (not the corpus size)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    class _Flags:
+        cache_ready = True
+        dep_check_ready = True
+    _sess.flags = _Flags()
+
+    # Fake a Source object with the minimum surface cmd_source_audit
+    # walks (name + a stable .source_version for predictable hashing).
+    class _Src:
+        def __init__(self, name):
+            self.name = name
+            self.source_version = '1.0-1'
+
+    class _DepTree:
+        selected_srcs = {'firefox-esr': _Src('firefox-esr')}
+        live_exclusive_src_names: set = set()
+        installer_exclusive_src_names: set = set()
+        pool_extras_src_names: set = set()
+        extras_src_names: set = set()
+    _sess.dep_tree = _DepTree()
+    _sess.udeb_dep_tree = None     # indl mode: installer is N/A
+    _sess.container = None         # no build container — preflight audit
+                                   # block at build.py:7463 is skipped
+    # _source_state is a method on BuildSession; for this test just
+    # return 'ok' for every source (we're asserting on the count, not
+    # the classification).
+    _sess._source_state = lambda _n, _s: 'ok'                # type: ignore[method-assign]
+    _sess._print_obsolete_patch_warning = lambda _srcs: None # type: ignore[method-assign]
+
+    _lines: 'list[str]' = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _sess.cmd_source_audit()
+    finally:
+        build.console.print = _orig
+    _joined = '\n'.join(_lines)
+    # Audit reports the corpus-size totals.  selected_srcs has 1
+    # entry → total = 1 (would be hundreds in dist mode).
+    assert '1  total' in _joined, _joined
+    assert '1  ok' in _joined, _joined
+
+
 def test_chroot_iso_builds_refuse_in_individual_mode():
     """MIRROR-02 chunk 3: every chroot/ISO entry point refuses cleanly
     when [Build] Mode = individual.  Verified for all five commands:
@@ -25093,6 +25150,7 @@ def main() -> int:
         test_buildconfig_mode_individual_parses,
         test_buildconfig_mode_rejects_unknown_value,
         test_parse_indl_list_strips_comments_dedups_preserves_order,
+        test_source_audit_naturally_scopes_to_indl_in_individual_mode,
         test_chroot_iso_builds_refuse_in_individual_mode,
         test_refuse_in_individual_mode_is_a_no_op_in_distribution,
         test_cache_parse_individual_mode_resolves_named_pkgs_only,
