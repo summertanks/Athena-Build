@@ -4558,6 +4558,11 @@ class BuildSession:
                 f"{len(_by_builder)} builder(s)")
             # 3. Walk claims; download per-file for our current snapshot
             _dl = _skip_own = _skip_present = _mismatch = _failed = 0
+            # MIRROR-02 chunk 10: collect successfully-downloaded
+            # claims per package so we can write a single local
+            # build.json record per source.  Indexed by package name;
+            # each entry holds the list of (claim, owner_builder).
+            _per_pkg_downloads: 'dict[str, list[tuple[dict, str]]]' = {}
             for _builder, _claims in _by_builder.items():
                 for _c in _claims:
                     if _c.get('claim_state') == 'retracted':
@@ -4577,6 +4582,15 @@ class BuildSession:
                     _local_path = os.path.join(_dst_dir, _fn)
                     if os.path.isfile(_local_path):
                         _skip_present += 1
+                        # Even when already present, record the claim
+                        # for the per-package build.json write below —
+                        # the on-disk file is the same SHA, so we want
+                        # the record to reflect our provenance even if
+                        # we didn't have to download it now.
+                        _pkg_name = str(_c.get('package') or '')
+                        if _pkg_name:
+                            _per_pkg_downloads.setdefault(_pkg_name, []).append(
+                                (_c, _builder))
                         continue
                     # Source path on the mirror = same relative layout
                     # under <pool_root>/dists/<codename>/<comp>/...
@@ -4605,6 +4619,19 @@ class BuildSession:
                         _mismatch += 1
                         continue
                     _dl += 1
+                    _pkg_name = str(_c.get('package') or '')
+                    if _pkg_name:
+                        _per_pkg_downloads.setdefault(_pkg_name, []).append(
+                            (_c, _builder))
+            # MIRROR-02 chunk 10: write local build.json record per
+            # pulled package so source audit + repo audit see the .deb
+            # as already-present (not needs_build).  Tunneled claims
+            # land as phase=tunneled + republished_from carried over.
+            # Non-tunneled claims land as phase=done + pulled_from
+            # annotation so we can distinguish "we built it" from
+            # "we pulled it" later.
+            self._mirror_pull_write_build_records(
+                _n, _per_pkg_downloads)
             console.print(
                 f"  downloaded={_dl} skipped_own={_skip_own} "
                 f"skipped_present={_skip_present} "
@@ -4614,6 +4641,114 @@ class BuildSession:
             if _mismatch or _failed:
                 _all_ok = False
         return _all_ok
+
+    def _mirror_pull_write_build_records(
+        self, mirror_name: str,
+        per_pkg: 'dict[str, list[tuple[dict, str]]]',
+    ) -> None:
+        """MIRROR-02 chunk 10: per-package build.json writer for
+        `cmd_mirror_pull`.
+
+        For each source package in `per_pkg` (mapping
+        package_name → list of (claim, owner_builder)), write (or
+        update) a local `<pkg>.build.json` record reflecting the pulled
+        state:
+
+          - If any claim has `republished_from` (tunneled on mirror) →
+            local record `phase='tunneled'`, `republished_from` copied
+            verbatim per-filename.  matches what cmd_tunnel_package
+            would have written if we'd tunneled locally.
+          - Else → local record `phase='done'`, `pulled_from` set to
+            `{mirror_name, owner_builder}` so subsequent `source
+            audit` runs know the file's provenance.
+
+        SKIPS packages with no claims in `per_pkg`.  Skips on write
+        failure (logged, but the pull itself succeeded — the .deb is
+        on disk; the record is best-effort metadata).
+        """
+        if not per_pkg:
+            return
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        try:
+            os.makedirs(_buildlog, exist_ok=True)
+        except OSError as _e:
+            logger.warning(
+                f"mirror pull: could not create buildlog dir "
+                f"{_buildlog}: {_e}")
+            return
+        for _pkg_name, _items in per_pkg.items():
+            if not _items:
+                continue
+            _claims = [_c for _c, _ in _items]
+            _outputs = sorted({str(_c.get('filename') or '') for _c in _claims
+                               if _c.get('filename')})
+            _output_hashes = {
+                str(_c.get('filename') or ''): str(_c.get('sha256') or '')
+                for _c in _claims if _c.get('filename')
+            }
+            # republished_from is per-file; collect across the package's
+            # claims.  Empty when none are tunneled.
+            _republished_from: 'dict[str, dict]' = {}
+            for _c in _claims:
+                _rfrom = _c.get('republished_from')
+                if isinstance(_rfrom, dict) and _rfrom:
+                    _fn = str(_c.get('filename') or '')
+                    if _fn:
+                        _republished_from[_fn] = _rfrom
+            _is_tunneled = bool(_republished_from)
+            # Owner builder for the local pulled_from annotation.
+            # All claims for one source on a mirror should share an
+            # owner (or all be tunneled).  Pick the first non-empty.
+            _owner_builder = ''
+            for _c, _bid_remote in _items:
+                if _bid_remote and not _is_tunneled:
+                    _owner_builder = str(_bid_remote)
+                    break
+            _now = utils._utc_now_iso()
+            # Use the first claim's metadata for the record header
+            # (intended_version, built_version, finished/built_at).
+            _head_claim = _claims[0]
+            _built_version = str(_head_claim.get('built_version') or '')
+            _intended_version = str(_head_claim.get('intended_version')
+                                    or _built_version)
+            # Idempotent: rewrite the record.  Existing local record
+            # (if any) is overwritten — the .deb on disk is the
+            # authoritative artefact; the build.json is a derived
+            # description of it.
+            _existing = utils.read_build_record(_buildlog, _pkg_name)
+            if _existing is not None:
+                _rec = dict(_existing)
+            else:
+                _rec = utils.new_build_record(
+                    package=_pkg_name,
+                    intended_version=_intended_version,
+                    patch_set_hash='',  # we didn't build it
+                    started=_now,
+                )
+            _rec.update({
+                'package':          _pkg_name,
+                'intended_version': _intended_version,
+                'built_version':    _built_version,
+                'phase':            'tunneled' if _is_tunneled else 'done',
+                'status':           'TUNNELED' if _is_tunneled else 'PASS',
+                'finished':         _now,
+                'elapsed_seconds':  0.0,
+                'exit_code':        0,
+                'oom_killed':       False,
+                'output_count':     len(_outputs),
+                'outputs':          _outputs,
+                'output_hashes':    _output_hashes,
+                'republished_from': _republished_from,
+                'pulled_from':      (None if _is_tunneled else {
+                    'mirror_name':    mirror_name,
+                    'owner_builder':  _owner_builder,
+                }),
+            })
+            try:
+                utils.write_build_record(_buildlog, _rec)
+            except OSError as _e:
+                logger.warning(
+                    f"mirror pull: write build.json for {_pkg_name}: {_e}")
 
     def cmd_mirror_audit(self, *args):
         """mirror audit [<name>] — federation consistency + signature integrity.
