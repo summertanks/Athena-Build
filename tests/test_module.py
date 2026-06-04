@@ -19961,25 +19961,21 @@ def test_cache_build_gates_on_snapshot_pins():
                      _m.group(0)), "cache build must gate on _ensure_snapshot_pins"
 
 
-def test_repo_refresh_is_thin_wrapper():
-    """repo refresh chains the update-aware steps and routes the publish
-    leg to whichever target shape is configured:
-
-      source sync → source build all → mirror publish (when mirrors set)
-                                     → repo publish ssh full (legacy)
-
-    Pre-flight gates on `_update_build_pending` (MIRROR-01 Phase 4),
-    which itself reads per-mirror state OR falls back to the legacy
-    snapshot.state.published when no mirrors are configured."""
+def test_refresh_top_level_chains_steps():
+    """MIRROR-01 cleanup: `refresh` lives at the top level (alongside
+    `autorun`).  It chains source sync → build all → publish:
+      * mirrors configured → cmd_mirror_publish (federation-gated)
+      * no mirrors → cmd_repo_publish('ssh', 'full') (legacy fallback)
+    Pre-flight gates on `_update_build_pending` (Phase 4 multi-mirror)."""
     import re
     _bp = os.path.join(_ROOT, 'scripts', 'build.py')
     with open(_bp) as fh:
         _body = fh.read()
-    _m = re.search(r'def cmd_repo_refresh\(self.*?(?=\n    def )',
+    _m = re.search(r'def cmd_refresh\(self.*?(?=\n    def )',
                    _body, re.DOTALL)
-    assert _m, "cmd_repo_refresh not found"
+    assert _m, "cmd_refresh not found"
     _b = _m.group(0)
-    assert 'takes no target' in _b, "repo refresh must reject a target arg"
+    assert 'takes no target' in _b, "refresh must reject a target arg"
     assert 'cmd_source_sync(' in _b, "must run source sync"
     assert "cmd_source_build('all')" in _b, "must run source build all"
     # BOTH publish paths must be present (mirror-aware + legacy fallback)
@@ -19994,6 +19990,16 @@ def test_repo_refresh_is_thin_wrapper():
     assert '_update_build_pending(' in _b, (
         "must short-circuit via _update_build_pending (replaces the legacy "
         "_snapshot_published direct check)")
+    # Top-level registration
+    assert "register_command('refresh'" in _body, (
+        "refresh must be registered at the top level")
+    # `repo refresh` survives ONLY as a deprecation forwarder
+    _r = re.search(r'def cmd_repo_refresh\(self.*?(?=\n    def )',
+                   _body, re.DOTALL)
+    assert _r, "cmd_repo_refresh deprecation stub missing"
+    _rb = _r.group(0)
+    assert 'DEPRECATED' in _rb, "repo refresh must print deprecation notice"
+    assert 'self.cmd_refresh(' in _rb, "repo refresh must forward to cmd_refresh"
 
 
 def test_publish_full_folds_index_merge_prune_and_gates_rsync():
@@ -24750,7 +24756,7 @@ def main() -> int:
         test_ensure_snapshot_pins_prompts_and_writes_when_unset,
         test_ensure_snapshot_pins_aborts_when_no_selection,
         test_cache_build_gates_on_snapshot_pins,
-        test_repo_refresh_is_thin_wrapper,
+        test_refresh_top_level_chains_steps,
         test_publish_full_folds_index_merge_prune_and_gates_rsync,
         test_source_build_autodetects_update_mode,
         test_do_update_build_sets_source_build_ready_on_nothing_to_build,
