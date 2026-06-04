@@ -29,7 +29,7 @@ bytes = same line).
 
 import logging
 import os
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import head as _head
 from . import identity as _identity
@@ -111,6 +111,74 @@ def generate_pending_claims(
             ))
     _pending.sort(key=lambda _c: (_c['package'], _c['filename']))
     return _pending
+
+
+def filter_pending_by_ownership(
+    builder_id: str,
+    candidates: List[dict],
+    existing_owners: Dict[str, dict],
+) -> Tuple[List[dict], List[dict]]:
+    """MIRROR-02 chunk 8: apply the publish-time ownership decision
+    matrix to each candidate claim.
+
+    Returns ``(kept_pending, blocked)`` where ``kept_pending`` is the
+    list of candidates we're allowed to publish (caller signs + appends
+    + uploads), and ``blocked`` is a list of finding dicts
+    ``{filename, owner, our_version, owner_version, reason}`` for the
+    candidates we cannot publish under current ownership rules.
+
+    Decision matrix (per filename):
+      - No existing owner record         → KEEP (we become owner)
+      - Owner is us                      → KEEP (re-claim is no-op)
+      - Tunneled (no owner)              → KEEP (we take ownership)
+      - Owner is other, our_ver > theirs → KEEP (ownership transfers)
+      - Owner is other, our_ver <= theirs → BLOCK (`ownership_blocked`)
+
+    Version compare via apt_pkg.version_compare so epoch/NMU suffixes
+    sort correctly (same convention as `dep_drift` and elsewhere).
+    """
+    import apt_pkg
+    _kept: List[dict] = []
+    _blocked: List[dict] = []
+    for _c in candidates:
+        _fn = _c.get('filename')
+        if not isinstance(_fn, str):
+            continue
+        _owner = existing_owners.get(_fn)
+        if _owner is None:
+            _kept.append(_c)
+            continue
+        _owner_builder = _owner.get('builder')
+        if _owner_builder is None:
+            # Tunneled — anyone can take ownership by republishing.
+            _kept.append(_c)
+            continue
+        if _owner_builder == builder_id:
+            # Already ours — keep (re-claim is harmless; the
+            # _known dedup in generate_pending_claims usually skips
+            # this, but cover the case for callers that don't dedup
+            # by filename).
+            _kept.append(_c)
+            continue
+        # Owner is another builder.  Version-compare.
+        _ours = str(_c.get('built_version') or '')
+        _theirs = str(_owner.get('version') or '')
+        try:
+            _cmp = apt_pkg.version_compare(_ours, _theirs)
+        except (SystemError, TypeError):
+            _cmp = 0
+        if _cmp > 0:
+            _kept.append(_c)
+            continue
+        _blocked.append({
+            'filename':       _fn,
+            'owner':          _owner_builder,
+            'our_version':    _ours,
+            'owner_version':  _theirs,
+            'reason':         ('owner is another builder and our '
+                               'version is not strictly higher'),
+        })
+    return _kept, _blocked
 
 
 def fill_sizes_from_pool(claims: List[dict], pool_index: dict) -> None:
@@ -468,6 +536,21 @@ def remote_publish(
             read_build_record=read_build_record,
         )
         _pending = [_p for _p in _pending if _p['filename'] not in _remote_known]
+        # MIRROR-02 chunk 8: ownership decision matrix.  Build the
+        # cross-builder owners projection and filter our candidates.
+        # `ownership_blocked` findings surface in the publish detail
+        # so the operator sees exactly which packages were refused
+        # and why; the rest of the publish proceeds (partial-success
+        # is the right shape per the design).
+        _owners = _store.project_owners(_by_builder)
+        _pending, _ownership_blocked = filter_pending_by_ownership(
+            builder_id, _pending, _owners)
+        if _ownership_blocked:
+            for _b in _ownership_blocked:
+                logger.warning(
+                    f"ownership_blocked: {_b['filename']} owned by "
+                    f"{_b['owner']!r} at {_b['owner_version']!r}; "
+                    f"our {_b['our_version']!r} not strictly higher")
         fill_sizes_from_pool(_pending, _pool)
 
         # Step 5b — MIRROR-01 Phase 3b: per-file .deb push.  For each
