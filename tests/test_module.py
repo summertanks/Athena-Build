@@ -23193,7 +23193,8 @@ def _coord_schema_v2_modules():
 def test_canonicalize_neighbours_lowercases_strips_slash_sorts_dedups():
     """Canonical form: lowercase + trailing-slash-strip + sort + dedup.
     Used by both sides of the federation gate so trivial differences
-    (case, slash, order) don't cause false BLOCK signals."""
+    (case, slash, order) don't cause false BLOCK signals.  v2
+    back-compat — `canonicalize_neighbours` returns flat list[str]."""
     _s, _ = _coord_schema_v2_modules()
     _got = _s.canonicalize_neighbours([
         'SSH://USER@HOST/path/',
@@ -23209,18 +23210,90 @@ def test_canonicalize_neighbours_lowercases_strips_slash_sorts_dedups():
     ], _got
 
 
+def test_canonicalize_neighbour_records_promotes_v2_and_passes_v3():
+    """v3 helper: v2 strings auto-promoted to records with empty meta;
+    v3 dicts pass-through with their public_url/public_proto preserved.
+    Mixed input handled — dict overrides str if the same URL appears
+    in both shapes."""
+    _s, _ = _coord_schema_v2_modules()
+    _got = _s.canonicalize_neighbour_records([
+        'ssh://a/p',                                          # v2 string
+        {'url': 'SSH://B/p',                                  # v3 dict
+         'public_url': 'https://b/asgard',
+         'public_proto': 'https'},
+        {'url': 'ssh://b/p/'},                                # dup of B; first wins
+        {'url': '', 'public_url': 'x'},                       # empty url dropped
+        42,                                                   # non-str/dict dropped
+        None,                                                 # ditto
+    ])
+    assert _got == [
+        {'url': 'ssh://a/p', 'public_url': '', 'public_proto': ''},
+        {'url': 'ssh://b/p',
+         'public_url': 'https://b/asgard', 'public_proto': 'https'},
+    ], _got
+
+
+def test_neighbour_urls_projects_to_flat_str_list():
+    """URL projection of canonical records.  Federation-gate uses this
+    for set comparison (dicts aren't hashable, so the gate works on the
+    flat str projection)."""
+    _s, _ = _coord_schema_v2_modules()
+    _got = _s.neighbour_urls([
+        {'url': 'ssh://b/p', 'public_url': 'https://b/asgard',
+         'public_proto': 'https'},
+        'ssh://A/p',                                          # v2 string
+    ])
+    assert _got == ['ssh://a/p', 'ssh://b/p']
+
+
+def test_canonicalize_neighbours_is_alias_for_url_projection():
+    """v2 back-compat: every old caller of `canonicalize_neighbours`
+    keeps getting a flat list[str] even when fed v3 dicts.  This is the
+    plumbing that lets existing federation-gate code keep working."""
+    _s, _ = _coord_schema_v2_modules()
+    _records = [
+        {'url': 'ssh://b/p', 'public_url': 'https://b/asgard',
+         'public_proto': 'https'},
+        {'url': 'ssh://a/p', 'public_url': 'http://a/asgard',
+         'public_proto': 'http'},
+    ]
+    assert (_s.canonicalize_neighbours(_records)
+            == _s.neighbour_urls(_records)
+            == ['ssh://a/p', 'ssh://b/p'])
+
+
 def test_new_coord_head_includes_neighbours_field():
     """new_coord_head always produces a `neighbours` key (empty list when
-    not passed), in canonicalised form."""
+    not passed), in canonicalised v3 record form.  Accepts both v2
+    list-of-strings input (auto-promoted, empty public_url/proto) and
+    v3 list-of-dicts input."""
     _s, _ = _coord_schema_v2_modules()
     _head = _s.new_coord_head(
         inrelease_sha256='a' * 64,
         snapshot={}, last_seqs={}, head_time='T',
         neighbours=['SSH://A/x/', 'file:///srv'],
     )
-    assert _head['v'] == 2
+    assert _head['v'] == 3
     assert 'neighbours' in _head
-    assert _head['neighbours'] == ['file:///srv', 'ssh://a/x']
+    # v3 records — sorted by url; v2 strings auto-promoted to records.
+    assert _head['neighbours'] == [
+        {'url': 'file:///srv',  'public_url': '', 'public_proto': ''},
+        {'url': 'ssh://a/x',    'public_url': '', 'public_proto': ''},
+    ]
+    # v3 dict input — public_url/proto preserved
+    _h_v3 = _s.new_coord_head(
+        inrelease_sha256='a' * 64,
+        snapshot={}, last_seqs={}, head_time='T',
+        neighbours=[
+            {'url': 'ssh://b/y',
+             'public_url': 'https://b/asgard', 'public_proto': 'https'},
+        ],
+    )
+    assert _h_v3['neighbours'] == [{
+        'url': 'ssh://b/y',
+        'public_url': 'https://b/asgard',
+        'public_proto': 'https',
+    }]
     # Omitted → []
     _h2 = _s.new_coord_head(
         inrelease_sha256='a' * 64,
@@ -23688,10 +23761,15 @@ def test_remote_publish_bootstrap_uploads_pubkey_when_no_head():
         _pubkey_pushes = [_p for _p in _pushed
                           if _p['remote'].endswith('/keyring/builders/alice.pub')]
         assert len(_pubkey_pushes) == 1, _pushed
-        # The new head must carry the bootstrap neighbours (canonicalised)
+        # The new head must carry the bootstrap neighbours (canonicalised
+        # to v3 records — empty public_url/proto since the publish call
+        # passed a flat list[str] of local_mirror_urls).
         assert _written_head, "write_coord_head never called"
         _new_head = _written_head[-1]
-        assert _new_head['neighbours'] == ['ssh://a/p', 'ssh://b/p']
+        assert _new_head['neighbours'] == [
+            {'url': 'ssh://a/p', 'public_url': '', 'public_proto': ''},
+            {'url': 'ssh://b/p', 'public_url': '', 'public_proto': ''},
+        ]
 
 
 def test_cmd_mirror_pull_no_mirrors_is_friendly():
@@ -24952,6 +25030,9 @@ def main() -> int:
         test_cmd_mirror_dispatch_routes_subcommands,
         # MIRROR-01 Phase 2 — federation neighbours + reconcile
         test_canonicalize_neighbours_lowercases_strips_slash_sorts_dedups,
+        test_canonicalize_neighbour_records_promotes_v2_and_passes_v3,
+        test_neighbour_urls_projects_to_flat_str_list,
+        test_canonicalize_neighbours_is_alias_for_url_projection,
         test_new_coord_head_includes_neighbours_field,
         test_check_federation_consistency_match_returns_no_findings,
         test_check_federation_consistency_missing_on_remote_is_critical,
