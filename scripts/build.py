@@ -1987,6 +1987,29 @@ class BuildSession:
         self.flags.signing_key_verified = True
         return True
 
+    def _ensure_repo_indexed_for_chroot(self) -> bool:
+        """MIRROR-01 Phase 8: auto-index the local repo before chroot
+        bring-up.  `repo index` is no longer operator-visible — chroot
+        build owns the side-effect.
+
+        Skips when `repo/dists/<codename>/InRelease` already exists
+        (no forced re-index; operator runs `repo repair` for that).
+        Returns True on success or skip; False on auto-index failure.
+        """
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _inrelease = os.path.join(
+            self.config.dir_repo, 'dists', _codename, 'InRelease')
+        if os.path.isfile(_inrelease):
+            return True
+        console.print(
+            "Local InRelease missing — auto-indexing repo "
+            "(folded `repo index full`)…", tui.COLOR_INFO)
+        if not self.cmd_index_repo():
+            console.print(
+                "Auto-index failed (see log).  Use `repo audit` to "
+                "diagnose.", tui.COLOR_ERROR)
+            return False
+        return True
 
     @staticmethod
     def _canonical_names(tree) -> 'set[str]':
@@ -3321,11 +3344,17 @@ class BuildSession:
 
         Remote-endpoint state (publish, audit-remote, federation
         membership) lives under `mirror`.  Source-producing operations
-        (sync, build, tunnel) live under `source` — `tunnel` migrated
-        from `repo` to `source` in MIRROR-01 Phase 8 because its
-        endpoint is a built .deb (same artefact shape as `source build`).
-        `repo` now covers the chroot/ISO-facing pool on this host:
-        audit + repair + indexing.
+        (sync, build, tunnel) live under `source`.  MIRROR-01 Phase 8
+        rationalised the surface:
+
+          - `tunnel` moved to `source tunnel` (endpoint is a built .deb)
+          - `index` is no longer operator-visible — `chroot build` and
+            `mirror publish` auto-index when InRelease is missing; the
+            handlers stay callable internally (and via
+            `repo repair refresh`).  This avoids an operator decision
+            point with no real user-facing output.
+
+        `repo` now exposes: audit + repair.
         """
         _table = {
             'audit':          'pre-ship gate: dep + conflict + stale-files + '
@@ -3334,11 +3363,6 @@ class BuildSession:
                               'a target name to drill in: `repo audit lsb-base`.',
             'repair':         'umbrella for repo-state fixups: strip, cleanup, '
                               'backfill-hashes',
-            'index full':     'index ALL suites in-place under '
-                              'repo/dists/<codename>{,-debug}/ (default)',
-            'index minimal':  'build + index + sign the runtime subset '
-                              '(main debs, no -dbg/-dbgsym/-source/udeb) '
-                              'into publish/',
         }
         if action == 'tunnel':
             console.print(
@@ -3347,19 +3371,18 @@ class BuildSession:
                 "shape as source build).  Use `source tunnel [pkg…]`.",
                 tui.COLOR_WARNING)
             return False
+        if action == 'index':
+            console.print(
+                "`repo index` is no longer operator-visible (MIRROR-01 "
+                "Phase 8) — `chroot build` and `mirror publish` "
+                "auto-index when needed.  Use `repo repair` if you "
+                "suspect a stale index.",
+                tui.COLOR_WARNING)
+            return False
         if action == 'audit':
             return self.cmd_audit(*args)
         if action == 'repair':
             return self.cmd_repo_repair(*args)
-        if action == 'index':
-            # Multi-token: `repo index full` (default) / `repo index minimal`.
-            _sub = args[0] if args else 'full'
-            _rest = args[1:]
-            if _sub == 'minimal':
-                return self.cmd_index_repo_minimal(*_rest)
-            if _sub == 'full':
-                return self.cmd_index_repo(*_rest)
-            return self._group_help('repo', _table, f'index {_sub}')
         return self._group_help('repo', _table, action)
 
     # ─────────────────────────────────────────────────────────────────────
@@ -3995,16 +4018,29 @@ class BuildSession:
         if _keys is None:
             return False
         _bid, _priv, _pub = _keys
-        # Resolve InRelease (local copy is the one we just signed)
+        # Resolve InRelease (the local copy we sign + push verbatim).
+        # MIRROR-01 Phase 8: auto-index when InRelease is missing —
+        # `repo index` is no longer an operator-visible command, so
+        # mirror publish owns the side-effect.  When InRelease exists,
+        # we trust it (no forced re-index — caller can clean repo +
+        # re-run if a stale index is suspected).
         _codename = str(self.config.build_codename).strip('"').strip("'")
         _inrelease = os.path.join(
             self.config.dir_repo, 'dists', _codename, 'InRelease')
         if not os.path.isfile(_inrelease):
             console.print(
-                f"mirror publish: local InRelease missing at {_inrelease} — "
-                "run `repo index full` first to produce a signed "
-                "InRelease.", tui.COLOR_ERROR)
-            return False
+                "mirror publish: local InRelease missing — auto-indexing "
+                "repo (folded `repo index full`)…", tui.COLOR_INFO)
+            if not self.cmd_index_repo():
+                console.print(
+                    "mirror publish: auto-index failed (see log).  "
+                    "`repo audit` to diagnose.", tui.COLOR_ERROR)
+                return False
+            if not os.path.isfile(_inrelease):
+                console.print(
+                    f"mirror publish: auto-index ran but InRelease still "
+                    f"missing at {_inrelease}.", tui.COLOR_ERROR)
+                return False
         # Resolve snapshot pin
         _snapshot_pin = self._snapshot_current() or ''
         # Resolve federation membership.  v3: per-peer records pulled
@@ -5974,6 +6010,13 @@ class BuildSession:
                 "(no-gate)",
                 tui.COLOR_WARNING,
             )
+
+        # MIRROR-01 Phase 8: auto-index the repo if InRelease is
+        # missing.  `repo index` is no longer operator-visible —
+        # chroot build (and mirror publish) own the side-effect.
+        # The chroot bring-up needs a signed InRelease so apt under
+        # `--no-check-valid-until` can install built packages.
+        self._ensure_repo_indexed_for_chroot()
 
         _debug = 'with_debug' in args
         if _debug:
