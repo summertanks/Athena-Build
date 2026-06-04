@@ -51,24 +51,30 @@ and an 8-check chroot verifier that gates ISO build.
 
 **Top risks (expanded as P0/P1 tasks below)**
 
-1. **No GPG verification of `InRelease`** — `Cache.__get_files` trusts
-   whatever `deb.debian.org` serves; a MITM or compromised mirror can
-   inject arbitrary `Packages` entries.
-2. **`MaxParallelBuilds` is a lie** — config field exists, parser reads it,
-   `source_build` is strictly serial.
-3. **`--force-depends` in `dpkg --configure -a`** is acknowledged
-   `TEMPORARY` in code (`buildsystem.py:419`, `:428`) and silently masks
-   real dep skew. Should fail loudly once snapshot pinning is the default.
-4. **No APT-repo metadata** generated for the built `.debs` — `repo/` is a
-   bag of files, not a usable apt source. Blocks the “build a derivative
-   distribution” end-state.
-5. **No installer image** — `iso build live` only produces a *live* ISO via
-   `live-boot`. The README/user goal of "including installation" needs an
-   installer ISO; design **pivoted 2026-05-10** to "rebuild d-i from source
-   via a parallel udeb dep tree through our existing pipeline" (replaces
-   the original "import vanilla d-i" plan). Full plan at
-   `docs/plans/comp-01-installer.md`. Phase 1 done; tracked under
-   COMP-01a..h.
+1. **~~No GPG verification of `InRelease`~~** — resolved by STA-01:
+   `utils.verify_inrelease()` + `[Security]` config gate every fetched
+   `InRelease` against a pinned keyring before `Packages` / `Sources` are
+   trusted (in `docs/done.md`).
+2. **~~`MaxParallelBuilds` is a lie~~** — resolved by COMP-03: source
+   builds now run in `ThreadPoolExecutor` with `[Build] MaxParallelBuilds`
+   honoured, per-worker scratch dirs, and `HeavyPackages` serialisation
+   for memory hogs (in `docs/done.md`).
+3. **~~`--force-depends` in `dpkg --configure -a`~~** — resolved by
+   STA-02: removed from `_configure_chroot`; STA-03 snapshot pinning +
+   `_check_dep_drift` / `_verify_dep_resolution` catch unresolved deps
+   before configure (in `docs/done.md`).
+4. **~~No APT-repo metadata~~** — resolved by COMP-02 + MIRROR-01:
+   `repo index full|minimal` produces signed `InRelease` over the local
+   pool; `mirror publish` does per-file additive push + Ed25519-signed
+   claims + tier-1 GPG `coord-head` to every configured peer.  See
+   [`docs/mirror-setup.md`](docs/mirror-setup.md).
+5. **~~No installer image~~** — installer ISO ships since 2026-05-14
+   (COMP-01a..g done; reaches `finish-install.d/20final-message` cleanly
+   on VMware BIOS + EFI).  Architecture **pivoted 2026-05-10** to
+   "rebuild d-i from source via a parallel udeb dep tree through our
+   existing pipeline" (replaces the original "import vanilla d-i" plan;
+   full plan at `docs/plans/comp-01-installer.md`).  COMP-01h
+   (real-hardware testing) is the only sub-phase still open.
 6. **~~Module-level globals in `build.py`~~** — resolved by ARCH-01;
    pipeline state now lives on `BuildSession` (cache / dep_tree /
    container / config / flags are instance attrs).  Console facade
@@ -96,11 +102,11 @@ and an 8-check chroot verifier that gates ISO build.
 
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
-| COMP-01 | P1 | todo | **Installer ISO** path. Today `iso build live` produces a live ISO only. *(architecture **pivoted 2026-05-10** from "import vanilla d-i" to "rebuild d-i runtime from source via parallel udeb dep tree through our existing pipeline" — full plan: `docs/plans/comp-01-installer.md`, project memory `project_installer_from_source.md`. Two distinct dep graphs (deb world + udeb world) over a single source corpus; same `source build` produces both `.deb` and `.udeb` outputs. Installer ramdisk is pure udeb closure (no debs, no systemd) — `rootskel`+busybox init runs cdebconf+main-menu+d-i step udebs. UI is `cdebconf-text-udeb`. Branding via debconf-overrides + companion udeb (no upstream source patches — see `docs/branding-methodology.md`). `installer.list` is mixed-universe — udeb names AND deb names; resolver dispatches per-entry. Sub-phases COMP-01a..h below; total ~5-7 weeks elapsed.)* |
+| COMP-01 | P1 | todo | **Installer ISO** path.  `iso build live` and `iso build installer` both ship today — installer ramdisk reaches `finish-install.d/20final-message` cleanly on VMware BIOS + EFI as of 2026-05-14 (sub-phases COMP-01a..g closed in `docs/done.md`).  Umbrella remains open pending **COMP-01h — real-hardware testing** (sub-row below).  *(architecture **pivoted 2026-05-10** from "import vanilla d-i" to "rebuild d-i runtime from source via parallel udeb dep tree through our existing pipeline" — full plan: `docs/plans/comp-01-installer.md`, project memory `project_installer_from_source.md`.  Two distinct dep graphs (deb world + udeb world) over a single source corpus; same `source build` produces both `.deb` and `.udeb` outputs.  Installer ramdisk is pure udeb closure (no debs, no systemd) — `rootskel`+busybox init runs cdebconf+main-menu+d-i step udebs.  UI is `cdebconf-text-udeb`.  Branding via debconf-overrides + companion udeb (no upstream source patches — see `docs/branding-methodology.md`).  `installer.list` is mixed-universe — udeb names AND deb names; resolver dispatches per-entry.  Total ~5-7 weeks elapsed across COMP-01a..g.)* |
 | COMP-01h | P1 | todo | **Installer Phase 8 — hardware testing** (1-2w). QEMU UEFI + BIOS smoke tests. Real hardware: at least one BIOS box + one UEFI box. Edge cases: small disk, no network, USB-only install media. Validate target boots cleanly after install completes. Treat as the gate before declaring COMP-01 done. *(VMware BIOS + EFI verified end-to-end through `finish-install.d/20final-message` 2026-05-14.  Real-hardware smoke + edge cases still pending.  Tracked in `docs/plans/comp-02-robust-build.md` § Phase F as the CI gate that would automate this.)* |
 | COMP-04 | P1 | todo | **Architecture support** beyond `amd64`. The code reads `arch` from config but `Dockerfile`, `pkg.list` (`linux-image-amd64`, `grub-efi-amd64`), and `build_iso` ISO name are amd64-hardcoded. Decide on second-arch target (likely `arm64`), parameterise. |
 | COMP-07 | P2 | todo | **Cross-build container per release** — `Dockerfile` is currently hard-pinned to `bookworm`. Auto-rebuild a per-release image (`bookworm`, `trixie`, `noble`, …) when `CONTAINER_RELEASE` changes; keep them in parallel so the user can cross-target. |
-| COMP-11 | P2 | todo | **Distro abstraction**: `[Build] Distro = debian \| ubuntu` selects parallel artifact sets — `pkg.list.<distro>` (Ubuntu uses `casper` instead of `live-boot`, plus its own initramfs hooks and grub package names), `Dockerfile.<distro>` (`FROM ubuntu:${RELEASE}`), and the `os-release` ID/ID_LIKE/VENDOR_NAME fields (subsumes COMP-10).  `[Snapshot] Enabled = false` becomes the implicit default for non-Debian distros (no snapshot.d.o equivalent).  Cluster: ARCH-13 + COMP-11 + HK-05 = "distro-portability".  Hardest piece: maintaining two parallel pkg.lists in sync; consider a shared base + per-distro overlay file. |
+| COMP-11 | P2 | todo | **Distro abstraction**: `[Build] Distro = debian \| ubuntu` selects parallel artifact sets — `pkg.list.<distro>` (Ubuntu uses `casper` instead of `live-boot`, plus its own initramfs hooks and grub package names), `Dockerfile.<distro>` (`FROM ubuntu:${RELEASE}`), and the `os-release` ID/ID_LIKE/VENDOR_NAME fields (subsumes COMP-10).  `[Snapshot] Enabled = false` becomes the implicit default for non-Debian distros (no snapshot.d.o equivalent).  Carries the rest of the "distro-portability" cluster: ARCH-13 (URL externalisation) and HK-05 (dead-config-line cleanup) closed in `docs/done.md`; COMP-11 is the surviving member.  Hardest piece: maintaining two parallel pkg.lists in sync; consider a shared base + per-distro overlay file. |
 | INST-01 | P2 | todo | **Installer i18n preseeding + non-en_US locale set.**  Today the language step is interactive at boot (`installer/preseed.cfg` ships no `debian-installer/locale`); installer strings are English-only (`S40-athena-branding` applies `@DISTRIBUTION@` substitutions only, no locale-driven template variants).  Preseed default locale, ship a chosen locale set (en_US + 2-3 candidates — pick from operator preference), pre-bake keymap defaults.  Reuses the existing `fork/source/athena-installer-data/data/S40-athena-branding` mechanism — adds locale overrides alongside the existing string overrides, no new infrastructure.  Touches `config/pool.list` (locale udebs).  Stays inside newt — no front-end change.  Filed 2026-05-29 from the comparative-analysis capability-gap audit (vs elementary / Pop / Mint / similar). |
 | INST-02 | P2 | todo | **Installer accessibility — speakup + brltty.**  No `speakup` (screen reader) or `brltty` (braille) udebs in the installer closure today (`config/pool.list` / `config/pkg.list` mark a11y as deferred).  Adds the udebs, documents boot-menu shortcut (`s` for speakup at GRUB), validates with a screen-reader smoke pass under QEMU.  Real accessibility gap vs stock Debian d-i.  Touches `config/pool.list` + `installer/grub.cfg` boot menu.  Depends structurally on INST-01 (accessible prompts work better in user's preseeded locale).  Note ISO size cost — verify against current ISO budget before committing.  Filed 2026-05-29 from the comparative-analysis capability-gap audit. |
 | INST-03 | P2 | todo | **Guided partition recipe — "Erase disk and install Asgard".**  Vanilla partman today: `installer/preseed.cfg` has zero partman entries; operator gets the full manual / guided picker.  Adds a custom partman recipe ("erase whole disk, single root, swap file, EFI on UEFI / BIOS-boot on legacy") + preseed defaults for the common path; keeps the manual mode reachable.  Removes the steepest cliff in the install flow today.  Stays inside d-i's partman — no front-end change.  New `fork/source/athena-installer-data/data/partman-recipe-asgard`.  Filed 2026-05-29 from the comparative-analysis capability-gap audit. |
@@ -134,9 +140,8 @@ and an 8-check chroot verifier that gates ISO build.
 | ID    | Sev | Status | Title |
 |-------|-----|--------|-------|
 | UX-06  | P3 | todo | Localised messages — today everything is English-only. |
-| OBS-01 | P2 | todo | **Per-source structured metrics — JSON sidecar.**  Today `log/build/<pkg>` carries raw container stdout and `<pkg>.result` is a single-line `PASS`/`FAIL`.  Wall clock per source is not captured; only the whole `AutorunTiming` session (`scripts/print_commands.py:31`) is timed.  Adds `time.monotonic()` brackets around `BuildContainer.build()` and writes `log/build/<pkg>.metrics.json` per build: `{started, finished, elapsed_seconds, status, exit_code, oom_killed, patch_set_hash, source_version, output_count}`.  Surfaces in `print summary` as a per-source elapsed column.  Foundation for OBS-02 / OBS-03 — schema is the contract.  Independent of CI / installer work, low risk.  Filed 2026-05-29 from the comparative-analysis capability-gap audit. |
-| OBS-02 | P2 | todo | **Persistent build history — append-only ledger.**  Aggregates OBS-01 records across runs into `log/build-history.jsonl` (one line per (source, run, timestamp)).  New `cmd build history [pkg]` queries the ledger: per-package failure frequency, last N runs, rolling pass rate.  Answers "what's been flaky for the last month?" — unanswerable today.  Apply the publish-before-prune discipline from UPD-01's remote ledger when sizing the rotation strategy (memory `project_upd01_update_architecture`).  Depends on OBS-01 schema.  Filed 2026-05-29 from the comparative-analysis capability-gap audit. |
-| OBS-03 | P2 | todo | **Resource telemetry per build.**  COMP-03 surfaces OOM only on exit-code-137 (post-failure hint).  Adds a poll thread (`docker stats --no-stream` every ~2s during `build()`) capturing peak RSS, time-in-state, sampled CPU; merges into OBS-01 metrics JSON.  Helps tune `BuildCpus` / `BuildMemory` / `HeavyPackages` empirically instead of by feel.  Depends on OBS-01.  Cleanup tied into `_deregister_live` so the poller can't outlive the container.  Filed 2026-05-29 from the comparative-analysis capability-gap audit. |
+| OBS-02 | P2 | todo | **Persistent build history — append-only ledger.**  Aggregates OBS-01 records across runs into `log/build-history.jsonl` (one line per (source, run, timestamp)).  New `cmd build history [pkg]` queries the ledger: per-package failure frequency, last N runs, rolling pass rate.  Answers "what's been flaky for the last month?" — unanswerable today.  Apply the publish-before-prune discipline from UPD-01's remote ledger when sizing the rotation strategy (memory `project_upd01_update_architecture`).  Builds on the OBS-01 `log/build/<pkg>.build.json` schema (shipped `34434f2`); aggregation is a tail-append over the signed records.  Filed 2026-05-29 from the comparative-analysis capability-gap audit. |
+| OBS-03 | P2 | todo | **Resource telemetry per build.**  COMP-03 surfaces OOM only on exit-code-137 (post-failure hint).  Adds a poll thread (`docker stats --no-stream` every ~2s during `build()`) capturing peak RSS, time-in-state, sampled CPU; merges into the OBS-01 `log/build/<pkg>.build.json` record under a new `resources` field (extends the shipped schema rather than a sidecar file).  Helps tune `BuildCpus` / `BuildMemory` / `HeavyPackages` empirically instead of by feel.  Cleanup tied into `_deregister_live` so the poller can't outlive the container.  Filed 2026-05-29 from the comparative-analysis capability-gap audit. |
 
 ## 9. House-cleaning — P3
 
