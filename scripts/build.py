@@ -6859,7 +6859,11 @@ class BuildSession:
     # pulled by depth-1 Recommends; 'all' = union of every selected source
     # in dep_tree + udeb_dep_tree (no exclusions — equivalent to running
     # pkg + live + installer + recommended back-to-back, deduped).
-    _SOURCE_SUBSETS = ('pkg', 'live', 'installer', 'recommended', 'all')
+    # MIRROR-02: 'individual' is recognised by the arg parser; gated
+    # to [Build] Mode = individual at dispatch time (cmd_source_build
+    # rejects it under dist mode with a hint pointing at 'all').
+    _SOURCE_SUBSETS = ('pkg', 'live', 'installer', 'recommended', 'all',
+                       'individual')
 
     @staticmethod
     def _parse_source_build_args(args):
@@ -8441,6 +8445,18 @@ class BuildSession:
         Prompts before returning if any builds fail, allowing the operator to
         decide whether to continue with the partial package set.
         """
+        # MIRROR-02: eager mode-validation for the 'individual' subset —
+        # reject outside indl mode BEFORE any flag-prereq checks so the
+        # operator gets a clear "wrong mode" message instead of a stale
+        # "Run 'source sync' first" hint.
+        if ('individual' in (_a.strip().lower() for _a in args)
+                and self.config.build_mode != 'individual'):
+            console.print(
+                "source build individual: only valid under "
+                "`[Build] Mode = individual`.  Did you mean `source "
+                "build all`?",
+                tui.COLOR_ERROR)
+            return
         if not self.flags.download_ready:
             console.print("Run 'source sync' first")
             return
@@ -8482,6 +8498,17 @@ class BuildSession:
             )
             _force = True
 
+        # MIRROR-02: in individual mode, the bare 'pkg' default gets
+        # rewritten to 'individual' so the operator-visible label
+        # matches their mode.  Functionally identical (pkg's
+        # excludes are empty in indl mode), this just removes
+        # ambiguity from the printed progress.
+        if (self.config.build_mode == 'individual'
+                and _subset == 'pkg'
+                and not _names):
+            _subset = 'individual'
+        # Mode-validation for 'individual' subset already ran at the
+        # top of cmd_source_build (eager-fail before flag gates).
         if _force:
             console.print("Force mode: skipping build cache checks")
         if _subset == 'pkg':
@@ -8497,6 +8524,10 @@ class BuildSession:
         elif _subset == 'all':
             console.print("All mode: building every selected source "
                           "(pkg + live + installer + recommended union)")
+        elif _subset == 'individual':
+            console.print(
+                "Individual mode: building every source in "
+                "config/indl.list")
         if _profile_override is not None:
             console.print(
                 f"Profile override active: DEB_BUILD_PROFILES + "
@@ -8579,6 +8610,16 @@ class BuildSession:
                           if self.udeb_dep_tree is not None else None))
                 if _s:
                     packages.append(_s)
+        elif _subset == 'individual':
+            # MIRROR-02 'individual' mode: every source in selected_srcs.
+            # In indl mode, selected_srcs IS the indl.list contents
+            # (chunk 2), so this is "build all of indl.list".  udeb_dep_tree
+            # is None in indl mode, so no udeb branch.  Same shape as 'all'
+            # but with the operator-visible "individual" label.
+            packages = [
+                _s for _name, _s in sorted(
+                    self.dep_tree.selected_srcs.items())
+            ]
         else:
             # subset == 'pkg' (the new bare-`source build` default).
             # Build the pkg.list closure ONLY: selected_srcs minus

@@ -278,6 +278,61 @@ def test_buildconfig_mode_rejects_unknown_value():
         assert 'banana' in cfg.error_str
 
 
+def test_parse_source_build_args_recognises_individual_subset():
+    """MIRROR-02 chunk 5: `_parse_source_build_args` accepts
+    'individual' as a recognised subset name (mode-gating happens
+    at dispatch time, not in the pure parser)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    assert 'individual' in BuildSession._SOURCE_SUBSETS
+    _err, _force, _subset, _names, _prof = \
+        BuildSession._parse_source_build_args(('individual',))
+    assert _err is None, _err
+    assert _subset == 'individual'
+    assert _names == []
+    assert _force is False
+    # Mutually exclusive with named packages (same rule as other subsets)
+    _err, *_ = BuildSession._parse_source_build_args(
+        ('individual', 'foo'))
+    assert _err is not None
+    assert 'mutually exclusive' in _err
+
+
+def test_cmd_source_build_individual_subset_rejected_in_dist_mode():
+    """`source build individual` is rejected outside individual mode
+    with a hint pointing at 'all' (the dist-mode equivalent for
+    'build everything')."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    class _Cfg:
+        build_mode = 'distribution'
+        build_profiles: list = []
+        build_options: list = []
+    class _Flags:
+        cache_ready = True
+        dep_check_ready = True
+        download_ready = True
+        build_container_ready = True
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.config = _Cfg()
+    _sess.flags = _Flags()
+    _lines: 'list[str]' = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _sess.cmd_source_build('individual')
+    finally:
+        build.console.print = _orig
+    _joined = '\n'.join(_lines)
+    assert 'only valid under' in _joined, _joined
+    assert "`source build all`" in _joined, _joined
+
+
 def test_source_audit_naturally_scopes_to_indl_in_individual_mode():
     """MIRROR-02 chunk 4: cmd_source_audit walks dep_tree.selected_srcs.
     Chunk 2 populates selected_srcs directly from indl.list in
@@ -25150,6 +25205,8 @@ def main() -> int:
         test_buildconfig_mode_individual_parses,
         test_buildconfig_mode_rejects_unknown_value,
         test_parse_indl_list_strips_comments_dedups_preserves_order,
+        test_parse_source_build_args_recognises_individual_subset,
+        test_cmd_source_build_individual_subset_rejected_in_dist_mode,
         test_source_audit_naturally_scopes_to_indl_in_individual_mode,
         test_chroot_iso_builds_refuse_in_individual_mode,
         test_refuse_in_individual_mode_is_a_no_op_in_distribution,
