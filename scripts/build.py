@@ -3576,8 +3576,8 @@ class BuildSession:
                 return False
 
         console.print(
-            f"derived: name={_name}  url={_normalised}  "
-            f"host={_host or '(n/a)'}  public_url={_public_url or '(n/a)'}",
+            f"derived: \tname={_name}  \n\t\turl={_normalised}  "
+            f"\n\t\thost={_host or '(n/a)'}  \n\t\tpublic_url={_public_url or '(n/a)'}",
             tui.COLOR_HIGHLIGHT)
 
         # ── Step 4: refuse early on duplicates ─────────────────────
@@ -7256,6 +7256,15 @@ class BuildSession:
         `summary` arg prints only the rebuild-queue count + subset
         breakdown — the operator's "how much work remains" view.
 
+        `verbose` arg adds two things to the default report:
+          - the existing per-name subset annotation under "Failures:"
+            (one line per actionable source)
+          - an "Informational (verbose)" block listing the names in
+            the terminal-state buckets (`tunneled`, `fail`,
+            `no_pkgs`) which the default report only summarises by
+            count.  The `ok` bucket is deliberately omitted from
+            verbose listing — it's almost always the full corpus.
+
         Read-only by design: never writes records, never invokes
         BuildContainer.build, never calls _refresh_patches.  Mutating
         the build state is `source repair`'s job (which uses the same
@@ -7452,6 +7461,27 @@ class BuildSession:
                     self._print_wrapped_names(
                         f"  {_state} ({len(_names)})", _names,
                     )
+
+        # Verbose-only: drill into the informational (non-actionable)
+        # buckets — `tunneled`, `fail`, `no_pkgs`.  These are TERMINAL
+        # states the operator can't re-run their way out of (tunneled
+        # = explicit third-party pull; fail = prior-build marker;
+        # no_pkgs = side-artifact-only source).  Default audit hides
+        # the names — too noisy on a corpus this size — but the
+        # operator asked, so verbose lists each.
+        if _verbose:
+            _informational = ('tunneled', 'fail', 'no_pkgs')
+            _any_info = any(_by_state.get(_s) for _s in _informational)
+            if _any_info:
+                console.print("")
+                console.print("Informational (verbose):")
+                for _state in _informational:
+                    _names = sorted(_by_state.get(_state, []))
+                    if not _names:
+                        continue
+                    console.print(f"  [{_state}] ({len(_names)}):")
+                    for _n in _names:
+                        console.print(f"    {_n}  ({_subset_for(_n)})")
 
         # Next-run rebuild queue (matches `source build all`).  The static
         # classifier above (needs_build / stale_pass) misses the UPD-01
@@ -9419,22 +9449,22 @@ def main(banner: str) -> None:
     # tip ≤ 80 cols.  Tips that need to enumerate many sub-actions
     # use `<subcmd>` and direct the operator at `<cmd>` (bare) which
     # prints the full per-action table via _group_help.
-    tui.register_command('cache',     session.cmd_cache,     'Cache:      cache <build|purge|parse|select|info <pkg>>')
-    tui.register_command('clean',     session.cmd_clean,     'Clean:      clean <subcmd> — run `clean` for the list')
-    tui.register_command('patch',     session.cmd_patch,     'Patches:    patch refresh')
-    tui.register_command('source',    session.cmd_source,    'Sources:    source <sync|build|audit|repair|fork>')
-    tui.register_command('repo',      session.cmd_repo,      'Repo:       repo <index|publish|audit|repair|tunnel|refresh>')
-    tui.register_command('snapshot',  session.cmd_snapshot,  'Snapshot:   snapshot <list|advance|workload|base>')
-    tui.register_command('container', session.cmd_container, 'Container:  container <init|purge>')
-    tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     chroot build [live|installer] | chroot verify')
-    tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
-    tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
-    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <init|add|remove|list|summary|status|publish|pull|audit|query|builders|conflict|reconcile-neighbours>')
-    tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
-    tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
-    tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
-    tui.register_command('resume',    session.cmd_resume,    'Resume:     resume — UX-04 restore Cache + DT from prior session')
-    tui.register_command('print',     session.cmd_print,     'Print:      print build state — try `print help`')
+    tui.register_command('cache',     session.cmd_cache,     'Cache:      \tcache <build|purge|parse|select|info <pkg>>')
+    tui.register_command('clean',     session.cmd_clean,     'Clean:      \tclean <subcmd> — run `clean` for the list')
+    tui.register_command('patch',     session.cmd_patch,     'Patches:    \tpatch refresh')
+    tui.register_command('source',    session.cmd_source,    'Sources:    \tsource <sync|build|audit|repair|fork>')
+    tui.register_command('repo',      session.cmd_repo,      'Repo:       \trepo <index|publish|audit|repair|tunnel|refresh>')
+    tui.register_command('snapshot',  session.cmd_snapshot,  'Snapshot:   \tsnapshot <list|advance|workload|base>')
+    tui.register_command('container', session.cmd_container, 'Container:  \tcontainer <init|purge>')
+    tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     \tchroot build [live|installer] | chroot verify')
+    tui.register_command('iso',       session.cmd_iso,       'ISO:        \tiso build <live|installer>')
+    tui.register_command('key',       session.cmd_key,       'Signing:    \tkey <generate|verify>')
+    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     \tmirror <init|add|remove|list|summary|status|publish|pull|audit|query|builders|conflict|reconcile-neighbours>')
+    tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       \tsbom [path] — emit CycloneDX 1.5 JSON')
+    tui.register_command('cve',       session.cmd_cve,       'CVE:        \tcve [path] — scan latest SBOM via grype (optional)')
+    tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    \tautorun [live|installer]')
+    tui.register_command('resume',    session.cmd_resume,    'Resume:     \tresume — UX-04 restore Cache + DT from prior session')
+    tui.register_command('print',     session.cmd_print,     'Print:      \tprint build state — try `print help`')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Athena Build System...", tui.COLOR_HIGHLIGHT)

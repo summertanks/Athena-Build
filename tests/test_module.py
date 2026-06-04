@@ -16628,6 +16628,37 @@ def test_cmd_source_audit_classifies_rebuilds_by_subset():
         "audit must print the command needed for each subset")
 
 
+def test_cmd_source_audit_verbose_lists_tunneled_and_failed_names():
+    """source audit verbose must drill into the terminal-state buckets
+    (tunneled, fail, no_pkgs) — operator saw the counts in the
+    non-verbose run and asked verbose to print the names too.
+    Source-grep test pins the contract (the method does subprocess +
+    dep-tree work that's too heavy to fixture into a unit-level run)."""
+    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
+    with open(_bp) as fh:
+        _body = fh.read()
+    import re
+    _m = re.search(
+        r'def cmd_source_audit\(self, \*args\):.*?(?=\n    def )',
+        _body, re.DOTALL,
+    )
+    assert _m, "cmd_source_audit not found"
+    _method = _m.group(0)
+    # Informational tuple includes the three terminal buckets
+    assert re.search(
+        r"_informational\s*=\s*\(\s*'tunneled'\s*,\s*'fail'\s*,\s*'no_pkgs'\s*\)",
+        _method,
+    ), "verbose must drill into tunneled / fail / no_pkgs"
+    # And the drill-down is gated on _verbose
+    assert re.search(
+        r"if _verbose:\s*\n\s+_informational\s*=", _method,
+    ), "informational drill-down must be gated on the verbose flag"
+    # Per-name annotation reuses _subset_for so the listing matches
+    # the actionable-block format
+    assert "_subset_for(_n)" in _method, (
+        "verbose listings must annotate each name with its subset")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST-05: offline Cache fixture
 #
@@ -24977,6 +25008,7 @@ def main() -> int:
         test_cmd_source_fork_enable_removes_marker,
         test_fork_mirror_discover_skips_disabled_trees,
         test_cmd_source_audit_classifies_rebuilds_by_subset,
+        test_cmd_source_audit_verbose_lists_tunneled_and_failed_names,
         test_readonly_named_commands_have_no_destructive_calls,
         test_destructive_helpers_warn_in_docstring,
         test_verify_pkg_artifact_ok_when_all_fields_match,
