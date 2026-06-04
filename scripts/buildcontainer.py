@@ -1353,10 +1353,25 @@ class BuildContainer:
                 f"{src_pkg.package}")
             return
 
-        # Per-file N: each binary gets its own +asg<R>u<N> from its OWN
-        # published history (NOT a shared per-source max), so a file updated
-        # more often than its siblings carries a higher N.
-        _n_stamped = 0
+        # Uniform per-source N: take the MAX of every sibling binary's
+        # individual asg_next_n candidate, then stamp ALL binaries from
+        # this source at that single N.  Reason: a kernel meta-package
+        # (linux-headers-amd64) has a stable name across kernel ABIs
+        # and accumulates a long published history → asg_next_n
+        # returns a high N.  Its ABI-pinned sibling
+        # (linux-headers-6.1.0-49-amd64) is a fresh name when the ABI
+        # bumps → asg_next_n returns 1.  Different N's would leave the
+        # meta's sibling-pin `Depends: linux-headers-6.1.0-49-amd64
+        # (= 6.1.174-1+asg1u<HIGH>)` unresolved on disk against the
+        # binary at +asg1u1.  `restamp_asg_deb` only rewrites pins
+        # matching the BINARY'S OWN version, so the only way to keep
+        # intra-source pins resolvable is to land every sibling at
+        # the same N.  Tradeoff: a binary whose history is shorter
+        # than its siblings skips some N's — fine, N is monotonic and
+        # the audit cares about the pin chain, not the per-file
+        # history density.
+        _per_file_n: 'list[int]' = []
+        _stampable: 'list[tuple[str, str]]' = []   # (path, basename)
         for _path in _current_paths:
             _b = os.path.basename(_path)
             _name, _ext = os.path.splitext(_b)
@@ -1365,7 +1380,14 @@ class BuildContainer:
                 continue
             _pkg, _ver, _arch = _parts
             _base = utils.pristine_base(_ver)
-            _n = utils.asg_next_n(_ledger.get(_pkg, []), _base, _release)
+            _per_file_n.append(utils.asg_next_n(
+                _ledger.get(_pkg, []), _base, _release))
+            _stampable.append((_path, _b))
+        if not _stampable:
+            return
+        _n = max(_per_file_n)
+        _n_stamped = 0
+        for _path, _b in _stampable:
             try:
                 _r = utils.restamp_asg_deb(_path, _release, _n)
                 if _r['status'] == 'rewritten':
@@ -1378,7 +1400,7 @@ class BuildContainer:
         if _n_stamped:
             logger.info(
                 f"asg-stamp: marked {_n_stamped} artifact(s) from source "
-                f"{src_pkg.package} (+asg{_release}, per-file N)")
+                f"{src_pkg.package} (+asg{_release}u{_n}, uniform N)")
 
     def _segregate_built_artifacts(self, src_pkg,
                                    source_dir: str) -> 'list[str]':

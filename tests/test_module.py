@@ -22242,6 +22242,78 @@ def test_source_state_tunneled_record_with_pristine_binary_returns_tunneled():
             f"as 'tunneled', got {_state!r}")
 
 
+def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
+    """Regression: when a source's binaries have different per-file
+    ledger histories (kernel meta `linux-headers-amd64` has accumulated
+    many published versions while the ABI-pinned sibling
+    `linux-headers-6.1.0-49-amd64` is fresh because the ABI just
+    bumped), `_normalize_built_artifacts` must stamp every sibling at
+    the SAME N — the MAX of the per-file candidates.  Different N's
+    leave intra-source `Depends: <sibling> (= ver+asg<R>u<N>)` pins
+    unresolved on disk.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer as _bc
+    import utils as _u
+    from unittest.mock import MagicMock, patch
+
+    # Simulate published history: meta has 4 prior asg versions, the
+    # ABI sibling is fresh.  Per-file N candidates: meta → 5, sibling → 1.
+    # Uniform N must be max(5, 1) = 5.
+    _ledger = {
+        'linux-headers-amd64': [
+            '6.1.174-1+asg1u1', '6.1.174-1+asg1u2',
+            '6.1.174-1+asg1u3', '6.1.174-1+asg1u4',
+        ],
+        'linux-headers-6.1.0-49-amd64': [],   # fresh ABI
+    }
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _meta = os.path.join(_tmp, 'linux-headers-amd64_6.1.174-1_amd64.deb')
+        _abi = os.path.join(
+            _tmp, 'linux-headers-6.1.0-49-amd64_6.1.174-1_amd64.deb')
+        # Touch the files — restamp_asg_deb is patched so contents don't matter.
+        for _p in (_meta, _abi):
+            with open(_p, 'wb') as _fh:
+                _fh.write(b'!<arch>\n')
+
+        _calls: 'list[tuple[str, int]]' = []
+        def _fake_restamp(path, release, n):
+            _calls.append((os.path.basename(path), n))
+            _new_base = os.path.basename(path).replace(
+                '_6.1.174-1_', f'_6.1.174-1+asg{release}u{n}_')
+            _new_path = os.path.join(os.path.dirname(path), _new_base)
+            os.rename(path, _new_path)
+            return {'status': 'rewritten', 'new_path': _new_path,
+                    'strips_count': 1}
+
+        _bc_inst = _bc.BuildContainer.__new__(_bc.BuildContainer)
+        _bc_inst.asg_ledger = _ledger
+
+        class _Cfg:
+            build_version = '1'
+        _bc_inst.config = _Cfg()
+
+        class _SrcPkg:
+            package = 'linux'
+            version = '6.1.174-1~deb12u1'  # delta — triggers stamp path
+
+        with patch.object(_u, 'restamp_asg_deb', side_effect=_fake_restamp):
+            _bc_inst._normalize_built_artifacts(
+                _SrcPkg(), [_meta, _abi], was_patched=False)
+
+    # Both siblings stamped at N=5 (the max).  Without the uniform-N
+    # fix, the ABI sibling would have stamped at N=1, leaving the
+    # meta's pin `(= 6.1.174-1+asg1u5)` unresolved against the
+    # binary at `6.1.174-1+asg1u1`.
+    assert len(_calls) == 2, _calls
+    _ns = {_n for _, _n in _calls}
+    assert _ns == {5}, (
+        f"expected all siblings stamped at uniform N=5, got Ns={_ns} "
+        f"(per-file N would have given {{1, 5}}); calls={_calls}")
+
+
 def test_humansize_thresholds():
     """B / KiB / MiB / GiB thresholds at 1024-multiples; one-decimal
     formatting matches the tunnel-output spec."""
@@ -27582,6 +27654,7 @@ def main() -> int:
         test_source_state_interrupted_when_record_is_non_terminal,
         test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass,
         test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
+        test_normalize_built_artifacts_uses_uniform_n_across_siblings,
         test_humansize_thresholds,
         test_shorten_origin_compacts_long_pool_url,
         test_new_build_record_threads_component_field,
