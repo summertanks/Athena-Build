@@ -9640,16 +9640,27 @@ class BuildSession:
         on `iso build *` to produce the bootable image.
         """
         _table = {
-            'live':      'cache→parse→download→container→source build (+live)→chroot build live→iso build live',
-            'installer': 'cache→parse→download→container→source build (+installer)→chroot build installer→iso build installer',
-            'disk':      'cache→parse→download→container→source build (+live)→chroot build live→iso build disk (qcow2)',
+            'live':       'cache→parse→download→container→source build (+live)→chroot build live→iso build live',
+            'installer':  'cache→parse→download→container→source build (+installer)→chroot build installer→iso build installer',
+            'disk':       'cache→parse→download→container→source build (+live)→chroot build live→iso build disk (qcow2)',
+            'individual': 'cache→parse→download→container→source build (individual) — STOPS at source_build_ready (no chroot/ISO)',
         }
+        # MIRROR-02: in [Build] Mode = individual, bare `autorun`
+        # routes to the individual pipeline (the live/installer/disk
+        # variants would refuse at their chroot/ISO steps anyway).
+        # Defensive against missing .config (test doubles).
+        _mode = getattr(getattr(self, 'config', None), 'build_mode',
+                        'distribution')
+        if action == '' and _mode == 'individual':
+            return self.cmd_auto_run_individual(*args)
         if action in ('', 'live'):
             return self.cmd_auto_run_live(*args)
         if action == 'installer':
             return self.cmd_auto_run_installer(*args)
         if action == 'disk':
             return self.cmd_auto_run_disk(*args)
+        if action == 'individual':
+            return self.cmd_auto_run_individual(*args)
         return self._group_help('autorun', _table, action)
 
     def cmd_auto_run_live(self):
@@ -9723,6 +9734,34 @@ class BuildSession:
             (self.cmd_build_iso_disk,    'iso_disk_ready',        'iso build disk'),
         ]
         self._run_autorun_steps('autorun disk', _steps)
+
+    def cmd_auto_run_individual(self):
+        """MIRROR-02: run the indl-mode pipeline through to a complete
+        source build of every package in `config/indl.list`.
+
+        Stops at source_build_ready — no chroot or ISO assembly
+        (those are refused in indl mode anyway per chunk 3).  The
+        intended endpoint is `mirror publish`, which the operator
+        runs explicitly after autorun completes successfully.
+
+        Refuses cleanly when the host isn't in individual mode (hint
+        points at the live/installer/disk variants).
+        """
+        if self.config.build_mode != 'individual':
+            console.print(
+                "autorun individual: requires `[Build] Mode = individual`. "
+                " Use `autorun live`/`installer`/`disk` for dist mode.",
+                tui.COLOR_ERROR)
+            return
+        _steps = [
+            (self.cmd_build_cache,       'cache_ready',           'cache build'),
+            (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
+            (self.cmd_source_sync,       'download_ready',        'source sync'),
+            (self.cmd_init_container,    'build_container_ready', 'container init'),
+            (lambda: self.cmd_source_build('individual'),
+                                          'source_build_ready',    'source build individual'),
+        ]
+        self._run_autorun_steps('autorun individual', _steps)
 
     def _run_autorun_steps(self, label: str, _steps: list) -> None:
         """Common driver shared by cmd_auto_run_{live,installer}.

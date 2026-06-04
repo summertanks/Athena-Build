@@ -278,6 +278,69 @@ def test_buildconfig_mode_rejects_unknown_value():
         assert 'banana' in cfg.error_str
 
 
+def test_cmd_auto_run_dispatch_routes_individual():
+    """MIRROR-02 chunk 6: `autorun individual` routes to
+    cmd_auto_run_individual.  Bare `autorun` in indl mode also routes
+    there.  Dist mode bare `autorun` still routes to live (back-compat)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_auto_run_live = lambda *a, **k: _calls.append('live')      # type: ignore
+    _sess.cmd_auto_run_installer = lambda *a, **k: _calls.append('inst') # type: ignore
+    _sess.cmd_auto_run_disk = lambda *a, **k: _calls.append('disk')      # type: ignore
+    _sess.cmd_auto_run_individual = lambda *a, **k: _calls.append('indl')# type: ignore
+
+    class _CfgDist:
+        build_mode = 'distribution'
+    class _CfgIndl:
+        build_mode = 'individual'
+
+    # Explicit `autorun individual` → individual (mode-agnostic
+    # dispatcher; cmd_auto_run_individual itself enforces the gate)
+    _sess.config = _CfgDist()
+    _calls.clear()
+    _sess.cmd_auto_run('individual')
+    assert _calls == ['indl'], _calls
+
+    # Bare `autorun` in dist mode → live (back-compat preserved)
+    _calls.clear()
+    _sess.cmd_auto_run('')
+    assert _calls == ['live'], _calls
+
+    # Bare `autorun` in indl mode → individual (mode-driven default)
+    _sess.config = _CfgIndl()
+    _calls.clear()
+    _sess.cmd_auto_run('')
+    assert _calls == ['indl'], _calls
+
+
+def test_cmd_auto_run_individual_refuses_in_dist_mode():
+    """`autorun individual` requires Mode = individual; rejected
+    otherwise with an actionable hint."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    class _Cfg:
+        build_mode = 'distribution'
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.config = _Cfg()
+    _lines: 'list[str]' = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _sess.cmd_auto_run_individual()
+    finally:
+        build.console.print = _orig
+    _joined = '\n'.join(_lines)
+    assert 'requires `[Build] Mode = individual`' in _joined, _joined
+    assert 'autorun live' in _joined or 'autorun live`/' in _joined, _joined
+
+
 def test_parse_source_build_args_recognises_individual_subset():
     """MIRROR-02 chunk 5: `_parse_source_build_args` accepts
     'individual' as a recognised subset name (mode-gating happens
@@ -25205,6 +25268,8 @@ def main() -> int:
         test_buildconfig_mode_individual_parses,
         test_buildconfig_mode_rejects_unknown_value,
         test_parse_indl_list_strips_comments_dedups_preserves_order,
+        test_cmd_auto_run_dispatch_routes_individual,
+        test_cmd_auto_run_individual_refuses_in_dist_mode,
         test_parse_source_build_args_recognises_individual_subset,
         test_cmd_source_build_individual_subset_rejected_in_dist_mode,
         test_source_audit_naturally_scopes_to_indl_in_individual_mode,
