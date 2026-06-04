@@ -1404,13 +1404,19 @@ class _ChrootMixin:
         registered mirror into the chroot, each line pinned to the
         project signing keyring via ``[signed-by=...]``.
 
+        Per-mirror URL precedence (MIRROR-01 Phase 6):
+          1. ``public_url`` (when set) — written verbatim.  This is the
+             canonical apt-readable URL the `mirror add` flow derives
+             from `<proto>://<host>/<dist-id>`; covers ssh:// publish
+             mirrors which apt itself can't dereference.
+          2. else ``url`` if it's a ``file://`` scheme — written
+             verbatim (offline / local-fs federation mirrors).
+          3. else (ssh:// without public_url, or anything else) — SKIPPED
+             with a warning.  apt can't dereference a raw ssh:// URL.
+
         No mirrors configured → no file written; the installed system
         relies on the ``/cdrom/pool`` source apt-cdrom-added at install
         time.
-
-        Mirrors whose URL uses an ssh transport (ssh:// or user@host:/)
-        are SKIPPED with a warning: apt on the installed system can't
-        dereference those.  file://, http://, https:// pass through.
 
         The keyring named by ``signed-by`` is installed by
         ``_install_signing_keyring`` (run just before this); the operator
@@ -1426,27 +1432,29 @@ class _ChrootMixin:
             _st = _mirror_mod.read_mirror_state(self._config, _n)
             if _st is None:
                 continue
-            _url = _st.get('url') or ''
-            if not _url:
-                continue
-            # apt can dereference http://, https://, file:// — not ssh
-            # transports.  Skip those with a warning.
-            if _url.startswith(('ssh://',)) or (
-                    '@' in _url and ':' in _url and not _url.startswith('/')
-                    and not _url.startswith('file://')):
+            _public_url = (_st.get('public_url') or '').strip()
+            _url = (_st.get('url') or '').strip()
+            _apt_url: str
+            if _public_url:
+                _apt_url = _public_url
+            elif _url.startswith('file://'):
+                _apt_url = _url
+            else:
                 tui.console.print(
-                    f"Skipping mirror {_n} in target sources.list — apt "
-                    f"can't dereference ssh transport ({_url}).  Register "
-                    "an HTTP/HTTPS mirror for installed-system use.",
+                    f"Skipping mirror {_n} in target sources.list — "
+                    f"publish URL {_url!r} isn't dereferenceable by apt "
+                    "and no `public_url` is recorded.  Re-add with "
+                    "`mirror add <ip|fqdn> <ssh-url> --proto http|https` "
+                    "to derive a usable apt URL.",
                     tui.COLOR_WARNING,
                 )
                 continue
             _path = f'/etc/apt/sources.list.d/athena-{_n}.list'
             self._write_chroot_file(
                 _path,
-                f'deb [signed-by={_keyring}] {_url} {_codename} main\n',
+                f'deb [signed-by={_keyring}] {_apt_url} {_codename} main\n',
             )
-            _written.append(f"{_path} → {_url}")
+            _written.append(f"{_path} → {_apt_url}")
         for _w in _written:
             tui.console.print(
                 f"Wrote {_w} {_codename} main (signed-by athena keyring)",

@@ -12186,10 +12186,11 @@ def _stub_chroot_mixin_for_apt_source(*, apt_source_url, build_codename='thor',
 
 
 def test_write_athena_apt_sources_emits_one_file_per_mirror():
-    """MIRROR-01 Phase 5: with two mirrors registered, the chroot gets
-    one /etc/apt/sources.list.d/athena-<name>.list per mirror, signed-by
-    the project keyring, AND the legacy /etc/apt/sources.list.d/athena.list
-    is NOT written."""
+    """MIRROR-01 Phase 6: with two ssh:// mirrors registered (each
+    carrying a derived `public_url`), the chroot gets one
+    /etc/apt/sources.list.d/athena-<name>.list per mirror, signed-by
+    the project keyring, AND the legacy
+    /etc/apt/sources.list.d/athena.list is NOT written."""
     import mirror as _mirror
     with tempfile.TemporaryDirectory() as _cfg_dir:
         inst, writes = _stub_chroot_mixin_for_apt_source(
@@ -12199,10 +12200,18 @@ def test_write_athena_apt_sources_emits_one_file_per_mirror():
         )
         _mirror.add_mirror(
             inst._config, name='alpha',
-            url='https://mirror-a.example.org/asgard', seed_pin='')
+            url='ssh://ubuntu@mirror-a.example.org/srv/asgard',
+            host='mirror-a.example.org', host_type='fqdn',
+            public_proto='https',
+            public_url='https://mirror-a.example.org/asgard',
+            seed_pin='')
         _mirror.add_mirror(
             inst._config, name='beta',
-            url='https://mirror-b.example.org/asgard', seed_pin='')
+            url='ssh://ubuntu@mirror-b.example.org/srv/asgard',
+            host='mirror-b.example.org', host_type='fqdn',
+            public_proto='https',
+            public_url='https://mirror-b.example.org/asgard',
+            seed_pin='')
         inst._write_athena_apt_sources()
         _paths = [_p for _p, _ in writes]
         assert sorted(_paths) == [
@@ -12211,31 +12220,41 @@ def test_write_athena_apt_sources_emits_one_file_per_mirror():
         ], _paths
         # Legacy single file is NOT produced when mirrors are registered.
         assert '/etc/apt/sources.list.d/athena.list' not in _paths
-        # Each line carries the signed-by pin + URL + codename + main.
+        # Each line carries the signed-by pin + public_url + codename + main.
         for _path, _content in writes:
             assert 'signed-by=/usr/share/keyrings/athena-archive-keyring.gpg' \
                 in _content, _content
             assert ' thor main\n' in _content, _content
+            # public_url (https://) is what apt reads, NOT the ssh:// url.
+            assert 'ssh://' not in _content, _content
+            assert 'https://mirror-' in _content, _content
 
 
-def test_write_athena_apt_sources_skips_ssh_url_with_warning():
-    """ssh:// URLs aren't dereferenceable by apt on the installed system;
-    they're SKIPPED (the warning channel surfaces it).  An adjacent
-    HTTPS mirror is still written."""
+def test_write_athena_apt_sources_skips_ssh_url_without_public_url():
+    """An ssh:// mirror WITHOUT a `public_url` cannot be dereferenced by
+    apt; the writer skips it with a warning.  An adjacent ssh:// mirror
+    WITH a public_url is still written."""
     import mirror as _mirror
     with tempfile.TemporaryDirectory() as _cfg_dir:
         inst, writes = _stub_chroot_mixin_for_apt_source(
             apt_source_url='', build_codename='thor', dir_config=_cfg_dir)
+        # Legacy-shaped ssh mirror — no public_url derived.
         _mirror.add_mirror(
-            inst._config, name='shell',
+            inst._config, name='legacy',
             url='ssh://ubuntu@host/srv/asgard', seed_pin='')
+        # New-shape ssh mirror — carries the derived public_url.
         _mirror.add_mirror(
-            inst._config, name='https',
-            url='https://web.example.org/asgard', seed_pin='')
+            inst._config, name='primary',
+            url='ssh://ubuntu@host2/srv/asgard',
+            host='host2', host_type='fqdn',
+            public_proto='http',
+            public_url='http://host2/asgard',
+            seed_pin='')
         inst._write_athena_apt_sources()
         _paths = [_p for _p, _ in writes]
-        # ssh mirror skipped; https mirror still written.
-        assert _paths == ['/etc/apt/sources.list.d/athena-https.list'], _paths
+        # legacy ssh-only mirror skipped; new-shape mirror written.
+        assert _paths == ['/etc/apt/sources.list.d/athena-primary.list'], _paths
+        assert 'http://host2/asgard thor main' in writes[0][1]
 
 
 def test_write_athena_apt_sources_accepts_file_scheme():
@@ -22350,6 +22369,117 @@ def _mirror_module():
     return mirror
 
 
+def test_validate_host_for_type_classifies_ip_fqdn_local():
+    """MIRROR-01 Phase 6: the `ip`/`fqdn`/`local` keyword the operator
+    types at `mirror add` time must agree with the URL shape."""
+    _m = _mirror_module()
+    # ip + ssh:// IPv4 host → ok
+    _ok, _ = _m.validate_host_for_type(
+        'ssh://ubuntu@140.245.198.222/srv/asgard', 'ip')
+    assert _ok
+    # ip + ssh:// IPv6 host → ok
+    _ok, _ = _m.validate_host_for_type(
+        'ssh://user@[2001:db8::1]/srv/asgard', 'ip')
+    assert _ok
+    # ip + ssh:// FQDN host → reject (use fqdn keyword)
+    _ok, _det = _m.validate_host_for_type(
+        'ssh://ubuntu@mirror.example.com/srv/asgard', 'ip')
+    assert not _ok and 'not a valid IPv4 or IPv6' in _det
+    # fqdn + ssh:// FQDN host → ok
+    _ok, _ = _m.validate_host_for_type(
+        'ssh://ubuntu@mirror.example.com/srv/asgard', 'fqdn')
+    assert _ok
+    # fqdn + ssh:// IPv4 → reject (use ip keyword)
+    _ok, _det = _m.validate_host_for_type(
+        'ssh://ubuntu@140.245.198.222/srv/asgard', 'fqdn')
+    assert not _ok and 'looks like an IP literal' in _det
+    # fqdn + single-label host → reject (FQDN needs at least 2 labels)
+    _ok, _det = _m.validate_host_for_type(
+        'ssh://ubuntu@localhost/srv/asgard', 'fqdn')
+    assert not _ok and 'not a valid DNS FQDN' in _det
+    # local + file:// → ok
+    _ok, _ = _m.validate_host_for_type('file:///srv/asgard', 'local')
+    assert _ok
+    # local + ssh:// → reject (wrong scheme)
+    _ok, _det = _m.validate_host_for_type(
+        'ssh://ubuntu@host.example/srv/asgard', 'local')
+    assert not _ok and "host type 'local' requires a file:// URL" in _det
+    # ip + file:// → reject (wrong scheme)
+    _ok, _det = _m.validate_host_for_type('file:///srv/asgard', 'ip')
+    assert not _ok and "requires an ssh:// URL" in _det
+    # unknown keyword → reject
+    _ok, _det = _m.validate_host_for_type(
+        'ssh://ubuntu@host.example/srv/asgard', 'banana')
+    assert not _ok and 'unknown host type' in _det
+
+
+def test_derive_name_from_url_maps_ip_fqdn_local():
+    """Auto-derived mirror name from URL + keyword."""
+    _m = _mirror_module()
+    # IPv4 → dashes
+    assert _m.derive_name_from_url(
+        'ssh://ubuntu@140.245.198.222/srv/asgard', 'ip') == '140-245-198-222'
+    # FQDN → dashes
+    assert _m.derive_name_from_url(
+        'ssh://ubuntu@mirror.example.com/srv/asgard', 'fqdn') \
+        == 'mirror-example-com'
+    # IPv6 brackets stripped, colons → dashes
+    assert _m.derive_name_from_url(
+        'ssh://user@[2001:db8::1]/srv/asgard', 'ip') == '2001-db8--1'
+    # local: name from path tail
+    assert _m.derive_name_from_url(
+        'file:///srv/asgard-staging', 'local') == 'asgard-staging'
+    # Empty / malformed paths fail safe
+    assert _m.derive_name_from_url('file:///', 'local') == 'local'
+    # Mismatched keyword × URL → None
+    assert _m.derive_name_from_url('file:///srv/asgard', 'ip') is None
+    # Unknown keyword → None
+    assert _m.derive_name_from_url(
+        'ssh://ubuntu@host/srv', 'banana') is None
+
+
+def test_derive_public_url_constructs_proto_host_dist():
+    """The apt-readable URL is <proto>://<host>/<dist-id-lowercased>."""
+    _m = _mirror_module()
+    assert _m.derive_public_url(
+        'ssh://ubuntu@140.245.198.222/srv/asgard',
+        dist_id='Asgard', proto='http',
+    ) == 'http://140.245.198.222/asgard'
+    assert _m.derive_public_url(
+        'ssh://ubuntu@mirror.example.com/srv/asgard',
+        dist_id='asgard', proto='https',
+    ) == 'https://mirror.example.com/asgard'
+    # file:// publish URLs have no public URL — apt clients on a remote
+    # host can't reach a file:// path, so we don't emit a misleading one.
+    assert _m.derive_public_url(
+        'file:///srv/asgard', dist_id='asgard', proto='http') is None
+    # Invalid proto / empty dist_id → None
+    assert _m.derive_public_url(
+        'ssh://ubuntu@host.example/srv', dist_id='asgard', proto='ftp') is None
+    assert _m.derive_public_url(
+        'ssh://ubuntu@host.example/srv', dist_id='', proto='http') is None
+
+
+def test_normalize_url_restricted_to_ssh_and_file():
+    """MIRROR-01 Phase 6 tightening: only ssh:// + file:// are valid
+    publish URLs.  The earlier permissive shape (http(s)://,
+    user@host:/path rsync shorthand) is rejected."""
+    _m = _mirror_module()
+    # Accepted
+    assert _m._normalize_url(
+        'ssh://ubuntu@host.example/srv/asgard'
+    ) == 'ssh://ubuntu@host.example/srv/asgard'
+    assert _m._normalize_url('file:///srv/asgard') == 'file:///srv/asgard'
+    # Plain absolute path is auto-prefixed (ergonomics)
+    assert _m._normalize_url('/srv/asgard') == 'file:///srv/asgard'
+    # Rejected
+    assert _m._normalize_url('http://web.example/asgard') is None
+    assert _m._normalize_url('https://web.example/asgard') is None
+    assert _m._normalize_url('ubuntu@host:/srv/asgard') is None
+    assert _m._normalize_url('') is None
+    assert _m._normalize_url(None) is None  # type: ignore[arg-type]
+
+
 def test_mirror_add_remove_round_trip():
     """add_mirror writes the state file; list_mirrors finds it; remove
     deletes it."""
@@ -22360,20 +22490,26 @@ def test_mirror_add_remove_round_trip():
         _cfg = _Cfg()
         assert _m.list_mirrors(_cfg) == []
         _ok, _detail = _m.add_mirror(
-            _cfg, name='alpha', url='ubuntu@host:/srv/asgard',
+            _cfg, name='alpha', url='ssh://ubuntu@host/srv/asgard',
             ssh_key='config/asgard.key', seed_pin='20260601T000000Z',
         )
         assert _ok, _detail
         assert _m.list_mirrors(_cfg) == ['alpha']
         _st = _m.read_mirror_state(_cfg, 'alpha')
         assert _st['name'] == 'alpha'
-        assert _st['url'] == 'ubuntu@host:/srv/asgard'
+        assert _st['url'] == 'ssh://ubuntu@host/srv/asgard'
         assert _st['type'] == 'ssh'
         assert _st['ssh_key'] == 'config/asgard.key'
         assert _st['base'] == '20260601T000000Z'
         assert _st['current'] == '20260601T000000Z'
         assert _st['last_publish_at'] == ''
         assert _st['neighbours_known'] == []
+        # New MIRROR-01 Phase 6 fields default to empty when caller
+        # doesn't pass them (back-compat shape for legacy callers).
+        assert _st['host'] == ''
+        assert _st['host_type'] == ''
+        assert _st['public_proto'] == ''
+        assert _st['public_url'] == ''
         # Remove by name
         _ok, _ = _m.remove_mirror(_cfg, url_or_name='alpha')
         assert _ok
@@ -23861,7 +23997,7 @@ def main() -> int:
         test_install_signing_keyring_warns_on_cp_failure,
         # MIRROR-01 Phase 5
         test_write_athena_apt_sources_emits_one_file_per_mirror,
-        test_write_athena_apt_sources_skips_ssh_url_with_warning,
+        test_write_athena_apt_sources_skips_ssh_url_without_public_url,
         test_write_athena_apt_sources_accepts_file_scheme,
         test_write_athena_apt_sources_noop_when_no_mirrors_and_no_url,
         test_live_chroot_sources_list_is_self_contained,
@@ -24233,6 +24369,10 @@ def main() -> int:
         test_snapshot_history_dedups_promoted_to_head,
         test_snapshot_history_ignores_malformed_file,
         test_snapshot_history_rejects_non_ts_strings,
+        test_validate_host_for_type_classifies_ip_fqdn_local,
+        test_derive_name_from_url_maps_ip_fqdn_local,
+        test_derive_public_url_constructs_proto_host_dist,
+        test_normalize_url_restricted_to_ssh_and_file,
         test_mirror_add_remove_round_trip,
         test_mirror_add_rejects_duplicate_name_and_url,
         test_mirror_add_rejects_invalid_name_and_url,
