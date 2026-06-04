@@ -303,9 +303,9 @@ Two operator personas:
   full corpus.  Cache parse walks `pkg.list` + `pool.list` etc.  Builds
   chroot + ISO.  `repo audit` covers the whole repo.
 - **Build mode** — owns a subset.  Operator lists their packages
-  in `config/indl.list` (flat list, `#` comments).  Cache parse skips
+  in `config/build_pkg.list` (flat list, `#` comments).  Cache parse skips
   the runtime closure walk entirely — `selected_pkgs` is exactly the
-  names in `indl.list`, no transitive deps pulled.  Chroot / ISO are
+  names in `build_pkg.list`, no transitive deps pulled.  Chroot / ISO are
   refused (`[Build] Mode = build` skips chroot/ISO assembly).
   `source audit` scopes to the indl subset.
 
@@ -316,7 +316,7 @@ Mode = build
 ```
 
 ```text
-# config/indl.list
+# config/build_pkg.list
 firefox-esr           # OOMs on host A
 libreoffice
 thunderbird
@@ -325,7 +325,7 @@ thunderbird
 Mode is shown persistently:
 
 - `print state` first line: `MODE: distribution` or
-  `MODE: build  [N pkg(s) in indl.list]`
+  `MODE: build  [N pkg(s) in build_pkg.list]`
 - `autorun <variant>: starting (MODE = …)` header
 - `mirror publish <name> [MODE=build]: → <url>` per-mirror header
 

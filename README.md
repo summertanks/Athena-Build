@@ -206,7 +206,7 @@ A build host has one of two modes:
   + ISO, runs the full repo closure audit.  Use this for the
   "I'm building the whole derivative distro" workflow.
 - **`build`** — owns a subset of packages listed in
-  `config/indl.list` (flat list of names, `#` comments allowed).
+  `config/build_pkg.list` (flat list of names, `#` comments allowed).
   Cache parse skips runtime closure walk; chroot + ISO are refused.
   Source build, `mirror add`, `mirror publish`, `mirror pull` all
   work as normal.  Use this when a teammate needs to take over one
@@ -220,7 +220,7 @@ Mode = build
 ```
 
 ```text
-# config/indl.list
+# config/build_pkg.list
 firefox-esr
 libreoffice
 ```

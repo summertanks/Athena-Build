@@ -861,7 +861,7 @@ class BuildSession:
     def _cache_parse_build_mode(self) -> bool:
         """MIRROR-02: build-mode dep parse.  Populates
         `dep_tree.selected_pkgs` with the binaries named in
-        `config/indl.list` (latest version per name), then
+        `config/build_pkg.list` (latest version per name), then
         `dep_tree.selected_srcs` via `parse_sources` so the source
         builder knows each Build-Depends.
 
@@ -876,15 +876,15 @@ class BuildSession:
         """
         assert self.dep_tree is not None
         assert self.cache is not None
-        _names = utils.parse_indl_list(self.config.indllist_path)
+        _names = utils.parse_build_pkg_list(self.config.build_pkg_list_path)
         if not _names:
             console.print(
-                f"WARNING: [Build] Mode = build but indl.list at "
-                f"{self.config.indllist_path} is empty or missing.",
+                f"WARNING: [Build] Mode = build but build_pkg.list at "
+                f"{self.config.build_pkg_list_path} is empty or missing.",
                 tui.COLOR_WARNING)
             return False
         console.print(
-            f"build mode: {len(_names)} package(s) from indl.list",
+            f"build mode: {len(_names)} package(s) from build_pkg.list",
             tui.COLOR_INFO)
         _resolved = 0
         for _name in _names:
@@ -1000,9 +1000,9 @@ class BuildSession:
 
         # ── MIRROR-02 build-mode branch ─────────────────────────────────
         # In build mode the build host targets just the packages named in
-        # `config/indl.list` — no runtime dep closure walk, no live/installer/
+        # `config/build_pkg.list` — no runtime dep closure walk, no live/installer/
         # pool extras, no chroot/ISO. selected_pkgs is populated directly from
-        # the indl.list lookups (single-version pick per name); parse_sources
+        # the build_pkg.list lookups (single-version pick per name); parse_sources
         # still runs so the source builder knows each package's Build-Depends.
         # Skip-everything-else: Passes I-VII don't run, udeb_dep_tree stays None.
         if self.config.build_mode == 'build':
@@ -1017,7 +1017,7 @@ class BuildSession:
             else:
                 _spiner.stop()
                 console.print(
-                    "cache parse (build): no usable packages in indl.list "
+                    "cache parse (build): no usable packages in build_pkg.list "
                     "(see warnings above); dep_check NOT set.",
                     tui.COLOR_ERROR)
             return
@@ -8182,7 +8182,7 @@ class BuildSession:
             verbose listing — it's almost always the full corpus.
 
         MIRROR-02: in `[Build] Mode = build`, `dep_tree.selected_srcs`
-        IS the indl subset (chunk 2 sets it directly from indl.list,
+        IS the indl subset (chunk 2 sets it directly from build_pkg.list,
         no closure walk), so this audit naturally scopes to just
         those sources — no extra filter needed.  In dist mode it
         walks the full corpus as before.
@@ -9064,7 +9064,7 @@ class BuildSession:
         elif _subset == 'indl':
             console.print(
                 "Indl subset: building every source in "
-                "config/indl.list")
+                "config/build_pkg.list")
         if _profile_override is not None:
             console.print(
                 f"Profile override active: DEB_BUILD_PROFILES + "
@@ -9149,8 +9149,8 @@ class BuildSession:
                     packages.append(_s)
         elif _subset == 'indl':
             # 'indl' subset: every source in selected_srcs.  In build
-            # mode, selected_srcs IS the indl.list contents, so this is
-            # "build all of indl.list".  udeb_dep_tree is None in build
+            # mode, selected_srcs IS the build_pkg.list contents, so this is
+            # "build all of build_pkg.list".  udeb_dep_tree is None in build
             # mode, so no udeb branch.  Same shape as 'all' but with the
             # operator-visible "indl" label.
             packages = [
@@ -10431,7 +10431,7 @@ class BuildSession:
 
     def cmd_auto_run_build(self):
         """MIRROR-02: run the build-mode pipeline through to a complete
-        source build of every package in `config/indl.list`.
+        source build of every package in `config/build_pkg.list`.
 
         Stops at source_build_ready — no chroot or ISO assembly
         (those are refused in build mode anyway per chunk 3).  The
@@ -10690,10 +10690,10 @@ def main(banner: str) -> None:
     _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'build'
                    else tui.COLOR_INFO)
     if _mode == 'build':
-        _indl_names = utils.parse_indl_list(
-            getattr(config, 'indllist_path', '') or '')
+        _build_pkg_names = utils.parse_build_pkg_list(
+            getattr(config, 'build_pkg_list_path', '') or '')
         console.print(
-            f"\tMode\t\t\tbuild  [{len(_indl_names)} pkg(s) in indl.list]",
+            f"\tMode\t\t\tbuild  [{len(_build_pkg_names)} pkg(s) in build_pkg.list]",
             _mode_color)
     else:
         console.print("\tMode\t\t\tdistribution", _mode_color)
