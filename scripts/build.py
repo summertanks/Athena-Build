@@ -4085,10 +4085,7 @@ class BuildSession:
                                    'snapshot pins, manifest tally) — read-only',
             'summary local <path>':'COMP-02: same summary against a local '
                                    'filesystem destination',
-            'refresh':        'UPD-01: realise the selected current pin — rebuild '
-                              'the published→current source delta, +asg-stamp, '
-                              'merge-index, publish additively, prune (no target; '
-                              'pick the destination via `snapshot select` first)',
+            'refresh':        'DEPRECATED: use top-level `refresh`; this is a forwarder',
             'external':       'enable/disable/status the external published repo '
                               '(repo external <status|enable|disable>)',
         }
@@ -5670,50 +5667,46 @@ class BuildSession:
         return True
 
     def _cmd_snapshot_overview(self):
-        """READ-ONLY status: base / current / latest + the current source."""
+        """READ-ONLY status: current + latest + the current source.
+
+        MIRROR-01: archive-floor (`base`) and per-target `published` pins
+        live in per-mirror state — see `mirror summary`.  Only the local
+        build pin (`current`) lives in config/snapshot.state.
+        """
         if not self.config.snapshot_enabled:
             console.print(
                 "  snapshot pinning is DISABLED ([Snapshot] Enabled=false)")
             return
         _cur = self._snapshot_current()
-        _base = self._snapshot_base_ts()
         _src = ('config/snapshot.state'
                 if utils.read_snapshot_state(self.config).get('current')
                 else f'[Snapshot] Timestamp={self.config.snapshot_timestamp_config}')
-        _pub = self._snapshot_published()
         console.print("Snapshot status:")
-        console.print(f"  base      (archive floor) : {_base or '(unset)'}")
-        console.print(f"  published (on the remote) : {_pub or '(unset)'}")
-        console.print(f"  current   (build pin)     : {_cur or '(unresolved)'}")
-        console.print(f"  current source            : {_src}")
+        console.print(f"  current  (build pin) : {_cur or '(unresolved)'}")
+        console.print(f"  current source       : {_src}")
         _latest = self._snapshot_latest()
-        console.print(f"  latest upstream           : {_latest or '(query failed)'}")
-        if _cur and _pub and apt_pkg.version_compare(_cur, _pub) > 0:
+        console.print(f"  latest upstream      : {_latest or '(query failed)'}")
+        # Update-pending hint: ANY laggard mirror means there's work to
+        # publish.  Uses the unified `_update_build_pending` gate which
+        # reads per-mirror state when mirrors are configured (Phase 4).
+        if self._update_build_pending():
             console.print(
-                f"  → current is AHEAD of published — `repo refresh` to build "
-                f"+ publish the {_cur} delta")
+                f"  → at least one publish target is behind {_cur} — "
+                f"`refresh` to build + publish the delta")
         if _cur and _latest and _latest > _cur:
             console.print(
                 "  → latest is AHEAD of current — `snapshot workload latest` to "
-                "see the delta, `repo refresh latest` to roll forward")
+                "see the delta, `snapshot select latest` + `refresh` to roll forward")
 
     def _cmd_snapshot_list(self):
-        """READ-ONLY: base, current, and every snapshot BETWEEN current and
-        latest (numbered) — the ones you can advance current to."""
+        """READ-ONLY: current + every snapshot BETWEEN current and latest
+        (numbered) — the ones you can advance current to."""
         if not self.config.snapshot_enabled:
             console.print("  snapshot pinning is DISABLED")
             return
-        _base = self._snapshot_base_ts()
         _cur = self._snapshot_current()
         _latest = self._snapshot_latest()
-        _pub = self._snapshot_published()
         console.print("Snapshot timeline:")
-        console.print(f"  [  base   ] {_base or '(unset)'}"
-                      + (f"  ({utils.format_snapshot_timestamp(_base)})"
-                         if _base else ''))
-        console.print(f"  [published] {_pub or '(unset)'}"
-                      + (f"  ({utils.format_snapshot_timestamp(_pub)})"
-                         if _pub else ''))
         console.print(f"  [ current ] {_cur or '(unresolved)'}"
                       + (f"  ({utils.format_snapshot_timestamp(_cur)})"
                          if _cur else ''))
@@ -5967,7 +5960,20 @@ class BuildSession:
                 console.print(f"    {_f}: {_why}")
 
     def cmd_repo_refresh(self, *args):
-        """UPD-01 / MIRROR-01 Phase 4: day-2 update cycle convenience.
+        """DEPRECATED (MIRROR-01 cleanup): the publish-refresh orchestrator
+        is now a top-level `refresh` command — it crosses the source +
+        mirror seams and doesn't belong under `repo` (which is local-disk
+        only).  This handler prints a deprecation hint and forwards to
+        the new top-level command.
+        """
+        console.print(
+            "repo refresh: DEPRECATED — use top-level `refresh`.  Same "
+            "behavior; new home reflects the source/repo/mirror seam.",
+            tui.COLOR_WARNING)
+        return self.cmd_refresh(*args)
+
+    def cmd_refresh(self, *args):
+        """MIRROR-01: day-2 update cycle convenience.
 
         Workflow:
           1. `source sync`     — update source/ to current pin
@@ -5978,7 +5984,11 @@ class BuildSession:
                * no mirrors → legacy `repo publish ssh full`
 
         Pre-flight gates: dep_check_ready, and at least one publish target
-        behind local current (otherwise nothing to refresh)."""
+        behind local current (otherwise nothing to refresh).
+
+        Top-level (not under repo / source / mirror) because it
+        orchestrates across all three.  Parallel to `autorun` (the longer
+        cache → source → chroot → iso chain)."""
         if args:
             console.print(
                 "repo refresh takes no target — set the destination with "
@@ -10359,6 +10369,7 @@ def main(banner: str) -> None:
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
+    tui.register_command('refresh',   session.cmd_refresh,   'Refresh:    refresh — source sync → build all → mirror publish (day-2)')
     tui.register_command('resume',    session.cmd_resume,    'Resume:     resume — UX-04 restore Cache + DT from prior session')
     tui.register_command('print',     session.cmd_print,     'Print:      print build state — try `print help`')
 
