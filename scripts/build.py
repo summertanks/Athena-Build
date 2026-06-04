@@ -2325,7 +2325,9 @@ class BuildSession:
     def _preflight_audit_source(self) -> bool:
         """Source-side audit gate for `chroot build live/installer`.
 
-        Walks `_source_state` over the merged deb+udeb dep tree.
+        N/A in individual mode (chroot/ISO are refused there — see
+        _refuse_in_individual_mode in chunk 3).  In dist mode walks
+        `_source_state` over the merged deb+udeb dep tree.
         Aborts (with operator y/n prompt) when any of these states
         are non-empty for selected sources:
 
@@ -7643,6 +7645,12 @@ class BuildSession:
             `no_pkgs`) which the default report only summarises by
             count.  The `ok` bucket is deliberately omitted from
             verbose listing — it's almost always the full corpus.
+
+        MIRROR-02: in `[Build] Mode = individual`, `dep_tree.selected_srcs`
+        IS the indl subset (chunk 2 sets it directly from indl.list,
+        no closure walk), so this audit naturally scopes to just
+        those sources — no extra filter needed.  In dist mode it
+        walks the full corpus as before.
 
         Read-only by design: never writes records, never invokes
         BuildContainer.build, never calls _refresh_patches.  Mutating
