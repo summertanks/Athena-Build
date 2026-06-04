@@ -22242,6 +22242,132 @@ def test_source_state_tunneled_record_with_pristine_binary_returns_tunneled():
             f"as 'tunneled', got {_state!r}")
 
 
+def _build_session_for_setget(_tmp):
+    """Minimal BuildSession stub with the bits cmd_set / cmd_get touch."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+
+    _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+
+    class _Cfg:
+        build_mode = 'distribution'
+        include_recommends = False
+        build_version = '0.1'
+        build_codename = 'thor'
+        build_distribution = 'Asgard'
+        arch = 'amd64'
+        snapshot_enabled = True
+        snapshot_timestamp_config = '20260602T173733Z'
+        max_parallel_builds = 3
+    _sess.config = _Cfg()
+    _sess.flags = MagicMock(dep_check_ready=True)
+    return _sess, _build_mod
+
+
+def test_cmd_get_lists_every_gettable_param_when_called_bare():
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+        _sess.cmd_get()
+        _joined = '\n'.join(_printed)
+        # Every settable param must be reachable via get.
+        for _name in _build_mod.BuildSession._SETTABLE:
+            assert _name in _joined, f"get-all missed {_name}: {_joined!r}"
+        assert 'distribution' in _joined  # current mode value
+
+
+def test_cmd_get_named_param_returns_current_value():
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+        _sess.cmd_get('mode')
+        assert any('distribution' in _p for _p in _printed), _printed
+
+
+def test_cmd_set_mode_switches_value_and_clears_dep_check_ready():
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+
+        # dep_check_ready starts True (the MagicMock default we set).
+        _sess.cmd_set('mode', 'individual')
+
+        assert _sess.config.build_mode == 'individual'
+        # dep_check_ready must be cleared so cache parse re-runs.
+        assert _sess.flags.dep_check_ready is False, _sess.flags
+        _joined = '\n'.join(_printed)
+        assert 'individual' in _joined
+        assert 'dep_check_ready cleared' in _joined
+
+
+def test_cmd_set_mode_invalid_value_keeps_old_value():
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+
+        _sess.cmd_set('mode', 'turbo')
+
+        assert _sess.config.build_mode == 'distribution'  # unchanged
+        # dep_check_ready stays untouched on rejection.
+        assert _sess.flags.dep_check_ready is True
+        _joined = '\n'.join(_printed)
+        assert 'invalid mode' in _joined
+
+
+def test_cmd_set_mode_same_value_is_noop():
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+
+        _sess.cmd_set('mode', 'distribution')
+
+        # No state change, no dep_check_ready clear.
+        assert _sess.config.build_mode == 'distribution'
+        assert _sess.flags.dep_check_ready is True
+        _joined = '\n'.join(_printed)
+        assert 'already' in _joined
+
+
+def test_cmd_set_unknown_param_reports_available_list():
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+
+        _sess.cmd_set('warp-factor', '9')
+
+        _joined = '\n'.join(_printed)
+        assert 'unknown param' in _joined
+        # The error must point the operator at the supported list.
+        assert 'mode' in _joined
+
+
 def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
     """Regression: when a source's binaries have different per-file
     ledger histories (kernel meta `linux-headers-amd64` has accumulated
@@ -27655,6 +27781,12 @@ def main() -> int:
         test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass,
         test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
         test_normalize_built_artifacts_uses_uniform_n_across_siblings,
+        test_cmd_get_lists_every_gettable_param_when_called_bare,
+        test_cmd_get_named_param_returns_current_value,
+        test_cmd_set_mode_switches_value_and_clears_dep_check_ready,
+        test_cmd_set_mode_invalid_value_keeps_old_value,
+        test_cmd_set_mode_same_value_is_noop,
+        test_cmd_set_unknown_param_reports_available_list,
         test_humansize_thresholds,
         test_shorten_origin_compacts_long_pool_url,
         test_new_build_record_threads_component_field,
