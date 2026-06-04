@@ -22759,6 +22759,136 @@ def test_coord_store_project_live_claims_collapses_retraction():
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
 
 
+def test_project_post_publish_state_merges_remote_claims_as_satisfiers():
+    """MIRROR-02 chunk 11: project_post_publish_state takes the local
+    RepoState and layers in remote claims as satisfier-only entries
+    (no Depends).  Multi-version-aware: when local has libdep@1.0
+    and remote has libdep@2.0, the result carries libdep@2.0 (the
+    newer satisfies more constraints)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    import repo_audit as _repo_audit
+    # Local state: libdep 1.0, no Depends (we built it).
+    _local = _repo_audit.RepoState(
+        packages={
+            'libdep': {'Package': 'libdep', 'Version': '1.0'},
+        },
+        provides_index={}, packages_file='', repo_mtime=0.0,
+    )
+    # Remote claim: libdep 2.0 (newer)
+    _claims = {
+        'team-b': [{
+            'package': 'libdep', 'built_version': '2.0',
+            'filename': 'libdep_2.0_amd64.deb', 'sha256': 'a' * 64,
+            'snapshot': 'S', 'builder': 'team-b',
+            'claim_state': 'published',
+        }]
+    }
+    _state = _mirror.project_post_publish_state(_local, _claims)
+    # Remote 2.0 > local 1.0 → remote wins as the projected entry
+    assert _state.packages['libdep']['Version'] == '2.0'
+
+
+def test_find_publish_closure_breaks_returns_empty_when_satisfied():
+    """When every Depends of our pending pkgs is satisfied by the
+    union (local + remote claims), no findings."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    import repo_audit as _repo_audit
+    # Local has libwebkit which Depends libssl3.  We're publishing
+    # libwebkit; libssl3 is already on the mirror (remote claim).
+    _local = _repo_audit.RepoState(
+        packages={
+            'libwebkit': {
+                'Package': 'libwebkit', 'Version': '2.0',
+                'Depends': 'libssl3 (>= 3.0.0)',
+            },
+        },
+        provides_index={}, packages_file='', repo_mtime=0.0,
+    )
+    _remote_claims = {
+        'team-b': [{
+            'package': 'libssl3', 'built_version': '3.0.5',
+            'filename': 'libssl3_3.0.5_amd64.deb', 'sha256': 'a' * 64,
+            'snapshot': 'S', 'builder': 'team-b',
+            'claim_state': 'published',
+        }]
+    }
+    _breaks = _mirror.find_publish_closure_breaks(
+        _local, _remote_claims,
+        our_pending_pkg_names=frozenset({'libwebkit'}))
+    assert _breaks == [], _breaks
+
+
+def test_find_publish_closure_breaks_detects_missing_dep():
+    """When our pending pkg depends on something not in local OR
+    remote, the closure check returns a finding naming the offender.
+    """
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    import repo_audit as _repo_audit
+    # Local has libwebkit which Depends a brand-new libfoo@5.0.
+    # Mirror has libfoo@3.0 (older — doesn't satisfy).  Publish
+    # libwebkit → closure break.
+    _local = _repo_audit.RepoState(
+        packages={
+            'libwebkit': {
+                'Package': 'libwebkit', 'Version': '2.0',
+                'Depends': 'libfoo (>= 5.0)',
+            },
+        },
+        provides_index={}, packages_file='', repo_mtime=0.0,
+    )
+    _remote_claims = {
+        'team-b': [{
+            'package': 'libfoo', 'built_version': '3.0',
+            'filename': 'libfoo_3.0_amd64.deb', 'sha256': 'a' * 64,
+            'snapshot': 'S', 'builder': 'team-b',
+            'claim_state': 'published',
+        }]
+    }
+    _breaks = _mirror.find_publish_closure_breaks(
+        _local, _remote_claims,
+        our_pending_pkg_names=frozenset({'libwebkit'}))
+    assert len(_breaks) >= 1, _breaks
+    # Each finding is (pkg, field, relation_str, why)
+    _names = [_b[0] for _b in _breaks]
+    assert 'libwebkit' in _names
+    # libfoo appears in the relation_str of the finding
+    assert any('libfoo' in _b[2] for _b in _breaks), _breaks
+
+
+def test_find_publish_closure_breaks_respects_consumer_set():
+    """The closure check bounds its consumer walk to our pending pkgs;
+    a pre-existing broken local package OUTSIDE the consumer set
+    doesn't fire."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    import repo_audit as _repo_audit
+    _local = _repo_audit.RepoState(
+        packages={
+            # `legacy-pkg` has unresolved Depends but isn't OUR pending
+            'legacy-pkg': {
+                'Package': 'legacy-pkg', 'Version': '1.0',
+                'Depends': 'missing-dep (>= 1.0)',
+            },
+            # `our-pkg` is what we're publishing; no Depends → no break
+            'our-pkg': {
+                'Package': 'our-pkg', 'Version': '1.0',
+            },
+        },
+        provides_index={}, packages_file='', repo_mtime=0.0,
+    )
+    _breaks = _mirror.find_publish_closure_breaks(
+        _local, remote_by_builder={},
+        our_pending_pkg_names=frozenset({'our-pkg'}))
+    assert _breaks == [], _breaks   # legacy-pkg is not our concern
+
+
 def test_mirror_pull_write_build_records_built_pkg_records_pulled_from():
     """MIRROR-02 chunk 10: a non-tunneled claim pulled from a mirror
     yields a local build.json with phase=done + pulled_from set to
@@ -26666,6 +26796,10 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_project_post_publish_state_merges_remote_claims_as_satisfiers,
+        test_find_publish_closure_breaks_returns_empty_when_satisfied,
+        test_find_publish_closure_breaks_detects_missing_dep,
+        test_find_publish_closure_breaks_respects_consumer_set,
         test_mirror_pull_write_build_records_built_pkg_records_pulled_from,
         test_mirror_pull_write_build_records_tunneled_pkg_records_republished_from,
         test_mirror_pull_write_build_records_aggregates_multi_output_pkg,
