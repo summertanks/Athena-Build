@@ -1303,8 +1303,9 @@ class BuildContainer:
         Stamping requires the ledger (self.asg_ledger: {pkg: [versions]}, the
         LOCAL signed published manifest) so N is monotonic against what's
         ALREADY published — local repo/ is single-snapshot and can't be the
-        source of truth.  When no ledger is set (a plain `source build`, not a
-        `repo refresh`), we strip only and do NOT stamp.  N is derived PER
+        source of truth.  When no ledger is set (a plain `source build`, not an
+        update-driven rebuild via `source build all` after a snapshot advance),
+        we strip only and do NOT stamp.  N is derived PER
         BINARY FILE (each file's own highest published N + 1) — a file updated
         more often than its siblings carries a higher N (e.g. foo at u5 while
         foo-data is at u1).

@@ -11,11 +11,13 @@ Two entry points:
                    coord-head with updated last_seqs → push coord-head
                    → release flock.
 
-`remote_publish` does NOT push the .deb pool itself.  The operator
-runs `repo publish ssh` (or `repo publish local`) — both already
-exist — to land binaries.  This split lets coord/publish stay
-focused on the sidecar tracking and the existing publish paths stay
-backwards-compatible for non-coord operators.
+`remote_publish` push the .deb pool per-file as part of the same
+transaction (MIRROR-01 Phase 3b): each pending claim's binary lands
+on the remote pool before its claim line is appended, so a partial
+publish leaves a consistent view.  When `pool_remote_spec` is None
+(legacy callers), pool push is skipped and the operator is expected
+to land binaries out-of-band — `cmd_mirror_publish` always wires
+both, so the legacy path is dead in tree.
 
 The 11-step state machine called out in the plan lives here in
 remote_publish().  Each step is a single function call; if any
@@ -323,9 +325,10 @@ def remote_publish(
     (ok, detail).  On failure detail explains the step that aborted.
 
     `inrelease_local_path` MUST be a local copy of the same InRelease
-    that's published at the remote — typically rsync'd in the same
-    operator step as `repo publish ssh`.  Used to compute the
-    sha256 that the new coord-head pins.
+    that's published at the remote — typically the InRelease produced
+    by `repo index` and pushed as part of this same `mirror publish`
+    transaction.  Used to compute the sha256 that the new coord-head
+    pins.
 
     `local_mirror_urls` (MIRROR-01 Phase 3): the canonical federation
     URL set the local builder has configured.  When `None`, federation
@@ -340,8 +343,9 @@ def remote_publish(
     host).  For each pending claim whose .deb is on the local pool,
     push that .deb per-file BEFORE writing its claim.  Files that fail
     to push are dropped from the claim set — partial publishes converge
-    on retry.  When `None`, the .deb-pool sync is skipped (legacy path:
-    operator runs `repo publish ssh full` for the .debs out-of-band).
+    on retry.  `cmd_mirror_publish` always wires this; the `None` path
+    survives only for unit-test fakes that exercise the sidecar layer
+    in isolation.
 
     `on_progress` callback (MIRROR-01 Phase 3b): invoked once per .deb
     push attempt as `on_progress(current, total, filename, ok)`.  Caller
@@ -503,9 +507,8 @@ def remote_publish(
             _pending = _kept_pending
 
         # Step 6 — sign + append every pending claim to the LOCAL jsonl
-        # (state=published; the .deb is now on the remote pool either
-        # because step 5b just pushed it or the operator ran the legacy
-        # `repo publish ssh full` before this command)
+        # (state=published; the .deb is now on the remote pool because
+        # step 5b just pushed it under the same transaction)
         _seq = _store.max_seq(config.dir_coord_claims, builder_id)
         _appended = 0
         for _claim in _pending:

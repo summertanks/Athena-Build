@@ -32,7 +32,7 @@ also run each command individually.
 cache build → cache parse → source sync → container init
    → source build → chroot build → chroot verify
    → iso build {live | installer | disk}
-   → repo index → repo publish
+   → repo index → mirror publish
 ```
 
 | Stage | Command | Purpose | Major modules |
@@ -51,11 +51,12 @@ After the artifact lands, two more stages handle distribution:
 | Stage | Command | Purpose |
 |---|---|---|
 | 9. Repo index | `repo index full \| minimal` | `dpkg-scanpackages` over `repo/dists/<codename>{,-debug}/`, `apt-ftparchive release`, GPG-sign `Release` + clearsign `InRelease`. |
-| 10. Repo publish | `repo publish ssh\|local …` | Transport the indexed repo to a destination.  See [`docs/repo-publish-vm-setup.md`](repo-publish-vm-setup.md). |
+| 10. Mirror publish | `mirror publish [<name>]` | Per-file `.deb` push + Ed25519-signed claims + tier-1 GPG-signed `coord-head` to every configured mirror (or one).  Federation-gated; first-publish bootstraps the peer.  See [`docs/mirror-setup.md`](mirror-setup.md). |
 
 For incremental updates (advance the snapshot, rebuild only the changed
-source delta, +asg-stamp, publish additively): see `repo refresh` and
-memory entry `project_upd01_update_architecture.md`.
+source delta, +asg-stamp, publish additively to every configured
+mirror): walk `source sync → source build all → mirror publish` and
+see memory entry `project_upd01_update_architecture.md`.
 
 ## BuildFlags — the stage gate
 
@@ -148,7 +149,7 @@ package.  Grouped by role:
   (COMP-02 publish twins, closing over `_reindex_and_sign_via`).
 - **`repo_audit.py`** — `published_ledger` (the `+asg uN` bump authority);
   `_write_signed_manifest` / `_read_signed_manifest` (fail-closed, STA-21);
-  external-vs-manifest reconciliation (`repo audit external ssh`).
+  cross-mirror manifest reconciliation (consumed by `mirror audit`).
 - **`fork_mirror.py`** — local fork tree mirror generator (the `file://`
   flat-shaped mirror cache reads alongside snapshot mirrors).
 
@@ -182,9 +183,10 @@ invariants you'll see referenced across the code:
   `+asg<R>u<N>` stamps, derived from the local signed manifest (the
   `+asg uN` bump authority), per-binary-file N.  Memory entry:
   `project_upd01_update_architecture.md`.
-- **Publish-before-prune** — `repo refresh` order is build → merge-index
-  → additive publish → THEN local prune.  Never prune a version before
-  it's on the remote.
+- **Publish-before-prune** — update order is build → `mirror publish`
+  (which per-file pushes new `.deb`s additively, signs claims, re-signs
+  `coord-head`) → THEN local prune.  Never prune a version before every
+  configured mirror's claim ledger records it.
 - **Identity strip** — every shipped artifact is audited for `Debian` /
   `debian.org` / `report-bug` residue.  Memory entry:
   `project_filter_debian_specific_installer_hooks.md`.
@@ -195,8 +197,9 @@ invariants you'll see referenced across the code:
   walkthrough of every module.
 - [`docs/patching.md`](patching.md) — patch directory conventions
   (DEP-3, pre-install, post-install).
-- [`docs/repo-publish-vm-setup.md`](repo-publish-vm-setup.md) — operator
-  guide for ssh + local publish + `repo summary`.
+- [`docs/mirror-setup.md`](mirror-setup.md) — operator guide for
+  registering / first-publish / wipe-and-redo on a publish-target
+  mirror (MIRROR-01 federation surface).
 - [`docs/branding-methodology.md`](branding-methodology.md) — identity-
   strip + Asgard branding methodology (Patterns A / B / C).
 - [`docs/plans/`](plans/) — per-initiative implementation plans

@@ -570,7 +570,7 @@ def _remote_scan_packages(ssh_cmd: 'list[str]', userhost: str,
 
 def _local_has_debs(root: str, rel: str) -> bool:
     """True if the local subdir `<root>/<rel>` holds any .deb/.udeb.  Twin of
-    `_remote_has_debs` for the `repo publish local <path>` transport."""
+    `_remote_has_debs` for local-fs mirrors (`mirror add … file://…`)."""
     _abs = os.path.join(root, rel)
     if not os.path.isdir(_abs):
         return False
@@ -580,7 +580,7 @@ def _local_has_debs(root: str, rel: str) -> bool:
 def _local_scan_packages(root: str, rel: str, udeb: bool) -> 'Optional[str]':
     """Run dpkg-scanpackages LOCALLY over `<root>/<rel>` and return the
     Packages text (Filenames relative to root).  Twin of `_remote_scan_packages`
-    for the `repo publish local <path>` transport.  None on failure."""
+    for local-fs mirrors (`mirror add … file://…`).  None on failure."""
     _argv = ['dpkg-scanpackages', '-m']
     if udeb:
         _argv += ['-t', 'udeb']
@@ -714,7 +714,7 @@ def local_reindex_and_sign(
 ) -> 'Optional[str]':
     """COMP-02: regenerate the apt index from what's at the local destination
     `dest_root` (after the additive .deb copy).  Twin of `remote_reindex_and_sign`
-    for the `repo publish local <path>` transport — no ssh wrapper; everything
+    for local-fs mirrors (`mirror add … file://…`) — no ssh wrapper; everything
     runs in-process.  Same merge-from-destination contract so the published
     Packages reflects prior versions kept at `dest_root` (UPD-01 append-only)."""
     return _reindex_and_sign_via(
@@ -1015,7 +1015,7 @@ def _generate_top_release(
     (~200-byte header it had written before reaching that file during the
     walk) and emit a stale `Release` entry in the SHA256 block —
     InRelease then advertised a hash that no consumer could verify
-    (`repo audit external` MISMATCH Release, 2026-05-28).  Workaround:
+    (`mirror audit` MISMATCH Release, 2026-05-28).  Workaround:
     write to a temp file OUTSIDE the walked subtree (`staging/.release-
     tmp-<...>`), then mv into place after apt-ftparchive completes.  The
     walk never sees a Release file at the target path, so the SHA256
