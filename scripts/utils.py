@@ -1879,9 +1879,11 @@ def append_snapshot_history(config: 'BuildConfig', ts: str) -> None:
 
 
 def read_snapshot_state(config: 'BuildConfig') -> dict:
-    """Read config/snapshot.state → {'base': ts, 'current': ts}; {} if absent
-    or malformed.  The operator-set pins (via `snapshot select/advance/base`)
-    live here and take precedence over [Snapshot] Timestamp."""
+    """Read config/snapshot.state → {'current': ts}; {} if absent or
+    malformed.  Legacy fields (`base`, `published`, `external`) from
+    pre-MIRROR-01 files are returned as-is by the reader for one
+    cycle — `write_snapshot_state` drops them on the next write so
+    the file shrinks to just `current` automatically."""
     import json
     try:
         with open(snapshot_state_path(config)) as fh:
@@ -1896,24 +1898,25 @@ def write_snapshot_state(config: 'BuildConfig',
                          current: 'Optional[str]' = None,
                          published: 'Optional[str]' = None,
                          external: 'Optional[bool]' = None) -> None:
-    """Merge base/current/published/external into config/snapshot.state and
-    clear the resolve memo so the new pin takes effect immediately within
-    this run.
+    """Write `current` to config/snapshot.state; clear the resolve memo.
 
-    Pin: `current` = the snapshot the operator selected to build at.
-    Legacy kwargs `base`, `published`, `external` are accepted (and merged
-    into the state file) for backward-compat — they don't drive any live
-    code path anymore; per-mirror state owns the publish-target pins."""
+    `current` is the only field that drives live code in MIRROR-01:
+    the operator-selected snapshot pin every build runs against.
+    Legacy kwargs `base`, `published`, `external` are accepted for
+    back-compat with old callers (so the function signature doesn't
+    break) but **silently dropped** — per-mirror state files own the
+    publish-target pins now; nothing reads these fields anymore.
+
+    Pre-MIRROR-01 snapshot.state files carrying base / published /
+    external get rewritten cleanly on the next write (the merge-then-
+    write logic from the old shape was removed in Phase 8)."""
     import json
-    _state = read_snapshot_state(config)
-    if base is not None:
-        _state['base'] = base
-    if current is not None:
-        _state['current'] = current
-    if published is not None:
-        _state['published'] = published
-    if external is not None:
-        _state['external'] = bool(external)
+    del base, published, external  # silently dropped — see docstring
+    _existing = read_snapshot_state(config)
+    _new_current = current if current is not None else _existing.get('current')
+    _state: 'dict[str, str]' = {}
+    if _new_current:
+        _state['current'] = _new_current
     _path = snapshot_state_path(config)
     os.makedirs(os.path.dirname(_path), exist_ok=True)
     with open(_path, 'w') as fh:
