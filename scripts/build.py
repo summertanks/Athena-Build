@@ -38,7 +38,7 @@ import shutil
 import subprocess
 import time
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 import apt_pkg
 
@@ -10139,6 +10139,124 @@ class BuildSession:
                 )
         console.print(f"\ncve: report → {_report_path}")
 
+    # ─────────────────────────────────────────────────────────────────
+    # set / get — session-local config parameter manipulation
+    # ─────────────────────────────────────────────────────────────────
+
+    def _set_mode(self, value: str) -> None:
+        """`set mode <distribution|individual>` — switch build mode in
+        the running session.  Clears dep_check_ready so the next
+        pipeline step re-resolves under the new mode; does NOT
+        persist to build.conf (operator commits the change explicitly
+        if they want it durable)."""
+        _valid = ('distribution', 'individual')
+        if value not in _valid:
+            console.print(
+                f"  invalid mode: {value!r}  (try: {' | '.join(_valid)})",
+                tui.COLOR_ERROR)
+            return
+        if self.config.build_mode == value:
+            console.print(f"  mode already = {value}", tui.COLOR_INFO)
+            return
+        _prev = self.config.build_mode
+        self.config.build_mode = value
+        console.print(
+            f"  mode  {_prev}  →  {value}  (session-local, "
+            "build.conf unchanged)", tui.COLOR_HIGHLIGHT)
+        if self.flags.dep_check_ready:
+            self.flags.dep_check_ready = False
+            console.print(
+                "  dep_check_ready cleared — run `cache parse` to "
+                "re-resolve under the new mode", tui.COLOR_INFO)
+        # Refresh the persistent TUI footer tag so the operator can't
+        # forget what mode they're in.  No-op on the CLI backend.
+        _inst = getattr(tui, 'tui_instance', None)
+        if _inst is not None and hasattr(_inst, 'dispatcher'):
+            try:
+                _banner = (
+                    "Athena Build System v0.1"
+                    + (' [indl]' if value == 'individual' else ''))[:50]
+                _inst.dispatcher.state.banner = _banner
+            except AttributeError:
+                pass
+
+    def _set_include_recommends(self, value: str) -> None:
+        """`set include-recommends <true|false>`"""
+        _v = value.lower()
+        if _v in ('true', '1', 'yes', 'on'):
+            _new = True
+        elif _v in ('false', '0', 'no', 'off'):
+            _new = False
+        else:
+            console.print(
+                f"  invalid bool: {value!r}  (try: true | false)",
+                tui.COLOR_ERROR)
+            return
+        if getattr(self.config, 'include_recommends', False) == _new:
+            console.print(f"  include-recommends already = {_new}",
+                          tui.COLOR_INFO)
+            return
+        self.config.include_recommends = _new
+        console.print(
+            f"  include-recommends  →  {_new}  (session-local)",
+            tui.COLOR_HIGHLIGHT)
+        if self.flags.dep_check_ready:
+            self.flags.dep_check_ready = False
+            console.print(
+                "  dep_check_ready cleared — run `cache parse`",
+                tui.COLOR_INFO)
+
+    _SETTABLE: 'dict[str, Callable]' = {}    # populated below
+    _GETTABLE: 'dict[str, Callable]' = {}
+
+    def cmd_set(self, *args) -> None:
+        """set <param> <value> — change a session-local config param.
+
+        Bare `set` lists the settable params.  Changes are NOT written
+        to build.conf; restart resets to the file's values.
+        """
+        if not args:
+            console.print("Settable params (session-local):")
+            for _p in sorted(self._SETTABLE):
+                console.print(f"  set {_p} <value>")
+            return
+        if len(args) < 2:
+            console.print(
+                f"  usage: set {args[0]} <value>", tui.COLOR_ERROR)
+            return
+        _param, _value = args[0], args[1]
+        _handler = self._SETTABLE.get(_param)
+        if _handler is None:
+            console.print(
+                f"  unknown param: {_param!r}", tui.COLOR_ERROR)
+            console.print(
+                f"  available: {', '.join(sorted(self._SETTABLE))}")
+            return
+        _handler(self, _value)
+
+    def cmd_get(self, *args) -> None:
+        """get [param] — show a session-local config param.
+
+        Bare `get` lists every gettable param + current value.
+        """
+        if not args:
+            console.print("Current config (session-local view):")
+            _w = max(len(_p) for _p in self._GETTABLE) if self._GETTABLE else 0
+            for _p in sorted(self._GETTABLE):
+                _v = self._GETTABLE[_p](self)
+                console.print(f"  {_p:<{_w}}  =  {_v}")
+            return
+        _param = args[0]
+        _getter = self._GETTABLE.get(_param)
+        if _getter is None:
+            console.print(
+                f"  unknown param: {_param!r}", tui.COLOR_ERROR)
+            console.print(
+                f"  available: {', '.join(sorted(self._GETTABLE))}")
+            return
+        _value = _getter(self)
+        console.print(f"  {_param}  =  {_value}")
+
     def cmd_resume(self, *args) -> None:
         """UX-04: restore Cache + DependencyTree + udeb_dep_tree from the
         last persisted session, gated by a fingerprint of every input
@@ -10384,6 +10502,32 @@ class BuildSession:
     # ---------------------------------------------------------------------------
 
 
+# Late-bind the set/get registries to the methods declared on the class.
+# Kept here so the methods are unambiguously bound before BuildSession is
+# instantiated.  Adding a new param: drop a `_set_X` method on BuildSession
+# and add it here.
+BuildSession._SETTABLE = {
+    'mode':                BuildSession._set_mode,
+    'include-recommends':  BuildSession._set_include_recommends,
+}
+BuildSession._GETTABLE = {
+    'mode':                lambda s: getattr(s.config, 'build_mode',
+                                              'distribution'),
+    'include-recommends':  lambda s: getattr(s.config,
+                                              'include_recommends', False),
+    'build-version':       lambda s: getattr(s.config, 'build_version', '?'),
+    'codename':            lambda s: getattr(s.config, 'build_codename', '?'),
+    'distribution':        lambda s: getattr(s.config,
+                                              'build_distribution', '?'),
+    'arch':                lambda s: getattr(s.config, 'arch', '?'),
+    'snapshot':            lambda s: (
+        getattr(s.config, 'snapshot_timestamp_config', '?')
+        if getattr(s.config, 'snapshot_enabled', False) else 'disabled'),
+    'max-parallel-builds': lambda s: getattr(s.config,
+                                              'max_parallel_builds', 1),
+}
+
+
 def main(banner: str) -> None:
     """Initialise apt_pkg, BuildConfig, the rendering backend (TUI or CLI),
     and a BuildSession; register every cmd_X handler; block until the user
@@ -10535,6 +10679,8 @@ def main(banner: str) -> None:
     tui.register_command('cve',       session.cmd_cve,       'CVE:        \tcve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    \tautorun [live|installer]')
     tui.register_command('resume',    session.cmd_resume,    'Resume:     \tresume — UX-04 restore Cache + DT from prior session')
+    tui.register_command('set',       session.cmd_set,       'Set:        \tset <param> <value> — session-local config change')
+    tui.register_command('get',       session.cmd_get,       'Get:        \tget [param] — show current config value(s)')
     tui.register_command('print',     session.cmd_print,     'Print:      \tprint build state — try `print help`')
 
     console.print(asciiart_logo, tui.COLOR_ERROR)
