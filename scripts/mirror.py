@@ -37,9 +37,11 @@ populated by later-phase commands; Phase 1's `add` writes a minimal
 record with `base=current=<local snapshot.current>`.
 """
 
+import ipaddress
 import json
 import logging
 import os
+import re
 from typing import List, Optional
 
 logger = logging.getLogger('athena')
@@ -48,6 +50,8 @@ logger = logging.getLogger('athena')
 MIRROR_STATE_PREFIX = 'mirror.'
 MIRROR_STATE_SUFFIX = '.state'
 VALID_TYPES = frozenset({'ssh', 'local'})
+HOST_TYPES = frozenset({'ip', 'fqdn', 'local'})
+VALID_PROTOS = frozenset({'http', 'https'})
 
 
 # ─────────────────────────── name + URL validation ──────────────────────
@@ -65,41 +69,206 @@ def _valid_name(name: str) -> bool:
 
 
 def _normalize_url(url: str) -> Optional[str]:
-    """Accept either a recognised scheme (`ssh://`, `file://`, `https://`)
-    or a bare `user@host:/path` shorthand (rsync/ssh natively understands
-    this).  Returns the normalised URL on success, None on rejection.
+    """Strict normalisation for publish-target URLs.  Accepts ONLY
+    ``ssh://user@host/path`` and ``file:///abs/path`` (plain
+    ``/abs/path`` is auto-prefixed with ``file://`` for ergonomics).
 
-    No DNS / reachability check at this layer — that's `mirror status`'s
-    job (Phase 3).
+    The earlier permissive shape (``http(s)://``, ``user@host:/path``
+    rsync shorthand) was retired with MIRROR-01 Phase 6: HTTP(S) is
+    the READ surface (`public_url`, written into
+    `sources.list.d/athena-<name>.list`), never the PUBLISH surface;
+    the rsync shorthand is too easy to fat-finger into a malformed
+    federation entry, so we force the explicit scheme.
+
+    Returns the normalised URL on success, None on rejection.  No
+    DNS / reachability checking at this layer — `cmd_mirror_add`
+    owns that.
     """
     if not isinstance(url, str) or not url:
         return None
     _stripped = url.strip()
     if not _stripped:
         return None
-    if _stripped.startswith(('ssh://', 'file://', 'https://', 'http://')):
+    if _stripped.startswith(('ssh://', 'file://')):
         return _stripped
-    # `user@host:/path` shorthand
-    if '@' in _stripped and ':' in _stripped:
-        return _stripped
-    # Plain absolute path = local file mirror
     if _stripped.startswith('/'):
         return 'file://' + _stripped
     return None
 
 
 def _infer_type(url: str) -> str:
-    """Pick the default transport type from the URL prefix.  Operators
-    can override via the `--type` arg at `mirror add` time."""
-    if url.startswith(('ssh://',)):
-        return 'ssh'
-    if url.startswith(('file://',)):
-        return 'local'
-    if url.startswith(('https://', 'http://')):
-        return 'local'  # treated as a webserver-served local mirror via rsync proxy
-    if '@' in url and ':' in url:
+    """Pick the transport type from the URL prefix.  ssh:// → 'ssh',
+    everything else (file:// or absolute path) → 'local'."""
+    if url.startswith('ssh://'):
         return 'ssh'
     return 'local'
+
+
+# ─────────────────────────── host / name / public-URL derivation ─────────
+#
+# MIRROR-01 Phase 6 splits the URL the operator types at `mirror add` time
+# into THREE derived facts that the mirror state file persists separately:
+#
+#   - `url`         — what we rsync to (ssh:// or file://)
+#   - `host`        — the FQDN or IP we'll DNS-resolve + TCP-probe
+#   - `public_url`  — what apt clients read from
+#                     (= `<proto>://<host>/<dist-id>`, written into
+#                       /etc/apt/sources.list.d/athena-<name>.list)
+#
+# The split is what lets `mirror add` (a) refuse adds that look reachable
+# over SSH but unreachable over HTTP and (b) write a usable
+# sources.list.d entry even though the publish URL is ssh://.
+
+
+_SSH_URL_RE = re.compile(
+    r'^ssh://(?:(?P<user>[^@/]+)@)?'
+    r'(?P<host>\[[^\]]+\]|[^/:]+)'   # bracketed IPv6 OR bare alnum host
+    r'(?::(?P<port>\d+))?'
+    r'(?P<path>/.*)?$'
+)
+_FQDN_RE = re.compile(r'^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?'
+                      r'(\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?)+$')
+
+
+def _extract_host_from_ssh_url(url: str) -> Optional[str]:
+    """`ssh://ubuntu@140.245.198.222/srv/asgard` → `140.245.198.222`.
+    `ssh://user@[2001:db8::1]/srv/asgard`         → `2001:db8::1` (brackets
+    stripped so downstream `ipaddress.ip_address` accepts it directly).
+    Returns None if URL isn't an ssh:// scheme or host can't be
+    extracted."""
+    if not isinstance(url, str) or not url.startswith('ssh://'):
+        return None
+    _m = _SSH_URL_RE.match(url)
+    if not _m:
+        return None
+    _host = _m.group('host') or ''
+    if _host.startswith('[') and _host.endswith(']'):
+        _host = _host[1:-1]
+    return _host or None
+
+
+def _is_valid_ip(host: str) -> bool:
+    """True for any well-formed IPv4 or IPv6 literal."""
+    if not isinstance(host, str) or not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _is_valid_fqdn(host: str) -> bool:
+    """Strict DNS-label check: lowercase ASCII alnum + hyphens, at
+    least two labels separated by dots, each label ≤ 63 chars.  No
+    trailing dot."""
+    if not isinstance(host, str) or not host:
+        return False
+    if len(host) > 253:
+        return False
+    return bool(_FQDN_RE.match(host.lower()))
+
+
+def validate_host_for_type(
+    url: str, host_type: str,
+) -> 'tuple[bool, str]':
+    """Cross-check the URL's host portion against the operator-supplied
+    keyword (`ip` / `fqdn` / `local`).  Returns (ok, detail).
+
+    - `ip`:    URL must be ssh://; host must parse as IPv4 or IPv6
+    - `fqdn`:  URL must be ssh://; host must parse as a DNS FQDN
+    - `local`: URL must be file://
+    """
+    if host_type not in HOST_TYPES:
+        return False, (
+            f"unknown host type {host_type!r} "
+            f"(expected one of {sorted(HOST_TYPES)})")
+    if host_type == 'local':
+        if not url.startswith('file://'):
+            return False, (
+                f"host type 'local' requires a file:// URL, got {url!r}")
+        return True, ''
+    # ip / fqdn → must be ssh://
+    if not url.startswith('ssh://'):
+        return False, (
+            f"host type {host_type!r} requires an ssh:// URL, got {url!r}")
+    _host = _extract_host_from_ssh_url(url)
+    if not _host:
+        return False, f"could not extract host from ssh URL {url!r}"
+    if host_type == 'ip':
+        if not _is_valid_ip(_host):
+            return False, (
+                f"host {_host!r} is not a valid IPv4 or IPv6 literal "
+                f"(use `fqdn` keyword for hostnames)")
+    else:  # fqdn
+        if _is_valid_ip(_host):
+            return False, (
+                f"host {_host!r} looks like an IP literal — use the `ip` "
+                "keyword instead of `fqdn`")
+        if not _is_valid_fqdn(_host):
+            return False, (
+                f"host {_host!r} is not a valid DNS FQDN "
+                "(needs at least two labels separated by dots)")
+    return True, ''
+
+
+def derive_name_from_url(url: str, host_type: str) -> Optional[str]:
+    """Auto-derive a mirror name from the URL + host type.
+
+    - ssh://...@140.245.198.222/...     + ip    → '140-245-198-222'
+    - ssh://...@mirror.example.com/...  + fqdn  → 'mirror-example-com'
+    - file:///srv/asgard-staging        + local → 'asgard-staging'
+
+    The result is sanitised against `_valid_name`; if sanitisation
+    yields an invalid name, returns None.  Colons and dots are mapped
+    to dashes; IPv6 brackets are stripped.
+    """
+    if host_type not in HOST_TYPES:
+        return None
+    if host_type == 'local':
+        if not url.startswith('file://'):
+            return None
+        _path = url[len('file://'):].rstrip('/')
+        _tail = os.path.basename(_path) or 'local'
+        _name = re.sub(r'[^a-z0-9_-]', '-', _tail.lower()).strip('-')
+        return _name if _valid_name(_name) else None
+    _host = _extract_host_from_ssh_url(url)
+    if not _host:
+        return None
+    # IPv6 hosts may be `[::1]` — strip brackets before mapping.
+    _clean = _host.strip('[]').lower()
+    _name = re.sub(r'[.:]', '-', _clean)
+    _name = re.sub(r'[^a-z0-9_-]', '-', _name).strip('-')
+    return _name if _valid_name(_name) else None
+
+
+def derive_public_url(
+    url: str, dist_id: str, proto: str,
+) -> Optional[str]:
+    """For an ssh:// publish URL, return the canonical apt-readable
+    URL ``<proto>://<host>/<dist-id>``.  For file:// URLs, returns
+    None — file:// publish targets don't get a sources.list.d entry
+    in the chroot.
+
+    `dist_id` is `[Build] DISTRIBUTION` lowercased (e.g. 'asgard').
+    `proto` must be 'http' or 'https'.
+    """
+    if proto not in VALID_PROTOS:
+        return None
+    if not isinstance(dist_id, str) or not dist_id:
+        return None
+    _dist = re.sub(r'[^a-z0-9_-]', '', dist_id.lower())
+    if not _dist:
+        return None
+    if not url.startswith('ssh://'):
+        return None
+    _host = _extract_host_from_ssh_url(url)
+    if not _host:
+        return None
+    # IPv6 must be re-bracketed inside a URL authority — RFC 3986 §3.2.2.
+    if ':' in _host and not _host.startswith('['):
+        _host = f'[{_host}]'
+    return f"{proto}://{_host}/{_dist}"
 
 
 # ─────────────────────────── state IO ──────────────────────────
@@ -211,16 +380,27 @@ def add_mirror(
     type: Optional[str] = None,
     ssh_key: Optional[str] = None,
     seed_pin: str = '',
+    host: str = '',
+    host_type: str = '',
+    public_proto: str = '',
+    public_url: str = '',
 ) -> 'tuple[bool, str]':
     """Register a new mirror.  Returns (ok, detail).
 
-    Phase 1 (this commit): writes the state file ONLY.  Federation-
-    membership propagation to existing peers (the `reconcile-neighbours`
-    step) lands in Phase 3 with the publish path.
+    Writes ``config/mirror.<name>.state`` ONLY — federation propagation
+    to peers (`reconcile-neighbours`) is the caller's next step.
 
     `seed_pin` is the timestamp to plant in `base` and `current` —
     typically the caller passes the local snapshot's current pin so the
     mirror starts at parity.
+
+    `host` / `host_type` / `public_proto` / `public_url` (MIRROR-01
+    Phase 6) record the operator-supplied split the new `cmd_mirror_add`
+    flow derives: rsync target URL (`url`), DNS-resolvable host (`host`)
+    + its kind (`ip`/`fqdn`/`local`), apt read protocol (`public_proto`),
+    and the canonical apt URL the chroot's
+    `sources.list.d/athena-<name>.list` line uses (`public_url`).  All
+    default to empty strings for state files written by an older flow.
     """
     if not _valid_name(name):
         return False, (
@@ -232,7 +412,7 @@ def add_mirror(
     if _norm is None:
         return False, (
             f"invalid URL {url!r} "
-            "(use ssh://, file://, https://, /abs/path, or user@host:/path)")
+            "(publish URLs must be ssh:// or file:///abs/path)")
     # Refuse duplicate URLs across mirror names
     for _other in list_mirrors(config):
         _ost = read_mirror_state(config, _other)
@@ -242,11 +422,23 @@ def add_mirror(
     _type = type or _infer_type(_norm)
     if _type not in VALID_TYPES:
         return False, f"invalid type {_type!r}; expected one of {sorted(VALID_TYPES)}"
+    if host_type and host_type not in HOST_TYPES:
+        return False, (
+            f"invalid host_type {host_type!r} "
+            f"(expected one of {sorted(HOST_TYPES)})")
+    if public_proto and public_proto not in VALID_PROTOS:
+        return False, (
+            f"invalid public_proto {public_proto!r} "
+            f"(expected one of {sorted(VALID_PROTOS)})")
     _state = {
         'name':             name,
         'url':              _norm,
         'type':             _type,
         'ssh_key':          ssh_key or '',
+        'host':             host or '',
+        'host_type':        host_type or '',
+        'public_proto':     public_proto or '',
+        'public_url':       public_url or '',
         'base':             seed_pin,
         'current':          seed_pin,
         'last_publish_at':  '',
