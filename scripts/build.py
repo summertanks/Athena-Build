@@ -4388,6 +4388,28 @@ class BuildSession:
             assert _st is not None  # checked above / by list_mirrors
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
+            # MIRROR-02 chunk 13: first-publish dist-mode gate.
+            # When the local builder is in [Build] Mode = individual
+            # AND the target mirror has no coord-head on remote
+            # (fresh bootstrap state), REFUSE.  Bootstrapping an
+            # indl-mode build into a virgin mirror would land a
+            # partial subset that's almost certainly not installable —
+            # the dist-mode bootstrap is what guarantees the initial
+            # closure invariant.  Defensive getattr for test doubles.
+            _mode = getattr(self.config, 'build_mode', 'distribution')
+            if _mode == 'individual':
+                _has_head = self._mirror_remote_has_coord_head(_n, _st)
+                if not _has_head:
+                    console.print(
+                        f"mirror publish {_n}: REFUSED — mirror has "
+                        "no coord-head yet (first publish must come "
+                        "from a distribution-mode build with `repo "
+                        "audit` passing).  Run `mirror publish` from "
+                        "a dist-mode host first, or set `[Build] "
+                        "Mode = distribution` on this host.",
+                        tui.COLOR_ERROR)
+                    _all_ok = False
+                    continue
             # Phase 8 gate: refuse to publish when this build's
             # snapshot.current is older than the mirror's `base` (the
             # mirror's archive floor).  Publishing pre-floor packages
@@ -4654,6 +4676,39 @@ class BuildSession:
             if _mismatch or _failed:
                 _all_ok = False
         return _all_ok
+
+    def _mirror_remote_has_coord_head(
+        self, mirror_name: str, state: dict,
+    ) -> bool:
+        """MIRROR-02 chunk 13: probe whether the mirror has a
+        coord-head on the remote.  Returns True iff a verified head
+        is fetchable; False on absent / verify-failed / network
+        error (the latter caller treats as "we can't tell —
+        conservative refuse")."""
+        import signing
+        import mirror as _mirror
+        _url = state.get('url', '')
+        _ssh_key = state.get('ssh_key') or None
+        if not _url:
+            return False
+        _coord_url = _mirror.coord_root_for(_url)
+        _stage = os.path.join(
+            self.config.dir_cache, 'mirror', mirror_name, 'probe-head')
+        try:
+            os.makedirs(_stage, mode=0o755, exist_ok=True)
+        except OSError:
+            return False
+        _ok, _det, _head = _mirror.probe_sidecar_head(
+            _coord_url,
+            signing_homedir=signing.signing_home(self.config),
+            stage_dir=_stage,
+            ssh_key=_ssh_key,
+        )
+        # probe_sidecar_head's three return shapes:
+        #   (True, 'no head yet ...', None) → fresh remote, NO head
+        #   (True, 'coord-head verified', dict) → head present
+        #   (False, '...', None) → verify failed / unreachable
+        return _ok and _head is not None
 
     def _mirror_recompute_base(self, mirror_name: str) -> str:
         """MIRROR-02 chunk 12: recompute mirror.base from the latest

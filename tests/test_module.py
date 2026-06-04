@@ -22759,6 +22759,123 @@ def test_coord_store_project_live_claims_collapses_retraction():
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
 
 
+def test_cmd_mirror_publish_refuses_indl_to_fresh_mirror():
+    """MIRROR-02 chunk 13: indl-mode publish to a mirror with no
+    coord-head on remote is REFUSED with a hint pointing at dist-mode
+    bootstrap."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import mirror as _mirror
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _td:
+        _cfg_dir = os.path.join(_td, 'config')
+        _cache_dir = os.path.join(_td, 'cache')
+        _repo_dir = os.path.join(_td, 'repo')
+        for _d in (_cfg_dir, _cache_dir,
+                   os.path.join(_repo_dir, 'dists', 'thor')):
+            os.makedirs(_d)
+        with open(os.path.join(_repo_dir, 'dists', 'thor', 'InRelease'),
+                  'w') as _fh:
+            _fh.write('Date: 2026-06-04\n')
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache  = _cache_dir
+            dir_repo   = _repo_dir
+            build_codename = 'thor'
+            build_mode = 'individual'
+
+        _mirror.add_mirror(
+            _Cfg(), name='primary',
+            url='ssh://ubuntu@host.example/srv/asgard',
+            seed_pin='')
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess._snapshot_current = lambda: '20260604T000000Z'  # type: ignore
+        _sess._coord_self_keys = lambda: (        # type: ignore
+            'athena-test', '/fake/priv', '/fake/pub')
+        # Stub the head probe: remote has no head yet
+        _sess._mirror_remote_has_coord_head = (   # type: ignore
+            lambda _name, _state: False)
+
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _ok = _sess.cmd_mirror_publish('primary')
+        finally:
+            build.console.print = _orig
+        _joined = '\n'.join(_lines)
+        assert _ok is False
+        assert 'REFUSED' in _joined
+        assert 'no coord-head yet' in _joined
+        assert 'distribution-mode' in _joined
+
+
+def test_cmd_mirror_publish_indl_to_initialised_mirror_proceeds():
+    """When the target mirror already HAS a coord-head, indl-mode
+    publish proceeds past the chunk-13 gate (subject to other gates
+    downstream)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import mirror as _mirror
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _td:
+        _cfg_dir = os.path.join(_td, 'config')
+        _cache_dir = os.path.join(_td, 'cache')
+        _repo_dir = os.path.join(_td, 'repo')
+        for _d in (_cfg_dir, _cache_dir,
+                   os.path.join(_repo_dir, 'dists', 'thor')):
+            os.makedirs(_d)
+        with open(os.path.join(_repo_dir, 'dists', 'thor', 'InRelease'),
+                  'w') as _fh:
+            _fh.write('Date: 2026-06-04\n')
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache  = _cache_dir
+            dir_repo   = _repo_dir
+            build_codename = 'thor'
+            build_mode = 'individual'
+
+        _mirror.add_mirror(
+            _Cfg(), name='primary',
+            url='ssh://ubuntu@host.example/srv/asgard',
+            seed_pin='20260601T000000Z')
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess._snapshot_current = lambda: '20260604T000000Z'  # type: ignore
+        _sess._coord_self_keys = lambda: (        # type: ignore
+            'athena-test', '/fake/priv', '/fake/pub')
+        # Remote HAS a head → gate passes; the publish would then
+        # attempt remote_publish (which our test setup can't satisfy),
+        # but we only care that the gate doesn't refuse here.
+        _sess._mirror_remote_has_coord_head = (   # type: ignore
+            lambda _name, _state: True)
+
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            try:
+                _sess.cmd_mirror_publish('primary')
+            except (AttributeError, OSError):
+                # Test cfg is intentionally incomplete — we only
+                # care that we got PAST the chunk-13 refuse path.
+                pass
+        finally:
+            build.console.print = _orig
+        _joined = '\n'.join(_lines)
+        # Specifically NOT the chunk-13 refuse path
+        assert 'no coord-head yet' not in _joined, _joined
+
+
 def test_mirror_recompute_base_returns_oldest_snapshot_across_claims():
     """MIRROR-02 chunk 12: _mirror_recompute_base reads the fetched
     claims jsonl and returns the oldest non-retracted snapshot
@@ -26880,6 +26997,8 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_cmd_mirror_publish_refuses_indl_to_fresh_mirror,
+        test_cmd_mirror_publish_indl_to_initialised_mirror_proceeds,
         test_mirror_recompute_base_returns_oldest_snapshot_across_claims,
         test_mirror_recompute_base_returns_empty_when_no_claims,
         test_project_post_publish_state_merges_remote_claims_as_satisfiers,
