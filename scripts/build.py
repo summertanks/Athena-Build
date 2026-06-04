@@ -4457,12 +4457,25 @@ class BuildSession:
                 continue
             # Success → bump mirror state
             import coord.schema as _schema
-            _mirror.update_mirror_state(
-                self.config, _n,
-                current=_snapshot_pin,
-                last_publish_at=_publish._utc_now(),
-                neighbours_known=_schema.canonicalize_neighbours(_local_urls),
-            )
+            # MIRROR-02 chunk 12: recompute mirror.base from the
+            # post-publish claim ledger.  base = oldest snapshot
+            # timestamp across all non-retracted claims on the mirror.
+            # Combined with chunk 6's snapshot.current >= mirror.base
+            # publish gate, this prevents back-publishing pre-floor
+            # builds and gives operators a clear "what's the oldest
+            # thing on this mirror" signal in mirror summary.
+            _new_base = self._mirror_recompute_base(_n)
+            _base_update: 'dict[str, object]' = {
+                'current':           _snapshot_pin,
+                'last_publish_at':   _publish._utc_now(),
+                'neighbours_known':  _schema.canonicalize_neighbours(_local_urls),
+            }
+            # Only overwrite base when we have a real value — empty
+            # means "no claims yet" (fresh mirror) and we should keep
+            # the seed-at-add-time value.
+            if _new_base:
+                _base_update['base'] = _new_base
+            _mirror.update_mirror_state(self.config, _n, **_base_update)
         return _all_ok
 
     def cmd_mirror_pull(self, *args):
@@ -4641,6 +4654,59 @@ class BuildSession:
             if _mismatch or _failed:
                 _all_ok = False
         return _all_ok
+
+    def _mirror_recompute_base(self, mirror_name: str) -> str:
+        """MIRROR-02 chunk 12: recompute mirror.base from the latest
+        fetched claims.  Returns the oldest snapshot timestamp across
+        all non-retracted claims; empty string when the cache is empty
+        (preserves the seed-at-add-time value via the merge in
+        update_mirror_state).
+
+        Reads from cache/mirror/<name>/fetched/claims/ which the
+        publish path just refreshed before the per-file push.  We
+        don't re-fetch: the per-publish flow already pulled the
+        sidecar at Step 2 of remote_publish.
+        """
+        import coord.identity as _id
+        import coord.store as _store
+        import signing
+        _fetched = os.path.join(
+            self.config.dir_cache, 'mirror', mirror_name, 'fetched')
+        _claims_dir = os.path.join(_fetched, 'claims')
+        _keyring_dir = os.path.join(_fetched, 'keyring', 'builders')
+        if not os.path.isdir(_claims_dir):
+            return ''
+        try:
+            _keyring = _id.load_keyring(_keyring_dir)
+        except (OSError, ValueError):
+            return ''
+        try:
+            _by_builder = _store.read_all_claims(_claims_dir, _keyring, {})
+        except OSError:
+            return ''
+        del signing  # only imported for parity with other call sites
+        _oldest: 'Optional[str]' = None
+        for _bid, _claims in _by_builder.items():
+            # Per-builder retraction fold: collect seqs that retraction
+            # lines target; skip both the retraction record itself and
+            # the claim it retracts.
+            _retracted_seqs: set = set()
+            for _c in _claims:
+                if _c.get('claim_state') == 'retracted':
+                    _r = _c.get('retracts_seq')
+                    if isinstance(_r, int):
+                        _retracted_seqs.add(_r)
+            for _c in _claims:
+                if _c.get('claim_state') == 'retracted':
+                    continue
+                if int(_c.get('seq', 0)) in _retracted_seqs:
+                    continue
+                _ts = str(_c.get('snapshot') or '').strip()
+                if not _ts:
+                    continue
+                if _oldest is None or _ts < _oldest:
+                    _oldest = _ts
+        return _oldest or ''
 
     def _mirror_pull_write_build_records(
         self, mirror_name: str,

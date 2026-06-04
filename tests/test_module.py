@@ -22759,6 +22759,90 @@ def test_coord_store_project_live_claims_collapses_retraction():
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
 
 
+def test_mirror_recompute_base_returns_oldest_snapshot_across_claims():
+    """MIRROR-02 chunk 12: _mirror_recompute_base reads the fetched
+    claims jsonl and returns the oldest non-retracted snapshot
+    timestamp.  Empty when no claims (fresh mirror); skips
+    retracted entries; reads across all builders."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    import coord.schema as _schema
+    import coord.store as _store
+    import coord.identity as _identity
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        _cache_dir = os.path.join(_td, 'cache')
+        os.makedirs(_cache_dir)
+        _fetched = os.path.join(_cache_dir, 'mirror', 'primary',
+                                'fetched')
+        _claims_dir = os.path.join(_fetched, 'claims')
+        _keyring_dir = os.path.join(_fetched, 'keyring', 'builders')
+        os.makedirs(_claims_dir)
+        os.makedirs(_keyring_dir)
+
+        class _Cfg:
+            dir_cache = _cache_dir
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+
+        # Two builders, three claims at different snapshots; one retracted
+        _c_old = _schema.new_claim(
+            builder='team-a', seq=1, package='foo',
+            intended_version='1.0', built_version='1.0',
+            filename='foo_1.0.deb', sha256='a' * 64, size=1,
+            snapshot='20260201T000000Z', built_at='T',
+            claim_state=_schema.CLAIM_STATE_PUBLISHED,
+        )
+        _c_old_retracted = _schema.new_claim(
+            builder='team-a', seq=2, package='bar',
+            intended_version='1.0', built_version='1.0',
+            filename='bar_1.0.deb', sha256='b' * 64, size=1,
+            snapshot='20260101T000000Z',   # OLDEST — but retracted
+            built_at='T',
+            claim_state=_schema.CLAIM_STATE_PUBLISHED,
+        )
+        _r = _schema.new_retraction(
+            builder='team-a', seq=3, package='bar',
+            retracts_seq=2, filename='bar_1.0.deb',
+            snapshot='S', built_at='T',
+        )
+        _c_newest = _schema.new_claim(
+            builder='team-b', seq=1, package='baz',
+            intended_version='2.0', built_version='2.0',
+            filename='baz_2.0.deb', sha256='c' * 64, size=1,
+            snapshot='20260601T000000Z', built_at='T',
+            claim_state=_schema.CLAIM_STATE_PUBLISHED,
+        )
+
+        _fake_by_builder = {
+            'team-a': [_c_old, _c_old_retracted, _r],
+            'team-b': [_c_newest],
+        }
+        with patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims',
+                          return_value=_fake_by_builder):
+            _base = _sess._mirror_recompute_base('primary')
+        # Oldest non-retracted = team-a's first claim (2026-02-01)
+        assert _base == '20260201T000000Z', _base
+
+
+def test_mirror_recompute_base_returns_empty_when_no_claims():
+    """Fresh mirror (empty claims dir / missing keyring) → empty
+    string; caller preserves the seed-at-add-time value."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_cache = _td
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        assert _sess._mirror_recompute_base('nonexistent') == ''
+
+
 def test_project_post_publish_state_merges_remote_claims_as_satisfiers():
     """MIRROR-02 chunk 11: project_post_publish_state takes the local
     RepoState and layers in remote claims as satisfier-only entries
@@ -26796,6 +26880,8 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_mirror_recompute_base_returns_oldest_snapshot_across_claims,
+        test_mirror_recompute_base_returns_empty_when_no_claims,
         test_project_post_publish_state_merges_remote_claims_as_satisfiers,
         test_find_publish_closure_breaks_returns_empty_when_satisfied,
         test_find_publish_closure_breaks_detects_missing_dep,
