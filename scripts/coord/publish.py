@@ -87,6 +87,13 @@ def generate_pending_claims(
             continue
         _outputs = _rec.get('outputs') or []
         _hashes = _rec.get('output_hashes') or {}
+        # MIRROR-02: per-output upstream provenance for tunneled
+        # passthrough.  Build record's `republished_from` field is
+        # the {filename: {url, upstream_sha256}} dict written by
+        # cmd_tunnel_package (chunk 9).  We pass each file's entry
+        # into the claim so the federation can treat tunneled
+        # packages as no-owner (project_owners returns builder=None).
+        _republished = _rec.get('republished_from') or {}
         for _fn in _outputs:
             if _fn in _known:
                 continue
@@ -95,6 +102,9 @@ def generate_pending_claims(
                 # Pre-coord legacy or skipped backfill — skip.  The
                 # operator runs `repo repair backfill-hashes` first.
                 continue
+            _rfrom = _republished.get(_fn) if isinstance(_republished, dict) else None
+            if not (isinstance(_rfrom, dict) and _rfrom):
+                _rfrom = None
             _pending.append(_schema.new_claim(
                 builder=builder_id,
                 seq=0,  # caller assigns before signing
@@ -107,7 +117,7 @@ def generate_pending_claims(
                 snapshot=snapshot_pin,
                 built_at=str(_rec.get('finished') or _rec.get('started') or ''),
                 claim_state=_schema.CLAIM_STATE_PENDING,
-                republished_from=None,
+                republished_from=_rfrom,
             ))
     _pending.sort(key=lambda _c: (_c['package'], _c['filename']))
     return _pending

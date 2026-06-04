@@ -1908,7 +1908,13 @@ class BuildSession:
         # COORD-01: track per-output destination so we can hash after
         # downloads complete and pin the digests into the tunneled
         # terminal record.
+        # MIRROR-02: also record the upstream URL per file so the
+        # claim layer can populate `republished_from` (the
+        # "no-owner" marker on the mirror) — without this the
+        # mirror's ownership projection would see us as the owner
+        # of a tunneled package.
         _output_paths: 'dict[str, str]' = {}
+        _output_urls: 'dict[str, str]' = {}
         for _filename in _files:
             _dst_dir = self.config.deb_dest_for_filename(_filename, _comp)
             _dest = os.path.join(_dst_dir, _filename)
@@ -1950,6 +1956,7 @@ class BuildSession:
                 continue
 
             _url = f"{_base}/{src_pkg.directory}/{_filename}"
+            _output_urls[_filename] = _url
             logger.info(f"tunnel {src_pkg.package}: downloading {_url}")
             _bytes, _detail = utils.download_file(_url, _dest)
             if _bytes < 0:
@@ -1970,6 +1977,21 @@ class BuildSession:
                 _h = utils.get_sha256(_dst)
                 if _h:
                     _output_hashes[_fn] = _h
+        # MIRROR-02: per-file upstream provenance.  For tunneled
+        # passthrough, upstream_sha256 == our downloaded SHA-256
+        # (the file IS upstream's binary verbatim — no NMU strip
+        # or version mangling).  The mirror uses this to mark the
+        # package as "no owner" (tunneled in the federation sense).
+        _republished_from: 'dict[str, dict]' = {}
+        if _success:
+            for _fn, _url in _output_urls.items():
+                _output_h = _output_hashes.get(_fn)
+                if not _output_h:
+                    continue
+                _republished_from[_fn] = {
+                    'url':             _url,
+                    'upstream_sha256': _output_h,
+                }
         try:
             utils.update_build_record(
                 _buildlog_path, src_pkg.package,
@@ -1980,6 +2002,7 @@ class BuildSession:
                 output_count=len(_files),
                 outputs=sorted(_files),
                 output_hashes=_output_hashes,
+                republished_from=_republished_from,
             )
         except (OSError, FileNotFoundError) as _e:
             logger.warning(f"tunnel {src_pkg.package}: build-record terminal: {_e}")

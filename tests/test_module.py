@@ -21745,31 +21745,37 @@ def _utils_module():
     return _u
 
 
-def test_build_record_schema_v2_field_set():
-    """Pin the v2 field set — adding a field is a schema bump that must
+def test_build_record_schema_v3_field_set():
+    """Pin the v3 field set — adding a field is a schema bump that must
     be reflected in the version constant; removing one breaks OBS-02
     history readers.  This test is the contract.
 
     v1→v2 (COORD-01): added `output_hashes` ({filename: sha256_hex}) so
     the coord-layer claim records have a stable per-binary digest to
-    pin without re-hashing every read."""
+    pin without re-hashing every read.
+
+    v2→v3 (MIRROR-02): added `republished_from`
+    ({filename: {url, upstream_sha256}}) populated by cmd_tunnel_package
+    so the federation can mark tunneled packages as no-owner."""
     _u = _utils_module()
     _rec = _u.new_build_record(
         package='libwmf', intended_version='0.2.12-5.1',
         patch_set_hash='abc123', started='2026-06-02T14:00:00Z',
     )
-    assert _u.BUILD_RECORD_SCHEMA_VERSION == 2
-    assert _rec['schema_version'] == 2
+    assert _u.BUILD_RECORD_SCHEMA_VERSION == 3
+    assert _rec['schema_version'] == 3
     _required = {
         'schema_version', 'package', 'intended_version', 'built_version',
         'patch_set_hash', 'phase', 'status', 'started', 'finished',
         'elapsed_seconds', 'exit_code', 'oom_killed', 'output_count', 'outputs',
         'output_hashes',
+        'republished_from',
     }
     assert set(_rec.keys()) == _required, (
-        f"v2 schema drift: {set(_rec.keys()) ^ _required}")
+        f"v3 schema drift: {set(_rec.keys()) ^ _required}")
     assert _rec['phase'] == 'entry'
     assert _rec['status'] is None
+    assert _rec['republished_from'] == {}
     assert _rec['outputs'] == []
     assert _rec['output_hashes'] == {}
 
@@ -22460,7 +22466,7 @@ def test_backfill_output_hashes_upgrades_v1_record():
         # Verify the upgraded record.
         _rec = _u.read_build_record(_log, 'libfoo')
         assert _rec is not None
-        assert _rec['schema_version'] == 2
+        assert _rec['schema_version'] == 3
         import hashlib as _hashlib
         _h1 = _hashlib.sha256(b'fake-deb-1').hexdigest()
         _h2 = _hashlib.sha256(b'fake-deb-2').hexdigest()
@@ -22468,6 +22474,8 @@ def test_backfill_output_hashes_upgrades_v1_record():
             'libfoo_1.0-1_amd64.deb': _h1,
             'libfoo-dev_1.0-1_amd64.deb': _h2,
         }
+        # MIRROR-02 v3: republished_from defaults to {} on backfill
+        assert _rec['republished_from'] == {}
         # Second backfill: idempotent — nothing to upgrade.
         _stats2 = _u.backfill_output_hashes(_log, _repo)
         assert _stats2['scanned'] == 1
@@ -22503,8 +22511,9 @@ def test_backfill_output_hashes_reports_missing_files():
         assert _stats['upgraded'] == 1
         _rec = _u.read_build_record(_log, 'ghost')
         assert _rec is not None
-        assert _rec['schema_version'] == 2
+        assert _rec['schema_version'] == 3
         assert _rec['output_hashes'] == {}  # nothing on disk to hash
+        assert _rec['republished_from'] == {}  # MIRROR-02 v3 default
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22745,6 +22754,124 @@ def test_coord_store_project_live_claims_collapses_retraction():
     )
     _proj = _st.project_live_claims({'alice': [_c1, _r1]})
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
+
+
+def test_generate_pending_claims_threads_republished_from_per_output():
+    """MIRROR-02 chunk 9: when a build.json record carries
+    `republished_from = {filename: {url, upstream_sha256}}` (the
+    tunneled-package case), each emitted claim's republished_from
+    matches the right per-file entry.  Verifies the build.json →
+    coord claim plumbing."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.schema as _schema
+
+    # Fake a buildlog dir + custom read_build_record stub
+    def _fake_read(_dir, _pkg):
+        if _pkg != 'libvlc':
+            return None
+        return {
+            'package': 'libvlc',
+            'intended_version': '3.0-1',
+            'built_version':    '3.0-1',
+            'phase':            'tunneled',
+            'outputs':          [
+                'libvlc_3.0-1_amd64.deb',
+                'libvlc-dev_3.0-1_amd64.deb',
+            ],
+            'output_hashes':    {
+                'libvlc_3.0-1_amd64.deb':     'a' * 64,
+                'libvlc-dev_3.0-1_amd64.deb': 'b' * 64,
+            },
+            'republished_from': {
+                'libvlc_3.0-1_amd64.deb': {
+                    'url':             'http://deb.debian.org/.../libvlc_3.0-1_amd64.deb',
+                    'upstream_sha256': 'a' * 64,
+                },
+                'libvlc-dev_3.0-1_amd64.deb': {
+                    'url':             'http://deb.debian.org/.../libvlc-dev_3.0-1_amd64.deb',
+                    'upstream_sha256': 'b' * 64,
+                },
+            },
+            'finished': '2026-06-04T12:00:00Z',
+        }
+
+    with tempfile.TemporaryDirectory() as _td:
+        # buildlog dir needs a .build.json entry name for our stub to match
+        _log = os.path.join(_td, 'log')
+        os.makedirs(_log)
+        with open(os.path.join(_log, 'libvlc.build.json'), 'w') as _fh:
+            _fh.write('{}')  # content ignored; read overridden
+
+        # claims dir empty → no _known dedup
+        _claims = os.path.join(_td, 'claims')
+        os.makedirs(_claims)
+        # public_key_path; coord.store reads it to verify, but for empty
+        # claims dir the read is short-circuited.  Pass a non-existent
+        # path; read_builder_claims returns [] when there's no jsonl.
+        _pending = _publish.generate_pending_claims(
+            builder_id='alice',
+            buildlog_dir=_log,
+            claims_dir=_claims,
+            public_key_path='/nonexistent.pub',
+            snapshot_pin='S',
+            read_build_record=_fake_read,
+        )
+        assert len(_pending) == 2
+        _by_fn = {_c['filename']: _c for _c in _pending}
+        assert _by_fn['libvlc_3.0-1_amd64.deb']['republished_from'] == {
+            'url':             'http://deb.debian.org/.../libvlc_3.0-1_amd64.deb',
+            'upstream_sha256': 'a' * 64,
+        }
+        assert _by_fn['libvlc-dev_3.0-1_amd64.deb']['republished_from'] == {
+            'url':             'http://deb.debian.org/.../libvlc-dev_3.0-1_amd64.deb',
+            'upstream_sha256': 'b' * 64,
+        }
+
+
+def test_generate_pending_claims_non_tunneled_record_carries_none():
+    """A normal (non-tunneled) build.json carries empty
+    `republished_from`; emitted claims must set the field to None
+    so project_owners treats us as the owner."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+
+    def _fake_read(_dir, _pkg):
+        return {
+            'package': 'lsb-base',
+            'intended_version': '11.4',
+            'built_version':    '11.4+asg1u1',
+            'phase':            'done',
+            'outputs':          ['lsb-base_11.4+asg1u1_all.deb'],
+            'output_hashes':    {
+                'lsb-base_11.4+asg1u1_all.deb': 'c' * 64,
+            },
+            'republished_from': {},   # MIRROR-02 v3 default for built records
+            'finished': '2026-06-04T12:00:00Z',
+        }
+
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        os.makedirs(_log)
+        with open(os.path.join(_log, 'lsb-base.build.json'), 'w') as _fh:
+            _fh.write('{}')
+        _claims = os.path.join(_td, 'claims')
+        os.makedirs(_claims)
+        _pending = _publish.generate_pending_claims(
+            builder_id='alice',
+            buildlog_dir=_log,
+            claims_dir=_claims,
+            public_key_path='/nonexistent.pub',
+            snapshot_pin='S',
+            read_build_record=_fake_read,
+        )
+        assert len(_pending) == 1
+        # new_claim omits republished_from from the dict when None
+        # (schema.py:119); project_owners' check `republished_from is None`
+        # works on dict.get() which returns None for absent keys.
+        assert _pending[0].get('republished_from') is None
 
 
 def _new_pending_claim(builder: str, package: str, filename: str,
@@ -26345,7 +26472,7 @@ def main() -> int:
         test_render_failure_one_shot_capture_writes_post_mortem,
         test_render_failure_capture_no_op_on_success,
         # OBS-01 canonical signed build record
-        test_build_record_schema_v2_field_set,
+        test_build_record_schema_v3_field_set,
         test_build_record_hmac_round_trip,
         test_build_record_tamper_detection,
         test_build_record_hmac_key_mode_0600,
@@ -26381,6 +26508,8 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_generate_pending_claims_threads_republished_from_per_output,
+        test_generate_pending_claims_non_tunneled_record_carries_none,
         test_filter_pending_by_ownership_no_existing_owner_keeps,
         test_filter_pending_by_ownership_own_claim_keeps,
         test_filter_pending_by_ownership_tunneled_keeps_takes_ownership,
