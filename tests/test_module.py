@@ -23012,6 +23012,78 @@ def test_cmd_mirror_add_drops_unreachable_neighbour():
         assert _dead in _joined
 
 
+def test_cmd_mirror_add_uses_peer_meta_over_operator_proto():
+    """Phase 7 — heterogeneous federation join: upstream's v3
+    per-peer records (each carries its own public_url + public_proto)
+    take precedence over the operator's --proto flag.  Verifies the
+    locally-written state file for each discovered peer reflects the
+    UPSTREAM's apt-readable URL, NOT the operator's --proto-derived one.
+    v2-shaped peers (empty meta) still fall back to operator's --proto."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    _primary = 'ssh://ubuntu@primary.example/home/ubuntu/asgard'
+    _peer_https = 'ssh://ubuntu@b.example/home/ubuntu/asgard'
+    _peer_http  = 'ssh://ubuntu@c.example/home/ubuntu/asgard'
+    _peer_v2    = 'ssh://ubuntu@d.example/home/ubuntu/asgard'
+    _peer_head = {
+        'v': 3,
+        'neighbours': [
+            {'url': _primary,    'public_url': 'http://primary.example/asgard',
+             'public_proto': 'http'},
+            {'url': _peer_https, 'public_url': 'https://b.example/asgard',
+             'public_proto': 'https'},
+            {'url': _peer_http,  'public_url': 'http://c.example/asgard',
+             'public_proto': 'http'},
+            {'url': _peer_v2,    'public_url': '', 'public_proto': ''},
+        ],
+    }
+    _discovered = [
+        {'url': _primary,    'reachable': True, 'verified': True,
+         'head': None, 'detail': 'self',
+         'public_url': 'http://primary.example/asgard', 'public_proto': 'http'},
+        {'url': _peer_https, 'reachable': True, 'verified': True,
+         'head': None, 'detail': 'verified',
+         'public_url': 'https://b.example/asgard', 'public_proto': 'https'},
+        {'url': _peer_http,  'reachable': True, 'verified': True,
+         'head': None, 'detail': 'verified',
+         'public_url': 'http://c.example/asgard', 'public_proto': 'http'},
+        {'url': _peer_v2,    'reachable': True, 'verified': True,
+         'head': None, 'detail': 'verified',
+         'public_url': '', 'public_proto': ''},
+    ]
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        try:
+            with _patch_mirror_add_primitives(
+                sidecar_head_return=(True, 'verified', _peer_head),
+                discover_peers_return=_discovered,
+            ):
+                # Operator passes --proto http; the per-peer signed
+                # meta should OVERRIDE this for peers that carry it.
+                _ok = _sess.cmd_mirror_add(
+                    'fqdn', _primary,
+                    '--ssh-key', 'config/repo.key',
+                    '--proto', 'http', '--yes',
+                )
+        finally:
+            _restore()
+        assert _ok is True, '\n'.join(_sess.lines)
+        # peer_https kept its upstream-recorded https URL despite the
+        # operator passing --proto http
+        _https = _mirror.read_mirror_state(_sess.config, 'b-example')
+        assert _https['public_url']   == 'https://b.example/asgard'
+        assert _https['public_proto'] == 'https'
+        # peer_http roundtrips http (matches operator too — coincidence)
+        _http = _mirror.read_mirror_state(_sess.config, 'c-example')
+        assert _http['public_url']   == 'http://c.example/asgard'
+        assert _http['public_proto'] == 'http'
+        # v2-shaped peer falls back to operator's --proto http
+        _v2 = _mirror.read_mirror_state(_sess.config, 'd-example')
+        assert _v2['public_url']   == 'http://d.example/asgard'
+        assert _v2['public_proto'] == 'http'
+
+
 def test_cmd_mirror_add_signing_key_gate_blocks():
     """No tier-1 signing key → REFUSED before any probe.  Key
     verification gate is the first thing cmd_mirror_add does."""
@@ -23469,11 +23541,16 @@ def test_reconcile_neighbours_rewrites_when_diff():
         assert _p.call_count == 2
         assert all(_r['changed'] for _r in _results)
         # The head passed to write_coord_head must carry the desired
-        # neighbours (both URLs), canonicalised.
+        # neighbours as v3 records, sorted by url.  File:// mirrors keep
+        # empty public_url / public_proto (no apt-readable URL).
         for _call in _w.call_args_list:
             _passed_head = _call.args[1]
-            assert set(_passed_head['neighbours']) == {
-                'file:///srv/a', 'file:///srv/b'}
+            assert _passed_head['neighbours'] == [
+                {'url': 'file:///srv/a',
+                 'public_url': '', 'public_proto': ''},
+                {'url': 'file:///srv/b',
+                 'public_url': '', 'public_proto': ''},
+            ]
 
 
 def test_neighbours_drift_tags_unpublished_in_sync_and_drift():
@@ -23770,6 +23847,134 @@ def test_remote_publish_bootstrap_uploads_pubkey_when_no_head():
             {'url': 'ssh://a/p', 'public_url': '', 'public_proto': ''},
             {'url': 'ssh://b/p', 'public_url': '', 'public_proto': ''},
         ]
+
+
+def test_remote_publish_bootstrap_carries_v3_per_peer_records():
+    """When the caller passes v3 records (each peer's apt-readable URL
+    + protocol), bootstrap writes them VERBATIM into the new
+    coord-head's `neighbours` so a heterogeneous federation
+    round-trips per-peer apt URLs instead of every joiner inheriting
+    the operator's --proto."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.store as _store
+    import coord.identity as _identity
+    import coord.reconcile as _reconcile
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_coord = _td
+            dir_coord_fetched = os.path.join(_td, 'fetched')
+            dir_coord_claims = os.path.join(_td, 'claims')
+            dir_log = _td
+            dir_repo = _td
+            dir_config = _td
+            dir_gnupg = _td
+        os.makedirs(_Cfg.dir_coord_fetched)
+        os.makedirs(_Cfg.dir_coord_claims)
+        _inrelease = os.path.join(_td, 'InRelease')
+        with open(_inrelease, 'wb') as _fh:
+            _fh.write(b'Date: 2026-06-01\nFake: contents\n')
+
+        _local_records = [
+            {'url': 'ssh://a/p',
+             'public_url': 'http://a/asgard',  'public_proto': 'http'},
+            {'url': 'ssh://b/p',
+             'public_url': 'https://b/asgard', 'public_proto': 'https'},
+        ]
+        _written_head: 'list[dict]' = []
+        def _fake_write_head(coord_dir, head, signing_home):
+            _written_head.append(head)
+            return True
+        _lock = object()
+        with patch.object(_transport, 'remote_flock_acquire',
+                          return_value=_lock), \
+             patch.object(_transport, 'remote_flock_release'), \
+             patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=None), \
+             patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims', return_value={}), \
+             patch.object(_store, 'max_seq', return_value=0), \
+             patch.object(_reconcile, 'publish_halt_reason',
+                          return_value=None), \
+             patch.object(_transport, 'push_jsonl',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'write_coord_head',
+                          side_effect=_fake_write_head), \
+             patch.object(_transport, 'push_coord_head',
+                          return_value=(True, '')), \
+             patch.object(_publish, 'generate_pending_claims',
+                          return_value=[]):
+            _ok, _detail = _publish.remote_publish(
+                builder_id='alice', config=_Cfg(),
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='20260601T000000Z',
+                remote_coord_spec='user@h:/asgard',
+                inrelease_local_path=_inrelease,
+                read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+                local_mirror_urls=_local_records,
+                ssh_host='user@h',
+            )
+        assert _ok, _detail
+        assert _written_head, "write_coord_head never called"
+        _new_head = _written_head[-1]
+        # Per-peer apt URLs round-trip into the signed federation head.
+        assert _new_head['neighbours'] == [
+            {'url': 'ssh://a/p',
+             'public_url': 'http://a/asgard',  'public_proto': 'http'},
+            {'url': 'ssh://b/p',
+             'public_url': 'https://b/asgard', 'public_proto': 'https'},
+        ]
+
+
+def test_all_mirror_neighbour_records_pulls_per_peer_meta_from_state():
+    """`mirror.all_mirror_neighbour_records` walks every per-mirror
+    state file and emits one record per peer, with the apt-readable URL
+    + protocol the operator supplied at `mirror add` time."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+        _cfg = _Cfg()
+        _m.add_mirror(
+            _cfg, name='alpha',
+            url='ssh://ubuntu@a.example/srv/asgard',
+            host='a.example', host_type='fqdn',
+            public_proto='http',
+            public_url='http://a.example/asgard',
+            seed_pin='')
+        _m.add_mirror(
+            _cfg, name='beta',
+            url='ssh://ubuntu@b.example/srv/asgard',
+            host='b.example', host_type='fqdn',
+            public_proto='https',
+            public_url='https://b.example/asgard',
+            seed_pin='')
+        _m.add_mirror(
+            _cfg, name='local',
+            url='file:///srv/asgard', seed_pin='')
+        _recs = _m.all_mirror_neighbour_records(_cfg)
+        # File:// mirror keeps empty public_url (no network apt URL);
+        # ssh:// mirrors carry their derived public URL + proto.
+        _by_url = {_r['url']: _r for _r in _recs}
+        assert _by_url['ssh://ubuntu@a.example/srv/asgard'] == {
+            'url': 'ssh://ubuntu@a.example/srv/asgard',
+            'public_url': 'http://a.example/asgard',
+            'public_proto': 'http',
+        }
+        assert _by_url['ssh://ubuntu@b.example/srv/asgard']['public_proto'] \
+            == 'https'
+        assert _by_url['file:///srv/asgard'] == {
+            'url': 'file:///srv/asgard',
+            'public_url': '', 'public_proto': '',
+        }
 
 
 def test_cmd_mirror_pull_no_mirrors_is_friendly():
@@ -25020,6 +25225,7 @@ def main() -> int:
         test_cmd_mirror_add_overlap_with_existing_neighbours,
         test_cmd_mirror_add_rejects_malformed_inputs,
         test_cmd_mirror_add_drops_unreachable_neighbour,
+        test_cmd_mirror_add_uses_peer_meta_over_operator_proto,
         test_cmd_mirror_add_signing_key_gate_blocks,
         test_mirror_add_remove_round_trip,
         test_mirror_add_rejects_duplicate_name_and_url,
@@ -25052,6 +25258,8 @@ def main() -> int:
         test_cmd_mirror_dispatch_routes_publish_and_pull,
         test_remote_publish_blocks_on_federation_drift,
         test_remote_publish_bootstrap_uploads_pubkey_when_no_head,
+        test_remote_publish_bootstrap_carries_v3_per_peer_records,
+        test_all_mirror_neighbour_records_pulls_per_peer_meta_from_state,
         test_cmd_mirror_pull_no_mirrors_is_friendly,
         test_transport_pull_single_file_primitive_exists,
         # MIRROR-01 Phase 3b — per-file .deb push + coord/pool split

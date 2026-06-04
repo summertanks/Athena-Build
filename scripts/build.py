@@ -3687,8 +3687,13 @@ class BuildSession:
             return False
 
         # Net-new peers discovered via the federation join.  Each one
-        # inherits the operator's SSH key + the same --proto.  Name
-        # auto-derived from URL (operator can rename later).
+        # inherits the operator's SSH key (Phase 7 keeps keys
+        # homogeneous).  Per-peer apt URL preference:
+        #   1. UPSTREAM's v3 record (peer's own public_url / public_proto
+        #      signed into the federation head) — federation
+        #      source-of-truth.
+        #   2. Local derivation from operator's --proto.
+        # v2-shaped upstream peers surface empty meta → fall back to (2).
         for _peer in _net_new_peers:
             _peer_url = _peer['url']
             if not _peer_url.startswith('ssh://'):
@@ -3709,13 +3714,20 @@ class BuildSession:
             _peer_host = _mirror._extract_host_from_ssh_url(_peer_url) or ''
             _peer_host_type = ('ip' if _mirror._is_valid_ip(_peer_host)
                                else 'fqdn')
-            _peer_public_url = _mirror.derive_public_url(
-                _peer_url, self.config.build_base_id, _proto or 'http') or ''
+            # Prefer upstream's signed per-peer meta; fall back to
+            # operator's --proto for v2-shaped peers (empty fields).
+            _peer_proto = (_peer.get('public_proto')
+                           or _proto or 'http')
+            _peer_public_url = (
+                _peer.get('public_url')
+                or _mirror.derive_public_url(
+                    _peer_url, self.config.build_base_id, _peer_proto)
+                or '')
             _pok, _pdet = _mirror.add_mirror(
                 self.config, name=_peer_name, url=_peer_url, type='ssh',
                 ssh_key=_parsed['ssh_key'], seed_pin=_seed,
                 host=_peer_host, host_type=_peer_host_type,
-                public_proto=_proto or '', public_url=_peer_public_url,
+                public_proto=_peer_proto, public_url=_peer_public_url,
             )
             console.print(
                 f"  peer {_peer_name}: {_pdet}",
@@ -3829,11 +3841,17 @@ class BuildSession:
         console.print(
             f"+ athena-{primary_name}.list: deb [signed-by={_keyring}] "
             f"{_apt} {_codename} main", tui.COLOR_INFO)
-        # Net-new discovered peers
+        # Net-new discovered peers — prefer upstream's signed per-peer
+        # apt URL (v3 record) over re-deriving from the operator's --proto.
         for _peer in net_new:
             _u = _peer['url']
-            _peer_public = _mirror.derive_public_url(
-                _u, self.config.build_base_id, proto or 'http') or _u
+            _peer_proto = (_peer.get('public_proto')
+                           or proto or 'http')
+            _peer_public = (
+                _peer.get('public_url')
+                or _mirror.derive_public_url(
+                    _u, self.config.build_base_id, _peer_proto)
+                or _u)
             _peer_name = _mirror.derive_name_from_url(_u, 'fqdn') or \
                 _mirror.derive_name_from_url(_u, 'ip') or '?'
             console.print(
@@ -3981,8 +3999,14 @@ class BuildSession:
             return False
         # Resolve snapshot pin
         _snapshot_pin = self._snapshot_current() or ''
-        # Resolve federation membership
-        _local_urls = _mirror.all_mirror_urls(self.config)
+        # Resolve federation membership.  v3: per-peer records pulled
+        # from local state files (each carries public_url +
+        # public_proto from the operator-supplied --proto at
+        # `mirror add` time) so a heterogeneous federation round-trips
+        # the apt-readable URL per peer.  The federation gate inside
+        # remote_publish still works on the URL projection — back-compat
+        # `canonicalize_neighbours` does the dict-→-str collapse.
+        _local_urls = _mirror.all_mirror_neighbour_records(self.config)
         # Target selection
         _target = args[0] if args else None
         if _target is not None:
