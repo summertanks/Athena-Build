@@ -289,6 +289,118 @@ readable; their per-peer records auto-promote to empty
 operator's `--proto`.  v1 coord-heads (no `neighbours` field at all)
 read as empty.
 
+## MIRROR-02: build modes, ownership, installability
+
+MIRROR-02 (shipped 2026-06-04 across 14 chunks; commits `4fd3aa4`
+through `aff3482`) layers three new concepts on top of MIRROR-01's
+federation:
+
+### Build modes — `[Build] Mode = distribution | individual`
+
+Two operator personas:
+
+- **Distribution mode** (default; unchanged from MIRROR-01) — owns the
+  full corpus.  Cache parse walks `pkg.list` + `pool.list` etc.  Builds
+  chroot + ISO.  `repo audit` covers the whole repo.
+- **Individual mode** — owns a subset.  Operator lists their packages
+  in `config/indl.list` (flat list, `#` comments).  Cache parse skips
+  the runtime closure walk entirely — `selected_pkgs` is exactly the
+  names in `indl.list`, no transitive deps pulled.  Chroot / ISO are
+  refused (`[Build] Mode = individual` skips chroot/ISO assembly).
+  `source audit` scopes to the indl subset.
+
+```ini
+# config/build.conf
+[Build]
+Mode = individual
+```
+
+```text
+# config/indl.list
+firefox-esr           # OOMs on host A
+libreoffice
+thunderbird
+```
+
+Mode is shown persistently:
+
+- `print state` first line: `MODE: distribution` or
+  `MODE: individual  [N pkg(s) in indl.list]`
+- `autorun <variant>: starting (MODE = …)` header
+- `mirror publish <name> [MODE=individual]: → <url>` per-mirror header
+
+`autorun individual` is the indl-mode autorun variant.  Bare `autorun`
+in indl mode routes there automatically.
+
+### Per-package ownership
+
+Each non-retracted `published` claim on the mirror has an "owner":
+
+- `republished_from is None` → claim's `builder` field is the owner.
+- `republished_from is not None` → claim is **tunneled**; no owner.
+
+`mirror publish` applies the ownership decision matrix per filename:
+
+| Existing owner | Our version > theirs? | Decision |
+|---|---|---|
+| no claim          | — | publish; we become owner |
+| owned by us       | — | publish (re-claim no-op) |
+| tunneled          | — | publish; we take ownership |
+| owned by other    | yes (strictly higher) | publish; ownership transfers |
+| owned by other    | no (same/lower)       | BLOCK (`ownership_blocked`) |
+
+Blocked filenames surface in the publish detail; the rest of the
+publish proceeds (partial-success is the design).  Version compare
+via `apt_pkg.version_compare`.
+
+### Installability gate (`mirror_closure_break`)
+
+Every `mirror publish` runs `repo_audit.audit_dep_closure` over the
+projected post-publish union state (mirror's existing claims + our
+pending), bounded to our pending packages as the consumer set.  Any
+unresolved hard `Depends` → REFUSE with detailed findings.
+
+This is the chunk-11 invariant: **at every moment, the mirror's pool
+must form a closed dep graph**.  Publishing a package whose deps
+aren't satisfied by the projected post-publish union is REFUSED
+loudly with the specific consumer + unsatisfied relation in the
+error message.
+
+Multi-version-aware: a mirror carries the UNION of every non-retracted
+claim across `[mirror.base, mirror.current]`.  An older claim whose
+`Depends:` is satisfied only by a newer-snapshot claim is fine — the
+projection includes both versions, and the closure walk resolves
+against the full set.
+
+### First-publish dist-mode gate
+
+An indl-mode builder publishing to a mirror with no `coord-head` yet
+(fresh bootstrap) is REFUSED.  Bootstrapping an indl-mode subset into
+a virgin mirror would seed a partial, non-installable starting state.
+The error message points the operator at the dist-mode bootstrap path.
+
+### `mirror.base` advances on publish
+
+After every successful `mirror publish`, `mirror.base` is recomputed
+to the **oldest snapshot timestamp across all non-retracted claims**
+on the mirror.  Combined with Phase 8's `snapshot.current >= mirror.base`
+publish gate, this gives operators a meaningful "oldest thing on this
+mirror" floor and prevents back-publishing pre-floor builds.
+
+### `mirror pull` writes local `build.json` records
+
+Pulled `.deb`s get a local build record so subsequent `source audit`
+and `repo audit` runs see them as already-built:
+
+- Tunneled-on-mirror → local `phase=tunneled`, `republished_from`
+  copied verbatim per filename
+- Owned by another builder → local `phase=done`, new `pulled_from =
+  {mirror_name, owner_builder}` annotation distinguishes "we built it"
+  from "we pulled it"
+
+Means a builder can pull from a mirror and immediately drive
+`chroot build` against the pulled tree, no `source build` step.
+
 ## Migrating from the legacy `[Repo]` keys
 
 If `config/build.conf` still carries the pre-MIRROR-01 keys, they're
