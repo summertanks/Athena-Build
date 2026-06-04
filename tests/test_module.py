@@ -22242,6 +22242,37 @@ def test_source_state_tunneled_record_with_pristine_binary_returns_tunneled():
             f"as 'tunneled', got {_state!r}")
 
 
+def test_humansize_thresholds():
+    """B / KiB / MiB / GiB thresholds at 1024-multiples; one-decimal
+    formatting matches the tunnel-output spec."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build as _b
+    assert _b._humansize(0) == '0 B'
+    assert _b._humansize(1023) == '1023 B'
+    assert _b._humansize(1024) == '1.0 KiB'
+    assert _b._humansize(74425 * 1024) == '72.7 MiB'
+    assert _b._humansize(2 * 1024 * 1024 * 1024) == '2.0 GiB'
+
+
+def test_shorten_origin_compacts_long_pool_url():
+    """A long snapshot.debian.org pool URL collapses to
+    `host/.../<last 5 parts>`; short URLs pass through."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build as _b
+    _long = (
+        'https://snapshot.debian.org/archive/debian-security/'
+        '20260602T173733Z/pool/updates/main/f/firefox-esr'
+    )
+    _out = _b._shorten_origin(_long, max_len=70)
+    assert _out == (
+        'snapshot.debian.org/.../pool/updates/main/f/firefox-esr'
+    ), _out
+    _short = 'https://example.com/pool/main/p/pkg'
+    assert _b._shorten_origin(_short, max_len=70) == _short
+
+
 def test_new_build_record_threads_component_field():
     """`new_build_record(component='non-free-firmware')` writes the
     component to the record; default stays 'main' for back-compat.
@@ -27551,6 +27582,8 @@ def main() -> int:
         test_source_state_interrupted_when_record_is_non_terminal,
         test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass,
         test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
+        test_humansize_thresholds,
+        test_shorten_origin_compacts_long_pool_url,
         test_new_build_record_threads_component_field,
         test_new_claim_threads_component_field,
         test_generate_pending_claims_threads_component_from_build_record,
