@@ -828,29 +828,28 @@ class BuildSession:
 
     # --------------------------------------Command: parse_dependency-------------------------------------
 
-    def _refuse_in_individual_mode(self, what: str) -> bool:
-        """MIRROR-02 gate: chroot/ISO commands are N/A in individual
-        mode (a single-package builder doesn't assemble the target
-        system).  Returns True iff the command should refuse +
-        operator-visible reason printed.
+    def _refuse_in_build_mode(self, what: str) -> bool:
+        """Chroot/ISO commands are N/A in build mode (a single-package
+        builder doesn't assemble the target system).  Returns True iff
+        the command should refuse + operator-visible reason printed.
 
         Tolerant of a missing `config` attr (defensive against
         test doubles that don't construct a full BuildConfig).
         """
         _mode = getattr(getattr(self, 'config', None), 'build_mode',
                         'distribution')
-        if _mode == 'individual':
+        if _mode == 'build':
             console.print(
-                f"{what}: N/A in individual mode — `[Build] Mode = "
-                "individual` skips chroot/ISO assembly.  Run on a "
-                "dist-mode host, or change config/build.conf.",
+                f"{what}: N/A in build mode — `[Build] Mode = build` "
+                "skips chroot/ISO assembly.  Run on a dist-mode host, "
+                "or change config/build.conf.",
                 tui.COLOR_WARNING)
             return True
         return False
 
     def _canonical_select_count(self, tree) -> int:
         """Count canonical-name keys in selected_pkgs (excludes Provides
-        aliases).  Used by indl-mode summary so the operator sees the
+        aliases).  Used by build-mode summary so the operator sees the
         true binary count, not the aliased duplicate count."""
         if tree is None:
             return 0
@@ -859,17 +858,17 @@ class BuildSession:
             if _k == tree.selected_pkgs[_k]['Package']
         )
 
-    def _cache_parse_individual_mode(self) -> bool:
-        """MIRROR-02: individual-mode dep parse.  Populates
+    def _cache_parse_build_mode(self) -> bool:
+        """MIRROR-02: build-mode dep parse.  Populates
         `dep_tree.selected_pkgs` with the binaries named in
         `config/indl.list` (latest version per name), then
         `dep_tree.selected_srcs` via `parse_sources` so the source
         builder knows each Build-Depends.
 
-        No runtime dep closure walk — indl mode is single-package
+        No runtime dep closure walk — build mode is single-package
         scope; runtime installability is the MIRROR's invariant, not
         the build host's (enforced at `mirror publish` time in
-        chunk 11).  No udeb_dep_tree (installer is N/A in indl mode).
+        chunk 11).  No udeb_dep_tree (installer is N/A in build mode).
 
         Returns True iff at least one package resolved.  Logs WARNINGs
         for misses; does NOT abort on partial resolution (operator
@@ -880,12 +879,12 @@ class BuildSession:
         _names = utils.parse_indl_list(self.config.indllist_path)
         if not _names:
             console.print(
-                f"WARNING: [Build] Mode = individual but indl.list at "
+                f"WARNING: [Build] Mode = build but indl.list at "
                 f"{self.config.indllist_path} is empty or missing.",
                 tui.COLOR_WARNING)
             return False
         console.print(
-            f"individual mode: {len(_names)} package(s) from indl.list",
+            f"build mode: {len(_names)} package(s) from indl.list",
             tui.COLOR_INFO)
         _resolved = 0
         for _name in _names:
@@ -899,7 +898,7 @@ class BuildSession:
                     f"  WARNING: '{_name}' not in cache — skipping",
                     tui.COLOR_WARNING)
                 logger.warning(
-                    f"individual mode: '{_name}' not in package_hashtable")
+                    f"build mode: '{_name}' not in package_hashtable")
                 continue
             _latest_ver = max(_versions.keys())
             _latest_pkgs = _versions[_latest_ver]
@@ -911,7 +910,7 @@ class BuildSession:
                 continue
             _pkg = _latest_pkgs[0]
             # Use canonical name as the key (matches what parse_dependency
-            # does at line ~491).  No Provides aliasing — indl mode is
+            # does at line ~491).  No Provides aliasing — build mode is
             # narrow-scope and no other code reads through aliases for
             # this tree.
             self.dep_tree.selected_pkgs[_pkg['Package']] = _pkg
@@ -922,10 +921,10 @@ class BuildSession:
         # Build-Depends; same call the dist-mode path makes at line 1186.
         if not self.dep_tree.parse_sources():
             console.print(
-                "individual mode: parse_sources reported errors "
+                "build mode: parse_sources reported errors "
                 "(see log) — continuing with partial source set",
                 tui.COLOR_WARNING)
-        # udeb_dep_tree stays None — installer is N/A in indl mode.
+        # udeb_dep_tree stays None — installer is N/A in build mode.
         return True
 
     def cmd_parse_dependency(self, *args):
@@ -999,26 +998,26 @@ class BuildSession:
         self.dep_tree = dependencytree.DependencyTree(self.cache, select_recommended=False,
                     arch=self.config.arch, build_profiles=self.config.build_profiles)
 
-        # ── MIRROR-02 individual-mode branch ─────────────────────────────────
-        # In individual mode the build host targets just the packages named in
+        # ── MIRROR-02 build-mode branch ─────────────────────────────────
+        # In build mode the build host targets just the packages named in
         # `config/indl.list` — no runtime dep closure walk, no live/installer/
         # pool extras, no chroot/ISO. selected_pkgs is populated directly from
         # the indl.list lookups (single-version pick per name); parse_sources
         # still runs so the source builder knows each package's Build-Depends.
         # Skip-everything-else: Passes I-VII don't run, udeb_dep_tree stays None.
-        if self.config.build_mode == 'individual':
-            if self._cache_parse_individual_mode():
+        if self.config.build_mode == 'build':
+            if self._cache_parse_build_mode():
                 self.flags.dep_check_ready = True
                 _spiner.stop()
                 console.print(
-                    f"cache parse (individual): {len(self.dep_tree.selected_srcs)} "
+                    f"cache parse (build): {len(self.dep_tree.selected_srcs)} "
                     f"source(s), {self._canonical_select_count(self.dep_tree)} "
                     f"binary(ies)",
                     tui.COLOR_HIGHLIGHT)
             else:
                 _spiner.stop()
                 console.print(
-                    "cache parse (individual): no usable packages in indl.list "
+                    "cache parse (build): no usable packages in indl.list "
                     "(see warnings above); dep_check NOT set.",
                     tui.COLOR_ERROR)
             return
@@ -2511,8 +2510,8 @@ class BuildSession:
     def _preflight_audit_source(self) -> bool:
         """Source-side audit gate for `chroot build live/installer`.
 
-        N/A in individual mode (chroot/ISO are refused there — see
-        _refuse_in_individual_mode in chunk 3).  In dist mode walks
+        N/A in build mode (chroot/ISO are refused there — see
+        _refuse_in_build_mode in chunk 3).  In dist mode walks
         `_source_state` over the merged deb+udeb dep tree.
         Aborts (with operator y/n prompt) when any of these states
         are non-empty for selected sources:
@@ -4528,15 +4527,15 @@ class BuildSession:
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
             # MIRROR-02 chunk 13: first-publish dist-mode gate.
-            # When the local builder is in [Build] Mode = individual
+            # When the local builder is in [Build] Mode = build
             # AND the target mirror has no coord-head on remote
             # (fresh bootstrap state), REFUSE.  Bootstrapping an
-            # indl-mode build into a virgin mirror would land a
+            # build-mode build into a virgin mirror would land a
             # partial subset that's almost certainly not installable —
             # the dist-mode bootstrap is what guarantees the initial
             # closure invariant.  Defensive getattr for test doubles.
             _mode = getattr(self.config, 'build_mode', 'distribution')
-            if _mode == 'individual':
+            if _mode == 'build':
                 _has_head = self._mirror_remote_has_coord_head(_n, _st)
                 if not _has_head:
                     console.print(
@@ -6730,7 +6729,7 @@ class BuildSession:
         front via _ensure_signing_key_verified — see CONF-02 phase 3 for why).
         The sudo password is collected interactively at the start of this command.
         """
-        if self._refuse_in_individual_mode("chroot build live"):
+        if self._refuse_in_build_mode("chroot build live"):
             return
         if not self.flags.source_build_ready:
             console.print("Run 'source build' first")
@@ -6835,7 +6834,7 @@ class BuildSession:
 
         On success sets self.flags.chroot_installer_ready.
         """
-        if self._refuse_in_individual_mode("chroot build installer"):
+        if self._refuse_in_build_mode("chroot build installer"):
             return
         if not self.flags.dep_check_ready:
             console.print("Run 'cache parse' first")
@@ -6960,7 +6959,7 @@ class BuildSession:
         Prerequisites: chroot must be built AND verified (chroot_verified
         flag), unless `force` is given in which case verify is re-run.
         """
-        if self._refuse_in_individual_mode("iso build live"):
+        if self._refuse_in_build_mode("iso build live"):
             return
         _force = 'force' in args
         if not _force and not self.flags.chroot_verified:
@@ -7037,7 +7036,7 @@ class BuildSession:
         Collects sudo password — initrd cpio reads root-owned chroot
         content, pool copy preserves ownership.
         """
-        if self._refuse_in_individual_mode("iso build installer"):
+        if self._refuse_in_build_mode("iso build installer"):
             return
         if not self.flags.chroot_installer_ready:
             console.print(
@@ -7296,11 +7295,11 @@ class BuildSession:
     # pulled by depth-1 Recommends; 'all' = union of every selected source
     # in dep_tree + udeb_dep_tree (no exclusions — equivalent to running
     # pkg + live + installer + recommended back-to-back, deduped).
-    # MIRROR-02: 'individual' is recognised by the arg parser; gated
-    # to [Build] Mode = individual at dispatch time (cmd_source_build
+    # MIRROR-02: 'build' is recognised by the arg parser; gated
+    # to [Build] Mode = build at dispatch time (cmd_source_build
     # rejects it under dist mode with a hint pointing at 'all').
     _SOURCE_SUBSETS = ('pkg', 'live', 'installer', 'recommended', 'all',
-                       'individual')
+                       'indl')
 
     @staticmethod
     def _parse_source_build_args(args):
@@ -7407,7 +7406,7 @@ class BuildSession:
         GRUB version (analogous to pre-COMP-14 ISO leakage).  Follow-
         up will move grub-install into the build container.
         """
-        if self._refuse_in_individual_mode("iso build disk"):
+        if self._refuse_in_build_mode("iso build disk"):
             return
         import disk_image
 
@@ -8182,7 +8181,7 @@ class BuildSession:
             count.  The `ok` bucket is deliberately omitted from
             verbose listing — it's almost always the full corpus.
 
-        MIRROR-02: in `[Build] Mode = individual`, `dep_tree.selected_srcs`
+        MIRROR-02: in `[Build] Mode = build`, `dep_tree.selected_srcs`
         IS the indl subset (chunk 2 sets it directly from indl.list,
         no closure walk), so this audit naturally scopes to just
         those sources — no extra filter needed.  In dist mode it
@@ -8984,15 +8983,15 @@ class BuildSession:
         Prompts before returning if any builds fail, allowing the operator to
         decide whether to continue with the partial package set.
         """
-        # MIRROR-02: eager mode-validation for the 'individual' subset —
-        # reject outside indl mode BEFORE any flag-prereq checks so the
-        # operator gets a clear "wrong mode" message instead of a stale
-        # "Run 'source sync' first" hint.
-        if ('individual' in (_a.strip().lower() for _a in args)
-                and self.config.build_mode != 'individual'):
+        # Eager mode-validation for the 'indl' subset — reject outside
+        # build mode BEFORE any flag-prereq checks so the operator gets
+        # a clear "wrong mode" message instead of a stale "Run 'source
+        # sync' first" hint.
+        if ('indl' in (_a.strip().lower() for _a in args)
+                and self.config.build_mode != 'build'):
             console.print(
-                "source build individual: only valid under "
-                "`[Build] Mode = individual`.  Did you mean `source "
+                "source build indl: only valid under "
+                "`[Build] Mode = build`.  Did you mean `source "
                 "build all`?",
                 tui.COLOR_ERROR)
             return
@@ -9037,17 +9036,16 @@ class BuildSession:
             )
             _force = True
 
-        # MIRROR-02: in individual mode, the bare 'pkg' default gets
-        # rewritten to 'individual' so the operator-visible label
-        # matches their mode.  Functionally identical (pkg's
-        # excludes are empty in indl mode), this just removes
-        # ambiguity from the printed progress.
-        if (self.config.build_mode == 'individual'
+        # In build mode, the bare 'pkg' default gets rewritten to
+        # 'indl' so the operator-visible label matches their mode.
+        # Functionally identical (pkg's excludes are empty in build
+        # mode), this just removes ambiguity from the printed progress.
+        if (self.config.build_mode == 'build'
                 and _subset == 'pkg'
                 and not _names):
-            _subset = 'individual'
-        # Mode-validation for 'individual' subset already ran at the
-        # top of cmd_source_build (eager-fail before flag gates).
+            _subset = 'indl'
+        # Mode-validation for 'indl' subset already ran at the top of
+        # cmd_source_build (eager-fail before flag gates).
         if _force:
             console.print("Force mode: skipping build cache checks")
         if _subset == 'pkg':
@@ -9063,9 +9061,9 @@ class BuildSession:
         elif _subset == 'all':
             console.print("All mode: building every selected source "
                           "(pkg + live + installer + recommended union)")
-        elif _subset == 'individual':
+        elif _subset == 'indl':
             console.print(
-                "Individual mode: building every source in "
+                "Indl subset: building every source in "
                 "config/indl.list")
         if _profile_override is not None:
             console.print(
@@ -9149,12 +9147,12 @@ class BuildSession:
                           if self.udeb_dep_tree is not None else None))
                 if _s:
                     packages.append(_s)
-        elif _subset == 'individual':
-            # MIRROR-02 'individual' mode: every source in selected_srcs.
-            # In indl mode, selected_srcs IS the indl.list contents
-            # (chunk 2), so this is "build all of indl.list".  udeb_dep_tree
-            # is None in indl mode, so no udeb branch.  Same shape as 'all'
-            # but with the operator-visible "individual" label.
+        elif _subset == 'indl':
+            # 'indl' subset: every source in selected_srcs.  In build
+            # mode, selected_srcs IS the indl.list contents, so this is
+            # "build all of indl.list".  udeb_dep_tree is None in build
+            # mode, so no udeb branch.  Same shape as 'all' but with the
+            # operator-visible "indl" label.
             packages = [
                 _s for _name, _s in sorted(
                     self.dep_tree.selected_srcs.items())
@@ -10144,12 +10142,12 @@ class BuildSession:
     # ─────────────────────────────────────────────────────────────────
 
     def _set_mode(self, value: str) -> None:
-        """`set mode <distribution|individual>` — switch build mode in
+        """`set mode <distribution|build>` — switch build mode in
         the running session.  Clears dep_check_ready so the next
         pipeline step re-resolves under the new mode; does NOT
         persist to build.conf (operator commits the change explicitly
         if they want it durable)."""
-        _valid = ('distribution', 'individual')
+        _valid = ('distribution', 'build')
         if value not in _valid:
             console.print(
                 f"  invalid mode: {value!r}  (try: {' | '.join(_valid)})",
@@ -10175,7 +10173,7 @@ class BuildSession:
             try:
                 _banner = (
                     "Athena Build System v0.1"
-                    + (' [indl]' if value == 'individual' else ''))[:50]
+                    + (' [build]' if value == 'build' else ''))[:50]
                 _inst.dispatcher.state.banner = _banner
             except AttributeError:
                 pass
@@ -10339,24 +10337,24 @@ class BuildSession:
             'live':       'cache→parse→download→container→source build (+live)→chroot build live→iso build live',
             'installer':  'cache→parse→download→container→source build (+installer)→chroot build installer→iso build installer',
             'disk':       'cache→parse→download→container→source build (+live)→chroot build live→iso build disk (qcow2)',
-            'individual': 'cache→parse→download→container→source build (individual) — STOPS at source_build_ready (no chroot/ISO)',
+            'build': 'cache→parse→download→container→source build (indl) — STOPS at source_build_ready (no chroot/ISO)',
         }
-        # MIRROR-02: in [Build] Mode = individual, bare `autorun`
-        # routes to the individual pipeline (the live/installer/disk
+        # MIRROR-02: in [Build] Mode = build, bare `autorun`
+        # routes to the build pipeline (the live/installer/disk
         # variants would refuse at their chroot/ISO steps anyway).
         # Defensive against missing .config (test doubles).
         _mode = getattr(getattr(self, 'config', None), 'build_mode',
                         'distribution')
-        if action == '' and _mode == 'individual':
-            return self.cmd_auto_run_individual(*args)
+        if action == '' and _mode == 'build':
+            return self.cmd_auto_run_build(*args)
         if action in ('', 'live'):
             return self.cmd_auto_run_live(*args)
         if action == 'installer':
             return self.cmd_auto_run_installer(*args)
         if action == 'disk':
             return self.cmd_auto_run_disk(*args)
-        if action == 'individual':
-            return self.cmd_auto_run_individual(*args)
+        if action == 'build':
+            return self.cmd_auto_run_build(*args)
         return self._group_help('autorun', _table, action)
 
     def cmd_auto_run_live(self):
@@ -10431,21 +10429,21 @@ class BuildSession:
         ]
         self._run_autorun_steps('autorun disk', _steps)
 
-    def cmd_auto_run_individual(self):
-        """MIRROR-02: run the indl-mode pipeline through to a complete
+    def cmd_auto_run_build(self):
+        """MIRROR-02: run the build-mode pipeline through to a complete
         source build of every package in `config/indl.list`.
 
         Stops at source_build_ready — no chroot or ISO assembly
-        (those are refused in indl mode anyway per chunk 3).  The
+        (those are refused in build mode anyway per chunk 3).  The
         intended endpoint is `mirror publish`, which the operator
         runs explicitly after autorun completes successfully.
 
-        Refuses cleanly when the host isn't in individual mode (hint
+        Refuses cleanly when the host isn't in build mode (hint
         points at the live/installer/disk variants).
         """
-        if self.config.build_mode != 'individual':
+        if self.config.build_mode != 'build':
             console.print(
-                "autorun individual: requires `[Build] Mode = individual`. "
+                "autorun build: requires `[Build] Mode = build`. "
                 " Use `autorun live`/`installer`/`disk` for dist mode.",
                 tui.COLOR_ERROR)
             return
@@ -10454,10 +10452,10 @@ class BuildSession:
             (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
             (self.cmd_source_sync,       'download_ready',        'source sync'),
             (self.cmd_init_container,    'build_container_ready', 'container init'),
-            (lambda: self.cmd_source_build('individual'),
-                                          'source_build_ready',    'source build individual'),
+            (lambda: self.cmd_source_build('build'),
+                                          'source_build_ready',    'source build indl'),
         ]
-        self._run_autorun_steps('autorun individual', _steps)
+        self._run_autorun_steps('autorun build', _steps)
 
     def _run_autorun_steps(self, label: str, _steps: list) -> None:
         """Common driver shared by cmd_auto_run_{live,installer}.
@@ -10633,15 +10631,15 @@ def main(banner: str) -> None:
     if hasattr(tui_inst, 'one_shot_cmds'):
         tui_inst.one_shot_cmds = list(_one_shot_cmds)
 
-    # Persistent mode indicator on the TUI footer banner.  In individual
+    # Persistent mode indicator on the TUI footer banner.  In build mode
     # mode the operator must never confuse a partial pipeline for a
-    # broken dist build; the footer carries `[indl]` for every screen.
+    # broken dist build; the footer carries `[build]` for every screen.
     if (not _headless
-            and getattr(config, 'build_mode', 'distribution') == 'individual'
+            and getattr(config, 'build_mode', 'distribution') == 'build'
             and hasattr(tui_inst, 'dispatcher')):
         try:
             tui_inst.dispatcher.state.banner = (
-                f"{banner} [indl]")[:50]
+                f"{banner} [build]")[:50]
         except AttributeError:
             pass
 
@@ -10689,13 +10687,13 @@ def main(banner: str) -> None:
     console.print(f"\tParent Distribution\t{config.release} {config.baseversion}")
     console.print(f"\tBuild Distribution\t{config.build_distribution} {config.build_version} ({config.build_codename})")
     _mode = getattr(config, 'build_mode', 'distribution')
-    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'individual'
+    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'build'
                    else tui.COLOR_INFO)
-    if _mode == 'individual':
+    if _mode == 'build':
         _indl_names = utils.parse_indl_list(
             getattr(config, 'indllist_path', '') or '')
         console.print(
-            f"\tMode\t\t\tindividual  [{len(_indl_names)} pkg(s) in indl.list]",
+            f"\tMode\t\t\tbuild  [{len(_indl_names)} pkg(s) in indl.list]",
             _mode_color)
     else:
         console.print("\tMode\t\t\tdistribution", _mode_color)

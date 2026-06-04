@@ -145,7 +145,7 @@ Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
 ### `BuildConfig`
 - Validates argv (working dir + paths to build.conf and the FIVE .list
   files: pkg, live, installer, pool, indl).  `--indl-list` defaults
-  to `config/indl.list`; only consumed when `[Build] Mode = individual`.
+  to `config/indl.list`; only consumed when `[Build] Mode = build`.
 - Parses build.conf via configparser. Reads `[Build]`, `[Base]`,
   every `[Mirror.*]` (constructing Mirror instances), `[Snapshot]`,
   `[Source]`, `[Security]`, and `[Directories]`.  The only `[Repo]`
@@ -167,7 +167,7 @@ Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
   (release codename, used for the apt suite name).
 - `[Build]` knobs include `DISTRIBUTION`, `CODENAME`, `VERSION`,
   `IncludeRecommends`, `MaxParallelBuilds`, `DiskImageSizeGB`, and
-  `Mode` (`'distribution'` or `'individual'`; default `distribution`;
+  `Mode` (`'distribution'` or `'build'`; default `distribution`;
   unknown values rejected with a clear `error_str`).
 - `[Source]` knobs: `SkipTest`, `Tunneled` (comma-separated source
   names), `BuildProfiles`, `BuildOptions`.
@@ -197,7 +197,7 @@ Read `config/indl.list` — flat list of binary package names, one per
 line, `#` comments and blank lines tolerated, inline comments allowed
 (`firefox-esr # OOMs on host A`). Dedups while preserving first-seen
 order. Missing file → empty list (caller checks `[Build] Mode ==
-'individual'` separately to decide whether empty is fatal).
+'build'` separately to decide whether empty is fatal).
 
 ### `new_build_record(*, package, intended_version, patch_set_hash, started=None)` and the build-record family
 Local-side sidecar that records every source build attempt.  Schema is
@@ -1285,7 +1285,7 @@ success and gates on prerequisites.
 - chroot: build (live | installer) / verify
 - iso: build (live | installer | disk)
 - key: generate / verify
-- autorun: live / installer / disk / individual
+- autorun: live / installer / disk / build
 - mirror: add / list / remove / publish / pull / audit / summary /
           reconcile-neighbours / show
 - print: state / config / packages / sources / extras / live / installer /
@@ -1317,8 +1317,8 @@ success and gates on prerequisites.
   parse_sources for both trees, derive_extras_src_names,
   derive_subset_exclusive_src_names, set dep_check_ready.
 
-**cmd_parse_dependency — individual mode:**
-When `config.build_mode == 'individual'`, Passes III–VII are SKIPPED.
+**cmd_parse_dependency — build mode:**
+When `config.build_mode == 'build'`, Passes III–VII are SKIPPED.
 The flow is:
 - Pass I/II remain (required + important — they're harmless and the
   source builder still needs core build-deps).
@@ -1333,7 +1333,7 @@ The flow is:
   `Build-Depends` so the BuildContainer has its build deps.
 - `dep_tree.indl_src_names` is just an alias for `selected_srcs.keys()`.
 - `validate_selection` and the extras/exclusive projections are SKIPPED
-  in indl mode (they presuppose a full closure).
+  in build mode (they presuppose a full closure).
 
 **cmd_source_sync:**
 Iterate over both trees' selected_srcs; `utils.download_source` for the
@@ -1346,7 +1346,7 @@ hash drift). Sets build_container_ready.
 
 **cmd_source_build [force] [subset|<names>] [[profiles]]:**
 - Parse args via the static `_parse_source_build_args` helper.
-- In individual mode, the legal scopes shrink to `all` (== everything
+- In build mode, the legal scopes shrink to `all` (== everything
   in `indl.list`) and explicit names; `pkg` / `live` / `installer` /
   `recommended` raise an eager arg-validation error pointing at the
   mode.
@@ -1366,8 +1366,8 @@ hash drift). Sets build_container_ready.
 - Record counts on session.last_source_build_counts. Set source_build_ready.
 
 **cmd_build_chroot_live:**
-- `_refuse_in_individual_mode('chroot build live')` early-return if
-  `config.build_mode == 'individual'` — single-package builds don't
+- `_refuse_in_build_mode('chroot build live')` early-return if
+  `config.build_mode == 'build'` — single-package builds don't
   produce a closed runtime set.
 - Gate on source_build_ready + signing key verified.
 - Pre-flight: `_preflight_audit_source` (build state of every selected
@@ -1380,13 +1380,13 @@ hash drift). Sets build_container_ready.
 
 **cmd_build_chroot_installer:**
 Parallel but against udeb_dep_tree and `build_installer_chroot`. Same
-indl-mode refuse at the top. No verify_chroot equivalent (the installer
+build-mode refuse at the top. No verify_chroot equivalent (the installer
 doesn't have a configured-state to verify). Sets chroot_installer_ready.
 
 **cmd_build_iso_live / cmd_build_iso_installer / cmd_build_iso_disk:**
 Drive `iso.build_live_iso`, `iso_installer.build_installer_iso`,
 `disk_image.build_disk_image` respectively. All three start with the
-indl-mode refuse. Sets the corresponding flag.
+build-mode refuse. Sets the corresponding flag.
 
 **cmd_audit [verbose|strict|refresh|quick|<target>]:**
 Six sections in order: DEP GATE / LIVE CONFLICTS / INSTALLER CONFLICTS /
@@ -1412,14 +1412,14 @@ suites_spec. `minimal` produces a runtime-only subset (excludes `-dbg`,
 - `workload [since <ts>]`: diff current → target snapshot and report
   the source set that would rebuild.
 
-**autorun (live | installer | disk | individual):**
+**autorun (live | installer | disk | build):**
 Walk the shared early stages (cache → cache parse → source sync →
 container init → source build pkg → subset-specific source build),
 then the divergent terminal stages (chroot build {live|installer} →
 chroot verify if live → iso build {live|installer|disk}). Bails on
 first failure. Emits the autorun summary at the end.
 
-`autorun individual` is the indl-mode variant: chain is cache →
+`autorun build` is the build-mode variant: chain is cache →
 cache parse (indl branch) → source sync → container init → source
 build (defaulting to everything in `indl.list`). Stops at
 `source_build_ready` — no chroot/ISO stages. Operator typically chains
@@ -1446,8 +1446,8 @@ publish, pull, audit, federation reconciliation.
 
 - `cmd_mirror_publish [<name>]` — orchestrator over
   `coord.publish.remote_publish`. Pre-loop:
-  - Mode banner (`MODE: distribution|individual`).
-  - First-publish gate: refuses indl-mode publish to a mirror whose
+  - Mode banner (`MODE: distribution|build`).
+  - First-publish gate: refuses build-mode publish to a mirror whose
     remote has no `coord-head.json` yet.
   - Loops over local config; per-mirror runs federation-gate
     (`check_federation_consistency`) and then the 11-step publish

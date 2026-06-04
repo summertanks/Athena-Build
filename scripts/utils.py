@@ -2087,7 +2087,7 @@ class BuildConfig:
     build_base_id: str
     build_codename: str
     build_version: str
-    build_mode: str   # MIRROR-02: 'distribution' (full corpus) | 'individual' (indl.list only)
+    build_mode: str   # MIRROR-02: 'distribution' (full corpus) | 'build' (indl.list only)
     container_release: str
     docker_server: str
 
@@ -2167,7 +2167,7 @@ class BuildConfig:
             parser.add_argument('--live-list', type=str, help='Specify live-only pkg list', required=False, default=livelist_path)
             parser.add_argument('--installer-list', type=str, help='Specify installer-only pkg list', required=False, default=installerlist_path)
             parser.add_argument('--pool-list', type=str, help='Specify pool-only pkg list (ship in apt pool, never installed)', required=False, default=poollist_path)
-            parser.add_argument('--indl-list', type=str, help='Specify individual-mode pkg list (MIRROR-02; flat names, only consumed when [Build] Mode = individual)', required=False, default=indllist_path)
+            parser.add_argument('--indl-list', type=str, help='Specify build-mode pkg list (MIRROR-02; flat names, only consumed when [Build] Mode = build)', required=False, default=indllist_path)
             args = parser.parse_args()
 
             # if paths are specified, they are absolute
@@ -2271,18 +2271,18 @@ class BuildConfig:
             # the full operator-facing rationale.
             self.include_recommends = config_parser.getboolean(
                 'Build', 'IncludeRecommends', fallback=True)
-            # MIRROR-02: build-mode switch.  `distribution` (default) drives the
+            # Build-mode switch.  `distribution` (default) drives the
             # full corpus through pkg.list/live.list/installer.list/pool.list
-            # with runtime dep closure.  `individual` works against just
+            # with runtime dep closure.  `build` works against just
             # `config/indl.list` (flat list of package names) — no runtime
             # closure walk, no chroot/ISO; only the named packages get built
             # and published.  Used by team builders who own a subset of the
             # distribution rather than the whole thing.
             self.build_mode = config_parser.get(
                 'Build', 'Mode', fallback='distribution').strip().lower()
-            if self.build_mode not in ('distribution', 'individual'):
+            if self.build_mode not in ('distribution', 'build'):
                 self.error_str = (
-                    f"[Build] Mode must be 'distribution' or 'individual', "
+                    f"[Build] Mode must be 'distribution' or 'build', "
                     f"got {self.build_mode!r}"
                 )
                 return
@@ -3311,13 +3311,13 @@ def parse_indl_list(path: str) -> 'list[str]':
     """MIRROR-02: parse `config/indl.list` — flat list of binary package
     names, one per line, `#` comments and blank lines tolerated.
 
-    No grouping: indl mode is narrow-scope (one team owns this list),
+    No grouping: build mode is narrow-scope (one team owns this list),
     grouping is overkill.  Names are stripped of whitespace and
     de-duplicated while preserving first-seen order (so the operator
     can read `mirror summary` deterministically against the file order).
 
     Returns an empty list when the file is absent — caller checks
-    `[Build] Mode == 'individual'` separately to decide whether an empty
+    `[Build] Mode == 'build'` separately to decide whether an empty
     list is fatal.  Raises OSError on unreadable file (caller surfaces).
     """
     if not os.path.isfile(path):

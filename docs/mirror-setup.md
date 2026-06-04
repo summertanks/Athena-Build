@@ -295,24 +295,24 @@ MIRROR-02 (shipped 2026-06-04 across 14 chunks; commits `4fd3aa4`
 through `aff3482`) layers three new concepts on top of MIRROR-01's
 federation:
 
-### Build modes — `[Build] Mode = distribution | individual`
+### Build modes — `[Build] Mode = distribution | build`
 
 Two operator personas:
 
 - **Distribution mode** (default; unchanged from MIRROR-01) — owns the
   full corpus.  Cache parse walks `pkg.list` + `pool.list` etc.  Builds
   chroot + ISO.  `repo audit` covers the whole repo.
-- **Individual mode** — owns a subset.  Operator lists their packages
+- **Build mode** — owns a subset.  Operator lists their packages
   in `config/indl.list` (flat list, `#` comments).  Cache parse skips
   the runtime closure walk entirely — `selected_pkgs` is exactly the
   names in `indl.list`, no transitive deps pulled.  Chroot / ISO are
-  refused (`[Build] Mode = individual` skips chroot/ISO assembly).
+  refused (`[Build] Mode = build` skips chroot/ISO assembly).
   `source audit` scopes to the indl subset.
 
 ```ini
 # config/build.conf
 [Build]
-Mode = individual
+Mode = build
 ```
 
 ```text
@@ -325,12 +325,12 @@ thunderbird
 Mode is shown persistently:
 
 - `print state` first line: `MODE: distribution` or
-  `MODE: individual  [N pkg(s) in indl.list]`
+  `MODE: build  [N pkg(s) in indl.list]`
 - `autorun <variant>: starting (MODE = …)` header
-- `mirror publish <name> [MODE=individual]: → <url>` per-mirror header
+- `mirror publish <name> [MODE=build]: → <url>` per-mirror header
 
-`autorun individual` is the indl-mode autorun variant.  Bare `autorun`
-in indl mode routes there automatically.
+`autorun build` is the build-mode autorun variant.  Bare `autorun`
+in build mode routes there automatically.
 
 ### Per-package ownership
 
@@ -374,8 +374,8 @@ against the full set.
 
 ### First-publish dist-mode gate
 
-An indl-mode builder publishing to a mirror with no `coord-head` yet
-(fresh bootstrap) is REFUSED.  Bootstrapping an indl-mode subset into
+An build-mode builder publishing to a mirror with no `coord-head` yet
+(fresh bootstrap) is REFUSED.  Bootstrapping an build-mode subset into
 a virgin mirror would seed a partial, non-installable starting state.
 The error message points the operator at the dist-mode bootstrap path.
 

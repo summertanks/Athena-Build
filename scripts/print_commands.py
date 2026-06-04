@@ -98,14 +98,14 @@ def _print_config(session, *_extras) -> None:
     sub-views for the nested sections to keep this digestible."""
     cfg = session.config
     _mode = getattr(cfg, 'build_mode', 'distribution')
-    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'individual'
+    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'build'
                    else tui.COLOR_INFO)
-    if _mode == 'individual':
+    if _mode == 'build':
         import utils as _utils
         _indl_path = getattr(cfg, 'indllist_path', '')
         _names = _utils.parse_indl_list(_indl_path) if _indl_path else []
         tui.console.print(
-            f"MODE: individual  [{len(_names)} pkg(s) in indl.list]",
+            f"MODE: build  [{len(_names)} pkg(s) in indl.list]",
             _mode_color)
 
     tui.console.print("")
@@ -231,14 +231,14 @@ def _print_state(session, *_extras) -> None:
     # confuse a partial indl pipeline for a broken dist build.
     _mode = getattr(getattr(session, 'config', None), 'build_mode',
                     'distribution')
-    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'individual'
+    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'build'
                    else tui.COLOR_INFO)
-    if _mode == 'individual':
+    if _mode == 'build':
         import utils as _utils
         _indl_path = getattr(session.config, 'indllist_path', '')
         _names = _utils.parse_indl_list(_indl_path) if _indl_path else []
         tui.console.print(
-            f"MODE: individual  [{len(_names)} pkg(s) in indl.list]",
+            f"MODE: build  [{len(_names)} pkg(s) in indl.list]",
             _mode_color)
     else:
         tui.console.print("MODE: distribution", _mode_color)
