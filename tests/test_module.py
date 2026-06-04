@@ -281,7 +281,7 @@ def test_buildconfig_mode_rejects_unknown_value():
 def test_print_state_shows_mode_header():
     """MIRROR-02 chunk 6b: `print state` surfaces the active build
     mode at the top of the output.  In build mode the line also shows
-    the indl.list pkg count."""
+    the build_pkg.list pkg count."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import tui
@@ -302,13 +302,13 @@ def test_print_state_shows_mode_header():
         iso_disk_ready = False
 
     with tempfile.TemporaryDirectory() as _td:
-        _indl = os.path.join(_td, 'indl.list')
+        _indl = os.path.join(_td, 'build_pkg.list')
         with open(_indl, 'w') as _fh:
             _fh.write('firefox-esr\nlibreoffice\nthunderbird\n')
 
         class _CfgIndl:
             build_mode = 'build'
-            indllist_path = _indl
+            build_pkg_list_path = _indl
         class _SessIndl:
             flags = _Flags()
             config = _CfgIndl()
@@ -328,7 +328,7 @@ def test_print_state_shows_mode_header():
         # Dist mode case
         class _CfgDist:
             build_mode = 'distribution'
-            indllist_path = _indl
+            build_pkg_list_path = _indl
         class _SessDist:
             flags = _Flags()
             config = _CfgDist()
@@ -463,7 +463,7 @@ def test_cmd_source_build_indl_subset_rejected_in_dist_mode():
 
 def test_source_audit_naturally_scopes_to_indl_in_build_mode():
     """MIRROR-02 chunk 4: cmd_source_audit walks dep_tree.selected_srcs.
-    Chunk 2 populates selected_srcs directly from indl.list in
+    Chunk 2 populates selected_srcs directly from build_pkg.list in
     build mode (no closure walk).  So source audit naturally
     scopes to the indl subset — no explicit per-mode filter needed.
     Test stubs a BuildSession where selected_srcs has just one
@@ -585,9 +585,9 @@ def test_refuse_in_build_mode_is_a_no_op_in_distribution():
 
 def test_cache_parse_build_mode_resolves_named_pkgs_only():
     """MIRROR-02 chunk 2: in build mode, cache parse populates
-    selected_pkgs directly from indl.list lookups (no transitive
+    selected_pkgs directly from build_pkg.list lookups (no transitive
     closure walk).  Cache has firefox-esr + libreoffice + their fake
-    Depends; indl.list names just firefox-esr; closure does NOT
+    Depends; build_pkg.list names just firefox-esr; closure does NOT
     include libreoffice or any of firefox-esr's Depends."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -652,14 +652,14 @@ def test_cache_parse_build_mode_resolves_named_pkgs_only():
             _td, packages={'main': _pkg_blob}, sources={'main': _src_blob})
         assert _cache_obj.is_valid, _cache_obj.error_str
 
-        # indl.list lists ONE package
-        _indl = os.path.join(_td, 'indl.list')
+        # build_pkg.list lists ONE package
+        _indl = os.path.join(_td, 'build_pkg.list')
         with open(_indl, 'w') as _fh:
             _fh.write('firefox-esr\n')
 
         import dependencytree
         class _Cfg:
-            indllist_path = _indl
+            build_pkg_list_path = _indl
             build_mode = 'build'
             arch = 'amd64'
             build_profiles = ['nodoc', 'nocheck']
@@ -682,7 +682,7 @@ def test_cache_parse_build_mode_resolves_named_pkgs_only():
         assert _ok is True, '\n'.join(_lines)
         # selected_pkgs has firefox-esr ONLY (canonical key); libdep
         # would be there if we walked closure, libreoffice would be
-        # there if we used the full indl.list.
+        # there if we used the full build_pkg.list.
         _canonical = {
             _k for _k in _sess.dep_tree.selected_pkgs
             if _k == _sess.dep_tree.selected_pkgs[_k]['Package']
@@ -695,7 +695,7 @@ def test_cache_parse_build_mode_resolves_named_pkgs_only():
 
 
 def test_cache_parse_build_mode_warns_on_missing_pkg():
-    """Names in indl.list that aren't in the cache get a WARNING and
+    """Names in build_pkg.list that aren't in the cache get a WARNING and
     are skipped — partial resolution still proceeds for the rest."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -722,13 +722,13 @@ def test_cache_parse_build_mode_warns_on_missing_pkg():
     with tempfile.TemporaryDirectory() as _td:
         _cache_obj = _make_offline_cache(
             _td, packages={'main': _pkg_blob}, sources={'main': _src_blob})
-        _indl = os.path.join(_td, 'indl.list')
+        _indl = os.path.join(_td, 'build_pkg.list')
         with open(_indl, 'w') as _fh:
             _fh.write('firefox-esr\nnonexistent-pkg\n')
 
         import dependencytree
         class _Cfg:
-            indllist_path = _indl
+            build_pkg_list_path = _indl
             build_mode = 'build'
             arch = 'amd64'
             build_profiles = ['nodoc', 'nocheck']
@@ -758,21 +758,21 @@ def test_cache_parse_build_mode_warns_on_missing_pkg():
 
 
 def test_cache_parse_build_mode_empty_indl_returns_false():
-    """Empty/missing indl.list → returns False with a clear warning;
+    """Empty/missing build_pkg.list → returns False with a clear warning;
     operator's dep_check_ready stays False."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
     from build import BuildSession
     with tempfile.TemporaryDirectory() as _td:
-        # No indl.list file
-        _indl = os.path.join(_td, 'indl.list')
+        # No build_pkg.list file
+        _indl = os.path.join(_td, 'build_pkg.list')
         import dependencytree
         # Minimal cache object — only need the helper not to walk it
         class _FakeCache:
             package_hashtable: dict = {}
         class _Cfg:
-            indllist_path = _indl
+            build_pkg_list_path = _indl
             build_mode = 'build'
             arch = 'amd64'
             build_profiles = ['nodoc', 'nocheck']
@@ -796,14 +796,14 @@ def test_cache_parse_build_mode_empty_indl_returns_false():
         assert 'empty or missing' in _joined
 
 
-def test_parse_indl_list_strips_comments_dedups_preserves_order():
-    """MIRROR-02: `config/indl.list` parser — flat list, `#` comments and
+def test_parse_build_pkg_list_strips_comments_dedups_preserves_order():
+    """MIRROR-02: `config/build_pkg.list` parser — flat list, `#` comments and
     blank lines stripped, inline comments allowed, dedup preserves
     first-seen order, missing file → empty list."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import utils
     with tempfile.TemporaryDirectory() as _td:
-        _path = os.path.join(_td, 'indl.list')
+        _path = os.path.join(_td, 'build_pkg.list')
         with open(_path, 'w') as _fh:
             _fh.write(
                 '# operator notes\n'
@@ -816,11 +816,11 @@ def test_parse_indl_list_strips_comments_dedups_preserves_order():
                 'firefox-esr\n'   # dup — dropped
                 '   # whitespace-only comment\n'
             )
-        _got = utils.parse_indl_list(_path)
+        _got = utils.parse_build_pkg_list(_path)
         assert _got == ['firefox-esr', 'libreoffice', 'thunderbird'], _got
         # Missing file → []
         _missing = os.path.join(_td, 'nonexistent.list')
-        assert utils.parse_indl_list(_missing) == []
+        assert utils.parse_build_pkg_list(_missing) == []
 
 
 def test_buildconfig_parses_three_mirrors():
@@ -27006,7 +27006,7 @@ def main() -> int:
         test_buildconfig_mode_defaults_to_distribution,
         test_buildconfig_mode_build_mode_parses,
         test_buildconfig_mode_rejects_unknown_value,
-        test_parse_indl_list_strips_comments_dedups_preserves_order,
+        test_parse_build_pkg_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,
         test_cmd_auto_run_dispatch_routes_build_mode,
         test_cmd_auto_run_build_refuses_in_dist_mode,

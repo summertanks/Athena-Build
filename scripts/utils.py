@@ -2087,7 +2087,7 @@ class BuildConfig:
     build_base_id: str
     build_codename: str
     build_version: str
-    build_mode: str   # MIRROR-02: 'distribution' (full corpus) | 'build' (indl.list only)
+    build_mode: str   # MIRROR-02: 'distribution' (full corpus) | 'build' (build_pkg.list only)
     container_release: str
     docker_server: str
 
@@ -2158,7 +2158,7 @@ class BuildConfig:
             livelist_path = os.path.join(working_dir, 'config/live.list')
             installerlist_path = os.path.join(working_dir, 'config/installer.list')
             poollist_path = os.path.join(working_dir, 'config/pool.list')
-            indllist_path = os.path.join(working_dir, 'config/indl.list')
+            build_pkg_list_path = os.path.join(working_dir, 'config/build_pkg.list')
 
             parser = argparse.ArgumentParser(description='Dependency Parser - Athena Build System')
             parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=False, default=working_dir)
@@ -2167,7 +2167,7 @@ class BuildConfig:
             parser.add_argument('--live-list', type=str, help='Specify live-only pkg list', required=False, default=livelist_path)
             parser.add_argument('--installer-list', type=str, help='Specify installer-only pkg list', required=False, default=installerlist_path)
             parser.add_argument('--pool-list', type=str, help='Specify pool-only pkg list (ship in apt pool, never installed)', required=False, default=poollist_path)
-            parser.add_argument('--indl-list', type=str, help='Specify build-mode pkg list (MIRROR-02; flat names, only consumed when [Build] Mode = build)', required=False, default=indllist_path)
+            parser.add_argument('--build-pkg-list', type=str, help='Specify build-mode pkg list (MIRROR-02; flat names, only consumed when [Build] Mode = build)', required=False, default=build_pkg_list_path)
             args = parser.parse_args()
 
             # if paths are specified, they are absolute
@@ -2177,7 +2177,7 @@ class BuildConfig:
             self.livelist_path = os.path.abspath(args.live_list)
             self.installerlist_path = os.path.abspath(args.installer_list)
             self.poollist_path = os.path.abspath(args.pool_list)
-            self.indllist_path = os.path.abspath(args.indl_list)
+            self.build_pkg_list_path = os.path.abspath(args.build_pkg_list)
 
             if not os.access(self.config_path, os.R_OK):
                 raise PermissionError(f'Config file is not readable: {self.config_path}')
@@ -2274,7 +2274,7 @@ class BuildConfig:
             # Build-mode switch.  `distribution` (default) drives the
             # full corpus through pkg.list/live.list/installer.list/pool.list
             # with runtime dep closure.  `build` works against just
-            # `config/indl.list` (flat list of package names) — no runtime
+            # `config/build_pkg.list` (flat list of package names) — no runtime
             # closure walk, no chroot/ISO; only the named packages get built
             # and published.  Used by team builders who own a subset of the
             # distribution rather than the whole thing.
@@ -3307,8 +3307,8 @@ def get_sha256(filepath: str, use_cache: bool = True) -> str:
     return _sha
 
 
-def parse_indl_list(path: str) -> 'list[str]':
-    """MIRROR-02: parse `config/indl.list` — flat list of binary package
+def parse_build_pkg_list(path: str) -> 'list[str]':
+    """MIRROR-02: parse `config/build_pkg.list` — flat list of binary package
     names, one per line, `#` comments and blank lines tolerated.
 
     No grouping: build mode is narrow-scope (one team owns this list),

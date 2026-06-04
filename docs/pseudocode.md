@@ -144,8 +144,9 @@ Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
 
 ### `BuildConfig`
 - Validates argv (working dir + paths to build.conf and the FIVE .list
-  files: pkg, live, installer, pool, indl).  `--indl-list` defaults
-  to `config/indl.list`; only consumed when `[Build] Mode = build`.
+  files: pkg, live, installer, pool, build_pkg).  `--build-pkg-list`
+  defaults to `config/build_pkg.list`; only consumed when
+  `[Build] Mode = build`.
 - Parses build.conf via configparser. Reads `[Build]`, `[Base]`,
   every `[Mirror.*]` (constructing Mirror instances), `[Snapshot]`,
   `[Source]`, `[Security]`, and `[Directories]`.  The only `[Repo]`
@@ -192,8 +193,8 @@ implicit `[base]` group). Returns dict-of-lists in declaration order;
 also extracts `## Description: ...` lines under each `[group]` header as
 group metadata used by tasksel `.desc` generation.
 
-### `parse_indl_list(path)`
-Read `config/indl.list` — flat list of binary package names, one per
+### `parse_build_pkg_list(path)`
+Read `config/build_pkg.list` — flat list of binary package names, one per
 line, `#` comments and blank lines tolerated, inline comments allowed
 (`firefox-esr # OOMs on host A`). Dedups while preserving first-seen
 order. Missing file → empty list (caller checks `[Build] Mode ==
@@ -1322,16 +1323,17 @@ When `config.build_mode == 'build'`, Passes III–VII are SKIPPED.
 The flow is:
 - Pass I/II remain (required + important — they're harmless and the
   source builder still needs core build-deps).
-- `selected_pkgs` is populated directly from `parse_indl_list(indl_path)`:
-  each binary is looked up in `cache.package_hashtable` (latest version
-  picked) and inserted into `dep_tree.selected_pkgs`; NO recursive
-  `Depends:` walk. The build host's job is to build the named packages;
-  runtime closure is the mirror's invariant (gated at publish), not
-  the build host's.
+- `selected_pkgs` is populated directly from
+  `parse_build_pkg_list(build_pkg_list_path)`: each binary is looked up
+  in `cache.package_hashtable` (latest version picked) and inserted
+  into `dep_tree.selected_pkgs`; NO recursive `Depends:` walk. The
+  build host's job is to build the named packages; runtime closure is
+  the mirror's invariant (gated at publish), not the build host's.
 - `selected_srcs` derives 1:1 from `selected_pkgs` via `Package.source`
   / fallback to name; then `parse_sources` walks each source's
   `Build-Depends` so the BuildContainer has its build deps.
-- `dep_tree.indl_src_names` is just an alias for `selected_srcs.keys()`.
+- `dep_tree.build_pkg_src_names` is just an alias for
+  `selected_srcs.keys()`.
 - `validate_selection` and the extras/exclusive projections are SKIPPED
   in build mode (they presuppose a full closure).
 
@@ -1347,7 +1349,7 @@ hash drift). Sets build_container_ready.
 **cmd_source_build [force] [subset|<names>] [[profiles]]:**
 - Parse args via the static `_parse_source_build_args` helper.
 - In build mode, the legal scopes shrink to `all` (== everything
-  in `indl.list`) and explicit names; `pkg` / `live` / `installer` /
+  in `build_pkg.list`) and explicit names; `pkg` / `live` / `installer` /
   `recommended` raise an eager arg-validation error pointing at the
   mode.
 - Auto-detect update-mode: when a published base exists and current
@@ -1420,8 +1422,8 @@ chroot verify if live → iso build {live|installer|disk}). Bails on
 first failure. Emits the autorun summary at the end.
 
 `autorun build` is the build-mode variant: chain is cache →
-cache parse (indl branch) → source sync → container init → source
-build (defaulting to everything in `indl.list`). Stops at
+cache parse (build-mode branch) → source sync → container init → source
+build (defaulting to everything in `build_pkg.list`). Stops at
 `source_build_ready` — no chroot/ISO stages. Operator typically chains
 into `mirror publish` separately once `source audit` is clean.
 

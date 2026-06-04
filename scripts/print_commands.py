@@ -102,10 +102,10 @@ def _print_config(session, *_extras) -> None:
                    else tui.COLOR_INFO)
     if _mode == 'build':
         import utils as _utils
-        _indl_path = getattr(cfg, 'indllist_path', '')
-        _names = _utils.parse_indl_list(_indl_path) if _indl_path else []
+        _build_pkg_path = getattr(cfg, 'build_pkg_list_path', '')
+        _names = _utils.parse_build_pkg_list(_build_pkg_path) if _build_pkg_path else []
         tui.console.print(
-            f"MODE: build  [{len(_names)} pkg(s) in indl.list]",
+            f"MODE: build  [{len(_names)} pkg(s) in build_pkg.list]",
             _mode_color)
 
     tui.console.print("")
@@ -228,17 +228,17 @@ def _print_state(session, *_extras) -> None:
         tui.console.print(f"  [{_mark}] {label}  {desc}")
 
     # Mode is the first thing on the screen so the operator can never
-    # confuse a partial indl pipeline for a broken dist build.
+    # confuse a partial build pipeline for a broken dist build.
     _mode = getattr(getattr(session, 'config', None), 'build_mode',
                     'distribution')
     _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'build'
                    else tui.COLOR_INFO)
     if _mode == 'build':
         import utils as _utils
-        _indl_path = getattr(session.config, 'indllist_path', '')
-        _names = _utils.parse_indl_list(_indl_path) if _indl_path else []
+        _build_pkg_path = getattr(session.config, 'build_pkg_list_path', '')
+        _names = _utils.parse_build_pkg_list(_build_pkg_path) if _build_pkg_path else []
         tui.console.print(
-            f"MODE: build  [{len(_names)} pkg(s) in indl.list]",
+            f"MODE: build  [{len(_names)} pkg(s) in build_pkg.list]",
             _mode_color)
     else:
         tui.console.print("MODE: distribution", _mode_color)
