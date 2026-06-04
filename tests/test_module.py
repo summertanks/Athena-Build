@@ -22747,6 +22747,96 @@ def test_coord_store_project_live_claims_collapses_retraction():
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
 
 
+def test_coord_store_project_owners_single_owner_per_filename():
+    """MIRROR-02 chunk 7: project_owners picks the latest claim per
+    filename across all builders and sets `builder` correctly."""
+    _s, _i, _st, *_ = _coord_modules()
+    _c1 = _s.new_claim(
+        builder='alice', seq=5, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo_1.0.deb', sha256='a' * 64,
+        size=1, snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _owners = _st.project_owners({'alice': [_c1]})
+    assert 'foo_1.0.deb' in _owners
+    _rec = _owners['foo_1.0.deb']
+    assert _rec['builder'] == 'alice'
+    assert _rec['version'] == '1.0'
+    assert _rec['republished_from'] is None  # non-tunneled
+    assert _rec['claim_state'] == 'published'
+
+
+def test_coord_store_project_owners_tunneled_has_no_owner():
+    """Tunneled claim (republished_from set) → owner is None.  This is
+    how chunk 8's publish decision sees 'no current owner — anyone
+    can claim'."""
+    _s, _i, _st, *_ = _coord_modules()
+    _tunneled = _s.new_claim(
+        builder='alice', seq=1, package='vlc',
+        intended_version='3.0-1', built_version='3.0-1',
+        filename='vlc_3.0-1.deb', sha256='c' * 64,
+        size=1, snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+        republished_from={'url': 'http://deb.debian.org/.../vlc_3.0-1.deb',
+                          'upstream_sha256': 'd' * 64},
+    )
+    _owners = _st.project_owners({'alice': [_tunneled]})
+    _rec = _owners['vlc_3.0-1.deb']
+    assert _rec['builder'] is None     # tunneled → no owner
+    assert _rec['republished_from'] is not None
+    assert _rec['republished_from']['upstream_sha256'] == 'd' * 64
+
+
+def test_coord_store_project_owners_picks_latest_by_seq():
+    """Two builders with claims for the same filename — higher seq wins.
+    Stable tiebreak by builder lexical sort when seqs are equal."""
+    _s, _i, _st, *_ = _coord_modules()
+    _alice_lower = _s.new_claim(
+        builder='alice', seq=1, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S1', built_at='T1',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _bob_higher = _s.new_claim(
+        builder='bob', seq=7, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S1', built_at='T1',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _owners = _st.project_owners({
+        'alice': [_alice_lower], 'bob': [_bob_higher]})
+    assert _owners['foo.deb']['builder'] == 'bob'
+    assert _owners['foo.deb']['seq'] == 7
+
+
+def test_coord_store_project_owners_skips_retracted():
+    """A retracted claim isn't a candidate for ownership."""
+    _s, _i, _st, *_ = _coord_modules()
+    _c1 = _s.new_claim(
+        builder='alice', seq=1, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo.deb', sha256='a' * 64, size=1,
+        snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _r1 = _s.new_retraction(
+        builder='alice', seq=2, package='foo',
+        retracts_seq=1, filename='foo.deb',
+        snapshot='S', built_at='T',
+    )
+    _owners = _st.project_owners({'alice': [_c1, _r1]})
+    assert 'foo.deb' not in _owners
+
+
+def test_coord_store_project_owners_handles_empty_input():
+    """Empty by_builder → empty projection (no errors)."""
+    _s, _i, _st, *_ = _coord_modules()
+    assert _st.project_owners({}) == {}
+    assert _st.project_owners({'alice': []}) == {}
+
+
 def test_coord_reconcile_detect_hash_conflicts_critical_and_info():
     """Same (pkg, ver), different hash → CRITICAL; same hash → INFO."""
     _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
@@ -26128,6 +26218,11 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_coord_store_project_owners_single_owner_per_filename,
+        test_coord_store_project_owners_tunneled_has_no_owner,
+        test_coord_store_project_owners_picks_latest_by_seq,
+        test_coord_store_project_owners_skips_retracted,
+        test_coord_store_project_owners_handles_empty_input,
         test_coord_reconcile_detect_hash_conflicts_critical_and_info,
         test_coord_reconcile_publish_halt_round_trip,
         test_coord_reconcile_audit_local_orphan_detection,
