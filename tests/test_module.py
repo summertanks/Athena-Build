@@ -21769,13 +21769,14 @@ def test_build_record_schema_v3_field_set():
         'patch_set_hash', 'phase', 'status', 'started', 'finished',
         'elapsed_seconds', 'exit_code', 'oom_killed', 'output_count', 'outputs',
         'output_hashes',
-        'republished_from',
+        'republished_from', 'pulled_from',
     }
     assert set(_rec.keys()) == _required, (
         f"v3 schema drift: {set(_rec.keys()) ^ _required}")
     assert _rec['phase'] == 'entry'
     assert _rec['status'] is None
     assert _rec['republished_from'] == {}
+    assert _rec['pulled_from'] is None
     assert _rec['outputs'] == []
     assert _rec['output_hashes'] == {}
 
@@ -22476,6 +22477,7 @@ def test_backfill_output_hashes_upgrades_v1_record():
         }
         # MIRROR-02 v3: republished_from defaults to {} on backfill
         assert _rec['republished_from'] == {}
+        assert _rec['pulled_from'] is None
         # Second backfill: idempotent — nothing to upgrade.
         _stats2 = _u.backfill_output_hashes(_log, _repo)
         assert _stats2['scanned'] == 1
@@ -22514,6 +22516,7 @@ def test_backfill_output_hashes_reports_missing_files():
         assert _rec['schema_version'] == 3
         assert _rec['output_hashes'] == {}  # nothing on disk to hash
         assert _rec['republished_from'] == {}  # MIRROR-02 v3 default
+        assert _rec['pulled_from'] is None    # MIRROR-02 v3 default
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22754,6 +22757,161 @@ def test_coord_store_project_live_claims_collapses_retraction():
     )
     _proj = _st.project_live_claims({'alice': [_c1, _r1]})
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
+
+
+def test_mirror_pull_write_build_records_built_pkg_records_pulled_from():
+    """MIRROR-02 chunk 10: a non-tunneled claim pulled from a mirror
+    yields a local build.json with phase=done + pulled_from set to
+    {mirror_name, owner_builder}.  Lets source audit distinguish
+    "we built it" from "we pulled it"."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils as _utils
+    from build import BuildSession
+
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        _buildlog = os.path.join(_log, 'build')
+        os.makedirs(_buildlog)
+
+        class _Cfg:
+            dir_log = _log
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _claim = {
+            'package':          'libnss3',
+            'intended_version': '2:3.87.1-1+deb12u1',
+            'built_version':    '2:3.87.1-1+deb12u1',
+            'filename':         'libnss3_2:3.87.1-1+deb12u1_amd64.deb',
+            'sha256':           'a' * 64,
+            'snapshot':         'S',
+            'builder':          'athena-team-b',  # owner
+            'claim_state':      'published',
+            # no republished_from → non-tunneled
+        }
+        _per_pkg = {'libnss3': [(_claim, 'athena-team-b')]}
+        _sess._mirror_pull_write_build_records('primary', _per_pkg)
+        _rec = _utils.read_build_record(_buildlog, 'libnss3')
+        assert _rec is not None
+        assert _rec['phase'] == 'done'
+        assert _rec['status'] == 'PASS'
+        assert _rec['built_version'] == '2:3.87.1-1+deb12u1'
+        assert _rec['outputs'] == ['libnss3_2:3.87.1-1+deb12u1_amd64.deb']
+        assert _rec['output_hashes'] == {
+            'libnss3_2:3.87.1-1+deb12u1_amd64.deb': 'a' * 64,
+        }
+        assert _rec['republished_from'] == {}
+        assert _rec['pulled_from'] == {
+            'mirror_name':   'primary',
+            'owner_builder': 'athena-team-b',
+        }
+
+
+def test_mirror_pull_write_build_records_tunneled_pkg_records_republished_from():
+    """A tunneled claim (republished_from set on the wire) pulled from
+    a mirror yields a local build.json with phase=tunneled +
+    republished_from copied verbatim per filename.  pulled_from stays
+    None — tunneled records use republished_from as the provenance
+    signal, not pulled_from."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils as _utils
+    from build import BuildSession
+
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        _buildlog = os.path.join(_log, 'build')
+        os.makedirs(_buildlog)
+        class _Cfg:
+            dir_log = _log
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _claim = {
+            'package':          'vlc',
+            'intended_version': '3.0-1',
+            'built_version':    '3.0-1',
+            'filename':         'vlc_3.0-1_amd64.deb',
+            'sha256':           'b' * 64,
+            'snapshot':         'S',
+            'builder':          'athena-team-c',
+            'claim_state':      'published',
+            'republished_from': {
+                'url':             'http://deb.debian.org/.../vlc_3.0-1_amd64.deb',
+                'upstream_sha256': 'b' * 64,
+            },
+        }
+        _per_pkg = {'vlc': [(_claim, 'athena-team-c')]}
+        _sess._mirror_pull_write_build_records('primary', _per_pkg)
+        _rec = _utils.read_build_record(_buildlog, 'vlc')
+        assert _rec is not None
+        assert _rec['phase'] == 'tunneled'
+        assert _rec['status'] == 'TUNNELED'
+        # republished_from is per-file, keyed by filename
+        assert _rec['republished_from'] == {
+            'vlc_3.0-1_amd64.deb': {
+                'url':             'http://deb.debian.org/.../vlc_3.0-1_amd64.deb',
+                'upstream_sha256': 'b' * 64,
+            },
+        }
+        # pulled_from is None for tunneled records
+        assert _rec['pulled_from'] is None
+
+
+def test_mirror_pull_write_build_records_aggregates_multi_output_pkg():
+    """Multiple .deb claims from the same source (e.g. libnss3 +
+    libnss3-dev) collapse into ONE build.json record with both
+    outputs listed."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import utils as _utils
+    from build import BuildSession
+
+    with tempfile.TemporaryDirectory() as _td:
+        _log = os.path.join(_td, 'log')
+        _buildlog = os.path.join(_log, 'build')
+        os.makedirs(_buildlog)
+        class _Cfg:
+            dir_log = _log
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _c1 = {
+            'package': 'nss', 'intended_version': '2:3.87-1',
+            'built_version': '2:3.87-1',
+            'filename': 'libnss3_2:3.87-1_amd64.deb',
+            'sha256':   'a' * 64, 'snapshot': 'S',
+            'builder':  'athena-team-b', 'claim_state': 'published',
+        }
+        _c2 = {
+            'package': 'nss', 'intended_version': '2:3.87-1',
+            'built_version': '2:3.87-1',
+            'filename': 'libnss3-dev_2:3.87-1_amd64.deb',
+            'sha256':   'd' * 64, 'snapshot': 'S',
+            'builder':  'athena-team-b', 'claim_state': 'published',
+        }
+        _per_pkg = {'nss': [(_c1, 'athena-team-b'), (_c2, 'athena-team-b')]}
+        _sess._mirror_pull_write_build_records('primary', _per_pkg)
+        _rec = _utils.read_build_record(_buildlog, 'nss')
+        assert _rec is not None
+        assert sorted(_rec['outputs']) == [
+            'libnss3-dev_2:3.87-1_amd64.deb',
+            'libnss3_2:3.87-1_amd64.deb',
+        ]
+        assert _rec['output_count'] == 2
+
+
+def test_mirror_pull_write_build_records_empty_input_is_no_op():
+    """No claims to write → no error, no side-effect."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    class _Cfg:
+        dir_log = '/nonexistent'  # never accessed when input is empty
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.config = _Cfg()
+    _sess._mirror_pull_write_build_records('primary', {})  # no raise
 
 
 def test_generate_pending_claims_threads_republished_from_per_output():
@@ -26508,6 +26666,10 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_mirror_pull_write_build_records_built_pkg_records_pulled_from,
+        test_mirror_pull_write_build_records_tunneled_pkg_records_republished_from,
+        test_mirror_pull_write_build_records_aggregates_multi_output_pkg,
+        test_mirror_pull_write_build_records_empty_input_is_no_op,
         test_generate_pending_claims_threads_republished_from_per_output,
         test_generate_pending_claims_non_tunneled_record_carries_none,
         test_filter_pending_by_ownership_no_existing_owner_keeps,

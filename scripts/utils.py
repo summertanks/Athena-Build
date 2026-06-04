@@ -1320,11 +1320,18 @@ BUILD_RECORD_SUFFIX = '.build.json'
 # per-emitted-binary digest that the coord layer pins into its claim
 # records.  v1 records survive unchanged (no field = empty hash dict);
 # the backfill_output_hashes() helper upgrades them in place when run.
-# v2 → v3 (MIRROR-02): adds republished_from
-# {filename: {url, upstream_sha256}}, populated by cmd_tunnel_package
-# (and chunk 10 mirror pull).  Threads through to the
-# claim's republished_from field so the federation can mark tunneled
-# packages as no-owner.  v2 records survive unchanged (empty dict).
+# v2 → v3 (MIRROR-02): adds two fields covering the federation's
+# tunneled + pulled provenance signals.
+#   - `republished_from` {filename: {url, upstream_sha256}} —
+#     populated by cmd_tunnel_package; threads through to the claim's
+#     republished_from field so the federation can mark tunneled
+#     packages as no-owner.
+#   - `pulled_from` {mirror_name, owner_builder} | None —
+#     populated by cmd_mirror_pull (chunk 10) when this builder
+#     pulled a peer's .deb to satisfy a missing dep / version.
+#     Distinguishes "we built it" from "we pulled it" in
+#     `source audit` without losing the record.
+# v2 records survive unchanged (defaults: {} and None respectively).
 _BUILD_RECORD_LEGACY_VERSIONS = frozenset({1, 2})
 _BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
 
@@ -1506,6 +1513,12 @@ def new_build_record(*, package: str,
         # Empty for normally-built records; populated by
         # cmd_tunnel_package and (read-side) by mirror pull.
         'republished_from': {},
+        # MIRROR-02: provenance marker for mirror-pulled records
+        # (chunk 10).  Shape: {mirror_name, owner_builder} when set,
+        # None for locally-built or locally-tunneled records.  Lets
+        # `source audit` distinguish "we built it" from "we pulled it"
+        # without losing the on-disk record.
+        'pulled_from':      None,
     }
 
 
@@ -1652,7 +1665,8 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         _outputs = _rec.get('outputs') or []
         _existing = _rec.get('output_hashes') or {}
         _current_version = _rec.get('schema_version', 1)
-        _has_v3_fields = 'republished_from' in _rec
+        _has_v3_fields = ('republished_from' in _rec
+                          and 'pulled_from' in _rec)
         if (_current_version >= BUILD_RECORD_SCHEMA_VERSION
                 and all(_o in _existing for _o in _outputs)
                 and _has_v3_fields):
@@ -1681,6 +1695,8 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         # records (only cmd_tunnel_package populates it at write time).
         if 'republished_from' not in _rec:
             _rec['republished_from'] = {}
+        if 'pulled_from' not in _rec:
+            _rec['pulled_from'] = None
         try:
             write_build_record(buildlog_dir, _rec)
             _stats['upgraded'] += 1
