@@ -91,6 +91,7 @@ def new_claim(
     built_at: str,
     claim_state: str = CLAIM_STATE_PENDING,
     republished_from: 'Optional[Dict[str, Any]]' = None,
+    component: str = 'main',
 ) -> dict:
     """Build an unsigned claim record.  Caller passes the result through
     identity.sign_claim before storing.  The `sig` field is added there.
@@ -99,6 +100,13 @@ def new_claim(
     tunneled packages; None / omitted for self-built packages.  Affects
     `coord sync pull` policy (the "don't pull your own" rule does NOT
     apply to republished entries — the upstream is the authority).
+
+    `component`: the apt component (main / contrib / non-free /
+    non-free-firmware) of the source's origin mirror.  Determines the
+    on-disk dir under repo/dists/<codename>/<comp>/binary-<arch>/ — a
+    `mirror pull` consumer reads this to route the file correctly.
+    Defaults to 'main' for back-compat with pre-component claim files
+    (which only ever lived in main).
     """
     if claim_state not in CLAIM_STATES:
         raise ValueError(f"bad claim_state: {claim_state!r}")
@@ -115,6 +123,7 @@ def new_claim(
         'snapshot':          snapshot,
         'built_at':          built_at,
         'claim_state':       claim_state,
+        'component':         component,
     }
     if republished_from is not None:
         _rec['republished_from'] = republished_from

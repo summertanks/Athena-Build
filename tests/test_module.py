@@ -21836,7 +21836,11 @@ def test_build_record_schema_v3_field_set():
 
     v2→v3 (MIRROR-02): added `republished_from`
     ({filename: {url, upstream_sha256}}) populated by cmd_tunnel_package
-    so the federation can mark tunneled packages as no-owner."""
+    so the federation can mark tunneled packages as no-owner; also
+    added `pulled_from` (provenance for mirror-pulled records) and
+    `component` (apt component of the source's origin mirror, so the
+    audit / mirror-pull / publish layers don't have to re-derive it
+    from the dep tree)."""
     _u = _utils_module()
     _rec = _u.new_build_record(
         package='libwmf', intended_version='0.2.12-5.1',
@@ -21849,7 +21853,7 @@ def test_build_record_schema_v3_field_set():
         'patch_set_hash', 'phase', 'status', 'started', 'finished',
         'elapsed_seconds', 'exit_code', 'oom_killed', 'output_count', 'outputs',
         'output_hashes',
-        'republished_from', 'pulled_from',
+        'republished_from', 'pulled_from', 'component',
     }
     assert set(_rec.keys()) == _required, (
         f"v3 schema drift: {set(_rec.keys()) ^ _required}")
@@ -21857,6 +21861,7 @@ def test_build_record_schema_v3_field_set():
     assert _rec['status'] is None
     assert _rec['republished_from'] == {}
     assert _rec['pulled_from'] is None
+    assert _rec['component'] == 'main'  # default when not specified
     assert _rec['outputs'] == []
     assert _rec['output_hashes'] == {}
 
@@ -22235,6 +22240,92 @@ def test_source_state_tunneled_record_with_pristine_binary_returns_tunneled():
         assert _state == 'tunneled', (
             f"tunneled record with pristine binary on disk should classify "
             f"as 'tunneled', got {_state!r}")
+
+
+def test_new_build_record_threads_component_field():
+    """`new_build_record(component='non-free-firmware')` writes the
+    component to the record; default stays 'main' for back-compat.
+    """
+    _u = _utils_module()
+    _rec = _u.new_build_record(
+        package='amd64-microcode',
+        intended_version='3.20250311.1~deb12u1',
+        patch_set_hash='',
+        component='non-free-firmware',
+    )
+    assert _rec['component'] == 'non-free-firmware', _rec['component']
+
+
+def test_new_claim_threads_component_field():
+    """schema.new_claim(component=…) writes it to the claim dict, with
+    'main' default for back-compat.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    _c_default = _sch.new_claim(
+        builder='b', seq=1, package='p', intended_version='1.0',
+        built_version='1.0', filename='p_1.0_amd64.deb', sha256='a' * 64,
+        size=10, snapshot='20260602T000000Z', built_at='2026-06-02T00:00:00Z',
+    )
+    assert _c_default['component'] == 'main', _c_default
+    _c_explicit = _sch.new_claim(
+        builder='b', seq=1, package='p', intended_version='1.0',
+        built_version='1.0', filename='p_1.0_amd64.deb', sha256='a' * 64,
+        size=10, snapshot='20260602T000000Z', built_at='2026-06-02T00:00:00Z',
+        component='non-free-firmware',
+    )
+    assert _c_explicit['component'] == 'non-free-firmware', _c_explicit
+
+
+def test_generate_pending_claims_threads_component_from_build_record():
+    """End-to-end: a build record's `component` field flows into the
+    pending claim's `component` field via generate_pending_claims.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import publish as _pub
+    from unittest.mock import patch
+
+    _rec = {
+        'phase':            'tunneled',
+        'status':           'TUNNELED',
+        'intended_version': '3.20250311.1~deb12u1',
+        'built_version':    '3.20250311.1',
+        'outputs':          ['amd64-microcode_3.20250311.1_amd64.deb'],
+        'output_hashes':    {
+            'amd64-microcode_3.20250311.1_amd64.deb': 'a' * 64,
+        },
+        'republished_from': {},
+        'pulled_from':      None,
+        'component':        'non-free-firmware',
+        'finished':         '2026-06-04T00:00:00Z',
+    }
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _claims_dir = os.path.join(_tmp, 'claims')
+        os.makedirs(_claims_dir, exist_ok=True)
+        # listdir wants a real .build.json file under a real buildlog dir.
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        os.makedirs(_buildlog, exist_ok=True)
+        with open(os.path.join(_buildlog,
+                                'amd64-microcode.build.json'), 'w') as _fh:
+            _fh.write('{}')
+
+        # store.read_builder_claims expects a pubkey path — stub it.
+        with patch.object(_pub._store, 'read_builder_claims',
+                          return_value=[]):
+            _pending = _pub.generate_pending_claims(
+                builder_id='test-builder',
+                buildlog_dir=_buildlog,
+                claims_dir=_claims_dir,
+                public_key_path='/nonexistent',
+                snapshot_pin='20260602T173733Z',
+                read_build_record=lambda _bl, _n: _rec,
+            )
+
+    assert len(_pending) == 1, _pending
+    assert _pending[0]['component'] == 'non-free-firmware', _pending[0]
 
 
 def test_source_state_uses_origin_component_for_disk_lookup():
@@ -27460,6 +27551,9 @@ def main() -> int:
         test_source_state_interrupted_when_record_is_non_terminal,
         test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass,
         test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
+        test_new_build_record_threads_component_field,
+        test_new_claim_threads_component_field,
+        test_generate_pending_claims_threads_component_from_build_record,
         test_source_state_uses_origin_component_for_disk_lookup,
         test_detect_build_audit_divergence_flags_missing_binary_with_no_fail_record,
         test_detect_build_audit_divergence_silent_when_record_says_fail,

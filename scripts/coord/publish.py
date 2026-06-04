@@ -94,6 +94,12 @@ def generate_pending_claims(
         # into the claim so the federation can treat tunneled
         # packages as no-owner (project_owners returns builder=None).
         _republished = _rec.get('republished_from') or {}
+        # Apt component for this source's binaries.  Pinned on the
+        # build record by new_build_record (from src._mirror.component
+        # at entry time).  Default 'main' for back-compat with pre-
+        # component records (they pre-date non-main publish, so 'main'
+        # is correct anyway).
+        _comp = str(_rec.get('component') or 'main')
         for _fn in _outputs:
             if _fn in _known:
                 continue
@@ -118,6 +124,7 @@ def generate_pending_claims(
                 built_at=str(_rec.get('finished') or _rec.get('started') or ''),
                 claim_state=_schema.CLAIM_STATE_PENDING,
                 republished_from=_rfrom,
+                component=_comp,
             ))
     _pending.sort(key=lambda _c: (_c['package'], _c['filename']))
     return _pending
