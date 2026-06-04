@@ -278,6 +278,71 @@ def test_buildconfig_mode_rejects_unknown_value():
         assert 'banana' in cfg.error_str
 
 
+def test_print_state_shows_mode_header():
+    """MIRROR-02 chunk 6b: `print state` surfaces the active build
+    mode at the top of the output.  In indl mode the line also shows
+    the indl.list pkg count."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui
+    import print_commands
+
+    class _Flags:
+        cache_ready = True
+        dep_check_ready = True
+        download_ready = False
+        build_container_ready = False
+        source_build_ready = False
+        signing_key_verified = False
+        chroot_ready = False
+        chroot_verified = False
+        chroot_installer_ready = False
+        iso_live_ready = False
+        iso_installer_ready = False
+        iso_disk_ready = False
+
+    with tempfile.TemporaryDirectory() as _td:
+        _indl = os.path.join(_td, 'indl.list')
+        with open(_indl, 'w') as _fh:
+            _fh.write('firefox-esr\nlibreoffice\nthunderbird\n')
+
+        class _CfgIndl:
+            build_mode = 'individual'
+            indllist_path = _indl
+        class _SessIndl:
+            flags = _Flags()
+            config = _CfgIndl()
+
+        _lines: 'list[str]' = []
+        _orig = tui.console.print
+        tui.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            print_commands._print_state(_SessIndl())
+        finally:
+            tui.console.print = _orig
+        _joined = '\n'.join(_lines)
+        assert 'MODE: individual' in _joined, _joined
+        assert '3 pkg(s)' in _joined, _joined
+
+        # Dist mode case
+        class _CfgDist:
+            build_mode = 'distribution'
+            indllist_path = _indl
+        class _SessDist:
+            flags = _Flags()
+            config = _CfgDist()
+        _lines = []
+        tui.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            print_commands._print_state(_SessDist())
+        finally:
+            tui.console.print = _orig
+        _joined = '\n'.join(_lines)
+        assert 'MODE: distribution' in _joined, _joined
+
+
 def test_cmd_auto_run_dispatch_routes_individual():
     """MIRROR-02 chunk 6: `autorun individual` routes to
     cmd_auto_run_individual.  Bare `autorun` in indl mode also routes
@@ -25268,6 +25333,7 @@ def main() -> int:
         test_buildconfig_mode_individual_parses,
         test_buildconfig_mode_rejects_unknown_value,
         test_parse_indl_list_strips_comments_dedups_preserves_order,
+        test_print_state_shows_mode_header,
         test_cmd_auto_run_dispatch_routes_individual,
         test_cmd_auto_run_individual_refuses_in_dist_mode,
         test_parse_source_build_args_recognises_individual_subset,

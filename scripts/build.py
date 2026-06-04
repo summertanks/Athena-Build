@@ -4393,8 +4393,10 @@ class BuildSession:
             # ssh_host derived from EITHER (they should agree); coord
             # tree is preferred since flock lives there.
             _ssh_host = _coord_ssh_host or _ssh_host
+            _mode_tag = self.config.build_mode
             console.print(
-                f"mirror publish {_n}: → {_url}", tui.COLOR_HIGHLIGHT)
+                f"mirror publish {_n} [MODE={_mode_tag}]: → {_url}",
+                tui.COLOR_HIGHLIGHT)
             # ProgressBar wired through on_progress.  Total updates
             # dynamically as we learn the count after step 5; until
             # then the bar shows 0/0.
@@ -9772,6 +9774,12 @@ class BuildSession:
         carrying the stage label that aborted (if any) + total wall time.
         """
         import print_commands
+        # MIRROR-02: surface the build mode at the top of the autorun
+        # run so the operator can never mistake a 5-step indl chain
+        # for a broken 8-step live chain.
+        _mode = getattr(self.config, 'build_mode', 'distribution')
+        console.print(
+            f"{label}: starting (MODE = {_mode})", tui.COLOR_HIGHLIGHT)
         _t0    = time.monotonic()
         _t0_dt = datetime.datetime.now()
         _aborted_at: Optional[str] = None
