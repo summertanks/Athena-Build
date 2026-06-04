@@ -36,7 +36,7 @@ Findings vocabulary:
 import dataclasses as _dc
 import logging as _logging
 import os as _os
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import schema as _schema
 from . import store as _store
@@ -103,7 +103,7 @@ def scan_pool_files(repo_root: str) -> Dict[str, str]:
 
 def audit_local(
     *, repo_root: str, claims_dir: str, builder_id: str,
-    public_key_path: str, get_sha256: 'callable',
+    public_key_path: str, get_sha256: Callable,
 ) -> Report:
     """Pool ↔ this-builder claims audit.
 
@@ -210,7 +210,7 @@ def audit_local(
 
 def audit_cross(
     *, buildlog_dir: str, claims_dir: str, builder_id: str,
-    public_key_path: str, read_build_record: 'callable',
+    public_key_path: str, read_build_record: Callable,
 ) -> Report:
     """build.json ↔ all-builder jsonls audit.
 
@@ -338,12 +338,12 @@ def detect_hash_conflicts(
             _key = (str(_c.get('package')), str(_c.get('built_version')))
             _by_pv.setdefault(_key, []).append((
                 str(_c.get('builder')), str(_c.get('sha256'))))
-    for (_pkg, _ver), _claims in _by_pv.items():
-        if len(_claims) < 2:
+    for (_pkg, _ver), _pairs in _by_pv.items():
+        if len(_pairs) < 2:
             continue
-        _shas = {_s for _b, _s in _claims}
+        _shas = {_s for _b, _s in _pairs}
         if len(_shas) > 1:
-            _detail = ', '.join(f"{_b}={_s[:12]}" for _b, _s in _claims)
+            _detail = ', '.join(f"{_b}={_s[:12]}" for _b, _s in _pairs)
             _findings.append(Finding(
                 severity='CRITICAL', kind='hash_conflict',
                 message=(
@@ -353,7 +353,7 @@ def detect_hash_conflicts(
                 package=_pkg,
             ))
         else:
-            _detail = ', '.join(_b for _b, _ in _claims)
+            _detail = ', '.join(_b for _b, _ in _pairs)
             _findings.append(Finding(
                 severity='INFO', kind='reproducible_duplicate',
                 message=(
