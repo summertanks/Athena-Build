@@ -2034,6 +2034,7 @@ class BuildConfig:
     build_base_id: str
     build_codename: str
     build_version: str
+    build_mode: str   # MIRROR-02: 'distribution' (full corpus) | 'individual' (indl.list only)
     container_release: str
     docker_server: str
 
@@ -2214,6 +2215,21 @@ class BuildConfig:
             # the full operator-facing rationale.
             self.include_recommends = config_parser.getboolean(
                 'Build', 'IncludeRecommends', fallback=True)
+            # MIRROR-02: build-mode switch.  `distribution` (default) drives the
+            # full corpus through pkg.list/live.list/installer.list/pool.list
+            # with runtime dep closure.  `individual` works against just
+            # `config/indl.list` (flat list of package names) — no runtime
+            # closure walk, no chroot/ISO; only the named packages get built
+            # and published.  Used by team builders who own a subset of the
+            # distribution rather than the whole thing.
+            self.build_mode = config_parser.get(
+                'Build', 'Mode', fallback='distribution').strip().lower()
+            if self.build_mode not in ('distribution', 'individual'):
+                self.error_str = (
+                    f"[Build] Mode must be 'distribution' or 'individual', "
+                    f"got {self.build_mode!r}"
+                )
+                return
             # COMP-09: default size for `iso build disk` output.  Sparse
             # qcow2 — actual on-disk footprint is much smaller (~chroot
             # size + metadata).  Operator overrides via `iso build disk
@@ -3233,6 +3249,40 @@ def get_sha256(filepath: str, use_cache: bool = True) -> str:
                 f"get_sha256: cannot write sidecar {_sidecar}: {e}"
             )
     return _sha
+
+
+def parse_indl_list(path: str) -> 'list[str]':
+    """MIRROR-02: parse `config/indl.list` — flat list of binary package
+    names, one per line, `#` comments and blank lines tolerated.
+
+    No grouping: indl mode is narrow-scope (one team owns this list),
+    grouping is overkill.  Names are stripped of whitespace and
+    de-duplicated while preserving first-seen order (so the operator
+    can read `mirror summary` deterministically against the file order).
+
+    Returns an empty list when the file is absent — caller checks
+    `[Build] Mode == 'individual'` separately to decide whether an empty
+    list is fatal.  Raises OSError on unreadable file (caller surfaces).
+    """
+    if not os.path.isfile(path):
+        return []
+    _raw = readfile(path)
+    _seen: 'set[str]' = set()
+    _out: 'list[str]' = []
+    for _l in _raw.splitlines():
+        _name = _l.strip()
+        if not _name or _name.startswith('#'):
+            continue
+        # Inline comment after a name: `firefox-esr # OOMs on host A`
+        if '#' in _name:
+            _name = _name.split('#', 1)[0].strip()
+            if not _name:
+                continue
+        if _name in _seen:
+            continue
+        _seen.add(_name)
+        _out.append(_name)
+    return _out
 
 
 def parse_pkg_list_groups(path: str) -> 'dict[str, list[str]]':
