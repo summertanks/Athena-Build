@@ -22709,6 +22709,44 @@ def test_reconcile_neighbours_rewrites_when_diff():
                 'file:///srv/a', 'file:///srv/b'}
 
 
+def test_neighbours_drift_tags_unpublished_in_sync_and_drift():
+    """`mirror.neighbours_drift` returns 'unpublished' when the peer has
+    no neighbours_known yet, 'in-sync' when it matches the local config,
+    and 'drift' (with explicit missing/extra lists) otherwise."""
+    _m = _mirror_module()
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_config = _td
+            dir_cache = os.path.join(_td, 'cache')
+        os.makedirs(_Cfg.dir_cache)
+        _cfg = _Cfg()
+        _m.add_mirror(_cfg, name='alpha', url='file:///srv/a', seed_pin='')
+        _m.add_mirror(_cfg, name='beta',  url='file:///srv/b', seed_pin='')
+        _m.add_mirror(_cfg, name='gamma', url='file:///srv/c', seed_pin='')
+        # Freshly added → no neighbours_known → 'unpublished'
+        _tag, _miss, _extra = _m.neighbours_drift(_cfg, 'alpha')
+        assert _tag == 'unpublished'
+        assert (_miss, _extra) == ([], [])
+        # Stamp alpha with the canonical local-config set → 'in-sync'
+        _local = _m.all_mirror_urls(_cfg)
+        _m.update_mirror_state(_cfg, 'alpha', neighbours_known=_local)
+        _tag, _miss, _extra = _m.neighbours_drift(_cfg, 'alpha')
+        assert _tag == 'in-sync', (_miss, _extra)
+        assert (_miss, _extra) == ([], [])
+        # Stamp beta with a STALE neighbours list (missing gamma, extra delta)
+        _m.update_mirror_state(
+            _cfg, 'beta',
+            neighbours_known=['file:///srv/a', 'file:///srv/b',
+                              'file:///srv/d'])
+        _tag, _miss, _extra = _m.neighbours_drift(_cfg, 'beta')
+        assert _tag == 'drift'
+        assert _miss == ['file:///srv/c']
+        assert _extra == ['file:///srv/d']
+        # Unknown mirror name → 'unpublished' (no state file)
+        _tag, _miss, _extra = _m.neighbours_drift(_cfg, 'nonexistent')
+        assert _tag == 'unpublished'
+
+
 def test_reconcile_neighbours_first_contact_skipped_friendly():
     """A peer with no coord-head yet (e.g., never published to) returns
     `no coord-head on remote (first publish will initialise neighbours)`;
@@ -24214,6 +24252,7 @@ def main() -> int:
         test_all_mirror_urls_returns_every_registered_url,
         test_reconcile_neighbours_no_op_when_already_in_sync,
         test_reconcile_neighbours_rewrites_when_diff,
+        test_neighbours_drift_tags_unpublished_in_sync_and_drift,
         test_reconcile_neighbours_first_contact_skipped_friendly,
         test_reconcile_neighbours_unreachable_peer_is_critical_failure,
         test_reconcile_neighbours_target_name_unknown_fails,

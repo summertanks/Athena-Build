@@ -268,6 +268,38 @@ def all_mirror_urls(config) -> 'list[str]':
     return _out
 
 
+def neighbours_drift(config, name: str) -> 'tuple[str, list[str], list[str]]':
+    """Compare a mirror's last-seen ``neighbours_known`` against the
+    canonical local-config mirror URL set.
+
+    Returns ``(tag, missing_on_peer, extra_on_peer)`` where ``tag`` is:
+      - ``unpublished``  — the peer has never been published to (no
+        ``neighbours_known`` recorded yet); first publish will bootstrap
+      - ``in-sync``      — peer's last-seen neighbours match local config
+      - ``drift``        — diff exists; operator should run
+                           ``mirror reconcile-neighbours``
+
+    ``missing_on_peer`` are URLs in local config that the peer's last
+    coord-head lacked; ``extra_on_peer`` are URLs the peer's coord-head
+    carries that local config no longer registers.  Both lists are
+    canonicalised.
+    """
+    import coord.schema as _schema
+    _st = read_mirror_state(config, name)
+    if _st is None:
+        return ('unpublished', [], [])
+    _known_raw = _st.get('neighbours_known') or []
+    if not _known_raw:
+        return ('unpublished', [], [])
+    _known = set(_schema.canonicalize_neighbours(_known_raw))
+    _local = set(_schema.canonicalize_neighbours(all_mirror_urls(config)))
+    _missing = sorted(_local - _known)
+    _extra = sorted(_known - _local)
+    if not _missing and not _extra:
+        return ('in-sync', [], [])
+    return ('drift', _missing, _extra)
+
+
 def coord_root_for(pool_url: str) -> str:
     """Derive the sidecar (coord-tree) root URL from the apt-pool URL.
 

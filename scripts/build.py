@@ -3481,7 +3481,11 @@ class BuildSession:
         return _ok
 
     def cmd_mirror_list(self, *args):
-        """One-line-per-mirror inventory: name, url, type."""
+        """One-line-per-mirror inventory: name, type, federation-consistency
+        tag, url.  The tag compares the peer's last-seen coord-head
+        neighbours against the local config's mirror URL set —
+        `in-sync` / `drift` / `unpublished` (first publish will
+        bootstrap)."""
         del args
         import mirror as _mirror
         _names = _mirror.list_mirrors(self.config)
@@ -3489,11 +3493,30 @@ class BuildSession:
             console.print("mirror list: no mirrors configured.")
             return True
         console.print(f"Mirrors ({len(_names)}):")
+        _drift_seen = False
         for _n in _names:
             _st = _mirror.read_mirror_state(self.config, _n) or {}
             _url = _st.get('url') or '?'
             _type = _st.get('type') or '?'
-            console.print(f"  {_n:<24s}  [{_type:<6s}]  {_url}")
+            _tag, _missing, _extra = _mirror.neighbours_drift(self.config, _n)
+            _color = (tui.COLOR_WARNING if _tag == 'drift'
+                      else tui.COLOR_HIGHLIGHT if _tag == 'in-sync'
+                      else tui.COLOR_NORMAL)
+            console.print(
+                f"  {_n:<24s}  [{_type:<6s}]  {_tag:<11s}  {_url}",
+                _color)
+            if _tag == 'drift':
+                _drift_seen = True
+                if _missing:
+                    console.print(
+                        f"    missing on peer: {', '.join(_missing)}")
+                if _extra:
+                    console.print(
+                        f"    extra on peer:   {', '.join(_extra)}")
+        if _drift_seen:
+            console.print(
+                "  (Run `mirror reconcile-neighbours` to align peers.)",
+                tui.COLOR_WARNING)
         return True
 
     def cmd_mirror_summary(self, *args):
