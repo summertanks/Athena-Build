@@ -249,18 +249,18 @@ def test_buildconfig_mode_defaults_to_distribution():
         assert cfg.build_mode == 'distribution', cfg.build_mode
 
 
-def test_buildconfig_mode_individual_parses():
-    """MIRROR-02: `[Build] Mode = individual` accepted; case + whitespace
+def test_buildconfig_mode_build_mode_parses():
+    """MIRROR-02: `[Build] Mode = build` accepted; case + whitespace
     tolerant."""
     _body = _BASE_CONF_BODY.replace(
         'MaxParallelBuilds = 1',
-        'MaxParallelBuilds = 1\n    Mode = Individual')
+        'MaxParallelBuilds = 1\n    Mode = Build')
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = _write_test_config(
             tmp, _body.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
         cfg = _build_config_from(tmp, cfg_path)
         assert cfg.is_valid, f"BuildConfig invalid: {cfg.error_str}"
-        assert cfg.build_mode == 'individual'
+        assert cfg.build_mode == 'build'
 
 
 def test_buildconfig_mode_rejects_unknown_value():
@@ -274,13 +274,13 @@ def test_buildconfig_mode_rejects_unknown_value():
             tmp, _body.format(mirror_block=_MINIMAL_MIRROR_BLOCK))
         cfg = _build_config_from(tmp, cfg_path)
         assert not cfg.is_valid
-        assert "'distribution' or 'individual'" in cfg.error_str
+        assert "'distribution' or 'build'" in cfg.error_str
         assert 'banana' in cfg.error_str
 
 
 def test_print_state_shows_mode_header():
     """MIRROR-02 chunk 6b: `print state` surfaces the active build
-    mode at the top of the output.  In indl mode the line also shows
+    mode at the top of the output.  In build mode the line also shows
     the indl.list pkg count."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -307,7 +307,7 @@ def test_print_state_shows_mode_header():
             _fh.write('firefox-esr\nlibreoffice\nthunderbird\n')
 
         class _CfgIndl:
-            build_mode = 'individual'
+            build_mode = 'build'
             indllist_path = _indl
         class _SessIndl:
             flags = _Flags()
@@ -322,7 +322,7 @@ def test_print_state_shows_mode_header():
         finally:
             tui.console.print = _orig
         _joined = '\n'.join(_lines)
-        assert 'MODE: individual' in _joined, _joined
+        assert 'MODE: build' in _joined, _joined
         assert '3 pkg(s)' in _joined, _joined
 
         # Dist mode case
@@ -343,9 +343,9 @@ def test_print_state_shows_mode_header():
         assert 'MODE: distribution' in _joined, _joined
 
 
-def test_cmd_auto_run_dispatch_routes_individual():
-    """MIRROR-02 chunk 6: `autorun individual` routes to
-    cmd_auto_run_individual.  Bare `autorun` in indl mode also routes
+def test_cmd_auto_run_dispatch_routes_build_mode():
+    """MIRROR-02 chunk 6: `autorun build` routes to
+    cmd_auto_run_build.  Bare `autorun` in build mode also routes
     there.  Dist mode bare `autorun` still routes to live (back-compat)."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -356,18 +356,18 @@ def test_cmd_auto_run_dispatch_routes_individual():
     _sess.cmd_auto_run_live = lambda *a, **k: _calls.append('live')      # type: ignore
     _sess.cmd_auto_run_installer = lambda *a, **k: _calls.append('inst') # type: ignore
     _sess.cmd_auto_run_disk = lambda *a, **k: _calls.append('disk')      # type: ignore
-    _sess.cmd_auto_run_individual = lambda *a, **k: _calls.append('indl')# type: ignore
+    _sess.cmd_auto_run_build = lambda *a, **k: _calls.append('indl')# type: ignore
 
     class _CfgDist:
         build_mode = 'distribution'
     class _CfgIndl:
-        build_mode = 'individual'
+        build_mode = 'build'
 
-    # Explicit `autorun individual` → individual (mode-agnostic
-    # dispatcher; cmd_auto_run_individual itself enforces the gate)
+    # Explicit `autorun build` → indl runner (mode-agnostic
+    # dispatcher; cmd_auto_run_build itself enforces the gate)
     _sess.config = _CfgDist()
     _calls.clear()
-    _sess.cmd_auto_run('individual')
+    _sess.cmd_auto_run('build')
     assert _calls == ['indl'], _calls
 
     # Bare `autorun` in dist mode → live (back-compat preserved)
@@ -375,15 +375,15 @@ def test_cmd_auto_run_dispatch_routes_individual():
     _sess.cmd_auto_run('')
     assert _calls == ['live'], _calls
 
-    # Bare `autorun` in indl mode → individual (mode-driven default)
+    # Bare `autorun` in build mode → indl runner (mode-driven default)
     _sess.config = _CfgIndl()
     _calls.clear()
     _sess.cmd_auto_run('')
     assert _calls == ['indl'], _calls
 
 
-def test_cmd_auto_run_individual_refuses_in_dist_mode():
-    """`autorun individual` requires Mode = individual; rejected
+def test_cmd_auto_run_build_refuses_in_dist_mode():
+    """`autorun build` requires Mode = build; rejected
     otherwise with an actionable hint."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -398,39 +398,39 @@ def test_cmd_auto_run_individual_refuses_in_dist_mode():
     build.console.print = lambda *a, **k: _lines.append(
         ' '.join(str(x) for x in a))
     try:
-        _sess.cmd_auto_run_individual()
+        _sess.cmd_auto_run_build()
     finally:
         build.console.print = _orig
     _joined = '\n'.join(_lines)
-    assert 'requires `[Build] Mode = individual`' in _joined, _joined
+    assert 'requires `[Build] Mode = build`' in _joined, _joined
     assert 'autorun live' in _joined or 'autorun live`/' in _joined, _joined
 
 
-def test_parse_source_build_args_recognises_individual_subset():
-    """MIRROR-02 chunk 5: `_parse_source_build_args` accepts
-    'individual' as a recognised subset name (mode-gating happens
-    at dispatch time, not in the pure parser)."""
+def test_parse_source_build_args_recognises_indl_subset():
+    """`_parse_source_build_args` accepts 'indl' as a recognised
+    subset name (mode-gating happens at dispatch time, not in the
+    pure parser)."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
-    assert 'individual' in BuildSession._SOURCE_SUBSETS
+    assert 'indl' in BuildSession._SOURCE_SUBSETS
     _err, _force, _subset, _names, _prof = \
-        BuildSession._parse_source_build_args(('individual',))
+        BuildSession._parse_source_build_args(('indl',))
     assert _err is None, _err
-    assert _subset == 'individual'
+    assert _subset == 'indl'
     assert _names == []
     assert _force is False
     # Mutually exclusive with named packages (same rule as other subsets)
     _err, *_ = BuildSession._parse_source_build_args(
-        ('individual', 'foo'))
+        ('indl', 'foo'))
     assert _err is not None
     assert 'mutually exclusive' in _err
 
 
-def test_cmd_source_build_individual_subset_rejected_in_dist_mode():
-    """`source build individual` is rejected outside individual mode
-    with a hint pointing at 'all' (the dist-mode equivalent for
-    'build everything')."""
+def test_cmd_source_build_indl_subset_rejected_in_dist_mode():
+    """`source build indl` is rejected outside build mode with a hint
+    pointing at 'all' (the dist-mode equivalent for 'build
+    everything')."""
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
@@ -453,7 +453,7 @@ def test_cmd_source_build_individual_subset_rejected_in_dist_mode():
     build.console.print = lambda *a, **k: _lines.append(
         ' '.join(str(x) for x in a))
     try:
-        _sess.cmd_source_build('individual')
+        _sess.cmd_source_build('indl')
     finally:
         build.console.print = _orig
     _joined = '\n'.join(_lines)
@@ -461,10 +461,10 @@ def test_cmd_source_build_individual_subset_rejected_in_dist_mode():
     assert "`source build all`" in _joined, _joined
 
 
-def test_source_audit_naturally_scopes_to_indl_in_individual_mode():
+def test_source_audit_naturally_scopes_to_indl_in_build_mode():
     """MIRROR-02 chunk 4: cmd_source_audit walks dep_tree.selected_srcs.
     Chunk 2 populates selected_srcs directly from indl.list in
-    individual mode (no closure walk).  So source audit naturally
+    build mode (no closure walk).  So source audit naturally
     scopes to the indl subset — no explicit per-mode filter needed.
     Test stubs a BuildSession where selected_srcs has just one
     source, runs cmd_source_audit, asserts the per-state counts add
@@ -494,7 +494,7 @@ def test_source_audit_naturally_scopes_to_indl_in_individual_mode():
         pool_extras_src_names: set = set()
         extras_src_names: set = set()
     _sess.dep_tree = _DepTree()
-    _sess.udeb_dep_tree = None     # indl mode: installer is N/A
+    _sess.udeb_dep_tree = None     # build mode: installer is N/A
     _sess.container = None         # no build container — preflight audit
                                    # block at build.py:7463 is skipped
     # _source_state is a method on BuildSession; for this test just
@@ -518,9 +518,9 @@ def test_source_audit_naturally_scopes_to_indl_in_individual_mode():
     assert '1  ok' in _joined, _joined
 
 
-def test_chroot_iso_builds_refuse_in_individual_mode():
+def test_chroot_iso_builds_refuse_in_build_mode():
     """MIRROR-02 chunk 3: every chroot/ISO entry point refuses cleanly
-    when [Build] Mode = individual.  Verified for all five commands:
+    when [Build] Mode = build.  Verified for all five commands:
     chroot build live/installer, iso build live/installer/disk.  Each
     prints an actionable hint pointing at the mode setting and
     returns without proceeding."""
@@ -530,7 +530,7 @@ def test_chroot_iso_builds_refuse_in_individual_mode():
     from build import BuildSession
 
     class _Cfg:
-        build_mode = 'individual'
+        build_mode = 'build'
 
     _commands = [
         ('cmd_build_chroot_live',       'chroot build live'),
@@ -554,13 +554,13 @@ def test_chroot_iso_builds_refuse_in_individual_mode():
             build.console.print = _orig
         _joined = '\n'.join(_lines)
         assert _label in _joined, (_method_name, _joined)
-        assert 'N/A in individual mode' in _joined, (_method_name, _joined)
+        assert 'N/A in build mode' in _joined, (_method_name, _joined)
         assert '[Build] Mode' in _joined, (_method_name, _joined)
         # None / False both signal "did not proceed"
         assert _r in (None, False), (_method_name, _r)
 
 
-def test_refuse_in_individual_mode_is_a_no_op_in_distribution():
+def test_refuse_in_build_mode_is_a_no_op_in_distribution():
     """The gate helper is silent + returns False when mode is
     distribution — distribution-mode chroot/ISO must work unchanged."""
     import sys as _sys
@@ -576,15 +576,15 @@ def test_refuse_in_individual_mode_is_a_no_op_in_distribution():
     build.console.print = lambda *a, **k: _lines.append(
         ' '.join(str(x) for x in a))
     try:
-        _refused = _sess._refuse_in_individual_mode('chroot build live')
+        _refused = _sess._refuse_in_build_mode('chroot build live')
     finally:
         build.console.print = _orig
     assert _refused is False
     assert _lines == [], _lines
 
 
-def test_cache_parse_individual_mode_resolves_named_pkgs_only():
-    """MIRROR-02 chunk 2: in individual mode, cache parse populates
+def test_cache_parse_build_mode_resolves_named_pkgs_only():
+    """MIRROR-02 chunk 2: in build mode, cache parse populates
     selected_pkgs directly from indl.list lookups (no transitive
     closure walk).  Cache has firefox-esr + libreoffice + their fake
     Depends; indl.list names just firefox-esr; closure does NOT
@@ -594,7 +594,7 @@ def test_cache_parse_individual_mode_resolves_named_pkgs_only():
     import build
     from build import BuildSession
     # Three packages in the offline cache.  firefox-esr Depends on
-    # libdep; if indl mode walked closure, libdep would land in
+    # libdep; if build mode walked closure, libdep would land in
     # selected_pkgs.  The test asserts it does NOT.
     _pkg_blob = (
         "Package: firefox-esr\n"
@@ -660,7 +660,7 @@ def test_cache_parse_individual_mode_resolves_named_pkgs_only():
         import dependencytree
         class _Cfg:
             indllist_path = _indl
-            build_mode = 'individual'
+            build_mode = 'build'
             arch = 'amd64'
             build_profiles = ['nodoc', 'nocheck']
 
@@ -676,7 +676,7 @@ def test_cache_parse_individual_mode_resolves_named_pkgs_only():
         build.console.print = lambda *a, **k: _lines.append(
             ' '.join(str(x) for x in a))
         try:
-            _ok = _sess._cache_parse_individual_mode()
+            _ok = _sess._cache_parse_build_mode()
         finally:
             build.console.print = _orig
         assert _ok is True, '\n'.join(_lines)
@@ -694,7 +694,7 @@ def test_cache_parse_individual_mode_resolves_named_pkgs_only():
         assert 'libdep' not in _sess.dep_tree.selected_srcs
 
 
-def test_cache_parse_individual_mode_warns_on_missing_pkg():
+def test_cache_parse_build_mode_warns_on_missing_pkg():
     """Names in indl.list that aren't in the cache get a WARNING and
     are skipped — partial resolution still proceeds for the rest."""
     import sys as _sys
@@ -729,7 +729,7 @@ def test_cache_parse_individual_mode_warns_on_missing_pkg():
         import dependencytree
         class _Cfg:
             indllist_path = _indl
-            build_mode = 'individual'
+            build_mode = 'build'
             arch = 'amd64'
             build_profiles = ['nodoc', 'nocheck']
         _sess = BuildSession.__new__(BuildSession)
@@ -743,7 +743,7 @@ def test_cache_parse_individual_mode_warns_on_missing_pkg():
         build.console.print = lambda *a, **k: _lines.append(
             ' '.join(str(x) for x in a))
         try:
-            _ok = _sess._cache_parse_individual_mode()
+            _ok = _sess._cache_parse_build_mode()
         finally:
             build.console.print = _orig
         # firefox-esr resolved, nonexistent-pkg surfaced WARNING
@@ -757,7 +757,7 @@ def test_cache_parse_individual_mode_warns_on_missing_pkg():
         assert _canonical == {'firefox-esr'}
 
 
-def test_cache_parse_individual_mode_empty_indl_returns_false():
+def test_cache_parse_build_mode_empty_indl_returns_false():
     """Empty/missing indl.list → returns False with a clear warning;
     operator's dep_check_ready stays False."""
     import sys as _sys
@@ -773,7 +773,7 @@ def test_cache_parse_individual_mode_empty_indl_returns_false():
             package_hashtable: dict = {}
         class _Cfg:
             indllist_path = _indl
-            build_mode = 'individual'
+            build_mode = 'build'
             arch = 'amd64'
             build_profiles = ['nodoc', 'nocheck']
         _sess = BuildSession.__new__(BuildSession)
@@ -788,7 +788,7 @@ def test_cache_parse_individual_mode_empty_indl_returns_false():
         build.console.print = lambda *a, **k: _lines.append(
             ' '.join(str(x) for x in a))
         try:
-            _ok = _sess._cache_parse_individual_mode()
+            _ok = _sess._cache_parse_build_mode()
         finally:
             build.console.print = _orig
         assert _ok is False
@@ -22305,13 +22305,13 @@ def test_cmd_set_mode_switches_value_and_clears_dep_check_ready():
         _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
 
         # dep_check_ready starts True (the MagicMock default we set).
-        _sess.cmd_set('mode', 'individual')
+        _sess.cmd_set('mode', 'build')
 
-        assert _sess.config.build_mode == 'individual'
+        assert _sess.config.build_mode == 'build'
         # dep_check_ready must be cleared so cache parse re-runs.
         assert _sess.flags.dep_check_ready is False, _sess.flags
         _joined = '\n'.join(_printed)
-        assert 'individual' in _joined
+        assert 'build' in _joined
         assert 'dep_check_ready cleared' in _joined
 
 
@@ -23565,7 +23565,7 @@ def test_coord_store_project_live_claims_collapses_retraction():
 
 
 def test_cmd_mirror_publish_refuses_indl_to_fresh_mirror():
-    """MIRROR-02 chunk 13: indl-mode publish to a mirror with no
+    """MIRROR-02 chunk 13: build-mode publish to a mirror with no
     coord-head on remote is REFUSED with a hint pointing at dist-mode
     bootstrap."""
     import sys as _sys
@@ -23589,7 +23589,7 @@ def test_cmd_mirror_publish_refuses_indl_to_fresh_mirror():
             dir_cache  = _cache_dir
             dir_repo   = _repo_dir
             build_codename = 'thor'
-            build_mode = 'individual'
+            build_mode = 'build'
 
         _mirror.add_mirror(
             _Cfg(), name='primary',
@@ -23621,7 +23621,7 @@ def test_cmd_mirror_publish_refuses_indl_to_fresh_mirror():
 
 
 def test_cmd_mirror_publish_indl_to_initialised_mirror_proceeds():
-    """When the target mirror already HAS a coord-head, indl-mode
+    """When the target mirror already HAS a coord-head, build-mode
     publish proceeds past the chunk-13 gate (subject to other gates
     downstream)."""
     import sys as _sys
@@ -23645,7 +23645,7 @@ def test_cmd_mirror_publish_indl_to_initialised_mirror_proceeds():
             dir_cache  = _cache_dir
             dir_repo   = _repo_dir
             build_codename = 'thor'
-            build_mode = 'individual'
+            build_mode = 'build'
 
         _mirror.add_mirror(
             _Cfg(), name='primary',
@@ -27004,20 +27004,20 @@ def main() -> int:
         test_mirror_rejects_suffix_without_leading_dash,
         test_mirror_with_snapshot_returns_new_instance_untouched_original,
         test_buildconfig_mode_defaults_to_distribution,
-        test_buildconfig_mode_individual_parses,
+        test_buildconfig_mode_build_mode_parses,
         test_buildconfig_mode_rejects_unknown_value,
         test_parse_indl_list_strips_comments_dedups_preserves_order,
         test_print_state_shows_mode_header,
-        test_cmd_auto_run_dispatch_routes_individual,
-        test_cmd_auto_run_individual_refuses_in_dist_mode,
-        test_parse_source_build_args_recognises_individual_subset,
-        test_cmd_source_build_individual_subset_rejected_in_dist_mode,
-        test_source_audit_naturally_scopes_to_indl_in_individual_mode,
-        test_chroot_iso_builds_refuse_in_individual_mode,
-        test_refuse_in_individual_mode_is_a_no_op_in_distribution,
-        test_cache_parse_individual_mode_resolves_named_pkgs_only,
-        test_cache_parse_individual_mode_warns_on_missing_pkg,
-        test_cache_parse_individual_mode_empty_indl_returns_false,
+        test_cmd_auto_run_dispatch_routes_build_mode,
+        test_cmd_auto_run_build_refuses_in_dist_mode,
+        test_parse_source_build_args_recognises_indl_subset,
+        test_cmd_source_build_indl_subset_rejected_in_dist_mode,
+        test_source_audit_naturally_scopes_to_indl_in_build_mode,
+        test_chroot_iso_builds_refuse_in_build_mode,
+        test_refuse_in_build_mode_is_a_no_op_in_distribution,
+        test_cache_parse_build_mode_resolves_named_pkgs_only,
+        test_cache_parse_build_mode_warns_on_missing_pkg,
+        test_cache_parse_build_mode_empty_indl_returns_false,
         test_buildconfig_parses_three_mirrors,
         test_deb_dest_for_filename_routes_by_component,
         test_buildconfig_rejects_no_mirrors,
