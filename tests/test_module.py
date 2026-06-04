@@ -16709,7 +16709,7 @@ def test_cmd_source_repair_leaves_fail_result_untouched():
             dir_source = os.path.join(_tmp, 'source')
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -16775,7 +16775,7 @@ def test_cmd_source_repair_skips_when_binaries_missing():
             dir_source = os.path.join(_tmp, 'source')
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -16849,7 +16849,7 @@ def test_cmd_source_repair_clears_stale_pass_when_binaries_not_valid():
             dir_source = os.path.join(_tmp, 'source')
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -16915,7 +16915,7 @@ def test_cmd_source_repair_leaves_consistent_pass_alone():
             dir_source = os.path.join(_tmp, 'source')
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -16983,7 +16983,7 @@ def test_cmd_source_repair_leaves_tunneled_marker_alone():
             dir_source = os.path.join(_tmp, 'source')
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
         class _Tree:
             selected_srcs = {'foo': _Src()}
             src_pkg_files = {'foo': list(_Src.pkgs)}
@@ -19954,7 +19954,7 @@ def test_needs_bump_build_per_file_exact_un():
 
         class _Cfg:
             build_version = '1'
-            def deb_dest_for_filename(self, f):
+            def deb_dest_for_filename(self, f, component='main'):
                 return _tmp
         _sess.config = _Cfg()
 
@@ -22062,7 +22062,7 @@ def test_source_state_interrupted_when_record_is_non_terminal():
             dir_source = os.path.join(_tmp, 'source')
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
 
         class _Container:
             buildlog_path = _buildlog
@@ -22134,7 +22134,7 @@ def test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass
             dir_source = _src_dir
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
 
         class _Container:
             buildlog_path = _buildlog
@@ -22207,7 +22207,7 @@ def test_source_state_tunneled_record_with_pristine_binary_returns_tunneled():
             dir_source = _src_dir
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
 
         class _Container:
             buildlog_path = _buildlog
@@ -22235,6 +22235,105 @@ def test_source_state_tunneled_record_with_pristine_binary_returns_tunneled():
         assert _state == 'tunneled', (
             f"tunneled record with pristine binary on disk should classify "
             f"as 'tunneled', got {_state!r}")
+
+
+def test_source_state_uses_origin_component_for_disk_lookup():
+    """Regression: amd64-microcode lives in non-free-firmware/binary-arch/,
+    not main/binary-arch/.  `_source_state` must derive the component
+    from `src._mirror.component` (mirroring `check_build` at
+    buildcontainer.py:1537) — otherwise audit looks under main and
+    reports stale_pass for a perfectly-good tunneled non-free-firmware
+    binary, while `source build all` (which DOES use the component)
+    skips it correctly.  Symptom we saw 2026-06-04: tunnel succeeds,
+    audit reports stale_pass, repair clears the record, re-tunnel,
+    audit reports stale_pass again — infinite loop because audit was
+    looking in the wrong dir the whole time.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    from unittest.mock import MagicMock
+    import build as _build_mod
+    import buildcontainer as _bc
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _buildlog = os.path.join(_tmp, 'log', 'build')
+        _repo = os.path.join(_tmp, 'repo')
+        _src_dir = os.path.join(_tmp, 'source')
+        # Plant the binary under non-free-firmware/binary-amd64/, NOT main/.
+        _nff_dir = os.path.join(_repo, 'non-free-firmware', 'binary-amd64')
+        _main_dir = os.path.join(_repo, 'main', 'binary-amd64')
+        os.makedirs(_buildlog, exist_ok=True)
+        os.makedirs(_nff_dir, exist_ok=True)
+        os.makedirs(_main_dir, exist_ok=True)
+        os.makedirs(_src_dir, exist_ok=True)
+        with open(os.path.join(_nff_dir,
+                                'amd64-microcode_3.20250311.1_amd64.deb'),
+                  'wb') as _fh:
+            _fh.write(b'!<arch>\n')
+
+        _rec = _u.new_build_record(
+            package='amd64-microcode',
+            intended_version='3.20250311.1~deb12u1',
+            patch_set_hash='',
+        )
+        _rec.update({
+            'phase':           'tunneled',
+            'status':          'TUNNELED',
+            'built_version':   '3.20250311.1',
+            'finished':        _u._utc_now_iso(),
+            'elapsed_seconds': 5.0,
+            'outputs':         ['amd64-microcode_3.20250311.1_amd64.deb'],
+        })
+        _u.write_build_record(_buildlog, _rec)
+
+        class _Mirror:
+            component = 'non-free-firmware'
+
+        class _Src:
+            pkgs = ['amd64-microcode_3.20250311.1_amd64.deb']
+            files = {}
+            version = '3.20250311.1~deb12u1'
+            patch_list = []
+            _mirror = _Mirror()
+
+        # Static method on the config; routes to the right component dir.
+        def _deb_dest(_f, _comp='main'):
+            if _comp == 'non-free-firmware':
+                return _nff_dir
+            return _main_dir
+
+        class _Cfg:
+            dir_repo = _repo
+            dir_log = os.path.join(_tmp, 'log')
+            dir_source = _src_dir
+            dir_patch_source = os.path.join(_tmp, 'patch', 'source')
+            deb_dest_for_filename = staticmethod(_deb_dest)
+
+        class _Container:
+            buildlog_path = _buildlog
+
+        _sess = _build_mod.BuildSession.__new__(_build_mod.BuildSession)
+        _sess.config = _Cfg
+        _sess.dep_tree = MagicMock(src_pkg_files={
+            'amd64-microcode': list(_Src.pkgs)})
+        _sess.udeb_dep_tree = None
+        _sess.container = _Container
+        _sess.flags = MagicMock(build_container_ready=True)
+
+        _orig_is_ar = _bc.BuildContainer.is_ar_file
+        _bc.BuildContainer.is_ar_file = staticmethod(lambda _p: True)
+        try:
+            _state = _sess._source_state('amd64-microcode', _Src())
+        finally:
+            _bc.BuildContainer.is_ar_file = _orig_is_ar
+
+        assert _state == 'tunneled', (
+            f"non-free-firmware tunneled package with pristine binary "
+            f"at non-free-firmware/binary-arch/ must classify as "
+            f"'tunneled' (audit's deb_dest_for_filename call must pass "
+            f"the component, mirroring check_build); got {_state!r}")
 
 
 def test_detect_build_audit_divergence_flags_missing_binary_with_no_fail_record():
@@ -22426,7 +22525,7 @@ def test_cmd_source_repair_clears_interrupted_record():
             dir_source = os.path.join(_tmp, 'source')
             dir_patch_source = os.path.join(_tmp, 'patch', 'source')
             @staticmethod
-            def deb_dest_for_filename(_f): return _repo
+            def deb_dest_for_filename(_f, _comp="main"): return _repo
 
         class _Container:
             buildlog_path = _buildlog
@@ -27361,6 +27460,7 @@ def main() -> int:
         test_source_state_interrupted_when_record_is_non_terminal,
         test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass,
         test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
+        test_source_state_uses_origin_component_for_disk_lookup,
         test_detect_build_audit_divergence_flags_missing_binary_with_no_fail_record,
         test_detect_build_audit_divergence_silent_when_record_says_fail,
         test_detect_build_audit_divergence_silent_on_clean_state,

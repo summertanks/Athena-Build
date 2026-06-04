@@ -7628,10 +7628,16 @@ class BuildSession:
         # (source audit / source repair) work without `container init`.
         # MUST match check_build's accept criteria (pristine or +asg
         # via find_matching_artifact) so audit and the build's
-        # skip-rebuild gate never disagree.
+        # skip-rebuild gate never disagree.  Component comes from the
+        # source's origin mirror — without this, a non-free-firmware
+        # package (e.g. amd64-microcode) would be looked up under main/
+        # binary-arch/ and audit would report 'stale_pass' even though
+        # the file sits at non-free-firmware/binary-arch/.  Mirrors
+        # check_build's component derivation at buildcontainer.py:1537.
+        _comp = getattr(getattr(src, '_mirror', None), 'component', '') or 'main'
         _all_present = True
         for _f in _expected:
-            _dst_dir = self.config.deb_dest_for_filename(_f)
+            _dst_dir = self.config.deb_dest_for_filename(_f, _comp)
             _match = utils.find_matching_artifact(_dst_dir, _f)
             if _match is None:
                 _all_present = False
