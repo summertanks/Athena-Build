@@ -214,6 +214,22 @@ def _print_state(session, *_extras) -> None:
         _mark = '✓' if _ok else '·'
         tui.console.print(f"  [{_mark}] {label}  {desc}")
 
+    # MIRROR-02: mode is the first thing on the screen so the
+    # operator can never confuse a partial indl pipeline for a
+    # broken dist build.
+    _mode = getattr(getattr(session, 'config', None), 'build_mode',
+                    'distribution')
+    _mode_color = (tui.COLOR_HIGHLIGHT if _mode == 'individual'
+                   else tui.COLOR_INFO)
+    if _mode == 'individual':
+        import utils as _utils
+        _indl_path = getattr(session.config, 'indllist_path', '')
+        _names = _utils.parse_indl_list(_indl_path) if _indl_path else []
+        tui.console.print(
+            f"MODE: individual  [{len(_names)} pkg(s) in indl.list]",
+            _mode_color)
+    else:
+        tui.console.print("MODE: distribution", _mode_color)
     tui.console.print("Pipeline state:")
     tui.console.print("")
     tui.console.print("  Shared:", tui.COLOR_INFO)
