@@ -22480,6 +22480,165 @@ def test_normalize_url_restricted_to_ssh_and_file():
     assert _m._normalize_url(None) is None  # type: ignore[arg-type]
 
 
+def test_probe_ssh_auth_classifies_success_and_failure():
+    """ssh BatchMode probe: rc=0 + 'ssh-ok' in stdout → ok; non-zero →
+    failure with stderr surfaced."""
+    _m = _mirror_module()
+    import subprocess
+    from unittest.mock import patch
+
+    class _Done:
+        def __init__(self, rc, out='', err=''):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    with patch.object(subprocess, 'run',
+                      return_value=_Done(0, 'ssh-ok\n', '')):
+        _ok, _det = _m.probe_ssh_auth('host.example', 'ubuntu', None)
+        assert _ok, _det
+        assert 'round-trip' in _det
+    with patch.object(subprocess, 'run',
+                      return_value=_Done(255, '', 'Permission denied\n')):
+        _ok, _det = _m.probe_ssh_auth('host.example', 'ubuntu', None)
+        assert not _ok
+        assert 'Permission denied' in _det
+    with patch.object(subprocess, 'run',
+                      side_effect=subprocess.TimeoutExpired('ssh', 10)):
+        _ok, _det = _m.probe_ssh_auth('host.example', 'ubuntu', None)
+        assert not _ok and 'timed out' in _det
+
+
+def test_probe_http_inrelease_handles_200_404_and_error():
+    """200 → ok; 404 → ok+detail mentioning bootstrap; URL/timeout
+    error → not ok."""
+    _m = _mirror_module()
+    import urllib.error
+    import urllib.request
+    from unittest.mock import patch
+
+    class _Resp:
+        def __init__(self, code):
+            self.status = code
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def getcode(self):
+            return self.status
+
+    with patch.object(urllib.request, 'urlopen',
+                      return_value=_Resp(200)):
+        _ok, _det = _m.probe_http_inrelease(
+            'http://host.example/asgard', 'thor')
+        assert _ok and 'present' in _det
+
+    with patch.object(urllib.request, 'urlopen',
+                      side_effect=urllib.error.HTTPError(
+                          'u', 404, 'Not Found', {}, None)):
+        _ok, _det = _m.probe_http_inrelease(
+            'http://host.example/asgard', 'thor')
+        assert _ok, _det
+        assert 'bootstrap' in _det.lower()
+
+    with patch.object(urllib.request, 'urlopen',
+                      side_effect=urllib.error.URLError('no route')):
+        _ok, _det = _m.probe_http_inrelease(
+            'http://host.example/asgard', 'thor')
+        assert not _ok
+        assert 'no route' in _det
+
+
+def test_probe_sidecar_head_no_head_verified_and_fail():
+    """Three outcomes: no coord-head on remote (bootstrap-pending,
+    ok+None); head present + verified (ok+dict); head present + verify
+    fails (not-ok)."""
+    _m = _mirror_module()
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.head as _head_mod
+    import coord.transport as _transport
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        _stage = os.path.join(_td, 'stage')
+        # Case 1: pull succeeds, no coord-head.json materialised
+        with patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=None):
+            _ok, _det, _head = _m.probe_sidecar_head(
+                'ssh://ubuntu@host/srv/asgard-coord',
+                signing_homedir='/fake/gpg', stage_dir=_stage)
+            assert _ok and _head is None
+            assert 'no head yet' in _det
+
+        # Case 2: head.json present + verify succeeds → dict returned
+        _stage2 = os.path.join(_td, 'stage2')
+        os.makedirs(_stage2, exist_ok=True)
+        with open(os.path.join(_stage2, 'coord-head.json'), 'w') as _fh:
+            _fh.write('{"v":2,"neighbours":["ssh://x/y"]}')
+        with patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value={'v': 2,
+                                        'neighbours': ['ssh://x/y']}):
+            _ok, _det, _head = _m.probe_sidecar_head(
+                'ssh://ubuntu@host/srv/asgard-coord',
+                signing_homedir='/fake/gpg', stage_dir=_stage2)
+            assert _ok and _head is not None
+            assert _head['neighbours'] == ['ssh://x/y']
+
+        # Case 3: head.json present but verify FAILS → not ok
+        _stage3 = os.path.join(_td, 'stage3')
+        os.makedirs(_stage3, exist_ok=True)
+        with open(os.path.join(_stage3, 'coord-head.json'), 'w') as _fh:
+            _fh.write('{"v":2}')
+        with patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=None):
+            _ok, _det, _head = _m.probe_sidecar_head(
+                'ssh://ubuntu@host/srv/asgard-coord',
+                signing_homedir='/fake/gpg', stage_dir=_stage3)
+            assert not _ok and _head is None
+            assert 'GPG verify FAILED' in _det
+
+
+def test_discover_federation_peers_classifies_each_neighbour():
+    """Per-neighbour reachable/verified flags from probe_sidecar_head."""
+    _m = _mirror_module()
+    from unittest.mock import patch
+
+    _head = {
+        'v': 2,
+        'neighbours': [
+            'ssh://ubuntu@reachable/srv/asgard',
+            'ssh://ubuntu@unreachable/srv/asgard',
+            'ssh://ubuntu@bootstrap-pending/srv/asgard',
+        ],
+    }
+    def _fake_probe(coord_url, *, signing_homedir, stage_dir, ssh_key=None):
+        if 'unreachable' in coord_url:
+            return False, 'TCP connect failed', None
+        if 'bootstrap-pending' in coord_url:
+            return True, 'no head yet', None
+        return True, 'verified', {'v': 2, 'neighbours': []}
+
+    with tempfile.TemporaryDirectory() as _td:
+        with patch.object(_m, 'probe_sidecar_head',
+                          side_effect=_fake_probe):
+            _peers = _m.discover_federation_peers(
+                _head, signing_homedir='/fake/gpg',
+                stage_root=_td)
+    assert len(_peers) == 3
+    _by_url = {_p['url']: _p for _p in _peers}
+    _r = _by_url['ssh://ubuntu@reachable/srv/asgard']
+    assert _r['reachable'] and _r['verified']
+    _u = _by_url['ssh://ubuntu@unreachable/srv/asgard']
+    assert not _u['reachable'] and not _u['verified']
+    _b = _by_url['ssh://ubuntu@bootstrap-pending/srv/asgard']
+    assert _b['reachable'] and not _b['verified']
+
+
 def test_mirror_add_remove_round_trip():
     """add_mirror writes the state file; list_mirrors finds it; remove
     deletes it."""
@@ -24373,6 +24532,10 @@ def main() -> int:
         test_derive_name_from_url_maps_ip_fqdn_local,
         test_derive_public_url_constructs_proto_host_dist,
         test_normalize_url_restricted_to_ssh_and_file,
+        test_probe_ssh_auth_classifies_success_and_failure,
+        test_probe_http_inrelease_handles_200_404_and_error,
+        test_probe_sidecar_head_no_head_verified_and_fail,
+        test_discover_federation_peers_classifies_each_neighbour,
         test_mirror_add_remove_round_trip,
         test_mirror_add_rejects_duplicate_name_and_url,
         test_mirror_add_rejects_invalid_name_and_url,
