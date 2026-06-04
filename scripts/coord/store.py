@@ -276,3 +276,71 @@ def iter_live_claims_by_filename(
             _fn = _c.get('filename')
             if isinstance(_fn, str) and _fn:
                 yield _fn, _c
+
+
+def project_owners(
+    by_builder: Dict[str, List[dict]],
+) -> Dict[str, dict]:
+    """MIRROR-02: project the per-builder claim ledger into a
+    per-filename ownership view.
+
+    Returns ``{filename: owner_record}`` where ``owner_record`` is::
+
+      {
+        'builder':       str | None,   # None ⇔ tunneled (no owner)
+        'version':       str,          # built_version on the winning claim
+        'sha256':        str,          # SHA-256 of the .deb in the pool
+        'claim_state':   str,          # 'published' / 'pending' (never retracted here)
+        'seq':           int,          # producer-side seq for tie-break
+        'republished_from': dict|None, # truthy ⇔ tunneled
+        'claim':         dict,         # the winning claim, verbatim
+      }
+
+    Ownership rules:
+      - Iterates `iter_live_claims_by_filename` (already drops retractions
+        and same-builder pending-vs-published collisions).
+      - For each filename, picks the latest claim by (seq, builder)
+        across builders.  `seq` ordering reflects builder-local
+        chronology of `publish` events; cross-builder ties broken by
+        builder-id lexical sort (deterministic, no clock dependency).
+      - A claim with `republished_from != None` is TUNNELED — the
+        returned record sets ``builder=None``.  Tunneled claims have
+        no owner; publishing over them is a normal (auto-ownership
+        transfer) path in chunk 8.
+      - A non-tunneled claim's ``builder`` field IS the owner.
+
+    Hash conflicts (same filename, different SHA across builders) are
+    NOT resolved here — that's `detect_hash_conflicts`' job at
+    `scripts/coord/reconcile.py:310`.  This projection just picks
+    "the latest" assuming the conflict was already gated.
+    """
+    _candidates: Dict[str, List[dict]] = {}
+    for _fn, _c in iter_live_claims_by_filename(by_builder):
+        _candidates.setdefault(_fn, []).append(_c)
+
+    _out: Dict[str, dict] = {}
+    for _fn, _claims in _candidates.items():
+        # Sort by (seq, builder) descending; first wins.  ``-`` on
+        # seq for desc; builder for stable tie-break (asc to match
+        # alphabetical convention).
+        _sorted = sorted(
+            _claims,
+            key=lambda _c: (
+                -int(_c.get('seq', 0)),
+                str(_c.get('builder', '')),
+            ),
+        )
+        _winner = _sorted[0]
+        _republished = _winner.get('republished_from')
+        _is_tunneled = bool(_republished)
+        _out[_fn] = {
+            'builder':          None if _is_tunneled
+                                else _winner.get('builder'),
+            'version':          str(_winner.get('built_version') or ''),
+            'sha256':           str(_winner.get('sha256') or ''),
+            'claim_state':      str(_winner.get('claim_state') or ''),
+            'seq':              int(_winner.get('seq') or 0),
+            'republished_from': _republished if _is_tunneled else None,
+            'claim':            _winner,
+        }
+    return _out
