@@ -2042,20 +2042,35 @@ class BuildSession:
                         f"for {src_pkg.package}")
                     _release = None
                 if _release is not None:
-                    _stamped: 'list[tuple[str, str]]' = []
+                    # Uniform per-source N: mirrors the rationale in
+                    # BuildContainer._normalize_built_artifacts.  Take the
+                    # MAX of every sibling binary's individual asg_next_n
+                    # candidate so intra-source sibling pins (`Depends: X
+                    # (= ver+asg<R>u<N>)`) all resolve.
+                    _per_file_n: 'list[int]' = []
+                    _stampable: 'list[tuple[str, str, str]]' = []
                     for _path, _ups_fn in _post_strip:
                         _b = os.path.basename(_path)
                         _name, _ext = os.path.splitext(_b)
                         _parts = _name.split('_')
                         if len(_parts) != 3:
-                            _stamped.append((_path, _ups_fn))
                             continue
                         _pkg_n, _ver, _arch = _parts
                         _base_ver = utils.pristine_base(_ver)
-                        _n = utils.asg_next_n(
-                            _ledger.get(_pkg_n, []), _base_ver, _release)
+                        _per_file_n.append(utils.asg_next_n(
+                            _ledger.get(_pkg_n, []), _base_ver, _release))
+                        _stampable.append((_path, _ups_fn, _b))
+                    _stampable_paths = {_p for _p, _, _ in _stampable}
+                    _stamped: 'list[tuple[str, str]]' = []
+                    _n_uniform = max(_per_file_n) if _per_file_n else 1
+                    for _path, _ups_fn in _post_strip:
+                        if _path not in _stampable_paths:
+                            _stamped.append((_path, _ups_fn))
+                            continue
+                        _b = os.path.basename(_path)
                         try:
-                            _r = utils.restamp_asg_deb(_path, _release, _n)
+                            _r = utils.restamp_asg_deb(
+                                _path, _release, _n_uniform)
                         except Exception as _e:
                             logger.warning(
                                 f"tunnel asg-stamp: {_b} failed: {_e}")
@@ -2067,7 +2082,7 @@ class BuildSession:
                             logger.info(
                                 f"tunnel asg-stamp: {_b} → "
                                 f"{os.path.basename(_new_path)} "
-                                f"(+asg{_release}u{_n})")
+                                f"(+asg{_release}u{_n_uniform})")
                         _stamped.append((_new_path, _ups_fn))
                     _current = _stamped
 
