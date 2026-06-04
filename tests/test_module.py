@@ -5709,12 +5709,15 @@ def test_cmd_iso_build_requires_subaction():
 
 # ─── COMP-02: repo index minimal/full + publish ssh/local ───────────────────
 
-def test_repo_index_dispatch():
-    """`repo index full` (and bare `repo index`) → cmd_index_repo;
-    `repo index minimal` → cmd_index_repo_minimal; unknown index sub →
-    help (no handler invoked)."""
+def test_repo_index_dispatch_retired_in_phase_8():
+    """MIRROR-01 Phase 8: `repo index` is no longer operator-visible.
+    The handlers (cmd_index_repo, cmd_index_repo_minimal) survive as
+    internal callables (chroot build + mirror publish auto-index); the
+    dispatch route prints a deprecation hint and returns False without
+    calling either handler."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
     from build import BuildSession
 
     _sess = BuildSession.__new__(BuildSession)
@@ -5722,17 +5725,25 @@ def test_repo_index_dispatch():
     _sess.cmd_index_repo         = lambda *a, **kw: _calls.append(('full', a))
     _sess.cmd_index_repo_minimal = lambda *a, **kw: _calls.append(('minimal', a))
 
-    _sess.cmd_repo('index', 'full')
-    assert _calls == [('full', ())], _calls
-    _calls.clear()
-    _sess.cmd_repo('index')                 # bare → full (back-compat)
-    assert _calls == [('full', ())], _calls
-    _calls.clear()
-    _sess.cmd_repo('index', 'minimal')
-    assert _calls == [('minimal', ())], _calls
-    _calls.clear()
-    _sess.cmd_repo('index', 'wat')          # unknown sub → help, no handler
-    assert _calls == [], f"unknown index sub must not invoke a handler: {_calls}"
+    _lines: 'list[str]' = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _r = _sess.cmd_repo('index', 'full')
+        _r2 = _sess.cmd_repo('index')
+        _r3 = _sess.cmd_repo('index', 'minimal')
+    finally:
+        build.console.print = _orig
+    # No handler call from operator-visible route
+    assert _calls == [], _calls
+    # Each invocation returns False + prints the deprecation hint
+    assert (_r, _r2, _r3) == (False, False, False)
+    _joined = '\n'.join(_lines)
+    assert 'no longer operator-visible' in _joined, _joined
+    # The handlers themselves still exist on the class (internal API)
+    assert callable(getattr(BuildSession, 'cmd_index_repo', None))
+    assert callable(getattr(BuildSession, 'cmd_index_repo_minimal', None))
 
 
 def test_deb_excluded_from_minimal():
@@ -24609,7 +24620,7 @@ def main() -> int:
         test_cache_purge_empty_dir_is_noop,
         # — iso build live | iso build installer split
         test_cmd_iso_build_requires_subaction,
-        test_repo_index_dispatch,
+        test_repo_index_dispatch_retired_in_phase_8,
         test_deb_excluded_from_minimal,
         test_generate_apt_repo_tolerates_empty_udeb_component,
         test_cmd_iso_build_live_forwards_to_cmd_build_iso_live,
