@@ -1768,11 +1768,11 @@ class BuildSession:
         # transition here.  patch_set_hash is empty (tunneled pkgs
         # never apply our patches).
         import time as _time
-        assert self.container is not None
+        _buildlog_path = os.path.join(self.config.dir_log, 'build')
         _t_tunnel_start = _time.monotonic()
         try:
             utils.write_build_record(
-                self.container.buildlog_path,
+                _buildlog_path,
                 utils.new_build_record(
                     package=src_pkg.package,
                     intended_version=str(src_pkg.version),
@@ -1781,10 +1781,6 @@ class BuildSession:
             )
         except OSError as _e:
             logger.warning(f"tunnel {src_pkg.package}: build-record entry: {_e}")
-
-        # Caller gates this on build_container_ready, so self.container
-        # is non-None by the time we get here.
-        assert self.container is not None
         # COORD-01: track per-output destination so we can hash after
         # downloads complete and pin the digests into the tunneled
         # terminal record.
@@ -1852,7 +1848,7 @@ class BuildSession:
                     _output_hashes[_fn] = _h
         try:
             utils.update_build_record(
-                self.container.buildlog_path, src_pkg.package,
+                _buildlog_path, src_pkg.package,
                 phase=('tunneled' if _success else 'failed'),
                 built_version=(str(src_pkg.version) if _success else None),
                 finished=utils._utc_now_iso(),
@@ -2204,9 +2200,6 @@ class BuildSession:
         flag guard above already catches that miss-ordering.
         """
         if not (self.dep_tree and self.dep_tree.selected_srcs):
-            return True
-        if self.container is None:
-            # _source_state needs container.is_ar_file
             return True
 
         assert self.dep_tree is not None
@@ -4723,8 +4716,8 @@ class BuildSession:
 
     def _cmd_snapshot_workload(self, *args):
         """READ-ONLY: sources that change from the CURRENT pin to the TARGET
-        (latest, or an explicit <ts>) — what `repo refresh` would rebuild
-        advancing current → target."""
+        (latest, or an explicit <ts>) — the rebuild set if you advance
+        current → target via `snapshot select` + `source build all`."""
         if not self.flags.dep_check_ready:
             console.print(
                 "snapshot workload: run `cache build` + `cache parse` first",
