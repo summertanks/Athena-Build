@@ -1261,12 +1261,10 @@ class _ChrootMixin:
         #
         # The network apt-source path goes through one or more
         # /etc/apt/sources.list.d/athena-*.list files, written by
-        # _write_athena_apt_sources below: one file per configured
-        # mirror (MIRROR-01 Phase 5), or a single athena.list from the
-        # legacy [Repo] AptSourceURL when no mirrors are registered.
-        # Live ISOs without either have NO apt sources by default —
-        # apt-install fails loud rather than silently pulling from
-        # upstream Debian.
+        # _write_athena_apt_sources below: one file per registered
+        # mirror.  Live ISOs without any registered mirror get NO apt
+        # network source — apt-install fails loud rather than silently
+        # pulling from upstream Debian.
         #
         # If the operator wants upstream Debian back on the running
         # system (off-policy, but their machine), they can uncomment
@@ -1281,11 +1279,11 @@ class _ChrootMixin:
             '# /etc/apt/sources.list — Asgard self-contained policy.\n'
             '#\n'
             '# This file is intentionally empty.  The Asgard apt pool\n'
-            '# ships on the installer ISO + (optionally) at a network\n'
-            '# URL configured via [Repo] AptSourceURL in build.conf,\n'
-            '# which writes /etc/apt/sources.list.d/athena.list.  Live\n'
-            '# images that need apt access at boot should either set\n'
-            '# AptSourceURL at build time or have the operator mount\n'
+            '# ships on the installer ISO + (optionally) one network\n'
+            '# source per registered mirror at /etc/apt/sources.list.d/\n'
+            '# athena-<name>.list.  Live images that need apt access at\n'
+            '# boot should either have a mirror registered at build time\n'
+            '# (`mirror add` on the build host) or have the operator mount\n'
             '# the installation media and `apt-cdrom add` it.\n'
             '#\n'
             '# For reference, the build pulled upstream packages from\n'
@@ -1331,10 +1329,9 @@ class _ChrootMixin:
         # Skipped silently when no signing key has been generated yet.
         self._install_signing_keyring()
 
-        # CONF-02 + MIRROR-01 Phase 5: optional network apt sources
-        # pinned to that keyring.  Iterates configured mirrors; falls
-        # back to legacy [Repo] AptSourceURL when no mirrors are
-        # configured; no-op otherwise.
+        # One /etc/apt/sources.list.d/athena-<name>.list per registered
+        # mirror, pinned to the project signing keyring; no-op when no
+        # mirrors are configured.
         self._write_athena_apt_sources()
 
         tui.console.print("System configuration files written")
@@ -1403,66 +1400,44 @@ class _ChrootMixin:
         )
 
     def _write_athena_apt_sources(self):
-        """CONF-02 + MIRROR-01 Phase 5: write apt network sources for the
-        installed system.
+        """Write one /etc/apt/sources.list.d/athena-<name>.list per
+        registered mirror into the chroot, each line pinned to the
+        project signing keyring via ``[signed-by=...]``.
 
-        Resolution order (operator-friendly precedence):
+        No mirrors configured → no file written; the installed system
+        relies on the ``/cdrom/pool`` source apt-cdrom-added at install
+        time.
 
-        1. **Mirrors configured** (`mirror add` ran on the build host):
-           write ONE source file per configured mirror at
-           ``/etc/apt/sources.list.d/athena-<name>.list``, each line
-           pinned to the project signing keyring via ``[signed-by=...]``.
-           The set of mirrors is the same federation the build host
-           publishes to — the installed system gets the entire federation
-           as redundant apt sources, with apt picking whichever is
-           reachable.
-
-        2. **No mirrors configured but ``[Repo] AptSourceURL`` is set**
-           (legacy single-mirror path): write the original single
-           ``/etc/apt/sources.list.d/athena.list``.  Preserves existing
-           operator configs verbatim until they migrate to `mirror add`.
-
-        3. **Neither**: no-op — the installed target relies solely on
-           the ``/cdrom/pool`` source apt-cdrom-added at install time.
+        Mirrors whose URL uses an ssh transport (ssh:// or user@host:/)
+        are SKIPPED with a warning: apt on the installed system can't
+        dereference those.  file://, http://, https:// pass through.
 
         The keyring named by ``signed-by`` is installed by
         ``_install_signing_keyring`` (run just before this); the operator
-        must have generated a signing key before either path produces
-        a usable source, otherwise apt would reject as unsigned-by-a-
-        missing-key.
+        must have generated a signing key before this produces a usable
+        source, otherwise apt would reject as unsigned-by-a-missing-key.
         """
         _codename = self._config.build_codename
         _keyring = '/usr/share/keyrings/athena-archive-keyring.gpg'
-        # Path 1: per-mirror federation sources
-        try:
-            import mirror as _mirror_mod
-            _names = _mirror_mod.list_mirrors(self._config)
-        except Exception:
-            _names = []
+        import mirror as _mirror_mod
+        _names = _mirror_mod.list_mirrors(self._config)
         _written: 'list[str]' = []
         for _n in _names:
-            try:
-                _st = _mirror_mod.read_mirror_state(self._config, _n)
-            except Exception:
-                _st = None
+            _st = _mirror_mod.read_mirror_state(self._config, _n)
             if _st is None:
                 continue
             _url = _st.get('url') or ''
             if not _url:
                 continue
-            # apt doesn't natively understand file:// or user@host:/ — for
-            # the installed system, ssh:// and user@host:/ shorthands
-            # aren't dereferenceable.  Convert: file:// stays (apt
-            # supports it); ssh:// + user@host:/ are SKIPPED with a
-            # warning so the operator can publish to an HTTP mirror that
-            # apt can actually use.
+            # apt can dereference http://, https://, file:// — not ssh
+            # transports.  Skip those with a warning.
             if _url.startswith(('ssh://',)) or (
                     '@' in _url and ':' in _url and not _url.startswith('/')
                     and not _url.startswith('file://')):
                 tui.console.print(
                     f"Skipping mirror {_n} in target sources.list — apt "
-                    f"can't dereference ssh transport ({_url}).  Publish "
-                    "via an HTTP/HTTPS mirror for installed-system use.",
+                    f"can't dereference ssh transport ({_url}).  Register "
+                    "an HTTP/HTTPS mirror for installed-system use.",
                     tui.COLOR_WARNING,
                 )
                 continue
@@ -1472,31 +1447,11 @@ class _ChrootMixin:
                 f'deb [signed-by={_keyring}] {_url} {_codename} main\n',
             )
             _written.append(f"{_path} → {_url}")
-        if _written:
-            for _w in _written:
-                tui.console.print(
-                    f"Wrote {_w} {_codename} main (signed-by athena keyring)",
-                    tui.COLOR_INFO,
-                )
-            return
-        # Path 2: legacy single-mirror via [Repo] AptSourceURL
-        _url = self._config.apt_source_url
-        if not _url:
-            return
-        self._write_chroot_file(
-            '/etc/apt/sources.list.d/athena.list',
-            f'deb [signed-by={_keyring}] '
-            f'{_url} {_codename} main\n'
-        )
-        tui.console.print(
-            f"Wrote /etc/apt/sources.list.d/athena.list -> {_url} "
-            f"{_codename} main (signed-by athena keyring)",
-            tui.COLOR_INFO,
-        )
-
-    # MIRROR-01 Phase 5: alias keeps existing call sites working through
-    # the rename window.  Remove once everything is on the new name.
-    _write_athena_apt_source = _write_athena_apt_sources
+        for _w in _written:
+            tui.console.print(
+                f"Wrote {_w} {_codename} main (signed-by athena keyring)",
+                tui.COLOR_INFO,
+            )
 
     def _write_chroot_file(self, rel_path: str, content: str):
         """Write content to rel_path inside the chroot as root.

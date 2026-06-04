@@ -583,53 +583,6 @@ def published_ledger(config: 'BuildConfig') -> 'dict[str, list[str]]':
         os.remove(_tp)
 
 
-def fetch_remote_ledger(config: 'BuildConfig') -> 'Optional[dict]':
-    """Download the published Packages index from the remote (the archive of
-    record) and parse it into a {package: [version, ...]} ledger.
-
-    Source of truth for +asg<R>u<N> N-derivation and change-detection — local
-    repo/ is single-snapshot and cannot supply the published history.
-
-    Returns the ledger dict on success (possibly empty if the remote has no
-    Packages yet), or None on failure (no AptSourceURL, unreachable, decode
-    error) — callers (repo refresh) MUST abort on None rather than stamp with
-    a stale/empty ledger (which would mint colliding N).  Caches the fetched
-    Packages under cache/published-ledger/ for reuse / offline inspection."""
-    _url_base = (getattr(config, 'apt_source_url', '') or '').rstrip('/')
-    if not _url_base:
-        logger.warning("fetch_remote_ledger: [Repo] AptSourceURL unset")
-        return None
-    _codename = str(config.build_codename).strip('"').strip("'")
-    _pkgs_url = (f"{_url_base}/dists/{_codename}/main/binary-"
-                 f"{config.arch}/Packages.gz")
-    _cache_dir = os.path.join(config.dir_cache, 'published-ledger')
-    try:
-        os.makedirs(_cache_dir, exist_ok=True)
-    except OSError:
-        pass
-    _local = os.path.join(_cache_dir, 'Packages')
-    try:
-        import requests
-        import gzip
-        _resp = utils._http_session().get(
-            _pkgs_url, timeout=utils._HTTP_TIMEOUT_FAST)
-        if _resp.status_code == 404:
-            # Remote reachable but no Packages yet (fresh archive) → empty.
-            logger.info(f"fetch_remote_ledger: {_pkgs_url} 404 — empty ledger")
-            with open(_local, 'w') as _fh:
-                _fh.write('')
-            return {}
-        _resp.raise_for_status()
-        _text = gzip.decompress(_resp.content).decode('utf-8', errors='replace')
-        with open(_local, 'w') as _fh:
-            _fh.write(_text)
-    except Exception as e:
-        logger.error(
-            f"fetch_remote_ledger({_pkgs_url}): {type(e).__name__}: {e}")
-        return None
-    return parse_packages_to_ledger(_local)
-
-
 def fetch_source_versions_at(config: 'BuildConfig',
                              target_ts: str) -> 'Optional[dict]':
     """Download each mirror's Sources index at `target_ts` and return

@@ -1900,10 +1900,10 @@ def write_snapshot_state(config: 'BuildConfig',
     clear the resolve memo so the new pin takes effect immediately within
     this run.
 
-    Pins: `base` = archive floor (forward-only), `current` = the snapshot the
-    operator selected to build at, `published` = the snapshot the remote (or
-    the local manifest, when external is off) currently reflects.  `external`
-    = runtime override of [Repo] ExternalEnabled."""
+    Pin: `current` = the snapshot the operator selected to build at.
+    Legacy kwargs `base`, `published`, `external` are accepted (and merged
+    into the state file) for backward-compat — they don't drive any live
+    code path anymore; per-mirror state owns the publish-target pins."""
     import json
     _state = read_snapshot_state(config)
     if base is not None:
@@ -2227,29 +2227,6 @@ class BuildConfig:
             ).strip()
             # CONF-02: optional network apt source for the INSTALLED system.
             # When set, build_chroot writes /etc/apt/sources.list.d/athena.list
-            # with [signed-by=athena-archive-keyring.gpg] pointing here, so a
-            # booted Asgard system pulls signed updates from the published
-            # Athena repo.  Empty (default) = no network source written; the
-            # target relies on the /cdrom/pool source added at install time.
-            # The URL is operator-supplied once the repo is published (COMP-02).
-            self.apt_source_url = config_parser.get(
-                'Repo', 'AptSourceURL', fallback=''
-            ).strip()
-            # COMP-02: rsync-over-SSH publish target for `repo publish ssh`.
-            # user@host:/path to a dir served over HTTP(S) by a web server on
-            # that VM.  Empty = publish refuses with a hint.  Optional key
-            # path overrides ssh-agent/default-key selection.
-            self.publish_ssh_target = config_parser.get(
-                'Repo', 'PublishSshTarget', fallback=''
-            ).strip()
-            self.publish_ssh_key = config_parser.get(
-                'Repo', 'PublishSshKey', fallback=''
-            ).strip()
-            # UPD-01: default for whether a remote published repo exists.  The
-            # runtime value can be overridden in config/snapshot.state
-            # ('external') via `repo external enable|disable`.
-            self.external_enabled = config_parser.getboolean(
-                'Repo', 'ExternalEnabled', fallback=True)
             self.skip_build_test = config_parser.get('Source', 'SkipTest').split(', ')
             _tunneled_raw = config_parser.get('Source', 'Tunneled', fallback='')
             self.tunnel_packages: list[str] = [p.strip() for p in _tunneled_raw.split(',') if p.strip()]

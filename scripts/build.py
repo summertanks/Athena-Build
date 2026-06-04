@@ -3321,783 +3321,32 @@ class BuildSession:
             tui.COLOR_HIGHLIGHT,
         )
 
-    def cmd_audit_external(self, *args):
-        """COMP-02: audit the EXTERNALLY-published repo at [Repo]
-        AptSourceURL — what apt clients actually fetch.  Read-only, HTTP.
-
-        Checks, in order (stops at the first hard failure):
-          1. dists/<codename>/InRelease is reachable.
-          2. Its inline signature verifies against our signing key
-             (signing.signing_pubkey_path) — same trust chain apt uses.
-          3. Every index in the now-trusted SHA256 block is present and
-             its size + SHA256 match.  (No pool .deb downloads.)
-
-        `repo audit external ssh` instead RECONCILES the local signed manifest
-        against the remote Packages and reports discrepancies (UPD-01).
-
-        Requires AptSourceURL set and a generated signing key.
-        """
-        if args and args[0] == 'ssh':
-            return self._audit_external_vs_manifest()
-        del args
-        import tempfile
-        import signing
-        from debian.deb822 import Release
-
-        _base = self.config.apt_source_url.rstrip('/')
-        if not _base:
-            console.print(
-                "repo audit external: [Repo] AptSourceURL is unset — set it "
-                "to the published repo URL first")
-            return
-        _cn = self.config.build_codename.strip('"').strip("'")
-        _keyring = signing.signing_pubkey_path(self.config)
-        if not os.path.exists(_keyring):
-            console.print(
-                f"repo audit external: signing pubkey {_keyring} missing — "
-                f"run `key generate` first")
-            return
-
-        console.print(f"repo audit external: {_base} (suite {_cn})")
-        # TemporaryDirectory auto-cleans on exit — keeps this read-only-named
-        # command free of explicit delete primitives (per the read-only guard).
-        with tempfile.TemporaryDirectory(prefix='athena-audit-ext-') as _tmp:
-            _gnupg = os.path.join(_tmp, 'gnupg')
-            os.makedirs(_gnupg)
-            os.chmod(_gnupg, 0o700)   # gpg refuses a homedir looser than 0700
-
-            # 1. reachable
-            _inrel_url = f'{_base}/dists/{_cn}/InRelease'
-            _inrel = os.path.join(_tmp, 'InRelease')
-            _size, _detail = utils.download_file(_inrel_url, _inrel)
-            if _size <= 0:
-                console.print(
-                    f"  [x] unreachable: {_inrel_url} "
-                    f"({_detail or 'no response'})", tui.COLOR_ERROR)
-                return
-            console.print(f"  [✓] reachable: {_inrel_url}")
-
-            # 2. signature verifies against our key
-            _ok, _vdetail = utils.verify_inrelease(_inrel, _keyring, _gnupg)
-            if not _ok:
-                console.print(
-                    f"  [x] signature did NOT verify against "
-                    f"{os.path.basename(_keyring)}: {_vdetail}", tui.COLOR_ERROR)
-                return
-            console.print(f"  [✓] signed: {_vdetail}")
-
-            # 3. every index present + size/SHA256 match the signed Release.
-            # Each index downloads to a unique temp name (no in-place reuse,
-            # so no os.remove needed here).
-            with open(_inrel) as _fh:
-                _rel = Release(_fh)
-            _entries = _rel.get('SHA256', [])
-            if not _entries:
-                console.print(
-                    "  [x] no SHA256 block in InRelease", tui.COLOR_ERROR)
-                return
-            _bad = 0
-            for _i, _e in enumerate(_entries):
-                _name, _exp_sha, _exp_size = (
-                    _e['name'], _e['sha256'], int(_e['size']))
-                _idx = os.path.join(_tmp, f'idx-{_i}')
-                _sz, _ = utils.download_file(f'{_base}/dists/{_cn}/{_name}', _idx)
-                if _sz <= 0:
-                    console.print(f"  [x] MISSING  {_name}", tui.COLOR_ERROR)
-                    _bad += 1
-                    continue
-                if (utils.get_sha256(_idx) != _exp_sha
-                        or os.path.getsize(_idx) != _exp_size):
-                    console.print(
-                        f"  [x] MISMATCH {_name}", tui.COLOR_ERROR)
-                    _bad += 1
-                else:
-                    console.print(f"  [✓] {_name}")
-
-            if _bad:
-                console.print(
-                    f"repo audit external: FAIL — {_bad} of {len(_entries)} "
-                    f"index file(s) missing or mismatched", tui.COLOR_ERROR)
-            else:
-                console.print(
-                    f"repo audit external: OK — signed + all {len(_entries)} "
-                    f"index files consistent", tui.COLOR_HIGHLIGHT)
-
-    def _audit_external_vs_manifest(self):
-        """READ-ONLY: reconcile the local signed manifest against the remote
-        Packages, reporting (pkg=version) entries present in one but not the
-        other (UPD-01 `repo audit external ssh`)."""
-        _local = repo_audit.published_ledger(self.config)
-        _remote = repo_audit.fetch_remote_ledger(self.config)
-        if _remote is None:
-            console.print(
-                "repo audit external ssh: remote unreachable (check [Repo] "
-                "AptSourceURL / network).", tui.COLOR_ERROR)
-            return
-        _only_local, _only_remote = repo_audit.manifest_vs_remote_discrepancies(
-            _local, _remote)
-        if not _only_local and not _only_remote:
-            console.print(
-                "repo audit external ssh: OK — local manifest matches the "
-                "remote.", tui.COLOR_HIGHLIGHT)
-            return
-        console.print(
-            f"repo audit external ssh: DISCREPANCY — {len(_only_local)} "
-            f"version(s) in the local manifest NOT on the remote; "
-            f"{len(_only_remote)} on the remote NOT in the manifest.",
-            tui.COLOR_WARNING)
-        for _pv in sorted(_only_local)[:30]:
-            console.print(f"    manifest-only: {_pv}")
-        for _pv in sorted(_only_remote)[:30]:
-            console.print(f"    remote-only:   {_pv}")
-
-    def cmd_repo_publish(self, *args):
-        """DEPRECATED (MIRROR-01 Phase 3): `repo publish` is the legacy
-        single-target publish.  It still ships the .deb pool + reindexes
-        + signs InRelease, but the SIDECAR layer (signed claim records +
-        coord-head with federation neighbours) is owned by `mirror publish`
-        now.  Operator workflow on a freshly-restructured tree:
-
-          1. `mirror add <name> <url>` — register your target as a mirror
-          2. `repo publish ssh full` — still ships .debs + reindex + InRelease
-          3. `mirror publish <name>` — signs + pushes the sidecar layer
-
-        Phase 5 will fold step 2 into `mirror publish`, removing this
-        command entirely.  For now both steps run; `repo publish` prints
-        this notice and proceeds.
-
-        Usage:
-          repo publish ssh [full|minimal]              (default scope: full)
-          repo publish local <path> [full|minimal]     (default scope: full)
-
-          full    — push the whole local pool's .debs.
-          minimal — push only the runtime subset (staged nested via
-                    cmd_index_repo_minimal; no debug/source/udeb).
-
-        ssh: rsync only the .debs up (ADDITIVE + `--ignore-existing` — .debs
-        are immutable per filename, so a re-publish never re-uploads an
-        existing one), run `dpkg-scanpackages` ON THE VM to rebuild the
-        index from what's ACTUALLY there (sign LOCALLY), upload the
-        regenerated metadata, and refresh the local manifest.  The remote
-        needs `dpkg-dev` installed; its host fingerprint must be in
-        known_hosts (publish is non-interactive).
-
-        local: same flow but the destination is a local filesystem path
-        (USB stick, NFS share, web-server docroot, etc.) — rsync runs
-        local-to-local (no `-e`), and `dpkg-scanpackages` runs in-process
-        instead of via ssh.  Missing target prompts to mkdir -p.
-
-        Because the index is rebuilt from what's at the destination, full
-        and minimal never clobber each other — the published `Packages` is
-        always the union present at the destination.  full then prunes
-        local + records published = current.
-
-        External repo DISABLED (`repo external disable`): full only — index
-        locally into the signed manifest (the +asg bump authority), no
-        transport.  Both `ssh` and `local` transports respect this gate.
-        """
-        # MIRROR-01 Phase 3 deprecation notice.  Print every time so the
-        # operator is reminded to follow up with `mirror publish`; the
-        # legacy .deb-pool + reindex flow still runs below.
-        import mirror as _mirror_mod
-        _configured = _mirror_mod.list_mirrors(self.config)
-        if _configured:
-            console.print(
-                "repo publish: DEPRECATED — sidecar layer is owned by "
-                "`mirror publish` now.  After this command lands the .deb "
-                "pool + InRelease, run `mirror publish` to sign + push the "
-                "claims + coord-head.  Phase 5 will fold both into one "
-                "command.", tui.COLOR_WARNING)
-        else:
-            console.print(
-                "repo publish: DEPRECATED.  Migrate by running `mirror add "
-                "<name> <url>` for your publish target, then this command "
-                "for the .deb pool + InRelease, and finally "
-                "`mirror publish <name>` for the sidecar layer.",
-                tui.COLOR_WARNING)
-        _kind = args[0] if len(args) > 0 else ''
-        if _kind == 'local':
-            _local_path = args[1] if len(args) > 1 else ''
-            _scope = args[2] if len(args) > 2 else 'full'
-            if not _local_path or _scope not in ('full', 'minimal'):
-                console.print("Usage: repo publish local <path> [full|minimal]")
-                return
-        elif _kind == 'ssh':
-            _scope = args[1] if len(args) > 1 else 'full'
-            _local_path = ''
-            if _scope not in ('full', 'minimal'):
-                console.print("Usage: repo publish ssh [full|minimal]")
-                return
-        else:
-            console.print("Usage: repo publish ssh [full|minimal]")
-            console.print("       repo publish local <path> [full|minimal]")
-            return
-        _external = self._external_enabled()
-
-        # ── External DISABLED → local-only (full): index into the manifest. ──
-        if not _external:
-            if _scope != 'full':
-                console.print(
-                    "repo publish: external disabled — only `full` is supported "
-                    "local-only (the manifest mirrors the complete local pool).",
-                    tui.COLOR_WARNING)
-                return
-            if not self._refresh_merge_index():
-                console.print("repo publish: local index/merge failed.",
-                              tui.COLOR_ERROR)
-                return
-            console.print("repo publish: external DISABLED — local manifest "
-                          "refreshed, nothing rsynced.", tui.COLOR_INFO)
-            if self.flags.dep_check_ready:
-                self.cmd_package_cleanup('force')
-            utils.write_snapshot_state(
-                self.config, published=self._snapshot_current())
-            return
-
-        # ── External ENABLED. Stage the deb source tree + suites to index. ──
-        _deb_dists, _suites_spec = self._publish_stage_source(_scope)
-        if _deb_dists is None or _suites_spec is None:
-            return
-
-        if _kind == 'ssh':
-            self._publish_via_ssh(_scope, _deb_dists, _suites_spec)
-        else:
-            self._publish_via_local(_scope, _local_path, _deb_dists,
-                                    _suites_spec)
-
-    def _publish_stage_source(self, scope: str):
-        """Stage the .deb source tree and the suites-spec the reindex will
-        walk.  full uses dir_repo/dists (everything); minimal calls
-        cmd_index_repo_minimal which lays out the runtime subset under
-        dir_publish/dists.  Returns (deb_dists_path, suites_spec) or
-        (None, None) on failure."""
-        _codename = self.config.build_codename.strip('"').strip("'")
-        if scope == 'minimal':
-            if not self.cmd_index_repo_minimal():
-                return None, None
-            _deb_dists = os.path.join(self.config.dir_publish, 'dists')
-            _suites_spec = {_codename: ['main']}
-        else:
-            _deb_dists = os.path.join(self.config.dir_repo, 'dists')
-            _suites_spec = {_codename: ['main', 'doc', 'tests',
-                                        'contrib', 'non-free',
-                                        'non-free-firmware'],
-                            f'{_codename}-debug': ['main']}
-        if not os.path.isdir(_deb_dists):
-            console.print(f"repo publish: {_deb_dists} missing — build first.",
-                          tui.COLOR_ERROR)
-            return None, None
-        return _deb_dists, _suites_spec
-
-    def _publish_finalize(self, scope: str, main_pkgs: str, what: str) -> None:
-        """Shared tail of every transport's publish path: refresh the local
-        signed manifest from the just-indexed main Packages, surface the
-        success line, and (for full) publish-before-prune + record
-        published = current.  `what` is the human-readable destination label
-        for the success line (`ssh://...` or local path)."""
-        _codename = self.config.build_codename.strip('"').strip("'")
-        # STA-21: fail loud on signing failure (silent unsigned writes
-        # would corrupt +asg uN bump derivation on the next publish).
-        if not repo_audit.write_published_manifest(self.config, main_pkgs):
-            console.print(
-                "repo publish: local manifest sign FAILED — sync succeeded "
-                "but the local +asg uN authority is now empty.  Run `key "
-                "generate` / `key verify` then re-publish.",
-                tui.COLOR_ERROR)
-            return
-        console.print(
-            f"repo publish: synced {scope} + re-indexed at "
-            f"{what}", tui.COLOR_HIGHLIGHT)
-        if self.config.apt_source_url:
-            console.print(
-                f"  apt source: {self.config.apt_source_url} {_codename} main",
-                tui.COLOR_INFO)
-        if scope == 'full':
-            console.print("repo publish: pruning local to single-snapshot…")
-            if self.flags.dep_check_ready:
-                self.cmd_package_cleanup('force')
-            utils.write_snapshot_state(
-                self.config, published=self._snapshot_current())
-            console.print(
-                f"repo publish: published is now {self._snapshot_current()}.",
-                tui.COLOR_HIGHLIGHT)
-
-    def _publish_via_ssh(self, scope: str, deb_dists: str,
-                          suites_spec: dict) -> None:
-        """UPD-02 ssh transport — rsync .debs to PublishSshTarget, reindex on
-        the remote VM, upload metadata, refresh the local manifest."""
-        _codename = self.config.build_codename.strip('"').strip("'")
-        _target = self.config.publish_ssh_target
-        if not _target:
-            console.print(
-                "repo publish: [Repo] PublishSshTarget is unset — set it, or "
-                "`repo external disable` for local-only.", tui.COLOR_ERROR)
-            return
-        _dist_id = self.config.build_base_id
-        if ':' in _target:
-            _userhost, _basepath = _target.split(':', 1)
-        else:
-            _userhost, _basepath = _target, ''
-        _root_path = (_basepath.rstrip('/') + '/' + _dist_id
-                      if _basepath else _dist_id)
-        _remote_root = f'{_userhost}:{_root_path}'
-        _ssh = ['ssh']
-        if self.config.publish_ssh_key:
-            _ssh += ['-i', self.config.publish_ssh_key]
-        _spin = Spinner(f"checking remote {_userhost}:{_root_path}")
-        try:
-            _rc = subprocess.run(
-                _ssh + [_userhost, 'test', '-d', _root_path],
-                capture_output=True, text=True).returncode
-        finally:
-            _spin.done()
-        if _rc != 0:
-            console.print(
-                f"repo publish: remote dir '{_root_path}' not found on "
-                f"{_userhost} — `ssh {_userhost} mkdir -p {_root_path}`.",
-                tui.COLOR_ERROR)
-            return
-
-        # 1. Push only the .debs (immutable → --ignore-existing, deb-only).
-        _debfilter = ['--include=*/', '--include=*.deb', '--include=*.udeb',
-                      '--exclude=*']
-        if self._rsync_streamed(
-                f'rsync debs → {_remote_root}', deb_dists,
-                f'{_remote_root}/dists/', _ssh,
-                ignore_existing=True, filters=_debfilter) != 0:
-            console.print("repo publish: .deb upload failed — see log.",
-                          tui.COLOR_ERROR)
-            return
-
-        # 2. Rebuild the index ON THE REMOTE (scan there, sign locally).
-        import signing
-        import apt_repo
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-        if subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
-                          capture_output=True, text=True).returncode != 0:
-            console.print("ERROR: incorrect sudo password")
-            return
-        _staging = os.path.join(self.config.dir_temp, 'remote-reindex')
-        if os.path.isdir(_staging):
-            shutil.rmtree(_staging)
-        os.makedirs(_staging, exist_ok=True)
-        try:
-            _main_pkgs = apt_repo.remote_reindex_and_sign(
-                staging=_staging, ssh_cmd=_ssh, userhost=_userhost,
-                remote_root=_root_path, suites_spec=suites_spec,
-                codename_for_suite={_s: _s for _s in suites_spec},
-                primary_suite=_codename, arch=self.config.arch,
-                version=self.config.build_version.strip('"').strip("'"),
-                password=_password,
-                signing_homedir=signing.signing_home(self.config))
-        finally:
-            _password = '*' * len(_password)  # noqa: F841
-        if _main_pkgs is None:
-            console.print("repo publish: remote re-index failed — see log "
-                          "(is dpkg-dev installed on the VM?).", tui.COLOR_ERROR)
-            return
-
-        # 3. Upload the freshly-generated metadata (staging holds metadata only).
-        if self._rsync_streamed(
-                f'rsync index → {_remote_root}',
-                os.path.join(_staging, 'dists'),
-                f'{_remote_root}/dists/', _ssh) != 0:
-            console.print("repo publish: metadata upload failed — see log.",
-                          tui.COLOR_ERROR)
-            return
-
-        self._publish_finalize(scope, _main_pkgs, _remote_root)
-
-    def _publish_via_local(self, scope: str, local_path: str,
-                            deb_dists: str, suites_spec: dict) -> None:
-        """COMP-02 local transport — rsync .debs to a local destination
-        (USB / NFS / web docroot / etc.), reindex in-process with
-        dpkg-scanpackages, refresh the local manifest.  Twin of
-        _publish_via_ssh but no `-e ssh`, no remote `test -d`, and no
-        dpkg-dev-on-the-VM requirement (host's dpkg-dev does the scan)."""
-        _codename = self.config.build_codename.strip('"').strip("'")
-        _dest = os.path.abspath(os.path.expanduser(local_path))
-        if not os.path.isdir(_dest):
-            _resp = Prompt(
-                PROMPT_YESNO,
-                f"Create local publish target {_dest}?").get_response().lower()
-            if _resp not in ('y', 'yes'):
-                console.print("repo publish: target missing — aborted.",
-                              tui.COLOR_ERROR)
-                return
-            try:
-                os.makedirs(_dest, exist_ok=True)
-            except OSError as e:
-                console.print(
-                    f"repo publish: cannot create {_dest}: {e}",
-                    tui.COLOR_ERROR)
-                return
-        if not os.access(_dest, os.W_OK):
-            console.print(
-                f"repo publish: {_dest} is not writable.",
-                tui.COLOR_ERROR)
-            return
-
-        # 1. Copy only the .debs (immutable → --ignore-existing, deb-only).
-        _debfilter = ['--include=*/', '--include=*.deb', '--include=*.udeb',
-                      '--exclude=*']
-        if self._rsync_streamed(
-                f'rsync debs → {_dest}', deb_dists,
-                f'{_dest}/dists/', ssh_cmd=[],
-                ignore_existing=True, filters=_debfilter) != 0:
-            console.print("repo publish: .deb copy failed — see log.",
-                          tui.COLOR_ERROR)
-            return
-
-        # 2. Rebuild the index from what's at the destination (in-process).
-        import signing
-        import apt_repo
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-        if subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
-                          capture_output=True, text=True).returncode != 0:
-            console.print("ERROR: incorrect sudo password")
-            return
-        _staging = os.path.join(self.config.dir_temp, 'local-reindex')
-        if os.path.isdir(_staging):
-            shutil.rmtree(_staging)
-        os.makedirs(_staging, exist_ok=True)
-        try:
-            _main_pkgs = apt_repo.local_reindex_and_sign(
-                staging=_staging, dest_root=_dest, suites_spec=suites_spec,
-                codename_for_suite={_s: _s for _s in suites_spec},
-                primary_suite=_codename, arch=self.config.arch,
-                version=self.config.build_version.strip('"').strip("'"),
-                password=_password,
-                signing_homedir=signing.signing_home(self.config))
-        finally:
-            _password = '*' * len(_password)  # noqa: F841
-        if _main_pkgs is None:
-            console.print("repo publish: local re-index failed — see log.",
-                          tui.COLOR_ERROR)
-            return
-
-        # 3. Copy the freshly-generated metadata (staging → dest).
-        if self._rsync_streamed(
-                f'rsync index → {_dest}',
-                os.path.join(_staging, 'dists'),
-                f'{_dest}/dists/', ssh_cmd=[]) != 0:
-            console.print("repo publish: metadata copy failed — see log.",
-                          tui.COLOR_ERROR)
-            return
-
-        self._publish_finalize(scope, _main_pkgs, _dest)
-
-    def cmd_repo_summary(self, *args):
-        """COMP-02: print a summary of the published repo at the destination.
-
-        Usage:
-          repo summary ssh                 (against [Repo] PublishSshTarget)
-          repo summary local <path>        (against a local filesystem path)
-
-        Reports:
-          - destination + suites discovered there
-          - file count + total bytes under <dest>/dists/
-          - per-suite InRelease signature (verifies against our pubkey) +
-            its `Date:` field
-          - snapshot pin state (base / published / current) from
-            config/snapshot.state
-          - local signed manifest tally (binary versions / source packages
-            tracked — = the +asg uN bump authority)
-
-        Read-only — never mutates the destination."""
-        _kind = args[0] if args else ''
-        if _kind == 'ssh':
-            return self._summary_via_ssh()
-        if _kind == 'local':
-            _path = args[1] if len(args) > 1 else ''
-            if not _path:
-                console.print("Usage: repo summary local <path>")
-                return
-            return self._summary_via_local(_path)
-        console.print("Usage: repo summary ssh")
-        console.print("       repo summary local <path>")
-
-    def _summary_via_ssh(self) -> None:
-        """COMP-02 summary via the ssh transport — ssh out to the configured
-        PublishSshTarget and inspect dists/ in place (no fetch of pool .debs;
-        just stat + cat InRelease)."""
-        _target = self.config.publish_ssh_target
-        if not _target:
-            console.print(
-                "repo summary: [Repo] PublishSshTarget is unset.",
-                tui.COLOR_ERROR)
-            return
-        _dist_id = self.config.build_base_id
-        if ':' in _target:
-            _userhost, _basepath = _target.split(':', 1)
-        else:
-            _userhost, _basepath = _target, ''
-        _root_path = (_basepath.rstrip('/') + '/' + _dist_id
-                      if _basepath else _dist_id)
-        _ssh = ['ssh']
-        if self.config.publish_ssh_key:
-            _ssh += ['-i', self.config.publish_ssh_key]
-
-        def _has_inrelease(suite: str) -> bool:
-            _r = subprocess.run(
-                _ssh + [_userhost, 'test', '-f',
-                        f'{_root_path}/dists/{suite}/InRelease'],
-                capture_output=True, text=True)
-            return _r.returncode == 0
-
-        def _read_inrelease(suite: str):
-            _r = subprocess.run(
-                _ssh + [_userhost, 'cat',
-                        f'{_root_path}/dists/{suite}/InRelease'],
-                capture_output=True, text=True)
-            return _r.stdout if _r.returncode == 0 else None
-
-        def _walk():
-            _r = subprocess.run(
-                _ssh + [_userhost,
-                        f'find {_root_path}/dists -type f '
-                        f'-printf "%s\\n" 2>/dev/null'],
-                capture_output=True, text=True)
-            _sizes = [int(_x) for _x in _r.stdout.split() if _x.isdigit()]
-            return len(_sizes), sum(_sizes)
-
-        self._summarize_destination(
-            f'ssh://{_userhost}:{_root_path}',
-            _has_inrelease, _read_inrelease, _walk)
-
-    def _summary_via_local(self, local_path: str) -> None:
-        """COMP-02 summary via the local transport — stat the destination
-        directly."""
-        _dest = os.path.abspath(os.path.expanduser(local_path))
-        if not os.path.isdir(_dest):
-            console.print(
-                f"repo summary: {_dest} not found.", tui.COLOR_ERROR)
-            return
-
-        def _has_inrelease(suite: str) -> bool:
-            return os.path.isfile(
-                os.path.join(_dest, 'dists', suite, 'InRelease'))
-
-        def _read_inrelease(suite: str):
-            _p = os.path.join(_dest, 'dists', suite, 'InRelease')
-            try:
-                with open(_p) as _fh:
-                    return _fh.read()
-            except OSError:
-                return None
-
-        def _walk():
-            _n, _bytes = 0, 0
-            _dists_root = os.path.join(_dest, 'dists')
-            if os.path.isdir(_dists_root):
-                for _dp, _dirs, _files in os.walk(_dists_root):
-                    for _f in _files:
-                        _p = os.path.join(_dp, _f)
-                        if os.path.isfile(_p):
-                            _n += 1
-                            _bytes += os.path.getsize(_p)
-            return _n, _bytes
-
-        self._summarize_destination(
-            _dest, _has_inrelease, _read_inrelease, _walk)
-
-    def _summarize_destination(self, label: str, has_inrelease,
-                                read_inrelease, walk_files) -> None:
-        """Shared body of `_summary_via_{ssh,local}`.  Transport-specific bits
-        are the three callables:
-          has_inrelease(suite) → bool       — probe for InRelease at the dest
-          read_inrelease(suite) → str|None  — read its content (or None)
-          walk_files() → (n, bytes)         — count + sum of files under dists/
-
-        Everything else (signature verify, snapshot pin readout, manifest
-        tally) is destination-agnostic."""
-        import signing
-        import tempfile
-        _codename = self.config.build_codename.strip('"').strip("'")
-        console.print(f"repo summary @ {label}", tui.COLOR_HIGHLIGHT)
-
-        # 1. file walk under dists/
-        _n, _bytes = walk_files()
-        console.print(
-            f"  Files            : {_n:,} file(s)  "
-            f"{_bytes // (2 ** 20):,} MB")
-
-        # 2. per-suite InRelease signature + date
-        _keyring = signing.signing_pubkey_path(self.config)
-        _have_key = os.path.exists(_keyring)
-        for _suite in (_codename, f'{_codename}-debug'):
-            if not has_inrelease(_suite):
-                continue
-            _text = read_inrelease(_suite)
-            if _text is None:
-                console.print(
-                    f"  InRelease ({_suite}) : (could not read)",
-                    tui.COLOR_WARNING)
-                continue
-            _date = ''
-            for _line in _text.splitlines():
-                if _line.startswith('Date:'):
-                    _date = _line.split(':', 1)[1].strip()
-                    break
-            if not _have_key:
-                console.print(
-                    f"  InRelease ({_suite}) : (no pubkey at {_keyring} — "
-                    f"`key generate` first)", tui.COLOR_WARNING)
-            else:
-                with tempfile.TemporaryDirectory(
-                        prefix='athena-summary-') as _tmp:
-                    _gnupg = os.path.join(_tmp, 'gnupg')
-                    os.makedirs(_gnupg)
-                    os.chmod(_gnupg, 0o700)
-                    _inrel = os.path.join(_tmp, 'InRelease')
-                    with open(_inrel, 'w') as _fh:
-                        _fh.write(_text)
-                    _ok, _detail = utils.verify_inrelease(
-                        _inrel, _keyring, _gnupg)
-                if _ok:
-                    console.print(
-                        f"  InRelease ({_suite}) : [✓] {_detail}")
-                else:
-                    console.print(
-                        f"  InRelease ({_suite}) : [x] {_detail}",
-                        tui.COLOR_ERROR)
-            if _date:
-                console.print(f"                     dated {_date}")
-
-        # 3. snapshot pin state
-        _state = utils.read_snapshot_state(self.config)
-        console.print(
-            f"  Snapshot pins    : base      {_state.get('base', '(unset)')}")
-        console.print(
-            f"                     published {_state.get('published', '(unset)')}")
-        console.print(
-            f"                     current   {_state.get('current', '(unset)')}")
-
-        # 4. local signed manifest tally
-        _ledger = repo_audit.published_ledger(self.config)
-        _bins = sum(len(_v) for _v in _ledger.values())
-        console.print(
-            f"  Local manifest   : {_bins:,} binary version(s) across "
-            f"{len(_ledger):,} package(s)")
-
-    def _rsync_streamed(self, label, src, dest, ssh_cmd, delete=False,
-                        ignore_existing=False, filters=None):
-        """rsync -aH (ADDITIVE by default) with --info=progress2, mirroring
-        rsync's single overall % into a ProgressBar so the operator sees
-        movement during a multi-GB sync.  rsync writes progress to stdout
-        using \\r in-place updates, so we read raw and split on \\r/\\n.
-        stderr is merged into stdout to avoid a pipe-buffer deadlock;
-        non-progress lines are kept for the error log.  Returns the rsync
-        return code.
-
-        delete=False (default) → NO `--delete`: the destination ACCUMULATES
-        files, never removing a published version absent from the local tree
-        (the UPD-01 append-only guarantee).  delete=True is reserved for an
-        explicit, deliberate mirror-reset — never the normal publish path.
-
-        ignore_existing=True (UPD-02) → `--ignore-existing`: skip files already
-        present at the destination by NAME (not mtime) — for the immutable .deb
-        pool pass, so a re-publish never re-uploads unchanged .debs.  `filters`
-        are extra rsync `--include`/`--exclude` args (e.g. a deb-only filter).
-
-        ssh_cmd=[] (COMP-02 local publish) → no `-e` arg, so rsync runs in
-        local-to-local mode (`dest` is a plain filesystem path)."""
-        _bar = ProgressBar(label, itr_label='', maxvalue=100,
-                           show_rate=False, label_width=34)
-        _argv = ['rsync', '-aH']
-        if delete:
-            _argv.append('--delete')
-        if ignore_existing:
-            _argv.append('--ignore-existing')
-        _argv += list(filters or [])
-        _argv += ['--info=progress2']
-        if ssh_cmd:
-            _argv += ['-e', ' '.join(ssh_cmd)]
-        _argv += [f'{src}/', dest]
-        _proc = subprocess.Popen(
-            _argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        _tail: 'list[str]' = []
-        try:
-            _stream = _proc.stdout
-            _seg = ''
-            while _stream is not None:
-                _ch = _stream.read(1)
-                if not _ch:
-                    break
-                if _ch in '\r\n':
-                    _line, _seg = _seg.strip(), ''
-                    if not _line:
-                        continue
-                    _m = re.search(r'(\d+)%', _line)
-                    if _m:
-                        _bar.step(int(_m.group(1)) - _bar.value)
-                    else:
-                        _tail.append(_line)
-                else:
-                    _seg += _ch
-            _proc.wait()
-        finally:
-            _bar.close()
-        if _proc.returncode != 0:
-            logger.error(
-                f"_rsync_streamed {label}: rc={_proc.returncode}; "
-                f"tail={' | '.join(_tail[-10:])}")
-        return _proc.returncode
 
     def cmd_repo(self, action: str = '', *args):
-        """Dispatcher for `repo <action>` commands.
+        """Dispatcher for `repo <action>` — LOCAL .deb pool lifecycle.
 
-        Merged from the former `package` and `repo` commands — the
-        whole repo lifecycle (tunnel a pre-built .deb in, audit
-        constraints, strip NMU residue, clean up obsoletes, index
-        metadata, migrate layout, reload a fork after edit) lives
-        under one verb.
+        Remote-endpoint state (publish, audit-remote, federation
+        membership) lives under `mirror`.  `repo` covers the
+        chroot/ISO-facing pool on this host: audit + repair + indexing.
         """
         _table = {
-            'tunnel':         'pull prebuilt .debs from Debian repo '
+            'tunnel':         'pull prebuilt .debs from upstream Debian repo '
                               '(repo tunnel [pkg…])',
-            'audit':          'one-stop pre-ship gate: dep + conflict + '
-                              'stale-files + content integrity + NMU '
-                              'residue.  Pass `quick` to skip the slow '
-                              '(~30s) integrity scan.  Pass a target '
-                              'name to drill in: `repo audit lsb-base`.',
-            'audit external': 'audit the published repo at AptSourceURL — '
-                              'reachable + InRelease signed by our key + '
-                              'index size/SHA256 consistent (no pool dl)',
-            'repair':         'umbrella for repo-state fixups: `repo '
-                              'repair strip` (NMU suffix backfill), '
-                              '`repo repair cleanup` (drop obsoletes).',
+            'audit':          'pre-ship gate: dep + conflict + stale-files + '
+                              'content integrity + NMU residue.  Pass `quick` '
+                              'to skip the slow (~30s) integrity scan.  Pass '
+                              'a target name to drill in: `repo audit lsb-base`.',
+            'repair':         'umbrella for repo-state fixups: strip, cleanup, '
+                              'backfill-hashes',
             'index full':     'index ALL suites in-place under '
                               'repo/dists/<codename>{,-debug}/ (default)',
             'index minimal':  'build + index + sign the runtime subset '
                               '(main debs, no -dbg/-dbgsym/-source/udeb) '
                               'into publish/',
-            'publish ssh full':    'rsync the full repo/ to [Repo] '
-                                   'PublishSshTarget (run `repo index full` first)',
-            'publish ssh minimal': 'rsync the minimal publish/ to '
-                                   'PublishSshTarget (run `repo index minimal` first)',
-            'publish local <path> [full|minimal]':
-                                   'COMP-02: copy + reindex at a local filesystem '
-                                   'destination (USB / NFS / web docroot); '
-                                   'missing <path> prompts to mkdir -p',
-            'summary ssh':         'COMP-02: summary of the ssh destination '
-                                   '(files, suites, InRelease signature + date, '
-                                   'snapshot pins, manifest tally) — read-only',
-            'summary local <path>':'COMP-02: same summary against a local '
-                                   'filesystem destination',
-            'refresh':        'DEPRECATED: use top-level `refresh`; this is a forwarder',
-            'external':       'enable/disable/status the external published repo '
-                              '(repo external <status|enable|disable>)',
         }
         if action == 'tunnel':
             return self.cmd_tunnel_package(*args)
-        if action == 'refresh':
-            return self.cmd_repo_refresh(*args)
         if action == 'audit':
-            # `repo audit external` audits the published mirror; everything
-            # else is the local repo gate (with optional drill-in target).
-            if args and args[0] == 'external':
-                return self.cmd_audit_external(*args[1:])
             return self.cmd_audit(*args)
         if action == 'repair':
             return self.cmd_repo_repair(*args)
@@ -4110,104 +3359,22 @@ class BuildSession:
             if _sub == 'full':
                 return self.cmd_index_repo(*_rest)
             return self._group_help('repo', _table, f'index {_sub}')
-        if action == 'publish':
-            return self.cmd_repo_publish(*args)
-        if action == 'summary':
-            return self.cmd_repo_summary(*args)
-        if action == 'external':
-            return self.cmd_repo_external(*args)
         return self._group_help('repo', _table, action)
 
-    def cmd_repo_external(self, action: str = '', *args):
-        """Enable/disable/inspect the EXTERNAL published repo (UPD-01).
-
-        Usage: repo external <status|enable|disable>
-
-        disable → LOCAL-ONLY: `repo publish` updates only the local signed
-        manifest (no rsync); +asg bumps derive from it.  For testing without a
-        VM.  Local stays single-snapshot, so advancing several snapshots while
-        disabled then re-enabling can jump bump numbers (you're warned).
-        enable → onto an EMPTY remote: rebaseline current = base (fresh first
-        publish); onto a NON-empty remote: requires published == current."""
-        del args
-        _table = {
-            'status':  'show external on/off + base/published/current',
-            'enable':  'turn the external repo ON (rebaseline if remote empty)',
-            'disable': 'LOCAL-ONLY mode (local manifest is the authority)',
-        }
-        if action == 'status':
-            _on = self._external_enabled()
-            console.print(
-                f"external repo: {'ENABLED' if _on else 'DISABLED (local-only)'}")
-            console.print(
-                f"  base / published / current: {self._snapshot_base_ts()} / "
-                f"{self._snapshot_published()} / {self._snapshot_current()}")
-            return
-        if action == 'disable':
-            utils.write_snapshot_state(self.config, external=False)
-            console.print(
-                "external repo: DISABLED — local-only.  `repo publish` now "
-                "updates only the local manifest; +asg bumps derive from it.  "
-                "Local stays single-snapshot.", tui.COLOR_WARNING)
-            return
-        if action == 'enable':
-            _remote = repo_audit.fetch_remote_ledger(self.config)
-            if _remote is None:
-                console.print(
-                    "repo external enable: remote unreachable (check [Repo] "
-                    "AptSourceURL / network) — not enabling.", tui.COLOR_ERROR)
-                return
-            if not _remote:
-                # boundary-D: empty remote → rebaseline as a first run.
-                _base = self._snapshot_base_ts()
-                utils.write_snapshot_state(self.config, external=True,
-                                           current=_base, published=_base)
-                self.flags.cache_ready = False
-                self.flags.dep_check_ready = False
-                console.print(
-                    f"external repo: ENABLED — remote is empty, rebaselined "
-                    f"current = base = {_base} (treat as a first publish).  Run "
-                    f"`cache build` + `cache parse`, a full build, then `repo "
-                    f"publish ssh full`.", tui.COLOR_WARNING)
-                return
-            _pub = self._snapshot_published()
-            _cur = self._snapshot_current()
-            if _cur and _pub and apt_pkg.version_compare(_cur, _pub) != 0:
-                console.print(
-                    f"repo external enable: REFUSED — current ({_cur}) != "
-                    f"published ({_pub}); publish the pending delta first so "
-                    f"local and remote don't diverge.", tui.COLOR_ERROR)
-                return
-            utils.write_snapshot_state(self.config, external=True)
-            console.print("external repo: ENABLED.", tui.COLOR_HIGHLIGHT)
-            return
-        return self._group_help('repo external', _table, action)
-
     # ─────────────────────────────────────────────────────────────────────
-    # MIRROR-01 — remote-endpoint umbrella (federated publish targets)
-    # Phase 1: add / remove / list / summary / status (operator-state CRUD).
-    # Phase 3 will land publish / pull / audit / query / reconcile-neighbours.
+    # Mirror umbrella — remote-endpoint federation
     # ─────────────────────────────────────────────────────────────────────
 
     def cmd_mirror(self, action: str = '', *args):
-        """Manage configured publish-target mirrors and their state.
+        """Manage federated publish-target mirrors and the build host's
+        signed-claim identity.
 
-        Phase 1 (this commit): operator-state CRUD only.  Network commands
-        (publish / pull / audit) land in later phases.
-
-        Subcommands:
-          add <name> <url> [--ssh-key PATH] [--type ssh|local]
-                                 register a new mirror; seeds base+current
-                                 from local snapshot.current
-          remove <name|url>      unregister; Phase 3 will also propagate
-                                 removal to peer coord-head.neighbours
-          list                   one-line-per-mirror inventory
-          summary [<name>]       full per-mirror state
-          status [<name>]        health overview (reachability tests are
-                                 Phase 3 — Phase 1 shows on-disk state only)
-
-        State lives at config/mirror.<name>.state (one file per mirror,
-        durable, gitignored).  See scripts/mirror.py for the schema."""
+        Per-mirror durable state lives at config/mirror.<name>.state.
+        Per-builder Ed25519 identity (signed by tier-1 GPG via the
+        federation coord-head) lives at coord/identity/.
+        """
+        if action == 'init':
+            return self.cmd_mirror_init(*args)
         if action == 'add':
             return self.cmd_mirror_add(*args)
         if action == 'remove' or action == 'delete':
@@ -4228,18 +3395,26 @@ class BuildSession:
             return self.cmd_mirror_audit(*args)
         if action == 'query':
             return self.cmd_mirror_query(*args)
+        if action == 'builders':
+            return self.cmd_mirror_builders(*args)
+        if action == 'conflict':
+            return self.cmd_mirror_conflict(*args)
         _table = {
+            'init <id>':                   'generate Ed25519 builder identity + '
+                                           'persist BUILDER_ID',
             'add <name> <url>':            'register a mirror; seeds base+current',
             'remove <name|url>':           'unregister a mirror',
             'list':                        'one-line-per-mirror inventory',
             'summary [<name>]':            'full per-mirror state',
-            'status [<name>]':             'on-disk health overview (Phase 1)',
+            'status [<name>]':             'health overview + builder identity + '
+                                           'halt sentinel',
             'reconcile-neighbours [<n>]':  'fan-out: align every peer\'s '
                                            'coord-head.neighbours with local '
-                                           'config; re-sign + push (Phase 2)',
-            'publish [<name>]':            'sign + push claims + re-sign '
-                                           'coord-head (federation-gated; '
-                                           'first-publish bootstrap)',
+                                           'config; re-sign + push',
+            'publish [<name>]':            'per-file .deb push + sign + push '
+                                           'claims + re-sign coord-head '
+                                           '(federation-gated; bootstraps a '
+                                           'fresh mirror on first contact)',
             'pull [<name>]':               'fetch + verify peer sidecar, then '
                                            'download claim .debs missing locally '
                                            '(skip-own; SHA-256 verified)',
@@ -4247,6 +3422,10 @@ class BuildSession:
                                            'hash conflicts, cross-mirror pool drift',
             'query <pkg> [<name>]':        'show claims matching <pkg> from '
                                            'the last fetched view of each mirror',
+            'builders':                    'list registered builders (local + '
+                                           'fetched keyring)',
+            'conflict resolve <pkg>':      'retract our claim for <pkg>; clear '
+                                           'PUBLISH_HALT',
         }
         return self._group_help('mirror', _table, action)
 
@@ -4285,13 +3464,14 @@ class BuildSession:
             tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
         if _ok:
             console.print(
-                "  (Phase 3 will also propagate the new URL to all peer "
-                "mirrors' coord-head.neighbours under flock.)")
+                "  (Run `mirror reconcile-neighbours` to propagate the new "
+                "URL to every peer's coord-head.neighbours under flock.)")
         return _ok
 
     def cmd_mirror_remove(self, *args):
-        """mirror remove <name|url> — unregister.  Phase 3 will also
-        propagate the removal to every peer mirror's neighbours list."""
+        """mirror remove <name|url> — unregister this mirror from local
+        state.  Run `mirror reconcile-neighbours` after to drop the URL
+        from every remaining peer's coord-head.neighbours."""
         import mirror as _mirror
         if not args:
             console.print(
@@ -4303,8 +3483,8 @@ class BuildSession:
             tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
         if _ok:
             console.print(
-                "  (Phase 3 will also propagate the removal to all peer "
-                "mirrors' coord-head.neighbours under flock.)")
+                "  (Run `mirror reconcile-neighbours` to propagate the "
+                "removal to remaining peers' coord-head.neighbours.)")
         return _ok
 
     def cmd_mirror_list(self, *args):
@@ -4351,7 +3531,7 @@ class BuildSession:
                 for _u in _nb:
                     console.print(f"    - {_u}")
             else:
-                console.print("  neighbours_known: (none — Phase 3 populates on publish)")
+                console.print("  neighbours_known: (none — first publish will populate)")
         return True
 
     def cmd_mirror_publish(self, *args):
@@ -4362,15 +3542,11 @@ class BuildSession:
           2. Federation gate: peer's coord-head.neighbours must match local
              config (or peer has no head yet → first-publish bootstrap)
           3. Hash-conflict scan (CRITICAL → PUBLISH_HALT)
-          4. Sign + append claims for every new build.json output_hashes
-          5. Push jsonl + re-sign coord-head pinning current InRelease sha
-          6. Update local config/mirror.<name>.state (current,
+          4. Per-file .deb push to the pool (with progress bar)
+          5. Sign + append claims for every new build.json output_hashes
+          6. Push jsonl + re-sign coord-head pinning current InRelease sha
+          7. Update local config/mirror.<name>.state (current,
              last_publish_at, neighbours_known)
-
-        Publish-time .deb pool sync: NOT yet integrated (Phase 3 ships the
-        sidecar layer end-to-end; per-file .deb push with progress lands
-        in Phase 3b).  For now run `repo publish ssh full` first to land
-        the .debs, then `mirror publish` for the sidecar.
 
         First-publish bootstrap: on a fresh empty mirror endpoint, this
         command uploads our pubkey to keyring/builders/ AND initialises
@@ -4424,9 +3600,9 @@ class BuildSession:
             assert _st is not None  # checked above / by list_mirrors
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
-            # MIRROR-01 Phase 3b: derive pool + coord specs from the
-            # operator-registered POOL URL.  Pool serves apt clients;
-            # sidecar is the sibling `-coord` tree.
+            # Derive pool + coord specs from the operator-registered POOL
+            # URL.  Pool serves apt clients; sidecar lives at the sibling
+            # `-coord` path on the same host.
             _pool_spec, _ssh_host = _mirror.rsync_spec_for_url(_url)
             _coord_url = _mirror.coord_root_for(_url)
             _coord_spec, _coord_ssh_host = _mirror.rsync_spec_for_url(
@@ -4871,77 +4047,55 @@ class BuildSession:
         """On-disk health overview.  Phase 1 surfaces what state is durable;
         network reachability + last-publish freshness land in Phase 3."""
         import mirror as _mirror
+        import coord.reconcile as _reconcile
+        import coord.store as _store
+        # Identity + halt sentinel
+        _bid = self._coord_builder_id()
+        if _bid:
+            console.print(
+                f"builder-id: {_bid}", tui.COLOR_HIGHLIGHT)
+            _claims_path = _store.claims_path(
+                self.config.dir_coord_claims, _bid)
+            if os.path.isfile(_claims_path):
+                try:
+                    with open(_claims_path, 'rb') as _fh:
+                        _lines = sum(1 for _ in _fh)
+                except OSError:
+                    _lines = 0
+                _seq = _store.max_seq(self.config.dir_coord_claims, _bid)
+                console.print(
+                    f"  claims jsonl: {_lines} line(s); last seq = {_seq}")
+            else:
+                console.print(f"  claims jsonl: <none at {_claims_path}>")
+        else:
+            console.print(
+                "builder-id: <not initialized> — run `mirror init <id>`",
+                tui.COLOR_WARNING)
+        _halt = _reconcile.publish_halt_reason(self.config.dir_coord)
+        if _halt is not None:
+            console.print(
+                f"PUBLISH_HALT: {_halt}", tui.COLOR_ERROR)
+        else:
+            console.print("PUBLISH_HALT: clear")
+        # Per-mirror state
         _names = ([args[0]] if args
                   else _mirror.list_mirrors(self.config))
         if not _names:
-            console.print("mirror status: no mirrors configured.")
+            console.print("\nno mirrors configured.")
             return True
+        console.print("\nmirrors:")
         for _n in _names:
             _st = _mirror.read_mirror_state(self.config, _n)
             if _st is None:
                 console.print(
-                    f"{_n}: NOT REGISTERED", tui.COLOR_ERROR)
+                    f"  {_n}: NOT REGISTERED", tui.COLOR_ERROR)
                 continue
             _published = bool(_st.get('last_publish_at'))
             _tag = 'PUBLISHED' if _published else 'NEVER PUBLISHED'
             console.print(
-                f"{_n}: {_tag}  current={_st.get('current', '') or '(unset)'}")
+                f"  {_n}: {_tag}  "
+                f"current={_st.get('current', '') or '(unset)'}")
         return True
-
-    # ─────────────────────────────────────────────────────────────────────
-    # COORD-01 — multi-builder repo coordination (sidecar claims layer)
-    # ─────────────────────────────────────────────────────────────────────
-
-    def cmd_coord(self, action: str = '', *args):
-        """Multi-builder coordination — sidecar claim record management.
-
-        Each builder owns an Ed25519 keypair (identity), an append-only
-        JSONL of signed claims for every .deb it ships, and views all
-        registered builders' claims through a 3-way audit (local pool ↔
-        own claims; local build.json ↔ claims).
-
-        Subcommands:
-          init <builder-id>  — generate Ed25519 keypair under coord/
-                               identity/, persist builder-id to
-                               coord/BUILDER_ID; print the public key
-                               for the operator to register on the
-                               repo host (out-of-band).
-          builders           — list registered builders (local identity
-                               + everyone in coord/fetched/keyring/).
-          audit local        — pool ↔ this builder's claims.
-          audit cross        — build.json ↔ this builder's claims.
-          status             — report current builder-id + claim count
-                               + last seq + PUBLISH_HALT presence.
-
-        Sync/publish (P2/P3) land in later commits.
-        """
-        if action == 'init':
-            return self.cmd_coord_init(*args)
-        if action == 'builders':
-            return self.cmd_coord_builders(*args)
-        if action == 'audit':
-            return self.cmd_coord_audit(*args)
-        if action == 'status':
-            return self.cmd_coord_status(*args)
-        if action == 'sync':
-            return self.cmd_coord_sync(*args)
-        if action == 'publish':
-            return self.cmd_coord_publish(*args)
-        if action == 'conflict':
-            return self.cmd_coord_conflict(*args)
-        _table = {
-            'init <id>':                  'generate Ed25519 claim key + persist builder-id',
-            'builders':                   'list registered builders (local + remote keyring)',
-            'audit local':                'pool ↔ this-builder claims',
-            'audit cross':                'build.json ↔ this-builder claims',
-            'audit repo':                 'remote pool + keyring (P2 fetch-and-verify)',
-            'sync pull <spec>':           'rsync remote repo-coord/ to coord/fetched/ + verify',
-            'publish local':              'sign pending claims into local jsonl (no remote)',
-            'publish remote <spec> <IR>': 'full transaction: flock + sync + sign + push (P3)',
-            'conflict resolve <pkg>':     'retract our claim for <pkg>; clear PUBLISH_HALT',
-            'status':                     'show builder-id, claim count, last seq, halt state',
-        }
-        return self._group_help('coord', _table, action)
 
     def _coord_builder_id(self) -> 'Optional[str]':
         """Read the persisted builder-id from coord/BUILDER_ID.  Returns
@@ -4954,26 +4108,28 @@ class BuildSession:
             return None
         return _bid or None
 
-    def cmd_coord_init(self, *args):
-        """Initialize this builder's coord identity.
+    def cmd_mirror_init(self, *args):
+        """Initialize this build host's mirror identity (Ed25519 keypair).
 
-        Usage: coord init <builder-id>
+        Usage: mirror init <builder-id>
 
         Builder-id is operator-chosen, ASCII (no spaces, slashes, '..').
         Constructs an Ed25519 keypair at:
           coord/identity/<id>.pem  (private, mode 0600)
           coord/identity/<id>.pub  (public, mode 0644)
 
-        Refuses to clobber an existing keypair — rotate via
-        `coord init <id> force` (P4-deferred).  Writes builder-id to
-        coord/BUILDER_ID so future commands resolve it automatically.
+        Refuses to clobber an existing keypair — to rotate, delete
+        coord/BUILDER_ID + coord/identity/<id>.* explicitly.  Writes the
+        builder-id to coord/BUILDER_ID so subsequent `mirror publish` /
+        `mirror pull` / `mirror audit` resolve it automatically.
 
-        Prints the public key path so the operator can scp it to the
-        repo host's repo-coord/keyring/builders/ directory.
+        After init: the operator manually registers the public key on
+        the mirror host (out-of-band) before the first `mirror publish`
+        bootstraps the federation.
         """
         import coord.identity as _id
         if not args:
-            console.print("Usage: coord init <builder-id>",
+            console.print("Usage: mirror init <builder-id>",
                           tui.COLOR_ERROR)
             return False
         _bid = args[0]
@@ -4981,14 +4137,14 @@ class BuildSession:
                 or _bid != _bid.strip()
                 or any(_c.isspace() for _c in _bid)):
             console.print(
-                f"coord init: invalid builder-id {_bid!r} — "
+                f"mirror init: invalid builder-id {_bid!r} — "
                 "use ASCII without spaces, slashes, '..'",
                 tui.COLOR_ERROR)
             return False
         _existing = self._coord_builder_id()
         if _existing and _existing != _bid:
             console.print(
-                f"coord init: BUILDER_ID already set to {_existing!r}; "
+                f"mirror init: BUILDER_ID already set to {_existing!r}; "
                 f"refusing to switch to {_bid!r}.  Delete coord/BUILDER_ID "
                 "explicitly if rotation is intended.",
                 tui.COLOR_ERROR)
@@ -4997,7 +4153,7 @@ class BuildSession:
             _priv, _pub = _id.generate_keypair(
                 self.config.dir_coord_identity, _bid)
         except OSError as _e:
-            console.print(f"coord init: keypair generation failed: {_e}",
+            console.print(f"mirror init: keypair generation failed: {_e}",
                           tui.COLOR_ERROR)
             return False
         _bid_path = os.path.join(self.config.dir_coord, 'BUILDER_ID')
@@ -5005,27 +4161,30 @@ class BuildSession:
             utils._atomic_write_bytes(
                 _bid_path, (_bid + '\n').encode('utf-8'))
         except OSError as _e:
-            console.print(f"coord init: persist BUILDER_ID: {_e}",
+            console.print(f"mirror init: persist BUILDER_ID: {_e}",
                           tui.COLOR_ERROR)
             return False
         console.print(
-            f"coord init: builder-id = {_bid}", tui.COLOR_HIGHLIGHT)
+            f"mirror init: builder-id = {_bid}", tui.COLOR_HIGHLIGHT)
         console.print(f"  private:  {_priv}")
         console.print(f"  public:   {_pub}")
         console.print(
-            "\nNext step: register the public key on the repo host:")
+            "\nRegister the public key on each mirror host (out-of-band) "
+            "before first publish:")
         console.print(
-            f"  scp {_pub} <repo-host>:repo-coord/keyring/builders/{_bid}.pub")
+            f"  scp {_pub} <mirror-host>:<mirror-coord-root>/"
+            f"keyring/builders/{_bid}.pub")
         return True
 
-    def cmd_coord_builders(self, *args):
-        """List registered builders.
+    def cmd_mirror_builders(self, *args):
+        """List registered builders across the federation.
 
-        Usage: coord builders
+        Usage: mirror builders
 
         Shows:
           - the local builder (per coord/BUILDER_ID) with its pubkey path
-          - every <id>.pub in coord/fetched/keyring/builders/ (P2 populated)
+          - every <id>.pub in coord/fetched/keyring/builders/ — fetched
+            by the most recent `mirror pull` / `mirror audit`
         """
         del args
         import coord.identity as _id
@@ -5038,11 +4197,11 @@ class BuildSession:
             else:
                 console.print(
                     f"  WARNING: pubkey missing at {_pub} — re-run "
-                    "coord init",
+                    "`mirror init <id>`",
                     tui.COLOR_WARNING)
         else:
             console.print(
-                "local builder: <not initialized> — run `coord init <id>`",
+                "local builder: <not initialized> — run `mirror init <id>`",
                 tui.COLOR_WARNING)
         _keyring_dir = os.path.join(
             self.config.dir_coord_fetched, 'keyring', 'builders')
@@ -5058,232 +4217,6 @@ class BuildSession:
                 f"\nno registered remote builders at {_keyring_dir}")
         return True
 
-    def cmd_coord_audit(self, mode: str = '', *args):
-        """Run a coord audit.
-
-        Usage:
-          coord audit local   — pool ↔ own claims (P1)
-          coord audit cross   — build.json ↔ own claims (P1)
-          coord audit repo    — remote pool + keyring (P3, not yet implemented)
-        """
-        del args
-        import coord.identity as _id
-        import coord.reconcile as _reconcile
-        _self = self._coord_builder_id()
-        if not _self:
-            console.print(
-                "coord audit: builder not initialized — run `coord init <id>`",
-                tui.COLOR_ERROR)
-            return False
-        _pub = _id.builder_pub_path(self.config.dir_coord_identity, _self)
-        if not os.path.isfile(_pub):
-            console.print(
-                f"coord audit: pubkey missing at {_pub} — re-run coord init",
-                tui.COLOR_ERROR)
-            return False
-        if mode == 'local':
-            _report = _reconcile.audit_local(
-                repo_root=self.config.dir_repo,
-                claims_dir=self.config.dir_coord_claims,
-                builder_id=_self,
-                public_key_path=_pub,
-                get_sha256=utils.get_sha256,
-            )
-        elif mode == 'cross':
-            _buildlog = (
-                self.container.buildlog_path
-                if self.container is not None
-                else os.path.join(self.config.dir_log, 'build'))
-            _report = _reconcile.audit_cross(
-                buildlog_dir=_buildlog,
-                claims_dir=self.config.dir_coord_claims,
-                builder_id=_self,
-                public_key_path=_pub,
-                read_build_record=utils.read_build_record,
-            )
-        elif mode == 'repo':
-            import coord.head as _head_mod
-            import coord.store as _store
-            import signing as _signing
-            _fetched = self.config.dir_coord_fetched
-            _signing_home = _signing.signing_home(self.config)
-            _head = _head_mod.read_coord_head(_fetched, _signing_home)
-            _keyring_dir = os.path.join(_fetched, 'keyring', 'builders')
-            _keyring = _id.load_keyring(_keyring_dir)
-            _revoked = (_head or {}).get('revoked_builders') or {}
-            _by_builder = _store.read_all_claims(
-                os.path.join(_fetched, 'claims'), _keyring, _revoked)
-            _report = _reconcile.audit_repo(
-                fetched_dir=_fetched, by_builder=_by_builder,
-                keyring=_keyring, head=_head,
-            )
-            # If a hash conflict was detected, write the halt sentinel.
-            if any(_f.kind == 'hash_conflict' and _f.severity == 'CRITICAL'
-                   for _f in _report.findings):
-                _reconcile.write_publish_halt(
-                    self.config.dir_coord,
-                    "hash conflict detected by coord audit repo")
-        else:
-            _table = {
-                'local': 'pool ↔ this-builder claims',
-                'cross': 'build.json ↔ this-builder claims',
-                'repo':  'remote pool + keyring (P3 — not implemented)',
-            }
-            return self._group_help('coord audit', _table, mode)
-        # Print findings grouped by severity
-        _by_sev = {'CRITICAL': [], 'WARN': [], 'INFO': []}
-        for _f in _report.findings:
-            _by_sev.setdefault(_f.severity, []).append(_f)
-        console.print(
-            f"coord audit {mode}: "
-            f"CRITICAL={_report.critical} "
-            f"WARN={_report.warn} "
-            f"INFO={_report.info}",
-            tui.COLOR_HIGHLIGHT if _report.critical == 0 else tui.COLOR_ERROR)
-        for _sev in ('CRITICAL', 'WARN', 'INFO'):
-            for _f in _by_sev[_sev]:
-                _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
-                          else tui.COLOR_WARNING if _sev == 'WARN'
-                          else tui.COLOR_NORMAL)
-                _tag = f"[{_sev}] {_f.kind}"
-                if _f.package:
-                    _tag += f" {_f.package}"
-                console.print(f"  {_tag}: {_f.message}", _color)
-        return _report.critical == 0
-
-    def cmd_coord_sync(self, mode: str = '', *args):
-        """coord sync — fetch/push the remote coord tree.
-
-        Usage:
-          coord sync pull <remote-spec>   (P2)  rsync remote → coord/fetched/
-                                                + tier-1 verify + per-claim
-                                                signature verify + delta report
-          coord sync push <remote-spec>   (P3)  rsync local jsonl + coord-head
-                                                to remote (under remote flock).
-                                                Lands with cmd_coord_publish.
-
-        Remote-spec is rsync-native: `user@host:/srv/repo-coord` or
-        `/local/path/to/repo-coord`.  No trailing slash needed.
-        """
-        if mode == 'pull':
-            return self.cmd_coord_sync_pull(*args)
-        if mode == 'push':
-            console.print(
-                "coord sync push: integrated into `coord publish` (P3)",
-                tui.COLOR_WARNING)
-            return False
-        _table = {
-            'pull <spec>': 'rsync remote repo-coord/ to coord/fetched/ + verify',
-            'push <spec>': 'integrated into `coord publish` (P3)',
-        }
-        return self._group_help('coord sync', _table, mode)
-
-    def cmd_coord_sync_pull(self, *args):
-        """coord sync pull <remote-spec> [--ssh-key path] — fetch + verify.
-
-        Steps:
-          1. rsync <remote-spec>/  →  coord/fetched/
-          2. read + verify coord-head.json.sig (tier-1 GPG key)
-          3. load keyring/builders/*.pub
-          4. fold per-builder jsonls; verify each line's Ed25519 sig
-          5. report: keyring count, claims by builder, conflicts, halt
-        """
-        if not args:
-            console.print(
-                "Usage: coord sync pull <remote-spec> [--ssh-key path]",
-                tui.COLOR_ERROR)
-            return False
-        _remote = args[0]
-        _ssh_key = None
-        _i = 1
-        while _i < len(args):
-            if args[_i] == '--ssh-key' and _i + 1 < len(args):
-                _ssh_key = args[_i + 1]
-                _i += 2
-            else:
-                _i += 1
-        import coord.transport as _transport
-        import coord.head as _head
-        import coord.identity as _id
-        import coord.store as _store
-        import coord.reconcile as _reconcile
-        import signing as _signing
-        _local = self.config.dir_coord_fetched
-        console.print(f"coord sync pull: rsync {_remote}/ → {_local}/")
-        _ok, _detail = _transport.pull_remote_coord(
-            local_dest=_local, remote_spec=_remote, ssh_key=_ssh_key)
-        if not _ok:
-            console.print(
-                f"coord sync pull: rsync failed: {_detail}", tui.COLOR_ERROR)
-            return False
-        # tier-1 verify of coord-head
-        _signing_home = _signing.signing_home(self.config)
-        _head_dict = _head.read_coord_head(_local, _signing_home)
-        if _head_dict is None:
-            console.print(
-                "coord sync pull: coord-head.json verify FAILED or absent "
-                "— remote tree is untrusted; refusing to proceed",
-                tui.COLOR_ERROR)
-            return False
-        console.print(
-            f"  coord-head OK: head_time={_head_dict.get('head_time')} "
-            f"inrelease_sha256={(_head_dict.get('inrelease_sha256') or '')[:12]}",
-            tui.COLOR_HIGHLIGHT)
-        # keyring + per-line verify
-        _keyring_dir = os.path.join(_local, 'keyring', 'builders')
-        _keyring = _id.load_keyring(_keyring_dir)
-        console.print(f"  keyring: {len(_keyring)} registered builder(s)")
-        _claims_dir = os.path.join(_local, 'claims')
-        _revoked = _head_dict.get('revoked_builders') or {}
-        _by_builder = _store.read_all_claims(
-            _claims_dir, _keyring, _revoked)
-        _total = sum(len(_v) for _v in _by_builder.values())
-        console.print(
-            f"  claims verified: {_total} across "
-            f"{len(_by_builder)} builder(s)")
-        for _bid, _claims in sorted(_by_builder.items()):
-            _live = sum(1 for _c in _claims
-                        if _c.get('claim_state') != 'retracted')
-            console.print(f"    {_bid}: {len(_claims)} total, {_live} live")
-        # hash-conflict scan (the BLOCK trigger)
-        _conf = _reconcile.detect_hash_conflicts(_by_builder)
-        _crit = [_f for _f in _conf if _f.severity == 'CRITICAL']
-        if _crit:
-            for _f in _crit:
-                console.print(f"  CRITICAL: {_f.message}", tui.COLOR_ERROR)
-            _reconcile.write_publish_halt(
-                self.config.dir_coord,
-                f"hash conflict at sync pull from {_remote}")
-            console.print(
-                f"  PUBLISH_HALT written to "
-                f"{os.path.join(self.config.dir_coord, 'PUBLISH_HALT')}",
-                tui.COLOR_ERROR)
-            return False
-        _info = [_f for _f in _conf if _f.severity == 'INFO']
-        if _info:
-            console.print(
-                f"  {len(_info)} reproducible duplicate(s) "
-                "(multi-builder, same hash)")
-        # delta vs local jsonl
-        _self = self._coord_builder_id()
-        if _self:
-            _local_seq = _store.max_seq(self.config.dir_coord_claims, _self)
-            _remote_seqs = _head_dict.get('last_seqs') or {}
-            _remote_self_seq = int(_remote_seqs.get(_self, 0))
-            if _remote_self_seq > _local_seq:
-                console.print(
-                    f"  WARN: remote coord-head reports {_self}@"
-                    f"seq={_remote_self_seq} but local last seq is "
-                    f"{_local_seq} — local jsonl is behind remote",
-                    tui.COLOR_WARNING)
-            elif _local_seq > _remote_self_seq:
-                console.print(
-                    f"  local {_self}@seq={_local_seq} is ahead of remote "
-                    f"head ({_remote_self_seq}) — push pending")
-            else:
-                console.print(f"  local {_self}@seq={_local_seq} = remote")
-        return True
-
     def _coord_self_keys(self) -> 'Optional[tuple[str, str, str]]':
         """(builder_id, private_path, public_path) for this builder, or
         None if not yet initialized.  All three present + readable on
@@ -5292,114 +4225,24 @@ class BuildSession:
         _bid = self._coord_builder_id()
         if not _bid:
             console.print(
-                "coord: builder not initialized — run `coord init <id>`",
+                "mirror: builder not initialized — run `mirror init <id>`",
                 tui.COLOR_ERROR)
             return None
         _priv = _id.builder_priv_path(self.config.dir_coord_identity, _bid)
         _pub = _id.builder_pub_path(self.config.dir_coord_identity, _bid)
         if not (os.path.isfile(_priv) and os.path.isfile(_pub)):
             console.print(
-                f"coord: keypair missing at {_priv} / {_pub} — re-run coord init",
+                f"mirror: keypair missing at {_priv} / {_pub} — re-run "
+                "`mirror init <id>`",
                 tui.COLOR_ERROR)
             return None
         return _bid, _priv, _pub
 
-    def cmd_coord_publish(self, mode: str = '', *args):
-        """coord publish — sign + push the claim layer.
+    def cmd_mirror_conflict(self, action: str = '', *args):
+        """mirror conflict — operator-driven conflict resolution.
 
         Usage:
-          coord publish local
-              Sign pending claims (build.json phase=done not yet
-              in jsonl) and append them to coord/claims/<id>.jsonl
-              with state=published.  No remote IO.  For dev /
-              single-host.
-
-          coord publish remote <coord-spec> <inrelease-path> [--ssh-key path]
-              Full transaction: acquire remote flock, fetch remote
-              coord tree, hash-conflict scan, sign + append pending
-              claims, push jsonl, re-sign coord-head, push coord-head,
-              release lock.  Pre-flight aborts if PUBLISH_HALT is
-              set; resolve via `coord conflict resolve`.
-
-              <coord-spec>      rsync target for remote repo-coord/
-                                (e.g. user@host:/srv/repo-coord)
-              <inrelease-path>  local copy of the InRelease whose sha
-                                the new coord-head pins
-              --ssh-key PATH    optional SSH key for rsync + flock
-        """
-        import coord.publish as _publish
-        _keys = self._coord_self_keys()
-        if _keys is None:
-            return False
-        _bid, _priv, _pub = _keys
-        _snapshot = utils.read_snapshot_state(self.config).get(
-            'current', '') or ''
-        if mode == 'local':
-            _created, _skipped = _publish.local_publish(
-                builder_id=_bid, config=self.config,
-                private_key_path=_priv, public_key_path=_pub,
-                snapshot_pin=_snapshot,
-                read_build_record=utils.read_build_record,
-                get_sha256=utils.get_sha256,
-            )
-            console.print(
-                f"coord publish local: created={_created} skipped={_skipped}",
-                tui.COLOR_HIGHLIGHT if _skipped == 0 else tui.COLOR_WARNING)
-            return _skipped == 0
-        if mode == 'bootstrap':
-            _created, _skipped = _publish.bootstrap_claims_from_pool(
-                builder_id=_bid, config=self.config,
-                private_key_path=_priv, public_key_path=_pub,
-                snapshot_pin=_snapshot,
-                get_sha256=utils.get_sha256,
-            )
-            console.print(
-                f"coord publish bootstrap: created={_created} skipped={_skipped}",
-                tui.COLOR_HIGHLIGHT if _created > 0 else tui.COLOR_WARNING)
-            return True
-        if mode == 'remote':
-            if len(args) < 2:
-                console.print(
-                    "Usage: coord publish remote <coord-spec> <inrelease-path>"
-                    " [--ssh-key path]",
-                    tui.COLOR_ERROR)
-                return False
-            _spec = args[0]
-            _inrelease = args[1]
-            _ssh_key = None
-            _i = 2
-            while _i < len(args):
-                if args[_i] == '--ssh-key' and _i + 1 < len(args):
-                    _ssh_key = args[_i + 1]
-                    _i += 2
-                else:
-                    _i += 1
-            _ok, _detail = _publish.remote_publish(
-                builder_id=_bid, config=self.config,
-                private_key_path=_priv, public_key_path=_pub,
-                snapshot_pin=_snapshot,
-                remote_coord_spec=_spec,
-                inrelease_local_path=_inrelease,
-                read_build_record=utils.read_build_record,
-                get_sha256=utils.get_sha256,
-                ssh_key=_ssh_key,
-            )
-            console.print(
-                f"coord publish remote: {_detail}",
-                tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
-            return _ok
-        _table = {
-            'local':                 'sign pending claims into local jsonl',
-            'bootstrap':             'one-shot: claim every .deb in repo/ (recovery for legacy corpus)',
-            'remote <spec> <IR>':    'full transaction (flock + sync + push)',
-        }
-        return self._group_help('coord publish', _table, mode)
-
-    def cmd_coord_conflict(self, action: str = '', *args):
-        """coord conflict — operator-only conflict resolution.
-
-        Usage:
-          coord conflict resolve <pkg> [--keep <builder-id>]
+          mirror conflict resolve <pkg> [--keep <builder-id>]
               Retract our local claim for <pkg> if --keep names a
               different builder (we lose).  If --keep names us (or is
               omitted), no retraction; only PUBLISH_HALT is cleared.
@@ -5407,23 +4250,23 @@ class BuildSession:
               is replaced with a signed retraction line.
         """
         if action == 'resolve':
-            return self.cmd_coord_conflict_resolve(*args)
+            return self.cmd_mirror_conflict_resolve(*args)
         _table = {
             'resolve <pkg>': 'retract our claim for pkg; clear PUBLISH_HALT',
         }
-        return self._group_help('coord conflict', _table, action)
+        return self._group_help('mirror conflict', _table, action)
 
-    def cmd_coord_conflict_resolve(self, *args):
+    def cmd_mirror_conflict_resolve(self, *args):
         """Operator-driven: retract our claim for `pkg` if --keep
         identifies a different builder; otherwise just clear the halt
         sentinel.
 
-        Usage: coord conflict resolve <pkg> [--keep <builder-id>]
+        Usage: mirror conflict resolve <pkg> [--keep <builder-id>]
         """
         import coord.publish as _publish
         if not args:
             console.print(
-                "Usage: coord conflict resolve <pkg> [--keep <builder-id>]",
+                "Usage: mirror conflict resolve <pkg> [--keep <builder-id>]",
                 tui.COLOR_ERROR)
             return False
         _pkg = args[0]
@@ -5446,13 +4289,13 @@ class BuildSession:
                 package=_pkg, target_seq=None,
             )
             console.print(
-                f"coord conflict resolve: {_detail}",
+                f"mirror conflict resolve: {_detail}",
                 tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
             if not _ok:
                 return False
         else:
             console.print(
-                f"coord conflict resolve: keep={_keep or _bid} (us); "
+                f"mirror conflict resolve: keep={_keep or _bid} (us); "
                 "no retraction needed")
         # Clear PUBLISH_HALT — operator has triaged
         _halt_path = os.path.join(
@@ -5470,46 +4313,8 @@ class BuildSession:
                           tui.COLOR_WARNING)
         return True
 
-    def cmd_coord_status(self, *args):
-        """Print current coord state — builder-id, claim count, last
-        seq, PUBLISH_HALT presence.
-
-        Usage: coord status
-        """
-        del args
-        import coord.reconcile as _reconcile
-        import coord.store as _store
-        _self = self._coord_builder_id()
-        if not _self:
-            console.print(
-                "coord status: <uninitialized> — run `coord init <id>`",
-                tui.COLOR_WARNING)
-            return False
-        console.print(f"coord builder-id: {_self}", tui.COLOR_HIGHLIGHT)
-        _claims_path = _store.claims_path(
-            self.config.dir_coord_claims, _self)
-        if os.path.isfile(_claims_path):
-            try:
-                with open(_claims_path, 'rb') as _fh:
-                    _lines = sum(1 for _ in _fh)
-            except OSError:
-                _lines = 0
-            _seq = _store.max_seq(self.config.dir_coord_claims, _self)
-            console.print(f"  claims jsonl: {_claims_path}")
-            console.print(f"  lines: {_lines}    last seq: {_seq}")
-        else:
-            console.print(
-                f"  claims jsonl: <none at {_claims_path}>")
-        _halt = _reconcile.publish_halt_reason(self.config.dir_coord)
-        if _halt is not None:
-            console.print(
-                f"  PUBLISH_HALT: {_halt}", tui.COLOR_ERROR)
-        else:
-            console.print("  PUBLISH_HALT: clear")
-        return True
-
     # ─────────────────────────────────────────────────────────────────────
-    # UPD-01 — snapshot management + the refresh orchestrator
+    # Snapshot pin management
     # ─────────────────────────────────────────────────────────────────────
 
     def cmd_snapshot(self, action: str = '', *args):
@@ -5529,9 +4334,9 @@ class BuildSession:
           snapshot advance <ts|latest>      — alias for `select <ts|latest>`
           snapshot history                  — last 20 selected current pins
 
-        MIRROR-01: forward-only by default.  `select force` is the documented
-        backtrack path.  The legacy `base` pin (archive floor) was removed in
-        MIRROR-01 Phase 1 — it lives in per-mirror state now (Phase 4).
+        Forward-only by default.  `select force` is the documented
+        backtrack path.  Archive-floor and per-target published pins live
+        in per-mirror state (see `mirror summary`), not here.
         """
         _table = {
             'list':         'current + the snapshots between current and latest',
@@ -5566,33 +4371,31 @@ class BuildSession:
             logger.warning(f"_snapshot_current: {e}")
             return None
 
-    def _snapshot_base_ts(self):
-        """DEPRECATED (MIRROR-01 Phase 1): archive-floor pin moved to per-mirror
-        state.  Compat shim: returns the legacy `base` from snapshot.state if
-        still present (existing operators), else defaults to current.  Removed
-        in Phase 5 once UPD-01 fully rewires through mirror state."""
-        _b = utils.read_snapshot_state(self.config).get('base', '')
-        return _b or self._snapshot_current()
+    def _mirror_floor(self) -> str:
+        """Return min(mirror.<each>.state.current) across every configured
+        mirror — the workload floor for UPD-01 (`_do_update_build`).
 
-    def _snapshot_published(self):
-        """DEPRECATED (MIRROR-01 Phase 1): `published` is a per-mirror property
-        now.  Compat shim: returns the legacy `published` from snapshot.state
-        if still present (preserves UPD-01 for existing operators in transition),
-        else falls back to base/current.  Removed in Phase 4 when
-        `_update_build_pending` reads per-mirror state directly."""
-        _p = utils.read_snapshot_state(self.config).get('published', '')
-        return _p or self._snapshot_base_ts()
-
-    def _external_enabled(self) -> bool:
-        """DEPRECATED (MIRROR-01 Phase 1): a single bool can't express
-        multi-mirror enabled/disabled state.  Compat shim: returns legacy
-        `external` from snapshot.state if present, else falls back to [Repo]
-        ExternalEnabled config.  Removed in Phase 5 alongside [Repo]
-        ExternalEnabled and the `cmd_repo_external` family."""
-        _st = utils.read_snapshot_state(self.config)
-        if 'external' in _st:
-            return bool(_st['external'])
-        return bool(getattr(self.config, 'external_enabled', True))
+        When NO mirrors are configured, returns the local current pin
+        (workload = "since current" = empty; no UPDATE mode work).
+        When a mirror is configured but never published, its current is
+        empty — treated as unconditionally behind (workload = full).
+        """
+        import mirror as _mirror_mod
+        _names = _mirror_mod.list_mirrors(self.config)
+        if not _names:
+            return self._snapshot_current() or ''
+        _floor = None
+        for _n in _names:
+            _st = _mirror_mod.read_mirror_state(self.config, _n)
+            if _st is None:
+                continue
+            _mc = _st.get('current') or ''
+            if not _mc:
+                # Never published → behind everything → empty floor
+                return ''
+            if _floor is None or _mc < _floor:
+                _floor = _mc
+        return _floor or self._snapshot_current() or ''
 
     def _snapshot_latest(self):
         """Latest upstream timestamp, or None on query failure."""
@@ -5638,8 +4441,8 @@ class BuildSession:
         so a new checkout has none) PROMPT the operator to select one — cache
         build depends on the snapshot.  Returns True to proceed, False to abort.
 
-        MIRROR-01 Phase 1: only `current` is local state.  Archive-floor `base`
-        moved to per-mirror state (Phase 4)."""
+        Only `current` is local state.  Archive-floor `base` and per-target
+        `published` pins live in per-mirror state (see `mirror summary`)."""
         if not self.config.snapshot_enabled:
             return True
         if utils.read_snapshot_state(self.config).get('current'):
@@ -5669,9 +4472,9 @@ class BuildSession:
     def _cmd_snapshot_overview(self):
         """READ-ONLY status: current + latest + the current source.
 
-        MIRROR-01: archive-floor (`base`) and per-target `published` pins
-        live in per-mirror state — see `mirror summary`.  Only the local
-        build pin (`current`) lives in config/snapshot.state.
+        Archive-floor and per-target published pins live in per-mirror
+        state — see `mirror summary`.  Only the local build pin
+        (`current`) lives in config/snapshot.state.
         """
         if not self.config.snapshot_enabled:
             console.print(
@@ -5820,14 +4623,16 @@ class BuildSession:
         console.print(f"snapshot select: {_old or '(unset)'} → {target}",
                       tui.COLOR_WARNING)
         console.print(
-            "  PRODUCTION IMPACT: changes what the next build/publish ships.")
-        _pub = self._snapshot_published()
-        if _old and _pub and apt_pkg.version_compare(_old, _pub) > 0:
+            "  PRODUCTION IMPACT: changes what the next build ships and "
+            "what mirrors will receive on the next publish.")
+        # Warn if any configured mirror is behind the OLD current — that
+        # unpublished delta gets skipped (bump numbers stay correct via
+        # the manifest, but intermediate versions won't be published).
+        if _old and self._update_build_pending():
             console.print(
-                f"  WARNING: current ({_old}) is AHEAD of published ({_pub}) "
-                f"— that delta is UNPUBLISHED.  Advancing to {target} leaves "
-                f"it unpublished (bump numbers stay correct via the manifest, "
-                f"but the intermediate versions won't be published).",
+                f"  WARNING: at least one mirror is BEHIND {_old}.  "
+                "Advancing current leaves that delta unpublished; run "
+                "`mirror publish` first or accept the gap.",
                 tui.COLOR_WARNING)
         if Prompt(PROMPT_YESNO,
                   f"Set current pin to {target}?").get_response().lower() \
@@ -5905,8 +4710,7 @@ class BuildSession:
         _h = utils.read_snapshot_history(self.config)
         if not _h:
             console.print(
-                "snapshot history: empty (no `snapshot select` has run yet "
-                "since MIRROR-01).")
+                "snapshot history: empty (no `snapshot select` has run yet).")
             return
         console.print(
             f"Snapshot history (last {len(_h)} selected; newest first):")
@@ -5958,122 +4762,6 @@ class BuildSession:
                 f"refresh:", tui.COLOR_ERROR)
             for _f, _why in _off[:20]:
                 console.print(f"    {_f}: {_why}")
-
-    def cmd_repo_refresh(self, *args):
-        """DEPRECATED (MIRROR-01 cleanup): the publish-refresh orchestrator
-        is now a top-level `refresh` command — it crosses the source +
-        mirror seams and doesn't belong under `repo` (which is local-disk
-        only).  This handler prints a deprecation hint and forwards to
-        the new top-level command.
-        """
-        console.print(
-            "repo refresh: DEPRECATED — use top-level `refresh`.  Same "
-            "behavior; new home reflects the source/repo/mirror seam.",
-            tui.COLOR_WARNING)
-        return self.cmd_refresh(*args)
-
-    def cmd_refresh(self, *args):
-        """MIRROR-01: day-2 update cycle convenience.
-
-        Workflow:
-          1. `source sync`     — update source/ to current pin
-          2. `source build all` — auto-detects update mode + +asg<R>u<N> stamps
-          3. publish step:
-               * mirrors configured → `mirror publish` (all enabled);
-                 federation-gated, per-file .deb push, signs + pushes sidecar
-               * no mirrors → legacy `repo publish ssh full`
-
-        Pre-flight gates: dep_check_ready, and at least one publish target
-        behind local current (otherwise nothing to refresh).
-
-        Top-level (not under repo / source / mirror) because it
-        orchestrates across all three.  Parallel to `autorun` (the longer
-        cache → source → chroot → iso chain)."""
-        if args:
-            console.print(
-                "repo refresh takes no target — set the destination with "
-                "`snapshot select <ts>`, then `cache build` + `cache "
-                "parse`, then `repo refresh`.", tui.COLOR_WARNING)
-            return
-        if not self.flags.dep_check_ready:
-            console.print(
-                "repo refresh: run `cache build` + `cache parse` first — at the "
-                "selected current pin (`snapshot select` invalidates the cache).",
-                tui.COLOR_ERROR)
-            return
-        # Update-pending gate uses the per-mirror floor (Phase 4
-        # `_update_build_pending`).  When no mirrors are configured, falls
-        # back to the legacy snapshot.state.published check.
-        if not self._update_build_pending():
-            console.print(
-                "repo refresh: current pin is not ahead of any publish "
-                "target — nothing to refresh.  Pick a newer destination "
-                "with `snapshot select`.", tui.COLOR_INFO)
-            return
-        import mirror as _mirror_mod
-        _has_mirrors = bool(_mirror_mod.list_mirrors(self.config))
-        if _has_mirrors:
-            console.print(
-                "repo refresh: source sync → source build all → mirror "
-                "publish (all enabled)", tui.COLOR_HIGHLIGHT)
-            self.cmd_source_sync()
-            self.cmd_source_build('all')   # auto-detects update mode + stamps
-            self.cmd_mirror_publish()       # publish to every configured mirror
-        else:
-            console.print(
-                "repo refresh: source sync → source build all → repo "
-                "publish ssh full (no mirrors configured; legacy path)",
-                tui.COLOR_HIGHLIGHT)
-            self.cmd_source_sync()
-            self.cmd_source_build('all')
-            self.cmd_repo_publish('ssh', 'full')
-
-    def _refresh_merge_index(self) -> bool:
-        """Build the suite index as the UNION of the local single-snapshot pool
-        and the PRIOR PUBLISHED manifest (apt_repo.merge_remote_index), signed
-        locally, then refresh the local signed manifest to the merged result.
-        Works offline (the manifest, not the remote, is the merge base).
-        Returns True on success."""
-        import signing
-        import apt_repo
-        _codename = self.config.build_codename.strip('"').strip("'")
-        _version = self.config.build_version.strip('"').strip("'")
-        # The prior published state = the local signed manifest (empty on the
-        # first publish → merge yields just the local pool).
-        _prior = repo_audit.local_manifest_path(self.config)
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-        _r = subprocess.run(['sudo', '-S', '-v'], input=_password + '\n',
-                            capture_output=True, text=True)
-        if _r.returncode != 0:
-            console.print("ERROR: incorrect sudo password")
-            return False
-        try:
-            if not apt_repo.merge_remote_index(
-                    repo_root=self.config.dir_repo,
-                    suite=_codename, codename=_codename, arch=self.config.arch,
-                    version=_version, remote_packages_path=_prior,
-                    password=_password,
-                    signing_homedir=signing.signing_home(self.config)):
-                return False
-        finally:
-            _password = '*' * len(_password)  # noqa: F841
-        # Refresh the local signed manifest = the merged multi-version index.
-        # STA-21: fail loud on signing failure.
-        _merged = os.path.join(self.config.dir_repo_main, 'Packages')
-        try:
-            with open(_merged) as _fh:
-                _ok = repo_audit.write_published_manifest(self.config, _fh.read())
-        except OSError as e:
-            console.print(f"repo: could not refresh manifest from {_merged}: {e}",
-                          tui.COLOR_ERROR)
-            return False
-        if not _ok:
-            console.print(
-                "repo: local manifest sign FAILED — `+asg uN` bump "
-                "authority is now empty.  Run `key generate` / `key verify` "
-                "then re-run `repo refresh`.", tui.COLOR_ERROR)
-            return False
-        return True
 
     def cmd_repo_repair(self, action: str = '', *args):
         """Umbrella for repo-state fixups.  Each sub-action mutates
@@ -7842,40 +6530,6 @@ class BuildSession:
         and get dropped as a dup by `_segregate_built_artifacts`."""
         return getattr(getattr(src, '_mirror', None), 'id', '') == 'fork'
 
-    def _workload_since_published(self, ledger: dict) -> 'set[str]':
-        """Selected source names whose pristine BASE advanced beyond what the
-        remote (the `ledger`) has published — the genuine rebuild workload for
-        the current snapshot (UPD-01 §4).
-
-        `ledger` is {package: [published version, ...]} from
-        repo_audit.fetch_remote_ledger.  A source is in the workload if any of
-        its predicted binaries has a base greater than the highest base
-        published for that binary (apt_pkg.version_compare), or unpublished.
-        The closure is inherent: the dep-tree resolved consistently at the
-        target snapshot, so rebuilding every base-advanced source yields a
-        consistent pool (no separate synthesized-stanza solve needed)."""
-        _published = repo_audit.published_base_versions(ledger)
-        assert self.dep_tree is not None
-        _srcs = dict(self.dep_tree.selected_srcs)
-        if self.udeb_dep_tree is not None:
-            for _n, _s in self.udeb_dep_tree.selected_srcs.items():
-                _srcs.setdefault(_n, _s)
-        _out: 'set[str]' = set()
-        for _name in _srcs:
-            for _f in self._predicted_files_for_source(_name):
-                if not (_f.endswith(('.deb', '.udeb'))):
-                    continue
-                _parts = _f.rsplit('.', 1)[0].split('_')
-                if len(_parts) != 3:
-                    continue
-                _bin, _ver, _ = _parts
-                _base = utils.pristine_base(_ver)
-                _pub = _published.get(_bin)
-                if _pub is None or apt_pkg.version_compare(_base, _pub) > 0:
-                    _out.add(_name)
-                    break
-        return _out
-
     def _workload_current_to_target(self, target_ts: str):
         """Sources whose upstream SOURCE version at `target_ts` is NEWER than
         the current pin's selected source version — what you'd rebuild
@@ -7942,11 +6596,10 @@ class BuildSession:
         """True when `source build` should run in UPDATE mode: at least one
         publish target is behind the local current snapshot.
 
-        MIRROR-01 Phase 4: when mirrors are configured, the floor is
-        `min(mirror.<each>.state.current)` — any laggard mirror means
-        there's an unpublished delta and UPDATE mode is the right path.
-        When no mirrors are configured (legacy), fall back to
-        snapshot.state.published.
+        The floor is `min(mirror.<each>.state.current)` across configured
+        mirrors — any laggard means an unpublished delta and UPDATE mode
+        is the right path.  No mirrors configured → no publish target →
+        no UPDATE mode.
 
         Requires dep_check_ready AND a non-empty local published.manifest
         (the +asg uN ledger; without it we have no version-stamping
@@ -7960,29 +6613,15 @@ class BuildSession:
         if not _cur:
             return False
         import mirror as _mirror_mod
-        _names = _mirror_mod.list_mirrors(self.config)
-        if _names:
-            _min_current = None
-            for _n in _names:
-                _st = _mirror_mod.read_mirror_state(self.config, _n)
-                if _st is None:
-                    continue
-                _mc = _st.get('current') or ''
-                if not _mc:
-                    # An un-published mirror is by definition behind any
-                    # current pin — schedule the publish.
-                    return True
-                if _min_current is None or _mc < _min_current:
-                    _min_current = _mc
-            if _min_current is None:
-                # All mirror state files are unreadable — fall through to
-                # legacy below rather than silently returning False.
-                pass
-            else:
-                return apt_pkg.version_compare(_cur, _min_current) > 0
-        # Legacy fallback (no mirrors configured)
-        _pub = self._snapshot_published()
-        return bool(_pub and apt_pkg.version_compare(_cur, _pub) > 0)
+        if not _mirror_mod.list_mirrors(self.config):
+            # No mirrors configured → no publish target → no UPDATE mode.
+            return False
+        _floor = self._mirror_floor()
+        if not _floor:
+            # A mirror is configured but never published — that delta IS
+            # the workload.
+            return True
+        return apt_pkg.version_compare(_cur, _floor) > 0
 
     def _needs_bump_build(self, name: str, src, ledger: dict,
                           release: int) -> bool:
@@ -8040,14 +6679,14 @@ class BuildSession:
         # every function that sets the flag True — so a future direct
         # caller can't leak a stale True if this raises mid-run.
         self.flags.source_build_ready = False
-        _published = self._snapshot_published()
+        _floor = self._mirror_floor()
         _current = self._snapshot_current()
         console.print(
-            f"source build: UPDATE mode — published {_published} → current "
+            f"source build: UPDATE mode — floor {_floor or '(none)'} → current "
             f"{_current}; rebuilding the changed source delta (+asg-stamped, "
             f"per-file N) plus any other source needing a build.",
             tui.COLOR_HIGHLIGHT)
-        _workload, _err = self._workload_since_snapshot(_published)
+        _workload, _err = self._workload_since_snapshot(_floor)
         if _err:
             console.print(f"source build (update): {_err}", tui.COLOR_ERROR)
             return
@@ -8155,11 +6794,7 @@ class BuildSession:
     def cmd_source_audit(self, *args):
         """READ-ONLY: report the build-state of every selected source.
 
-        Usage: source audit [verbose] [summary] [--since-published]
-
-        `--since-published` intersects the rebuild queue with the genuine
-        upstream advances vs the remote ledger (UPD-01 §4) — "what changed
-        since the published archive", the `repo refresh` workload view.
+        Usage: source audit [verbose] [summary]
 
         Audits dep_tree + udeb_dep_tree (merged).  Classifies each
         source into one of `_SOURCE_STATES` via `_source_state` —
@@ -8270,25 +6905,6 @@ class BuildSession:
         _by_subset: 'dict[str, list[str]]' = _dd(list)
         for _n in _rebuild_candidates:
             _by_subset[_subset_for(_n)].append(_n)
-
-        # ── --since-published: genuine upstream advances vs the remote ──
-        if '--since-published' in args:
-            _ledger = repo_audit.fetch_remote_ledger(self.config)
-            if _ledger is None:
-                console.print(
-                    "source audit --since-published: remote ledger "
-                    "unreachable (check [Repo] AptSourceURL / network)",
-                    tui.COLOR_ERROR)
-                return
-            _workload = self._workload_since_published(_ledger)
-            _advanced = sorted(set(_rebuild_candidates) & _workload)
-            console.print(
-                f"Source audit (since published): {len(_advanced)} of "
-                f"{len(_rebuild_candidates)} rebuild candidate(s) are genuine "
-                f"upstream advances vs the published archive.")
-            for _n in _advanced:
-                console.print(f"    {_n}  [{_subset_for(_n)}]")
-            return
 
         if _summary:
             console.print(
@@ -8438,12 +7054,13 @@ class BuildSession:
                 f"  {len(_rebuild_candidates):5d}  total to (re)build "
                 f"(matches `Rebuild queue by subset` above)")
             return
-        _published = self._snapshot_published()
+        _floor = self._mirror_floor()
         _current = self._snapshot_current()
         console.print(
-            f"  Mode: UPDATE — published {_published} → current {_current}",
+            f"  Mode: UPDATE — mirror floor {_floor or '(none)'} → "
+            f"current {_current}",
             tui.COLOR_INFO)
-        _workload, _err = self._workload_since_snapshot(_published)
+        _workload, _err = self._workload_since_snapshot(_floor)
         if _err:
             console.print(
                 f"  WARN: cannot compute snapshot delta — {_err}",
@@ -10364,12 +8981,10 @@ def main(banner: str) -> None:
     tui.register_command('chroot',    session.cmd_chroot,    'Chroot:     chroot build [live|installer] | chroot verify')
     tui.register_command('iso',       session.cmd_iso,       'ISO:        iso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    key <generate|verify>')
-    tui.register_command('coord',     session.cmd_coord,     'Coord:      coord <init|builders|audit|status>')
-    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <add|remove|list|summary|status|publish|pull|audit|query|reconcile-neighbours>')
+    tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     mirror <init|add|remove|list|summary|status|publish|pull|audit|query|builders|conflict|reconcile-neighbours>')
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       sbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        cve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    autorun [live|installer]')
-    tui.register_command('refresh',   session.cmd_refresh,   'Refresh:    refresh — source sync → build all → mirror publish (day-2)')
     tui.register_command('resume',    session.cmd_resume,    'Resume:     resume — UX-04 restore Cache + DT from prior session')
     tui.register_command('print',     session.cmd_print,     'Print:      print build state — try `print help`')
 
