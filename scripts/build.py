@@ -792,6 +792,86 @@ class BuildSession:
 
     # --------------------------------------Command: parse_dependency-------------------------------------
 
+    def _canonical_select_count(self, tree) -> int:
+        """Count canonical-name keys in selected_pkgs (excludes Provides
+        aliases).  Used by indl-mode summary so the operator sees the
+        true binary count, not the aliased duplicate count."""
+        if tree is None:
+            return 0
+        return sum(
+            1 for _k in tree.selected_pkgs
+            if _k == tree.selected_pkgs[_k]['Package']
+        )
+
+    def _cache_parse_individual_mode(self) -> bool:
+        """MIRROR-02: individual-mode dep parse.  Populates
+        `dep_tree.selected_pkgs` with the binaries named in
+        `config/indl.list` (latest version per name), then
+        `dep_tree.selected_srcs` via `parse_sources` so the source
+        builder knows each Build-Depends.
+
+        No runtime dep closure walk — indl mode is single-package
+        scope; runtime installability is the MIRROR's invariant, not
+        the build host's (enforced at `mirror publish` time in
+        chunk 11).  No udeb_dep_tree (installer is N/A in indl mode).
+
+        Returns True iff at least one package resolved.  Logs WARNINGs
+        for misses; does NOT abort on partial resolution (operator
+        sees the WARNINGs + the per-pass count summary).
+        """
+        assert self.dep_tree is not None
+        assert self.cache is not None
+        _names = utils.parse_indl_list(self.config.indllist_path)
+        if not _names:
+            console.print(
+                f"WARNING: [Build] Mode = individual but indl.list at "
+                f"{self.config.indllist_path} is empty or missing.",
+                tui.COLOR_WARNING)
+            return False
+        console.print(
+            f"individual mode: {len(_names)} package(s) from indl.list",
+            tui.COLOR_INFO)
+        _resolved = 0
+        for _name in _names:
+            # package_hashtable is Dict[name, Dict[Version, List[Package]]];
+            # pick the highest version then the first Package at that
+            # version (multi-mirror duplicates are byte-identical at this
+            # point — the cache builder already deduped).
+            _versions = self.cache.package_hashtable.get(_name)
+            if not _versions:
+                console.print(
+                    f"  WARNING: '{_name}' not in cache — skipping",
+                    tui.COLOR_WARNING)
+                logger.warning(
+                    f"individual mode: '{_name}' not in package_hashtable")
+                continue
+            _latest_ver = max(_versions.keys())
+            _latest_pkgs = _versions[_latest_ver]
+            if not _latest_pkgs:
+                console.print(
+                    f"  WARNING: '{_name}' present but no Package at "
+                    f"{_latest_ver} — skipping",
+                    tui.COLOR_WARNING)
+                continue
+            _pkg = _latest_pkgs[0]
+            # Use canonical name as the key (matches what parse_dependency
+            # does at line ~491).  No Provides aliasing — indl mode is
+            # narrow-scope and no other code reads through aliases for
+            # this tree.
+            self.dep_tree.selected_pkgs[_pkg['Package']] = _pkg
+            _resolved += 1
+        if _resolved == 0:
+            return False
+        # parse_sources walks selected_pkgs → selected_srcs and pulls
+        # Build-Depends; same call the dist-mode path makes at line 1186.
+        if not self.dep_tree.parse_sources():
+            console.print(
+                "individual mode: parse_sources reported errors "
+                "(see log) — continuing with partial source set",
+                tui.COLOR_WARNING)
+        # udeb_dep_tree stays None — installer is N/A in indl mode.
+        return True
+
     def cmd_parse_dependency(self, *args):
         """Resolve the full closure of packages needed to build the target system.
 
@@ -862,6 +942,30 @@ class BuildSession:
         console.print("Preparing Parsing Tree...", tui.COLOR_INFO)
         self.dep_tree = dependencytree.DependencyTree(self.cache, select_recommended=False,
                     arch=self.config.arch, build_profiles=self.config.build_profiles)
+
+        # ── MIRROR-02 individual-mode branch ─────────────────────────────────
+        # In individual mode the build host targets just the packages named in
+        # `config/indl.list` — no runtime dep closure walk, no live/installer/
+        # pool extras, no chroot/ISO. selected_pkgs is populated directly from
+        # the indl.list lookups (single-version pick per name); parse_sources
+        # still runs so the source builder knows each package's Build-Depends.
+        # Skip-everything-else: Passes I-VII don't run, udeb_dep_tree stays None.
+        if self.config.build_mode == 'individual':
+            if self._cache_parse_individual_mode():
+                self.flags.dep_check_ready = True
+                _spiner.stop()
+                console.print(
+                    f"cache parse (individual): {len(self.dep_tree.selected_srcs)} "
+                    f"source(s), {self._canonical_select_count(self.dep_tree)} "
+                    f"binary(ies)",
+                    tui.COLOR_HIGHLIGHT)
+            else:
+                _spiner.stop()
+                console.print(
+                    "cache parse (individual): no usable packages in indl.list "
+                    "(see warnings above); dep_check NOT set.",
+                    tui.COLOR_ERROR)
+            return
 
         # --- Pass I: required ---------------------------------------------------
         required_packages = self.cache.required

@@ -278,6 +278,219 @@ def test_buildconfig_mode_rejects_unknown_value():
         assert 'banana' in cfg.error_str
 
 
+def test_cache_parse_individual_mode_resolves_named_pkgs_only():
+    """MIRROR-02 chunk 2: in individual mode, cache parse populates
+    selected_pkgs directly from indl.list lookups (no transitive
+    closure walk).  Cache has firefox-esr + libreoffice + their fake
+    Depends; indl.list names just firefox-esr; closure does NOT
+    include libreoffice or any of firefox-esr's Depends."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    # Three packages in the offline cache.  firefox-esr Depends on
+    # libdep; if indl mode walked closure, libdep would land in
+    # selected_pkgs.  The test asserts it does NOT.
+    _pkg_blob = (
+        "Package: firefox-esr\n"
+        "Source: firefox-esr\n"
+        "Version: 130.0esr-1\n"
+        "Architecture: amd64\n"
+        "Depends: libdep (>= 1.0)\n"
+        "Filename: pool/main/f/firefox-esr/firefox-esr_130.0esr-1_amd64.deb\n"
+        "Size: 1\n"
+        "SHA256: " + ("a" * 64) + "\n"
+        "\n"
+        "Package: libreoffice\n"
+        "Source: libreoffice\n"
+        "Version: 7.4-1\n"
+        "Architecture: amd64\n"
+        "Filename: pool/main/l/libreoffice/libreoffice_7.4-1_amd64.deb\n"
+        "Size: 1\n"
+        "SHA256: " + ("b" * 64) + "\n"
+        "\n"
+        "Package: libdep\n"
+        "Source: libdep\n"
+        "Version: 1.0-1\n"
+        "Architecture: amd64\n"
+        "Filename: pool/main/l/libdep/libdep_1.0-1_amd64.deb\n"
+        "Size: 1\n"
+        "SHA256: " + ("c" * 64) + "\n"
+    )
+    _src_blob = (
+        "Package: firefox-esr\n"
+        "Binary: firefox-esr\n"
+        "Version: 130.0esr-1\n"
+        "Architecture: any\n"
+        "Directory: pool/main/f/firefox-esr\n"
+        "Checksums-Sha256:\n"
+        " " + ("a" * 64) + " 100 firefox-esr_130.0esr-1.dsc\n"
+        "\n"
+        "Package: libreoffice\n"
+        "Binary: libreoffice\n"
+        "Version: 7.4-1\n"
+        "Architecture: any\n"
+        "Directory: pool/main/l/libreoffice\n"
+        "Checksums-Sha256:\n"
+        " " + ("b" * 64) + " 100 libreoffice_7.4-1.dsc\n"
+        "\n"
+        "Package: libdep\n"
+        "Binary: libdep\n"
+        "Version: 1.0-1\n"
+        "Architecture: any\n"
+        "Directory: pool/main/l/libdep\n"
+        "Checksums-Sha256:\n"
+        " " + ("c" * 64) + " 100 libdep_1.0-1.dsc\n"
+    )
+    with tempfile.TemporaryDirectory() as _td:
+        _cache_obj = _make_offline_cache(
+            _td, packages={'main': _pkg_blob}, sources={'main': _src_blob})
+        assert _cache_obj.is_valid, _cache_obj.error_str
+
+        # indl.list lists ONE package
+        _indl = os.path.join(_td, 'indl.list')
+        with open(_indl, 'w') as _fh:
+            _fh.write('firefox-esr\n')
+
+        import dependencytree
+        class _Cfg:
+            indllist_path = _indl
+            build_mode = 'individual'
+            arch = 'amd64'
+            build_profiles = ['nodoc', 'nocheck']
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess.cache = _cache_obj
+        _sess.dep_tree = dependencytree.DependencyTree(
+            _cache_obj, select_recommended=False,
+            arch='amd64', build_profiles=['nodoc', 'nocheck'])
+
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _ok = _sess._cache_parse_individual_mode()
+        finally:
+            build.console.print = _orig
+        assert _ok is True, '\n'.join(_lines)
+        # selected_pkgs has firefox-esr ONLY (canonical key); libdep
+        # would be there if we walked closure, libreoffice would be
+        # there if we used the full indl.list.
+        _canonical = {
+            _k for _k in _sess.dep_tree.selected_pkgs
+            if _k == _sess.dep_tree.selected_pkgs[_k]['Package']
+        }
+        assert _canonical == {'firefox-esr'}, _canonical
+        # selected_srcs populated via parse_sources()
+        assert 'firefox-esr' in _sess.dep_tree.selected_srcs
+        assert 'libreoffice' not in _sess.dep_tree.selected_srcs
+        assert 'libdep' not in _sess.dep_tree.selected_srcs
+
+
+def test_cache_parse_individual_mode_warns_on_missing_pkg():
+    """Names in indl.list that aren't in the cache get a WARNING and
+    are skipped — partial resolution still proceeds for the rest."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    _pkg_blob = (
+        "Package: firefox-esr\n"
+        "Source: firefox-esr\n"
+        "Version: 130.0esr-1\n"
+        "Architecture: amd64\n"
+        "Filename: pool/main/f/firefox-esr/firefox-esr_130.0esr-1_amd64.deb\n"
+        "Size: 1\n"
+        "SHA256: " + ("a" * 64) + "\n"
+    )
+    _src_blob = (
+        "Package: firefox-esr\n"
+        "Binary: firefox-esr\n"
+        "Version: 130.0esr-1\n"
+        "Architecture: any\n"
+        "Directory: pool/main/f/firefox-esr\n"
+        "Checksums-Sha256:\n"
+        " " + ("a" * 64) + " 100 firefox-esr_130.0esr-1.dsc\n"
+    )
+    with tempfile.TemporaryDirectory() as _td:
+        _cache_obj = _make_offline_cache(
+            _td, packages={'main': _pkg_blob}, sources={'main': _src_blob})
+        _indl = os.path.join(_td, 'indl.list')
+        with open(_indl, 'w') as _fh:
+            _fh.write('firefox-esr\nnonexistent-pkg\n')
+
+        import dependencytree
+        class _Cfg:
+            indllist_path = _indl
+            build_mode = 'individual'
+            arch = 'amd64'
+            build_profiles = ['nodoc', 'nocheck']
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess.cache = _cache_obj
+        _sess.dep_tree = dependencytree.DependencyTree(
+            _cache_obj, select_recommended=False,
+            arch='amd64', build_profiles=['nodoc', 'nocheck'])
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _ok = _sess._cache_parse_individual_mode()
+        finally:
+            build.console.print = _orig
+        # firefox-esr resolved, nonexistent-pkg surfaced WARNING
+        assert _ok is True
+        _joined = '\n'.join(_lines)
+        assert "'nonexistent-pkg' not in cache" in _joined
+        _canonical = {
+            _k for _k in _sess.dep_tree.selected_pkgs
+            if _k == _sess.dep_tree.selected_pkgs[_k]['Package']
+        }
+        assert _canonical == {'firefox-esr'}
+
+
+def test_cache_parse_individual_mode_empty_indl_returns_false():
+    """Empty/missing indl.list → returns False with a clear warning;
+    operator's dep_check_ready stays False."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _td:
+        # No indl.list file
+        _indl = os.path.join(_td, 'indl.list')
+        import dependencytree
+        # Minimal cache object — only need the helper not to walk it
+        class _FakeCache:
+            package_hashtable: dict = {}
+        class _Cfg:
+            indllist_path = _indl
+            build_mode = 'individual'
+            arch = 'amd64'
+            build_profiles = ['nodoc', 'nocheck']
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess.cache = _FakeCache()
+        _sess.dep_tree = dependencytree.DependencyTree.__new__(
+            dependencytree.DependencyTree)
+        _sess.dep_tree.selected_pkgs = {}
+        _sess.dep_tree.selected_srcs = {}
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _ok = _sess._cache_parse_individual_mode()
+        finally:
+            build.console.print = _orig
+        assert _ok is False
+        _joined = '\n'.join(_lines)
+        assert 'empty or missing' in _joined
+
+
 def test_parse_indl_list_strips_comments_dedups_preserves_order():
     """MIRROR-02: `config/indl.list` parser — flat list, `#` comments and
     blank lines stripped, inline comments allowed, dedup preserves
@@ -24815,6 +25028,9 @@ def main() -> int:
         test_buildconfig_mode_individual_parses,
         test_buildconfig_mode_rejects_unknown_value,
         test_parse_indl_list_strips_comments_dedups_preserves_order,
+        test_cache_parse_individual_mode_resolves_named_pkgs_only,
+        test_cache_parse_individual_mode_warns_on_missing_pkg,
+        test_cache_parse_individual_mode_empty_indl_returns_false,
         test_buildconfig_parses_three_mirrors,
         test_deb_dest_for_filename_routes_by_component,
         test_buildconfig_rejects_no_mirrors,

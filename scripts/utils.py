@@ -2105,6 +2105,7 @@ class BuildConfig:
             livelist_path = os.path.join(working_dir, 'config/live.list')
             installerlist_path = os.path.join(working_dir, 'config/installer.list')
             poollist_path = os.path.join(working_dir, 'config/pool.list')
+            indllist_path = os.path.join(working_dir, 'config/indl.list')
 
             parser = argparse.ArgumentParser(description='Dependency Parser - Athena Build System')
             parser.add_argument('--working-dir', type=str, help='Specify Working directory', required=False, default=working_dir)
@@ -2113,6 +2114,7 @@ class BuildConfig:
             parser.add_argument('--live-list', type=str, help='Specify live-only pkg list', required=False, default=livelist_path)
             parser.add_argument('--installer-list', type=str, help='Specify installer-only pkg list', required=False, default=installerlist_path)
             parser.add_argument('--pool-list', type=str, help='Specify pool-only pkg list (ship in apt pool, never installed)', required=False, default=poollist_path)
+            parser.add_argument('--indl-list', type=str, help='Specify individual-mode pkg list (MIRROR-02; flat names, only consumed when [Build] Mode = individual)', required=False, default=indllist_path)
             args = parser.parse_args()
 
             # if paths are specified, they are absolute
@@ -2122,6 +2124,7 @@ class BuildConfig:
             self.livelist_path = os.path.abspath(args.live_list)
             self.installerlist_path = os.path.abspath(args.installer_list)
             self.poollist_path = os.path.abspath(args.pool_list)
+            self.indllist_path = os.path.abspath(args.indl_list)
 
             if not os.access(self.config_path, os.R_OK):
                 raise PermissionError(f'Config file is not readable: {self.config_path}')
