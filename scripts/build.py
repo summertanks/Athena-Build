@@ -3962,13 +3962,19 @@ class BuildSession:
         return True
 
     def cmd_mirror_summary(self, *args):
-        """Full per-mirror state dump."""
+        """Full per-mirror state dump.  Phase 8 adds `we_own: N` — the
+        count of non-retracted claims this builder owns on each mirror,
+        sourced from the most-recently-fetched
+        cache/mirror/<name>/fetched/claims/<our-builder-id>.jsonl.
+        `(no claims jsonl fetched yet)` when no fetch has happened —
+        run `mirror pull` or `mirror publish` first."""
         import mirror as _mirror
         _names = ([args[0]] if args
                   else _mirror.list_mirrors(self.config))
         if not _names:
             console.print("mirror summary: no mirrors configured.")
             return True
+        _bid = self._coord_builder_id()
         for _n in _names:
             _st = _mirror.read_mirror_state(self.config, _n)
             if _st is None:
@@ -3983,6 +3989,7 @@ class BuildSession:
             console.print(f"  base:             {_st.get('base', '') or '(unset)'}")
             console.print(f"  current:          {_st.get('current', '') or '(unset)'}")
             console.print(f"  last_publish_at:  {_st.get('last_publish_at', '') or '(never)'}")
+            console.print(f"  we_own:           {self._mirror_summary_we_own_line(_n, _bid)}")
             _nb = _st.get('neighbours_known') or []
             if _nb:
                 console.print(f"  neighbours_known: {len(_nb)} peer(s)")
@@ -3991,6 +3998,161 @@ class BuildSession:
             else:
                 console.print("  neighbours_known: (none — first publish will populate)")
         return True
+
+    def _mirror_summary_we_own_line(
+        self, mirror_name: str, builder_id: 'Optional[str]',
+    ) -> str:
+        """Count of non-retracted claims THIS builder owns on the
+        named mirror.  Reads from the local fetched cache (the same
+        place mirror pull / publish writes to); returns a friendly
+        sentinel string when there's nothing to count from."""
+        if not builder_id:
+            return "(builder id not initialised — run `mirror init <id>`)"
+        _claims_path = os.path.join(
+            self.config.dir_cache, 'mirror', mirror_name, 'fetched',
+            'claims', f'{builder_id}.jsonl',
+        )
+        if not os.path.isfile(_claims_path):
+            return "(no claims jsonl fetched yet — run `mirror pull`)"
+        import json
+        import coord.schema as _schema
+        _live = 0
+        _retracted = 0
+        try:
+            with open(_claims_path) as _fh:
+                for _line in _fh:
+                    _s = _line.strip()
+                    if not _s:
+                        continue
+                    try:
+                        _c = json.loads(_s)
+                    except ValueError:
+                        continue
+                    if not isinstance(_c, dict):
+                        continue
+                    if _c.get('claim_state') == _schema.CLAIM_STATE_RETRACTED:
+                        _retracted += 1
+                    else:
+                        _live += 1
+        except OSError as _e:
+            return f"(unreadable: {_e})"
+        _retracted_str = (f" ({_retracted} retracted)" if _retracted else '')
+        return f"{_live} pkg(s){_retracted_str}"
+
+    def _mirror_audit_disk_vs_claims(
+        self, mirror_name: str, mirror_state: dict,
+        by_builder: 'dict',
+    ) -> 'list[tuple[str, str, str]]':
+        """MIRROR-01 Phase 8 integrity sweep: cross-check the union of
+        claim `filename` fields (sidecar truth) against the actual
+        ``.deb``/``.udeb`` files present in the mirror's pool dir.
+
+        Returns ``list[(severity, kind, message)]``:
+          - ``CRITICAL  missing_on_disk``  claim references a file the
+            remote pool doesn't carry — apt clients fetching it would
+            404; consumers of `mirror pull` would skip that download
+          - ``WARNING   orphan_on_disk``   on-disk file has no claim
+            backing it (operator out-of-band rsync? leftover from a
+            wiped builder?); not load-bearing today but operator
+            should know
+
+        ssh mirrors: single remote `find` over the pool tree.  file://
+        mirrors: local `os.walk`.  Network/permission failures return
+        an empty list (silent) — they're not the audit's signal.
+        """
+        _url = mirror_state.get('url', '')
+        if not _url:
+            return []
+
+        # 1. Claim-side: every non-retracted claim's filename
+        _claimed: set = set()
+        for _bid, _claims in by_builder.items():
+            for _c in _claims:
+                if _c.get('claim_state') == 'retracted':
+                    continue
+                _fn = _c.get('filename')
+                if isinstance(_fn, str) and _fn:
+                    _claimed.add(_fn)
+
+        # 2. Disk-side
+        _on_disk: 'Optional[set]' = self._mirror_audit_pool_listing(
+            _url, mirror_state.get('ssh_key') or None)
+        if _on_disk is None:
+            # Pool listing failed silently (network / perms / unsupported
+            # scheme) — emit a single INFO-ish line so the operator knows
+            # the cross-check was skipped, but don't gate.
+            return [('INFO', 'pool_listing_unavailable',
+                     f"could not enumerate pool for {mirror_name!r}; "
+                     "claim-vs-disk cross-check skipped")]
+
+        _missing = sorted(_claimed - _on_disk)
+        _orphan = sorted(_on_disk - _claimed)
+        _findings: 'list[tuple[str, str, str]]' = []
+        for _fn in _missing[:20]:
+            _findings.append((
+                'CRITICAL', 'missing_on_disk',
+                f"claim references {_fn!r} but no such file in pool"))
+        if len(_missing) > 20:
+            _findings.append((
+                'CRITICAL', 'missing_on_disk',
+                f"…and {len(_missing) - 20} more"))
+        for _fn in _orphan[:20]:
+            _findings.append((
+                'WARNING', 'orphan_on_disk',
+                f"pool carries {_fn!r} with no backing claim"))
+        if len(_orphan) > 20:
+            _findings.append((
+                'WARNING', 'orphan_on_disk',
+                f"…and {len(_orphan) - 20} more"))
+        return _findings
+
+    def _mirror_audit_pool_listing(
+        self, url: str, ssh_key: 'Optional[str]',
+    ) -> 'Optional[set]':
+        """Enumerate ``.deb``/``.udeb`` files in the mirror's pool dir.
+        Returns a set of basenames or None on unsupported scheme /
+        I/O failure."""
+        if url.startswith('file://'):
+            _root = url[len('file://'):]
+            if not os.path.isdir(_root):
+                return None
+            _out: set = set()
+            for _dp, _dirs, _files in os.walk(_root):
+                for _f in _files:
+                    if _f.endswith(('.deb', '.udeb')):
+                        _out.add(_f)
+            return _out
+        if not url.startswith('ssh://'):
+            return None
+        import shlex
+        import subprocess
+        import mirror as _mirror_mod
+        _host = _mirror_mod._extract_host_from_ssh_url(url) or ''
+        _user = _mirror_mod._extract_user_from_ssh_url(url) or ''
+        _path = _mirror_mod._extract_path_from_ssh_url(url) or ''
+        if not (_host and _path):
+            return None
+        _argv: 'list[str]' = [
+            'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+            '-o', 'StrictHostKeyChecking=accept-new',
+        ]
+        if ssh_key:
+            _argv += ['-i', ssh_key]
+        _target = f'{_user}@{_host}' if _user else _host
+        _quoted = shlex.quote(_path)
+        _argv += [
+            _target,
+            f'find {_quoted} -type f \\( -name "*.deb" -o '
+            f'-name "*.udeb" \\) -printf "%f\\n" 2>/dev/null',
+        ]
+        try:
+            _r = subprocess.run(
+                _argv, capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if _r.returncode != 0:
+            return None
+        return {_l.strip() for _l in _r.stdout.splitlines() if _l.strip()}
 
     def cmd_mirror_publish(self, *args):
         """mirror publish [<name>] — publish to one mirror, or all when no name.
@@ -4077,6 +4239,24 @@ class BuildSession:
             assert _st is not None  # checked above / by list_mirrors
             _url = _st.get('url', '')
             _ssh_key = _st.get('ssh_key') or None
+            # Phase 8 gate: refuse to publish when this build's
+            # snapshot.current is older than the mirror's `base` (the
+            # mirror's archive floor).  Publishing pre-floor packages
+            # would either be silently dropped on the next prune or
+            # corrupt the +asg uN derivation.  `(unset)` mirror.base
+            # = first-publish bootstrap; let it through.
+            _mirror_base = (_st.get('base') or '').strip()
+            if _mirror_base and _snapshot_pin \
+                    and _snapshot_pin < _mirror_base:
+                console.print(
+                    f"mirror publish {_n}: REFUSED — build snapshot "
+                    f"({_snapshot_pin}) is older than this mirror's "
+                    f"archive floor (mirror.base = {_mirror_base}).  "
+                    "Advance the build snapshot (`snapshot select <ts>`) "
+                    "or wipe + re-add the mirror with a fresh base.",
+                    tui.COLOR_ERROR)
+                _all_ok = False
+                continue
             # Derive pool + coord specs from the operator-registered POOL
             # URL.  Pool serves apt clients; sidecar lives at the sibling
             # `-coord` path on the same host.
@@ -4383,11 +4563,26 @@ class BuildSession:
                     f"  {_f.severity:8s}  {_f.kind}: {_f.message}",
                     tui.COLOR_ERROR)
                 _all_ok = False
+            # Integrity sweep — Phase 8: claim ↔ on-disk pool dir
+            # listing cross-check (orphan .debs the sidecar doesn't
+            # know about, claimed filenames missing from disk).  Costs
+            # one ssh `find` per ssh mirror.
+            _disk_findings = self._mirror_audit_disk_vs_claims(
+                _n, _st, _by_builder)
+            _disk_crit = [_f for _f in _disk_findings
+                          if _f[0] == 'CRITICAL']
+            for _sev, _kind, _msg in _disk_findings:
+                _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                          else tui.COLOR_WARNING)
+                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+            if _disk_crit:
+                _all_ok = False
             _total = sum(len(_v) for _v in _by_builder.values())
-            if not _fed_crit and not _conf_crit:
+            if not _fed_crit and not _conf_crit and not _disk_crit:
                 console.print(
                     f"  ok        {_total} claim(s) across "
-                    f"{len(_by_builder)} builder(s); neighbours match")
+                    f"{len(_by_builder)} builder(s); neighbours "
+                    "match; on-disk pool matches sidecar")
         # Cross-mirror pool-SHA consistency
         if len(_per_mirror) > 1:
             console.print("\ncross-mirror pool-SHA consistency:",

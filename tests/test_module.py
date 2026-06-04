@@ -24340,6 +24340,208 @@ def test_cmd_mirror_dispatch_routes_audit_and_query():
         _body)
 
 
+def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
+    """Phase 8 publish gate: BLOCK when build snapshot.current < mirror.base.
+    Surfaces an actionable error + leaves no state change."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import mirror as _mirror
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _td:
+        _cfg_dir = os.path.join(_td, 'config')
+        _cache_dir = os.path.join(_td, 'cache')
+        _repo_dir = os.path.join(_td, 'repo')
+        os.makedirs(_cfg_dir)
+        os.makedirs(_cache_dir)
+        os.makedirs(os.path.join(_repo_dir, 'dists', 'thor'))
+        # InRelease present so the early indexing gate passes
+        with open(os.path.join(_repo_dir, 'dists', 'thor',
+                               'InRelease'), 'w') as _fh:
+            _fh.write('Date: 2026-06-01\n')
+
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache  = _cache_dir
+            dir_repo   = _repo_dir
+            build_codename = 'thor'
+
+        # Add mirror with a base FROM THE FUTURE relative to the build pin
+        _mirror.add_mirror(
+            _Cfg(), name='primary',
+            url='file:///srv/asgard',
+            seed_pin='20260615T000000Z')  # mirror.base = 20260615…
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess._snapshot_current = lambda: '20260601T000000Z'  # OLDER
+        # Identity stub — publish path checks for coord keys.
+        _sess._coord_self_keys = lambda: (
+            'athena-test', '/fake/priv', '/fake/pub')
+
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _ok = _sess.cmd_mirror_publish('primary')
+        finally:
+            build.console.print = _orig
+        _joined = '\n'.join(_lines)
+        assert _ok is False, _joined
+        assert 'REFUSED' in _joined
+        assert 'archive floor' in _joined
+        assert '20260615T000000Z' in _joined
+        assert '20260601T000000Z' in _joined
+
+
+def test_mirror_audit_disk_vs_claims_flags_missing_and_orphan():
+    """Phase 8 integrity sweep: cross-checks every non-retracted
+    claim's filename against the actual on-disk pool listing.  For a
+    file:// mirror, the helper walks the pool dir directly (no ssh).
+    Three claims: A is on disk (ok), B is missing on disk (CRITICAL),
+    C has no claim (orphan, WARNING).  D is retracted → not counted."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _td:
+        _pool = os.path.join(_td, 'pool')
+        os.makedirs(os.path.join(_pool, 'main'))
+        # On-disk: A.deb (claimed + present), C.deb (orphan)
+        for _f in ('a_1.0_amd64.deb', 'c_1.0_amd64.deb'):
+            with open(os.path.join(_pool, 'main', _f), 'wb') as _fh:
+                _fh.write(b'')
+        _sess = BuildSession.__new__(BuildSession)
+        class _Cfg:
+            dir_config = _td
+            dir_cache  = _td
+            dir_coord  = _td
+        _sess.config = _Cfg()
+        _mirror_state = {
+            'url': f'file://{_pool}',
+            'ssh_key': '',
+        }
+        _by_builder = {
+            'athena-test': [
+                {'filename': 'a_1.0_amd64.deb',
+                 'claim_state': 'published'},
+                {'filename': 'b_1.0_amd64.deb',  # missing on disk
+                 'claim_state': 'published'},
+                {'filename': 'd_old.deb',
+                 'claim_state': 'retracted', 'retracts_seq': 0},
+            ],
+        }
+        _findings = _sess._mirror_audit_disk_vs_claims(
+            'm', _mirror_state, _by_builder)
+        _kinds = {(_s, _k) for _s, _k, _ in _findings}
+        # B claimed but absent → CRITICAL missing_on_disk
+        assert ('CRITICAL', 'missing_on_disk') in _kinds, _findings
+        _msgs_missing = [_m for _s, _k, _m in _findings
+                         if _k == 'missing_on_disk']
+        assert any("'b_1.0_amd64.deb'" in _m for _m in _msgs_missing), _msgs_missing
+        # C present but unclaimed → WARNING orphan_on_disk
+        assert ('WARNING', 'orphan_on_disk') in _kinds, _findings
+        _msgs_orphan = [_m for _s, _k, _m in _findings
+                        if _k == 'orphan_on_disk']
+        assert any("'c_1.0_amd64.deb'" in _m for _m in _msgs_orphan), _msgs_orphan
+        # D retracted → must NOT count toward missing
+        assert not any("'d_old.deb'" in _m for _, _, _m in _findings)
+        # A both claimed and present → no finding mentions it
+        assert not any("'a_1.0_amd64.deb'" in _m for _, _, _m in _findings)
+
+
+def test_cmd_mirror_summary_we_own_counts_non_retracted_claims():
+    """Phase 8: `mirror summary` adds `we_own: N pkg(s)` per mirror,
+    sourced from the fetched claims jsonl.  Counts non-retracted
+    entries; surfaces retraction count parenthetically when > 0.
+    Friendly sentinel string when no jsonl has been fetched yet."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    import mirror as _mirror
+    from build import BuildSession
+    import json as _json
+    with tempfile.TemporaryDirectory() as _td:
+        _cfg_dir = os.path.join(_td, 'config')
+        _cache_dir = os.path.join(_td, 'cache')
+        _coord_dir = os.path.join(_td, 'coord')
+        os.makedirs(_cfg_dir)
+        os.makedirs(_cache_dir)
+        os.makedirs(_coord_dir)
+        # Builder ID file (the `we_own` count needs to know who WE are)
+        with open(os.path.join(_coord_dir, 'BUILDER_ID'), 'w') as _fh:
+            _fh.write('athena-test')
+
+        _sess = BuildSession.__new__(BuildSession)
+        class _Cfg:
+            dir_config = _cfg_dir
+            dir_cache  = _cache_dir
+            dir_coord  = _coord_dir
+        _sess.config = _Cfg()
+        # Register one mirror; doesn't matter what URL — the count
+        # comes from the fetched cache, not the live remote.
+        _mirror.add_mirror(_Cfg(), name='primary',
+                           url='ssh://h/srv/asgard', seed_pin='')
+        # Drop a fetched claims jsonl with 3 live + 1 retracted claim
+        _fetched = os.path.join(_cache_dir, 'mirror', 'primary',
+                                'fetched', 'claims')
+        os.makedirs(_fetched)
+        with open(os.path.join(_fetched, 'athena-test.jsonl'), 'w') as _fh:
+            for _i in range(3):
+                _fh.write(_json.dumps({
+                    'builder': 'athena-test', 'seq': _i + 1,
+                    'package': f'pkg-{_i}', 'claim_state': 'published',
+                }) + '\n')
+            _fh.write(_json.dumps({
+                'builder': 'athena-test', 'seq': 4,
+                'package': 'old-pkg', 'claim_state': 'retracted',
+                'retracts_seq': 0,
+            }) + '\n')
+
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _r = _sess.cmd_mirror_summary('primary')
+        finally:
+            build.console.print = _orig
+        assert _r is True, '\n'.join(_lines)
+        _joined = '\n'.join(_lines)
+        assert 'we_own:' in _joined
+        assert '3 pkg(s)' in _joined
+        assert '1 retracted' in _joined
+
+    # Second case: no fetched jsonl → friendly sentinel
+    with tempfile.TemporaryDirectory() as _td2:
+        _cfg_dir = os.path.join(_td2, 'config')
+        _cache_dir = os.path.join(_td2, 'cache')
+        _coord_dir = os.path.join(_td2, 'coord')
+        for _d in (_cfg_dir, _cache_dir, _coord_dir):
+            os.makedirs(_d)
+        with open(os.path.join(_coord_dir, 'BUILDER_ID'), 'w') as _fh:
+            _fh.write('athena-test')
+        _sess = BuildSession.__new__(BuildSession)
+        class _Cfg2:
+            dir_config = _cfg_dir
+            dir_cache  = _cache_dir
+            dir_coord  = _coord_dir
+        _sess.config = _Cfg2()
+        _mirror.add_mirror(_Cfg2(), name='primary',
+                           url='ssh://h/srv/asgard', seed_pin='')
+        _lines = []
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _sess.cmd_mirror_summary('primary')
+        finally:
+            build.console.print = _orig
+        _joined = '\n'.join(_lines)
+        assert 'no claims jsonl fetched yet' in _joined
+
+
 def test_cmd_mirror_query_reports_no_match():
     """`mirror query <pkg>` with no claims for that package across any
     mirror surfaces the no-match guidance message."""
@@ -25392,6 +25594,9 @@ def main() -> int:
         test_remote_publish_drops_claim_when_push_fails,
         # MIRROR-01 Phase 4 — audit + query + multi-mirror UPD-01 wiring
         test_cmd_mirror_dispatch_routes_audit_and_query,
+        test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
+        test_mirror_audit_disk_vs_claims_flags_missing_and_orphan,
+        test_cmd_mirror_summary_we_own_counts_non_retracted_claims,
         test_cmd_mirror_query_reports_no_match,
         test_cmd_mirror_query_requires_pkg_arg,
         test_cmd_mirror_audit_no_mirrors_reports_warning,

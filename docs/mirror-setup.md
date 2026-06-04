@@ -361,6 +361,74 @@ reconcile.  For multiple peers:
   `unpublished` / `in-sync` / `drift`.  Drift rows print the missing
   and extra URLs and remind the operator to reconcile.
 
+## Phase 8 publish gate: `snapshot.current >= mirror.base`
+
+Every `mirror publish` invocation checks that the local build's
+snapshot pin is at least as fresh as each target mirror's archive
+floor.  If `snapshot.current < mirror.base`, the publish is
+**REFUSED** with:
+
+```
+mirror publish <name>: REFUSED — build snapshot (<current>) is older
+than this mirror's archive floor (mirror.base = <base>).  Advance the
+build snapshot (`snapshot select <ts>`) or wipe + re-add the mirror
+with a fresh base.
+```
+
+Publishing pre-floor packages would either be silently dropped on
+the next prune at the mirror, or corrupt the `+asg uN` derivation
+(which assumes the mirror's published Packages index is the
+authoritative bump-N counter).  Empty `mirror.base` (= mirror has
+never been published to) is allowed through — first publish
+bootstraps it.
+
+## Where the parts live now (`source` / `repo` / `mirror`)
+
+| Family | Purpose | Notable subcommands |
+|---|---|---|
+| `source` | produce a built `.deb` (any path) | `sync`, `build`, `tunnel`, `audit`, `repair`, `fork` |
+| `repo` | LOCAL `.deb` pool maintenance | `audit`, `repair` |
+| `mirror` | REMOTE federation endpoint state | `add`, `publish`, `pull`, `audit`, `summary`, `query`, `reconcile-neighbours`, `init`, etc. |
+
+`source tunnel` (was `repo tunnel` pre-Phase 8): pulls a prebuilt
+`.deb` for packages we choose NOT to build from source, records a
+tunneled `build.json` claim, and the .deb round-trips through
+`mirror publish` like any built artefact.  See operator notes in
+the README.
+
+`repo index` was retired from the operator surface in Phase 8 —
+`chroot build` and `mirror publish` auto-index when the local
+`InRelease` is missing.  Use `repo repair` if you suspect a stale
+index.
+
+## `mirror summary` per-mirror `we_own` count
+
+The summary now lists `we_own: N pkg(s)` per mirror — counts
+non-retracted claims this builder owns on each mirror, sourced from
+the most-recently-fetched `cache/mirror/<name>/fetched/claims/<our-id>.jsonl`.
+
+If you've never run `mirror pull` or `mirror publish` against the
+mirror, the line says `(no claims jsonl fetched yet — run mirror pull)`
+instead of a count.
+
+## `mirror audit` integrity sweep
+
+Phase 8 extends `mirror audit` with a per-mirror cross-check between
+the signed claim ledger and the actual files in the mirror's pool dir:
+
+- **CRITICAL `missing_on_disk`** — a sidecar claim references a file
+  that's not actually in the pool.  apt clients fetching it would 404;
+  `mirror pull` would skip the download.
+- **WARNING `orphan_on_disk`** — a `.deb`/`.udeb` is sitting in the
+  pool with no claim backing it (operator out-of-band rsync? leftover
+  from a wiped builder?).  Not load-bearing today but operator should
+  know.
+
+Cost: one remote `find` per ssh mirror; local `os.walk` for file://
+mirrors.  Network/permission failure on the listing surfaces a
+single `INFO pool_listing_unavailable` line and the cross-check is
+skipped (other audit checks still run).
+
 ## Subcommand quick reference
 
 ```
@@ -369,12 +437,12 @@ mirror add <ip|fqdn|local> <url> [--ssh-key PATH] [--proto http|https] [--name N
                                 register a mirror — probes, sidecar, federation discovery, preview, confirm
 mirror remove <name|url>        unregister LOCALLY (no remote/peer changes)
 mirror list                     name, type, federation-consistency tag, url
-mirror summary [<name>]         full per-mirror state dump
+mirror summary [<name>]         per-mirror state + we_own count + neighbours_known list
 mirror status [<name>]          builder identity + halt sentinel + per-mirror PUBLISHED/NEVER PUBLISHED
 mirror reconcile-neighbours     fan-out: align every peer's coord-head.neighbours with local config
-mirror publish [<name>]         per-file .deb push + sign claims + re-sign coord-head (federation-gated)
+mirror publish [<name>]         per-file .deb push + sign claims + re-sign coord-head (federation-gated + snapshot-base-gated)
 mirror pull [<name>]            fetch peer sidecar, download missing claim .debs (skip-own; SHA verified)
-mirror audit [<name>]           federation consistency, claim sigs, hash conflicts, cross-mirror pool drift
+mirror audit [<name>]           federation consistency, claim sigs, hash conflicts, cross-mirror pool drift, on-disk pool ↔ claims integrity
 mirror query <pkg> [<name>]     show claims matching <pkg> from last fetched view of each mirror
 mirror builders                 list registered builders (local + fetched keyring)
 mirror conflict resolve <pkg>   retract our claim for <pkg>; clear PUBLISH_HALT
