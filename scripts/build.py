@@ -3815,7 +3815,7 @@ class BuildSession:
           2. tier-1 verify coord-head; Ed25519-verify every claim line
           3. Federation neighbours match local config (CRITICAL on diff)
           4. Hash-conflict scan across builders (CRITICAL → operator
-             must run `coord conflict resolve`)
+             must run `mirror conflict resolve`)
           5. Cross-mirror pool-SHA consistency (when 2+ mirrors and
              they overlap on the same filename, fail if SHAs disagree)
 
@@ -6388,13 +6388,10 @@ class BuildSession:
         if _interrupted:
             return 'interrupted'
 
-        # (5) predicted binaries.
+        # (5) predicted binaries.  `is_ar_file` is a staticmethod so we
+        # don't need a live container instance — read-only callers
+        # (source audit / source repair) work without `container init`.
         _all_present = True
-        # Caller has gated on build_container_ready (see source audit /
-        # source repair) — self.container is set.  is_ar_file is a
-        # staticmethod so accessing it through the class works without
-        # the optional-None unwrap mypy wants.
-        assert self.container is not None
         for _f in _expected:
             # UPD-01: accept the predicted pristine name OR a +asg<R>u<N>
             # stamped variant (find_matching_artifact) — same reconciliation
@@ -6404,7 +6401,7 @@ class BuildSession:
             if _match is None:
                 _all_present = False
                 break
-            if not self.container.is_ar_file(_match):
+            if not buildcontainer.BuildContainer.is_ar_file(_match):
                 _all_present = False
                 break
 
@@ -6442,15 +6439,12 @@ class BuildSession:
 
         `source repair` does NOT trigger a rebuild itself — it only
         adjusts the records so the NEXT `source build` does the right
-        thing.
-
-        Prereqs: cache build + cache parse + container init.
+        thing.  Read-only WRT the container; needs cache + dep tree.
         """
-        if not (self.flags.cache_ready and self.flags.dep_check_ready
-                and self.flags.build_container_ready):
+        if not (self.flags.cache_ready and self.flags.dep_check_ready):
             console.print(
-                "source repair needs cache build + cache parse + container "
-                "init to have run first.",
+                "source repair needs `cache build` + `cache parse` to "
+                "have run first.",
                 tui.COLOR_ERROR,
             )
             return
@@ -6830,13 +6824,15 @@ class BuildSession:
         the build state is `source repair`'s job (which uses the same
         classifier).
 
-        Prereqs: cache + cache parse + container init.
+        Prereqs: cache_ready + dep_check_ready.  Walks dep_tree to know
+        which sources are selected.  The "Next-run build" section needs
+        a live container (to call check_build); when none is initialized
+        that section is omitted but the rest of the audit still runs.
         """
-        if not (self.flags.cache_ready and self.flags.dep_check_ready
-                and self.flags.build_container_ready):
+        if not (self.flags.cache_ready and self.flags.dep_check_ready):
             console.print(
-                "source audit needs cache build + cache parse + container "
-                "init to have run first.",
+                "source audit needs `cache build` + `cache parse` to have "
+                "run first.",
                 tui.COLOR_ERROR,
             )
             return
