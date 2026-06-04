@@ -221,6 +221,13 @@ Fields (the entry-phase shape):
   `cmd_mirror_pull` for `.deb`s pulled from a peer's mirror.
   Distinguishes "we built it" from "we pulled it" without losing the
   record.
+- `component` (str, default `'main'`) — apt component of the source's
+  origin mirror.  Pinned on the record so downstream consumers
+  (federation claims, `mirror pull`, audit) don't have to re-derive it
+  from the dep tree.  Threads through `coord.publish.generate_pending_claims`
+  into the federation claim's matching `component` field, which
+  `cmd_mirror_pull` reads to route the file to the correct
+  `repo/dists/<codename>/<comp>/binary-<arch>/` dir.
 
 `write_build_record(buildlog_dir, record)`: HMAC-signs with a
 session-local key under `log/build/.metrics.hmac.key`, then atomic
@@ -238,8 +245,8 @@ status when phase reaches a terminal value.
 `backfill_output_hashes(buildlog_dir, repo_root)`: idempotent
 walker that upgrades older records to current schema, hashing
 emitted `.deb`s under `repo_root` via `get_sha256`'s cached digest
-and initialising the federation fields (`republished_from={}`,
-`pulled_from=None`).
+and initialising any missing federation fields (`republished_from={}`,
+`pulled_from=None`, `component='main'`).
 
 ---
 
@@ -600,9 +607,11 @@ primitives (rsync + ssh flock), and the 11-step publish state machine.
   Fields: `v`, `builder`, `seq`, `package`, `intended_version`,
   `built_version`, `filename`, `sha256`, `size`, `snapshot`,
   `built_at`, `claim_state` (`pending` / `published` / `retracted`),
-  `republished_from` (optional dict {url, upstream_sha256} for
-  tunneled passthrough — federation treats it as "no owner"), `sig`
-  (Ed25519, filled in by signer).
+  `component` (apt component for routing on pull; defaults to `'main'`
+  for back-compat with pre-component claim files), `republished_from`
+  (optional dict {url, upstream_sha256} for tunneled passthrough —
+  federation treats it as "no owner"), `sig` (Ed25519, filled in by
+  signer).
 - `new_retraction(*, builder, seq, package, retracts_seq, …)` —
   builder-signed tombstone referencing the seq of the claim being
   withdrawn.
@@ -728,7 +737,10 @@ Rsync + ssh flock primitives for the publish/pull/reconcile paths:
 emit one unsigned claim per output filename that isn't already in this
 builder's live jsonl.  Reads `build.json.republished_from` per output
 and passes the matching entry to `schema.new_claim`, so tunneled
-outputs round-trip through the federation as "no owner".
+outputs round-trip through the federation as "no owner".  Also reads
+the build record's `component` field and threads it onto each claim —
+`cmd_mirror_pull` uses that field to route the downloaded file to the
+correct `repo/dists/<codename>/<comp>/binary-<arch>/` dir.
 
 `filter_pending_by_ownership(builder_id, candidates, existing_owners)`:
 returns `(kept_pending, blocked_findings)` applying the ownership
@@ -807,16 +819,39 @@ build, segregate outputs to component dirs, strip NMU and stamp
   just-emitted set, not the whole repo.
 
 ### `_normalize_built_artifacts(src_pkg, emitted_paths, was_patched)`
-For each just-emitted artifact: strip NMU via `utils.strip_nmu_from_deb`,
-then (if a remote ledger is loaded and this source rebuild is part of an
-update delta) stamp `+asg<R>u<N>` via `utils.restamp_asg_deb`.
+Two phases:
+1. Strip NMU via `utils.strip_nmu_from_deb` on every artifact;
+   rewrites the .deb's `Version:` field and every version constraint
+   in dep-related fields, then renames the file.
+2. If this is a delta build (any strip rewrote a file, or
+   `was_patched`, or the upstream source itself is a delta) AND
+   `self.asg_ledger` is loaded, stamp `+asg<R>u<N>` via
+   `utils.restamp_asg_deb`.
+
+**Uniform N per source** (load-bearing): compute
+`asg_next_n(ledger.get(pkg,[]), pristine_base(ver), R)` for every
+sibling binary FIRST, then stamp ALL of them at `max(per-file Ns)`.
+Per-file N desynced kernel meta `linux-headers-amd64` (long ledger
+history → high N) from its fresh ABI sibling
+`linux-headers-6.1.0-49-amd64` (empty ledger → N=1) — and
+`restamp_asg_deb` only rewrites the binary's OWN sibling-pins, so the
+meta's `Depends: linux-headers-6.1.0-49-amd64 (= ver+asg1u<HIGH>)`
+went unresolved against the binary at `+asg1u1`.  Uniform N keeps the
+pin chain resolvable; tradeoff is a binary whose history is shorter
+skips some N's.
 
 ### `check_build(src_pkg, expected_files)`
 - expected_files non-empty.
-- `.result` reads PASS or TUNNELED.
-- Every main-classified file in expected_files is present at its routed
-  location (accepting either pristine or `+asg<R>u<N>`-stamped via
-  `utils.find_matching_artifact`) AND is a valid ar archive.
+- Build-record (`<pkg>.build.json`) classifies as `ok` or `tunneled`
+  via `utils.classify_build_record`.
+- Component derived from `src_pkg._mirror.component` (or `'main'`) —
+  non-main components (contrib / non-free / non-free-firmware) route
+  via `config.deb_dest_for_filename(file, component)`.
+- Every main-classified file in expected_files is present at its
+  routed location (accepting either the pristine name OR a
+  `+asg<R>u<N>`-stamped variant via `utils.find_matching_artifact`)
+  AND opens as a valid ar archive (`is_ar_file`, backed by
+  python-debian's `DebFile`).
 - Side artifacts (-dev/-doc/-dbgsym/-tests) are NOT gated — missing
   ones don't trigger rebuild.
 
@@ -944,8 +979,8 @@ ramdisk, no pool indexing.
 ## disk_image.py — qcow2 disk image
 
 **Purpose:** master a pre-installed bootable qcow2 disk image from the
-verified live chroot (COMP-09). Same gate as live ISO; output is a
-single qcow2 instead of an ISO.
+verified live chroot. Same gate as live ISO; output is a single qcow2
+instead of an ISO.
 
 ### `build_disk_image(chroot, dir_image, password, size_gb, ...)`
 - `qemu-img create` a sparse qcow2 of the requested size.
@@ -1275,7 +1310,7 @@ success and gates on prerequisites.
 - The 60+ cmd_* methods — dispatched via group helpers (cmd_cache,
   cmd_source, etc.) into the concrete handlers.
 
-### Top-level commands (13), each with `_group_help` tables
+### Top-level commands (15), each with `_group_help` tables
 - cache: build / purge / parse / select / info
 - clean: cache / source / repo / buildroot / image / download / container / all
 - patch: refresh
@@ -1289,6 +1324,7 @@ success and gates on prerequisites.
 - autorun: live / installer / disk / build
 - mirror: add / list / remove / publish / pull / audit / summary /
           reconcile-neighbours / show
+- set / get: session-local config tweaks (mode, include-recommends, …)
 - print: state / config / packages / sources / extras / live / installer /
          pool / build / tunneled / fork / container / snapshot / mirrors /
          signing / repo / stats / help
@@ -1348,24 +1384,38 @@ hash drift). Sets build_container_ready.
 
 **cmd_source_build [force] [subset|<names>] [[profiles]]:**
 - Parse args via the static `_parse_source_build_args` helper.
-- In build mode, the legal scopes shrink to `all` (== everything
-  in `build_pkg.list`) and explicit names; `pkg` / `live` / `installer` /
-  `recommended` raise an eager arg-validation error pointing at the
-  mode.
+  `_SOURCE_SUBSETS = ('pkg', 'live', 'installer', 'recommended', 'all',
+  'indl')`.  In build mode the legal scopes shrink to `indl` (==
+  everything in `build_pkg.list`) and explicit names; `pkg` / `live` /
+  `installer` / `recommended` raise an eager arg-validation error.
 - Auto-detect update-mode: when a published base exists and current
   snapshot is ahead, rebuild the delta with `+asg<R>u<N>` stamping.
 - Pick the package set per subset (pkg / live / installer / recommended /
-  all / explicit names). Each subset is a slice of the unified corpus.
-- For each src_pkg:
+  all / indl / explicit names). Each subset is a slice of the unified
+  corpus.
+- For each src_pkg, `_build_one_source` runs:
   - Skip if in `cache.skip_src`.
-  - If tunneled: call `_do_tunnel` (which uses the upstream Filename:
-    from the cache, NOT the strip-NMU pristine name — those would 404
-    on snapshot.debian.org or silently fetch wrong unstable binaries).
-  - Else: check_build to skip rebuild if .result is fresh; else
+  - If in `config.tunnel_packages`: skip-gate via `check_build` against
+    `_predicted_files_for_source` (pristine names); if missing → call
+    `_do_tunnel` which downloads upstream-named, runs strip + asg-stamp,
+    lands the binary in pristine / `+asg` form.  See
+    `cmd_tunnel_package` below for the full normalisation sequence.
+  - Else: same `check_build` skip-gate; if not satisfied →
     `container.build(src_pkg, profiles_override, options_override)`,
     then re-check_build to confirm artifacts landed.
-  - Track built / tunneled / failed / skipped counts.
-- Record counts on session.last_source_build_counts. Set source_build_ready.
+  - Returns one of `'built' | 'tunneled' | 'failed' | 'skipped'`;
+    caller tallies counts.
+- After the loop: `_detect_build_audit_divergence(packages)` runs the
+  audit↔build sync gate.  For every source operated on (excluding
+  `cache.skip_src`), compares `_source_state` (audit's view) vs the
+  build record's `classify_build_record`.  If audit returns a hard
+  state (`needs_build` / `stale_pass` / `interrupted` / `needs_sync`)
+  AND the record doesn't say `'fail'`, surface as a divergence finding
+  and REFUSE to set `source_build_ready`.  Catches any drift between
+  `check_build`'s accept criteria and `_source_state`'s classifier —
+  the firefox-esr bug class.
+- Record counts on `session.last_source_build_counts`. Set
+  source_build_ready (only when no divergences).
 
 **cmd_build_chroot_live:**
 - `_refuse_in_build_mode('chroot build live')` early-return if
@@ -1457,14 +1507,21 @@ publish, pull, audit, federation reconciliation.
     not abort the others).
 
 - `cmd_mirror_pull [<name>] [<pkg>...]` — rsync the delta of `pool/`
-  + any new claims from the named mirror; for every newly-arrived
-  `.deb` writes a local `build.json` record:
-  - tunneled-on-mirror (claim has `republished_from`) →
-    `phase='tunneled'`, copy `republished_from`.
-  - owned-by-other → `phase='done'` + `pulled_from = {mirror_name,
-    owner_builder, upstream_sha256}`.
+  + any new claims from the named mirror.  For each candidate claim:
+  - read its `component` field (default `'main'`) and route the local
+    on-disk path via `config.deb_dest_for_filename(filename,
+    component)` — without this a non-free-firmware claim lands at
+    `main/binary-arch/` and the remote URL (derived from the local
+    path) 404s.
   - Our own claims are SKIPPED (we built it; rebuilding by pull would
     drop our ownership).
+  - For every newly-arrived `.deb` write a local `build.json` record
+    via `_mirror_pull_write_build_records`:
+    - tunneled-on-mirror (claim has `republished_from`) →
+      `phase='tunneled'`, copy `republished_from`, `component` from
+      claim.
+    - owned-by-other → `phase='done'` + `pulled_from = {mirror_name,
+      owner_builder}`, `component` from claim.
 
 - `cmd_mirror_audit [<name>]` — pull peer's coord tree + claims, run
   `coord.reconcile.audit_cross`, then closure-projection of the
@@ -1484,13 +1541,109 @@ publish, pull, audit, federation reconciliation.
   the last-pulled coord-head snapshot (federation membership +
   `last_seqs` per builder + freshness check).
 
-### `cmd_tunnel_package` (`source tunnel <pkg>`)
+### `cmd_tunnel_package` (`source tunnel <pkg>`) and `_do_tunnel`
 
-Writes the local `build.json` record with `phase='tunneled'` and
-`republished_from = {url, upstream_sha256}`. The claim emitter in
-`coord.publish.generate_pending_claims` reads that field per-output
-and propagates it onto the federation claim — so tunneled-locally
-becomes tunneled-on-mirror (no-owner) without losing provenance.
+`_do_tunnel(src_pkg)` is the per-source tunneling primitive.  It
+downloads upstream's prebuilt `.deb`s and runs them through the SAME
+strip + asg-stamp pipeline a from-source build uses, so the on-disk
+artifact is indistinguishable from a built binary (pristine-named
+or `+asg<R>u<N>`-stamped).  The only artefact preserved upstream is
+`build.json.republished_from = {url, upstream_sha256}` (pre-strip
+hash), which `coord.publish.generate_pending_claims` propagates onto
+the federation claim — the mirror sidecar marks the package as
+"no owner" (tunneled provenance) without affecting any
+apt / repo-audit / source-audit interpretation.
+
+Sequence:
+1. Download each binary using the upstream `Filename:` from the
+   cache (`_tunnel_filenames_for_source`).  snapshot.debian.org serves
+   files by their original upstream filename; the URL must carry
+   any `~debNuN` / `+debNuN` suffix verbatim or the URL 404s.
+2. Hash each freshly-downloaded file for the federation provenance
+   (`upstream_sha256`).
+3. `utils.strip_nmu_from_deb` rewrites Version field + every dep
+   constraint, renames file to pristine.
+4. If delta + `container.asg_ledger` is loaded: `restamp_asg_deb` at
+   the source's uniform N (max of per-file candidates — same rule as
+   `_normalize_built_artifacts`).
+5. Write build-record terminal fields with FINAL post-normalize
+   filenames + SHAs in `outputs`/`output_hashes`; `built_version` is
+   the pristine version; `republished_from` keys by final filename →
+   upstream URL + pre-strip SHA; `component` carries the source's
+   origin mirror component.
+
+`cmd_tunnel_package(*args)` is the `source tunnel <pkg>` umbrella —
+validates names, iterates `_do_tunnel` per source, prints the
+per-package detail block (`upstream`, `on-disk` versions, file count
++ size, strip/stamp counts, pool path, origin URL).
+
+### `_source_state` and `_detect_build_audit_divergence`
+
+`_source_state(pkg, src)` is the audit-side classifier
+(`source audit` walks every selected source through it).  Returns one
+of `ok | tunneled | fail | needs_build | stale_pass | needs_sync |
+interrupted | no_pkgs`.
+
+Resolution order (short-circuits):
+1. no predicted binaries → `'no_pkgs'`
+2. record=fail → `'fail'` (operator marker; leave alone)
+3. any source file missing on disk OR `.verified` absent →
+   `'needs_sync'`
+4. record=interrupted → `'interrupted'`
+5. Disk check — for every predicted file,
+   `find_matching_artifact(config.deb_dest_for_filename(file,
+   src._mirror.component or 'main'), file)` + `is_ar_file` (the SAME
+   accept criteria `check_build` uses, so audit and the build's
+   skip-rebuild gate stay in lock-step).  Component derivation is
+   load-bearing: non-main packages (e.g. `amd64-microcode` under
+   `non-free-firmware`) would otherwise be looked up under `main/`
+   and report `stale_pass` for a perfectly-good binary.
+6. Any binary missing/not-ar with record=ok or tunneled → `'stale_pass'`;
+   otherwise (no record) → `'needs_build'`.
+7. Binaries all valid:
+   - record=tunneled → `'tunneled'` (no patch_set_hash check;
+     tunneled packages don't carry our patches)
+   - record=ok with patches matching → `'ok'`; differs →
+     `'stale_pass'`
+   - else → `'needs_build'`
+
+`_detect_build_audit_divergence(packages)` is the sanity gate
+`cmd_source_build` runs post-loop.  For each in-scope source
+(excluding `cache.skip_src`):
+- Audit's view: `_source_state(pkg.package, pkg)`
+- Build's view: `classify_build_record(read_build_record(...))`
+
+A finding is emitted when audit returns a hard state
+(`needs_build` / `stale_pass` / `interrupted` / `needs_sync`) AND the
+record does NOT say `'fail'` (which would be a consistent declared
+failure).  Empty findings = lock-step.  Non-empty → either the
+skip-gate accepts a shape audit doesn't, the audit classifier accepts
+a shape `check_build` doesn't, or an on-disk file vanished between
+build and the gate.  `cmd_source_build` REFUSES to set
+`source_build_ready` on any finding; operator runs
+`source audit` + `source repair` to investigate.
+
+### `cmd_set` / `cmd_get` — session-local config tweaks
+
+`set <param> <value>` and `get [param]` for live config inspection
+and modification.  Changes are session-local; restart re-reads
+`build.conf`.  Registries `BuildSession._SETTABLE` and `_GETTABLE`
+(dicts of name → handler) are populated immediately after the class
+body — adding a new param is one `_set_X` method + one registry entry.
+
+Currently:
+- **Settable** (each setter validates, updates the attribute, and
+  clears `dep_check_ready` when the change invalidates the resolved
+  dep tree):
+  - `mode` — `distribution` | `build`.  Refreshes the TUI footer's
+    `[build]` tag.
+  - `include-recommends` — bool.
+- **Gettable** (read-only views over `BuildConfig`):
+  `mode`, `include-recommends`, `build-version`, `codename`,
+  `distribution`, `arch`, `snapshot`, `max-parallel-builds`.
+
+Bare `get` lists every gettable + current value.  Bare `set` lists
+the settable params.  Unknown params surface the supported set.
 
 ### `main(banner)`
 - Detect `--headless`; strip from argv before BuildConfig sees it.
@@ -1590,7 +1743,7 @@ prior publish exists.  Concrete example after a snapshot advance:
 > source build all
 source build: UPDATE mode — published 20260517T203347Z → current
   20260529T081521Z; rebuilding the changed source delta (+asg-stamped,
-  per-file N) plus any other source needing a build.
+  uniform N per source) plus any other source needing a build.
   11 changed source(s): bind9, evince, firefox-esr, gnutls28, haveged,
   krb5, libgcrypt20, linux, linux-signed-amd64, rsync, samba
 ```
