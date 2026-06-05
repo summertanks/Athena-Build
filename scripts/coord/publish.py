@@ -405,6 +405,7 @@ def remote_publish(
     ssh_key: 'Optional[str]' = None,
     pool_remote_spec: 'Optional[str]' = None,
     on_progress: 'Optional[Callable]' = None,
+    on_status: 'Optional[Callable[[str], None]]' = None,
 ) -> Tuple[bool, str]:
     """11-step publish transaction (see module docstring).  Returns
     (ok, detail).  On failure detail explains the step that aborted.
@@ -445,6 +446,14 @@ def remote_publish(
     `remote_coord_spec` if not given (parses the `user@host:/path`
     form).  Required for flock acquisition.
     """
+    def _status(msg: str) -> None:
+        """Surface a step transition to the operator via on_status (when
+        wired by cmd_mirror_publish).  No-op when omitted (tests).
+        Also tee'd to the logger so the log tab captures the same trail."""
+        if on_status is not None:
+            on_status(msg)
+        logger.info(f"coord.publish: {msg}")
+
     # Step 0 — pre-flight: PUBLISH_HALT check
     _halt = _reconcile.publish_halt_reason(config.dir_coord)
     if _halt is not None:
@@ -461,6 +470,7 @@ def remote_publish(
     # Step 1 — acquire remote flock (skipped when local-fs)
     _lock_proc = None
     if ssh_host:
+        _status(f"acquiring remote flock on {ssh_host} ({flock_path})")
         _lock_proc = _transport.remote_flock_acquire(
             ssh_host=ssh_host, lock_path=flock_path,
             timeout_sec=flock_timeout, ssh_key=ssh_key,
@@ -470,6 +480,7 @@ def remote_publish(
 
     try:
         # Step 2 — fetch remote coord tree (under lock)
+        _status("fetching remote coord tree (rsync)")
         _fetched = config.dir_coord_fetched
         _ok, _detail = _transport.pull_remote_coord(
             local_dest=_fetched, remote_spec=remote_coord_spec,
@@ -479,6 +490,7 @@ def remote_publish(
             return False, f"pull failed: {_detail}"
 
         # Step 3 — verify coord-head, build keyring + claim view
+        _status("verifying coord-head signature + loading peer keyring")
         import signing
         _signing_home = signing.signing_home(config)
         _head_dict = _head.read_coord_head(_fetched, _signing_home)
@@ -487,6 +499,10 @@ def remote_publish(
         _revoked = (_head_dict or {}).get('revoked_builders') or {}
         _by_builder = _store.read_all_claims(
             os.path.join(_fetched, 'claims'), _keyring, _revoked)
+        _status(
+            f"loaded {len(_keyring)} peer pubkey(s), "
+            f"{sum(len(v) for v in _by_builder.values())} prior claim(s) "
+            f"across {len(_by_builder)} builder(s)")
 
         # Step 3b — MIRROR-01 Phase 3: federation gate.
         # If remote head exists, its neighbours must match local config's
@@ -511,6 +527,9 @@ def remote_publish(
         # validate our claims.  Subsequent steps then write the new
         # coord-head with neighbours = local_mirror_urls.
         if _is_bootstrap and local_mirror_urls is not None:
+            _status(
+                f"first-publish bootstrap: uploading our pubkey → "
+                f"keyring/builders/{builder_id}.pub")
             _remote_pub = (
                 remote_coord_spec.rstrip('/')
                 + f'/keyring/builders/{builder_id}.pub')
@@ -524,6 +543,7 @@ def remote_publish(
                     f"first-publish: pubkey upload failed: {_detail_pub}")
 
         # Step 4 — hash conflict detection
+        _status("hash-conflict scan across all builders")
         _conf = _reconcile.detect_hash_conflicts(_by_builder)
         _crit = [_f for _f in _conf if _f.severity == 'CRITICAL']
         if _crit:
@@ -544,6 +564,7 @@ def remote_publish(
             if isinstance(_c.get('filename'), str)
             and _c.get('claim_state') != _schema.CLAIM_STATE_RETRACTED
         }
+        _status("generating pending claims from build records")
         _pending = generate_pending_claims(
             builder_id=builder_id,
             buildlog_dir=_buildlog,
@@ -552,13 +573,14 @@ def remote_publish(
             snapshot_pin=snapshot_pin,
             read_build_record=read_build_record,
         )
+        _pending_total = len(_pending)
         _pending = [_p for _p in _pending if _p['filename'] not in _remote_known]
-        # MIRROR-02 chunk 8: ownership decision matrix.  Build the
-        # cross-builder owners projection and filter our candidates.
-        # `ownership_blocked` findings surface in the publish detail
-        # so the operator sees exactly which packages were refused
-        # and why; the rest of the publish proceeds (partial-success
-        # is the right shape per the design).
+        # Ownership decision matrix.  Build the cross-builder owners
+        # projection and filter our candidates.  `ownership_blocked`
+        # findings surface in the publish detail so the operator sees
+        # exactly which packages were refused and why; the rest of the
+        # publish proceeds (partial-success is the right shape per
+        # the design).
         _owners = _store.project_owners(_by_builder)
         _pending, _ownership_blocked = filter_pending_by_ownership(
             builder_id, _pending, _owners)
@@ -568,6 +590,10 @@ def remote_publish(
                     f"ownership_blocked: {_b['filename']} owned by "
                     f"{_b['owner']!r} at {_b['owner_version']!r}; "
                     f"our {_b['our_version']!r} not strictly higher")
+        _status(
+            f"pending claims: {len(_pending)} to publish "
+            f"({_pending_total - len(_pending) - len(_ownership_blocked)} "
+            f"already on remote, {len(_ownership_blocked)} ownership-blocked)")
         # MIRROR-02 chunk 11: post-publish installability gate.
         # Project the union state (mirror's existing claims + our
         # pending) and walk audit_dep_closure with consumer_set =
@@ -616,6 +642,10 @@ def remote_publish(
         # cheap: unchanged files skip transfer entirely.
         _pushed_count = 0
         _push_fail_count = 0
+        if pool_remote_spec is not None and _pending:
+            _status(
+                f"pushing {len(_pending)} .deb(s) to remote pool "
+                f"(progress bar follows)")
         if pool_remote_spec is not None:
             _total_to_push = len(_pending)
             _kept_pending: list = []
@@ -647,6 +677,10 @@ def remote_publish(
                         f"coord.publish: push {_fn} failed: {_detail_push}")
                     _push_fail_count += 1
             _pending = _kept_pending
+            if _total_to_push:
+                _status(
+                    f"pool push: {_pushed_count} sent, "
+                    f"{_push_fail_count} failed")
 
         # Step 6 — sign + append every pending claim to the LOCAL jsonl
         # (state=published; the .deb is now on the remote pool because
@@ -668,10 +702,15 @@ def remote_publish(
                     f"coord.publish: local append failed for "
                     f"{_claim.get('package')}: {_e}")
 
+        _status(
+            f"signed + appended {_appended} claim(s) to local jsonl "
+            f"(seq → {_seq})")
+
         # Step 7 — push the updated jsonl to the remote
         _local_jsonl = _store.claims_path(
             config.dir_coord_claims, builder_id)
         if os.path.isfile(_local_jsonl):
+            _status("pushing claim jsonl to remote")
             _remote_jsonl = (
                 remote_coord_spec.rstrip('/') + f'/claims/{builder_id}.jsonl')
             _ok, _detail = _transport.push_jsonl(
@@ -723,12 +762,14 @@ def remote_publish(
             neighbours=_neighbours,
             revoked_builders=(_head_dict or {}).get('revoked_builders'),
         )
+        _status(f"signing coord-head (last_seqs[{builder_id}]={_seq})")
         _ok = _head.write_coord_head(
             config.dir_coord, _new_head, _signing_home)
         if not _ok:
             return False, "coord-head write/sign failed"
 
         # Step 9 — push the new coord-head to the remote
+        _status("pushing coord-head to remote")
         _ok, _detail = _transport.push_coord_head(
             local_coord_dir=config.dir_coord,
             remote_dir_spec=remote_coord_spec.rstrip('/') + '/',
@@ -736,6 +777,8 @@ def remote_publish(
         )
         if not _ok:
             return False, f"push coord-head failed: {_detail}"
+        if ssh_host:
+            _status("releasing remote flock")
 
         _push_summary = (
             f"; pushed {_pushed_count} .deb(s)"
