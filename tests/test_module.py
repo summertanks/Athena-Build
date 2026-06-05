@@ -22440,6 +22440,57 @@ def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
         f"(per-file N would have given {{1, 5}}); calls={_calls}")
 
 
+def test_cmd_parse_dependency_build_mode_uses_spinner_done_not_stop():
+    """Regression: in build mode, `cmd_parse_dependency` calls
+    `Spinner.done()` (the real API), NOT `.stop()`.  Earlier code
+    called `_spiner.stop()` which AttributeError'd because Spinner
+    has no `stop` method.  Stub Spinner that raises if `.stop()` is
+    touched — the test fails loudly if anyone reintroduces it.
+    """
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    import build
+    from unittest.mock import MagicMock
+
+    _done_called = []
+
+    class _FakeSpinner:
+        def __init__(self, _msg): pass
+        def done(self): _done_called.append(True)
+        def __getattr__(self, _name):
+            raise AttributeError(
+                f"Spinner has no attribute {_name!r} — use done()")
+
+    _orig_Spinner = build.Spinner
+    build.Spinner = _FakeSpinner
+    try:
+        _sess = build.BuildSession.__new__(build.BuildSession)
+
+        class _Cfg:
+            build_mode = 'build'
+            arch = 'amd64'
+            build_profiles: list = []
+        _sess.config = _Cfg()
+        _sess.flags = MagicMock(cache_ready=True, dep_check_ready=False)
+        _sess.cache = MagicMock()
+        _sess.dep_tree = None
+        _sess.udeb_dep_tree = None
+        _sess._cache_parse_build_mode = lambda: True
+        _sess._canonical_select_count = lambda _t: 1
+        _orig_dt = build.dependencytree.DependencyTree
+        build.dependencytree.DependencyTree = lambda *a, **k: MagicMock(
+            selected_srcs={'foo': MagicMock()})
+        try:
+            _sess.cmd_parse_dependency()
+        finally:
+            build.dependencytree.DependencyTree = _orig_dt
+    finally:
+        build.Spinner = _orig_Spinner
+
+    assert _done_called, "Spinner.done() should have been called"
+
+
 def test_humansize_thresholds():
     """B / KiB / MiB / GiB thresholds at 1024-multiples; one-decimal
     formatting matches the tunnel-output spec."""
@@ -27787,6 +27838,7 @@ def main() -> int:
         test_cmd_set_mode_invalid_value_keeps_old_value,
         test_cmd_set_mode_same_value_is_noop,
         test_cmd_set_unknown_param_reports_available_list,
+        test_cmd_parse_dependency_build_mode_uses_spinner_done_not_stop,
         test_humansize_thresholds,
         test_shorten_origin_compacts_long_pool_url,
         test_new_build_record_threads_component_field,
