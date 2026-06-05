@@ -19643,6 +19643,143 @@ def test_virtual_build_live_cohort_conflict_critical():
     assert _conf2 == []
 
 
+def test_virtual_build_synthesize_claim_ledger_one_per_record():
+    """One virtual record → one claim under our builder; seq monotonic
+    from seq_start; intended==built_version (virtual)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/a/s/a_1.0_amd64.deb',
+         'SHA256': 'x' * 64, 'Size': '0'},
+        {'Package': 'b', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/b/s/b_1.0_amd64.deb',
+         'SHA256': 'y' * 64, 'Size': '0'},
+    ]
+    _bb = _vb.synthesize_claim_ledger(
+        _recs, our_builder_id='athena-primary',
+        snapshot='T1', seq_start=5)
+    _claims = _bb['athena-primary']
+    assert len(_claims) == 2
+    assert _claims[0]['seq'] == 5
+    assert _claims[1]['seq'] == 6
+    assert _claims[0]['filename'] == 'a_1.0_amd64.deb'
+    assert _claims[0]['built_version'] == '1.0'
+    assert _claims[0]['claim_state'] == 'published'
+
+
+def test_virtual_publish_dry_run_silent_against_empty_remote():
+    """Empty remote → no ownership conflicts; deterministic synthetic
+    SHA-256s prevent hash conflicts even with two binaries from one
+    source."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/a/s/a_1.0_amd64.deb',
+         'SHA256': 'x' * 64, 'Size': '0'},
+    ]
+    _merged, _f = _vb.virtual_publish_dry_run(
+        _recs, our_builder_id='athena-primary', snapshot='T1',
+        remote_by_builder=None)
+    _crit = [_t for _t in _f if _t[0] == 'CRITICAL']
+    assert _crit == []
+    assert 'athena-primary' in _merged
+    assert len(_merged['athena-primary']) == 1
+
+
+def test_virtual_publish_dry_run_ownership_blocked_critical():
+    """A peer currently owns the same filename at the SAME version →
+    virtual publish would be REFUSED → CRITICAL virtual_ownership_blocked.
+
+    Both claims share the same synthetic sha (reproducible-build
+    scenario) so we isolate the ownership check from the hash-conflict
+    check — both real gates run, the test only inspects ownership."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    from coord import schema as _sch
+    _shared_sha = 'x' * 64
+    _peer_claim = _sch.new_claim(
+        builder='athena-peer', seq=1, package='a',
+        intended_version='1.0', built_version='1.0',
+        filename='a_1.0_amd64.deb',
+        sha256=_shared_sha, size=0, snapshot='T0',
+        built_at='1970-01-01T00:00:00Z',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/a/s/a_1.0_amd64.deb',
+         'SHA256': _shared_sha, 'Size': '0'},
+    ]
+    _merged, _f = _vb.virtual_publish_dry_run(
+        _recs, our_builder_id='athena-primary', snapshot='T1',
+        remote_by_builder={'athena-peer': [_peer_claim]})
+    _blocked = [_t for _t in _f if _t[1] == 'virtual_ownership_blocked']
+    assert len(_blocked) == 1
+    assert 'athena-peer' in _blocked[0][2]
+
+
+def test_virtual_publish_dry_run_tunneled_target_emits_transfer_and_hash_conflict():
+    """Tunneled peer claim (republished_from set) → INFO ownership
+    transfer.  Real-world tunneled+local-build SHAs differ → ALSO
+    CRITICAL hash conflict (correct behaviour — operator must resolve
+    the hash divergence before the transfer can land).  Test asserts
+    BOTH findings appear so neither check regresses silently."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    from coord import schema as _sch
+    _peer_claim = _sch.new_claim(
+        builder='athena-peer', seq=1, package='a',
+        intended_version='1.0', built_version='1.0',
+        filename='a_1.0_amd64.deb',
+        sha256='p' * 64, size=0, snapshot='T0',
+        built_at='1970-01-01T00:00:00Z',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED,
+        republished_from={'url': 'http://u', 'upstream_sha256': 'p'})
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/a/s/a_1.0_amd64.deb',
+         'SHA256': 'x' * 64, 'Size': '0'},
+    ]
+    _merged, _f = _vb.virtual_publish_dry_run(
+        _recs, our_builder_id='athena-primary', snapshot='T1',
+        remote_by_builder={'athena-peer': [_peer_claim]})
+    _info = [_t for _t in _f if _t[1] == 'virtual_ownership_transfer']
+    assert len(_info) == 1
+    assert 'tunneled' in _info[0][2]
+    _hash = [_t for _t in _f if _t[1] == 'virtual_hash_conflict']
+    assert len(_hash) == 1
+
+
+def test_virtual_publish_dry_run_same_sha_no_hash_conflict():
+    """Cross-builder duplicate filename with SAME sha → reproducible
+    build outcome; no CRITICAL hash conflict.  Ownership is still
+    blocked (same version, different builder) but that's a separate
+    finding."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    from coord import schema as _sch
+    _shared = 'z' * 64
+    _peer_claim = _sch.new_claim(
+        builder='athena-peer', seq=1, package='a',
+        intended_version='1.0', built_version='1.0',
+        filename='a_1.0_amd64.deb',
+        sha256=_shared, size=0, snapshot='T0',
+        built_at='1970-01-01T00:00:00Z',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/a/s/a_1.0_amd64.deb',
+         'SHA256': _shared, 'Size': '0'},
+    ]
+    _merged, _f = _vb.virtual_publish_dry_run(
+        _recs, our_builder_id='athena-primary', snapshot='T1',
+        remote_by_builder={'athena-peer': [_peer_claim]})
+    _hash_crit = [_t for _t in _f
+                  if _t[1] == 'virtual_hash_conflict']
+    assert _hash_crit == []
+
+
 def test_virtual_build_from_cache_collapses_hashtable_shape():
     """`from_cache` flattens cache.package_hashtable's nested
     Package list down to a single control-dict per (name, ver)."""
@@ -28767,6 +28904,12 @@ def main() -> int:
         test_virtual_build_synthesize_repo_state_flags_duplicate_name,
         test_virtual_build_invalid_record_skipped_with_critical,
         test_virtual_build_live_cohort_conflict_critical,
+        # virtual-build chunk 4 — claim ledger + publish dry-run
+        test_virtual_build_synthesize_claim_ledger_one_per_record,
+        test_virtual_publish_dry_run_silent_against_empty_remote,
+        test_virtual_publish_dry_run_ownership_blocked_critical,
+        test_virtual_publish_dry_run_tunneled_target_emits_transfer_and_hash_conflict,
+        test_virtual_publish_dry_run_same_sha_no_hash_conflict,
         test_virtual_build_from_cache_collapses_hashtable_shape,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,
