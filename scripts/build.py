@@ -5254,9 +5254,13 @@ class BuildSession:
             # Our-own-claims on-disk rehash.  Costs O(our_claim_count)
             # disk reads but worth it: catches pool bitrot on our side
             # that the apt-index chain would silently propagate.
+            # `buildlog_dir` lets the helper distinguish
+            # "local build ahead of remote" (WARNING) from real bitrot
+            # (CRITICAL).
             _own_disk_findings = _mirror.audit_own_claims_on_disk(
                 _by_builder, _our_bid,
-                local_repo_dir=self.config.dir_repo)
+                local_repo_dir=self.config.dir_repo,
+                buildlog_dir=os.path.join(self.config.dir_log, 'build'))
             _own_disk_crit = [_f for _f in _own_disk_findings
                               if _f[0] == 'CRITICAL']
             for _sev, _kind, _msg in _own_disk_findings:

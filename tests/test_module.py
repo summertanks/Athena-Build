@@ -25335,6 +25335,89 @@ def test_audit_own_claims_on_disk_match_disk_silent_mismatch_critical():
         assert all(_t[0] == 'CRITICAL' for _t in _findings)
 
 
+def test_audit_own_claims_on_disk_ahead_of_remote_is_warning_not_critical():
+    """When the on-disk .deb's sha matches the LOCAL build.json's
+    output_hashes but disagrees with the REMOTE claim sha → a
+    rebuild-not-yet-published; emit WARNING, not CRITICAL bitrot.
+
+    Catches the audit-noise pattern operators hit after rebuilding
+    a source without re-running `mirror publish`."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hashlib
+    import mirror as _mir
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _td:
+        _repo = os.path.join(_td, 'repo')
+        _buildlog = os.path.join(_td, 'log', 'build')
+        os.makedirs(_buildlog)
+        _file_path = os.path.join(_repo, 'main', 'a',
+                                  'a_1.0_amd64.deb')
+        os.makedirs(os.path.dirname(_file_path))
+        with open(_file_path, 'wb') as _fh:
+            _fh.write(b'new-bytes')
+        _new_sha = _hashlib.sha256(b'new-bytes').hexdigest()
+        # Local build.json records the NEW sha (post-rebuild).
+        _rec = _u.new_build_record(
+            package='a', intended_version='1.0', patch_set_hash='')
+        _rec['output_hashes'] = {'a_1.0_amd64.deb': _new_sha}
+        _u.write_build_record(_buildlog, _rec)
+        # Remote claim still has OLD sha (pre-rebuild).
+        _by_builder = {
+            'athena-ours': [
+                {'package': 'a', 'filename': 'a_1.0_amd64.deb',
+                 'sha256': 'd' * 64, 'claim_state': 'published'},
+            ],
+        }
+        _findings = _mir.audit_own_claims_on_disk(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_repo, buildlog_dir=_buildlog)
+        _kinds = [_t[1] for _t in _findings]
+        assert _kinds == ['own_claim_local_ahead_of_remote'], _findings
+        assert _findings[0][0] == 'WARNING'
+
+
+def test_audit_own_claims_on_disk_real_bitrot_still_critical():
+    """Disk sha matches neither remote claim NOR local build.json →
+    real bitrot, CRITICAL stays."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hashlib
+    import mirror as _mir
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _td:
+        _repo = os.path.join(_td, 'repo')
+        _buildlog = os.path.join(_td, 'log', 'build')
+        os.makedirs(_buildlog)
+        _file_path = os.path.join(_repo, 'main', 'a',
+                                  'a_1.0_amd64.deb')
+        os.makedirs(os.path.dirname(_file_path))
+        with open(_file_path, 'wb') as _fh:
+            _fh.write(b'rotted-bytes')   # not what build recorded
+        _rotted_sha = _hashlib.sha256(b'rotted-bytes').hexdigest()
+        # Local build.json records a DIFFERENT (correct) sha.
+        _rec = _u.new_build_record(
+            package='a', intended_version='1.0', patch_set_hash='')
+        _rec['output_hashes'] = {'a_1.0_amd64.deb': 'k' * 64}
+        _u.write_build_record(_buildlog, _rec)
+        _by_builder = {
+            'athena-ours': [
+                {'package': 'a', 'filename': 'a_1.0_amd64.deb',
+                 'sha256': 'd' * 64, 'claim_state': 'published'},
+            ],
+        }
+        _findings = _mir.audit_own_claims_on_disk(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_repo, buildlog_dir=_buildlog)
+        assert len(_findings) == 1
+        assert _findings[0][0] == 'CRITICAL'
+        assert _findings[0][1] == 'own_claim_disk_sha_mismatch'
+        assert 'bitrot or corruption' in _findings[0][2]
+        del _rotted_sha   # used for clarity in setup
+
+
 def test_audit_own_claims_on_disk_no_our_builder_id_is_noop():
     """When our_builder_id is None (rare — fresh host pre-keygen) the
     helper short-circuits.  Used to guard against AttributeError in
@@ -29249,6 +29332,8 @@ def main() -> int:
         test_audit_sidecar_seq_integrity_flags_dup_gap_and_missing_one,
         test_audit_own_claims_on_disk_match_disk_silent_mismatch_critical,
         test_audit_own_claims_on_disk_no_our_builder_id_is_noop,
+        test_audit_own_claims_on_disk_ahead_of_remote_is_warning_not_critical,
+        test_audit_own_claims_on_disk_real_bitrot_still_critical,
         # MIRROR-01 audit gap (6) — cross-mirror head drift
         test_audit_cross_mirror_head_drift_silent_when_aligned,
         test_audit_cross_mirror_head_drift_neighbours_diff_is_critical,
