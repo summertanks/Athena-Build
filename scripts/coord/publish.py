@@ -609,9 +609,26 @@ def remote_publish(
                 import mirror as _mirror_mod
                 import repo_audit as _repo_audit
                 _local_state = _repo_audit.scan_repo_state(config)
-                _our_pkg_names = frozenset(str(_c.get('package') or '')
-                                           for _c in _pending
-                                           if _c.get('package'))
+                # consumer_set MUST be BINARY package names — that's
+                # what `state.packages` is keyed by and what
+                # `audit_dep_closure` iterates.  Claim's `.package`
+                # field holds the SOURCE name (`'bind9'`), not the
+                # binary name (`'bind9-dnsutils'`).  Deriving the set
+                # from `.filename` (which encodes `<binpkg>_<ver>_<arch>`)
+                # gives the right scope — and matches what
+                # `repo_audit`'s own dep gate uses (binary names from
+                # dep_tree.selected_pkgs).  Caught 2026-06-05: a
+                # source-name consumer_set walked transitional meta
+                # `bind9`'s Depends (dns-root-data), which our install
+                # corpus doesn't actually pull in, leaving the gate
+                # complaining about deps `repo audit` legitimately
+                # passes.
+                _our_pkg_names = frozenset(
+                    _bn for _bn in (
+                        str(_c.get('filename') or '').split('_', 1)[0]
+                        for _c in _pending if _c.get('filename')
+                    ) if _bn
+                )
                 _breaks = _mirror_mod.find_publish_closure_breaks(
                     _local_state, _by_builder, _our_pkg_names)
             except (AttributeError, OSError) as _e:
