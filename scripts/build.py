@@ -10359,6 +10359,7 @@ class BuildSession:
                 source=_src, package_universe=_universe,
                 asg_ledger=_asg_ledger, release=_release,
                 arch=_arch, was_patched=_was_patched,
+                peer_sources=set(_scope_names),
             ))
         if _missing_srcs:
             console.print(

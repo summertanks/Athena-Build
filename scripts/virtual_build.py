@@ -44,6 +44,63 @@ logger = logging.getLogger('athena')
 # ─────────────────────────── Synthesizer primitives ──────────────────
 
 
+def _strip_nmu_from_relation(raw: str) -> str:
+    """Strip NMU layers from EVERY constraint version in a Depends-like
+    relation string.  Mirrors what real-build's
+    :func:`utils.strip_nmu_from_control_text` does post-build to the
+    binary's on-disk control file.  Without this, virtual build's
+    inherited-from-upstream Depends still pin to upstream NMU
+    versions (``grub-common (>= 2.06-13+deb12u2)``) while our own
+    synthesized binaries strip+stamp to ``2.06-13+asg1uN`` —
+    apt's version_compare sees the asg-stamped version as LOWER
+    than ``+deb12u2`` (ASCII ``a`` < ``d``) and the closure breaks.
+
+    Run BEFORE sibling-pin rewriting so the latter sees pristine bases.
+    """
+    if not raw:
+        return raw
+    try:
+        from debian.deb822 import PkgRelation
+    except ImportError:
+        return raw
+    try:
+        _relations = PkgRelation.parse_relations(raw)
+    except Exception:
+        return raw
+    _changed = False
+    for _or_group in _relations:
+        for _rel in _or_group:
+            _vc = _rel.get('version')
+            if not _vc:
+                continue
+            _op, _cur = _vc
+            _stripped = utils.strip_nmu_suffix(_cur)
+            if _stripped != _cur:
+                _rel['version'] = (_op, _stripped)
+                _changed = True
+    if not _changed:
+        return raw
+    return PkgRelation.str(_relations)
+
+
+def _upstream_canonical_source(upstream_record: Dict[str, str]) -> str:
+    """Extract the canonical source-package name from an upstream
+    binary Package record.  Per Debian Packages format, the ``Source:``
+    field carries either ``<srcname>`` or ``<srcname> (<version>)``;
+    when omitted, the source name equals the binary name.
+
+    Used by :func:`synthesize_source_binaries` to filter out
+    falsely-declared binaries: a ``-signed-amd64`` source's
+    ``Binary:`` field over-reports the udebs (the unsigned source
+    actually emits them), and the upstream binary record's
+    ``Source:`` field is the authoritative producer.
+    """
+    _src = (upstream_record.get('Source') or '').strip()
+    if not _src:
+        return (upstream_record.get('Package') or '').strip()
+    return _src.split(' ', 1)[0]
+
+
 def _rewrite_sibling_pins(raw: str,
                            sibling_ver_map: Dict[str, str],
                            sibling_pristine_map: Dict[str, str]) -> str:
@@ -197,8 +254,13 @@ def synthesize_binary_record(
         _raw = upstream_record.get(_field)
         if not _raw:
             continue
+        # Two-pass rewriting: NMU strip first (every constraint
+        # version), THEN sibling pin rewriting (per-target).  Same
+        # order as real-build: strip_nmu_from_control_text runs
+        # before any sibling-pin restamping.
+        _stripped = _strip_nmu_from_relation(_raw)
         _rewritten = _rewrite_sibling_pins(
-            _raw, sibling_ver_map, sibling_pristine_map)
+            _stripped, sibling_ver_map, sibling_pristine_map)
         _rec[_field] = _rewritten
     for _field in ('Priority', 'Section', 'Essential',
                    'Multi-Arch', 'Homepage'):
@@ -215,6 +277,7 @@ def synthesize_source_binaries(
     source: Any, package_universe: Dict[str, Dict[str, Any]],
     asg_ledger: Optional[Dict[str, List[str]]], release: int,
     arch: str, was_patched: bool = False,
+    peer_sources: 'Optional[set[str]]' = None,
 ) -> List[Dict[str, str]]:
     """End-to-end: take one Source and return one synthesized RepoState
     record per binary it would emit.
@@ -262,6 +325,7 @@ def synthesize_source_binaries(
     apt_pkg.init_system()
     _upstream_per_binary: Dict[str, Optional[Dict[str, str]]] = {}
     _base_ver_per_binary: Dict[str, str] = {}
+    _emit_binaries: List[str] = []
     for _b in _binaries:
         _upstream_per_binary[_b] = None
         _name_entries = package_universe.get(_b)
@@ -274,16 +338,38 @@ def synthesize_source_binaries(
                     _cmp = 0
                 if _cmp > 0:
                     _hi_ver, _hi_rec = _v, _r
+            # Canonical-source check: the upstream binary's `Source:`
+            # field names its REAL producer.  When the canonical
+            # producer is ALSO being synthesized in this run
+            # (peer_sources knows the scope), skip this binary so the
+            # canonical source's synth emits it.  Catches the
+            # linux + linux-signed-amd64 over-declaration where one
+            # source lists -di udebs in `Binary:` but the other
+            # actually emits them.
+            #
+            # When peer_sources is None (test fixtures, ad-hoc
+            # synthesis) OR the canonical source is NOT in scope (we
+            # are an Athena fork that legitimately renames + emits
+            # upstream-named binaries), DON'T skip — our source IS
+            # the producer in that universe.
+            _canon_src = _upstream_canonical_source(_hi_rec)
+            if (_canon_src and _canon_src != _src_name
+                    and peer_sources is not None
+                    and _canon_src in peer_sources):
+                continue
             _upstream_per_binary[_b] = _hi_rec
-            # The KEY (_hi_ver) is the cache-table version; some
-            # callers stamp upstream Provides-aliased entries with the
-            # PROVIDED name's version, not the real one.  Prefer the
-            # record's own Version field when present — it's the
-            # authoritative upstream binary version.
             _rec_ver = _hi_rec.get('Version', '') if _hi_rec else ''
             _base_ver_per_binary[_b] = _rec_ver or str(_hi_ver)
         else:
             _base_ver_per_binary[_b] = _src_ver
+        _emit_binaries.append(_b)
+    # All downstream loops use _emit_binaries (post-canonical-source
+    # filter) rather than the raw _binaries list — otherwise we'd
+    # still emit synthetic records for binaries belonging to other
+    # sources, defeating the filter.
+    _binaries = _emit_binaries
+    if not _binaries:
+        return []
 
     # Step 2 — pristine base per binary (strip NMU residue).  asg-stamp
     # math + intra-source pin rewriting both work on the pristine.
@@ -446,6 +532,7 @@ def validate_against_build_records(
             source=_src, package_universe=package_universe,
             asg_ledger=asg_ledger, release=release,
             arch=arch, was_patched=_was_patched,
+            peer_sources=set(source_names),
         )
         _pred_files: 'List[str]' = [
             os.path.basename(_r.get('Filename', '') or '')
