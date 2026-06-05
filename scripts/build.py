@@ -10158,14 +10158,20 @@ class BuildSession:
             return
         _prev = self.config.build_mode
         self.config.build_mode = value
+        # The dep tree's selected set depends on the mode (build mode
+        # short-circuits Passes III–VII and reads build_pkg.list
+        # instead), so any cached parse state is now invalid.  Clear
+        # dep_check_ready unconditionally — no-op when already False —
+        # and ALWAYS print the warning so the operator can't proceed
+        # to source build / chroot / iso under a half-stale tree.
+        self.flags.dep_check_ready = False
         console.print(
             f"  mode  {_prev}  →  {value}  (session-local, "
             "build.conf unchanged)", tui.COLOR_HIGHLIGHT)
-        if self.flags.dep_check_ready:
-            self.flags.dep_check_ready = False
-            console.print(
-                "  dep_check_ready cleared — run `cache parse` to "
-                "re-resolve under the new mode", tui.COLOR_INFO)
+        console.print(
+            "  WARNING: mode change requires `cache parse` to re-resolve "
+            "the dep tree before the next pipeline step.",
+            tui.COLOR_WARNING)
         # Refresh the persistent TUI footer tag so the operator can't
         # forget what mode they're in.  No-op on the CLI backend.
         _inst = getattr(tui, 'tui_instance', None)
