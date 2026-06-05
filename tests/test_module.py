@@ -19502,6 +19502,90 @@ def test_normalize_built_artifacts_stamps_delta_when_ledger_present():
         assert _ver == '3.0.15-1+asg1u1', _ver
 
 
+def test_normalize_built_artifacts_stamps_lineage_continuation_when_ledger_has_prior_asg():
+    """The fix shipped 2026-06-05: even when this build has NO
+    delta-shape signal (pristine source version, no patches applied,
+    no NMU strip), if the ledger has a prior `+asg<R>u<N>` entry at
+    THIS binary's pristine base, we must stamp the rebuild to continue
+    the lineage — otherwise sibling-source metas (e.g. linux-signed-
+    amd64 → linux-headers-amd64) that captured the prior `+asg<R>u<N>`
+    silently dangle.
+    """
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _p = os.path.join(_tmp, 'linux-headers-6.1.0-49-common_6.1.174-1_all.deb')
+        _build_minimal_deb(_p, 'linux-headers-6.1.0-49-common',
+                           '6.1.174-1', 'all')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        # Ledger reflects a prior publish at +asg1u1 — the lineage we
+        # must continue.  Without this fix, _was_delta=False short-
+        # circuited the stamp and the rebuild shipped pristine.
+        _bc.asg_ledger = {
+            'linux-headers-6.1.0-49-common': ['6.1.174-1+asg1u1'],
+        }
+
+        class _FakeConfig:
+            build_version = '1'
+
+        class _Src:
+            package = 'linux'         # source name
+            version = '6.1.174-1'      # PRISTINE — no NMU suffix
+
+        _bc.config = _FakeConfig()
+        # was_patched=False, no strip happens (filename already pristine).
+        # Old logic: _was_delta=False → no stamp → ships pristine.
+        # New logic: ledger has +asg1u1 at this base → lineage
+        # continuation → stamp to +asg1u2.
+        _bc._normalize_built_artifacts(_Src(), [_p], was_patched=False)
+
+        assert not os.path.exists(_p), (
+            "pristine file should have been stamped + renamed")
+        _stamped = os.path.join(
+            _tmp, 'linux-headers-6.1.0-49-common_6.1.174-1+asg1u2_all.deb')
+        assert os.path.exists(_stamped), (
+            f"lineage-continuation stamp not applied; "
+            f"expected {os.path.basename(_stamped)} on disk, "
+            f"got: {sorted(os.listdir(_tmp))}")
+
+
+def test_normalize_built_artifacts_no_stamp_when_ledger_has_no_lineage():
+    """Mirror to the above: ledger is present but contains NO `+asg`
+    entries at this binary's base (e.g. only pristine publishes, or
+    entries for an unrelated source).  Then no lineage to continue;
+    ship pristine.
+    """
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _p = os.path.join(_tmp, 'foo_1.0-1_amd64.deb')
+        _build_minimal_deb(_p, 'foo', '1.0-1', 'amd64')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        # Ledger only has a PRISTINE publish for foo (no asg suffix) —
+        # nothing to continue.  And an unrelated entry for `bar` to make
+        # sure the lookup is keyed by binary name.
+        _bc.asg_ledger = {
+            'foo': ['1.0-1'],
+            'bar': ['2.0-1+asg1u1'],
+        }
+
+        class _FakeConfig:
+            build_version = '1'
+
+        class _Src:
+            package = 'foo'
+            version = '1.0-1'
+
+        _bc.config = _FakeConfig()
+        _bc._normalize_built_artifacts(_Src(), [_p], was_patched=False)
+        assert os.path.exists(_p), (
+            "no lineage in ledger → should ship pristine, no rename")
+
+
 def test_normalize_built_artifacts_no_stamp_without_ledger():
     """No remote ledger (a plain `source build`, not a refresh) → strip only,
     NO asg stamp, even for a delta build."""
@@ -27611,6 +27695,8 @@ def main() -> int:
         test_tunnel_filenames_for_source_uses_upstream_not_stripped,
         test_tunnel_filenames_falls_back_when_binary_not_in_cache,
         test_normalize_built_artifacts_stamps_delta_when_ledger_present,
+        test_normalize_built_artifacts_stamps_lineage_continuation_when_ledger_has_prior_asg,
+        test_normalize_built_artifacts_no_stamp_when_ledger_has_no_lineage,
         test_normalize_built_artifacts_no_stamp_without_ledger,
         test_postbuild_convergence_hard_fails_when_check_build_still_false,
         # UPD-01 step 4: remote ledger + version-aware local cleanup
