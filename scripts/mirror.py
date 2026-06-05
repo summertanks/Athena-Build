@@ -1326,24 +1326,35 @@ def audit_sidecar_seq_integrity(
 def audit_own_claims_on_disk(
     by_builder: 'dict[str, list[dict]]',
     our_builder_id: 'Optional[str]', local_repo_dir: str,
+    buildlog_dir: 'Optional[str]' = None,
 ) -> 'list[tuple[str, str, str]]':
     """Rehash every .deb we ourselves published and compare with the
     claim's ``sha256``.  Catches pool bitrot on OUR side independent
-    of the apt-index chain (gap #1) — that chain trusts the on-pool
-    Packages file's sha; this one rehashes the actual bytes against
-    the sidecar's claim.
+    of the apt-index chain (gap #1).
+
+    When ``buildlog_dir`` is supplied AND a disk-vs-claim mismatch is
+    found, the helper additionally consults the local ``build.json``
+    for the source package: if the on-disk sha matches an entry in
+    the build record's ``output_hashes``, the divergence is reframed
+    as **WARNING** ``own_claim_local_ahead_of_remote`` (a rebuild
+    happened locally but hasn't been re-published yet — operator
+    action: run ``mirror publish``).  Only when the on-disk sha
+    matches NEITHER the claim nor the local build record do we
+    emit **CRITICAL** ``own_claim_disk_sha_mismatch`` — that's the
+    real bitrot case.
 
     Skipped for peer-built claims (we don't have their files locally)
-    and for tunneled claims (republished_from set — the asg-stamp
-    normalisation rewrites bytes, so a re-hash would not match the
-    upstream sha; the value of the check is for the build host on
-    its own publishes).
+    and for tunneled claims (republished_from set).
 
     Findings:
-      ``own_claim_disk_missing``     CRITICAL — our claim references a
-                                     file that isn't in local_repo_dir
-      ``own_claim_disk_sha_mismatch``CRITICAL — file present but its
-                                     sha disagrees with the claim
+      ``own_claim_disk_missing``             CRITICAL — our claim
+            references a file that isn't in local_repo_dir
+      ``own_claim_local_ahead_of_remote``    WARNING  — on-disk sha
+            matches local build.json's output_hashes but NOT the
+            remote claim; operator should re-publish
+      ``own_claim_disk_sha_mismatch``        CRITICAL — file present,
+            disagrees with both the claim AND any local build record
+            we can find (or no build record found at all)
     """
     import hashlib as _hashlib
     import os as _os
@@ -1359,6 +1370,35 @@ def audit_own_claims_on_disk(
             for _f in _files:
                 if _f.endswith(('.deb', '.udeb')):
                     _by_name[_f] = _os.path.join(_root, _f)
+    # Cache build_record lookups keyed on (source_name); each record
+    # carries output_hashes for every binary it produced.  Reuse so a
+    # multi-binary source (kernel: ~30 binaries) only touches disk once.
+    _br_cache: 'dict[str, dict]' = {}
+
+    def _local_build_has_sha(_claim: dict, _on_disk_sha: str) -> bool:
+        """True when the local build record for this claim's source
+        carries an output_hashes entry equal to _on_disk_sha."""
+        if not buildlog_dir:
+            return False
+        _source = str(_claim.get('package') or '')
+        if not _source:
+            return False
+        _rec = _br_cache.get(_source)
+        if _rec is None:
+            try:
+                import utils as _utils
+                _rec = _utils.read_build_record(buildlog_dir, _source) or {}
+            except Exception:
+                _rec = {}
+            _br_cache[_source] = _rec
+        _oh = _rec.get('output_hashes') or {}
+        # Match by filename if present, otherwise any value match
+        # (older v2 records may key on something different).
+        _fn = str(_claim.get('filename') or '')
+        if _fn and _oh.get(_fn) == _on_disk_sha:
+            return True
+        return _on_disk_sha in set(_oh.values())
+
     for _c in _claims:
         if _c.get('claim_state') == 'retracted':
             continue
@@ -1383,11 +1423,20 @@ def audit_own_claims_on_disk(
                 'CRITICAL', 'own_claim_disk_unreadable',
                 f"{_fn}: cannot read {_path}: {_e}"))
             continue
-        if _actual != _claim_sha:
+        if _actual == _claim_sha:
+            continue
+        if _local_build_has_sha(_c, _actual):
+            _findings.append((
+                'WARNING', 'own_claim_local_ahead_of_remote',
+                f"{_fn}: on-disk sha={_actual[:12]} matches local "
+                f"build.json; remote claim sha={_claim_sha[:12]} is "
+                "older — run `mirror publish` to re-sync"))
+        else:
             _findings.append((
                 'CRITICAL', 'own_claim_disk_sha_mismatch',
                 f"{_fn}: on-disk sha={_actual[:12]} disagrees with "
-                f"claim sha={_claim_sha[:12]} — local pool bitrot"))
+                f"claim sha={_claim_sha[:12]} and no matching local "
+                "build record — bitrot or corruption"))
     return _findings
 
 
