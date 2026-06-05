@@ -22241,7 +22241,9 @@ def test_cmd_set_mode_invalid_value_keeps_old_value():
         assert 'invalid mode' in _joined
 
 
-def test_cmd_set_mode_same_value_is_noop():
+def test_cmd_set_mode_same_value_is_noop_when_dep_check_ready():
+    """Re-typing the current mode while the dep tree is parsed → no
+    state change, no warning."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
@@ -22257,6 +22259,35 @@ def test_cmd_set_mode_same_value_is_noop():
         assert _sess.flags.dep_check_ready is True
         _joined = '\n'.join(_printed)
         assert 'already' in _joined
+        # dep tree is parsed — no "run cache parse" hint.
+        assert 'cache parse' not in _joined, (
+            f"no parse hint should fire when dep_check_ready=True; "
+            f"got {_joined!r}")
+
+
+def test_cmd_set_mode_same_value_surfaces_parse_hint_when_not_parsed():
+    """Re-typing the current mode while the dep tree is NOT parsed →
+    no state change, but the parse hint surfaces so the operator
+    isn't misled by 'mode already = build' into thinking they're
+    ready to source-build."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    _stub_tui()
+    with tempfile.TemporaryDirectory() as _tmp:
+        _sess, _build_mod = _build_session_for_setget(_tmp)
+        _sess.flags.dep_check_ready = False
+        _printed: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
+
+        _sess.cmd_set('mode', 'distribution')
+
+        assert _sess.config.build_mode == 'distribution'
+        assert _sess.flags.dep_check_ready is False
+        _joined = '\n'.join(_printed)
+        assert 'already' in _joined
+        assert 'cache parse' in _joined, (
+            f"parse hint should fire when dep_check_ready=False; "
+            f"got {_joined!r}")
 
 
 def test_cmd_set_unknown_param_reports_available_list():
@@ -27688,7 +27719,8 @@ def main() -> int:
         test_cmd_get_named_param_returns_current_value,
         test_cmd_set_mode_switches_value_and_warns_to_re_run_cache_parse,
         test_cmd_set_mode_invalid_value_keeps_old_value,
-        test_cmd_set_mode_same_value_is_noop,
+        test_cmd_set_mode_same_value_is_noop_when_dep_check_ready,
+        test_cmd_set_mode_same_value_surfaces_parse_hint_when_not_parsed,
         test_cmd_set_unknown_param_reports_available_list,
         test_humansize_thresholds,
         test_shorten_origin_compacts_long_pool_url,

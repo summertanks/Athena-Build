@@ -10155,6 +10155,16 @@ class BuildSession:
             return
         if self.config.build_mode == value:
             console.print(f"  mode already = {value}", tui.COLOR_INFO)
+            # Operator may have re-typed this to confirm state.
+            # Surface whether the dep tree is parsed under this mode —
+            # `mode already = build` reads ambiguously when
+            # dep_check_ready is False (operator could think they're
+            # ready to source-build when they aren't).
+            if not self.flags.dep_check_ready:
+                console.print(
+                    "  (dep tree not yet parsed — run `cache parse` "
+                    "before the next pipeline step)",
+                    tui.COLOR_WARNING)
             return
         _prev = self.config.build_mode
         self.config.build_mode = value
@@ -10169,8 +10179,7 @@ class BuildSession:
             f"  mode  {_prev}  →  {value}  (session-local, "
             "build.conf unchanged)", tui.COLOR_HIGHLIGHT)
         console.print(
-            "  WARNING: mode change requires `cache parse` to re-resolve "
-            "the dep tree before the next pipeline step.",
+            "  WARNING: mode change requires `cache parse` rerun",
             tui.COLOR_WARNING)
         # Refresh the persistent TUI footer tag so the operator can't
         # forget what mode they're in.  No-op on the CLI backend.
