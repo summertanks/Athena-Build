@@ -19578,8 +19578,11 @@ def test_virtual_build_closure_break_emits_critical():
 
 
 def test_virtual_build_synthesize_repo_state_flags_duplicate_name():
-    """Two virtual records with same Package name → keep higher version,
-    emit INFO virtual_duplicate_name."""
+    """Cross-source binary-name overlaps → higher version wins;
+    instead of one INFO per overlap (spammy on Debian kernel-signed
+    chains where linux + linux-signed-amd64 both declare ~100 same
+    -di udebs), emit ONE summary INFO with count + source-pair
+    preview."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
     _recs = [
@@ -19589,11 +19592,41 @@ def test_virtual_build_synthesize_repo_state_flags_duplicate_name():
         {'Package': 'a', 'Version': '2.0', 'Architecture': 'amd64',
          'Source': 's2', 'Filename': 'pool/a-2.0.deb',
          'SHA256': 'y' * 64, 'Size': '0'},
+        {'Package': 'b', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's1', 'Filename': 'pool/b-1.0.deb',
+         'SHA256': 'z' * 64, 'Size': '0'},
+        {'Package': 'b', 'Version': '2.0', 'Architecture': 'amd64',
+         'Source': 's2', 'Filename': 'pool/b-2.0.deb',
+         'SHA256': 'w' * 64, 'Size': '0'},
     ]
     _state, _f = _vb.synthesize_repo_state(_recs)
     assert _state.packages['a']['Version'] == '2.0'   # higher wins
+    assert _state.packages['b']['Version'] == '2.0'
     _infos = [_t for _t in _f if _t[1] == 'virtual_duplicate_name']
+    # Exactly ONE summary line, not one per overlap.
     assert len(_infos) == 1
+    # Summary mentions count + source pair.
+    _msg = _infos[0][2]
+    assert 'deduped 2' in _msg
+    assert 's1+s2' in _msg
+
+
+def test_virtual_build_no_duplicate_findings_when_no_overlap():
+    """Clean case — no duplicate names → no virtual_duplicate_name
+    finding at all (the summary line is conditional on
+    _dup_count > 0)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's1', 'Filename': 'pool/a.deb',
+         'SHA256': 'x' * 64, 'Size': '0'},
+        {'Package': 'b', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's2', 'Filename': 'pool/b.deb',
+         'SHA256': 'y' * 64, 'Size': '0'},
+    ]
+    _state, _f = _vb.synthesize_repo_state(_recs)
+    assert not any(_t[1] == 'virtual_duplicate_name' for _t in _f)
 
 
 def test_virtual_build_invalid_record_skipped_with_critical():
@@ -29091,6 +29124,7 @@ def main() -> int:
         test_virtual_build_synthesize_repo_state_resolves_closed_graph,
         test_virtual_build_closure_break_emits_critical,
         test_virtual_build_synthesize_repo_state_flags_duplicate_name,
+        test_virtual_build_no_duplicate_findings_when_no_overlap,
         test_virtual_build_invalid_record_skipped_with_critical,
         test_virtual_build_live_cohort_conflict_critical,
         # virtual-build chunk 5 — CLI dispatcher

@@ -349,9 +349,11 @@ def synthesize_repo_state(
 
     Behaviour mirrors :func:`repo_audit.scan_repo_state`'s parser:
       - on duplicate Package names, the highest-Version record wins
-        (apt-style) — but a clash emits an INFO finding so the operator
-        can see which two sources tried to ship the same name (a real
-        build would hit the file-collision gate)
+        (apt-style) — silently for the common kernel-signed chain
+        pattern (linux + linux-signed-amd64 both declare the same
+        ``*-di`` udebs in ``Binary:``; in real builds only `linux`
+        emits them).  A single summary INFO records the count so the
+        operator knows dedup happened.
       - missing required fields → CRITICAL ``virtual_invalid_record``
       - provides_index built via the same `_build_provides_index`
         helper repo_audit uses, so downstream audits see virtual
@@ -363,6 +365,8 @@ def synthesize_repo_state(
 
     _findings: 'List[Tuple[str, str, str]]' = []
     _packages: 'Dict[str, Dict[str, str]]' = {}
+    _dup_count = 0
+    _dup_sources: 'set[tuple[str, str]]' = set()
     for _r in virtual_records:
         _name = _r.get('Package', '')
         _ver = _r.get('Version', '')
@@ -379,20 +383,25 @@ def synthesize_repo_state(
                 _cmp = apt_pkg.version_compare(_ver, _prev_ver)
             except Exception:
                 _cmp = 0
+            _dup_count += 1
+            _src_pair = tuple(sorted([
+                _prev.get('Source', '?'), _r.get('Source', '?')]))
+            _dup_sources.add(_src_pair)  # type: ignore[arg-type]
             if _cmp <= 0:
-                _findings.append((
-                    'INFO', 'virtual_duplicate_name',
-                    f"two sources synthesized binary {_name!r}: "
-                    f"keeping {_prev.get('Source', '?')} @ "
-                    f"{_prev_ver} over {_r.get('Source', '?')} @ "
-                    f"{_ver}"))
                 continue
-            _findings.append((
-                'INFO', 'virtual_duplicate_name',
-                f"two sources synthesized binary {_name!r}: "
-                f"replacing {_prev.get('Source', '?')} @ "
-                f"{_prev_ver} with {_r.get('Source', '?')} @ {_ver}"))
         _packages[_name] = dict(_r)
+    if _dup_count:
+        _pair_preview = ', '.join(
+            f"{_a}+{_b}" for _a, _b in sorted(_dup_sources)[:3])
+        _more = ''
+        if len(_dup_sources) > 3:
+            _more = f" (+{len(_dup_sources) - 3} more pairs)"
+        _findings.append((
+            'INFO', 'virtual_duplicate_name',
+            f"deduped {_dup_count} cross-source binary name(s) "
+            f"across {len(_dup_sources)} source-pair(s): "
+            f"{_pair_preview}{_more} — kept highest version "
+            "(expected for kernel-signed / installer-udeb chains)"))
     _provides = _build_provides_index(_packages)
     _state = RepoState(
         packages=_packages, provides_index=_provides,
