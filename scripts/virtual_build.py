@@ -83,84 +83,6 @@ def _strip_nmu_from_relation(raw: str) -> str:
     return PkgRelation.str(_relations)
 
 
-def _build_local_deb_index(local_repo_dir: str) -> Dict[str, Dict[str, str]]:
-    """Walk ``local_repo_dir`` once, build
-    ``{binary_name: {version_str: full_path}}``.  Used to read the
-    ACTUAL Depends our build emitted, which differs from upstream's
-    Depends when Build-Deps weren't available (the
-    ``libavcodec59 → libaribb24-0`` case: upstream cache says it
-    depends on libaribb24-0, but our fork built without libaribb24-dev
-    so dh_shlibdeps produced a smaller Depends list).
-    """
-    _index: Dict[str, Dict[str, str]] = {}
-    if not os.path.isdir(local_repo_dir):
-        return _index
-    for _root, _dirs, _files in os.walk(local_repo_dir):
-        for _f in _files:
-            if not _f.endswith(('.deb', '.udeb')):
-                continue
-            _base = _f.rsplit('.', 1)[0]
-            _parts = _base.split('_')
-            if len(_parts) != 3:
-                continue
-            _name, _ver, _arch = _parts
-            _index.setdefault(_name, {})[_ver] = os.path.join(_root, _f)
-    return _index
-
-
-def _read_local_deb_control(deb_path: str) -> 'Optional[Dict[str, str]]':
-    """Read control fields from a built .deb on disk via python-debian's
-    DebFile.  Returns ``{control_field: value_str}`` or None on any
-    error.  The fields here are the AUTHORITATIVE record of what our
-    build emitted — substvars resolved, NMU stripped, asg stamped."""
-    try:
-        from debian.debfile import DebFile
-        from debian.deb822 import Deb822
-        with DebFile(deb_path) as _deb:
-            _bytes = _deb.control.get_content('control')
-        if not _bytes:
-            return None
-        _ctrl = Deb822(_bytes)
-        return {_k: str(_ctrl[_k]) for _k in _ctrl}
-    except Exception:
-        return None
-
-
-def _pick_best_local_deb(
-    local_index: Dict[str, Dict[str, str]], binary_name: str,
-    pristine: str,
-) -> 'Optional[str]':
-    """Pick the highest-version locally-built .deb for ``binary_name``
-    at the given ``pristine`` base.  Returns the path or None when
-    nothing on disk matches.  Used to override upstream-inherited
-    Depends with our build's actual emission."""
-    _entries = local_index.get(binary_name)
-    if not _entries:
-        return None
-    # dpkg .deb filenames omit the epoch; pristine here may carry one.
-    # Compare both sides epoch-stripped so the match works.
-    _pristine_no_epoch = _strip_epoch(pristine)
-    _matching: 'List[Tuple[str, str]]' = []
-    for _ver, _path in _entries.items():
-        if _strip_epoch(utils.pristine_base(_ver)) == _pristine_no_epoch:
-            _matching.append((_ver, _path))
-    if not _matching:
-        return None
-    try:
-        import apt_pkg
-        apt_pkg.init_system()
-        _matching.sort(
-            key=lambda _vp: _vp[0],
-            reverse=False)
-        _best_ver, _best_path = _matching[0]
-        for _v, _p in _matching[1:]:
-            if apt_pkg.version_compare(_v, _best_ver) > 0:
-                _best_ver, _best_path = _v, _p
-        return _best_path
-    except Exception:
-        return _matching[0][1]
-
-
 def _upstream_canonical_source(upstream_record: Dict[str, str]) -> str:
     """Extract the canonical source-package name from an upstream
     binary Package record.  Per Debian Packages format, the ``Source:``
@@ -356,7 +278,6 @@ def synthesize_source_binaries(
     asg_ledger: Optional[Dict[str, List[str]]], release: int,
     arch: str, was_patched: bool = False,
     peer_sources: 'Optional[set[str]]' = None,
-    local_deb_index: 'Optional[Dict[str, Dict[str, str]]]' = None,
 ) -> List[Dict[str, str]]:
     """End-to-end: take one Source and return one synthesized RepoState
     record per binary it would emit.
@@ -491,33 +412,30 @@ def synthesize_source_binaries(
         for _b in _binaries:
             _virtual_ver_per_binary[_b] = _pristine_per_binary[_b]
 
-    # Step 4 — for each binary, prefer the AUTHORITATIVE record:
-    # the locally-built .deb's control fields if one exists at the
-    # same pristine base.  Real dh_shlibdeps already resolved
-    # substvars against our fork's actual link graph, so the local
-    # Depends is the only true source.  Falls back to upstream
-    # cache when no local artifact exists (binary not yet built or
-    # purged).  Catches the libavcodec59 → libaribb24-0 false
-    # closure break (fork drops opt-codecs not in Build-Deps).
+    # Step 4 — synthesize records from upstream cache (pre-build,
+    # data-driven).  Virtual build is a sanity check that runs
+    # BEFORE source builds; we deliberately do NOT consult any
+    # post-build .deb on disk.  When upstream cache lacks the
+    # binary (kernel ABI floats, fork-only renames), we ship a
+    # skeleton record with no Depends.  Sibling-pin and global
+    # cross-source pin rewriting still apply.
     _out: List[Dict[str, str]] = []
     for _b in _binaries:
-        _control: 'Optional[Dict[str, str]]' = None
-        if local_deb_index is not None:
-            _deb_path = _pick_best_local_deb(
-                local_deb_index, _b, _pristine_per_binary[_b])
-            if _deb_path is not None:
-                _control = _read_local_deb_control(_deb_path)
-        if _control is None:
-            _control = _upstream_per_binary[_b]
         _rec = synthesize_binary_record(
             source_name=_src_name,
             binary_name=_b,
             virtual_version=_virtual_ver_per_binary[_b],
             arch=arch,
-            upstream_record=_control,
+            upstream_record=_upstream_per_binary[_b],
             sibling_ver_map=_virtual_ver_per_binary,
             sibling_pristine_map=_pristine_per_binary,
         )
+        # Track whether this binary has an upstream-canonical Source
+        # signal (used by synthesize_repo_state to detect ambiguous
+        # cross-source collisions where the data doesn't tell us
+        # which source canonically produces the binary).
+        if _upstream_per_binary[_b] is not None:
+            _rec['_canonical_known'] = '1'
         _out.append(_rec)
     return _out
 
@@ -717,28 +635,27 @@ def _extract_relation_targets(rel_str: str) -> 'List[str]':
     return _names
 
 
-def _prefix_source_dedup(prev_record: Dict[str, str],
-                          new_record: Dict[str, str]) -> 'Optional[str]':
-    """Decide which of two colliding records to keep based on the
-    "kernel signing chain" naming convention: source A whose name is
-    a prefix-with-dash of source B (e.g. ``linux`` is prefix of
-    ``linux-signed-amd64``) is the canonical producer.  B's
-    Binary: field over-declares A's binaries; B's synth emits at B's
-    own version, A's emits at A's version — dedup must prefer A or
-    cross-source sibling pins fail at apt resolution.
+def _collision_is_ambiguous(prev_record: Dict[str, str],
+                             new_record: Dict[str, str]) -> bool:
+    """A cross-source collision is *ambiguous from data* when neither
+    colliding record carries an upstream-canonical Source signal
+    (i.e. ``_canonical_known`` is unset on both).  That happens for
+    binaries upstream cache doesn't have at all — kernel-ABI floats,
+    fork-only renames — where the data doesn't tell us which source
+    truly produces the binary.
 
-    Returns ``'prev'``, ``'new'``, or ``None`` (no opinion → fall back
-    to highest-version dedup).
+    Returning True signals the dedup picked one record arbitrarily
+    and callers downstream (closure check) should treat any
+    constraint failure against that binary as a possible
+    ambiguity-derived artifact, not a real synth bug.
+
+    NOTE: this replaces the previous prefix-source heuristic
+    (``linux`` ⊂ ``linux-signed-amd64``).  Naming patterns are
+    situational and break when data changes; "did upstream tell us"
+    is principled and only ever degrades to "we couldn't say."
     """
-    _prev_src = prev_record.get('Source', '')
-    _new_src = new_record.get('Source', '')
-    if not _prev_src or not _new_src or _prev_src == _new_src:
-        return None
-    if _new_src.startswith(_prev_src + '-'):
-        return 'prev'
-    if _prev_src.startswith(_new_src + '-'):
-        return 'new'
-    return None
+    return (not prev_record.get('_canonical_known')
+            and not new_record.get('_canonical_known'))
 
 
 def _global_pin_rewrite(raw: str,
@@ -795,11 +712,15 @@ def _global_pin_rewrite(raw: str,
 
 def synthesize_repo_state(
     virtual_records: 'List[Dict[str, str]]',
-) -> 'Tuple[Any, List[Tuple[str, str, str]]]':
+) -> 'Tuple[Any, List[Tuple[str, str, str]], set]':
     """Project a list of synthesized binary records into a RepoState
     object that the existing repo_audit functions can consume.
 
-    Returns ``(repo_state, findings)``.  Findings carry
+    Returns ``(repo_state, findings, ambiguous_names)`` where
+    ``ambiguous_names`` is the set of binary names whose dedup
+    outcome lacked an upstream-canonical Source signal — virtual
+    can't determine which source truly produces them, so closure
+    checks against these targets are downstream-uncertain.  Findings carry
     ``(severity, kind, message)`` triples matching the mirror-audit
     convention so the CLI layer can render them uniformly.
 
@@ -823,6 +744,13 @@ def synthesize_repo_state(
     _packages: 'Dict[str, Dict[str, str]]' = {}
     _dup_count = 0
     _dup_sources: 'set[tuple[str, str]]' = set()
+    # Track binary names whose dedup outcome was ambiguous (no
+    # upstream-canonical Source signal on either record).  Closure
+    # findings whose target is in this set are downgraded from
+    # CRITICAL to WARNING — the apparent break may be a side-effect
+    # of picking the wrong record under data ambiguity.
+    _ambiguous_names: 'set[str]' = set()
+    _ambig_source_pairs: 'set[tuple[str, str]]' = set()
     for _r in virtual_records:
         _name = _r.get('Package', '')
         _ver = _r.get('Version', '')
@@ -839,21 +767,20 @@ def synthesize_repo_state(
             _src_pair = tuple(sorted([
                 _prev.get('Source', '?'), _r.get('Source', '?')]))
             _dup_sources.add(_src_pair)  # type: ignore[arg-type]
-            # Prefer-by-source-prefix runs BEFORE version comparison —
-            # the kernel signing chain (linux + linux-signed-amd64)
-            # has the suffix-source at HIGHER version but the prefix-
-            # source as canonical producer.  Highest-version dedup
-            # would pick the wrong record and break cross-source pins.
-            _decision = _prefix_source_dedup(_prev, _r)
-            if _decision == 'prev':
+            # Data-driven ambiguity check: when both colliding
+            # records lack an upstream-canonical Source signal,
+            # the data doesn't tell us which source produces this
+            # binary.  Track it so closure check knows to downgrade
+            # any downstream CRITICALs against this name.
+            if _collision_is_ambiguous(_prev, _r):
+                _ambiguous_names.add(_name)
+                _ambig_source_pairs.add(_src_pair)  # type: ignore[arg-type]
+            try:
+                _cmp = apt_pkg.version_compare(_ver, _prev_ver)
+            except Exception:
+                _cmp = 0
+            if _cmp <= 0:
                 continue
-            if _decision != 'new':
-                try:
-                    _cmp = apt_pkg.version_compare(_ver, _prev_ver)
-                except Exception:
-                    _cmp = 0
-                if _cmp <= 0:
-                    continue
         _packages[_name] = dict(_r)
     if _dup_count:
         _pair_preview = ', '.join(
@@ -865,10 +792,20 @@ def synthesize_repo_state(
             'INFO', 'virtual_duplicate_name',
             f"deduped {_dup_count} cross-source binary name(s) "
             f"across {len(_dup_sources)} source-pair(s): "
-            f"{_pair_preview}{_more} — prefer-prefix-source applied "
-            "where one source is a suffix-variant of the other "
-            "(kernel-signed/installer-udeb chain); else highest "
-            "version"))
+            f"{_pair_preview}{_more} — kept highest version"))
+    if _ambig_source_pairs:
+        _ambig_preview = ', '.join(
+            f"{_a}+{_b}" for _a, _b in sorted(_ambig_source_pairs)[:3])
+        _ambig_more = (
+            f" (+{len(_ambig_source_pairs) - 3} more)"
+            if len(_ambig_source_pairs) > 3 else '')
+        _findings.append((
+            'WARNING', 'virtual_dedup_ambiguous',
+            f"{len(_ambiguous_names)} binary name(s) collided across "
+            "sources WITHOUT upstream-canonical Source field "
+            f"({_ambig_preview}{_ambig_more}) — picked one record "
+            "by highest version, but closure findings against these "
+            "names will be downgraded to WARNING"))
     # Post-dedup cross-source pin reconciliation.  After dedup, the
     # state knows the FINAL Version of each binary; walk every record
     # and rewrite constraints where target's pristine matches but
@@ -884,12 +821,17 @@ def synthesize_repo_state(
             if not _raw:
                 continue
             _entry[_field] = _global_pin_rewrite(_raw, _packages)
+    # Strip the internal _canonical_known hint before handing the
+    # state to repo_audit primitives (they don't expect underscore
+    # fields and the hint isn't useful downstream).
+    for _entry in _packages.values():
+        _entry.pop('_canonical_known', None)
     _provides = _build_provides_index(_packages)
     _state = RepoState(
         packages=_packages, provides_index=_provides,
         packages_file='<virtual>', repo_mtime=0.0,
     )
-    return _state, _findings
+    return _state, _findings, _ambiguous_names
 
 
 def virtual_repo_audit(
@@ -924,26 +866,42 @@ def virtual_repo_audit(
     """
     from repo_audit import audit_dep_closure, audit_conflict_cohort
 
-    _state, _findings = synthesize_repo_state(virtual_records)
+    _state, _findings, _ambiguous = synthesize_repo_state(virtual_records)
 
     _unresolved, _weak = audit_dep_closure(
         _state, consumer_set=install_corpus)
     for _pkg, _field, _rel, _why in _unresolved:
-        # Distinguish two failure modes for actionable reporting:
-        #  - target name absent from state.packages → scope expansion
-        #    needed (source not in dep_tree; tunneling from upstream
-        #    Debian also resolves) — `virtual_target_out_of_scope`
-        #  - target present but version mismatch → potential synth
-        #    bug — `virtual_closure_break` (the original kind)
+        # Three failure modes for actionable reporting:
+        #  - target absent → WARNING virtual_target_out_of_scope.
+        #    Cache parse decided this source wasn't needed; real
+        #    build's dh_shlibdeps won't link to a binary that isn't
+        #    available, so the upstream-inherited Depends constraint
+        #    is likely vestigial.  Operator awareness, not gating.
+        #  - target present but from ambiguous-canonical dedup →
+        #    WARNING virtual_closure_break_ambiguous.  We picked one
+        #    candidate by version; the apparent break may be from
+        #    picking the wrong record.
+        #  - target present, dedup unambiguous, version mismatch →
+        #    CRITICAL virtual_closure_break.  Real synth bug.
         _target_names = _extract_relation_targets(_rel)
         _all_absent = bool(_target_names) and all(
             _t not in _state.packages for _t in _target_names)
         if _all_absent:
             _findings.append((
-                'CRITICAL', 'virtual_target_out_of_scope',
+                'WARNING', 'virtual_target_out_of_scope',
                 f"{_pkg}: {_field} = {_rel!r} — "
-                f"{','.join(sorted(_target_names))} not in synth scope "
-                "(add source to dep_tree or tunnel from upstream)"))
+                f"{','.join(sorted(_target_names))} not in synth scope. "
+                "cache parse did not select these sources; real build's "
+                "dh_shlibdeps would also skip linking (no dev pkg "
+                "available), so the constraint is most likely vestigial"))
+            continue
+        _hit_ambig = any(_t in _ambiguous for _t in _target_names)
+        if _hit_ambig:
+            _findings.append((
+                'WARNING', 'virtual_closure_break_ambiguous',
+                f"{_pkg}: {_field} = {_rel!r} — target derived from "
+                "ambiguous cross-source collision; apparent break may "
+                "be a dedup artifact, not a real version drift"))
         else:
             _findings.append((
                 'CRITICAL', 'virtual_closure_break',

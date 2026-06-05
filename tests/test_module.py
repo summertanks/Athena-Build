@@ -19715,39 +19715,58 @@ def test_virtual_build_skips_binaries_from_other_canonical_source():
     assert _names == {'linux-image-amd64-signed-template'}, _names
 
 
-def test_virtual_build_prefix_source_dedup_prefers_base_over_signed():
-    """Two records collide on Package name; one source is suffix-variant
-    of the other (linux + linux-signed-amd64).  Dedup must prefer
-    the prefix source (linux) regardless of which version is higher.
-
-    The kernel signing chain: linux-signed-amd64 over-declares linux's
-    ABI-pinned binaries in its `Binary:` field but doesn't actually
-    emit them at its own version — Debian's real build version-aligns
-    these to linux.  Highest-version dedup picks linux-signed
-    (6.1.174+1 > 6.1.174-1) and breaks cross-source sibling pins.
-    """
+def test_virtual_build_ambiguous_dedup_emits_warning_and_tracks_name():
+    """Two records collide on Package name AND neither carries an
+    upstream-canonical Source signal (`_canonical_known` unset).
+    Data doesn't tell us which source canonically produces this
+    binary.  Dedup picks the higher-version record (no naming
+    heuristic) and emits WARNING virtual_dedup_ambiguous so the
+    operator knows downstream findings against this name are
+    uncertain."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
     _recs = [
+        # Both lack _canonical_known — both upstream-cache misses
+        # (kernel ABI floats, fork-only renames).
         {'Package': 'linux-headers-6.1.0-49-amd64',
-         'Version': '6.1.174-1+asg1u1',
-         'Source': 'linux',
+         'Version': '6.1.174-1+asg1u1', 'Source': 'linux',
          'Architecture': 'amd64',
          'Filename': 'pool/main/l/linux/...', 'SHA256': 'x' * 64,
          'Size': '0'},
         {'Package': 'linux-headers-6.1.0-49-amd64',
-         'Version': '6.1.174+1',
-         'Source': 'linux-signed-amd64',  # suffix variant of 'linux'
+         'Version': '6.1.174+1', 'Source': 'linux-signed-amd64',
          'Architecture': 'amd64',
          'Filename': 'pool/main/l/linux-signed-amd64/...',
          'SHA256': 'y' * 64, 'Size': '0'},
     ]
-    _state, _ = _vb.synthesize_repo_state(_recs)
-    # linux wins despite lower version — kernel signing chain
-    # canonical-source rule.
-    assert _state.packages['linux-headers-6.1.0-49-amd64']['Source'] == 'linux'
-    assert (_state.packages['linux-headers-6.1.0-49-amd64']['Version']
-            == '6.1.174-1+asg1u1')
+    _state, _f, _ambig = _vb.synthesize_repo_state(_recs)
+    # Highest-version dedup; no naming heuristic.
+    assert _state.packages['linux-headers-6.1.0-49-amd64']['Version'] == '6.1.174+1'
+    # Ambiguity tracked and surfaced.
+    assert 'linux-headers-6.1.0-49-amd64' in _ambig
+    _amb = [_t for _t in _f if _t[1] == 'virtual_dedup_ambiguous']
+    assert len(_amb) == 1
+    assert _amb[0][0] == 'WARNING'
+
+
+def test_virtual_build_unambiguous_dedup_no_ambiguity_warning():
+    """When ONE colliding record has _canonical_known (upstream told us
+    the producer), dedup is NOT ambiguous — the canonical filter would
+    have prevented the collision in the normal synth flow.  No
+    ambiguity warning, just the standard duplicate-name INFO."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Source': 'sa',
+         '_canonical_known': '1', 'Architecture': 'amd64',
+         'Filename': 'pool/a.deb', 'SHA256': 'x' * 64, 'Size': '0'},
+        {'Package': 'a', 'Version': '2.0', 'Source': 'sb',
+         '_canonical_known': '1', 'Architecture': 'amd64',
+         'Filename': 'pool/a2.deb', 'SHA256': 'y' * 64, 'Size': '0'},
+    ]
+    _state, _f, _ambig = _vb.synthesize_repo_state(_recs)
+    assert _ambig == set()
+    assert not any(_t[1] == 'virtual_dedup_ambiguous' for _t in _f)
 
 
 def test_virtual_build_global_pin_rewrite_resolves_cross_source_pin():
@@ -19788,73 +19807,31 @@ def test_virtual_build_global_pin_rewrite_resolves_cross_source_pin():
     assert _crit == [], _crit
 
 
-def test_virtual_build_local_deb_overrides_upstream_depends():
-    """When a locally-built .deb exists at the same pristine base,
-    its actual Depends MUST override upstream cache.  Catches the
-    fork-drops-codec class: upstream `libavcodec59` lists
-    `libaribb24-0 (>= 1.0.3)` but our fork-built artifact dropped
-    it (build-dep `libaribb24-dev` wasn't available, so
-    dh_shlibdeps produced a smaller Depends).  Inheriting upstream
-    verbatim produces a false closure CRITICAL; the local artifact
-    is the authoritative substvar-resolved source."""
-    import sys as _sys
-    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import shutil as _sh
-    if not _sh.which('dpkg-deb'):
-        return  # Skip on hosts without dpkg
-    import virtual_build as _vb
+def test_virtual_build_out_of_scope_is_warning_not_critical():
+    """Cache parse decides scope; real build's dh_shlibdeps follows
+    that decision.  If a consumer's hard Depends references a target
+    absent from synth state, the upstream-inherited constraint is
+    most likely vestigial — virtual cannot tell pre-build, so this
+    is WARNING (operator awareness), not CRITICAL (gating).
 
-    class _StubSrc:
-        package = 'ffmpeg'
-        version = '5.1.9-0'
-        binary = ['libavcodec59']
-
-    with tempfile.TemporaryDirectory() as _td:
-        # Build a minimal local .deb whose Depends does NOT include
-        # libaribb24-0 (mirrors the fork-built reality).
-        _dest = os.path.join(_td, 'main', 'binary-amd64')
-        os.makedirs(_dest)
-        _build_minimal_deb(
-            os.path.join(_dest, 'libavcodec59_5.1.9-0_amd64.deb'),
-            'libavcodec59', '5.1.9-0', 'amd64')
-        _local_index = _vb._build_local_deb_index(_td)
-        assert 'libavcodec59' in _local_index
-        # Upstream cache claims a libaribb24-0 Depends — but local
-        # artifact doesn't.
-        _univ = {
-            'libavcodec59': {'5.1.9-0+deb12u1': {
-                'Package': 'libavcodec59',
-                'Version': '5.1.9-0+deb12u1',
-                'Source': 'ffmpeg', 'Architecture': 'amd64',
-                'Depends': 'libaribb24-0 (>= 1.0.3), libc6 (>= 2.35)',
-            }},
-        }
-        _recs = _vb.synthesize_source_binaries(
-            source=_StubSrc(), package_universe=_univ,
-            asg_ledger={}, release=1, arch='amd64',
-            peer_sources={'ffmpeg'}, local_deb_index=_local_index,
-        )
-        assert len(_recs) == 1
-        # The minimal .deb's Depends should NOT contain libaribb24-0
-        # (minimal-deb builder doesn't add it).  Local-deb override
-        # wins → libaribb24-0 absent from the synthesized Depends.
-        _dep = _recs[0].get('Depends', '')
-        assert 'libaribb24-0' not in _dep, _dep
-
-
-def test_virtual_build_local_deb_index_epoch_strip_matches_pristine():
-    """Filenames omit epoch; pristine may carry one.  `_pick_best_local_deb`
-    must strip epoch on both sides for the match to work."""
+    Pins the user's principle: out-of-scope deps are observational,
+    not a synth bug or installer-breaking guarantee."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
-    # Filename version (no epoch) vs pristine with epoch.
-    _idx = {'libavcodec59': {
-        '5.1.9-0+asg1u2': '/path/libavcodec59_5.1.9-0+asg1u2_amd64.deb',
-    }}
-    _got = _vb._pick_best_local_deb(
-        _idx, 'libavcodec59', pristine='7:5.1.9-0')
-    assert _got is not None
-    assert 'libavcodec59_5.1.9-0+asg1u2' in _got
+    _recs = [
+        {'Package': 'consumer', 'Version': '1.0',
+         'Architecture': 'amd64', 'Source': 's',
+         'Depends': 'libout-of-scope (>= 1.0)',
+         'Filename': 'pool/c.deb', 'SHA256': 'x' * 64, 'Size': '0'},
+    ]
+    _, _f = _vb.virtual_repo_audit(
+        _recs, install_corpus=frozenset({'consumer'}))
+    _kinds = [(_t[0], _t[1]) for _t in _f]
+    assert ('WARNING', 'virtual_target_out_of_scope') in _kinds
+    # NOT CRITICAL.
+    assert not any(_sev == 'CRITICAL'
+                   and _kind == 'virtual_target_out_of_scope'
+                   for _sev, _kind in _kinds)
 
 
 def test_virtual_build_classifies_out_of_scope_target_separately():
@@ -19885,13 +19862,16 @@ def test_virtual_build_classifies_out_of_scope_target_separately():
     _, _f = _vb.virtual_repo_audit(
         _recs,
         install_corpus=frozenset({'consumer-a', 'consumer-b'}))
-    _kinds = sorted(_t[1] for _t in _f if _t[0] == 'CRITICAL')
-    assert _kinds == ['virtual_closure_break',
-                      'virtual_target_out_of_scope'], _kinds
+    # Out-of-scope is WARNING (cache parse decided; not blocking).
+    # Closure_break is CRITICAL (target present at wrong version
+    # — real synth bug).
+    _crits = sorted(_t[1] for _t in _f if _t[0] == 'CRITICAL')
+    _warns = sorted(_t[1] for _t in _f if _t[0] == 'WARNING')
+    assert _crits == ['virtual_closure_break'], _crits
+    assert 'virtual_target_out_of_scope' in _warns, _warns
     _oos = [_t for _t in _f
             if _t[1] == 'virtual_target_out_of_scope']
     assert 'libabsent-not-in-scope' in _oos[0][2]
-    assert 'tunnel' in _oos[0][2]
 
 
 def test_virtual_build_extract_relation_targets_handles_alternatives():
@@ -20053,12 +20033,12 @@ def test_virtual_build_synthesize_repo_state_resolves_closed_graph():
 
 
 def test_virtual_build_closure_break_emits_critical():
-    """Binary in consumer_set Depends on a name not in the synthesized
-    state → CRITICAL.  Classification depends on whether the target
-    name appears in state at all: absent → `virtual_target_out_of_scope`
-    (operator action: scope expand / tunnel); present-but-wrong-version
-    → `virtual_closure_break` (potential synth bug).  Either way,
-    blocking."""
+    """Closure-break classification covers two cases:
+      - target absent → WARNING virtual_target_out_of_scope
+        (cache parse decision; real dh_shlibdeps follows; not gating)
+      - target present, wrong version, unambiguous dedup →
+        CRITICAL virtual_closure_break (real synth bug)
+    This test pins the WARNING path (target absent)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
     _recs = [
@@ -20068,9 +20048,10 @@ def test_virtual_build_closure_break_emits_critical():
     ]
     _state, _f = _vb.virtual_repo_audit(
         _recs, install_corpus=frozenset({'a'}))
-    _kinds = [_t[1] for _t in _f if _t[0] == 'CRITICAL']
-    # Target is absent → out-of-scope classification.
-    assert 'virtual_target_out_of_scope' in _kinds
+    _warn_kinds = [_t[1] for _t in _f if _t[0] == 'WARNING']
+    assert 'virtual_target_out_of_scope' in _warn_kinds
+    _crit_kinds = [_t[1] for _t in _f if _t[0] == 'CRITICAL']
+    assert _crit_kinds == [], _crit_kinds
 
 
 def test_virtual_build_synthesize_repo_state_flags_duplicate_name():
@@ -20095,7 +20076,7 @@ def test_virtual_build_synthesize_repo_state_flags_duplicate_name():
          'Source': 's2', 'Filename': 'pool/b-2.0.deb',
          'SHA256': 'w' * 64, 'Size': '0'},
     ]
-    _state, _f = _vb.synthesize_repo_state(_recs)
+    _state, _f, _ = _vb.synthesize_repo_state(_recs)
     assert _state.packages['a']['Version'] == '2.0'   # higher wins
     assert _state.packages['b']['Version'] == '2.0'
     _infos = [_t for _t in _f if _t[1] == 'virtual_duplicate_name']
@@ -20121,7 +20102,7 @@ def test_virtual_build_no_duplicate_findings_when_no_overlap():
          'Source': 's2', 'Filename': 'pool/b.deb',
          'SHA256': 'y' * 64, 'Size': '0'},
     ]
-    _state, _f = _vb.synthesize_repo_state(_recs)
+    _state, _f, _ = _vb.synthesize_repo_state(_recs)
     assert not any(_t[1] == 'virtual_duplicate_name' for _t in _f)
 
 
@@ -20138,7 +20119,7 @@ def test_virtual_build_invalid_record_skipped_with_critical():
          'Filename': 'pool/c.deb', 'SHA256': 'z' * 64,
          'Size': '0'},
     ]
-    _state, _f = _vb.synthesize_repo_state(_recs)
+    _state, _f, _ = _vb.synthesize_repo_state(_recs)
     _crit = [_t for _t in _f if _t[0] == 'CRITICAL']
     assert len(_crit) == 2
     assert 'c' in _state.packages
@@ -29620,10 +29601,10 @@ def main() -> int:
         test_virtual_build_metapackage_stamps_when_lineage_present,
         test_virtual_build_strips_nmu_from_inherited_depends_constraint,
         test_virtual_build_skips_binaries_from_other_canonical_source,
-        test_virtual_build_prefix_source_dedup_prefers_base_over_signed,
+        test_virtual_build_ambiguous_dedup_emits_warning_and_tracks_name,
+        test_virtual_build_unambiguous_dedup_no_ambiguity_warning,
         test_virtual_build_global_pin_rewrite_resolves_cross_source_pin,
-        test_virtual_build_local_deb_overrides_upstream_depends,
-        test_virtual_build_local_deb_index_epoch_strip_matches_pristine,
+        test_virtual_build_out_of_scope_is_warning_not_critical,
         test_virtual_build_classifies_out_of_scope_target_separately,
         test_virtual_build_extract_relation_targets_handles_alternatives,
         test_virtual_build_recommends_suppressed_by_default,
