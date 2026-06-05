@@ -38,8 +38,12 @@ MIN_LINES       = 24
 def _safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
     """Write `text` at (y, x) inside `win`, clipping to fit.  Never raises.
 
-    The last cell of a row, if written, can trigger a forced scroll;
-    avoid by reserving one column.  Off-window coords silently no-op."""
+    Off-window coords silently no-op.  Clipping width is
+    ``max_x - x - 1``: leaving the bottom-right cell untouched avoids
+    curses' forced-scroll trigger AND in observed cases prevents the
+    next row's first column getting overwritten when the cursor lands
+    at the absolute end of a row.  The wrap layer
+    (``Renderer.width()``) MUST honor the same width budget."""
     try:
         max_y, max_x = win.getmaxyx()
         if y < 0 or y >= max_y or x < 0 or x >= max_x:
@@ -112,12 +116,24 @@ class Renderer:
 
     def width(self) -> int:
         """Current writable tab content width — used by dispatcher for
-        wrap-row calculations.  Subtract 1: `_safe_addstr` reserves the
-        rightmost column to avoid bottom-right scroll triggers, so the
-        wrap layer must use the same effective width or wrapped chunks
-        get silently right-clipped."""
+        wrap-row calculations.
+
+        Subtract 2 from the raw window width, not 1.  Reasoning:
+        - `_safe_addstr` itself clips to ``max_x - 1`` to keep the
+          bottom-right cell untouched (curses forced-scroll guard).
+        - But chunks of exactly ``max_x - 1`` chars land the cursor
+          AT column ``max_x - 1`` (the very last column).  In some
+          terminals this state leaks into the NEXT row's first cell
+          on the subsequent addstr — the first character of every
+          wrapped continuation line appears blank.
+
+        Wrap budget = ``max_x - 2`` leaves a one-column gap before
+        the reserved cell so the cursor never reaches the last column
+        and no edge-case behaviour fires.  Visible content per row
+        is ``max_x - 2`` chars in cols 0..max_x-3; cols max_x-2 and
+        max_x-1 stay empty."""
         _raw = self._w if self._w > 0 else MIN_COLS
-        return max(1, _raw - 1)
+        return max(1, _raw - 2)
 
     def content_rows(self) -> int:
         """Current tab content rows — used by dispatcher for scroll."""
@@ -240,12 +256,14 @@ class Renderer:
         i = len(tab.buffer) - 1
         while i >= 0 and len(display) < need:
             text, attr = tab.buffer[i]
-            # `_safe_addstr` reserves one column on the right to avoid the
-            # bottom-right cell triggering a forced scroll, so the usable
-            # writable width is max_x - 1.  wrap_line MUST be told the
-            # same so the wrapped chunks fit without the renderer
-            # silently clipping the last character of every line.
-            wrapped = wrap.wrap_line(text.rstrip('\n'), max(1, max_x - 1))
+            # Wrap budget = max_x - 2.  See `Renderer.width()` for
+            # the full reasoning: chunks of exactly max_x - 1 chars
+            # land the cursor at the last column, which (on observed
+            # terminals) causes the first character of the NEXT row
+            # to be silently dropped on the subsequent addstr.
+            # Shrinking by one more column keeps cursor in cols
+            # 0..max_x-3 and eliminates the edge.
+            wrapped = wrap.wrap_line(text.rstrip('\n'), max(1, max_x - 2))
             for chunk in reversed(wrapped):
                 display.append((chunk, attr))
             i -= 1
