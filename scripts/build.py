@@ -10475,6 +10475,35 @@ class BuildSession:
 
         # ---- Summary --------------------------------------------------
         _total_crit = len(_audit_crit) + len(_pub_crit)
+        # Out-of-scope target consolidation: when CRITICALs are all
+        # `virtual_target_out_of_scope`, surface the unique missing
+        # target names as actionable list (scope expand / tunnel).
+        _oos = [_f for _f in _audit_findings
+                if _f[1] == 'virtual_target_out_of_scope']
+        if _oos:
+            _missing_targets: 'set[str]' = set()
+            for _, _, _msg in _oos:
+                # Extract the comma-list between "— " and " not in"
+                if ' not in synth scope' in _msg:
+                    _seg = _msg.split('— ', 1)[1]
+                    _names = _seg.split(' not in', 1)[0]
+                    for _n in _names.split(','):
+                        _n = _n.strip()
+                        if _n:
+                            _missing_targets.add(_n)
+            if _missing_targets:
+                console.print("")
+                console.print(
+                    f"  out-of-scope targets ({len(_missing_targets)} "
+                    "unique): add source(s) producing these to "
+                    "dep_tree, or tunnel from upstream Debian:",
+                    tui.COLOR_WARNING)
+                for _t in sorted(_missing_targets)[:15]:
+                    console.print(f"    - {_t}", tui.COLOR_WARNING)
+                if len(_missing_targets) > 15:
+                    console.print(
+                        f"    …and {len(_missing_targets) - 15} more",
+                        tui.COLOR_WARNING)
         console.print("")
         if _total_crit == 0:
             console.print(

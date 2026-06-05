@@ -594,6 +594,36 @@ def validate_against_build_records(
 # ─────────────────────────── RepoState assembly ──────────────────────
 
 
+def _extract_relation_targets(rel_str: str) -> 'List[str]':
+    """Extract the dep target names from a printed relation string
+    (e.g. ``'libaribb24-0 (>= 1.0.3)'`` → ``['libaribb24-0']``;
+    ``'a | b (>= 1.0)'`` → ``['a', 'b']``).
+
+    OR-alternatives are returned as separate entries — they're
+    alternatives, ANY satisfying is enough; if ALL are absent,
+    closure fails on all of them.  Used to classify closure breaks:
+    if every named target is absent from synth state, the failure
+    is "out of corpus" rather than "synth bug."
+    """
+    if not rel_str:
+        return []
+    try:
+        from debian.deb822 import PkgRelation
+    except ImportError:
+        return []
+    try:
+        _parsed = PkgRelation.parse_relations(rel_str)
+    except Exception:
+        return []
+    _names: 'List[str]' = []
+    for _or_group in _parsed:
+        for _rel in _or_group:
+            _n = (_rel.get('name') or '').strip()
+            if _n:
+                _names.append(_n)
+    return _names
+
+
 def _prefix_source_dedup(prev_record: Dict[str, str],
                           new_record: Dict[str, str]) -> 'Optional[str]':
     """Decide which of two colliding records to keep based on the
@@ -742,8 +772,10 @@ def synthesize_repo_state(
             'INFO', 'virtual_duplicate_name',
             f"deduped {_dup_count} cross-source binary name(s) "
             f"across {len(_dup_sources)} source-pair(s): "
-            f"{_pair_preview}{_more} — kept highest version "
-            "(expected for kernel-signed / installer-udeb chains)"))
+            f"{_pair_preview}{_more} — prefer-prefix-source applied "
+            "where one source is a suffix-variant of the other "
+            "(kernel-signed/installer-udeb chain); else highest "
+            "version"))
     # Post-dedup cross-source pin reconciliation.  After dedup, the
     # state knows the FINAL Version of each binary; walk every record
     # and rewrite constraints where target's pristine matches but
@@ -804,9 +836,25 @@ def virtual_repo_audit(
     _unresolved, _weak = audit_dep_closure(
         _state, consumer_set=install_corpus)
     for _pkg, _field, _rel, _why in _unresolved:
-        _findings.append((
-            'CRITICAL', 'virtual_closure_break',
-            f"{_pkg}: {_field} = {_rel!r} — {_why}"))
+        # Distinguish two failure modes for actionable reporting:
+        #  - target name absent from state.packages → scope expansion
+        #    needed (source not in dep_tree; tunneling from upstream
+        #    Debian also resolves) — `virtual_target_out_of_scope`
+        #  - target present but version mismatch → potential synth
+        #    bug — `virtual_closure_break` (the original kind)
+        _target_names = _extract_relation_targets(_rel)
+        _all_absent = bool(_target_names) and all(
+            _t not in _state.packages for _t in _target_names)
+        if _all_absent:
+            _findings.append((
+                'CRITICAL', 'virtual_target_out_of_scope',
+                f"{_pkg}: {_field} = {_rel!r} — "
+                f"{','.join(sorted(_target_names))} not in synth scope "
+                "(add source to dep_tree or tunnel from upstream)"))
+        else:
+            _findings.append((
+                'CRITICAL', 'virtual_closure_break',
+                f"{_pkg}: {_field} = {_rel!r} — {_why}"))
     if report_recommends:
         for _pkg, _field, _rel in _weak:
             _findings.append((
