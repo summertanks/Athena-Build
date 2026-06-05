@@ -19540,6 +19540,109 @@ def test_virtual_build_synthesize_source_binaries_end_to_end():
     assert 'libc6 (>= 2.36)' in _by_name['openssl']['Depends']
 
 
+def test_virtual_build_synthesize_repo_state_resolves_closed_graph():
+    """Two virtual binaries where one depends on the other → closure
+    audit silent (no CRITICAL)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Depends': 'b', 'Filename': 'pool/a.deb',
+         'SHA256': 'x' * 64, 'Size': '0'},
+        {'Package': 'b', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/b.deb',
+         'SHA256': 'y' * 64, 'Size': '0'},
+    ]
+    _state, _f = _vb.virtual_repo_audit(
+        _recs, install_corpus=frozenset({'a', 'b'}))
+    _crit = [_t for _t in _f if _t[0] == 'CRITICAL']
+    assert _crit == []
+    assert 'a' in _state.packages
+    assert 'b' in _state.packages
+
+
+def test_virtual_build_closure_break_emits_critical():
+    """Binary in consumer_set Depends on a name not in the synthesized
+    state → CRITICAL virtual_closure_break."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Depends': 'missing-dep', 'Filename': 'pool/a.deb',
+         'SHA256': 'x' * 64, 'Size': '0'},
+    ]
+    _state, _f = _vb.virtual_repo_audit(
+        _recs, install_corpus=frozenset({'a'}))
+    _kinds = [_t[1] for _t in _f if _t[0] == 'CRITICAL']
+    assert 'virtual_closure_break' in _kinds
+
+
+def test_virtual_build_synthesize_repo_state_flags_duplicate_name():
+    """Two virtual records with same Package name → keep higher version,
+    emit INFO virtual_duplicate_name."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's1', 'Filename': 'pool/a-1.0.deb',
+         'SHA256': 'x' * 64, 'Size': '0'},
+        {'Package': 'a', 'Version': '2.0', 'Architecture': 'amd64',
+         'Source': 's2', 'Filename': 'pool/a-2.0.deb',
+         'SHA256': 'y' * 64, 'Size': '0'},
+    ]
+    _state, _f = _vb.synthesize_repo_state(_recs)
+    assert _state.packages['a']['Version'] == '2.0'   # higher wins
+    _infos = [_t for _t in _f if _t[1] == 'virtual_duplicate_name']
+    assert len(_infos) == 1
+
+
+def test_virtual_build_invalid_record_skipped_with_critical():
+    """Record missing Package or Version → CRITICAL
+    virtual_invalid_record, dropped from state."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Version': '1.0', 'Architecture': 'amd64'},  # no Package
+        {'Package': 'b', 'Architecture': 'amd64'},    # no Version
+        {'Package': 'c', 'Version': '1.0',            # valid
+         'Architecture': 'amd64', 'Source': 's',
+         'Filename': 'pool/c.deb', 'SHA256': 'z' * 64,
+         'Size': '0'},
+    ]
+    _state, _f = _vb.synthesize_repo_state(_recs)
+    _crit = [_t for _t in _f if _t[0] == 'CRITICAL']
+    assert len(_crit) == 2
+    assert 'c' in _state.packages
+    assert 'b' not in _state.packages
+
+
+def test_virtual_build_live_cohort_conflict_critical():
+    """Two binaries in live_cohort, one Conflicts the other → CRITICAL
+    virtual_cohort_conflict.  Same conflict pair outside cohort → silent."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Conflicts': 'b', 'Filename': 'pool/a.deb',
+         'SHA256': 'x' * 64, 'Size': '0'},
+        {'Package': 'b', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/b.deb',
+         'SHA256': 'y' * 64, 'Size': '0'},
+    ]
+    # Both in live cohort → fires.
+    _state, _f = _vb.virtual_repo_audit(
+        _recs, install_corpus=frozenset({'a', 'b'}),
+        live_cohort=frozenset({'a', 'b'}))
+    _conf = [_t for _t in _f if _t[1] == 'virtual_cohort_conflict']
+    assert len(_conf) >= 1
+    # b alone → no conflict (a is not in cohort).
+    _state2, _f2 = _vb.virtual_repo_audit(
+        _recs, install_corpus=frozenset({'b'}),
+        live_cohort=frozenset({'b'}))
+    _conf2 = [_t for _t in _f2 if _t[1] == 'virtual_cohort_conflict']
+    assert _conf2 == []
+
+
 def test_virtual_build_from_cache_collapses_hashtable_shape():
     """`from_cache` flattens cache.package_hashtable's nested
     Package list down to a single control-dict per (name, ver)."""
@@ -28658,6 +28761,12 @@ def main() -> int:
         test_virtual_build_sibling_pin_only_rewritten_when_pristine_matches,
         test_virtual_build_sibling_pin_with_nmu_constraint_pristine_matches,
         test_virtual_build_synthesize_source_binaries_end_to_end,
+        # virtual-build chunk 3 — RepoState assembly + virtual repo_audit
+        test_virtual_build_synthesize_repo_state_resolves_closed_graph,
+        test_virtual_build_closure_break_emits_critical,
+        test_virtual_build_synthesize_repo_state_flags_duplicate_name,
+        test_virtual_build_invalid_record_skipped_with_critical,
+        test_virtual_build_live_cohort_conflict_critical,
         test_virtual_build_from_cache_collapses_hashtable_shape,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,

@@ -332,3 +332,126 @@ def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
 # (the bump-rewrite path could share this).  Currently unused by chunk
 # 2 since PkgRelation handles the parse round-trip.
 _PIN_RE = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
+
+
+# ─────────────────────────── RepoState assembly ──────────────────────
+
+
+def synthesize_repo_state(
+    virtual_records: 'List[Dict[str, str]]',
+) -> 'Tuple[Any, List[Tuple[str, str, str]]]':
+    """Project a list of synthesized binary records into a RepoState
+    object that the existing repo_audit functions can consume.
+
+    Returns ``(repo_state, findings)``.  Findings carry
+    ``(severity, kind, message)`` triples matching the mirror-audit
+    convention so the CLI layer can render them uniformly.
+
+    Behaviour mirrors :func:`repo_audit.scan_repo_state`'s parser:
+      - on duplicate Package names, the highest-Version record wins
+        (apt-style) — but a clash emits an INFO finding so the operator
+        can see which two sources tried to ship the same name (a real
+        build would hit the file-collision gate)
+      - missing required fields → CRITICAL ``virtual_invalid_record``
+      - provides_index built via the same `_build_provides_index`
+        helper repo_audit uses, so downstream audits see virtual
+        records the same way they see scanned ones
+    """
+    import apt_pkg
+    from repo_audit import RepoState, _build_provides_index
+    apt_pkg.init_system()
+
+    _findings: 'List[Tuple[str, str, str]]' = []
+    _packages: 'Dict[str, Dict[str, str]]' = {}
+    for _r in virtual_records:
+        _name = _r.get('Package', '')
+        _ver = _r.get('Version', '')
+        if not _name or not _ver:
+            _findings.append((
+                'CRITICAL', 'virtual_invalid_record',
+                f"synthesized record missing Package/Version: "
+                f"{_r!r}"))
+            continue
+        _prev = _packages.get(_name)
+        if _prev is not None:
+            _prev_ver = _prev.get('Version', '')
+            try:
+                _cmp = apt_pkg.version_compare(_ver, _prev_ver)
+            except Exception:
+                _cmp = 0
+            if _cmp <= 0:
+                _findings.append((
+                    'INFO', 'virtual_duplicate_name',
+                    f"two sources synthesized binary {_name!r}: "
+                    f"keeping {_prev.get('Source', '?')} @ "
+                    f"{_prev_ver} over {_r.get('Source', '?')} @ "
+                    f"{_ver}"))
+                continue
+            _findings.append((
+                'INFO', 'virtual_duplicate_name',
+                f"two sources synthesized binary {_name!r}: "
+                f"replacing {_prev.get('Source', '?')} @ "
+                f"{_prev_ver} with {_r.get('Source', '?')} @ {_ver}"))
+        _packages[_name] = dict(_r)
+    _provides = _build_provides_index(_packages)
+    _state = RepoState(
+        packages=_packages, provides_index=_provides,
+        packages_file='<virtual>', repo_mtime=0.0,
+    )
+    return _state, _findings
+
+
+def virtual_repo_audit(
+    virtual_records: 'List[Dict[str, str]]',
+    install_corpus: 'Optional[frozenset[str]]' = None,
+    live_cohort: 'Optional[frozenset[str]]' = None,
+    installer_cohort: 'Optional[frozenset[str]]' = None,
+) -> 'Tuple[Any, List[Tuple[str, str, str]]]':
+    """Assemble a virtual RepoState and run the real audit primitives
+    against it.  Returns ``(repo_state, findings)`` so the caller can
+    chain into virtual_publish_dry_run (chunk 4) without re-scanning.
+
+    `install_corpus` is the union of binary names that would be
+    dpkg-installed somewhere in the live chroot / installer / pool —
+    same shape `audit_dep_closure` expects.  Pass `None` to audit every
+    binary in the synthetic state (whole-repo scan; useful for
+    standalone "would this corpus install?" checks).
+
+    `live_cohort` / `installer_cohort` are passed to
+    :func:`repo_audit.audit_conflict_cohort` — Conflict/Breaks within
+    each cohort fire ``CRITICAL virtual_cohort_conflict``.  Omit either
+    to skip its conflict pass.
+
+    Closure breaks → ``CRITICAL virtual_closure_break``.
+    Weak (Recommends) misses → ``WARNING virtual_recommends_miss``
+    (informational only; matches real-pipeline policy where weak deps
+    don't gate publish).
+    """
+    from repo_audit import audit_dep_closure, audit_conflict_cohort
+
+    _state, _findings = synthesize_repo_state(virtual_records)
+
+    _unresolved, _weak = audit_dep_closure(
+        _state, consumer_set=install_corpus)
+    for _pkg, _field, _rel, _why in _unresolved:
+        _findings.append((
+            'CRITICAL', 'virtual_closure_break',
+            f"{_pkg}: {_field} = {_rel!r} — {_why}"))
+    for _pkg, _field, _rel in _weak:
+        _findings.append((
+            'WARNING', 'virtual_recommends_miss',
+            f"{_pkg}: {_field} = {_rel!r}"))
+
+    if live_cohort:
+        _live_conflicts = audit_conflict_cohort(_state, live_cohort)
+        for _pkg, _field, _other, _rel in _live_conflicts:
+            _findings.append((
+                'CRITICAL', 'virtual_cohort_conflict',
+                f"{_pkg} (live): {_field} = {_rel!r} → {_other}"))
+    if installer_cohort:
+        _inst_conflicts = audit_conflict_cohort(_state, installer_cohort)
+        for _pkg, _field, _other, _rel in _inst_conflicts:
+            _findings.append((
+                'CRITICAL', 'virtual_cohort_conflict',
+                f"{_pkg} (installer): {_field} = {_rel!r} → {_other}"))
+    return _state, _findings
