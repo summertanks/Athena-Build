@@ -944,29 +944,49 @@ class BuildContainer:
                 )
                 # 2. Normalise the emitted .debs (now in their subdirs):
                 #    strip NMU → pristine, then stamp +asg<R>u<N> when this
-                #    is a delta build AND a remote ledger is loaded (UPD-01).
-                #    was_patched feeds the delta decision.
+                #    is a delta build AND a remote ledger is loaded.
+                #    was_patched feeds the delta decision.  Returns the
+                #    POST-NORMALIZE paths — strip + asg-stamp rename the
+                #    files in place, so `_emitted` (pre-normalize paths)
+                #    no longer points at real files post-normalize.
                 _was_patched = (src_patch_path != self.patch_empty)
-                self._normalize_built_artifacts(src_pkg, _emitted, _was_patched)
-                # OBS-01 phase=normalized → done: post-strip pristine
-                # version is the canonical built_version (memory
-                # `feedback_strip_nmu_at_build`).  intended_version vs
-                # built_version drift becomes visible at this point.
+                _final_paths = self._normalize_built_artifacts(
+                    src_pkg, _emitted, _was_patched)
+                if not _final_paths:
+                    _final_paths = list(_emitted)
+                # Post-strip pristine version is the canonical
+                # built_version.  intended_version vs built_version
+                # drift becomes visible at this point.
                 _built_version = utils.strip_nmu_suffix(str(src_pkg.version))
-                # COORD-01: hash every output AFTER normalize.  Normalize
-                # rewrites the .deb in place (NMU strip + asg-stamp), so
-                # the published bytes — and thus the digest the coord
-                # claim record pins — are only stable here.  use_cache=
-                # False because the file was just written; we don't want
-                # a stale (size, mtime) sidecar to lie about content.
-                _output_hashes = {}
-                for _p in _emitted:
+                # Hash every output AFTER normalize, against the
+                # post-rename paths the normalise pass returned.  The
+                # prior version iterated `_emitted` (pre-normalize) —
+                # for any source whose strip / asg-stamp ACTUALLY
+                # renamed files, those paths were stale and
+                # get_sha256 returned '' for every output, leaving
+                # output_hashes = {} on the build record.  That broke
+                # `coord.publish.generate_pending_claims` (which
+                # requires a non-empty sha to emit a claim), so
+                # ~880 of 985 successfully-built sources never
+                # appeared in athena-primary.jsonl.  Caught 2026-06-05.
+                # use_cache=False because the files were just written;
+                # we don't want a stale (size, mtime) sidecar to lie.
+                _output_hashes: 'dict[str, str]' = {}
+                _final_basenames: 'list[str]' = []
+                for _p in _final_paths:
+                    _b = os.path.basename(_p)
+                    _final_basenames.append(_b)
                     _h = utils.get_sha256(_p, use_cache=False)
                     if _h:
-                        _output_hashes[os.path.basename(_p)] = _h
+                        _output_hashes[_b] = _h
+                # Also refresh the `outputs` list to the post-normalize
+                # filenames — the segregated-phase write captured
+                # pre-strip names which no longer exist on disk.
                 self._record_phase(
                     src_pkg.package, phase='done',
                     built_version=_built_version,
+                    output_count=len(_final_basenames),
+                    outputs=sorted(_final_basenames),
                     output_hashes=_output_hashes,
                 )
 
@@ -1288,7 +1308,7 @@ class BuildContainer:
 
     def _normalize_built_artifacts(self, src_pkg,
                                    built_files: 'list[str]',
-                                   was_patched: bool = False) -> None:
+                                   was_patched: bool = False) -> 'list[str]':
         """Normalise every just-emitted artifact: strip upstream NMU layers
         to pristine, then (when there's an asg lineage to continue OR this
         build is a fresh delta) stamp our `+asg<R>u<N>` update marker.
@@ -1322,7 +1342,7 @@ class BuildContainer:
         a missed strip surfaces later via `repo audit_nmu`.
         """
         if not built_files:
-            return
+            return []
         # --- 1. strip NMU → pristine (track delta + post-strip paths) ---
         _any_stripped = False
         _current_paths: 'list[str]' = []
@@ -1370,7 +1390,7 @@ class BuildContainer:
                 if _was_delta:
                     break
         if not (_was_delta and _ledger is not None):
-            return
+            return list(_current_paths)
 
         try:
             _release = int(str(self.config.build_version).strip('"').strip("'"))
@@ -1379,7 +1399,7 @@ class BuildContainer:
                 f"asg-stamp: [Build] VERSION is not an integer "
                 f"({self.config.build_version!r}) — skipping stamp for "
                 f"{src_pkg.package}")
-            return
+            return list(_current_paths)
 
         # Uniform per-source N: take the MAX of every sibling binary's
         # individual asg_next_n candidate, then stamp ALL binaries from
@@ -1399,8 +1419,8 @@ class BuildContainer:
         # the audit cares about the pin chain, not the per-file
         # history density.
         _per_file_n: 'list[int]' = []
-        _stampable: 'list[tuple[str, str]]' = []   # (path, basename)
-        for _path in _current_paths:
+        _stampable_idx: 'list[int]' = []   # indices into _current_paths
+        for _i, _path in enumerate(_current_paths):
             _b = os.path.basename(_path)
             _name, _ext = os.path.splitext(_b)
             _parts = _name.split('_')
@@ -1410,25 +1430,36 @@ class BuildContainer:
             _base = utils.pristine_base(_ver)
             _per_file_n.append(utils.asg_next_n(
                 _ledger.get(_pkg, []), _base, _release))
-            _stampable.append((_path, _b))
-        if not _stampable:
-            return
+            _stampable_idx.append(_i)
+        if not _stampable_idx:
+            return list(_current_paths)
         _n = max(_per_file_n)
         _n_stamped = 0
-        for _path, _b in _stampable:
+        for _i in _stampable_idx:
+            _path = _current_paths[_i]
+            _b = os.path.basename(_path)
             try:
                 _r = utils.restamp_asg_deb(_path, _release, _n)
+                _new = _r.get('new_path', _path)
                 if _r['status'] == 'rewritten':
                     _n_stamped += 1
                     logger.info(
                         f"asg-stamp: {_b} → "
-                        f"{os.path.basename(_r['new_path'])} (+asg{_release}u{_n})")
+                        f"{os.path.basename(_new)} (+asg{_release}u{_n})")
+                # Update tracked path so the caller can find the
+                # actual on-disk file post-normalize (essential for
+                # output_hashes — get_sha256 on the stale pre-stamp
+                # path returns empty, leaving the build record's
+                # output_hashes dict empty and the publish layer with
+                # nothing to claim).
+                _current_paths[_i] = _new
             except Exception as e:
                 logger.warning(f"asg-stamp: {_b} failed: {e}")
         if _n_stamped:
             logger.info(
                 f"asg-stamp: marked {_n_stamped} artifact(s) from source "
                 f"{src_pkg.package} (+asg{_release}u{_n}, uniform N)")
+        return list(_current_paths)
 
     def _segregate_built_artifacts(self, src_pkg,
                                    source_dir: str) -> 'list[str]':

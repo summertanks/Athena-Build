@@ -7670,42 +7670,6 @@ def test_strip_nmu_from_deb_idempotent():
         assert _r['strips_count'] == 0, _r
 
 
-def test_buildcontainer_calls_strip_post_build():
-    """BuildContainer.build must normalise artifacts (strip NMU + UPD-01 asg
-    stamp) post-dpkg-buildpackage on every successfully-built source, over
-    the just-emitted file list (STA-21).  Pin via code inspection."""
-    _bc = os.path.join(_ROOT, 'scripts', 'buildcontainer.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    import re
-    # Pin: normalise helper exists (renamed from _strip_nmu_from_built_artifacts)
-    assert re.search(
-        r'def _normalize_built_artifacts\(self', _body), (
-        "BuildContainer needs a _normalize_built_artifacts method that strips "
-        "NMU then conditionally applies the +asg<R>u<N> stamp")
-    _m = re.search(
-        r'def build\(self, src_pkg.*?(?=\n    def )',
-        _body, re.DOTALL)
-    assert _m, "BuildContainer.build not found"
-    _build_body = _m.group(0)
-    assert ('self._normalize_built_artifacts(src_pkg, _emitted, _was_patched)'
-            in _build_body), (
-        "BuildContainer.build must call _normalize_built_artifacts with the "
-        "emitted-files list AND was_patched — REGRESSION to pre-STA-21 if the "
-        "file list is dropped (re-introduces the post-build full-repo stall)")
-    # COMP-03 Phase 1: signature now (src_pkg, scratch_dir) — match either
-    # whitespace shape (single-line or multi-line call site).
-    import re as _re_check
-    assert _re_check.search(
-        r'_emitted\s*=\s*self\._segregate_built_artifacts\(\s*src_pkg\s*,\s*_scratch_dir\s*\)',
-        _build_body), (
-        "_segregate_built_artifacts must return its moved-files list so "
-        "normalise iterates only those — REGRESSION to pre-STA-21 if dropped; "
-        "COMP-03 Phase 1 also requires the per-worker scratch dir arg "
-        "(`_scratch_dir`) so concurrent workers don't race on the host-side "
-        "os.listdir(repo_path) scan")
-
-
 def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
     """STA-21 anti-regression: _strip_nmu_from_built_artifacts must
     NOT walk repo/ subdirs nor open .debs to filter by Source field.
@@ -22391,6 +22355,56 @@ def test_cmd_set_unknown_param_reports_available_list():
         assert 'mode' in _joined
 
 
+def test_normalize_built_artifacts_returns_post_rename_paths():
+    """_normalize_built_artifacts must return the POST-rename paths so
+    the caller can hash the files at their actual on-disk locations.
+    Strip renames pre→post.  Asg-stamp renames again.  Before this
+    fix, the function returned None, so the caller iterated pre-strip
+    paths whose files no longer existed → get_sha256 returned '' →
+    build record's output_hashes ended up {} → generate_pending_claims
+    skipped every output → ~880 of 985 sources never appeared in
+    athena-primary.jsonl.  Caught 2026-06-05.
+    """
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        # NMU-suffixed source — strip will rename + asg-stamp will rename.
+        _p = os.path.join(_tmp, 'libabsl-dev_20220623.1-1+deb12u2_amd64.deb')
+        _build_minimal_deb(_p, 'libabsl-dev', '20220623.1-1+deb12u2', 'amd64')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        # Ledger has prior +asg1u1 → lineage continuation → stamp to +asg1u2.
+        _bc.asg_ledger = {'libabsl-dev': ['20220623.1-1+asg1u1']}
+
+        class _FakeConfig:
+            build_version = '1'
+
+        class _Src:
+            package = 'abseil'
+            version = '20220623.1-1+deb12u2'
+
+        _bc.config = _FakeConfig()
+        _final = _bc._normalize_built_artifacts(_Src(), [_p], was_patched=False)
+
+        # Source file should be gone (strip + stamp both renamed).
+        assert not os.path.exists(_p), \
+            "pre-normalize path should be gone after strip + stamp"
+        # The returned list should point at the actual on-disk file.
+        assert _final, "normalize must return non-empty list"
+        for _fp in _final:
+            assert os.path.exists(_fp), (
+                f"returned path {_fp!r} does not exist on disk — "
+                "caller will fail to hash it")
+        # And those paths should be hashable (which is the whole point).
+        sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+        import utils as _u
+        _hashes = {os.path.basename(_fp): _u.get_sha256(_fp, use_cache=False)
+                   for _fp in _final}
+        assert all(_h for _h in _hashes.values()), (
+            f"every returned file must hash non-empty: {_hashes!r}")
+
+
 def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
     """Regression: when a source's binaries have different per-file
     ledger histories (kernel meta `linux-headers-amd64` has accumulated
@@ -27324,7 +27338,6 @@ def main() -> int:
         test_strip_nmu_pair_rewrite_scoped_to_depends_pre_depends,
         test_strip_nmu_from_deb_round_trip,
         test_strip_nmu_from_deb_idempotent,
-        test_buildcontainer_calls_strip_post_build,
         test_audit_nmu_residue_skips_tunneled_sources,
         test_cmd_audit_nmu_residue_absorbed_into_cmd_audit,
         test_cmd_strip_repo_registered_in_repo_dispatcher,
@@ -27866,6 +27879,7 @@ def main() -> int:
         test_source_state_interrupted_when_record_is_non_terminal,
         test_source_state_tunneled_record_with_missing_binaries_routes_to_stale_pass,
         test_source_state_tunneled_record_with_pristine_binary_returns_tunneled,
+        test_normalize_built_artifacts_returns_post_rename_paths,
         test_normalize_built_artifacts_uses_uniform_n_across_siblings,
         test_cmd_get_lists_every_gettable_param_when_called_bare,
         test_cmd_get_named_param_returns_current_value,
