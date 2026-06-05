@@ -26,49 +26,62 @@ breaks, ownership blocks — before any build runs.
 | Blind spot | Why |
 |---|---|
 | Compile-time failures (gcc errors, dh-helper bugs, autoconf failures) | We don't actually build anything |
-| Linkage drift in fork patches | Substvar policy is conservative — see below |
+| Linkage drift in fork patches WHEN NO LOCAL BUILD EXISTS | Falls back to upstream cache; once the source is built once, the local `.deb` is authoritative |
 | Non-deterministic binary lists (kernel meta whose names depend on upstream ABI bumps) | We trust `Source.binary` (Binary: field) verbatim |
 | Stale mirror state | Operator must run `mirror pull` first for accurate ownership / cross-builder findings |
-| Substvars from upstream's actual link graph | Inherited as text from upstream's already-resolved binary `Depends:` |
+| Substvars on never-built sources | Inherited from upstream cache; first real build re-grounds the prediction |
 
 The blind spots are deliberately not engineered around — adding them
 would either re-implement `dh_shlibdeps` (the substvar resolver) or
 duplicate the actual build.  Real builds are still the source of
 truth; virtual build is the cheap pre-filter.
 
-## Substvar policy (conservative, locked)
+## Substvar policy (local-artifact-authoritative)
 
-Each synthesized binary inherits its upstream binary's `Depends:`,
-`Pre-Depends:`, `Conflicts:`, `Breaks:`, `Provides:`, `Replaces:`,
-`Recommends:` **verbatim**.  Two transformations:
+Virtual build now reads the **actual** `.deb`'s control fields when
+a locally-built artifact exists at the same pristine base.  Real
+`dh_shlibdeps` has already resolved every substvar against the
+fork's actual link graph; the on-disk `.deb` is the only true source.
 
-1. **NMU stripping**: constraint versions of form `<base>+debNuN`,
-   `<base>+asgRuN`, `<base>-Nb<bN>` are normalised to `<base>` (via
-   `pristine_base`) so a sibling pin `(= 1.0-1+deb12u1)` reads as
-   `(= 1.0-1)`.
-2. **Sibling pin rewrite**: when a constraint's TARGET is a sibling
-   binary in the same source AND its (normalised) version equals our
-   source's pristine base, the version is rewritten to the sibling's
-   predicted virtual version.  Catches the intra-source `(= ver)` pin
-   that real-build's `restamp_asg_deb` rewrites.
+Resolution order per binary:
 
-External constraints (libc6, soname pins to unrelated sources, kernel
-ABI pins) are LEFT UNCHANGED — apt resolves them at install time
-against whatever versions of those packages happen to be in the repo.
+1. **Local artifact** — `repo/dists/<codename>/main/binary-<arch>/<name>_<ver>_<arch>.deb` at the synth-predicted pristine base.  Read its `Depends:`, `Conflicts:`, `Provides:`, `Replaces:` verbatim.
+2. **Upstream cache** — fallback when no local artifact exists yet.  Then four transformations apply: NMU strip, sibling-pin rewrite (intra-source), cross-source global pin rewrite, canonical-source filter.
+3. **Skeleton** — when neither upstream cache nor local artifact carries the binary (kernel-ABI names whose ABI number doesn't match the cached snapshot).
 
-### False-clean risk
+External constraints (libc6, soname pins to unrelated sources) pass
+through untouched — apt resolves them at install time against whatever
+versions of those packages happen to be in the repo.
 
-A fork patch that changes which shared library the binary links to
-(switches from `libssl1.1` to `libssl3`, say) updates `Depends:` only
-when `dh_shlibdeps` runs at real-build time.  Virtual build inherits
-the upstream's pre-patch `Depends:` — so the virtual closure check
-sees the OLD soname constraint, not the new one.  If the new soname
-isn't in the repo, the real build will fail closure but virtual would
-pass.
+### Why this matters
 
-Mitigation when this bites: tighten policy to "parse fork's
-`debian/control` and use its declared `Depends:`" for forks under
-`fork/source/`.  Deferred until a false-clean ships.
+The previous "inherit upstream verbatim" policy produced false
+CRITICALs in two real-world cases:
+
+- **Fork drops opt-codec**: our `ffmpeg` fork builds `libavcodec59`
+  without `libaribb24-dev` available as a Build-Dep, so
+  `dh_shlibdeps` produces a smaller `Depends:` than upstream
+  Debian's.  Inheriting upstream's `Depends: libaribb24-0` flagged a
+  spurious closure break against the local repo (which doesn't ship
+  `libaribb24-0` at all because it's not needed).  Reading the local
+  `.deb` shows the correct (smaller) Depends.
+
+- **Fork adds new dep**: a patch that switches linkage from
+  `libssl1.1` to `libssl3` adds the new soname to `Depends:`.  Local
+  artifact reflects this; upstream cache doesn't.
+
+When no local artifact exists (fresh source not yet built), virtual
+build falls back to upstream cache — accepting the conservative
+blind spot for that one binary.  Once it ships, subsequent virtual
+runs use the authoritative reading.
+
+### Indexing cost
+
+`cmd_virtual_build` builds a `{binary_name: {version: path}}` index
+of `repo/` once at startup (~one walk over `dists/<codename>/main/`).
+Per-binary lookup is a dict access + version_compare; the actual
+`DebFile` read happens on demand (once per binary name).  Cost is
+negligible compared to the audit pass itself.
 
 ## Phases (vs the real pipeline)
 
