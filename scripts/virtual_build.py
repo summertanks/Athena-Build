@@ -441,39 +441,46 @@ def synthesize_source_binaries(
 
 
 def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
-    """Project the Cache's package_hashtable into the shape
-    `synthesize_source_binaries` expects.
+    """Project the Cache's package_hashtable AND udeb_hashtable into
+    the shape `synthesize_source_binaries` expects.
 
-    Cache's hashtable is `{name: {ver: [Package, ...]}}` (lists because
-    of Provides aliasing) — we collapse to `{name: {ver: control_dict}}`
-    where control_dict is a flat str→str mapping suitable for
-    RepoState consumers.  Picks the first Package per (name, ver)
-    (Provides-aliased entries share control fields with the real
-    provider).
+    Cache holds udebs (Section: debian-installer records) in a
+    PARALLEL hashtable, indexed from
+    `dists/<suite>/main/debian-installer/binary-<arch>/Packages`.
+    Both must be included or the canonical-source filter can't fire
+    for udeb names (every kernel `*-di` lookup misses, both linux
+    and linux-signed-amd64 fall through and collide on dedup —
+    that's where the 52-binary ambiguous-dedup noise comes from).
+
+    Each hashtable's shape is `{name: {ver: [Package, ...]}}` (lists
+    because of Provides aliasing).  Collapsed here to
+    `{name: {ver: control_dict}}` with str→str values matching
+    `scan_repo_state`'s output.  Picks the first Package per
+    (name, ver) — Provides-aliased entries share control fields.
     """
     _out: Dict[str, Dict[str, Any]] = {}
-    _ht = getattr(cache, 'package_hashtable', None)
-    if _ht is None:
-        return _out
-    for _name, _versions in _ht.items():
-        _per_name: Dict[str, Dict[str, str]] = {}
-        for _ver, _pkgs in _versions.items():
-            if not _pkgs:
-                continue
-            _p = _pkgs[0]
-            _ctrl: Dict[str, str] = {}
-            # Package is a deb822 subclass — iterate its raw fields.
-            try:
-                for _field in _p:
-                    _val = _p.get(_field)
-                    if _val is None:
-                        continue
-                    _ctrl[_field] = str(_val)
-            except Exception:
-                continue
-            _per_name[str(_ver)] = _ctrl
-        if _per_name:
-            _out[_name] = _per_name
+    for _attr in ('package_hashtable', 'udeb_hashtable'):
+        _ht = getattr(cache, _attr, None)
+        if _ht is None:
+            continue
+        for _name, _versions in _ht.items():
+            _per_name: Dict[str, Dict[str, str]] = _out.get(_name, {})
+            for _ver, _pkgs in _versions.items():
+                if not _pkgs:
+                    continue
+                _p = _pkgs[0]
+                _ctrl: Dict[str, str] = {}
+                try:
+                    for _field in _p:
+                        _val = _p.get(_field)
+                        if _val is None:
+                            continue
+                        _ctrl[_field] = str(_val)
+                except Exception:
+                    continue
+                _per_name[str(_ver)] = _ctrl
+            if _per_name:
+                _out[_name] = _per_name
     return _out
 
 

@@ -20361,6 +20361,44 @@ def test_virtual_build_from_cache_collapses_hashtable_shape():
     assert _ctrl['Depends'] == 'libc6'
 
 
+def test_virtual_build_from_cache_merges_udeb_hashtable():
+    """from_cache MUST include cache.udeb_hashtable too.  Cache holds
+    udebs (Section: debian-installer records) in a parallel
+    hashtable; without merging, the canonical-source filter can't fire
+    for udeb names — every kernel `*-di` lookup misses, both
+    linux + linux-signed-amd64 fall through and collide on dedup."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _P(dict):
+        def __init__(self, **f):
+            super().__init__()
+            for k, v in f.items():
+                self[k] = v
+            self.package = f['Package']
+            self.version = f['Version']
+
+    class _StubCache:
+        package_hashtable = {
+            'libfoo': {'1.0': [_P(Package='libfoo', Version='1.0',
+                                  Source='libfoo-src')]},
+        }
+        # Kernel udebs live here in the real Cache class.
+        udeb_hashtable = {
+            'kernel-image-6.1.0-49-amd64-di': {'6.1.174-1': [_P(
+                Package='kernel-image-6.1.0-49-amd64-di',
+                Version='6.1.174-1',
+                Source='linux-signed-amd64')]},
+        }
+    _u = _vb.from_cache(_StubCache())
+    # Both deb + udeb names present after merge.
+    assert 'libfoo' in _u
+    assert 'kernel-image-6.1.0-49-amd64-di' in _u
+    # The udeb's Source field survives — canonical filter can fire.
+    _udeb_rec = _u['kernel-image-6.1.0-49-amd64-di']['6.1.174-1']
+    assert _udeb_rec['Source'] == 'linux-signed-amd64'
+
+
 def test_compute_post_build_versions_release_advances_resets_n():
     """A new release R bumps the major; N resets to 1 against the same
     base because asg_next_n is keyed on (base, release)."""
@@ -29609,6 +29647,7 @@ def main() -> int:
         test_virtual_publish_dry_run_tunneled_target_emits_transfer_and_hash_conflict,
         test_virtual_publish_dry_run_same_sha_no_hash_conflict,
         test_virtual_build_from_cache_collapses_hashtable_shape,
+        test_virtual_build_from_cache_merges_udeb_hashtable,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,
         test_tunnel_filenames_for_source_uses_upstream_not_stripped,
