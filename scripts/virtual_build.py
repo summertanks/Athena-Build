@@ -561,11 +561,21 @@ def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
             for _ver, _pkgs in _versions.items():
                 if not _pkgs:
                     continue
-                # Prefer the entry whose `Package` field matches our
-                # lookup key — that's the standalone real producer.
-                # Fall back to first entry only when no exact-name
-                # match exists (rare: fork-only renames where
-                # upstream cache has no real entry).
+                # ONLY keep entries where the `Package` field matches
+                # our lookup key — that's the standalone real producer.
+                # Skip versions whose entries are all Provides-aliased
+                # records (where the actual `Package` field names a
+                # DIFFERENT binary providing this name).
+                #
+                # Example: `inetutils-telnet` (Package=inetutils-telnet,
+                # Provides=telnet, Arch=amd64, Ver=2:2.4-2+deb12u3) is
+                # appended to package_hashtable['telnet'] alongside the
+                # standalone `telnet` transitional dummy (Package=telnet,
+                # Arch=all, Ver=0.17+2.4-2+deb12u3).  Highest-version
+                # picking grabs the Provides-aliased version (epoch
+                # sorts up), wrong-arch and wrong-version.  Filtering to
+                # exact-name entries keeps the standalone visible to
+                # version-comparison; Provides-aliased versions vanish.
                 _p = None
                 for _candidate in _pkgs:
                     try:
@@ -575,7 +585,10 @@ def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
                     except Exception:
                         continue
                 if _p is None:
-                    _p = _pkgs[0]
+                    # No standalone real producer at this version —
+                    # only Provides-aliases.  Skip; the binary at this
+                    # version doesn't exist in its own right.
+                    continue
                 _ctrl: Dict[str, str] = {}
                 try:
                     for _field in _p:
