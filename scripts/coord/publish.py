@@ -711,6 +711,32 @@ def remote_publish(
                     f"pool push: {_pushed_count} sent, "
                     f"{_push_fail_count} failed")
 
+            # Step 5c — push the apt-trust path (dists/<codename>/ tree:
+            # InRelease, Release, Release.gpg, per-component Packages +
+            # variants).  Without this the remote pool is unusable by
+            # apt clients even though every .deb is present.  Order
+            # matters: pool first (already done above), then dist tree
+            # — never the other way around, or apt could fetch an
+            # InRelease pointing at a .deb not yet on remote.
+            try:
+                _codename = str(config.build_codename).strip('"').strip("'")
+            except AttributeError:
+                _codename = ''
+            if _codename and pool_remote_spec is not None:
+                _local_dist = os.path.join(
+                    config.dir_repo, 'dists', _codename)
+                _remote_dist = (
+                    pool_remote_spec.rstrip('/')
+                    + f'/dists/{_codename}')
+                _status(f"pushing dist tree dists/{_codename}/")
+                _ok_dt, _dt_detail = _transport.push_dist_tree(
+                    local_dist_dir=_local_dist,
+                    remote_dir_spec=_remote_dist,
+                    ssh_key=ssh_key,
+                )
+                if not _ok_dt:
+                    return False, f"push dist tree failed: {_dt_detail}"
+
         # Step 6 — sign + append every pending claim to the LOCAL jsonl
         # (state=published; the .deb is now on the remote pool because
         # step 5b just pushed it under the same transaction)

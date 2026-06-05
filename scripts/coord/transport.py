@@ -175,6 +175,52 @@ def push_jsonl(
     return True, ''
 
 
+def push_dist_tree(
+    *, local_dist_dir: str, remote_dir_spec: str,
+    ssh_key: 'Optional[str]' = None,
+) -> Tuple[bool, str]:
+    """Rsync the entire ``repo/dists/<codename>/`` subtree (Release,
+    InRelease, Release.gpg, per-component Packages + compressed
+    variants, Sources, by-hash dirs) to the remote pool root's
+    matching path.
+
+    Without this the remote pool has the ``.deb``s under ``pool/...``
+    but no apt-trust path — apt clients can't fetch InRelease, can't
+    verify the Packages index, and can't resolve any pkg.  Mirror
+    audit (gap #1) flags it as ``inrelease_unreachable``.
+
+    `local_dist_dir` is the absolute path to the local
+    ``repo/dists/<codename>/`` directory.  `remote_dir_spec` is the
+    rsync target for the SAME ``dists/<codename>/`` path on the
+    remote — caller composes from ``pool_remote_spec`` +
+    ``dists/<codename>``.
+
+    Idempotent (rsync -aH); files already on the remote with matching
+    mtimes are skipped.  Uses ``--delete`` so stale per-arch dirs
+    from a removed component don't accumulate on the remote.
+    """
+    if not os.path.isdir(local_dist_dir):
+        return False, (
+            f"local dist dir {local_dist_dir} does not exist — "
+            "run `repo index` (or let `mirror publish` auto-index) "
+            "before pushing")
+    _src = local_dist_dir.rstrip('/') + '/'
+    _dst = remote_dir_spec.rstrip('/') + '/'
+    _argv = list(_RSYNC_BASE) + ['--delete']
+    _ssh = _ssh_arg(ssh_key)
+    if _ssh is not None:
+        _argv += _ssh
+    _argv += [_src, _dst]
+    _r = subprocess.run(_argv, capture_output=True, text=True)
+    if _r.returncode != 0:
+        _tail = (_r.stderr or _r.stdout or '').strip().splitlines()[-5:]
+        _detail = ' | '.join(_tail)
+        logger.error(
+            f"coord.transport.push_dist_tree: rc={_r.returncode}: {_detail}")
+        return False, _detail
+    return True, ''
+
+
 def push_coord_head(
     *, local_coord_dir: str, remote_dir_spec: str,
     ssh_key: 'Optional[str]' = None,

@@ -27836,6 +27836,51 @@ def test_transport_push_single_deb_roundtrip_with_local_fs():
             assert _fh.read() == b'fake-deb-bytes'
 
 
+def test_transport_push_dist_tree_roundtrip_with_local_fs():
+    """push_dist_tree rsyncs the WHOLE dists/<codename>/ subtree to a
+    local-fs destination.  Verifies InRelease + Packages + by-hash
+    arrive intact and stale files on the remote get pruned (--delete)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _t
+    with tempfile.TemporaryDirectory() as _td:
+        _src = os.path.join(_td, 'src_dist')
+        _dst = os.path.join(_td, 'dst_dist')
+        os.makedirs(os.path.join(_src, 'main', 'binary-amd64'))
+        with open(os.path.join(_src, 'InRelease'), 'w') as _fh:
+            _fh.write('clearsigned-fake')
+        with open(os.path.join(_src, 'Release'), 'w') as _fh:
+            _fh.write('Suite: test\n')
+        with open(os.path.join(_src, 'main', 'binary-amd64',
+                               'Packages'), 'w') as _fh:
+            _fh.write('Package: foo\nVersion: 1.0\n')
+        # Pre-existing stale file on dst that --delete should remove.
+        os.makedirs(_dst)
+        with open(os.path.join(_dst, 'stale'), 'w') as _fh:
+            _fh.write('old')
+        _ok, _detail = _t.push_dist_tree(
+            local_dist_dir=_src, remote_dir_spec=_dst)
+        assert _ok, _detail
+        with open(os.path.join(_dst, 'InRelease')) as _fh:
+            assert _fh.read() == 'clearsigned-fake'
+        with open(os.path.join(_dst, 'main', 'binary-amd64',
+                               'Packages')) as _fh:
+            assert _fh.read().startswith('Package: foo')
+        # --delete pruned the stale file.
+        assert not os.path.isfile(os.path.join(_dst, 'stale'))
+
+
+def test_transport_push_dist_tree_missing_local_dir_fails_clean():
+    """Missing local dist dir → returns (False, helpful detail)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _t
+    with tempfile.TemporaryDirectory() as _td:
+        _ok, _detail = _t.push_dist_tree(
+            local_dist_dir=os.path.join(_td, 'nope'),
+            remote_dir_spec=os.path.join(_td, 'dst'))
+        assert not _ok
+        assert 'does not exist' in _detail
+
+
 def test_remote_publish_pushes_debs_per_file_and_calls_progress():
     """When `pool_remote_spec` is given, remote_publish pushes each
     pending claim's .deb via transport.push_single_deb and invokes
@@ -29312,6 +29357,8 @@ def main() -> int:
         test_coord_root_for_appends_suffix_to_last_path_component,
         test_transport_push_single_deb_primitive_exists,
         test_transport_push_single_deb_roundtrip_with_local_fs,
+        test_transport_push_dist_tree_roundtrip_with_local_fs,
+        test_transport_push_dist_tree_missing_local_dir_fails_clean,
         test_remote_publish_pushes_debs_per_file_and_calls_progress,
         test_remote_publish_drops_claim_when_push_fails,
         # MIRROR-01 Phase 4 — audit + query + multi-mirror UPD-01 wiring
