@@ -4603,6 +4603,13 @@ class BuildSession:
                 if total:
                     _bar_ref.set_max(total)
                 _bar_ref.step(1)
+            def _on_status(_msg, *, _name_ref=_n):
+                # Each publish step gets a visible line so the
+                # operator sees forward progress instead of silence
+                # (publish involves several minute-scale ssh/rsync
+                # round trips; without this the TUI just shows the
+                # initial banner until success/failure).
+                console.print(f"  · {_msg}", tui.COLOR_INFO)
             try:
                 _ok, _detail = _publish.remote_publish(
                     builder_id=_bid, config=self.config,
@@ -4617,6 +4624,7 @@ class BuildSession:
                     ssh_key=_ssh_key,
                     pool_remote_spec=_pool_spec,
                     on_progress=_progress,
+                    on_status=_on_status,
                 )
             finally:
                 _bar.close()
