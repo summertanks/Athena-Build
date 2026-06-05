@@ -5228,6 +5228,20 @@ class BuildSession:
                         tui.COLOR_WARNING)
                 if _claim_idx_crit:
                     _all_ok = False
+            # Sidecar JSONL structural integrity — seq monotonicity
+            # within each builder.  Independent of cryptographic
+            # signature verification (already done by read_all_claims);
+            # this catches replays + manual edits + truncations.
+            _seq_findings = _mirror.audit_sidecar_seq_integrity(
+                _by_builder)
+            _seq_crit = [_f for _f in _seq_findings
+                         if _f[0] == 'CRITICAL']
+            for _sev, _kind, _msg in _seq_findings:
+                _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                          else tui.COLOR_WARNING)
+                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+            if _seq_crit:
+                _all_ok = False
             # Ownership summary — surfaces who owns what across the
             # federation.  No findings emitted at this layer (hash
             # conflicts handled by detect_hash_conflicts above); the
@@ -5237,6 +5251,20 @@ class BuildSession:
                 _our_bid = self._coord_builder_id()
             except (AttributeError, OSError):
                 _our_bid = None
+            # Our-own-claims on-disk rehash.  Costs O(our_claim_count)
+            # disk reads but worth it: catches pool bitrot on our side
+            # that the apt-index chain would silently propagate.
+            _own_disk_findings = _mirror.audit_own_claims_on_disk(
+                _by_builder, _our_bid,
+                local_repo_dir=self.config.dir_repo)
+            _own_disk_crit = [_f for _f in _own_disk_findings
+                              if _f[0] == 'CRITICAL']
+            for _sev, _kind, _msg in _own_disk_findings:
+                _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                          else tui.COLOR_WARNING)
+                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+            if _own_disk_crit:
+                _all_ok = False
             _own_summary, _ = _mirror.audit_ownership_summary(
                 _by_builder, our_builder_id=_our_bid)
             _own_line = (
@@ -5254,12 +5282,14 @@ class BuildSession:
             _total = sum(len(_v) for _v in _by_builder.values())
             if (not _fed_crit and not _conf_crit and not _disk_crit
                     and not _ir_crit and not _pkg_crit
-                    and not _claim_idx_crit):
+                    and not _claim_idx_crit and not _seq_crit
+                    and not _own_disk_crit):
                 console.print(
                     f"  ok        {_total} claim(s) across "
                     f"{len(_by_builder)} builder(s); neighbours "
                     "match; on-disk pool matches sidecar; "
-                    "InRelease + Packages chain verified")
+                    "InRelease + Packages chain verified; "
+                    "sidecar seq integrity ok")
         # Cross-mirror pool-SHA consistency
         if len(_per_mirror) > 1:
             console.print("\ncross-mirror pool-SHA consistency:",
