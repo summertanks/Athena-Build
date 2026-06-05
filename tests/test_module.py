@@ -24842,6 +24842,130 @@ def test_audit_cross_mirror_head_drift_revocation_diff_is_critical():
     assert _kind == 'cross_mirror_revocation_drift'
 
 
+def test_audit_federation_walk_skips_when_no_extra_peers():
+    """All declared neighbours are already in per_mirror → no walk
+    attempted, no findings."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    _per_mirror = [
+        {'name': 'm1', 'url': 'ssh://a/repo', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://b/repo'],
+        }, 'by_builder': {}},
+        {'name': 'm2', 'url': 'ssh://b/repo', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://b/repo'],
+        }, 'by_builder': {}},
+    ]
+    with tempfile.TemporaryDirectory() as _td:
+        _walked, _findings = _mir.audit_federation_walk(
+            _per_mirror, signing_home='/dev/null', cache_dir=_td)
+    assert _walked == []
+    assert _findings == []
+
+
+def test_audit_federation_walk_unreachable_peer_is_critical():
+    """A neighbour URL that isn't configured locally — walker attempts
+    rsync pull; on fail emits CRITICAL federation_neighbour_unreachable."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import patch
+    import mirror as _mir
+    from coord import transport as _tx
+    _per_mirror = [
+        {'name': 'm1', 'url': 'ssh://a/repo', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://c/repo'],  # c not local
+        }, 'by_builder': {}},
+    ]
+
+    def _fake_pull(*, local_dest, remote_spec, ssh_key=None):
+        return False, 'connection refused'
+
+    with tempfile.TemporaryDirectory() as _td:
+        with patch.object(_tx, 'pull_remote_coord',
+                          side_effect=_fake_pull):
+            _walked, _findings = _mir.audit_federation_walk(
+                _per_mirror, signing_home='/dev/null', cache_dir=_td)
+    assert _walked == []
+    assert len(_findings) == 1
+    _sev, _kind, _msg = _findings[0]
+    assert _sev == 'CRITICAL'
+    assert _kind == 'federation_neighbour_unreachable'
+    assert 'connection refused' in _msg
+
+
+def test_audit_federation_walk_unverified_peer_is_critical():
+    """Pull succeeds but coord-head signature can't be verified
+    (read_coord_head returns None) → CRITICAL federation_neighbour_unverified."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import patch
+    import mirror as _mir
+    from coord import head as _head_mod
+    from coord import transport as _tx
+    _per_mirror = [
+        {'name': 'm1', 'url': 'ssh://a/repo', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://c/repo'],
+        }, 'by_builder': {}},
+    ]
+
+    def _fake_pull(*, local_dest, remote_spec, ssh_key=None):
+        return True, ''
+
+    with tempfile.TemporaryDirectory() as _td:
+        with patch.object(_tx, 'pull_remote_coord',
+                          side_effect=_fake_pull), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=None):
+            _walked, _findings = _mir.audit_federation_walk(
+                _per_mirror, signing_home='/dev/null', cache_dir=_td)
+    assert _walked == []
+    assert len(_findings) == 1
+    assert _findings[0][1] == 'federation_neighbour_unverified'
+
+
+def test_audit_federation_walk_asymmetric_membership_is_critical():
+    """Peer's coord-head is reachable + verified, but its declared
+    neighbours don't overlap with the source mirror's federation view
+    (excluding the peer itself) → CRITICAL federation_neighbour_asymmetric."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import patch
+    import mirror as _mir
+    from coord import head as _head_mod
+    from coord import transport as _tx
+    _per_mirror = [
+        {'name': 'm1', 'url': 'ssh://a/repo', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://b/repo', 'ssh://c/repo'],
+        }, 'by_builder': {}},
+        {'name': 'm2', 'url': 'ssh://b/repo', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://b/repo', 'ssh://c/repo'],
+        }, 'by_builder': {}},
+    ]
+    # Peer C's coord-head — DOES NOT list a or b → asymmetric.
+    _peer_head = {
+        'neighbours': ['ssh://c/repo', 'ssh://d/repo'],
+        'revoked_builders': {},
+    }
+
+    def _fake_pull(*, local_dest, remote_spec, ssh_key=None):
+        return True, ''
+
+    with tempfile.TemporaryDirectory() as _td:
+        with patch.object(_tx, 'pull_remote_coord',
+                          side_effect=_fake_pull), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=_peer_head):
+            _walked, _findings = _mir.audit_federation_walk(
+                _per_mirror, signing_home='/dev/null', cache_dir=_td)
+    assert len(_walked) == 1
+    assert _walked[0]['head'] is _peer_head
+    # Both m1 and m2 declare c; cycle guard means we walk c once and
+    # emit at most one asymmetric finding (against the first declarer).
+    _asym = [_f for _f in _findings
+             if _f[1] == 'federation_neighbour_asymmetric']
+    assert len(_asym) == 1
+
+
 def test_audit_cross_mirror_head_drift_single_mirror_is_noop():
     """One reachable mirror (or zero) → nothing to compare → silent."""
     import sys as _sys
@@ -28523,6 +28647,11 @@ def main() -> int:
         test_audit_cross_mirror_head_drift_neighbours_diff_is_critical,
         test_audit_cross_mirror_head_drift_revocation_diff_is_critical,
         test_audit_cross_mirror_head_drift_single_mirror_is_noop,
+        # MIRROR-01 audit gap (5) — recursive federation walk
+        test_audit_federation_walk_skips_when_no_extra_peers,
+        test_audit_federation_walk_unreachable_peer_is_critical,
+        test_audit_federation_walk_unverified_peer_is_critical,
+        test_audit_federation_walk_asymmetric_membership_is_critical,
     ]
     failures = 0
     for t in tests:

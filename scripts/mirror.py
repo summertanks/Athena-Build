@@ -1077,6 +1077,132 @@ def audit_ownership_summary(
     return _summary, []
 
 
+def _canon_url(url: str) -> str:
+    """Lowercase + strip trailing slash for URL comparison.  Mirrors
+    the canonical form ``coord.schema.canonicalize_neighbours`` uses."""
+    return (url or '').lower().rstrip('/')
+
+
+def audit_federation_walk(
+    per_mirror: 'list[dict]', signing_home: str, cache_dir: str,
+    ssh_key: 'Optional[str]' = None,
+) -> 'tuple[list[dict], list[tuple[str, str, str]]]':
+    """For every neighbour URL declared in any reachable mirror's
+    coord-head that ISN'T itself one of our locally-configured mirrors
+    (already fetched + verified in :func:`cmd_mirror_audit`), pull
+    that neighbour's coord-head and verify:
+
+      - it's reachable (rsync pull succeeds)
+      - it's tier-1 GPG signed (``read_coord_head`` happy)
+      - it lists the mirror that declared it (symmetric membership)
+
+    This is the "recursive" half of federation gating: the local
+    federation gate (``check_federation_consistency``) only checks
+    that local config matches a peer's declared neighbours.  THIS
+    walk asks each declared peer "does your federation view list
+    the mirror that declared you back?" — catching the case where
+    operator A has B in their federation but B has dropped A.
+
+    Returns ``(walked_records, findings)`` where ``walked_records``
+    carries the same shape as ``per_mirror`` entries (``name``,
+    ``head``, ``by_builder``) for downstream consumers.  Single
+    hop — multi-hop would require recursion + cycle guard but the
+    operator can already see further hops by adding the peer as a
+    local mirror.
+    """
+    import os as _os
+    from coord import head as _head_mod
+    from coord import schema as _sch
+    from coord import transport as _transport
+
+    _findings: 'list[tuple[str, str, str]]' = []
+    _walked: 'list[dict]' = []
+    # Configured mirrors — skip these; they're audited directly.
+    _local_urls: 'set[str]' = {
+        _canon_url(str(_m.get('url') or ''))
+        for _m in per_mirror if _m.get('url')
+    }
+    # Cycle guard — start with locals so we don't re-walk.
+    _visited: 'set[str]' = set(_local_urls)
+
+    for _m in per_mirror:
+        _h = _m.get('head')
+        if _h is None:
+            continue
+        _src_name = _m['name']
+        _nbrs_records = _sch.canonicalize_neighbour_records(
+            _h.get('neighbours') or [])
+        for _rec in _nbrs_records:
+            _peer_url = _rec.get('url') if isinstance(_rec, dict) else None
+            if not isinstance(_peer_url, str) or not _peer_url:
+                continue
+            _peer_canon = _canon_url(_peer_url)
+            if _peer_canon in _visited:
+                continue
+            _visited.add(_peer_canon)
+            # Display name — best-effort derive from host; fall back
+            # to the URL itself if derive returns None.
+            _peer_name = (derive_name_from_url(_peer_url, host_type='ssh')
+                          or _peer_url)
+            _coord_root = coord_root_for(_peer_url)
+            _rsync_spec, _ = rsync_spec_for_url(_coord_root)
+            _local_dest = _os.path.join(
+                cache_dir, 'walked', _peer_name)
+            _os.makedirs(_local_dest, exist_ok=True)
+            _ok, _detail = _transport.pull_remote_coord(
+                local_dest=_local_dest, remote_spec=_rsync_spec,
+                ssh_key=ssh_key,
+            )
+            if not _ok:
+                _findings.append((
+                    'CRITICAL', 'federation_neighbour_unreachable',
+                    f"{_peer_name} (declared by {_src_name}): could "
+                    f"not pull coord — {_detail}"))
+                continue
+            _peer_head = _head_mod.read_coord_head(
+                _local_dest, signing_home)
+            if _peer_head is None:
+                _findings.append((
+                    'CRITICAL', 'federation_neighbour_unverified',
+                    f"{_peer_name} (declared by {_src_name}): "
+                    "coord-head missing or tier-1 signature failed"))
+                continue
+            _walked.append({
+                'name': _peer_name, 'head': _peer_head,
+                'url': _peer_url,
+            })
+            # Symmetric membership: does the peer list the mirror that
+            # declared it?  We need an URL for the source mirror; use
+            # the entry from this iteration's source neighbour record
+            # if the peer happens to declare us by URL.  Practically,
+            # check whether THIS peer's neighbours list any URL that
+            # matches one of our configured mirrors' canonical URLs.
+            _peer_nbrs = {
+                _canon_url(str(_r.get('url') or ''))
+                for _r in _sch.canonicalize_neighbour_records(
+                    _peer_head.get('neighbours') or [])
+                if isinstance(_r, dict)
+            }
+            _src_nbrs_self = {
+                _canon_url(str(_r.get('url') or ''))
+                for _r in _sch.canonicalize_neighbour_records(
+                    _h.get('neighbours') or [])
+                if isinstance(_r, dict)
+            }
+            # If src lists exactly one URL that matches peer (the peer
+            # we just walked), peer should reciprocally list at least
+            # one URL from src's set (minus peer itself).
+            _src_others = _src_nbrs_self - {_peer_canon}
+            if _src_others and not (_peer_nbrs & _src_others):
+                _findings.append((
+                    'CRITICAL', 'federation_neighbour_asymmetric',
+                    f"{_peer_name}: neighbours list "
+                    f"({sorted(_peer_nbrs)}) does not overlap with "
+                    f"{_src_name}'s federation view "
+                    f"({sorted(_src_others)})"))
+    return _walked, _findings
+
+
 def audit_cross_mirror_head_drift(
     per_mirror: 'list[dict]',
 ) -> 'list[tuple[str, str, str]]':

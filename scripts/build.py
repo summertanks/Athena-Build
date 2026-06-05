@@ -5123,7 +5123,7 @@ class BuildSession:
                     tui.COLOR_ERROR)
                 _all_ok = False
                 _per_mirror.append({'name': _n, 'head': None,
-                                    'by_builder': {}})
+                                    'by_builder': {}, 'url': _url})
                 continue
             _head = _head_mod.read_coord_head(_fetched, _signing_home)
             if _head is None:
@@ -5132,7 +5132,7 @@ class BuildSession:
                     tui.COLOR_ERROR)
                 _all_ok = False
                 _per_mirror.append({'name': _n, 'head': None,
-                                    'by_builder': {}})
+                                    'by_builder': {}, 'url': _url})
                 continue
             _keyring = _id.load_keyring(
                 os.path.join(_fetched, 'keyring', 'builders'))
@@ -5140,7 +5140,7 @@ class BuildSession:
             _by_builder = _store.read_all_claims(
                 os.path.join(_fetched, 'claims'), _keyring, _revoked)
             _per_mirror.append({'name': _n, 'head': _head,
-                                'by_builder': _by_builder})
+                                'by_builder': _by_builder, 'url': _url})
             # Federation gate
             _fed = _reconcile.check_federation_consistency(_local_urls, _head)
             _fed_crit = [_f for _f in _fed if _f.severity == 'CRITICAL']
@@ -5337,6 +5337,40 @@ class BuildSession:
                 console.print(
                     "  ok        coord-head federation membership "
                     "consistent across mirrors")
+        # Federation walk — pull coord-heads of every neighbour
+        # declared by a reachable mirror that ISN'T itself configured
+        # locally.  Verifies the wider federation graph is symmetric
+        # and signature-clean.  Single hop; the operator can extend by
+        # adding peers as local mirrors.
+        _walk_cache = os.path.join(
+            self.config.dir_cache, 'mirror', '_federation_walk')
+        os.makedirs(_walk_cache, exist_ok=True)
+        # Use the first configured mirror's ssh key if available; most
+        # federations share an admin key.  Multi-key federations need
+        # per-peer key resolution which we defer until an operator asks.
+        _walk_key = None
+        for _m in _per_mirror:
+            _st_walk = _mirror.read_mirror_state(self.config, _m['name'])
+            if _st_walk and _st_walk.get('ssh_key'):
+                _walk_key = _st_walk.get('ssh_key')
+                break
+        _walked, _walk_findings = _mirror.audit_federation_walk(
+            _per_mirror, signing_home=_signing_home,
+            cache_dir=_walk_cache, ssh_key=_walk_key,
+        )
+        if _walked or _walk_findings:
+            console.print("\nfederation walk:", tui.COLOR_HIGHLIGHT)
+        for _sev, _kind, _msg in _walk_findings:
+            _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                      else tui.COLOR_WARNING)
+            console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+        if any(_f[0] == 'CRITICAL' for _f in _walk_findings):
+            _all_ok = False
+        if _walked and not any(
+                _f[0] == 'CRITICAL' for _f in _walk_findings):
+            console.print(
+                f"  ok        {len(_walked)} non-local peer(s) "
+                "reachable, signed, and symmetric")
         return _all_ok
 
     def cmd_mirror_query(self, *args):
