@@ -426,6 +426,7 @@ in CI for the same reason.
 - [`docs/patching.md`](docs/patching.md) — source / pre-install / post-install patch conventions + DEP-3.
 - [`docs/release.md`](docs/release.md) — release runbook (snapshot pin → key → build → publish → tag).
 - [`docs/mirror-setup.md`](docs/mirror-setup.md) — operator howto for `mirror add` / first-publish / wipe-and-redo on the MIRROR-01 federation surface.
+- [`docs/virtual-build.md`](docs/virtual-build.md) — `virtual build` dry-run pipeline: predict bump arithmetic, closure breaks, and ownership blocks before running any source build.
 - [`docs/install-docker.md`](docs/install-docker.md) — Docker Engine install on the build host.
 - [`docs/pseudocode.md`](docs/pseudocode.md) — natural-English walkthrough of every module.
 - [`TODO.md`](TODO.md) — open work, with severity + status + history preserved.
