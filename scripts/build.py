@@ -10474,45 +10474,6 @@ class BuildSession:
 
         # ---- Summary --------------------------------------------------
         _total_crit = len(_audit_crit) + len(_pub_crit)
-        # Roll up WARNING-level findings into actionable buckets the
-        # operator can quickly scan: out-of-scope targets (cache parse
-        # didn't pull these source(s)) and ambiguous dedups (data
-        # didn't tell us the canonical producer).  These are not
-        # blocking but useful to understand.
-        _oos_targets: 'set[str]' = set()
-        for _sev, _kind, _msg in _audit_findings:
-            if _sev != 'WARNING' or _kind != 'virtual_target_out_of_scope':
-                continue
-            # Message shape: "<consumer> -> <t1,t2,...>: source not selected"
-            if ' -> ' not in _msg or ':' not in _msg:
-                continue
-            _after = _msg.split(' -> ', 1)[1]
-            _targets_seg = _after.split(':', 1)[0]
-            for _n in _targets_seg.split(','):
-                _n = _n.strip()
-                if _n:
-                    _oos_targets.add(_n)
-        if _oos_targets:
-            # Diagnose WHY each is out-of-scope by walking selected
-            # sources' Build-Depends; surface the cache-parse vs
-            # virtual-build attribution.
-            _why_map = _vb.diagnose_out_of_scope_targets(
-                target_names=sorted(_oos_targets),
-                selected_srcs=_selected_srcs,
-                package_universe=_universe, arch=_arch)
-            console.print("")
-            console.print(
-                f"  out-of-scope ({len(_oos_targets)}):",
-                tui.COLOR_WARNING)
-            for _t in sorted(_oos_targets)[:15]:
-                _why = _why_map.get(_t, '')
-                console.print(f"    {_t}", tui.COLOR_WARNING)
-                if _why:
-                    console.print(f"      why: {_why}", tui.COLOR_INFO)
-            if len(_oos_targets) > 15:
-                console.print(
-                    f"    +{len(_oos_targets) - 15} more",
-                    tui.COLOR_WARNING)
         console.print("")
         if _total_crit == 0:
             console.print(

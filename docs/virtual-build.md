@@ -69,38 +69,50 @@ those names get downgraded to `WARNING virtual_closure_break_ambiguous`.
 
 | Kind | Severity | Why |
 |---|---|---|
-| `virtual_closure_break` | CRITICAL | Target present at wrong version; potential synth bug |
-| `virtual_target_out_of_scope` | WARNING | Cache parse decided this source wasn't needed; real `dh_shlibdeps` would also skip linking it (no dev pkg available) — constraint is most likely vestigial.  Not gating. |
+| `virtual_closure_break` | CRITICAL | Target present at wrong version; pre-build provable synth/asg-stamp bug |
 | `virtual_closure_break_ambiguous` | WARNING | Target derived from ambiguous cross-source dedup; apparent break may be a dedup artifact |
 | `virtual_dedup_ambiguous` | WARNING | Cross-source collision with no upstream-canonical signal; data alone can't say which source produces the binary |
-| `virtual_duplicate_name` | INFO | Dedup happened (informational count) |
+| `virtual_binary_list_overlap` | INFO | Binary-list declaration overlap between sources (kernel signing chain pattern) — real builds emit subsets |
 | `virtual_invalid_record` | CRITICAL | Synthesis produced a record missing Package/Version (real bug) |
 
+**Absent targets are silent.**  When a consumer's Depends references
+a binary that isn't in synth state (because cache parse didn't pull
+the source), virtual build emits NO finding.  Cache parse's mandate is
+the installed-system runtime closure; build-time substvar resolution
+runs in the build chroot (today: upstream Debian) and decides what
+ends up in the consumer's actual Depends.  Virtual cannot determine
+that outcome statically.  Real `repo audit` post-build reads the
+on-disk Depends and surfaces any genuine closure break.
+
 The CRITICAL bar is reserved for things we can *prove* will break.
-Cache-parse-derived scope decisions and unresolvable ambiguities are
-operator-observable but not gating.
+Unresolvable ambiguities are observable; out-of-scope absences are
+beyond virtual's scope.
 
-## Why this matters for the fork-drops-codec class
+## What virtual can and cannot say
 
-In production:
+**Can prove pre-build** (CRITICAL when broken):
+- asg-stamp arithmetic against the published ledger
+- intra-source sibling-pin rewriting
+- cross-source pin rewriting (pristine matches)
+- ownership and hash-conflict gates in the publish dry-run
+- synthesis record well-formedness
 
-1. ffmpeg's debian/control declares `Build-Depends: ..., libaribb24-dev, ...`
-2. cache parse walks that build-dep list, but `libaribb24-dev` belongs to source `aribb24`
-3. If `aribb24` is not in `selected_srcs` (operator didn't pull it), cache parse will not download/build it
-4. At real build time, the build container has no `libaribb24-dev` → ffmpeg's configure detects this and disables the libaribb24 feature → `dh_shlibdeps` produces a `libavcodec59` whose Depends does NOT include `libaribb24-0`
-5. The installer is fine
+**Cannot say pre-build** (silent):
+- whether `dh_shlibdeps` will include a given dep in the produced binary
+- whether ffmpeg's configure will detect and disable a missing codec
+- whether the installer will succeed against the predicted state
+  (real `repo audit` after real build is the authoritative check)
 
-Virtual build sees upstream's `libavcodec59 Depends: libaribb24-0` (from
-upstream cache's snapshot, which was built WITH libaribb24-dev).  It
-cannot statically tell that our real build will produce a different
-Depends.  So it reports `WARNING virtual_target_out_of_scope` —
-operator awareness that "upstream pins this dep; you didn't pull the
-source; if real build's configure handles it gracefully, you're fine."
+## Architectural note: build chroot today vs end-state
 
-If `aribb24` were genuinely needed (some other consumer required it,
-or ffmpeg's configure fails without it), adding the source to scope is
-the resolution.  Either way, virtual surfaces the question rather than
-deciding for the operator.
+Today, the build container is constructed from upstream Debian's repo.
+Build-deps come from there; our self-contained distro is the install
+target only.  Cache parse's `parse_sources` walks the runtime closure
+of pkg.list / live.list / installer.list / pool.list to populate
+`selected_srcs` — by design, NOT Build-Depends.  When/if the build
+chroot moves to our own distro end-to-end, cache parse will need an
+additional Build-Depends walk; until then, virtual build respects the
+current scope decision.
 
 ## Phases (vs the real pipeline)
 

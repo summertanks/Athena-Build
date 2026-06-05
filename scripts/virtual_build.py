@@ -440,87 +440,6 @@ def synthesize_source_binaries(
     return _out
 
 
-def diagnose_out_of_scope_targets(
-    target_names: 'List[str]', selected_srcs: 'Dict[str, Any]',
-    package_universe: 'Dict[str, Dict[str, Any]]',
-    arch: str,
-) -> 'Dict[str, str]':
-    """For each out-of-scope target, return a one-line answer to
-    "why isn't this in scope?".
-
-    Walks every selected source's Build-Depends.  If the target
-    (or its `-dev` companion) appears as a build-dep of some
-    selected source, the answer is:
-      "<source> Build-Depends <target>-dev; cache parse does not
-       pull build-deps as sources, only the runtime closure"
-
-    If no selected source references it, the answer is:
-      "no selected source declares this as a build-dep"
-
-    Returns ``{target_name: explanation_string}``.  Uses upstream
-    Package's Source field where available to find each target's
-    canonical source name.
-    """
-    _out: Dict[str, str] = {}
-    # For each selected source, parse Build-Depends, collect binary
-    # names it declares as needed at build time.
-    _src_build_deps: Dict[str, set] = {}
-    for _name, _src in selected_srcs.items():
-        try:
-            _bd = _src.build_depends(arch, frozenset())
-        except Exception:
-            _bd = []
-        _names: set = set()
-        for _or_group in _bd:
-            for _rel in _or_group:
-                _n = _rel[0].strip() if _rel and _rel[0] else ''
-                if _n:
-                    _names.add(_n)
-        _src_build_deps[_name] = _names
-
-    for _t in target_names:
-        _hits: List[str] = []
-        # Direct hit?
-        for _src_name, _bd_set in _src_build_deps.items():
-            if _t in _bd_set:
-                _hits.append(f"{_src_name} Build-Depends {_t}")
-        # Common companion: <name>-dev → <name>0 / <name>X
-        # (typical Debian convention).  Check upstream's Source field
-        # for the target to find its canonical source.
-        if not _hits:
-            _entries = package_universe.get(_t, {})
-            _canon_src = ''
-            for _rec in _entries.values():
-                _canon_src = _upstream_canonical_source(_rec)
-                if _canon_src:
-                    break
-            if _canon_src:
-                # Find any source that build-depends on a binary
-                # produced by _canon_src.
-                _canon_binaries: set = set()
-                for _rec in package_universe.values():
-                    for _r in _rec.values():
-                        if _upstream_canonical_source(_r) == _canon_src:
-                            _canon_binaries.add(_r.get('Package', ''))
-                for _src_name, _bd_set in _src_build_deps.items():
-                    _common = _bd_set & _canon_binaries
-                    if _common:
-                        _hits.append(
-                            f"{_src_name} Build-Depends "
-                            f"{next(iter(sorted(_common)))} "
-                            f"(from source {_canon_src})")
-        if _hits:
-            _out[_t] = (
-                f"{_hits[0]}; cache parse walks runtime closure "
-                "only, not Build-Depends as a separate root")
-        else:
-            _out[_t] = (
-                "no selected source declares this as build-dep "
-                "(upstream cache has the runtime constraint from "
-                "a build context we don't share)")
-    return _out
-
-
 def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
     """Project the Cache's package_hashtable into the shape
     `synthesize_source_binaries` expects.
@@ -952,29 +871,31 @@ def virtual_repo_audit(
     _unresolved, _weak = audit_dep_closure(
         _state, consumer_set=install_corpus)
     for _pkg, _field, _rel, _why in _unresolved:
-        # Three failure modes for actionable reporting:
-        #  - target absent → WARNING virtual_target_out_of_scope.
-        #    Cache parse decided this source wasn't needed; real
-        #    build's dh_shlibdeps won't link to a binary that isn't
-        #    available, so the upstream-inherited Depends constraint
-        #    is likely vestigial.  Operator awareness, not gating.
+        # Two failure modes virtual CAN determine pre-build:
         #  - target present but from ambiguous-canonical dedup →
         #    WARNING virtual_closure_break_ambiguous.  We picked one
         #    candidate by version; the apparent break may be from
         #    picking the wrong record.
         #  - target present, dedup unambiguous, version mismatch →
         #    CRITICAL virtual_closure_break.  Real synth bug.
+        #
+        # When the target is ABSENT from synth state we deliberately
+        # stay silent.  Cache parse's mandate is the installed-system
+        # runtime closure; build-time link resolution happens in the
+        # build chroot against upstream Debian, not against our scope.
+        # Whether `dh_shlibdeps` will or won't include the constraint
+        # in the produced binary's Depends is determined at real-build
+        # time, not statically.  Real `repo audit` (post-build) reads
+        # the actual on-disk Depends — that's the authoritative check
+        # for absent-target consequences.
         _target_names = _extract_relation_targets(_rel)
         _all_absent = bool(_target_names) and all(
             _t not in _state.packages for _t in _target_names)
-        _tgt_str = ','.join(sorted(_target_names)) or _rel
         if _all_absent:
-            _findings.append((
-                'WARNING', 'virtual_target_out_of_scope',
-                f"{_pkg} -> {_tgt_str}: source not selected"))
             continue
         _hit_ambig = any(_t in _ambiguous for _t in _target_names)
         if _hit_ambig:
+            _tgt_str = ','.join(sorted(_target_names))
             _findings.append((
                 'WARNING', 'virtual_closure_break_ambiguous',
                 f"{_pkg} -> {_tgt_str}: target from ambiguous dedup"))
