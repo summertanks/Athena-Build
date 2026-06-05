@@ -9015,12 +9015,26 @@ class BuildSession:
             console.print(_err)
             return
 
-        # UPD-01 (gotcha G): a subset/all/bare invocation AUTO-DETECTS update
-        # mode — when a published base exists and current is ahead of it,
-        # rebuild the published→current SOURCE delta (stamped +asg<R>u<N>)
-        # instead of a plain subset build.  Explicit package names or a
-        # [profile] override opt out (manual builds).  The operator runs the
-        # same `source build [all|live|installer]`; we tell them which we ran.
+        # Load the asg ledger from the LOCAL signed manifest BEFORE any
+        # build path branches.  Previously the ledger was only loaded in
+        # UPDATE mode (via _do_update_build), so a NORMAL-mode rebuild of
+        # a source whose binaries had previously been published at
+        # `+asg<R>u<N>` would silently ship pristine — losing the
+        # lineage and breaking dep pins in sibling-source metas that
+        # captured the previous version.  Loading unconditionally lets
+        # `_normalize_built_artifacts` see the lineage and bump
+        # monotonically against the manifest.  No mirrors needed — the
+        # manifest is local.
+        if self.container is not None:
+            self.container.asg_ledger = repo_audit.published_ledger(
+                self.config)
+
+        # A subset/all/bare invocation AUTO-DETECTS update mode — when a
+        # published base exists and current is ahead of it, rebuild the
+        # published→current SOURCE delta (stamped `+asg<R>u<N>`) instead
+        # of a plain subset build.  Explicit package names or a [profile]
+        # override opt out (manual builds).  The operator runs the same
+        # `source build [all|live|installer]`; we tell them which we ran.
         if (not _names and _profile_override is None
                 and self._update_build_pending()):
             return self._do_update_build()

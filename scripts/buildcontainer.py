@@ -1290,28 +1290,33 @@ class BuildContainer:
                                    built_files: 'list[str]',
                                    was_patched: bool = False) -> None:
         """Normalise every just-emitted artifact: strip upstream NMU layers
-        to pristine, then (when this build is a DELTA and a remote ledger is
-        available) stamp our +asg<R>u<N> update marker.
+        to pristine, then (when there's an asg lineage to continue OR this
+        build is a fresh delta) stamp our `+asg<R>u<N>` update marker.
 
         `built_files` is the list of post-segregate absolute paths returned by
         _segregate_built_artifacts — the files this source build just
-        produced (STA-19: we trust that list, no full-repo rescan).
+        produced.
 
-        DELTA decision (UPD-01): a build is a delta if the strip rewrote any
-        artifact (upstream carried an NMU layer), OR a fork patch was applied
-        (`was_patched`), OR the selected source version is itself an NMU
-        delta.  Only deltas get stamped — a plain pristine upstream build (and
-        the initial full build at the pinned snapshot) ships pristine.
+        STAMP DECISION.  Two independent triggers:
 
-        Stamping requires the ledger (self.asg_ledger: {pkg: [versions]}, the
-        LOCAL signed published manifest) so N is monotonic against what's
-        ALREADY published — local repo/ is single-snapshot and can't be the
-        source of truth.  When no ledger is set (a plain `source build`, not an
-        update-driven rebuild via `source build all` after a snapshot advance),
-        we strip only and do NOT stamp.  N is derived PER
-        BINARY FILE (each file's own highest published N + 1) — a file updated
-        more often than its siblings carries a higher N (e.g. foo at u5 while
-        foo-data is at u1).
+        (a) Fresh delta — this build itself is a delta vs. pristine upstream:
+            an NMU layer got stripped, a fork patch was applied, OR the
+            selected source version carries an NMU suffix.
+
+        (b) Lineage continuation — the LOCAL signed published manifest
+            (self.asg_ledger) already contains a `+asg<R>u<N>` entry for
+            one of this build's outputs at this binary's pristine base.
+            This means we've previously SHIPPED an asg generation; landing
+            this build at pristine would silently REGRESS sibling-source
+            metas (e.g. linux-signed-amd64's linux-headers-amd64 meta) that
+            captured the prior version.  Continuing the lineage avoids the
+            regression — asg_next_n returns highest_published_N + 1.
+
+        Either trigger is sufficient.  When neither holds AND no ledger
+        entry exists for any output, we ship pristine.
+
+        Uniform N per source: every sibling binary stamps at max(per-file
+        asg_next_n) — see [[asg-stamp-uniform-n-per-source]].
 
         Failures are logged but don't propagate — best-effort normalisation;
         a missed strip surfaces later via `repo audit_nmu`.
@@ -1341,6 +1346,29 @@ class BuildContainer:
         _src_is_delta = (
             utils.strip_nmu_suffix(str(src_pkg.version)) != str(src_pkg.version))
         _was_delta = _any_stripped or was_patched or _src_is_delta
+        # Lineage-continuation trigger: even when nothing in THIS build looks
+        # delta-shaped, if the manifest already has a `+asg<R>u<N>` entry for
+        # any output at the same pristine base, we MUST continue stamping —
+        # else a sibling-source's meta that previously captured `+asg<R>u<N>`
+        # would dangle against our newly-pristine sibling.  Caught 2026-06-05
+        # when a snapshot-advance rebuild of `linux` (no NMU, no patches
+        # applied) silently shipped pristine 6.1.174-1 while the
+        # linux-signed-amd64 metas still pinned `(= 6.1.174-1+asg1u1)`.
+        if not _was_delta and _ledger is not None:
+            for _path in _current_paths:
+                _name, _ext = os.path.splitext(os.path.basename(_path))
+                _parts = _name.split('_')
+                if len(_parts) != 3:
+                    continue
+                _pkg, _ver, _arch = _parts
+                _base = utils.pristine_base(_ver)
+                for _prev in _ledger.get(_pkg, []):
+                    if (utils.pristine_base(_prev) == _base
+                            and utils.parse_asg_suffix(_prev) is not None):
+                        _was_delta = True
+                        break
+                if _was_delta:
+                    break
         if not (_was_delta and _ledger is not None):
             return
 
