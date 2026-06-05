@@ -10333,12 +10333,10 @@ class BuildSession:
 
         # ---- Header ---------------------------------------------------
         console.print(
-            f"virtual build: scope={_scope_label}  arch={_arch}  "
+            f"virtual build: {_scope_label}  arch={_arch}  "
             f"release={_release}", tui.COLOR_HIGHLIGHT)
         console.print(
-            "  policy: pre-build prediction from cache + asg ledger; "
-            "out-of-scope deps reported as WARNING (cache parse decides "
-            "scope, dh_shlibdeps follows).  Compile errors NOT detected.",
+            "  pre-build prediction; cache parse decides scope",
             tui.COLOR_INFO)
 
         # ---- Phase: synthesize binary records -------------------------
@@ -10483,27 +10481,37 @@ class BuildSession:
         # blocking but useful to understand.
         _oos_targets: 'set[str]' = set()
         for _sev, _kind, _msg in _audit_findings:
-            if _sev == 'WARNING' and _kind == 'virtual_target_out_of_scope':
-                if ' not in synth scope' in _msg:
-                    _seg = _msg.split('— ', 1)[1]
-                    _names = _seg.split(' not in', 1)[0]
-                    for _n in _names.split(','):
-                        _n = _n.strip()
-                        if _n:
-                            _oos_targets.add(_n)
+            if _sev != 'WARNING' or _kind != 'virtual_target_out_of_scope':
+                continue
+            # Message shape: "<consumer> -> <t1,t2,...>: source not selected"
+            if ' -> ' not in _msg or ':' not in _msg:
+                continue
+            _after = _msg.split(' -> ', 1)[1]
+            _targets_seg = _after.split(':', 1)[0]
+            for _n in _targets_seg.split(','):
+                _n = _n.strip()
+                if _n:
+                    _oos_targets.add(_n)
         if _oos_targets:
+            # Diagnose WHY each is out-of-scope by walking selected
+            # sources' Build-Depends; surface the cache-parse vs
+            # virtual-build attribution.
+            _why_map = _vb.diagnose_out_of_scope_targets(
+                target_names=sorted(_oos_targets),
+                selected_srcs=_selected_srcs,
+                package_universe=_universe, arch=_arch)
             console.print("")
             console.print(
-                f"  out-of-scope targets ({len(_oos_targets)} unique): "
-                "cache parse did not pull source(s) producing these. "
-                "Real `dh_shlibdeps` would also skip linking; "
-                "verify intentional, or extend scope:",
+                f"  out-of-scope ({len(_oos_targets)}):",
                 tui.COLOR_WARNING)
             for _t in sorted(_oos_targets)[:15]:
-                console.print(f"    - {_t}", tui.COLOR_WARNING)
+                _why = _why_map.get(_t, '')
+                console.print(f"    {_t}", tui.COLOR_WARNING)
+                if _why:
+                    console.print(f"      why: {_why}", tui.COLOR_INFO)
             if len(_oos_targets) > 15:
                 console.print(
-                    f"    …and {len(_oos_targets) - 15} more",
+                    f"    +{len(_oos_targets) - 15} more",
                     tui.COLOR_WARNING)
         console.print("")
         if _total_crit == 0:
