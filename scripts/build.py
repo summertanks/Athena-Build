@@ -5172,12 +5172,94 @@ class BuildSession:
                 console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
             if _disk_crit:
                 _all_ok = False
+            # InRelease/Packages chain verification.  Pulls remote
+            # InRelease, verifies its sha256 matches coord-head's pin,
+            # parses its SHA256 block, pulls + verifies each main
+            # Packages file, cross-checks every claim against the apt
+            # index.  Catches: pool ↔ apt-index drift, claim references
+            # that aren't in the published Packages, claim sha that
+            # disagrees with what apt would serve.
+            _codename = str(self.config.build_codename).strip('"').strip("'")
+            _release, _ir_findings = _mirror.audit_inrelease_against_head(
+                pool_url=_url, codename=_codename,
+                expected_sha256=str(_head.get('inrelease_sha256') or ''),
+                fetched_dir=os.path.join(_fetched, 'apt'),
+                ssh_key=_ssh_key,
+            )
+            _ir_crit = [_f for _f in _ir_findings if _f[0] == 'CRITICAL']
+            for _sev, _kind, _msg in _ir_findings:
+                _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                          else tui.COLOR_WARNING)
+                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+            if _ir_crit:
+                _all_ok = False
+            _pkg_idx: 'dict[str, dict]' = {}
+            _pkg_findings: 'list[tuple[str, str, str]]' = []
+            if _release is not None:
+                _pkg_idx, _pkg_findings = _mirror.audit_packages_chain(
+                    pool_url=_url, codename=_codename, release=_release,
+                    fetched_dir=os.path.join(_fetched, 'apt'),
+                    ssh_key=_ssh_key,
+                    arches=(self.config.arch,),
+                )
+            _pkg_crit = [_f for _f in _pkg_findings if _f[0] == 'CRITICAL']
+            for _sev, _kind, _msg in _pkg_findings:
+                _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                          else tui.COLOR_WARNING)
+                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+            if _pkg_crit:
+                _all_ok = False
+            _claim_idx_crit: 'list' = []
+            if _pkg_idx:
+                _claim_idx_findings = _mirror.audit_claims_vs_packages(
+                    _by_builder, _pkg_idx)
+                _claim_idx_crit = [_f for _f in _claim_idx_findings
+                                   if _f[0] == 'CRITICAL']
+                # First 10 findings inlined; rest summarised so a single
+                # corrupt index doesn't flood the screen.
+                for _sev, _kind, _msg in _claim_idx_findings[:10]:
+                    _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                              else tui.COLOR_WARNING)
+                    console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+                if len(_claim_idx_findings) > 10:
+                    console.print(
+                        f"  …and {len(_claim_idx_findings) - 10} more "
+                        "(use coord query for the full list)",
+                        tui.COLOR_WARNING)
+                if _claim_idx_crit:
+                    _all_ok = False
+            # Ownership summary — surfaces who owns what across the
+            # federation.  No findings emitted at this layer (hash
+            # conflicts handled by detect_hash_conflicts above); the
+            # summary is informational so the operator can spot a
+            # surprising distribution at a glance.
+            try:
+                _our_bid = self._coord_builder_id()
+            except (AttributeError, OSError):
+                _our_bid = None
+            _own_summary, _ = _mirror.audit_ownership_summary(
+                _by_builder, our_builder_id=_our_bid)
+            _own_line = (
+                f"  ownership   we_own={_own_summary['we_own']}  "
+                f"peers_own={_own_summary['peers_own']}  "
+                f"tunneled={_own_summary['tunneled']}  "
+                f"total_filenames={_own_summary['total']}")
+            if _own_summary['by_peer']:
+                _peer_list = ', '.join(
+                    f"{_pid}={_n}"
+                    for _pid, _n in sorted(
+                        _own_summary['by_peer'].items()))
+                _own_line += f"  (peers: {_peer_list})"
+            console.print(_own_line, tui.COLOR_INFO)
             _total = sum(len(_v) for _v in _by_builder.values())
-            if not _fed_crit and not _conf_crit and not _disk_crit:
+            if (not _fed_crit and not _conf_crit and not _disk_crit
+                    and not _ir_crit and not _pkg_crit
+                    and not _claim_idx_crit):
                 console.print(
                     f"  ok        {_total} claim(s) across "
                     f"{len(_by_builder)} builder(s); neighbours "
-                    "match; on-disk pool matches sidecar")
+                    "match; on-disk pool matches sidecar; "
+                    "InRelease + Packages chain verified")
         # Cross-mirror pool-SHA consistency
         if len(_per_mirror) > 1:
             console.print("\ncross-mirror pool-SHA consistency:",

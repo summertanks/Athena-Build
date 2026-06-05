@@ -24458,6 +24458,207 @@ def test_coord_store_project_owners_handles_empty_input():
     assert _st.project_owners({'alice': []}) == {}
 
 
+def _write_clearsigned_inrelease(path: str, sha256_block: 'list[tuple[str, int, str]]') -> None:
+    """Build a minimal clearsigned-format InRelease at `path` carrying
+    the given SHA256 block.  Not actually GPG-signed (audit doesn't
+    re-verify; it hashes raw bytes), but the deb822 parser accepts
+    the clearsigned wrapper either way."""
+    _body = [
+        "Architectures: amd64",
+        "Codename: thor",
+        "Components: main",
+        "Date: Fri, 05 Jun 2026 00:00:00 +0000",
+        "Suite: thor",
+        "SHA256:",
+    ]
+    for _sha, _size, _name in sha256_block:
+        _body.append(f" {_sha} {_size:>9} {_name}")
+    _content = "\n".join([
+        "-----BEGIN PGP SIGNED MESSAGE-----",
+        "Hash: SHA512",
+        "",
+        *_body,
+        "",
+        "-----BEGIN PGP SIGNATURE-----",
+        "iQfake==",
+        "-----END PGP SIGNATURE-----",
+        "",
+    ])
+    with open(path, 'w') as _fh:
+        _fh.write(_content)
+
+
+def test_audit_inrelease_against_head_sha_match_returns_parsed_release():
+    """Happy path: InRelease pulls successfully, sha matches the
+    coord-head pin, deb822.Release parses cleanly, no findings."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hashlib
+    from unittest.mock import patch
+    import mirror as _mir
+    from coord import transport as _tx
+
+    with tempfile.TemporaryDirectory() as _td:
+        # Build a fake InRelease in a sibling dir; rely on the rsync
+        # stub to "pull" it (just copies path-to-path).
+        _src_dir = os.path.join(_td, 'src')
+        os.makedirs(_src_dir)
+        _src = os.path.join(_src_dir, 'InRelease')
+        _write_clearsigned_inrelease(_src, [(
+            'a' * 64, 100, 'main/binary-amd64/Packages')])
+        _expected_sha = _hashlib.sha256(open(_src, 'rb').read()).hexdigest()
+
+        _fetched = os.path.join(_td, 'fetched')
+
+        def _fake_pull(*, remote_spec, local_path, ssh_key=None):
+            # remote_spec ends with `/InRelease`; copy from our src.
+            import shutil as _sh
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            _sh.copy(_src, local_path)
+            return True, ''
+
+        with patch.object(_tx, 'pull_single_file', side_effect=_fake_pull):
+            _release, _findings = _mir.audit_inrelease_against_head(
+                pool_url='file:///fake/pool',
+                codename='thor',
+                expected_sha256=_expected_sha,
+                fetched_dir=_fetched,
+            )
+
+        assert _findings == [], f"unexpected findings: {_findings}"
+        assert _release is not None
+        assert _release.get('Codename') == 'thor'
+        # SHA256 block should be parseable.
+        _sha_block = _release.get('SHA256')
+        assert isinstance(_sha_block, list) and len(_sha_block) == 1
+
+
+def test_audit_inrelease_against_head_sha_mismatch_critical():
+    """coord-head pins sha=X, on-pool InRelease hashes to Y → CRITICAL
+    inrelease_sha_mismatch.  Returned release is None so caller
+    short-circuits the chain."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import patch
+    import mirror as _mir
+    from coord import transport as _tx
+
+    with tempfile.TemporaryDirectory() as _td:
+        _src_dir = os.path.join(_td, 'src')
+        os.makedirs(_src_dir)
+        _src = os.path.join(_src_dir, 'InRelease')
+        _write_clearsigned_inrelease(_src, [(
+            'a' * 64, 100, 'main/binary-amd64/Packages')])
+
+        def _fake_pull(*, remote_spec, local_path, ssh_key=None):
+            import shutil as _sh
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            _sh.copy(_src, local_path)
+            return True, ''
+
+        with patch.object(_tx, 'pull_single_file', side_effect=_fake_pull):
+            _release, _findings = _mir.audit_inrelease_against_head(
+                pool_url='file:///fake/pool',
+                codename='thor',
+                expected_sha256='0' * 64,  # deliberate mismatch
+                fetched_dir=os.path.join(_td, 'fetched'),
+            )
+
+        assert _release is None
+        assert len(_findings) == 1
+        _sev, _kind, _ = _findings[0]
+        assert _sev == 'CRITICAL'
+        assert _kind == 'inrelease_sha_mismatch'
+
+
+def test_audit_claims_vs_packages_flags_missing_and_mismatched():
+    """Claim → no Packages entry  →  CRITICAL claim_not_in_apt_index.
+    Claim sha disagrees with Packages sha  →  CRITICAL
+    claim_apt_sha_mismatch.  Matching claim is silent."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+
+    _packages_idx = {
+        'foo_1.0_amd64.deb': {
+            'package': 'foo', 'version': '1.0',
+            'sha256': 'a' * 64, 'size': '100',
+        },
+        'baz_2.0_amd64.deb': {
+            'package': 'baz', 'version': '2.0',
+            'sha256': 'b' * 64, 'size': '200',
+        },
+    }
+    _by_builder = {
+        'athena-primary': [
+            # OK — present + sha matches.
+            {'package': 'foo', 'filename': 'foo_1.0_amd64.deb',
+             'sha256': 'a' * 64, 'claim_state': 'published'},
+            # CRITICAL — sha disagrees with apt index.
+            {'package': 'baz', 'filename': 'baz_2.0_amd64.deb',
+             'sha256': 'c' * 64, 'claim_state': 'published'},
+            # CRITICAL — filename not in any Packages.
+            {'package': 'qux', 'filename': 'qux_3.0_amd64.deb',
+             'sha256': 'd' * 64, 'claim_state': 'published'},
+            # Retracted — ignored.
+            {'package': 'old', 'filename': 'old_0.1_amd64.deb',
+             'sha256': 'e' * 64, 'claim_state': 'retracted'},
+        ],
+    }
+    _findings = _mir.audit_claims_vs_packages(_by_builder, _packages_idx)
+    _kinds = sorted(_f[1] for _f in _findings)
+    assert _kinds == ['claim_apt_sha_mismatch',
+                      'claim_not_in_apt_index'], _findings
+    # Both should be CRITICAL.
+    assert all(_f[0] == 'CRITICAL' for _f in _findings), _findings
+
+
+def test_audit_ownership_summary_buckets_correctly():
+    """Summary counts: we_own (our_builder_id), peers_own (others),
+    tunneled (republished_from set → builder=None in project_owners)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    from coord import schema as _sch
+
+    def _claim(builder, seq, fn, sha, republished_from=None):
+        _c = _sch.new_claim(
+            builder=builder, seq=seq, package=fn.split('_', 1)[0],
+            intended_version='1.0', built_version='1.0',
+            filename=fn, sha256=sha, size=1,
+            snapshot='S', built_at='T',
+            claim_state=_sch.CLAIM_STATE_PUBLISHED,
+            republished_from=republished_from,
+        )
+        return _c
+
+    _by_builder = {
+        'athena-primary': [
+            _claim('athena-primary', 1, 'pkg-ours-1_1.0_amd64.deb',
+                   'a' * 64),
+            _claim('athena-primary', 2, 'pkg-ours-2_1.0_amd64.deb',
+                   'b' * 64),
+            _claim('athena-primary', 3, 'pkg-tunneled_1.0_amd64.deb',
+                   'c' * 64,
+                   republished_from={'url': 'http://u', 'upstream_sha256': 'c'}),
+        ],
+        'athena-secondary': [
+            _claim('athena-secondary', 1, 'pkg-peer_1.0_amd64.deb',
+                   'd' * 64),
+        ],
+    }
+
+    _summary, _findings = _mir.audit_ownership_summary(
+        _by_builder, our_builder_id='athena-primary')
+
+    assert _summary['total'] == 4
+    assert _summary['we_own'] == 2
+    assert _summary['peers_own'] == 1
+    assert _summary['tunneled'] == 1
+    assert _summary['by_peer'] == {'athena-secondary': 1}
+    assert _findings == []
+
+
 def test_coord_reconcile_detect_hash_conflicts_critical_and_info():
     """Same (pkg, ver), different hash → CRITICAL; same hash → INFO."""
     _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
