@@ -231,8 +231,20 @@ def synthesize_binary_record(
     Returned dict carries str values (matches what scan_repo_state
     stores from apt_pkg.TagFile).
     """
-    _fn = _stamped_filename(binary_name, virtual_version, arch)
-    _sha = _virtual_sha256(binary_name, virtual_version, arch)
+    # Resolve filename Architecture from upstream record first:
+    # `Architecture: all` produces `_all.deb`, `Architecture: any`
+    # (or arch-specific like `amd64`) produces `_<config_arch>.deb`.
+    # dpkg-buildpackage names the .deb after the BINARY's Architecture
+    # field, not the source's build architecture.  Without this,
+    # virtual mispredicts every arch-all binary's filename as
+    # `_amd64.deb` while real build correctly writes `_all.deb`.
+    _filename_arch = arch
+    if upstream_record is not None:
+        _ua_raw = (upstream_record.get('Architecture') or '').strip()
+        if _ua_raw == 'all':
+            _filename_arch = 'all'
+    _fn = _stamped_filename(binary_name, virtual_version, _filename_arch)
+    _sha = _virtual_sha256(binary_name, virtual_version, _filename_arch)
     _prefix = (binary_name[:4] if binary_name.startswith('lib')
                else binary_name[:1])
     _filename_field = (
@@ -240,7 +252,7 @@ def synthesize_binary_record(
     _rec: Dict[str, str] = {
         'Package':      binary_name,
         'Version':      virtual_version,
-        'Architecture': arch,
+        'Architecture': _filename_arch,
         'Source':       source_name,
         'Filename':     _filename_field,
         'SHA256':       _sha,
@@ -267,9 +279,6 @@ def synthesize_binary_record(
         _val = upstream_record.get(_field)
         if _val:
             _rec[_field] = _val
-    _ua = upstream_record.get('Architecture')
-    if _ua and _ua.strip() in ('all', 'any'):
-        _rec['Architecture'] = _ua.strip()
     return _rec
 
 
@@ -564,28 +573,75 @@ def validate_against_build_records(
         def _binary_name(_fn: str) -> str:
             return _fn.split('_', 1)[0] if '_' in _fn else _fn
 
+        def _strip_asg(_v: str) -> str:
+            """Drop a trailing +asgRuN so the comparison ignores
+            asg-stamp lineage state (which evolves over time and is
+            an orthogonal layer to the synthesizer's name + base
+            prediction)."""
+            return utils.ASG_SUFFIX_RE.sub('', _v)
+
+        def _filename_signature(_fn: str) -> 'Tuple[str, str, str]':
+            """(binary_name, asg-stripped pristine version, arch)
+            for cross-checking.  Eliminates asg-suffix from comparison
+            while keeping arch + pristine base — those ARE
+            synthesizer-controlled and any mismatch IS a real bug."""
+            _base = _fn.rsplit('.', 1)[0]
+            _parts = _base.split('_')
+            if len(_parts) != 3:
+                return (_fn, '', '')
+            _name, _ver, _arch = _parts
+            return (_name, _strip_asg(utils.pristine_base(_ver)), _arch)
+
         _real_names: 'set[str]' = {_binary_name(_f) for _f in _real_files}
         _pred_names: 'set[str]' = {_binary_name(_f) for _f in _pred_files}
         _missing = _real_names - _pred_names   # real has, pred doesn't
         _extra = _pred_names - _real_names     # pred has, real doesn't
-        # Version drift: same binary name, but predicted filename
-        # doesn't appear in the real output_hashes' history.  A
-        # plausible prediction is one of the historic versions; if
-        # NONE match, the asg-stamp math is wrong.
-        _real_by_name: 'Dict[str, set[str]]' = {}
+        # Build (name, pristine-base, arch) signature sets and compare.
+        # Mismatch at this level = real synthesizer bug.  Full-string
+        # mismatches that pass the signature check = pure asg-stamp
+        # drift (ledger state evolved between real build and validate
+        # run; not a synth bug).
+        _real_sigs: 'Dict[str, set[Tuple[str, str, str]]]' = {}
         for _fn in _real_files:
-            _real_by_name.setdefault(_binary_name(_fn), set()).add(_fn)
+            _sig = _filename_signature(_fn)
+            _real_sigs.setdefault(_sig[0], set()).add(_sig)
+        _pred_sigs: 'Dict[str, set[Tuple[str, str, str]]]' = {}
+        for _fn in _pred_files:
+            _sig = _filename_signature(_fn)
+            _pred_sigs.setdefault(_sig[0], set()).add(_sig)
+
         _version_drift: 'List[Tuple[str, str, str]]' = []
+        _asg_drift: 'List[Tuple[str, str, str]]' = []
         for _bn in _real_names & _pred_names:
             _pred_match = [_f for _f in _pred_files
                            if _binary_name(_f) == _bn]
-            _real_match = _real_by_name.get(_bn, set())
-            if not any(_p in _real_match for _p in _pred_match):
-                _version_drift.append((
-                    _bn,
-                    ','.join(sorted(_real_match)[:3]),
-                    ','.join(_pred_match[:3])))
-        if not _missing and not _extra and not _version_drift:
+            _real_match = sorted(_real_sigs.get(_bn, set()))
+            _pred_sig_match = sorted(_pred_sigs.get(_bn, set()))
+            # If signature (name, pristine-base, arch) intersects,
+            # the synthesizer's prediction agrees with reality at the
+            # level it CONTROLS.  Any remaining filename diff is
+            # asg-suffix only → ledger-state drift, not a synth bug.
+            if set(_real_match) & set(_pred_sig_match):
+                # Signature match — full strings may still differ if
+                # asg-suffix differs.  Check that case → asg_drift.
+                _real_full = sorted(
+                    _f for _f in _real_files if _binary_name(_f) == _bn)
+                _pred_full = sorted(
+                    _f for _f in _pred_files if _binary_name(_f) == _bn)
+                if not (set(_real_full) & set(_pred_full)):
+                    _asg_drift.append((
+                        _bn,
+                        ','.join(_real_full[:3]),
+                        ','.join(_pred_full[:3])))
+                continue
+            _version_drift.append((
+                _bn,
+                ','.join(_f[0] + '_' + _f[1] + '_' + _f[2]
+                        for _f in _real_match[:3]),
+                ','.join(_f[0] + '_' + _f[1] + '_' + _f[2]
+                        for _f in _pred_sig_match[:3])))
+        if (not _missing and not _extra
+                and not _version_drift and not _asg_drift):
             _stats['sources_matched'] += 1
             continue
         _stats['sources_drifted'] += 1
@@ -594,6 +650,16 @@ def validate_against_build_records(
                 'CRITICAL', 'virtual_validate_version_drift',
                 f"{_name}/{_bn}: predicted={_pred_str!r} but built "
                 f"history has {_real_str!r}"))
+        if _asg_drift:
+            # Pure asg-suffix drift — synth is asking "if next build
+            # happened NOW, what stamp?" while real-build's record is
+            # from a snapshot of the ledger at THE TIME of that build.
+            # Not a synthesizer bug; surface as INFO so operator sees
+            # the count without thinking the synth is broken.
+            _findings.append((
+                'INFO', 'virtual_validate_asg_drift',
+                f"{_name}: {len(_asg_drift)} binary(s) differ only in "
+                "+asgRuN suffix (ledger state evolved since real build)"))
         if _missing:
             _findings.append((
                 'WARNING', 'virtual_validate_predicted_missing',
