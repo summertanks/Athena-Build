@@ -10220,6 +10220,8 @@ class BuildSession:
             package_universe=_universe, asg_ledger=_asg_ledger,
             release=_release, arch=self.config.arch,
             buildlog_dir=_buildlog,
+            active_profiles=frozenset(
+                getattr(self.config, 'build_profiles', frozenset())),
         )
         console.print(
             f"  checked={_stats['sources_checked']}  "
@@ -10359,6 +10361,8 @@ class BuildSession:
                 asg_ledger=_asg_ledger, release=_release,
                 arch=_arch, was_patched=_was_patched,
                 peer_sources=set(_scope_names),
+                active_profiles=frozenset(
+                    getattr(self.config, 'build_profiles', frozenset())),
             ))
         if _missing_srcs:
             console.print(
