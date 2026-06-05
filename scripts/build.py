@@ -300,6 +300,14 @@ class BuildSession:
         self.flags: BuildFlags = BuildFlags.load(
             BuildFlags.default_path(config))
         self.last_source_build_counts: 'Optional[dict]' = None
+        # True only inside _do_update_build → cmd_source_build.  Gates
+        # `_bump_active` (which forces rebuild of NMU-versioned sources
+        # missing their expected `+asg<R>u<N>` artifact).  In NORMAL
+        # mode the ledger is still loaded — for post-build stamping
+        # lineage continuation — but bump-target detection MUST stay
+        # off: the predicate would otherwise flag every NMU-suffixed
+        # upstream source on every cmd_source_build call.
+        self._in_update_build: bool = False
 
     @staticmethod
     def _read_pkg_list(path: str, already_selected: set) -> list:
@@ -8112,7 +8120,14 @@ class BuildSession:
             # Pass the full delta workload (the loop skips the up-to-date and
             # rebuilds bump-targets) plus the extra needs_build sources.  Ledger
             # loaded → delta respins get +asg-stamped; forks build pristine.
-            self.cmd_source_build(*(list(_workload) + _extra))
+            # _in_update_build=True enables _bump_active inside cmd_source_build
+            # — the bump-target predicate (same-base re-spin → exact
+            # `+asg<R>u<N>` missing) only makes sense in this workflow.
+            self._in_update_build = True
+            try:
+                self.cmd_source_build(*(list(_workload) + _extra))
+            finally:
+                self._in_update_build = False
         finally:
             if self.container is not None:
                 self.container.asg_ledger = None
@@ -9212,8 +9227,18 @@ class BuildSession:
         # artifact is missing — the one case the filename-based skip gate can't
         # see (the rebuilt pristine name collides with the prior build).  N is
         # per-file; the post-build stamp (buildcontainer) applies it.
+        # _bump_active forces same-base re-spin rebuilds (the predicate
+        # at _needs_bump_build checks if THIS-generation `+asg<R>u<N>`
+        # artifacts are on disk for NMU-suffixed sources).  Gated on
+        # _in_update_build so it ONLY fires inside _do_update_build's
+        # snapshot-delta workflow.  Outside update mode, the ledger may
+        # be loaded for post-build stamping (lineage continuation), but
+        # bump-target detection must stay off — otherwise every NMU-
+        # versioned upstream source (3/4 of the corpus) gets flagged on
+        # every cmd_source_build call.
         _bump_active = (self.container is not None
-                        and getattr(self.container, 'asg_ledger', None) is not None)
+                        and getattr(self.container, 'asg_ledger', None) is not None
+                        and self._in_update_build)
         _bump_release = None
         if _bump_active:
             try:
