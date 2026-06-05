@@ -19309,6 +19309,120 @@ def test_asg_next_n_is_per_file_and_cumulative():
     assert asg_next_n(['3.0.15-1+asg1u1'], '3.0.15-1', 2) == 1      # R differs
 
 
+def test_compute_post_build_versions_pristine_when_no_delta_no_lineage():
+    """No NMU suffix, no patch, no ledger entry → every binary stays
+    at pristine source version."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import compute_post_build_versions
+    _v = compute_post_build_versions(
+        source_version='3.0.15-1',
+        binaries=['openssl', 'libssl3'],
+        asg_ledger=None, release=1,
+    )
+    assert _v == {'openssl': '3.0.15-1', 'libssl3': '3.0.15-1'}
+
+
+def test_compute_post_build_versions_stamps_when_was_patched():
+    """Fork patches applied → was_patched=True → asg stamp at N=1 for
+    every binary, uniform per source."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import compute_post_build_versions
+    _v = compute_post_build_versions(
+        source_version='2.0.0-1',
+        binaries=['fork-a', 'fork-a-data'],
+        asg_ledger={}, release=1, was_patched=True,
+    )
+    assert _v == {'fork-a': '2.0.0-1+asg1u1',
+                  'fork-a-data': '2.0.0-1+asg1u1'}
+
+
+def test_compute_post_build_versions_stamps_when_nmu_stripped():
+    """Source has NMU layer → pristine differs from raw → delta → stamp."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import compute_post_build_versions
+    _v = compute_post_build_versions(
+        source_version='3.0.15-1+deb12u1',
+        binaries=['openssl', 'libssl3'],
+        asg_ledger={'openssl': []}, release=1,
+    )
+    assert _v == {'openssl': '3.0.15-1+asg1u1',
+                  'libssl3': '3.0.15-1+asg1u1'}
+
+
+def test_compute_post_build_versions_lineage_continuation_no_delta():
+    """No NMU, no patch, but ledger has prior +asg entry at this base
+    → MUST continue stamping (the linux-signed kernel-meta scenario,
+    [[asg-lineage-continuation]]).  N advances per-binary individually
+    then unified to max."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import compute_post_build_versions
+    _v = compute_post_build_versions(
+        source_version='6.1.174-1',
+        binaries=['linux-image', 'linux-headers'],
+        asg_ledger={
+            'linux-image':   ['6.1.174-1+asg1u1', '6.1.174-1+asg1u2'],
+            'linux-headers': ['6.1.174-1+asg1u1'],
+        },
+        release=1,
+    )
+    # image candidate=3, headers candidate=2 → uniform N=3.
+    assert _v == {'linux-image':   '6.1.174-1+asg1u3',
+                  'linux-headers': '6.1.174-1+asg1u3'}
+
+
+def test_compute_post_build_versions_lineage_ignores_unrelated_base():
+    """Ledger has +asg entries at a DIFFERENT base (older kernel) →
+    lineage NOT triggered; we ship pristine."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import compute_post_build_versions
+    _v = compute_post_build_versions(
+        source_version='6.1.174-1',
+        binaries=['linux-image'],
+        asg_ledger={'linux-image': ['6.1.140-1+asg1u5']},  # OLD base
+        release=1,
+    )
+    assert _v == {'linux-image': '6.1.174-1'}
+
+
+def test_compute_post_build_versions_uniform_n_across_siblings():
+    """Two binaries from one source — one has a long ledger (N candidate=5),
+    sibling is fresh (candidate=1) — both stamp at MAX(5, 1) = 5 so the
+    intra-source `(= ver)` pin in the meta package resolves on disk."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import compute_post_build_versions
+    _v = compute_post_build_versions(
+        source_version='6.1.174-1',
+        binaries=['linux-headers-amd64',           # name-stable, long history
+                  'linux-headers-6.1.0-49-amd64'], # ABI-pinned, fresh name
+        asg_ledger={
+            'linux-headers-amd64': [
+                '6.1.174-1+asg1u1', '6.1.174-1+asg1u2',
+                '6.1.174-1+asg1u3', '6.1.174-1+asg1u4',
+            ],
+            'linux-headers-6.1.0-49-amd64': [],
+        },
+        release=1, was_patched=True,  # ensure stamp triggers
+    )
+    assert _v == {
+        'linux-headers-amd64':           '6.1.174-1+asg1u5',
+        'linux-headers-6.1.0-49-amd64':  '6.1.174-1+asg1u5',
+    }
+
+
+def test_compute_post_build_versions_release_advances_resets_n():
+    """A new release R bumps the major; N resets to 1 against the same
+    base because asg_next_n is keyed on (base, release)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import compute_post_build_versions
+    _v = compute_post_build_versions(
+        source_version='3.0.15-1',
+        binaries=['openssl'],
+        asg_ledger={'openssl': ['3.0.15-1+asg1u3']},  # release=1 entries
+        release=2, was_patched=True,
+    )
+    assert _v == {'openssl': '3.0.15-1+asg2u1'}
+
+
 def test_check_build_matches_asg_variant_of_prediction():
     """check_build must accept a +asg<R>u<N> stamped artifact for a pristine
     prediction — otherwise the source rebuilds every run (CONF-13 loop)."""
@@ -28369,6 +28483,14 @@ def main() -> int:
         # UPD-01 step 3: build-side stamping + check_build matching + Guard B
         test_highest_asg_update_reads_remote_ledger,
         test_asg_next_n_is_per_file_and_cumulative,
+        # virtual-build chunk 1 — compute_post_build_versions pure helper
+        test_compute_post_build_versions_pristine_when_no_delta_no_lineage,
+        test_compute_post_build_versions_stamps_when_was_patched,
+        test_compute_post_build_versions_stamps_when_nmu_stripped,
+        test_compute_post_build_versions_lineage_continuation_no_delta,
+        test_compute_post_build_versions_lineage_ignores_unrelated_base,
+        test_compute_post_build_versions_uniform_n_across_siblings,
+        test_compute_post_build_versions_release_advances_resets_n,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,
         test_tunnel_filenames_for_source_uses_upstream_not_stripped,

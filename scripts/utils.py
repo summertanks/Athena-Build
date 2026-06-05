@@ -15,7 +15,7 @@ import argparse
 import requests
 import tui
 from tui import Prompt, Spinner, ProgressBar
-from typing import List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Forward-reference target for type hints — dependencytree imports utils
@@ -454,6 +454,64 @@ def asg_next_n(published_versions: 'List[str]',
     ledger), so a binary updated more often than its siblings carries a higher
     N.  First update for a base/release → 1."""
     return highest_asg_update(published_versions, base, release) + 1
+
+
+def compute_post_build_versions(
+    source_version: str, binaries: 'List[str]',
+    asg_ledger: 'Optional[dict]', release: int,
+    was_patched: bool = False,
+) -> 'Dict[str, str]':
+    """Pure version math: predict the Version field every binary built
+    from a source will carry post-normalisation, WITHOUT running a build.
+
+    Mirrors :meth:`buildcontainer.BuildContainer._normalize_built_artifacts`
+    exactly, but as a function of cache data only — so virtual-build and
+    audit code can ask "what version will dpkg-buildpackage land?" before
+    actually running it.
+
+    Decision tree (matches normalize_built_artifacts):
+      1. pristine = strip_nmu_suffix(source_version)
+      2. delta = (pristine != source_version) OR was_patched
+      3. lineage = asg_ledger has any +asg<*>u<*> entry at base=pristine
+         for any of `binaries`
+      4. if not (delta or lineage): every binary stays at `pristine`
+      5. else: N = max(asg_next_n(ledger[b], pristine, release)
+                       for each b in binaries that has a ledger entry,
+                       OR 1 if none).  Every binary stamps at base+asgRuN
+         — uniform N per source, see
+         [[asg-stamp-uniform-n-per-source]].
+
+    `asg_ledger` shape: ``{binary_name: [version_str, ...]}`` (the
+    published-versions ledger used by ``asg_next_n``).  None or empty →
+    no lineage continuation possible.
+
+    Returns ``{binary_name: predicted_version_str}`` for every name in
+    `binaries`.
+    """
+    _pristine = strip_nmu_suffix(source_version)
+    _is_delta = (_pristine != source_version) or was_patched
+    _ledger = asg_ledger or {}
+    _has_lineage = False
+    for _b in binaries:
+        for _prev in _ledger.get(_b, []):
+            if (pristine_base(_prev) == _pristine
+                    and parse_asg_suffix(_prev) is not None):
+                _has_lineage = True
+                break
+        if _has_lineage:
+            break
+    if not (_is_delta or _has_lineage):
+        return dict.fromkeys(binaries, _pristine)
+    # Uniform N per source: take the MAX of every sibling's individual
+    # asg_next_n candidate.  Binaries with no ledger entry contribute
+    # asg_next_n([], pristine, release) = 1 — the floor.
+    _candidates = [
+        asg_next_n(_ledger.get(_b, []), _pristine, release)
+        for _b in binaries
+    ]
+    _n = max(_candidates) if _candidates else 1
+    _stamped = apply_asg_suffix(_pristine, release, _n)
+    return dict.fromkeys(binaries, _stamped)
 
 
 def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
