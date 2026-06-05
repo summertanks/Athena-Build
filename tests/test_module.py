@@ -19715,6 +19715,104 @@ def test_virtual_build_skips_binaries_from_other_canonical_source():
     assert _names == {'linux-image-amd64-signed-template'}, _names
 
 
+def test_virtual_build_prefix_source_dedup_prefers_base_over_signed():
+    """Two records collide on Package name; one source is suffix-variant
+    of the other (linux + linux-signed-amd64).  Dedup must prefer
+    the prefix source (linux) regardless of which version is higher.
+
+    The kernel signing chain: linux-signed-amd64 over-declares linux's
+    ABI-pinned binaries in its `Binary:` field but doesn't actually
+    emit them at its own version — Debian's real build version-aligns
+    these to linux.  Highest-version dedup picks linux-signed
+    (6.1.174+1 > 6.1.174-1) and breaks cross-source sibling pins.
+    """
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'linux-headers-6.1.0-49-amd64',
+         'Version': '6.1.174-1+asg1u1',
+         'Source': 'linux',
+         'Architecture': 'amd64',
+         'Filename': 'pool/main/l/linux/...', 'SHA256': 'x' * 64,
+         'Size': '0'},
+        {'Package': 'linux-headers-6.1.0-49-amd64',
+         'Version': '6.1.174+1',
+         'Source': 'linux-signed-amd64',  # suffix variant of 'linux'
+         'Architecture': 'amd64',
+         'Filename': 'pool/main/l/linux-signed-amd64/...',
+         'SHA256': 'y' * 64, 'Size': '0'},
+    ]
+    _state, _ = _vb.synthesize_repo_state(_recs)
+    # linux wins despite lower version — kernel signing chain
+    # canonical-source rule.
+    assert _state.packages['linux-headers-6.1.0-49-amd64']['Source'] == 'linux'
+    assert (_state.packages['linux-headers-6.1.0-49-amd64']['Version']
+            == '6.1.174-1+asg1u1')
+
+
+def test_virtual_build_global_pin_rewrite_resolves_cross_source_pin():
+    """One source's binary `Depends:` pins a binary from ANOTHER source
+    at the target's UPSTREAM version.  After asg-stamping the target,
+    the constraint reads stale; the post-dedup global pin rewriter
+    must update it to the target's actual Version so closure check
+    resolves.
+
+    This is the linux-signed.linux-headers-amd64 →
+    linux.linux-headers-6.1.0-49-amd64 (= 6.1.174-1) case.
+    """
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'linux-headers-6.1.0-49-amd64',
+         'Version': '6.1.174-1+asg1u2',  # stamped
+         'Source': 'linux', 'Architecture': 'amd64',
+         'Filename': 'pool/main/l/linux/headers-49.deb',
+         'SHA256': 'a' * 64, 'Size': '0'},
+        {'Package': 'linux-headers-amd64',
+         'Version': '6.1.174+1', 'Source': 'linux-signed-amd64',
+         'Architecture': 'amd64',
+         # Cross-source pin to a binary in DIFFERENT source at
+         # pristine version (would fail strict equality without
+         # global pin rewriting).
+         'Depends': 'linux-headers-6.1.0-49-amd64 (= 6.1.174-1)',
+         'Filename': 'pool/main/l/linux-signed-amd64/meta.deb',
+         'SHA256': 'b' * 64, 'Size': '0'},
+    ]
+    _state, _f = _vb.virtual_repo_audit(
+        _recs, install_corpus=frozenset({'linux-headers-amd64'}))
+    # Pin got rewritten to target's actual stamped version.
+    _dep = _state.packages['linux-headers-amd64']['Depends']
+    assert '(= 6.1.174-1+asg1u2)' in _dep
+    # Closure now resolves.
+    _crit = [_t for _t in _f if _t[0] == 'CRITICAL']
+    assert _crit == [], _crit
+
+
+def test_virtual_build_recommends_suppressed_by_default():
+    """Recommends are non-gating per Debian Policy §7.2.  virtual_repo_audit
+    must NOT emit virtual_recommends_miss findings unless explicitly
+    asked (report_recommends=True).  Operator output is too noisy
+    otherwise — every consumer pkg has 0-N Recommends targets we
+    don't ship."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        {'Package': 'a', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Recommends': 'missing-pkg',
+         'Filename': 'pool/a.deb', 'SHA256': 'x' * 64, 'Size': '0'},
+    ]
+    _, _f = _vb.virtual_repo_audit(
+        _recs, install_corpus=frozenset({'a'}))
+    assert not any(_t[1] == 'virtual_recommends_miss' for _t in _f), _f
+    # Explicit opt-in still surfaces them as INFO.
+    _, _f2 = _vb.virtual_repo_audit(
+        _recs, install_corpus=frozenset({'a'}),
+        report_recommends=True)
+    _info = [_t for _t in _f2 if _t[1] == 'virtual_recommends_miss']
+    assert len(_info) == 1
+    assert _info[0][0] == 'INFO'
+
+
 def test_virtual_build_canonical_filter_off_when_peer_not_in_scope():
     """Fork case: athena-cdrom-setup declares apt-cdrom-setup binary;
     upstream Source: apt-cdrom-setup.  apt-cdrom-setup source is NOT
@@ -29399,6 +29497,9 @@ def main() -> int:
         test_virtual_build_metapackage_stamps_when_lineage_present,
         test_virtual_build_strips_nmu_from_inherited_depends_constraint,
         test_virtual_build_skips_binaries_from_other_canonical_source,
+        test_virtual_build_prefix_source_dedup_prefers_base_over_signed,
+        test_virtual_build_global_pin_rewrite_resolves_cross_source_pin,
+        test_virtual_build_recommends_suppressed_by_default,
         test_virtual_build_canonical_filter_off_when_peer_not_in_scope,
         test_virtual_publish_dry_run_skips_own_already_published_filenames,
         test_virtual_publish_dry_run_synthesizes_only_new_filenames,
