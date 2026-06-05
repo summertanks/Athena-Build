@@ -455,3 +455,147 @@ def virtual_repo_audit(
                 'CRITICAL', 'virtual_cohort_conflict',
                 f"{_pkg} (installer): {_field} = {_rel!r} → {_other}"))
     return _state, _findings
+
+
+# ─────────────────────────── Claim ledger + publish dry-run ──────────
+
+
+def synthesize_claim_ledger(
+    virtual_records: 'List[Dict[str, str]]', our_builder_id: str,
+    snapshot: str, seq_start: int = 1,
+    built_at: str = '1970-01-01T00:00:00Z',
+) -> 'Dict[str, List[Dict[str, Any]]]':
+    """One synthetic claim per virtual binary, all owned by
+    `our_builder_id`.  Returns the by_builder dict shape that
+    coord.store / coord.reconcile / mirror.audit_* consume.
+
+    `seq_start` lets the caller chain claims onto an existing remote
+    ledger (a real publish would do `len(existing) + 1`).
+
+    `built_at` is a deterministic placeholder — virtual builds have no
+    wall-clock event; tests pin it to avoid Date.now() flakiness.
+    Mirror audit ignores this field for gate decisions.
+    """
+    from coord import schema as _sch
+    _claims: 'List[Dict[str, Any]]' = []
+    _seq = seq_start
+    for _r in virtual_records:
+        _name = _r.get('Package', '')
+        _ver = _r.get('Version', '')
+        _fn = os.path.basename(_r.get('Filename', '') or '')
+        _sha = _r.get('SHA256', '')
+        if not _name or not _ver or not _fn or not _sha:
+            continue
+        try:
+            _size = int(_r.get('Size', 0) or 0)
+        except (TypeError, ValueError):
+            _size = 0
+        _claim = _sch.new_claim(
+            builder=our_builder_id, seq=_seq, package=_name,
+            intended_version=_ver, built_version=_ver,
+            filename=_fn, sha256=_sha, size=_size,
+            snapshot=snapshot, built_at=built_at,
+            claim_state=_sch.CLAIM_STATE_PUBLISHED,
+        )
+        _claims.append(_claim)
+        _seq += 1
+    return {our_builder_id: _claims}
+
+
+def virtual_publish_dry_run(
+    virtual_records: 'List[Dict[str, str]]', our_builder_id: str,
+    snapshot: str,
+    remote_by_builder: 'Optional[Dict[str, List[Dict[str, Any]]]]' = None,
+) -> 'Tuple[Dict[str, List[Dict[str, Any]]], List[Tuple[str, str, str]]]':
+    """Project the publish that virtual-build would attempt and run
+    the real publish-time gates against the projection.
+
+    Returns ``(merged_by_builder, findings)`` where ``merged_by_builder``
+    is our synthetic claims unioned with `remote_by_builder` (the
+    last-fetched view of each peer's sidecar).  Findings:
+
+      ``virtual_hash_conflict``       CRITICAL — same filename + sha
+                                      across builders disagree (real
+                                      ``detect_hash_conflicts`` raised
+                                      it)
+      ``virtual_ownership_blocked``   CRITICAL — our claim's filename is
+                                      currently owned by another builder
+                                      AND we're not strictly higher
+                                      version (the chunk-8 ownership
+                                      rule from the MIRROR-02 plan)
+      ``virtual_ownership_transfer``  INFO — we'd take ownership of a
+                                      currently-tunneled or
+                                      lower-version filename; not a
+                                      block, just visibility
+
+    When `remote_by_builder` is None, ownership and cross-builder hash
+    checks are skipped (only intra-our-claims hash-conflict can fire,
+    which never does because synthetic SHAs are deterministic by
+    triple — but the call is still made so a regression breaks loudly).
+    """
+    from coord import reconcile as _reconcile
+    from coord import store as _store
+    import apt_pkg
+    apt_pkg.init_system()
+
+    _findings: 'List[Tuple[str, str, str]]' = []
+    _ours = synthesize_claim_ledger(
+        virtual_records, our_builder_id, snapshot)
+    _merged: 'Dict[str, List[Dict[str, Any]]]' = {}
+    if remote_by_builder:
+        for _bid, _claims in remote_by_builder.items():
+            _merged[_bid] = list(_claims)
+    # Merge our synthetic claims into our builder's bucket (if we have
+    # a remote bucket for the same builder, append after seq advance).
+    _existing = _merged.get(our_builder_id, [])
+    _seq_floor = (max((_c.get('seq', 0) for _c in _existing),
+                      default=0) + 1)
+    _ours_renumbered = synthesize_claim_ledger(
+        virtual_records, our_builder_id, snapshot,
+        seq_start=_seq_floor)
+    _merged[our_builder_id] = _existing + _ours_renumbered[our_builder_id]
+
+    # Hash-conflict scan — real reconcile, virtual input.
+    _hc = _reconcile.detect_hash_conflicts(_merged)
+    for _f in _hc:
+        if _f.severity == 'CRITICAL':
+            _findings.append((
+                'CRITICAL', 'virtual_hash_conflict',
+                f"{_f.kind}: {_f.message}"))
+
+    # Ownership decision per virtual claim, against pre-merge state.
+    if remote_by_builder is not None:
+        _pre_owners = _store.project_owners(remote_by_builder)
+        for _claim in _ours_renumbered[our_builder_id]:
+            _fn = _claim['filename']
+            _our_ver = _claim['built_version']
+            _owner = _pre_owners.get(_fn)
+            if _owner is None:
+                continue   # no existing claim, free to take
+            _owner_builder = _owner.get('builder')
+            _owner_ver = _owner.get('version', '')
+            if _owner_builder is None:
+                _findings.append((
+                    'INFO', 'virtual_ownership_transfer',
+                    f"{_fn}: tunneled on mirror — virtual publish "
+                    "would take ownership"))
+                continue
+            if _owner_builder == our_builder_id:
+                continue
+            try:
+                _cmp = apt_pkg.version_compare(_our_ver, _owner_ver)
+            except Exception:
+                _cmp = 0
+            if _cmp > 0:
+                _findings.append((
+                    'INFO', 'virtual_ownership_transfer',
+                    f"{_fn}: currently owned by {_owner_builder} "
+                    f"@ {_owner_ver}; virtual publish at {_our_ver} "
+                    "would transfer ownership (higher version)"))
+            else:
+                _findings.append((
+                    'CRITICAL', 'virtual_ownership_blocked',
+                    f"{_fn}: owned by {_owner_builder} @ {_owner_ver}; "
+                    f"virtual publish at {_our_ver} would be REFUSED "
+                    "(not strictly higher)"))
+    return _merged, _findings
