@@ -1008,14 +1008,14 @@ class BuildSession:
         if self.config.build_mode == 'build':
             if self._cache_parse_build_mode():
                 self.flags.dep_check_ready = True
-                _spiner.stop()
+                _spiner.done()
                 console.print(
                     f"cache parse (build): {len(self.dep_tree.selected_srcs)} "
                     f"source(s), {self._canonical_select_count(self.dep_tree)} "
                     f"binary(ies)",
                     tui.COLOR_HIGHLIGHT)
             else:
-                _spiner.stop()
+                _spiner.done()
                 console.print(
                     "cache parse (build): no usable packages in build_pkg.list "
                     "(see warnings above); dep_check NOT set.",
