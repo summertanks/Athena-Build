@@ -10349,7 +10349,7 @@ class BuildSession:
             _our_bid = self._coord_builder_id() or 'athena-virtual'
         except (AttributeError, OSError):
             _our_bid = 'athena-virtual'
-        _snapshot = str(getattr(self.snapshot_state, 'current', '') or 'T')
+        _snapshot = self._snapshot_current() or 'T'
         console.print("\nvirtual publish dry-run:", tui.COLOR_HIGHLIGHT)
         if not _remote_by_builder:
             console.print(
