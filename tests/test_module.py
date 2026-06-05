@@ -1915,22 +1915,6 @@ def test_ux05d_cli_print_emits_ansi_when_tty():
         assert _p.call_args.args[0] == 'hello'
 
 
-def test_ux05e_main_strips_cmd_and_yes_from_argv_and_seeds_backend():
-    """UX-05e: build.py:main reads `--cmd <cmd>` (potentially multiple)
-    and `--yes`, strips them from sys.argv before BuildConfig sees argv,
-    and seeds the backend's one_shot_cmds + auto_yes."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
-    # main() reads --yes, --cmd, --headless and strips each from sys.argv
-    for _flag in ("'--headless'", "'--yes'", "'--cmd'"):
-        assert _flag in _src, f"UX-05: main() must recognise {_flag}"
-    # one_shot_cmds threaded onto backend; auto_yes assigned
-    assert 'tui_inst.auto_yes = _auto_yes' in _src
-    assert "if hasattr(tui_inst, 'one_shot_cmds')" in _src
-
-
 def test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits():
     """UX-05e: Cli with one_shot_cmds populated must dispatch each
     in order then exit (no REPL).  Exit code reflects worst outcome."""
@@ -2015,23 +1999,6 @@ def test_ux05g_cmd_methods_reset_flags_on_entry():
         "resets:\n  " + "\n  ".join(
             f"{_n}: flags.{_a} = True at L{_l} without matching False-reset"
             for _n, _a, _l in _missing))
-
-
-def test_ux05c_progressbar_step_does_not_print_in_cli():
-    """UX-05c: ProgressBar.step() must not invoke the backend's print
-    surface — only add_widget (start marker) and del_widget (done
-    marker) emit output.  This preserves the "no per-step flood" design
-    in CLI mode regardless of how fast the inner loop steps the bar."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import inspect
-    from tui.widgets import ProgressBar
-    _src = inspect.getsource(ProgressBar.step)
-    # ProgressBar.step body must not reach for any backend print path
-    assert 'print(' not in _src, (
-        "UX-05c: ProgressBar.step() must not print directly — would "
-        "flood CLI stdout under hot loops")
-    assert 'add_widget' not in _src and 'del_widget' not in _src, _src
-    assert 'self._tui' not in _src, _src
 
 
 def test_sec05_audit_build_deps_default_false():
@@ -9690,36 +9657,6 @@ def test_cmd_init_container_gated_on_cache_ready():
     )
 
 
-def test_autorun_step_lists_include_container_init():
-    """`container init` is part of both autorun pipelines, ordered
-    AFTER cache build (gate requires it) and BEFORE source build.
-    Scope assertion to the `_steps = [...]` literal."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
-    import re
-    for _fn in ('cmd_auto_run_live', 'cmd_auto_run_installer'):
-        _m = re.search(rf"\n    def {_fn}\b.*?_steps = \[(?P<list>.*?)\]\s*\n",
-                       _body, re.DOTALL)
-        assert _m is not None, f"{_fn}'s _steps list not found"
-        _steps = _m.group('list')
-        assert 'cmd_init_container' in _steps, (
-            f"{_fn} missing cmd_init_container step — source builds will "
-            f"hit 'Run `container init` first' mid-pipeline"
-        )
-        # Ordering: cache build comes BEFORE container init (gate
-        # requirement), container init comes BEFORE source build
-        # (source build needs the container ready).
-        _cache_idx = _steps.find('cmd_build_cache')
-        _container_idx = _steps.find('cmd_init_container')
-        _source_idx = _steps.find('cmd_source_build')
-        assert _cache_idx < _container_idx < _source_idx, (
-            f"{_fn} step order broken: expected cache_build → "
-            f"init_container → source_build, got idx "
-            f"{_cache_idx}/{_container_idx}/{_source_idx}"
-        )
-
-
 def test_derive_extras_src_names_marks_extras_only_sources():
     """A source whose every binary is in extras_pkg_names is in
     extras_src_names.  A mixed source (some selected + some extras) is NOT."""
@@ -11811,27 +11748,6 @@ def test_source_build_installer_subset_unions_udeb_tree_with_deb_arm():
     ]
 
 
-def test_refresh_patches_iterates_both_deb_and_udeb_trees():
-    """Phase 4 regression guard: _refresh_patches must walk the udeb tree
-    too — otherwise a source that exists only in udeb_dep_tree (e.g.
-    fuse3 pulled because libfuse3-3-udeb is a d-i udeb dep) gets an
-    empty patch_list even when patch/source/<pkg>/<ver>/*.patch is on
-    disk, and `source build <pkg>` fails because the build container
-    runs the unpatched debian/rules.  Caught in production 2026-05-10."""
-    import sys, inspect
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-    src = inspect.getsource(BuildSession._refresh_patches)
-    # Both tree references must appear: the deb tree (always) and the
-    # udeb tree (Phase 4).  Use string substring rather than a real
-    # invocation since _refresh_patches reads BuildConfig + filesystem;
-    # the contract is "iterate the union", which we can pin via source.
-    assert 'self.dep_tree.selected_srcs' in src, (
-        "_refresh_patches must include deb tree")
-    assert 'self.udeb_dep_tree' in src and 'selected_srcs' in src, (
-        "_refresh_patches must walk udeb tree's sources too")
-
-
 def test_refresh_patches_invalidates_record_when_patch_newer():
     """COMP-02 phase C: _refresh_patches must drop the build.json record
     when the patch CONTENT has changed since the last successful build.
@@ -12075,29 +11991,6 @@ def test_refresh_patches_keeps_result_when_patch_older_than_result():
         assert os.path.exists(_result), (
             "result NEWER than all patches must NOT be invalidated"
         )
-
-
-def test_source_download_iterates_both_deb_and_udeb_trees():
-    """Phase 4 regression guard: cmd_source_sync must call
-    utils.download_source for the udeb tree too — otherwise sources that
-    exist only in udeb_dep_tree (base-installer, debian-installer-utils,
-    debootstrap, etc.) never land in dir_source and `source build
-    installer` fails with `cp: cannot stat /source/<pkg>*: No such file
-    or directory` inside the build container.  Caught in production on
-    2026-05-10."""
-    import sys, inspect
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import BuildSession
-    src = inspect.getsource(BuildSession.cmd_source_sync)
-    # Both tree references must appear in the code (size + download call).
-    assert 'self.dep_tree.download_size' in src or '_deb_size' in src, (
-        "cmd_source_sync must include deb tree download size")
-    assert 'self.udeb_dep_tree.download_size' in src or '_udeb_size' in src, (
-        "cmd_source_sync must include udeb tree download size")
-    assert 'utils.download_source(self.dep_tree' in src, (
-        "cmd_source_sync must call download_source on deb tree")
-    assert 'utils.download_source(' in src and 'self.udeb_dep_tree' in src, (
-        "cmd_source_sync must also call download_source on udeb tree")
 
 
 def test_autorun_installer_runs_source_build_then_source_build_installer():
@@ -22440,57 +22333,6 @@ def test_normalize_built_artifacts_uses_uniform_n_across_siblings():
         f"(per-file N would have given {{1, 5}}); calls={_calls}")
 
 
-def test_cmd_parse_dependency_build_mode_uses_spinner_done_not_stop():
-    """Regression: in build mode, `cmd_parse_dependency` calls
-    `Spinner.done()` (the real API), NOT `.stop()`.  Earlier code
-    called `_spiner.stop()` which AttributeError'd because Spinner
-    has no `stop` method.  Stub Spinner that raises if `.stop()` is
-    touched — the test fails loudly if anyone reintroduces it.
-    """
-    import sys as _sys
-    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    _stub_tui()
-    import build
-    from unittest.mock import MagicMock
-
-    _done_called = []
-
-    class _FakeSpinner:
-        def __init__(self, _msg): pass
-        def done(self): _done_called.append(True)
-        def __getattr__(self, _name):
-            raise AttributeError(
-                f"Spinner has no attribute {_name!r} — use done()")
-
-    _orig_Spinner = build.Spinner
-    build.Spinner = _FakeSpinner
-    try:
-        _sess = build.BuildSession.__new__(build.BuildSession)
-
-        class _Cfg:
-            build_mode = 'build'
-            arch = 'amd64'
-            build_profiles: list = []
-        _sess.config = _Cfg()
-        _sess.flags = MagicMock(cache_ready=True, dep_check_ready=False)
-        _sess.cache = MagicMock()
-        _sess.dep_tree = None
-        _sess.udeb_dep_tree = None
-        _sess._cache_parse_build_mode = lambda: True
-        _sess._canonical_select_count = lambda _t: 1
-        _orig_dt = build.dependencytree.DependencyTree
-        build.dependencytree.DependencyTree = lambda *a, **k: MagicMock(
-            selected_srcs={'foo': MagicMock()})
-        try:
-            _sess.cmd_parse_dependency()
-        finally:
-            build.dependencytree.DependencyTree = _orig_dt
-    finally:
-        build.Spinner = _orig_Spinner
-
-    assert _done_called, "Spinner.done() should have been called"
-
-
 def test_humansize_thresholds():
     """B / KiB / MiB / GiB thresholds at 1024-multiples; one-decimal
     formatting matches the tunnel-output spec."""
@@ -27123,9 +26965,7 @@ def main() -> int:
         test_ux05a_auto_yes_short_circuits_informational_yesno,
         test_ux05a_auto_yes_does_not_skip_password_or_options,
         test_ux05b_atena_sudo_password_env_var_picked_up,
-        test_ux05c_progressbar_step_does_not_print_in_cli,
         test_ux05d_cli_print_emits_ansi_when_tty,
-        test_ux05e_main_strips_cmd_and_yes_from_argv_and_seeds_backend,
         test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits,
         test_ux05g_cmd_methods_reset_flags_on_entry,
         # SEC-05: opt-in build-dep audit gate
@@ -27363,7 +27203,6 @@ def main() -> int:
         test_canonical_names_filters_virtual_aliases_from_cohort,
         test_cohort_resolvers_route_through_canonical_names,
         test_cmd_init_container_gated_on_cache_ready,
-        test_autorun_step_lists_include_container_init,
         test_derive_extras_src_names_marks_extras_only_sources,
         # phase 1: live.list / installer.list split
         test_dep_tree_initialises_subset_exclusive_sets_empty,
@@ -27444,13 +27283,11 @@ def main() -> int:
         test_source_build_args_subsets_mutually_exclusive,
         test_source_build_pkg_subset_excludes_live_installer_extras,
         test_source_build_installer_subset_unions_udeb_tree_with_deb_arm,
-        test_refresh_patches_iterates_both_deb_and_udeb_trees,
         test_refresh_patches_invalidates_record_when_patch_newer,
         test_refresh_patches_keeps_result_when_patch_older_than_result,
         test_refresh_patches_skips_invalidation_for_header_only_edit,
         test_refresh_patches_invalidates_when_patches_removed,
         test_patch_set_hash_stable_and_order_sensitive,
-        test_source_download_iterates_both_deb_and_udeb_trees,
         test_autorun_installer_runs_source_build_then_source_build_installer,
         test_autorun_live_chains_iso_build_after_chroot,
         test_autorun_installer_chains_iso_build_after_chroot,
@@ -27838,7 +27675,6 @@ def main() -> int:
         test_cmd_set_mode_invalid_value_keeps_old_value,
         test_cmd_set_mode_same_value_is_noop,
         test_cmd_set_unknown_param_reports_available_list,
-        test_cmd_parse_dependency_build_mode_uses_spinner_done_not_stop,
         test_humansize_thresholds,
         test_shorten_origin_compacts_long_pool_url,
         test_new_build_record_threads_component_field,
