@@ -24479,6 +24479,72 @@ def test_coord_reconcile_detect_hash_conflicts_critical_and_info():
     assert 'reproducible' in _infos[0].kind
 
 
+def test_coord_reconcile_detect_hash_conflicts_multi_binary_same_source_no_false_positive():
+    """Regression 2026-06-05: a single source builds N binaries, all
+    sharing the same source name + source version but with DIFFERENT
+    filenames + DIFFERENT SHA-256 (normal — different files, naturally
+    different bytes).  Hash-conflict detector must NOT flag these as
+    a conflict.
+
+    Previously grouped by (package=source_name, built_version) which
+    false-positived every multi-binary source.  Now grouped by
+    `filename` (the unique-per-pkg+ver+arch key).
+    """
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    # Mirror the user's actual case: one source `firmware-nonfree`
+    # version `20230210-5` produces 6 distinct binaries (different
+    # filenames, different SHA-256s — perfectly normal).
+    _bins = [
+        ('firmware-amd-graphics_20230210-5_all.deb', 'a' * 64),
+        ('firmware-atheros_20230210-5_all.deb',      'b' * 64),
+        ('firmware-brcm80211_20230210-5_all.deb',    'c' * 64),
+        ('firmware-iwlwifi_20230210-5_all.deb',      'd' * 64),
+        ('firmware-misc-nonfree_20230210-5_all.deb', 'e' * 64),
+        ('firmware-realtek_20230210-5_all.deb',      'f' * 64),
+    ]
+    _claims = [
+        _s.new_claim(
+            builder='athena-primary', seq=_seq, package='firmware-nonfree',
+            intended_version='20230210-5', built_version='20230210-5',
+            filename=_fn, sha256=_sha, size=1,
+            snapshot='S', built_at='T',
+            claim_state=_s.CLAIM_STATE_PUBLISHED,
+        )
+        for _seq, (_fn, _sha) in enumerate(_bins, start=1)
+    ]
+    _findings = _r.detect_hash_conflicts({'athena-primary': _claims})
+    _crits = [_f for _f in _findings if _f.severity == 'CRITICAL']
+    assert _crits == [], (
+        f"multi-binary same-source must not raise hash conflicts; "
+        f"got {[f.message for f in _crits]}")
+
+
+def test_coord_reconcile_detect_hash_conflicts_same_filename_diff_sha_is_critical():
+    """Direct sanity: same filename + different SHA-256 across two
+    builders → CRITICAL (the case the detector actually exists for).
+    """
+    _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
+    _a = _s.new_claim(
+        builder='alice', seq=1, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo_1.0_amd64.deb', sha256='a' * 64, size=1,
+        snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _b = _s.new_claim(
+        builder='bob', seq=1, package='foo',
+        intended_version='1.0', built_version='1.0',
+        filename='foo_1.0_amd64.deb', sha256='b' * 64, size=1,
+        snapshot='S', built_at='T',
+        claim_state=_s.CLAIM_STATE_PUBLISHED,
+    )
+    _findings = _r.detect_hash_conflicts({'alice': [_a], 'bob': [_b]})
+    _crits = [_f for _f in _findings if _f.severity == 'CRITICAL']
+    assert len(_crits) == 1, _crits
+    assert 'hash conflict on foo_1.0_amd64.deb' in _crits[0].message, (
+        _crits[0].message)
+
+
 def test_coord_reconcile_publish_halt_round_trip():
     """write + read_publish_halt round-trips reason text."""
     _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
@@ -27871,6 +27937,8 @@ def main() -> int:
         test_coord_store_project_owners_skips_retracted,
         test_coord_store_project_owners_handles_empty_input,
         test_coord_reconcile_detect_hash_conflicts_critical_and_info,
+        test_coord_reconcile_detect_hash_conflicts_multi_binary_same_source_no_false_positive,
+        test_coord_reconcile_detect_hash_conflicts_same_filename_diff_sha_is_critical,
         test_coord_reconcile_publish_halt_round_trip,
         test_coord_reconcile_audit_local_orphan_detection,
         test_coord_reconcile_audit_local_hash_mismatch_critical,

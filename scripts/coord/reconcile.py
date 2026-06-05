@@ -310,19 +310,30 @@ def audit_cross(
 def detect_hash_conflicts(
     by_builder: 'Dict[str, List[dict]]',
 ) -> List[Finding]:
-    """Scan the merged claim view for (package, built_version) tuples
-    claimed by 2+ different builders with DIFFERENT sha256s.
+    """Scan the merged claim view for binary FILENAMES claimed 2+ times
+    with DIFFERENT sha256s.  A `.deb` filename encodes pkg+ver+arch
+    uniquely, so two claims for the same filename must agree on the
+    file's SHA-256 — they're either the same binary or two builders
+    that produced a bit-reproducible result.
 
     Hash conflict = HASH_CONFLICT_POLICY=BLOCK → CRITICAL.
 
-    Same (pkg, ver, sha256) by two builders is NOT a conflict — it
-    just means independent builds agreed on a hash.  That's the
-    happy outcome if both happen to be bit-reproducible; report it
-    as INFO so the audit at least mentions the duplication.
+    Same filename + same SHA-256 (across builders) is NOT a conflict —
+    it just means independent builds agreed bit-for-bit on the output.
+    That's the happy outcome; report it as INFO so the audit at least
+    surfaces the duplication.
+
+    NOTE: grouping by `claim.filename` (not by `(claim.package,
+    claim.built_version)`).  `claim.package` holds the SOURCE name —
+    e.g. `firmware-nonfree` source produces 6 distinct binary
+    filenames (firmware-amd-graphics, firmware-atheros, …) at the
+    same source version `20230210-5`.  Grouping by source pkg + ver
+    false-positives EVERY multi-binary source as a conflict.  Caught
+    2026-06-05.
     """
     _findings: List[Finding] = []
-    # Index: (package, built_version) → list of (builder, sha256)
-    _by_pv: 'Dict[Tuple[str, str], List[Tuple[str, str]]]' = {}
+    # Index: filename → list of (builder, sha256, package_source_name)
+    _by_fn: 'Dict[str, List[Tuple[str, str, str]]]' = {}
     for _bid, _claims in by_builder.items():
         _retracted: set = set()
         for _c in _claims:
@@ -335,31 +346,40 @@ def detect_hash_conflicts(
                 continue
             if int(_c.get('seq', 0)) in _retracted:
                 continue
-            _key = (str(_c.get('package')), str(_c.get('built_version')))
-            _by_pv.setdefault(_key, []).append((
-                str(_c.get('builder')), str(_c.get('sha256'))))
-    for (_pkg, _ver), _pairs in _by_pv.items():
-        if len(_pairs) < 2:
+            _fn = str(_c.get('filename') or '')
+            if not _fn:
+                continue
+            _by_fn.setdefault(_fn, []).append((
+                str(_c.get('builder')),
+                str(_c.get('sha256')),
+                str(_c.get('package') or ''),
+            ))
+    for _fn, _entries in _by_fn.items():
+        if len(_entries) < 2:
             continue
-        _shas = {_s for _b, _s in _pairs}
+        _shas = {_s for _b, _s, _ in _entries}
+        # Pull a representative source pkg name for the Finding's
+        # `package` field — entries for one filename always share the
+        # same source.
+        _pkg_field = _entries[0][2]
         if len(_shas) > 1:
-            _detail = ', '.join(f"{_b}={_s[:12]}" for _b, _s in _pairs)
+            _detail = ', '.join(f"{_b}={_s[:12]}" for _b, _s, _ in _entries)
             _findings.append(Finding(
                 severity='CRITICAL', kind='hash_conflict',
                 message=(
-                    f"hash conflict on ({_pkg}, {_ver}): {_detail} — "
+                    f"hash conflict on {_fn}: {_detail} — "
                     f"policy={_policy.HASH_CONFLICT_POLICY} → "
                     f"publish halt"),
-                package=_pkg,
+                package=_pkg_field,
             ))
         else:
-            _detail = ', '.join(_b for _b, _ in _pairs)
+            _builders = ', '.join(_b for _b, _, _ in _entries)
             _findings.append(Finding(
                 severity='INFO', kind='reproducible_duplicate',
                 message=(
-                    f"({_pkg}, {_ver}) shipped by multiple builders "
-                    f"({_detail}) with identical sha256 — reproducible"),
-                package=_pkg,
+                    f"{_fn} shipped by multiple builders "
+                    f"({_builders}) with identical sha256 — reproducible"),
+                package=_pkg_field,
             ))
     return _findings
 
