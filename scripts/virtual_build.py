@@ -83,6 +83,84 @@ def _strip_nmu_from_relation(raw: str) -> str:
     return PkgRelation.str(_relations)
 
 
+def _build_local_deb_index(local_repo_dir: str) -> Dict[str, Dict[str, str]]:
+    """Walk ``local_repo_dir`` once, build
+    ``{binary_name: {version_str: full_path}}``.  Used to read the
+    ACTUAL Depends our build emitted, which differs from upstream's
+    Depends when Build-Deps weren't available (the
+    ``libavcodec59 → libaribb24-0`` case: upstream cache says it
+    depends on libaribb24-0, but our fork built without libaribb24-dev
+    so dh_shlibdeps produced a smaller Depends list).
+    """
+    _index: Dict[str, Dict[str, str]] = {}
+    if not os.path.isdir(local_repo_dir):
+        return _index
+    for _root, _dirs, _files in os.walk(local_repo_dir):
+        for _f in _files:
+            if not _f.endswith(('.deb', '.udeb')):
+                continue
+            _base = _f.rsplit('.', 1)[0]
+            _parts = _base.split('_')
+            if len(_parts) != 3:
+                continue
+            _name, _ver, _arch = _parts
+            _index.setdefault(_name, {})[_ver] = os.path.join(_root, _f)
+    return _index
+
+
+def _read_local_deb_control(deb_path: str) -> 'Optional[Dict[str, str]]':
+    """Read control fields from a built .deb on disk via python-debian's
+    DebFile.  Returns ``{control_field: value_str}`` or None on any
+    error.  The fields here are the AUTHORITATIVE record of what our
+    build emitted — substvars resolved, NMU stripped, asg stamped."""
+    try:
+        from debian.debfile import DebFile
+        from debian.deb822 import Deb822
+        with DebFile(deb_path) as _deb:
+            _bytes = _deb.control.get_content('control')
+        if not _bytes:
+            return None
+        _ctrl = Deb822(_bytes)
+        return {_k: str(_ctrl[_k]) for _k in _ctrl}
+    except Exception:
+        return None
+
+
+def _pick_best_local_deb(
+    local_index: Dict[str, Dict[str, str]], binary_name: str,
+    pristine: str,
+) -> 'Optional[str]':
+    """Pick the highest-version locally-built .deb for ``binary_name``
+    at the given ``pristine`` base.  Returns the path or None when
+    nothing on disk matches.  Used to override upstream-inherited
+    Depends with our build's actual emission."""
+    _entries = local_index.get(binary_name)
+    if not _entries:
+        return None
+    # dpkg .deb filenames omit the epoch; pristine here may carry one.
+    # Compare both sides epoch-stripped so the match works.
+    _pristine_no_epoch = _strip_epoch(pristine)
+    _matching: 'List[Tuple[str, str]]' = []
+    for _ver, _path in _entries.items():
+        if _strip_epoch(utils.pristine_base(_ver)) == _pristine_no_epoch:
+            _matching.append((_ver, _path))
+    if not _matching:
+        return None
+    try:
+        import apt_pkg
+        apt_pkg.init_system()
+        _matching.sort(
+            key=lambda _vp: _vp[0],
+            reverse=False)
+        _best_ver, _best_path = _matching[0]
+        for _v, _p in _matching[1:]:
+            if apt_pkg.version_compare(_v, _best_ver) > 0:
+                _best_ver, _best_path = _v, _p
+        return _best_path
+    except Exception:
+        return _matching[0][1]
+
+
 def _upstream_canonical_source(upstream_record: Dict[str, str]) -> str:
     """Extract the canonical source-package name from an upstream
     binary Package record.  Per Debian Packages format, the ``Source:``
@@ -278,6 +356,7 @@ def synthesize_source_binaries(
     asg_ledger: Optional[Dict[str, List[str]]], release: int,
     arch: str, was_patched: bool = False,
     peer_sources: 'Optional[set[str]]' = None,
+    local_deb_index: 'Optional[Dict[str, Dict[str, str]]]' = None,
 ) -> List[Dict[str, str]]:
     """End-to-end: take one Source and return one synthesized RepoState
     record per binary it would emit.
@@ -412,16 +491,30 @@ def synthesize_source_binaries(
         for _b in _binaries:
             _virtual_ver_per_binary[_b] = _pristine_per_binary[_b]
 
-    # Step 4 — synthesize per-binary records using the per-target
-    # pristine map so sibling-pin rewriting catches metapackage cases.
+    # Step 4 — for each binary, prefer the AUTHORITATIVE record:
+    # the locally-built .deb's control fields if one exists at the
+    # same pristine base.  Real dh_shlibdeps already resolved
+    # substvars against our fork's actual link graph, so the local
+    # Depends is the only true source.  Falls back to upstream
+    # cache when no local artifact exists (binary not yet built or
+    # purged).  Catches the libavcodec59 → libaribb24-0 false
+    # closure break (fork drops opt-codecs not in Build-Deps).
     _out: List[Dict[str, str]] = []
     for _b in _binaries:
+        _control: 'Optional[Dict[str, str]]' = None
+        if local_deb_index is not None:
+            _deb_path = _pick_best_local_deb(
+                local_deb_index, _b, _pristine_per_binary[_b])
+            if _deb_path is not None:
+                _control = _read_local_deb_control(_deb_path)
+        if _control is None:
+            _control = _upstream_per_binary[_b]
         _rec = synthesize_binary_record(
             source_name=_src_name,
             binary_name=_b,
             virtual_version=_virtual_ver_per_binary[_b],
             arch=arch,
-            upstream_record=_upstream_per_binary[_b],
+            upstream_record=_control,
             sibling_ver_map=_virtual_ver_per_binary,
             sibling_pristine_map=_pristine_per_binary,
         )

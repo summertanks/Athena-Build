@@ -19788,6 +19788,75 @@ def test_virtual_build_global_pin_rewrite_resolves_cross_source_pin():
     assert _crit == [], _crit
 
 
+def test_virtual_build_local_deb_overrides_upstream_depends():
+    """When a locally-built .deb exists at the same pristine base,
+    its actual Depends MUST override upstream cache.  Catches the
+    fork-drops-codec class: upstream `libavcodec59` lists
+    `libaribb24-0 (>= 1.0.3)` but our fork-built artifact dropped
+    it (build-dep `libaribb24-dev` wasn't available, so
+    dh_shlibdeps produced a smaller Depends).  Inheriting upstream
+    verbatim produces a false closure CRITICAL; the local artifact
+    is the authoritative substvar-resolved source."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return  # Skip on hosts without dpkg
+    import virtual_build as _vb
+
+    class _StubSrc:
+        package = 'ffmpeg'
+        version = '5.1.9-0'
+        binary = ['libavcodec59']
+
+    with tempfile.TemporaryDirectory() as _td:
+        # Build a minimal local .deb whose Depends does NOT include
+        # libaribb24-0 (mirrors the fork-built reality).
+        _dest = os.path.join(_td, 'main', 'binary-amd64')
+        os.makedirs(_dest)
+        _build_minimal_deb(
+            os.path.join(_dest, 'libavcodec59_5.1.9-0_amd64.deb'),
+            'libavcodec59', '5.1.9-0', 'amd64')
+        _local_index = _vb._build_local_deb_index(_td)
+        assert 'libavcodec59' in _local_index
+        # Upstream cache claims a libaribb24-0 Depends — but local
+        # artifact doesn't.
+        _univ = {
+            'libavcodec59': {'5.1.9-0+deb12u1': {
+                'Package': 'libavcodec59',
+                'Version': '5.1.9-0+deb12u1',
+                'Source': 'ffmpeg', 'Architecture': 'amd64',
+                'Depends': 'libaribb24-0 (>= 1.0.3), libc6 (>= 2.35)',
+            }},
+        }
+        _recs = _vb.synthesize_source_binaries(
+            source=_StubSrc(), package_universe=_univ,
+            asg_ledger={}, release=1, arch='amd64',
+            peer_sources={'ffmpeg'}, local_deb_index=_local_index,
+        )
+        assert len(_recs) == 1
+        # The minimal .deb's Depends should NOT contain libaribb24-0
+        # (minimal-deb builder doesn't add it).  Local-deb override
+        # wins → libaribb24-0 absent from the synthesized Depends.
+        _dep = _recs[0].get('Depends', '')
+        assert 'libaribb24-0' not in _dep, _dep
+
+
+def test_virtual_build_local_deb_index_epoch_strip_matches_pristine():
+    """Filenames omit epoch; pristine may carry one.  `_pick_best_local_deb`
+    must strip epoch on both sides for the match to work."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    # Filename version (no epoch) vs pristine with epoch.
+    _idx = {'libavcodec59': {
+        '5.1.9-0+asg1u2': '/path/libavcodec59_5.1.9-0+asg1u2_amd64.deb',
+    }}
+    _got = _vb._pick_best_local_deb(
+        _idx, 'libavcodec59', pristine='7:5.1.9-0')
+    assert _got is not None
+    assert 'libavcodec59_5.1.9-0+asg1u2' in _got
+
+
 def test_virtual_build_classifies_out_of_scope_target_separately():
     """When ALL targets of an unresolved hard Depends are absent from
     the synth state, emit `virtual_target_out_of_scope` (operator
@@ -29553,6 +29622,8 @@ def main() -> int:
         test_virtual_build_skips_binaries_from_other_canonical_source,
         test_virtual_build_prefix_source_dedup_prefers_base_over_signed,
         test_virtual_build_global_pin_rewrite_resolves_cross_source_pin,
+        test_virtual_build_local_deb_overrides_upstream_depends,
+        test_virtual_build_local_deb_index_epoch_strip_matches_pristine,
         test_virtual_build_classifies_out_of_scope_target_separately,
         test_virtual_build_extract_relation_targets_handles_alternatives,
         test_virtual_build_recommends_suppressed_by_default,

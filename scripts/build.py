@@ -10330,15 +10330,28 @@ class BuildSession:
         _asg_ledger = _ra.published_ledger(self.config) or {}
         _universe = _vb.from_cache(self.cache)
         _arch = self.config.arch
+        # Build a one-shot index of locally-built .debs.  When a binary
+        # has a real artifact on disk, synth reads its ACTUAL control
+        # (post-dh_shlibdeps); upstream cache is the substvar fallback
+        # only.  Catches the fork-drops-codec false-CRITICAL class:
+        # upstream `Depends: libaribb24-0` is dropped by our fork
+        # because libaribb24-dev wasn't a Build-Dep, and the local
+        # .deb is the only source of truth for that.
+        _local_index = _vb._build_local_deb_index(self.config.dir_repo)
 
         # ---- Header ---------------------------------------------------
         console.print(
             f"virtual build: scope={_scope_label}  arch={_arch}  "
             f"release={_release}", tui.COLOR_HIGHLIGHT)
         console.print(
-            "  policy: conservative substvars (inherit upstream Depends; "
-            "rewrite sibling pins only).  Compile errors NOT detected.",
+            "  policy: local-artifact-authoritative (read built .deb's "
+            "control when present; upstream cache as fallback).  Compile "
+            "errors NOT detected.",
             tui.COLOR_INFO)
+        if _local_index:
+            console.print(
+                f"  indexed {len(_local_index)} local binary names "
+                "from repo/", tui.COLOR_INFO)
 
         # ---- Phase: synthesize binary records -------------------------
         _records: 'list[dict]' = []
@@ -10360,6 +10373,7 @@ class BuildSession:
                 asg_ledger=_asg_ledger, release=_release,
                 arch=_arch, was_patched=_was_patched,
                 peer_sources=set(_scope_names),
+                local_deb_index=_local_index,
             ))
         if _missing_srcs:
             console.print(
