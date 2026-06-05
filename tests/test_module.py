@@ -19409,6 +19409,167 @@ def test_compute_post_build_versions_uniform_n_across_siblings():
     }
 
 
+def test_virtual_build_synthesize_binary_record_inherits_upstream_deps():
+    """Synthesized record carries upstream Depends/Conflicts/Provides
+    verbatim except for sibling pins, which rewrite to virtual ver."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _upstream = {
+        'Package': 'libfoo3', 'Version': '3.0-1', 'Architecture': 'amd64',
+        'Depends': 'libc6 (>= 2.36), libfoo-data (= 3.0-1)',
+        'Conflicts': 'libfoo2',
+        'Provides': 'libfoo-api3',
+    }
+    _rec = _vb.synthesize_binary_record(
+        source_name='libfoo', source_pristine='3.0-1',
+        binary_name='libfoo3', virtual_version='3.0-1+asg1u1',
+        arch='amd64', upstream_record=_upstream,
+        sibling_ver_map={'libfoo3': '3.0-1+asg1u1',
+                         'libfoo-data': '3.0-1+asg1u1'},
+    )
+    # Version + sibling pin rewritten to virtual; external (libc6) kept.
+    assert _rec['Version'] == '3.0-1+asg1u1'
+    assert 'libc6 (>= 2.36)' in _rec['Depends']
+    assert 'libfoo-data (= 3.0-1+asg1u1)' in _rec['Depends']
+    assert _rec['Conflicts'] == 'libfoo2'
+    assert _rec['Provides'] == 'libfoo-api3'
+    # Filename + sha synthesized deterministically.
+    assert _rec['Filename'].endswith('libfoo3_3.0-1+asg1u1_amd64.deb')
+    assert len(_rec['SHA256']) == 64
+
+
+def test_virtual_build_synthesize_record_no_upstream_minimal_skeleton():
+    """When upstream cache doesn't carry this binary (kernel ABI name,
+    fork-only binary), synthesizer falls back to minimal record."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _rec = _vb.synthesize_binary_record(
+        source_name='linux', source_pristine='6.1.174-1',
+        binary_name='linux-headers-6.1.0-49-amd64',
+        virtual_version='6.1.174-1+asg1u1', arch='amd64',
+        upstream_record=None, sibling_ver_map={},
+    )
+    assert _rec['Package'] == 'linux-headers-6.1.0-49-amd64'
+    assert _rec['Version'] == '6.1.174-1+asg1u1'
+    assert _rec['Architecture'] == 'amd64'
+    assert _rec['Source'] == 'linux'
+    assert 'Depends' not in _rec   # nothing to inherit
+    assert _rec['Filename'].startswith('pool/main/')
+
+
+def test_virtual_build_sibling_pin_only_rewritten_when_pristine_matches():
+    """Sibling pin (= V) is rewritten ONLY when V's pristine base equals
+    the source's pristine.  An external constraint of the SAME version
+    (rare but possible) targeting a non-sibling name stays untouched."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _upstream = {
+        'Package': 'a', 'Version': '1.0-1',
+        # b is sibling — rewrite.  zzz is not — leave.
+        'Depends': 'b (= 1.0-1), zzz (= 1.0-1)',
+    }
+    _rec = _vb.synthesize_binary_record(
+        source_name='libfoo', source_pristine='1.0-1',
+        binary_name='a', virtual_version='1.0-1+asg1u1', arch='amd64',
+        upstream_record=_upstream,
+        sibling_ver_map={'a': '1.0-1+asg1u1', 'b': '1.0-1+asg1u1'},
+    )
+    assert 'b (= 1.0-1+asg1u1)' in _rec['Depends']
+    assert 'zzz (= 1.0-1)' in _rec['Depends']
+
+
+def test_virtual_build_sibling_pin_with_nmu_constraint_pristine_matches():
+    """Upstream constraint reads `b (= 1.0-1+deb12u1)` — pristine base
+    is 1.0-1 (matches source pristine) AND target is sibling → rewrite
+    to virtual.  Catches the path where upstream binaries from a security
+    snapshot have NMU-stamped intra-source pins."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _upstream = {
+        'Package': 'a', 'Version': '1.0-1+deb12u1',
+        'Depends': 'b (= 1.0-1+deb12u1)',
+    }
+    _rec = _vb.synthesize_binary_record(
+        source_name='libfoo', source_pristine='1.0-1',
+        binary_name='a', virtual_version='1.0-1+asg1u1', arch='amd64',
+        upstream_record=_upstream,
+        sibling_ver_map={'a': '1.0-1+asg1u1', 'b': '1.0-1+asg1u1'},
+    )
+    assert 'b (= 1.0-1+asg1u1)' in _rec['Depends']
+
+
+def test_virtual_build_synthesize_source_binaries_end_to_end():
+    """One Source → list of per-binary records via version math + cache
+    lookup.  Uses a stub Source with .package / .version / .binary."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _StubSrc:
+        package = 'openssl'
+        version = '3.0.15-1+deb12u1'   # NMU-stamped → delta → stamp
+        binary = ['openssl', 'libssl3']
+
+    _universe = {
+        'openssl': {
+            '3.0.15-1+deb12u1': {
+                'Package': 'openssl', 'Version': '3.0.15-1+deb12u1',
+                'Architecture': 'amd64',
+                'Depends': 'libssl3 (= 3.0.15-1+deb12u1), libc6 (>= 2.36)',
+            },
+        },
+        'libssl3': {
+            '3.0.15-1+deb12u1': {
+                'Package': 'libssl3', 'Version': '3.0.15-1+deb12u1',
+                'Architecture': 'amd64',
+                'Depends': 'libc6 (>= 2.36)',
+            },
+        },
+    }
+    _recs = _vb.synthesize_source_binaries(
+        source=_StubSrc(), package_universe=_universe,
+        asg_ledger={}, release=1, arch='amd64',
+    )
+    assert len(_recs) == 2
+    _by_name = {_r['Package']: _r for _r in _recs}
+    # NMU strip → delta → asg-stamp.  Both binaries at uniform N=1.
+    assert _by_name['openssl']['Version'] == '3.0.15-1+asg1u1'
+    assert _by_name['libssl3']['Version'] == '3.0.15-1+asg1u1'
+    # Sibling pin in openssl's Depends rewritten to virtual libssl3.
+    assert 'libssl3 (= 3.0.15-1+asg1u1)' in _by_name['openssl']['Depends']
+    # External constraint preserved.
+    assert 'libc6 (>= 2.36)' in _by_name['openssl']['Depends']
+
+
+def test_virtual_build_from_cache_collapses_hashtable_shape():
+    """`from_cache` flattens cache.package_hashtable's nested
+    Package list down to a single control-dict per (name, ver)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _StubPkg(dict):
+        def __init__(self, **fields):
+            super().__init__()
+            for _k, _v in fields.items():
+                self[_k] = _v
+            self.package = fields['Package']
+            self.version = fields['Version']
+
+    class _StubCache:
+        package_hashtable = {
+            'libfoo': {
+                '1.0-1': [_StubPkg(Package='libfoo', Version='1.0-1',
+                                   Architecture='amd64',
+                                   Depends='libc6')],
+            },
+        }
+    _u = _vb.from_cache(_StubCache())
+    assert set(_u.keys()) == {'libfoo'}
+    assert set(_u['libfoo'].keys()) == {'1.0-1'}
+    _ctrl = _u['libfoo']['1.0-1']
+    assert _ctrl['Package'] == 'libfoo'
+    assert _ctrl['Depends'] == 'libc6'
+
+
 def test_compute_post_build_versions_release_advances_resets_n():
     """A new release R bumps the major; N resets to 1 against the same
     base because asg_next_n is keyed on (base, release)."""
@@ -28491,6 +28652,13 @@ def main() -> int:
         test_compute_post_build_versions_lineage_ignores_unrelated_base,
         test_compute_post_build_versions_uniform_n_across_siblings,
         test_compute_post_build_versions_release_advances_resets_n,
+        # virtual-build chunk 2 — binary record synthesizer
+        test_virtual_build_synthesize_binary_record_inherits_upstream_deps,
+        test_virtual_build_synthesize_record_no_upstream_minimal_skeleton,
+        test_virtual_build_sibling_pin_only_rewritten_when_pristine_matches,
+        test_virtual_build_sibling_pin_with_nmu_constraint_pristine_matches,
+        test_virtual_build_synthesize_source_binaries_end_to_end,
+        test_virtual_build_from_cache_collapses_hashtable_shape,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,
         test_tunnel_filenames_for_source_uses_upstream_not_stripped,
