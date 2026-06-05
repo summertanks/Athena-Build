@@ -44,35 +44,35 @@ logger = logging.getLogger('athena')
 # ─────────────────────────── Synthesizer primitives ──────────────────
 
 
-def _pristine_constraint_match(constraint_ver: str,
-                                source_pristine: str) -> bool:
-    """True when an intra-binary constraint version (after NMU strip)
-    equals the source's pristine base — i.e. this is a sibling pin
-    that real-build would rewrite to our virtual version.
-
-    Constraint vers can be `<base>`, `<base>+debNuN`, `<base>+asgRuN`,
-    or `<base>-Nb<bN>` — all normalise to `<base>` via pristine_base.
-    """
-    return utils.pristine_base(constraint_ver) == source_pristine
-
-
-def _rewrite_sibling_pins(raw: str, source_pristine: str,
-                           sibling_ver_map: Dict[str, str]) -> str:
+def _rewrite_sibling_pins(raw: str,
+                           sibling_ver_map: Dict[str, str],
+                           sibling_pristine_map: Dict[str, str]) -> str:
     """Rewrite `(= V)` / `(>= V)` etc. constraints in a relation field
-    where the target is a sibling binary in the same source AND V
-    pristine-matches the source.  Other constraints left unchanged.
+    where the target is a sibling binary in the same source AND V's
+    pristine base equals THAT SIBLING'S pristine base (i.e. the
+    constraint pins the sibling's upstream version, which real-build
+    would re-stamp to the sibling's virtual version).
 
-    Uses python-debian's PkgRelation parser → reformat round-trip so we
-    don't have to handle every operator + whitespace edge case by hand.
+    Why per-target (not per-source) pristine matching: in a metapackage
+    source like ``gcc-defaults`` (source version ``1.213``), the
+    upstream binary ``gcc``'s control reads
+    ``Depends: cpp (= 4:12.2.0-3)`` — the constraint pins ``cpp`` at
+    the COMPILER upstream version, not the source version.  Matching
+    against the SIBLING's pristine catches this; matching against the
+    SOURCE's pristine misses it and leaves the dep referring to a
+    binary version that doesn't exist in the synthesized state →
+    spurious closure break.
+
+    Other constraints (external pkgs, non-matching versions) left
+    untouched.  Uses python-debian's PkgRelation parser → reformat
+    round-trip so we don't have to handle every operator + whitespace
+    edge case by hand.
     """
     if not raw or not sibling_ver_map:
         return raw
     try:
         from debian.deb822 import PkgRelation
     except ImportError:
-        # If python-debian is unavailable (shouldn't happen in this
-        # repo), leave the constraint untouched — verbatim inheritance
-        # is still informative for non-sibling deps.
         return raw
     try:
         _relations = PkgRelation.parse_relations(raw)
@@ -88,7 +88,9 @@ def _rewrite_sibling_pins(raw: str, source_pristine: str,
             if not _vc:
                 continue
             _op, _cur = _vc
-            if _pristine_constraint_match(_cur, source_pristine):
+            _target_pristine = sibling_pristine_map.get(_name, '')
+            if (_target_pristine
+                    and utils.pristine_base(_cur) == _target_pristine):
                 _rel['version'] = (_op, sibling_ver_map[_name])
                 _changed = True
     if not _changed:
@@ -96,16 +98,26 @@ def _rewrite_sibling_pins(raw: str, source_pristine: str,
     return PkgRelation.str(_relations)
 
 
+def _strip_epoch(version: str) -> str:
+    """Drop the ``<epoch>:`` prefix from a Debian version string.
+
+    On-disk ``.deb`` filenames OMIT the epoch entirely — dpkg-buildpackage
+    writes ``gcc_12.2.0-3_amd64.deb`` even though the internal
+    ``Version:`` is ``4:12.2.0-3``.  Verified against the live build
+    log 2026-06-05.  (HTTP URL-encoding to ``%3a`` is a separate apt
+    pool quirk that only kicks in if the filename DID carry the epoch
+    — which dpkg's filenames don't.)
+    """
+    return version.split(':', 1)[-1] if ':' in version else version
+
+
 def _stamped_filename(name: str, version: str, arch: str,
                       ext: str = '.deb') -> str:
     """Synthetic on-disk basename in `name_version_arch.ext` form —
     the same convention dpkg uses; matches what `mirror audit` would
-    see."""
-    # `:` (epoch) is illegal in filenames; dpkg writes it as `%3a` in
-    # apt pool filenames (e.g. libcurl4 epoch 7).  Pristine-base
-    # filename pattern matches.
-    _safe_ver = version.replace(':', '%3a')
-    return f"{name}_{_safe_ver}_{arch}{ext}"
+    see.  Strips the epoch from the version segment (dpkg's filename
+    convention; see :func:`_strip_epoch`)."""
+    return f"{name}_{_strip_epoch(version)}_{arch}{ext}"
 
 
 def _virtual_sha256(name: str, version: str, arch: str) -> str:
@@ -138,39 +150,36 @@ def _control_lookup_from_upstream(
 
 
 def synthesize_binary_record(
-    source_name: str, source_pristine: str,
-    binary_name: str, virtual_version: str, arch: str,
+    source_name: str, binary_name: str, virtual_version: str, arch: str,
     upstream_record: Optional[Dict[str, str]],
     sibling_ver_map: Dict[str, str],
+    sibling_pristine_map: Dict[str, str],
 ) -> Dict[str, str]:
     """Build one RepoState.packages-style record for a single virtual
     binary.
 
     `upstream_record` is the binary's CURRENT upstream control fields
-    (from cache.package_hashtable, highest version).  None means the
-    upstream cache doesn't carry this binary at all (a fork-only
-    binary, or a kernel-ABI-dependent name) — we then build a minimal
-    record with just Package / Version / Architecture / Filename /
-    Source / SHA256.  Real build would create this binary too; closure
-    against it works only via Provides from siblings, which is the
-    only thing we know about it statically anyway.
+    (from cache.package_hashtable, highest version).  None → minimal
+    skeleton with just Package / Version / Architecture / Filename /
+    Source / SHA256.
 
-    `sibling_ver_map` is the full `{binary_name: virtual_version}` for
-    this source so intra-source `(= V)` pins get rewritten.
+    `sibling_ver_map` is the full ``{binary_name: virtual_version}``
+    for this source.  `sibling_pristine_map` is the parallel
+    ``{binary_name: pristine_upstream_version}`` map — per-binary,
+    because metapackage sources (gcc-defaults, glibc) ship binaries at
+    DIFFERENT upstream versions than the source itself, so source-level
+    pristine matching would miss intra-source pins.  See
+    :func:`_rewrite_sibling_pins`.
 
     Returned dict carries str values (matches what scan_repo_state
     stores from apt_pkg.TagFile).
     """
     _fn = _stamped_filename(binary_name, virtual_version, arch)
     _sha = _virtual_sha256(binary_name, virtual_version, arch)
-    # Use the same component layout as dpkg-scanpackages /
-    # scan_repo_state expects (apt convention: pool/<component>/
-    # <first-letter-or-lib<L>>/<source>/<file>).
     _prefix = (binary_name[:4] if binary_name.startswith('lib')
                else binary_name[:1])
     _filename_field = (
         f"pool/main/{_prefix}/{source_name}/{_fn}")
-    # Skeleton — minimal record when no upstream is available.
     _rec: Dict[str, str] = {
         'Package':      binary_name,
         'Version':      virtual_version,
@@ -182,10 +191,6 @@ def synthesize_binary_record(
     }
     if upstream_record is None:
         return _rec
-    # Inherit relation fields from upstream — these carry symbolic
-    # substvars resolved by upstream's build.  For non-forked binaries
-    # this IS what our build would produce; for forked binaries it's
-    # the conservative-policy approximation (see module docstring).
     for _field in ('Depends', 'Pre-Depends', 'Recommends', 'Suggests',
                    'Enhances', 'Conflicts', 'Breaks', 'Provides',
                    'Replaces'):
@@ -193,19 +198,13 @@ def synthesize_binary_record(
         if not _raw:
             continue
         _rewritten = _rewrite_sibling_pins(
-            _raw, source_pristine, sibling_ver_map)
+            _raw, sibling_ver_map, sibling_pristine_map)
         _rec[_field] = _rewritten
-    # Inherit Priority/Section/etc if upstream carries them — purely
-    # informational for the audit, but mirror audit_nmu_residue + other
-    # passes reference some.
     for _field in ('Priority', 'Section', 'Essential',
                    'Multi-Arch', 'Homepage'):
         _val = upstream_record.get(_field)
         if _val:
             _rec[_field] = _val
-    # Architecture: upstream may say 'all' for arch-independent
-    # binaries; respect it (otherwise virtual closure misses arch-all
-    # deps).
     _ua = upstream_record.get('Architecture')
     if _ua and _ua.strip() in ('all', 'any'):
         _rec['Architecture'] = _ua.strip()
@@ -249,43 +248,96 @@ def synthesize_source_binaries(
     _binaries: List[str] = list(getattr(source, 'binary', []) or [])
     if not _binaries:
         return []
-    _ver_map = utils.compute_post_build_versions(
-        source_version=_src_ver, binaries=_binaries,
-        asg_ledger=asg_ledger, release=release,
-        was_patched=was_patched,
-    )
-    _pristine = utils.strip_nmu_suffix(_src_ver)
-    _out: List[Dict[str, str]] = []
+    _ledger = asg_ledger or {}
+
+    # Step 1 — per-binary upstream resolution.  Real dpkg-buildpackage
+    # writes each binary's filename with its OWN Version from
+    # debian/control (NOT the source's Version: field).  For
+    # metapackages (gcc-defaults source @ 1.213 → gcc binary @
+    # 4:12.2.0-3) the difference matters.  Look up each binary's
+    # upstream Package record and use ITS Version as the base.  Falls
+    # back to source.version when upstream cache doesn't carry the
+    # binary (kernel-ABI names, fork-only binaries).
+    import apt_pkg
+    apt_pkg.init_system()
+    _upstream_per_binary: Dict[str, Optional[Dict[str, str]]] = {}
+    _base_ver_per_binary: Dict[str, str] = {}
     for _b in _binaries:
-        _virt_ver = _ver_map.get(_b, _pristine)
-        _upstream = None
+        _upstream_per_binary[_b] = None
         _name_entries = package_universe.get(_b)
         if _name_entries:
-            # Pick highest version (apt-style).  package_universe shape
-            # mirrors cache.package_hashtable: {ver_str: record_dict}.
-            try:
-                import apt_pkg
-                _ordered = sorted(
-                    _name_entries.items(),
-                    key=lambda _kv: _kv[0],
-                    # apt_pkg.version_compare-based key is more accurate
-                    # but Python sort is stable + apt versions sort
-                    # close enough for tie-breaks here; reduce to
-                    # version_compare when callers report drift.
-                )
-                # Walk and pick highest via apt_pkg.version_compare.
-                _hi_ver, _hi_rec = _ordered[0]
-                for _v, _r in _ordered[1:]:
-                    if apt_pkg.version_compare(_v, _hi_ver) > 0:
-                        _hi_ver, _hi_rec = _v, _r
-                _upstream = _hi_rec
-            except Exception:
-                # Fall back to whatever first lookup returns.
-                _upstream = next(iter(_name_entries.values()), None)
+            _hi_ver, _hi_rec = next(iter(_name_entries.items()))
+            for _v, _r in _name_entries.items():
+                try:
+                    _cmp = apt_pkg.version_compare(_v, _hi_ver)
+                except Exception:
+                    _cmp = 0
+                if _cmp > 0:
+                    _hi_ver, _hi_rec = _v, _r
+            _upstream_per_binary[_b] = _hi_rec
+            # The KEY (_hi_ver) is the cache-table version; some
+            # callers stamp upstream Provides-aliased entries with the
+            # PROVIDED name's version, not the real one.  Prefer the
+            # record's own Version field when present — it's the
+            # authoritative upstream binary version.
+            _rec_ver = _hi_rec.get('Version', '') if _hi_rec else ''
+            _base_ver_per_binary[_b] = _rec_ver or str(_hi_ver)
+        else:
+            _base_ver_per_binary[_b] = _src_ver
+
+    # Step 2 — pristine base per binary (strip NMU residue).  asg-stamp
+    # math + intra-source pin rewriting both work on the pristine.
+    _pristine_per_binary: Dict[str, str] = {
+        _b: utils.strip_nmu_suffix(_v)
+        for _b, _v in _base_ver_per_binary.items()
+    }
+
+    # Step 3 — delta + lineage decision, uniform N across siblings.
+    # Mirrors BuildContainer._normalize_built_artifacts exactly: any
+    # binary triggers delta → all stamp; ledger entry at any sibling's
+    # pristine → lineage trigger; N = max(per-binary asg_next_n).
+    _any_delta = was_patched
+    for _b in _binaries:
+        if _pristine_per_binary[_b] != _base_ver_per_binary[_b]:
+            _any_delta = True
+            break
+    _has_lineage = False
+    for _b in _binaries:
+        for _prev in _ledger.get(_b, []):
+            if (utils.pristine_base(_prev) == _pristine_per_binary[_b]
+                    and utils.parse_asg_suffix(_prev) is not None):
+                _has_lineage = True
+                break
+        if _has_lineage:
+            break
+
+    _virtual_ver_per_binary: Dict[str, str] = {}
+    if _any_delta or _has_lineage:
+        _candidates = [
+            utils.asg_next_n(
+                _ledger.get(_b, []), _pristine_per_binary[_b], release)
+            for _b in _binaries
+        ]
+        _n = max(_candidates) if _candidates else 1
+        for _b in _binaries:
+            _virtual_ver_per_binary[_b] = utils.apply_asg_suffix(
+                _pristine_per_binary[_b], release, _n)
+    else:
+        for _b in _binaries:
+            _virtual_ver_per_binary[_b] = _pristine_per_binary[_b]
+
+    # Step 4 — synthesize per-binary records using the per-target
+    # pristine map so sibling-pin rewriting catches metapackage cases.
+    _out: List[Dict[str, str]] = []
+    for _b in _binaries:
         _rec = synthesize_binary_record(
-            source_name=_src_name, source_pristine=_pristine,
-            binary_name=_b, virtual_version=_virt_ver, arch=arch,
-            upstream_record=_upstream, sibling_ver_map=_ver_map,
+            source_name=_src_name,
+            binary_name=_b,
+            virtual_version=_virtual_ver_per_binary[_b],
+            arch=arch,
+            upstream_record=_upstream_per_binary[_b],
+            sibling_ver_map=_virtual_ver_per_binary,
+            sibling_pristine_map=_pristine_per_binary,
         )
         _out.append(_rec)
     return _out
@@ -332,6 +384,124 @@ def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
 # (the bump-rewrite path could share this).  Currently unused by chunk
 # 2 since PkgRelation handles the parse round-trip.
 _PIN_RE = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
+
+
+# ─────────────────────────── Self-validation against build records ──
+
+
+def validate_against_build_records(
+    source_names: 'List[str]',
+    source_lookup: 'Any',  # callable: name -> Source or dict
+    package_universe: 'Dict[str, Dict[str, Any]]',
+    asg_ledger: 'Optional[Dict[str, List[str]]]', release: int,
+    arch: str, buildlog_dir: str,
+) -> 'Tuple[Dict[str, Any], List[Tuple[str, str, str]]]':
+    """Run the synthesizer against each source for which a successful
+    build.json exists on disk; compare the predicted filenames
+    against the ACTUAL ``output_hashes`` keys produced by real
+    dpkg-buildpackage.
+
+    Returns ``(stats_dict, findings)``.  Stats:
+      ``sources_checked``  — sources with a matching build.json
+      ``sources_matched``  — synthesizer predictions == real filenames
+      ``sources_drifted``  — at least one predicted filename absent
+                             from real output, or vice versa
+
+    Findings (per drifted source):
+      ``virtual_validate_predicted_missing``  WARNING — real build
+            emitted a file the synthesizer did NOT predict (side
+            artifact, or upstream Binary: list under-reports)
+      ``virtual_validate_predicted_extra``    WARNING — synthesizer
+            predicted a file real build did NOT emit (Build-Profile
+            filter, arch mismatch)
+      ``virtual_validate_version_drift``      CRITICAL — predicted
+            filename's name matches a real one but version segment
+            differs (asg-stamp math wrong, or upstream-version
+            lookup wrong)
+
+    Self-test for the synthesizer; intended to be run after every
+    significant successful build round so drift surfaces immediately.
+    """
+    import utils as _utils
+    _findings: 'List[Tuple[str, str, str]]' = []
+    _stats: 'Dict[str, int]' = {
+        'sources_checked': 0,
+        'sources_matched': 0,
+        'sources_drifted': 0,
+    }
+    for _name in source_names:
+        _rec = _utils.read_build_record(buildlog_dir, _name)
+        if _rec is None:
+            continue
+        _real_files: 'List[str]' = list(
+            (_rec.get('output_hashes') or {}).keys())
+        if not _real_files:
+            continue
+        _stats['sources_checked'] += 1
+        _src = source_lookup(_name)
+        if _src is None:
+            continue
+        _was_patched = bool(getattr(_src, 'patch_list', None))
+        _virt = synthesize_source_binaries(
+            source=_src, package_universe=package_universe,
+            asg_ledger=asg_ledger, release=release,
+            arch=arch, was_patched=_was_patched,
+        )
+        _pred_files: 'List[str]' = [
+            os.path.basename(_r.get('Filename', '') or '')
+            for _r in _virt
+        ]
+        # output_hashes accumulates HISTORY across rebuilds (e.g.
+        # glibc carries both +asg1u1 and +asg1u2 of the same binary).
+        # The synthesizer predicts ONE-NEXT-BUILD, not history; so
+        # compare by binary name (the first `_` segment) instead of
+        # full filename.
+        def _binary_name(_fn: str) -> str:
+            return _fn.split('_', 1)[0] if '_' in _fn else _fn
+
+        _real_names: 'set[str]' = {_binary_name(_f) for _f in _real_files}
+        _pred_names: 'set[str]' = {_binary_name(_f) for _f in _pred_files}
+        _missing = _real_names - _pred_names   # real has, pred doesn't
+        _extra = _pred_names - _real_names     # pred has, real doesn't
+        # Version drift: same binary name, but predicted filename
+        # doesn't appear in the real output_hashes' history.  A
+        # plausible prediction is one of the historic versions; if
+        # NONE match, the asg-stamp math is wrong.
+        _real_by_name: 'Dict[str, set[str]]' = {}
+        for _fn in _real_files:
+            _real_by_name.setdefault(_binary_name(_fn), set()).add(_fn)
+        _version_drift: 'List[Tuple[str, str, str]]' = []
+        for _bn in _real_names & _pred_names:
+            _pred_match = [_f for _f in _pred_files
+                           if _binary_name(_f) == _bn]
+            _real_match = _real_by_name.get(_bn, set())
+            if not any(_p in _real_match for _p in _pred_match):
+                _version_drift.append((
+                    _bn,
+                    ','.join(sorted(_real_match)[:3]),
+                    ','.join(_pred_match[:3])))
+        if not _missing and not _extra and not _version_drift:
+            _stats['sources_matched'] += 1
+            continue
+        _stats['sources_drifted'] += 1
+        for _bn, _real_str, _pred_str in _version_drift[:5]:
+            _findings.append((
+                'CRITICAL', 'virtual_validate_version_drift',
+                f"{_name}/{_bn}: predicted={_pred_str!r} but built "
+                f"history has {_real_str!r}"))
+        if _missing:
+            _findings.append((
+                'WARNING', 'virtual_validate_predicted_missing',
+                f"{_name}: real build emitted {len(_missing)} "
+                "binary name(s) synthesizer did NOT predict — first: "
+                f"{next(iter(sorted(_missing)))}"))
+        if _extra:
+            _findings.append((
+                'WARNING', 'virtual_validate_predicted_extra',
+                f"{_name}: synthesizer predicted {len(_extra)} binary "
+                "name(s) real build did NOT emit — first: "
+                f"{next(iter(sorted(_extra)))}"))
+    return _stats, _findings
 
 
 # ─────────────────────────── RepoState assembly ──────────────────────
@@ -548,19 +718,34 @@ def virtual_publish_dry_run(
     apt_pkg.init_system()
 
     _findings: 'List[Tuple[str, str, str]]' = []
-    _ours = synthesize_claim_ledger(
-        virtual_records, our_builder_id, snapshot)
     _merged: 'Dict[str, List[Dict[str, Any]]]' = {}
     if remote_by_builder:
         for _bid, _claims in remote_by_builder.items():
             _merged[_bid] = list(_claims)
-    # Merge our synthetic claims into our builder's bucket (if we have
-    # a remote bucket for the same builder, append after seq advance).
+
+    # Skip virtual records for filenames already published by us on
+    # the remote.  A real publish wouldn't re-emit them (the .deb
+    # already exists on the mirror at our claim's sha) — and
+    # generating a NEW synthetic claim with a DIFFERENT (synthetic)
+    # sha for the same filename would fire detect_hash_conflicts as
+    # "athena-primary vs athena-primary" — a false-positive specific
+    # to the dry-run model.  Real ownership decisions only apply to
+    # filenames we'd actually push.
     _existing = _merged.get(our_builder_id, [])
+    _existing_fns: 'set[str]' = {
+        str(_c.get('filename') or '')
+        for _c in _existing
+        if _c.get('claim_state') != 'retracted'
+    }
+    _new_records = [
+        _r for _r in virtual_records
+        if os.path.basename(_r.get('Filename', '') or '')
+        not in _existing_fns
+    ]
     _seq_floor = (max((_c.get('seq', 0) for _c in _existing),
                       default=0) + 1)
     _ours_renumbered = synthesize_claim_ledger(
-        virtual_records, our_builder_id, snapshot,
+        _new_records, our_builder_id, snapshot,
         seq_start=_seq_floor)
     _merged[our_builder_id] = _existing + _ours_renumbered[our_builder_id]
 
