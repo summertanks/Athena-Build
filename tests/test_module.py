@@ -22188,24 +22188,39 @@ def test_cmd_get_named_param_returns_current_value():
         assert any('distribution' in _p for _p in _printed), _printed
 
 
-def test_cmd_set_mode_switches_value_and_clears_dep_check_ready():
+def test_cmd_set_mode_switches_value_and_warns_to_re_run_cache_parse():
+    """Mode change clears dep_check_ready AND prints a `cache parse`
+    warning regardless of the prior flag state.  Dep-tree contents
+    depend on the mode (build mode short-circuits passes III–VII), so
+    any cached parse is invalid post-change."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
     with tempfile.TemporaryDirectory() as _tmp:
+        # Case 1: dep_check_ready already True.
         _sess, _build_mod = _build_session_for_setget(_tmp)
         _printed: 'list[str]' = []
         _build_mod.console.print = lambda *a, **k: _printed.append(str(a[0]))
-
-        # dep_check_ready starts True (the MagicMock default we set).
         _sess.cmd_set('mode', 'build')
-
         assert _sess.config.build_mode == 'build'
-        # dep_check_ready must be cleared so cache parse re-runs.
         assert _sess.flags.dep_check_ready is False, _sess.flags
         _joined = '\n'.join(_printed)
         assert 'build' in _joined
-        assert 'dep_check_ready cleared' in _joined
+        assert 'cache parse' in _joined
+        assert 'mode change requires' in _joined.lower()
+
+        # Case 2: dep_check_ready already False (operator hasn't parsed
+        # yet).  Warning must STILL print so the operator knows the
+        # mode change carries the same requirement.
+        _sess2, _ = _build_session_for_setget(_tmp)
+        _sess2.flags.dep_check_ready = False
+        _printed2: 'list[str]' = []
+        _build_mod.console.print = lambda *a, **k: _printed2.append(str(a[0]))
+        _sess2.cmd_set('mode', 'build')
+        assert _sess2.config.build_mode == 'build'
+        _joined2 = '\n'.join(_printed2)
+        assert 'cache parse' in _joined2, (
+            "warning must print even when dep_check_ready was already False")
 
 
 def test_cmd_set_mode_invalid_value_keeps_old_value():
@@ -27671,7 +27686,7 @@ def main() -> int:
         test_normalize_built_artifacts_uses_uniform_n_across_siblings,
         test_cmd_get_lists_every_gettable_param_when_called_bare,
         test_cmd_get_named_param_returns_current_value,
-        test_cmd_set_mode_switches_value_and_clears_dep_check_ready,
+        test_cmd_set_mode_switches_value_and_warns_to_re_run_cache_parse,
         test_cmd_set_mode_invalid_value_keeps_old_value,
         test_cmd_set_mode_same_value_is_noop,
         test_cmd_set_unknown_param_reports_available_list,
