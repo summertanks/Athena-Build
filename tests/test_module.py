@@ -19807,65 +19807,15 @@ def test_virtual_build_global_pin_rewrite_resolves_cross_source_pin():
     assert _crit == [], _crit
 
 
-def test_virtual_build_diagnose_out_of_scope_traces_build_dep():
-    """`diagnose_out_of_scope_targets` walks selected sources'
-    Build-Depends and answers WHY a target isn't in scope.
-    The canonical case: ffmpeg Build-Depends libaribb24-dev; cache
-    parse walks runtime closure only, not Build-Depends — so
-    aribb24 source never gets pulled even though upstream binary
-    libaribb24-0 is referenced."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import virtual_build as _vb
-
-    class _FfmpegSrc:
-        package = 'ffmpeg'
-
-        def build_depends(self, arch, active_profiles):
-            # Mock parsed Build-Depends: list of OR-groups; each
-            # OR-group is a list of (name, ver, op) tuples.
-            return [
-                [('libaribb24-dev', '', '')],
-                [('libc-dev', '', '')],
-            ]
-    _selected = {'ffmpeg': _FfmpegSrc()}
-    _univ: dict = {}  # not exercised for this direct-hit path
-    _why = _vb.diagnose_out_of_scope_targets(
-        target_names=['libaribb24-dev'],
-        selected_srcs=_selected, package_universe=_univ,
-        arch='amd64')
-    assert 'ffmpeg' in _why['libaribb24-dev']
-    assert 'libaribb24-dev' in _why['libaribb24-dev']
-    assert 'cache parse' in _why['libaribb24-dev']
-
-
-def test_virtual_build_diagnose_no_build_dep_when_orphan():
-    """When NO selected source references the target in its
-    Build-Depends, surface the orphan case clearly."""
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import virtual_build as _vb
-
-    class _OtherSrc:
-        package = 'other'
-
-        def build_depends(self, arch, active_profiles):
-            return [[('libc-dev', '', '')]]
-
-    _why = _vb.diagnose_out_of_scope_targets(
-        target_names=['libnobody-cares'],
-        selected_srcs={'other': _OtherSrc()},
-        package_universe={}, arch='amd64')
-    assert 'no selected source' in _why['libnobody-cares']
-
-
-def test_virtual_build_out_of_scope_is_warning_not_critical():
-    """Cache parse decides scope; real build's dh_shlibdeps follows
-    that decision.  If a consumer's hard Depends references a target
-    absent from synth state, the upstream-inherited constraint is
-    most likely vestigial — virtual cannot tell pre-build, so this
-    is WARNING (operator awareness), not CRITICAL (gating).
-
-    Pins the user's principle: out-of-scope deps are observational,
-    not a synth bug or installer-breaking guarantee."""
+def test_virtual_build_absent_target_is_silent():
+    """Target absent from synth state must produce NO finding.
+    Cache parse decides scope for the installed system; build-time
+    `dh_shlibdeps` runs in the build chroot (upstream Debian today)
+    and resolves substvars there, not against our scope.  Virtual
+    build cannot statically determine whether an absent target
+    will or won't end up in the consumer's actual Depends — so it
+    stays silent.  Real `repo audit` post-build reads the on-disk
+    Depends and surfaces any genuine closure break."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
     _recs = [
@@ -19876,52 +19826,34 @@ def test_virtual_build_out_of_scope_is_warning_not_critical():
     ]
     _, _f = _vb.virtual_repo_audit(
         _recs, install_corpus=frozenset({'consumer'}))
-    _kinds = [(_t[0], _t[1]) for _t in _f]
-    assert ('WARNING', 'virtual_target_out_of_scope') in _kinds
-    # NOT CRITICAL.
-    assert not any(_sev == 'CRITICAL'
-                   and _kind == 'virtual_target_out_of_scope'
-                   for _sev, _kind in _kinds)
+    # No CRITICAL, no WARNING, no INFO for the absent-target case.
+    _audit_kinds = [_t[1] for _t in _f
+                    if _t[1] not in (
+                        'virtual_binary_list_overlap',
+                        'virtual_dedup_ambiguous')]
+    assert _audit_kinds == [], _audit_kinds
 
 
-def test_virtual_build_classifies_out_of_scope_target_separately():
-    """When ALL targets of an unresolved hard Depends are absent from
-    the synth state, emit `virtual_target_out_of_scope` (operator
-    fixes by adding source to dep_tree or tunneling).  When a target
-    IS in state but version doesn't match, emit
-    `virtual_closure_break` (potential synth bug).  Operator needs
-    different actions for each."""
+def test_virtual_build_version_mismatch_stays_critical():
+    """Target IS in state but version doesn't match → CRITICAL
+    virtual_closure_break (real synth bug, post-asg-stamp math is
+    wrong somewhere).  This case is preserved as the only blocking
+    closure finding virtual can prove pre-build."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
     _recs = [
-        # Consumer with target absent from synth scope.
-        {'Package': 'consumer-a', 'Version': '1.0',
-         'Architecture': 'amd64', 'Source': 'sa',
-         'Depends': 'libabsent-not-in-scope (>= 1.0)',
-         'Filename': 'pool/c.deb', 'SHA256': 'x' * 64, 'Size': '0'},
-        # Consumer with target present but wrong version.
-        {'Package': 'consumer-b', 'Version': '1.0',
+        {'Package': 'consumer', 'Version': '1.0',
          'Architecture': 'amd64', 'Source': 'sb',
          'Depends': 'libpresent (= 99.99)',
-         'Filename': 'pool/c2.deb', 'SHA256': 'y' * 64, 'Size': '0'},
-        # The present target at a non-matching version.
+         'Filename': 'pool/c.deb', 'SHA256': 'x' * 64, 'Size': '0'},
         {'Package': 'libpresent', 'Version': '1.0',
          'Architecture': 'amd64', 'Source': 'sl',
-         'Filename': 'pool/l.deb', 'SHA256': 'z' * 64, 'Size': '0'},
+         'Filename': 'pool/l.deb', 'SHA256': 'y' * 64, 'Size': '0'},
     ]
     _, _f = _vb.virtual_repo_audit(
-        _recs,
-        install_corpus=frozenset({'consumer-a', 'consumer-b'}))
-    # Out-of-scope is WARNING (cache parse decided; not blocking).
-    # Closure_break is CRITICAL (target present at wrong version
-    # — real synth bug).
-    _crits = sorted(_t[1] for _t in _f if _t[0] == 'CRITICAL')
-    _warns = sorted(_t[1] for _t in _f if _t[0] == 'WARNING')
+        _recs, install_corpus=frozenset({'consumer'}))
+    _crits = [_t[1] for _t in _f if _t[0] == 'CRITICAL']
     assert _crits == ['virtual_closure_break'], _crits
-    assert 'virtual_target_out_of_scope' in _warns, _warns
-    _oos = [_t for _t in _f
-            if _t[1] == 'virtual_target_out_of_scope']
-    assert 'libabsent-not-in-scope' in _oos[0][2]
 
 
 def test_virtual_build_extract_relation_targets_handles_alternatives():
@@ -20082,13 +20014,11 @@ def test_virtual_build_synthesize_repo_state_resolves_closed_graph():
     assert 'b' in _state.packages
 
 
-def test_virtual_build_closure_break_emits_critical():
-    """Closure-break classification covers two cases:
-      - target absent → WARNING virtual_target_out_of_scope
-        (cache parse decision; real dh_shlibdeps follows; not gating)
-      - target present, wrong version, unambiguous dedup →
-        CRITICAL virtual_closure_break (real synth bug)
-    This test pins the WARNING path (target absent)."""
+def test_virtual_build_absent_target_emits_no_finding():
+    """Target absent from synth state produces no finding at all
+    (virtual cannot determine outcome pre-build — see
+    test_virtual_build_absent_target_is_silent for full
+    rationale)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
     _recs = [
@@ -20098,10 +20028,10 @@ def test_virtual_build_closure_break_emits_critical():
     ]
     _state, _f = _vb.virtual_repo_audit(
         _recs, install_corpus=frozenset({'a'}))
-    _warn_kinds = [_t[1] for _t in _f if _t[0] == 'WARNING']
-    assert 'virtual_target_out_of_scope' in _warn_kinds
-    _crit_kinds = [_t[1] for _t in _f if _t[0] == 'CRITICAL']
-    assert _crit_kinds == [], _crit_kinds
+    _kinds = [_t[1] for _t in _f
+              if _t[1] not in ('virtual_binary_list_overlap',
+                               'virtual_dedup_ambiguous')]
+    assert _kinds == [], _kinds
 
 
 def test_virtual_build_synthesize_repo_state_flags_duplicate_name():
@@ -29654,10 +29584,8 @@ def main() -> int:
         test_virtual_build_ambiguous_dedup_emits_warning_and_tracks_name,
         test_virtual_build_unambiguous_dedup_no_ambiguity_warning,
         test_virtual_build_global_pin_rewrite_resolves_cross_source_pin,
-        test_virtual_build_out_of_scope_is_warning_not_critical,
-        test_virtual_build_diagnose_out_of_scope_traces_build_dep,
-        test_virtual_build_diagnose_no_build_dep_when_orphan,
-        test_virtual_build_classifies_out_of_scope_target_separately,
+        test_virtual_build_absent_target_is_silent,
+        test_virtual_build_version_mismatch_stays_critical,
         test_virtual_build_extract_relation_targets_handles_alternatives,
         test_virtual_build_recommends_suppressed_by_default,
         test_virtual_build_canonical_filter_off_when_peer_not_in_scope,
@@ -29665,7 +29593,7 @@ def main() -> int:
         test_virtual_publish_dry_run_synthesizes_only_new_filenames,
         # virtual-build chunk 3 — RepoState assembly + virtual repo_audit
         test_virtual_build_synthesize_repo_state_resolves_closed_graph,
-        test_virtual_build_closure_break_emits_critical,
+        test_virtual_build_absent_target_emits_no_finding,
         test_virtual_build_synthesize_repo_state_flags_duplicate_name,
         test_virtual_build_no_duplicate_findings_when_no_overlap,
         test_virtual_build_invalid_record_skipped_with_critical,
