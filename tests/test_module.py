@@ -19643,6 +19643,67 @@ def test_virtual_build_live_cohort_conflict_critical():
     assert _conf2 == []
 
 
+def test_cmd_virtual_dispatch_routes_build_and_run():
+    """`virtual build` and `virtual run` both reach cmd_virtual_build;
+    bare `virtual` also delegates (default action)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _calls = []
+    _sess.cmd_virtual_build = lambda *a, **k: _calls.append(('vb', a))  # type: ignore
+    _sess._group_help = lambda *a, **k: 'help'                          # type: ignore
+    _sess.cmd_virtual('build', 'all')
+    _sess.cmd_virtual('run')
+    _sess.cmd_virtual('')
+    assert len(_calls) == 3
+    assert _calls[0] == ('vb', ('all',))
+    assert _calls[1] == ('vb', ())
+    assert _calls[2] == ('vb', ())
+
+
+def test_cmd_virtual_build_refuses_without_cache():
+    """No cache → CRITICAL error + False return.  Operator must run
+    `cache build` + `cache parse` first."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.cache = None
+    _lines = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _r = _sess.cmd_virtual_build()
+    finally:
+        build.console.print = _orig
+    assert _r is False
+    assert any('cache not parsed' in _ln for _ln in _lines)
+
+
+def test_cmd_virtual_build_refuses_without_dep_tree():
+    """Cache present but dep_tree=None → CRITICAL error + False."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.cache = object()       # truthy but no data
+    _sess.dep_tree = None
+    _lines = []
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    try:
+        _r = _sess.cmd_virtual_build()
+    finally:
+        build.console.print = _orig
+    assert _r is False
+    assert any('dep_tree not populated' in _ln for _ln in _lines)
+
+
 def test_virtual_build_synthesize_claim_ledger_one_per_record():
     """One virtual record → one claim under our builder; seq monotonic
     from seq_start; intended==built_version (virtual)."""
@@ -28904,6 +28965,10 @@ def main() -> int:
         test_virtual_build_synthesize_repo_state_flags_duplicate_name,
         test_virtual_build_invalid_record_skipped_with_critical,
         test_virtual_build_live_cohort_conflict_critical,
+        # virtual-build chunk 5 — CLI dispatcher
+        test_cmd_virtual_dispatch_routes_build_and_run,
+        test_cmd_virtual_build_refuses_without_cache,
+        test_cmd_virtual_build_refuses_without_dep_tree,
         # virtual-build chunk 4 — claim ledger + publish dry-run
         test_virtual_build_synthesize_claim_ledger_one_per_record,
         test_virtual_publish_dry_run_silent_against_empty_remote,
