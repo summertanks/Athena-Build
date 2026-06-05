@@ -178,17 +178,43 @@ def strip_deb_to_pristine(deb_path: str, dry_run: bool) -> Tuple[str, str]:
     if new_path != deb_path and os.path.exists(new_path):
         os.remove(new_path)
 
-    with tempfile.TemporaryDirectory(prefix='strip-asg-') as work:
-        subprocess.run(
-            ['dpkg-deb', '-R', deb_path, work],
-            check=True, capture_output=True,
-        )
-        with open(os.path.join(work, 'DEBIAN', 'control'), 'w') as fh:
-            fh.write(new_ctrl_text)
-        subprocess.run(
-            ['dpkg-deb', '--root-owner-group', '-b', work, new_path],
-            check=True, capture_output=True,
-        )
+    try:
+        with tempfile.TemporaryDirectory(prefix='strip-asg-') as work:
+            _r = subprocess.run(
+                ['dpkg-deb', '-R', deb_path, work],
+                capture_output=True, text=True,
+            )
+            if _r.returncode != 0:
+                print(f"  SKIP (dpkg-deb -R failed, exit {_r.returncode}): "
+                      f"{base}")
+                _err = (_r.stderr or _r.stdout or '').strip()
+                if _err:
+                    for _line in _err.splitlines()[:4]:
+                        print(f"    {_line}")
+                return ('error', deb_path)
+            with open(os.path.join(work, 'DEBIAN', 'control'), 'w') as fh:
+                fh.write(new_ctrl_text)
+            _r = subprocess.run(
+                ['dpkg-deb', '--root-owner-group', '-b', work, new_path],
+                capture_output=True, text=True,
+            )
+            if _r.returncode != 0:
+                print(f"  SKIP (dpkg-deb -b failed, exit {_r.returncode}): "
+                      f"{base}")
+                _err = (_r.stderr or _r.stdout or '').strip()
+                if _err:
+                    for _line in _err.splitlines()[:4]:
+                        print(f"    {_line}")
+                # Clean up any partial output.
+                if new_path != deb_path and os.path.exists(new_path):
+                    try:
+                        os.remove(new_path)
+                    except OSError:
+                        pass
+                return ('error', deb_path)
+    except Exception as e:
+        print(f"  SKIP ({type(e).__name__}): {base}: {e}")
+        return ('error', deb_path)
 
     # Remove the old .deb (now superseded) and any matching .verified sidecar.
     if new_path != deb_path:
@@ -314,6 +340,7 @@ def main():
     print("=== Phase 3: strip kept variants to pristine ===")
     stripped = 0
     unchanged = 0
+    errors = 0
     for fn in sorted(os.listdir(LINUX_DIR)):
         if fn in _scheduled_removal:
             continue
@@ -336,7 +363,10 @@ def main():
                 _scheduled_removal.add(fn + '.verified')
         elif status == 'unchanged':
             unchanged += 1
-    print(f"  → {stripped} stripped, {unchanged} already pristine\n")
+        elif status == 'error':
+            errors += 1
+    print(f"  → {stripped} stripped, {unchanged} already pristine"
+          + (f", {errors} skipped on error" if errors else "") + "\n")
 
     # ── Phase 4: wipe any remaining orphan .verified sidecars ──────────────
     print("=== Phase 4: wipe orphan .verified sidecars ===")
@@ -359,11 +389,16 @@ def main():
         orphans_removed += 1
     print(f"  → {orphans_removed} orphan sidecars\n")
 
+    _err_tail = f", {errors} skipped on error" if errors else ""
     print(f"{'Dry-run' if dry_run else 'Recovery'} complete: "
-          f"{old_removed} old-gen + {deduped} dups + {stripped} stripped "
-          f"+ {orphans_removed} orphans.")
+          f"{old_removed} old-gen + {deduped} dups + {stripped} stripped"
+          f"{_err_tail} + {orphans_removed} orphans.")
+    if errors:
+        print(f"\nWARN: {errors} file(s) skipped due to errors above.  "
+              f"Re-run the script after investigating — it is idempotent "
+              f"(already-pristine files are skipped on re-run).")
     if dry_run:
-        print("Re-run with --apply to commit.")
+        print("\nRe-run with --apply to commit.")
     else:
         print("\nNext steps:")
         print("  1. `repo index`   — regenerate Packages")
