@@ -10330,28 +10330,16 @@ class BuildSession:
         _asg_ledger = _ra.published_ledger(self.config) or {}
         _universe = _vb.from_cache(self.cache)
         _arch = self.config.arch
-        # Build a one-shot index of locally-built .debs.  When a binary
-        # has a real artifact on disk, synth reads its ACTUAL control
-        # (post-dh_shlibdeps); upstream cache is the substvar fallback
-        # only.  Catches the fork-drops-codec false-CRITICAL class:
-        # upstream `Depends: libaribb24-0` is dropped by our fork
-        # because libaribb24-dev wasn't a Build-Dep, and the local
-        # .deb is the only source of truth for that.
-        _local_index = _vb._build_local_deb_index(self.config.dir_repo)
 
         # ---- Header ---------------------------------------------------
         console.print(
             f"virtual build: scope={_scope_label}  arch={_arch}  "
             f"release={_release}", tui.COLOR_HIGHLIGHT)
         console.print(
-            "  policy: local-artifact-authoritative (read built .deb's "
-            "control when present; upstream cache as fallback).  Compile "
-            "errors NOT detected.",
+            "  policy: pre-build prediction from cache + asg ledger; "
+            "out-of-scope deps reported as WARNING (cache parse decides "
+            "scope, dh_shlibdeps follows).  Compile errors NOT detected.",
             tui.COLOR_INFO)
-        if _local_index:
-            console.print(
-                f"  indexed {len(_local_index)} local binary names "
-                "from repo/", tui.COLOR_INFO)
 
         # ---- Phase: synthesize binary records -------------------------
         _records: 'list[dict]' = []
@@ -10373,7 +10361,6 @@ class BuildSession:
                 asg_ledger=_asg_ledger, release=_release,
                 arch=_arch, was_patched=_was_patched,
                 peer_sources=set(_scope_names),
-                local_deb_index=_local_index,
             ))
         if _missing_srcs:
             console.print(
@@ -10489,35 +10476,35 @@ class BuildSession:
 
         # ---- Summary --------------------------------------------------
         _total_crit = len(_audit_crit) + len(_pub_crit)
-        # Out-of-scope target consolidation: when CRITICALs are all
-        # `virtual_target_out_of_scope`, surface the unique missing
-        # target names as actionable list (scope expand / tunnel).
-        _oos = [_f for _f in _audit_findings
-                if _f[1] == 'virtual_target_out_of_scope']
-        if _oos:
-            _missing_targets: 'set[str]' = set()
-            for _, _, _msg in _oos:
-                # Extract the comma-list between "— " and " not in"
+        # Roll up WARNING-level findings into actionable buckets the
+        # operator can quickly scan: out-of-scope targets (cache parse
+        # didn't pull these source(s)) and ambiguous dedups (data
+        # didn't tell us the canonical producer).  These are not
+        # blocking but useful to understand.
+        _oos_targets: 'set[str]' = set()
+        for _sev, _kind, _msg in _audit_findings:
+            if _sev == 'WARNING' and _kind == 'virtual_target_out_of_scope':
                 if ' not in synth scope' in _msg:
                     _seg = _msg.split('— ', 1)[1]
                     _names = _seg.split(' not in', 1)[0]
                     for _n in _names.split(','):
                         _n = _n.strip()
                         if _n:
-                            _missing_targets.add(_n)
-            if _missing_targets:
-                console.print("")
+                            _oos_targets.add(_n)
+        if _oos_targets:
+            console.print("")
+            console.print(
+                f"  out-of-scope targets ({len(_oos_targets)} unique): "
+                "cache parse did not pull source(s) producing these. "
+                "Real `dh_shlibdeps` would also skip linking; "
+                "verify intentional, or extend scope:",
+                tui.COLOR_WARNING)
+            for _t in sorted(_oos_targets)[:15]:
+                console.print(f"    - {_t}", tui.COLOR_WARNING)
+            if len(_oos_targets) > 15:
                 console.print(
-                    f"  out-of-scope targets ({len(_missing_targets)} "
-                    "unique): add source(s) producing these to "
-                    "dep_tree, or tunnel from upstream Debian:",
+                    f"    …and {len(_oos_targets) - 15} more",
                     tui.COLOR_WARNING)
-                for _t in sorted(_missing_targets)[:15]:
-                    console.print(f"    - {_t}", tui.COLOR_WARNING)
-                if len(_missing_targets) > 15:
-                    console.print(
-                        f"    …and {len(_missing_targets) - 15} more",
-                        tui.COLOR_WARNING)
         console.print("")
         if _total_crit == 0:
             console.print(

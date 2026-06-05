@@ -36,52 +36,71 @@ would either re-implement `dh_shlibdeps` (the substvar resolver) or
 duplicate the actual build.  Real builds are still the source of
 truth; virtual build is the cheap pre-filter.
 
-## Substvar policy (local-artifact-authoritative)
+## Operating principle
 
-Virtual build now reads the **actual** `.deb`'s control fields when
-a locally-built artifact exists at the same pristine base.  Real
-`dh_shlibdeps` has already resolved every substvar against the
-fork's actual link graph; the on-disk `.deb` is the only true source.
+Virtual build runs **BEFORE** any source build.  It must not depend
+on any post-build artifact (on-disk `.deb`, build log, etc.).  Its
+inputs are exactly what `cache parse` + `source sync` see:
 
-Resolution order per binary:
+- upstream cache (Packages + Sources records, per snapshot)
+- our local fork sources (Binary list, Build-Depends, patches)
+- the asg ledger (published manifest)
+- cache-parse's selection decision (`dep_tree.selected_srcs` etc.)
 
-1. **Local artifact** — `repo/dists/<codename>/main/binary-<arch>/<name>_<ver>_<arch>.deb` at the synth-predicted pristine base.  Read its `Depends:`, `Conflicts:`, `Provides:`, `Replaces:` verbatim.
-2. **Upstream cache** — fallback when no local artifact exists yet.  Then four transformations apply: NMU strip, sibling-pin rewrite (intra-source), cross-source global pin rewrite, canonical-source filter.
-3. **Skeleton** — when neither upstream cache nor local artifact carries the binary (kernel-ABI names whose ABI number doesn't match the cached snapshot).
+If a dep can't be determined from those inputs, virtual reports the
+uncertainty rather than guess.
 
-External constraints (libc6, soname pins to unrelated sources) pass
-through untouched — apt resolves them at install time against whatever
-versions of those packages happen to be in the repo.
+## Resolution order per binary
 
-### Why this matters
+1. **Upstream cache** — read the binary's upstream Package record; inherit `Depends:`, `Conflicts:`, `Provides:`, etc. with these transformations applied:
+   - NMU strip on every constraint version (mirrors real build's `strip_nmu_from_control_text`)
+   - Intra-source sibling-pin rewrite at the per-binary pristine base
+   - Cross-source global-pin rewrite (constraint pristine matches state.packages[target] pristine)
+   - Canonical-source filter (when upstream Package has a `Source:` field that names a peer source in scope)
+2. **Skeleton** — when upstream cache doesn't carry the binary (kernel-ABI floats, fork-only renames), emit a minimal record with just Package/Version/Arch/Source/Filename/SHA256.  No Depends inherited.
 
-The previous "inherit upstream verbatim" policy produced false
-CRITICALs in two real-world cases:
+When two sources collide on the same Package name AND neither carries
+an upstream `Source:` signal, virtual cannot determine which source
+truly produces the binary.  Dedup picks the highest version and emits
+a `WARNING virtual_dedup_ambiguous` finding; closure findings against
+those names get downgraded to `WARNING virtual_closure_break_ambiguous`.
 
-- **Fork drops opt-codec**: our `ffmpeg` fork builds `libavcodec59`
-  without `libaribb24-dev` available as a Build-Dep, so
-  `dh_shlibdeps` produces a smaller `Depends:` than upstream
-  Debian's.  Inheriting upstream's `Depends: libaribb24-0` flagged a
-  spurious closure break against the local repo (which doesn't ship
-  `libaribb24-0` at all because it's not needed).  Reading the local
-  `.deb` shows the correct (smaller) Depends.
+## Severity convention
 
-- **Fork adds new dep**: a patch that switches linkage from
-  `libssl1.1` to `libssl3` adds the new soname to `Depends:`.  Local
-  artifact reflects this; upstream cache doesn't.
+| Kind | Severity | Why |
+|---|---|---|
+| `virtual_closure_break` | CRITICAL | Target present at wrong version; potential synth bug |
+| `virtual_target_out_of_scope` | WARNING | Cache parse decided this source wasn't needed; real `dh_shlibdeps` would also skip linking it (no dev pkg available) — constraint is most likely vestigial.  Not gating. |
+| `virtual_closure_break_ambiguous` | WARNING | Target derived from ambiguous cross-source dedup; apparent break may be a dedup artifact |
+| `virtual_dedup_ambiguous` | WARNING | Cross-source collision with no upstream-canonical signal; data alone can't say which source produces the binary |
+| `virtual_duplicate_name` | INFO | Dedup happened (informational count) |
+| `virtual_invalid_record` | CRITICAL | Synthesis produced a record missing Package/Version (real bug) |
 
-When no local artifact exists (fresh source not yet built), virtual
-build falls back to upstream cache — accepting the conservative
-blind spot for that one binary.  Once it ships, subsequent virtual
-runs use the authoritative reading.
+The CRITICAL bar is reserved for things we can *prove* will break.
+Cache-parse-derived scope decisions and unresolvable ambiguities are
+operator-observable but not gating.
 
-### Indexing cost
+## Why this matters for the fork-drops-codec class
 
-`cmd_virtual_build` builds a `{binary_name: {version: path}}` index
-of `repo/` once at startup (~one walk over `dists/<codename>/main/`).
-Per-binary lookup is a dict access + version_compare; the actual
-`DebFile` read happens on demand (once per binary name).  Cost is
-negligible compared to the audit pass itself.
+In production:
+
+1. ffmpeg's debian/control declares `Build-Depends: ..., libaribb24-dev, ...`
+2. cache parse walks that build-dep list, but `libaribb24-dev` belongs to source `aribb24`
+3. If `aribb24` is not in `selected_srcs` (operator didn't pull it), cache parse will not download/build it
+4. At real build time, the build container has no `libaribb24-dev` → ffmpeg's configure detects this and disables the libaribb24 feature → `dh_shlibdeps` produces a `libavcodec59` whose Depends does NOT include `libaribb24-0`
+5. The installer is fine
+
+Virtual build sees upstream's `libavcodec59 Depends: libaribb24-0` (from
+upstream cache's snapshot, which was built WITH libaribb24-dev).  It
+cannot statically tell that our real build will produce a different
+Depends.  So it reports `WARNING virtual_target_out_of_scope` —
+operator awareness that "upstream pins this dep; you didn't pull the
+source; if real build's configure handles it gracefully, you're fine."
+
+If `aribb24` were genuinely needed (some other consumer required it,
+or ffmpeg's configure fails without it), adding the source to scope is
+the resolution.  Either way, virtual surfaces the question rather than
+deciding for the operator.
 
 ## Phases (vs the real pipeline)
 
