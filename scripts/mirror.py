@@ -1077,6 +1077,135 @@ def audit_ownership_summary(
     return _summary, []
 
 
+def audit_sidecar_seq_integrity(
+    by_builder: 'dict[str, list[dict]]',
+) -> 'list[tuple[str, str, str]]':
+    """Per-builder JSONL structural checks: seq numbers must be unique
+    and contiguous from 1.  Catches manual jsonl edits, partial-write
+    truncation, and replay attempts that slipped through signature
+    verification (a re-signed line with a duplicated seq is still a
+    valid Ed25519 signature; this is the layer that flags the dup).
+
+    Findings:
+      ``sidecar_duplicate_seq``  CRITICAL — same (builder, seq) appears
+                                 in 2+ records
+      ``sidecar_seq_gap``        CRITICAL — seq numbers have a hole
+                                 (e.g. 1, 2, 4) — a record was deleted
+                                 or never landed
+      ``sidecar_seq_missing_1``  CRITICAL — first seq isn't 1 — early
+                                 records were truncated
+    """
+    _findings: 'list[tuple[str, str, str]]' = []
+    for _bid, _claims in by_builder.items():
+        if not _claims:
+            continue
+        _seqs: 'list[int]' = []
+        _dups: 'set[int]' = set()
+        _seen: 'set[int]' = set()
+        for _c in _claims:
+            _s = _c.get('seq')
+            if not isinstance(_s, int):
+                continue
+            if _s in _seen:
+                _dups.add(_s)
+            _seen.add(_s)
+            _seqs.append(_s)
+        if not _seqs:
+            continue
+        for _d in sorted(_dups):
+            _findings.append((
+                'CRITICAL', 'sidecar_duplicate_seq',
+                f"{_bid}: seq={_d} appears on multiple claims — "
+                "jsonl was edited or a replay slipped through"))
+        _unique = sorted(_seen)
+        if _unique[0] != 1:
+            _findings.append((
+                'CRITICAL', 'sidecar_seq_missing_1',
+                f"{_bid}: lowest seq is {_unique[0]} (expected 1) — "
+                "early records may have been truncated"))
+        _gaps: 'list[int]' = []
+        for _i in range(1, len(_unique)):
+            if _unique[_i] != _unique[_i - 1] + 1:
+                _gaps.extend(range(_unique[_i - 1] + 1, _unique[_i]))
+        if _gaps:
+            _preview = ', '.join(str(_g) for _g in _gaps[:5])
+            _more = (f" (+{len(_gaps) - 5} more)"
+                     if len(_gaps) > 5 else '')
+            _findings.append((
+                'CRITICAL', 'sidecar_seq_gap',
+                f"{_bid}: missing seq(s) {_preview}{_more} — record(s) "
+                "deleted or never landed"))
+    return _findings
+
+
+def audit_own_claims_on_disk(
+    by_builder: 'dict[str, list[dict]]',
+    our_builder_id: 'Optional[str]', local_repo_dir: str,
+) -> 'list[tuple[str, str, str]]':
+    """Rehash every .deb we ourselves published and compare with the
+    claim's ``sha256``.  Catches pool bitrot on OUR side independent
+    of the apt-index chain (gap #1) — that chain trusts the on-pool
+    Packages file's sha; this one rehashes the actual bytes against
+    the sidecar's claim.
+
+    Skipped for peer-built claims (we don't have their files locally)
+    and for tunneled claims (republished_from set — the asg-stamp
+    normalisation rewrites bytes, so a re-hash would not match the
+    upstream sha; the value of the check is for the build host on
+    its own publishes).
+
+    Findings:
+      ``own_claim_disk_missing``     CRITICAL — our claim references a
+                                     file that isn't in local_repo_dir
+      ``own_claim_disk_sha_mismatch``CRITICAL — file present but its
+                                     sha disagrees with the claim
+    """
+    import hashlib as _hashlib
+    import os as _os
+
+    _findings: 'list[tuple[str, str, str]]' = []
+    if not our_builder_id:
+        return _findings
+    _claims = by_builder.get(our_builder_id) or []
+    # Walk the local pool dir once to build {basename: full_path}.
+    _by_name: 'dict[str, str]' = {}
+    if _os.path.isdir(local_repo_dir):
+        for _root, _dirs, _files in _os.walk(local_repo_dir):
+            for _f in _files:
+                if _f.endswith(('.deb', '.udeb')):
+                    _by_name[_f] = _os.path.join(_root, _f)
+    for _c in _claims:
+        if _c.get('claim_state') == 'retracted':
+            continue
+        if _c.get('republished_from'):
+            continue
+        _fn = str(_c.get('filename') or '')
+        _claim_sha = str(_c.get('sha256') or '')
+        if not _fn or not _claim_sha:
+            continue
+        _path = _by_name.get(_fn)
+        if _path is None:
+            _findings.append((
+                'CRITICAL', 'own_claim_disk_missing',
+                f"{_fn} (our claim) not in {local_repo_dir} — our own "
+                "pool diverges from our sidecar"))
+            continue
+        try:
+            with open(_path, 'rb') as _fh:
+                _actual = _hashlib.sha256(_fh.read()).hexdigest()
+        except OSError as _e:
+            _findings.append((
+                'CRITICAL', 'own_claim_disk_unreadable',
+                f"{_fn}: cannot read {_path}: {_e}"))
+            continue
+        if _actual != _claim_sha:
+            _findings.append((
+                'CRITICAL', 'own_claim_disk_sha_mismatch',
+                f"{_fn}: on-disk sha={_actual[:12]} disagrees with "
+                f"claim sha={_claim_sha[:12]} — local pool bitrot"))
+    return _findings
+
+
 def all_mirror_neighbour_records(config) -> 'list[dict]':
     """v3 source-of-truth for ``coord-head.neighbours``: a record per
     configured mirror carrying its publish URL plus the apt-readable

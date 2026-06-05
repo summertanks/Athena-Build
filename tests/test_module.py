@@ -24659,6 +24659,119 @@ def test_audit_ownership_summary_buckets_correctly():
     assert _findings == []
 
 
+def test_audit_sidecar_seq_integrity_clean_run_is_silent():
+    """Contiguous seqs 1..N per builder → no findings."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    _by_builder = {
+        'athena-a': [{'seq': _i, 'filename': f'p{_i}_.deb'}
+                     for _i in range(1, 6)],
+        'athena-b': [{'seq': _i, 'filename': f'q{_i}_.deb'}
+                     for _i in range(1, 4)],
+    }
+    assert _mir.audit_sidecar_seq_integrity(_by_builder) == []
+
+
+def test_audit_sidecar_seq_integrity_flags_dup_gap_and_missing_one():
+    """Three independent failure modes — each emits its own CRITICAL."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    _by_builder = {
+        'athena-dup': [
+            {'seq': 1, 'filename': 'a_.deb'},
+            {'seq': 2, 'filename': 'b_.deb'},
+            {'seq': 2, 'filename': 'b2_.deb'},  # duplicate seq
+        ],
+        'athena-gap': [
+            {'seq': 1, 'filename': 'a_.deb'},
+            {'seq': 2, 'filename': 'b_.deb'},
+            {'seq': 4, 'filename': 'd_.deb'},   # gap at 3
+        ],
+        'athena-start': [
+            {'seq': 3, 'filename': 'c_.deb'},   # doesn't start at 1
+            {'seq': 4, 'filename': 'd_.deb'},
+        ],
+    }
+    _f = _mir.audit_sidecar_seq_integrity(_by_builder)
+    _kinds = sorted(_t[1] for _t in _f)
+    assert _kinds == ['sidecar_duplicate_seq', 'sidecar_seq_gap',
+                      'sidecar_seq_missing_1'], _f
+    assert all(_t[0] == 'CRITICAL' for _t in _f)
+
+
+def test_audit_own_claims_on_disk_match_disk_silent_mismatch_critical():
+    """Our own claim referencing a present-on-disk .deb whose sha
+    matches → silent.  Same filename with a different on-disk byte
+    stream → CRITICAL.  Missing-on-disk → CRITICAL.  Tunneled +
+    peer-claim are ignored."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hashlib
+    import mirror as _mir
+
+    with tempfile.TemporaryDirectory() as _td:
+        _good_path = os.path.join(_td, 'main', 'g',
+                                  'good_1.0_amd64.deb')
+        os.makedirs(os.path.dirname(_good_path))
+        with open(_good_path, 'wb') as _fh:
+            _fh.write(b'good-bytes')
+        _good_sha = _hashlib.sha256(b'good-bytes').hexdigest()
+
+        _bad_path = os.path.join(_td, 'main', 'b',
+                                 'bad_1.0_amd64.deb')
+        os.makedirs(os.path.dirname(_bad_path))
+        with open(_bad_path, 'wb') as _fh:
+            _fh.write(b'actual-bytes')  # disk content
+        _claim_sha_for_bad = _hashlib.sha256(
+            b'CLAIMED-bytes').hexdigest()  # but claim says other sha
+
+        _by_builder = {
+            'athena-ours': [
+                {'package': 'good', 'filename': 'good_1.0_amd64.deb',
+                 'sha256': _good_sha, 'claim_state': 'published'},
+                {'package': 'bad', 'filename': 'bad_1.0_amd64.deb',
+                 'sha256': _claim_sha_for_bad,
+                 'claim_state': 'published'},
+                {'package': 'gone', 'filename': 'gone_1.0_amd64.deb',
+                 'sha256': 'a' * 64, 'claim_state': 'published'},
+                # Tunneled — ignored (asg-stamp rewrites bytes).
+                {'package': 'tun', 'filename': 'tun_1.0_amd64.deb',
+                 'sha256': 'b' * 64, 'claim_state': 'published',
+                 'republished_from': {'url': 'x', 'upstream_sha256': 'y'}},
+                # Retracted — ignored.
+                {'package': 'old', 'filename': 'old_1.0_amd64.deb',
+                 'sha256': 'c' * 64, 'claim_state': 'retracted'},
+            ],
+            # Peer claims — ignored (we don't have those .debs).
+            'athena-peer': [
+                {'package': 'p', 'filename': 'p_1.0_amd64.deb',
+                 'sha256': 'd' * 64, 'claim_state': 'published'},
+            ],
+        }
+        _findings = _mir.audit_own_claims_on_disk(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_td)
+        _kinds = sorted(_t[1] for _t in _findings)
+        assert _kinds == ['own_claim_disk_missing',
+                          'own_claim_disk_sha_mismatch'], _findings
+        assert all(_t[0] == 'CRITICAL' for _t in _findings)
+
+
+def test_audit_own_claims_on_disk_no_our_builder_id_is_noop():
+    """When our_builder_id is None (rare — fresh host pre-keygen) the
+    helper short-circuits.  Used to guard against AttributeError in
+    cmd_mirror_audit when the operator runs audit before keygen."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    assert _mir.audit_own_claims_on_disk(
+        {'athena-x': [{'filename': 'a', 'sha256': 'b' * 64,
+                       'claim_state': 'published'}]},
+        our_builder_id=None, local_repo_dir='/nonexistent') == []
+
+
 def test_coord_reconcile_detect_hash_conflicts_critical_and_info():
     """Same (pkg, ver), different hash → CRITICAL; same hash → INFO."""
     _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
@@ -28309,6 +28422,16 @@ def main() -> int:
         test_cmd_mirror_query_reports_no_match,
         test_cmd_mirror_query_requires_pkg_arg,
         test_cmd_mirror_audit_no_mirrors_reports_warning,
+        # MIRROR-01 audit gap (1) — InRelease + Packages chain + ownership
+        test_audit_inrelease_against_head_sha_match_returns_parsed_release,
+        test_audit_inrelease_against_head_sha_mismatch_critical,
+        test_audit_claims_vs_packages_flags_missing_and_mismatched,
+        test_audit_ownership_summary_buckets_correctly,
+        # MIRROR-01 audit gap (3) — sidecar JSONL integrity + own-disk rehash
+        test_audit_sidecar_seq_integrity_clean_run_is_silent,
+        test_audit_sidecar_seq_integrity_flags_dup_gap_and_missing_one,
+        test_audit_own_claims_on_disk_match_disk_silent_mismatch_critical,
+        test_audit_own_claims_on_disk_no_our_builder_id_is_noop,
     ]
     failures = 0
     for t in tests:
