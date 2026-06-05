@@ -19518,6 +19518,7 @@ def test_virtual_build_synthesize_source_binaries_end_to_end():
         'openssl': {
             '3.0.15-1+deb12u1': {
                 'Package': 'openssl', 'Version': '3.0.15-1+deb12u1',
+                'Source': 'openssl',
                 'Architecture': 'amd64',
                 'Depends': 'libssl3 (= 3.0.15-1+deb12u1), libc6 (>= 2.36)',
             },
@@ -19525,6 +19526,7 @@ def test_virtual_build_synthesize_source_binaries_end_to_end():
         'libssl3': {
             '3.0.15-1+deb12u1': {
                 'Package': 'libssl3', 'Version': '3.0.15-1+deb12u1',
+                'Source': 'openssl',
                 'Architecture': 'amd64',
                 'Depends': 'libc6 (>= 2.36)',
             },
@@ -19563,17 +19565,17 @@ def test_virtual_build_metapackage_uses_binary_upstream_version():
     _universe = {
         'cpp': {'4:12.2.0-3': {
             'Package': 'cpp', 'Version': '4:12.2.0-3',
-            'Architecture': 'amd64',
+            'Source': 'gcc-defaults', 'Architecture': 'amd64',
             'Depends': 'cpp-12 (>= 12.2.0-14~)',
         }},
         'gcc': {'4:12.2.0-3': {
             'Package': 'gcc', 'Version': '4:12.2.0-3',
-            'Architecture': 'amd64',
+            'Source': 'gcc-defaults', 'Architecture': 'amd64',
             'Depends': 'cpp (= 4:12.2.0-3), gcc-12 (>= 12.2.0-14~)',
         }},
         'g++': {'4:12.2.0-3': {
             'Package': 'g++', 'Version': '4:12.2.0-3',
-            'Architecture': 'amd64',
+            'Source': 'gcc-defaults', 'Architecture': 'amd64',
             'Depends': 'gcc (= 4:12.2.0-3), cpp (= 4:12.2.0-3)',
         }},
     }
@@ -19609,10 +19611,12 @@ def test_virtual_build_metapackage_stamps_when_lineage_present():
     _universe = {
         'cpp': {'4:12.2.0-3': {
             'Package': 'cpp', 'Version': '4:12.2.0-3',
+            'Source': 'gcc-defaults',
             'Architecture': 'amd64', 'Depends': '',
         }},
         'gcc': {'4:12.2.0-3': {
             'Package': 'gcc', 'Version': '4:12.2.0-3',
+            'Source': 'gcc-defaults',
             'Architecture': 'amd64',
             'Depends': 'cpp (= 4:12.2.0-3)',
         }},
@@ -19631,6 +19635,115 @@ def test_virtual_build_metapackage_stamps_when_lineage_present():
     assert _by_name['gcc']['Version'] == '4:12.2.0-3+asg1u3'
     # gcc's sibling pin → stamped cpp version.
     assert 'cpp (= 4:12.2.0-3+asg1u3)' in _by_name['gcc']['Depends']
+
+
+def test_virtual_build_strips_nmu_from_inherited_depends_constraint():
+    """Upstream consumer pins to an NMU-stamped target version
+    (``grub-common (>= 2.06-13+deb12u2)``).  Real build's
+    strip_nmu_from_control_text strips this to ``(>= 2.06-13)``
+    so our asg-stamped target (``2.06-13+asg1u1``) satisfies it.
+    Virtual synth MUST do the same to avoid false closure breaks."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _StubSrc:
+        package = 'grub-efi-amd64-signed'
+        version = '1+2.06+13'
+        binary = ['grub-efi-amd64-signed']
+
+    _universe = {
+        'grub-efi-amd64-signed': {'1+2.06+13': {
+            'Package': 'grub-efi-amd64-signed',
+            'Version': '1+2.06+13',
+            'Source': 'grub-efi-amd64-signed',
+            'Architecture': 'amd64',
+            'Depends': 'grub-common (>= 2.06-13+deb12u2)',
+        }},
+    }
+    _recs = _vb.synthesize_source_binaries(
+        source=_StubSrc(), package_universe=_universe,
+        asg_ledger={}, release=1, arch='amd64',
+    )
+    assert len(_recs) == 1
+    # Constraint version got NMU-stripped: now '2.06-13', not
+    # '2.06-13+deb12u2'.  apt's version_compare on '2.06-13+asg1u1'
+    # vs '2.06-13' returns positive → satisfied.
+    assert 'grub-common (>= 2.06-13)' in _recs[0]['Depends']
+    assert '+deb12u2' not in _recs[0]['Depends']
+
+
+def test_virtual_build_skips_binaries_from_other_canonical_source():
+    """Source A's `Binary:` field declares a binary whose upstream
+    Package record carries `Source: B`.  A doesn't actually emit it
+    (the linux-signed-amd64 over-declaration pattern).  Synth must
+    SKIP this binary when processing A; B's synth will emit it
+    canonically.  Pinned to prevent the linux-headers-amd64 closure
+    break regressing."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _StubSignedSrc:
+        package = 'linux-signed-amd64'
+        version = '6.1.174+1'
+        binary = ['kernel-image-6.1.0-49-amd64-di',
+                  'linux-image-amd64-signed-template']
+
+    _universe = {
+        # This udeb's upstream record says it's from `linux`, NOT
+        # linux-signed-amd64 — so linux-signed should SKIP it.
+        'kernel-image-6.1.0-49-amd64-di': {'6.1.174-1': {
+            'Package': 'kernel-image-6.1.0-49-amd64-di',
+            'Version': '6.1.174-1', 'Source': 'linux',
+            'Architecture': 'amd64',
+        }},
+        # This one is genuinely from linux-signed-amd64.
+        'linux-image-amd64-signed-template': {'6.1.174+1': {
+            'Package': 'linux-image-amd64-signed-template',
+            'Version': '6.1.174+1', 'Source': 'linux-signed-amd64',
+            'Architecture': 'amd64',
+        }},
+    }
+    # peer_sources includes the canonical producer (`linux`) — filter
+    # fires because linux IS being synthesized elsewhere in this run.
+    _recs = _vb.synthesize_source_binaries(
+        source=_StubSignedSrc(), package_universe=_universe,
+        asg_ledger={}, release=1, arch='amd64',
+        peer_sources={'linux', 'linux-signed-amd64'},
+    )
+    _names = {_r['Package'] for _r in _recs}
+    # Only the genuinely-produced binary made it through.
+    assert _names == {'linux-image-amd64-signed-template'}, _names
+
+
+def test_virtual_build_canonical_filter_off_when_peer_not_in_scope():
+    """Fork case: athena-cdrom-setup declares apt-cdrom-setup binary;
+    upstream Source: apt-cdrom-setup.  apt-cdrom-setup source is NOT
+    in scope (we replaced it with our fork).  Filter must NOT skip —
+    our fork IS the producer."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _StubFork:
+        package = 'athena-cdrom-setup'
+        version = '0.6'
+        binary = ['apt-cdrom-setup']
+
+    _universe = {
+        'apt-cdrom-setup': {'0.6': {
+            'Package': 'apt-cdrom-setup', 'Version': '0.6',
+            'Source': 'apt-cdrom-setup',  # upstream canonical
+            'Architecture': 'amd64',
+        }},
+    }
+    # peer_sources contains only OUR fork; upstream's apt-cdrom-setup
+    # source is absent → filter MUST NOT fire.
+    _recs = _vb.synthesize_source_binaries(
+        source=_StubFork(), package_universe=_universe,
+        asg_ledger={}, release=1, arch='amd64',
+        peer_sources={'athena-cdrom-setup'},
+    )
+    assert len(_recs) == 1
+    assert _recs[0]['Package'] == 'apt-cdrom-setup'
 
 
 def test_virtual_publish_dry_run_skips_own_already_published_filenames():
@@ -29284,6 +29397,9 @@ def main() -> int:
         test_virtual_build_synthesize_source_binaries_end_to_end,
         test_virtual_build_metapackage_uses_binary_upstream_version,
         test_virtual_build_metapackage_stamps_when_lineage_present,
+        test_virtual_build_strips_nmu_from_inherited_depends_constraint,
+        test_virtual_build_skips_binaries_from_other_canonical_source,
+        test_virtual_build_canonical_filter_off_when_peer_not_in_scope,
         test_virtual_publish_dry_run_skips_own_already_published_filenames,
         test_virtual_publish_dry_run_synthesizes_only_new_filenames,
         # virtual-build chunk 3 — RepoState assembly + virtual repo_audit
