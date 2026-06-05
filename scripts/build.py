@@ -4596,9 +4596,12 @@ class BuildSession:
                 maxvalue=1, show_rate=False, label_width=34)
             def _progress(current, total, _filename, _ok, *,
                           _bar_ref=_bar):
-                # Lazy-update maxvalue once we see the true total.
-                if total and _bar_ref.maxvalue != total:
-                    _bar_ref.maxvalue = total
+                # Lazy-update max once we see the true total.  set_max
+                # is the public setter; ProgressBar has no `.maxvalue`
+                # attribute (stored as self._max).  set_max is
+                # idempotent so unconditional-call is fine.
+                if total:
+                    _bar_ref.set_max(total)
                 _bar_ref.step(1)
             try:
                 _ok, _detail = _publish.remote_publish(
