@@ -36,7 +36,16 @@ logger = logging.getLogger('athena')
 # and consistent with the existing publish path).  --delete is OPT-IN
 # — pulls accumulate by default so a transient remote-file removal
 # can't silently scrub our local fetched/ copy.
-_RSYNC_BASE: List[str] = ['rsync', '-aH', '--info=stats1']
+# --mkpath: rsync 3.2.3+ creates the destination's missing parent
+# dirs.  Needed by push_jsonl and push_single_deb on first publish —
+# `<remote-coord>/keyring/builders/`, `<remote-coord>/claims/`, and the
+# `<pool>/dists/<codename>/<comp>/binary-<arch>/` subtree don't exist on
+# a freshly-prepared mirror endpoint (probe_remote_writable creates the
+# coord root and pool root but not their subdirs).  No-op for the three
+# other callsites in this module (pull_remote_coord, pull_single_file,
+# push_coord_head) — their destination parents are pre-created by
+# os.makedirs or by probe_remote_writable.
+_RSYNC_BASE: List[str] = ['rsync', '-aH', '--mkpath', '--info=stats1']
 
 
 def _ssh_arg(ssh_key: 'Optional[str]') -> 'Optional[List[str]]':
