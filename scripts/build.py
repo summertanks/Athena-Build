@@ -10146,14 +10146,110 @@ class BuildSession:
 
           build [all|indl|<src>...]   run virtual pipeline on scope
           run                          alias for `virtual build`
+          validate [<src>...]          compare synthesizer vs the
+                                       on-disk build.json output_hashes
+                                       (self-test: surfaces synth bugs
+                                       before they show up in audit)
         """
         if action in ('build', 'run', ''):
             return self.cmd_virtual_build(*args)
+        if action == 'validate':
+            return self.cmd_virtual_validate(*args)
         _table = {
             'build [scope]':     "virtual pipeline; scope = all|indl|<src>...",
             'run':               "alias for `virtual build`",
+            'validate [<src>...]': "compare synthesizer vs real build.json output_hashes",
         }
         return self._group_help('virtual', _table, action)
+
+    def cmd_virtual_validate(self, *args):
+        """Self-test: run the synthesizer against every source we have
+        a successful build.json for, compare predicted filenames
+        against the real ``output_hashes`` keys, report drift.
+
+        Use this after a successful real build to confirm the
+        synthesizer's predictions match reality.  Catches:
+          - asg-stamp math wrong (version drift)
+          - upstream-version lookup wrong (metapackage case)
+          - Build-Profile or arch filtering wrong (extra/missing files)
+
+        Scope: explicit source names, else every source in
+        dep_tree.selected_srcs ∪ udeb's.
+        """
+        if self.cache is None or self.dep_tree is None:
+            console.print(
+                "virtual validate: cache + dep_tree must be populated; "
+                "run `cache build` + `cache parse`.", tui.COLOR_ERROR)
+            return False
+        import virtual_build as _vb
+        import repo_audit as _ra
+        _selected_srcs: dict = dict(
+            getattr(self.dep_tree, 'selected_srcs', {}) or {})
+        if self.udeb_dep_tree is not None:
+            for _n, _s in (getattr(self.udeb_dep_tree, 'selected_srcs', {})
+                           or {}).items():
+                _selected_srcs.setdefault(_n, _s)
+        _scope = list(args) if args else sorted(_selected_srcs.keys())
+        if not _scope:
+            console.print(
+                "virtual validate: scope is empty.", tui.COLOR_WARNING)
+            return True
+        try:
+            _release = int(str(self.config.build_version)
+                           .strip('"').strip("'"))
+        except (TypeError, ValueError):
+            _release = 1
+        _asg_ledger = _ra.published_ledger(self.config) or {}
+        _universe = _vb.from_cache(self.cache)
+
+        def _lookup(_name: str):
+            _src = _selected_srcs.get(_name)
+            if _src is not None:
+                return _src
+            _candidates = (getattr(self.cache, 'source_hashtable', {})
+                           .get(_name, []))
+            return _candidates[0] if _candidates else None
+
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        console.print(
+            f"virtual validate: scope={len(_scope)} source(s)  "
+            f"arch={self.config.arch}  release={_release}",
+            tui.COLOR_HIGHLIGHT)
+        _stats, _findings = _vb.validate_against_build_records(
+            source_names=_scope, source_lookup=_lookup,
+            package_universe=_universe, asg_ledger=_asg_ledger,
+            release=_release, arch=self.config.arch,
+            buildlog_dir=_buildlog,
+        )
+        console.print(
+            f"  checked={_stats['sources_checked']}  "
+            f"matched={_stats['sources_matched']}  "
+            f"drifted={_stats['sources_drifted']}",
+            tui.COLOR_INFO)
+        for _sev, _kind, _msg in _findings[:50]:
+            _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                      else tui.COLOR_WARNING)
+            console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+        if len(_findings) > 50:
+            console.print(
+                f"  …and {len(_findings) - 50} more findings",
+                tui.COLOR_WARNING)
+        _crit = any(_f[0] == 'CRITICAL' for _f in _findings)
+        if _crit:
+            console.print(
+                "virtual validate: SYNTHESIZER DRIFT — see version_drift "
+                "findings.", tui.COLOR_ERROR)
+            return False
+        if _stats['sources_drifted']:
+            console.print(
+                "virtual validate: completed with WARNING drift "
+                "(filename set diffs, not version drift).",
+                tui.COLOR_WARNING)
+        else:
+            console.print(
+                "virtual validate: PASS — synthesizer predictions match "
+                "real build artifacts.", tui.COLOR_INFO)
+        return True
 
     def cmd_virtual_build(self, *args):
         """Run the virtual build pipeline for `scope` and report findings.

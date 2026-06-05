@@ -19421,11 +19421,13 @@ def test_virtual_build_synthesize_binary_record_inherits_upstream_deps():
         'Provides': 'libfoo-api3',
     }
     _rec = _vb.synthesize_binary_record(
-        source_name='libfoo', source_pristine='3.0-1',
+        source_name='libfoo',
         binary_name='libfoo3', virtual_version='3.0-1+asg1u1',
         arch='amd64', upstream_record=_upstream,
         sibling_ver_map={'libfoo3': '3.0-1+asg1u1',
                          'libfoo-data': '3.0-1+asg1u1'},
+        sibling_pristine_map={'libfoo3': '3.0-1',
+                              'libfoo-data': '3.0-1'},
     )
     # Version + sibling pin rewritten to virtual; external (libc6) kept.
     assert _rec['Version'] == '3.0-1+asg1u1'
@@ -19444,10 +19446,11 @@ def test_virtual_build_synthesize_record_no_upstream_minimal_skeleton():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
     _rec = _vb.synthesize_binary_record(
-        source_name='linux', source_pristine='6.1.174-1',
+        source_name='linux',
         binary_name='linux-headers-6.1.0-49-amd64',
         virtual_version='6.1.174-1+asg1u1', arch='amd64',
         upstream_record=None, sibling_ver_map={},
+        sibling_pristine_map={},
     )
     assert _rec['Package'] == 'linux-headers-6.1.0-49-amd64'
     assert _rec['Version'] == '6.1.174-1+asg1u1'
@@ -19469,10 +19472,11 @@ def test_virtual_build_sibling_pin_only_rewritten_when_pristine_matches():
         'Depends': 'b (= 1.0-1), zzz (= 1.0-1)',
     }
     _rec = _vb.synthesize_binary_record(
-        source_name='libfoo', source_pristine='1.0-1',
+        source_name='libfoo',
         binary_name='a', virtual_version='1.0-1+asg1u1', arch='amd64',
         upstream_record=_upstream,
         sibling_ver_map={'a': '1.0-1+asg1u1', 'b': '1.0-1+asg1u1'},
+        sibling_pristine_map={'a': '1.0-1', 'b': '1.0-1'},
     )
     assert 'b (= 1.0-1+asg1u1)' in _rec['Depends']
     assert 'zzz (= 1.0-1)' in _rec['Depends']
@@ -19490,10 +19494,11 @@ def test_virtual_build_sibling_pin_with_nmu_constraint_pristine_matches():
         'Depends': 'b (= 1.0-1+deb12u1)',
     }
     _rec = _vb.synthesize_binary_record(
-        source_name='libfoo', source_pristine='1.0-1',
+        source_name='libfoo',
         binary_name='a', virtual_version='1.0-1+asg1u1', arch='amd64',
         upstream_record=_upstream,
         sibling_ver_map={'a': '1.0-1+asg1u1', 'b': '1.0-1+asg1u1'},
+        sibling_pristine_map={'a': '1.0-1', 'b': '1.0-1'},
     )
     assert 'b (= 1.0-1+asg1u1)' in _rec['Depends']
 
@@ -19538,6 +19543,163 @@ def test_virtual_build_synthesize_source_binaries_end_to_end():
     assert 'libssl3 (= 3.0.15-1+asg1u1)' in _by_name['openssl']['Depends']
     # External constraint preserved.
     assert 'libc6 (>= 2.36)' in _by_name['openssl']['Depends']
+
+
+def test_virtual_build_metapackage_uses_binary_upstream_version():
+    """gcc-defaults source @ 1.213 produces gcc/cpp binaries that
+    Debian stamps at the COMPILER version (4:12.2.0-3), not the
+    source version.  Synthesizer must use the per-binary upstream
+    Version as the base; sibling pin rewriting must use per-target
+    pristine.  Catches the actual 2026-06-05 closure-break in live
+    `virtual build`."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _StubGccDefaults:
+        package = 'gcc-defaults'
+        version = '1.213'   # source version — NOT what binaries carry
+        binary = ['cpp', 'gcc', 'g++']
+
+    _universe = {
+        'cpp': {'4:12.2.0-3': {
+            'Package': 'cpp', 'Version': '4:12.2.0-3',
+            'Architecture': 'amd64',
+            'Depends': 'cpp-12 (>= 12.2.0-14~)',
+        }},
+        'gcc': {'4:12.2.0-3': {
+            'Package': 'gcc', 'Version': '4:12.2.0-3',
+            'Architecture': 'amd64',
+            'Depends': 'cpp (= 4:12.2.0-3), gcc-12 (>= 12.2.0-14~)',
+        }},
+        'g++': {'4:12.2.0-3': {
+            'Package': 'g++', 'Version': '4:12.2.0-3',
+            'Architecture': 'amd64',
+            'Depends': 'gcc (= 4:12.2.0-3), cpp (= 4:12.2.0-3)',
+        }},
+    }
+    _recs = _vb.synthesize_source_binaries(
+        source=_StubGccDefaults(), package_universe=_universe,
+        asg_ledger={}, release=1, arch='amd64',
+    )
+    _by_name = {_r['Package']: _r for _r in _recs}
+    # Versions match upstream binary Version (NOT source 1.213).
+    assert _by_name['cpp']['Version'] == '4:12.2.0-3'
+    assert _by_name['gcc']['Version'] == '4:12.2.0-3'
+    assert _by_name['g++']['Version'] == '4:12.2.0-3'
+    # Sibling pins rewritten correctly (no asg-stamp because this is
+    # a clean pristine build with no ledger, no delta, no patches).
+    assert 'cpp (= 4:12.2.0-3)' in _by_name['gcc']['Depends']
+    # External (gcc-12) preserved untouched.
+    assert 'gcc-12 (>= 12.2.0-14~)' in _by_name['gcc']['Depends']
+
+
+def test_virtual_build_metapackage_stamps_when_lineage_present():
+    """gcc-defaults case under asg-stamp: ledger has prior +asg entry
+    at the COMPILER pristine base, lineage continuation triggers,
+    every binary stamps at uniform N over its own pristine base, and
+    sibling pins rewrite to the stamped version."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _StubGccDefaults:
+        package = 'gcc-defaults'
+        version = '1.213'
+        binary = ['cpp', 'gcc']
+
+    _universe = {
+        'cpp': {'4:12.2.0-3': {
+            'Package': 'cpp', 'Version': '4:12.2.0-3',
+            'Architecture': 'amd64', 'Depends': '',
+        }},
+        'gcc': {'4:12.2.0-3': {
+            'Package': 'gcc', 'Version': '4:12.2.0-3',
+            'Architecture': 'amd64',
+            'Depends': 'cpp (= 4:12.2.0-3)',
+        }},
+    }
+    _ledger = {
+        'cpp': ['4:12.2.0-3+asg1u1'],
+        'gcc': ['4:12.2.0-3+asg1u1', '4:12.2.0-3+asg1u2'],
+    }
+    _recs = _vb.synthesize_source_binaries(
+        source=_StubGccDefaults(), package_universe=_universe,
+        asg_ledger=_ledger, release=1, arch='amd64',
+    )
+    _by_name = {_r['Package']: _r for _r in _recs}
+    # Uniform N = max(cpp_next=2, gcc_next=3) = 3.
+    assert _by_name['cpp']['Version'] == '4:12.2.0-3+asg1u3'
+    assert _by_name['gcc']['Version'] == '4:12.2.0-3+asg1u3'
+    # gcc's sibling pin → stamped cpp version.
+    assert 'cpp (= 4:12.2.0-3+asg1u3)' in _by_name['gcc']['Depends']
+
+
+def test_virtual_publish_dry_run_skips_own_already_published_filenames():
+    """When the remote sidecar already has our claim for filename X
+    at our recorded sha, virtual_publish_dry_run must SKIP synthesizing
+    a duplicate claim for X.  Otherwise the merge contains TWO
+    athena-primary claims for X (one real, one synthetic with
+    deterministic-by-triple sha) → detect_hash_conflicts false-positive
+    on every previously-published binary."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    from coord import schema as _sch
+    _real_sha = 'a' * 64
+    _existing = _sch.new_claim(
+        builder='athena-primary', seq=1, package='openssl',
+        intended_version='3.0', built_version='3.0',
+        filename='openssl_3.0_amd64.deb',
+        sha256=_real_sha, size=0, snapshot='T0',
+        built_at='1970-01-01T00:00:00Z',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    # Virtual record for the SAME filename with the SYNTHETIC sha
+    # (deterministic by name+ver+arch, not the real sha).
+    _virt = [
+        {'Package': 'openssl', 'Version': '3.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/o/s/openssl_3.0_amd64.deb',
+         'SHA256': _vb._virtual_sha256('openssl', '3.0', 'amd64'),
+         'Size': '0'},
+    ]
+    _merged, _f = _vb.virtual_publish_dry_run(
+        _virt, our_builder_id='athena-primary', snapshot='T1',
+        remote_by_builder={'athena-primary': [_existing]})
+    # No hash conflict (no duplicate claim added).
+    _hash = [_t for _t in _f if _t[1] == 'virtual_hash_conflict']
+    assert _hash == [], _hash
+    # Existing claim count unchanged.
+    assert len(_merged['athena-primary']) == 1
+
+
+def test_virtual_publish_dry_run_synthesizes_only_new_filenames():
+    """We own filename X on remote AND we have a new virtual record
+    for filename Y (never published).  Only Y should be synthesized.
+    """
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    from coord import schema as _sch
+    _existing = _sch.new_claim(
+        builder='athena-primary', seq=1, package='openssl',
+        intended_version='3.0', built_version='3.0',
+        filename='openssl_3.0_amd64.deb',
+        sha256='r' * 64, size=0, snapshot='T0',
+        built_at='1970-01-01T00:00:00Z',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _virt = [
+        {'Package': 'openssl', 'Version': '3.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/o/s/openssl_3.0_amd64.deb',
+         'SHA256': 'p' * 64, 'Size': '0'},
+        {'Package': 'newpkg', 'Version': '1.0', 'Architecture': 'amd64',
+         'Source': 's', 'Filename': 'pool/main/n/s/newpkg_1.0_amd64.deb',
+         'SHA256': 'q' * 64, 'Size': '0'},
+    ]
+    _merged, _f = _vb.virtual_publish_dry_run(
+        _virt, our_builder_id='athena-primary', snapshot='T1',
+        remote_by_builder={'athena-primary': [_existing]})
+    # 1 existing + 1 new (newpkg only).
+    assert len(_merged['athena-primary']) == 2
+    _new_fns = [_c['filename']
+                for _c in _merged['athena-primary']
+                if _c.get('seq', 0) > 1]
+    assert _new_fns == ['newpkg_1.0_amd64.deb']
 
 
 def test_virtual_build_synthesize_repo_state_resolves_closed_graph():
@@ -29120,6 +29282,10 @@ def main() -> int:
         test_virtual_build_sibling_pin_only_rewritten_when_pristine_matches,
         test_virtual_build_sibling_pin_with_nmu_constraint_pristine_matches,
         test_virtual_build_synthesize_source_binaries_end_to_end,
+        test_virtual_build_metapackage_uses_binary_upstream_version,
+        test_virtual_build_metapackage_stamps_when_lineage_present,
+        test_virtual_publish_dry_run_skips_own_already_published_filenames,
+        test_virtual_publish_dry_run_synthesizes_only_new_filenames,
         # virtual-build chunk 3 — RepoState assembly + virtual repo_audit
         test_virtual_build_synthesize_repo_state_resolves_closed_graph,
         test_virtual_build_closure_break_emits_critical,
