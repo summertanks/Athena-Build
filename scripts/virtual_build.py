@@ -537,15 +537,19 @@ def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
     PARALLEL hashtable, indexed from
     `dists/<suite>/main/debian-installer/binary-<arch>/Packages`.
     Both must be included or the canonical-source filter can't fire
-    for udeb names (every kernel `*-di` lookup misses, both linux
-    and linux-signed-amd64 fall through and collide on dedup —
-    that's where the 52-binary ambiguous-dedup noise comes from).
+    for udeb names (every kernel `*-di` lookup misses).
 
-    Each hashtable's shape is `{name: {ver: [Package, ...]}}` (lists
-    because of Provides aliasing).  Collapsed here to
-    `{name: {ver: control_dict}}` with str→str values matching
-    `scan_repo_state`'s output.  Picks the first Package per
-    (name, ver) — Provides-aliased entries share control fields.
+    Each hashtable's shape is `{name: {ver: [Package, ...]}}`.  The
+    list per (name, ver) can carry BOTH the standalone binary's
+    Package record AND any other binary's record that `Provides:`
+    this name — they have different Architecture / Source fields.
+
+    Critical: pick the entry whose ``Package`` field equals ``_name``
+    (the standalone real producer) rather than ``_pkgs[0]``.
+    Otherwise apt-transport-https (Architecture: all standalone) gets
+    overwritten by the apt-package-via-Provides record (Architecture:
+    amd64) — which produces ``_amd64.deb`` filename predictions
+    for binaries that actually emit as ``_all.deb``.
     """
     _out: Dict[str, Dict[str, Any]] = {}
     for _attr in ('package_hashtable', 'udeb_hashtable'):
@@ -557,7 +561,21 @@ def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
             for _ver, _pkgs in _versions.items():
                 if not _pkgs:
                     continue
-                _p = _pkgs[0]
+                # Prefer the entry whose `Package` field matches our
+                # lookup key — that's the standalone real producer.
+                # Fall back to first entry only when no exact-name
+                # match exists (rare: fork-only renames where
+                # upstream cache has no real entry).
+                _p = None
+                for _candidate in _pkgs:
+                    try:
+                        if (_candidate.get('Package') or '').strip() == _name:
+                            _p = _candidate
+                            break
+                    except Exception:
+                        continue
+                if _p is None:
+                    _p = _pkgs[0]
                 _ctrl: Dict[str, str] = {}
                 try:
                     for _field in _p:
@@ -732,28 +750,49 @@ def validate_against_build_records(
                 'CRITICAL', 'virtual_validate_version_drift',
                 f"{_name}/{_bn}: predicted={_pred_str!r} but built "
                 f"history has {_real_str!r}"))
+        # Per-source asg/extra/missing aren't emitted per finding —
+        # they'd flood the output (765+ sources show one each).  We
+        # accumulate counts into stats and emit ONE summary line per
+        # category after the loop completes.
         if _asg_drift:
-            # Pure asg-suffix drift — synth is asking "if next build
-            # happened NOW, what stamp?" while real-build's record is
-            # from a snapshot of the ledger at THE TIME of that build.
-            # Not a synthesizer bug; surface as INFO so operator sees
-            # the count without thinking the synth is broken.
-            _findings.append((
-                'INFO', 'virtual_validate_asg_drift',
-                f"{_name}: {len(_asg_drift)} binary(s) differ only in "
-                "+asgRuN suffix (ledger state evolved since real build)"))
+            _stats['asg_drift_sources'] = (
+                _stats.get('asg_drift_sources', 0) + 1)
+            _stats['asg_drift_binaries'] = (
+                _stats.get('asg_drift_binaries', 0) + len(_asg_drift))
         if _missing:
-            _findings.append((
-                'WARNING', 'virtual_validate_predicted_missing',
-                f"{_name}: real build emitted {len(_missing)} "
-                "binary name(s) synthesizer did NOT predict — first: "
-                f"{next(iter(sorted(_missing)))}"))
+            _stats['missing_sources'] = (
+                _stats.get('missing_sources', 0) + 1)
+            _stats['missing_binaries'] = (
+                _stats.get('missing_binaries', 0) + len(_missing))
         if _extra:
-            _findings.append((
-                'WARNING', 'virtual_validate_predicted_extra',
-                f"{_name}: synthesizer predicted {len(_extra)} binary "
-                "name(s) real build did NOT emit — first: "
-                f"{next(iter(sorted(_extra)))}"))
+            _stats['extra_sources'] = (
+                _stats.get('extra_sources', 0) + 1)
+            _stats['extra_binaries'] = (
+                _stats.get('extra_binaries', 0) + len(_extra))
+
+    # Post-loop summary findings — operator-friendly, one line each.
+    if _stats.get('asg_drift_sources'):
+        _findings.append((
+            'INFO', 'virtual_validate_asg_drift',
+            f"{_stats['asg_drift_binaries']} binaries across "
+            f"{_stats['asg_drift_sources']} source(s) differ only in "
+            "+asgRuN suffix (ledger evolved since real build, not a "
+            "synth bug)"))
+    if _stats.get('missing_sources'):
+        _findings.append((
+            'WARNING', 'virtual_validate_predicted_missing',
+            f"{_stats['missing_binaries']} binaries across "
+            f"{_stats['missing_sources']} source(s) emitted by real "
+            "build but synthesizer did NOT predict (procedural emit "
+            "from debian/rules — not statically derivable)"))
+    if _stats.get('extra_sources'):
+        _findings.append((
+            'WARNING', 'virtual_validate_predicted_extra',
+            f"{_stats['extra_binaries']} binaries across "
+            f"{_stats['extra_sources']} source(s) predicted by "
+            "synthesizer but real build did NOT emit (procedural skip "
+            "in debian/rules — typically *-dev, *-udeb without "
+            "static profile gate)"))
     return _stats, _findings
 
 
