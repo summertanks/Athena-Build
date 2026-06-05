@@ -19788,6 +19788,55 @@ def test_virtual_build_global_pin_rewrite_resolves_cross_source_pin():
     assert _crit == [], _crit
 
 
+def test_virtual_build_classifies_out_of_scope_target_separately():
+    """When ALL targets of an unresolved hard Depends are absent from
+    the synth state, emit `virtual_target_out_of_scope` (operator
+    fixes by adding source to dep_tree or tunneling).  When a target
+    IS in state but version doesn't match, emit
+    `virtual_closure_break` (potential synth bug).  Operator needs
+    different actions for each."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    _recs = [
+        # Consumer with target absent from synth scope.
+        {'Package': 'consumer-a', 'Version': '1.0',
+         'Architecture': 'amd64', 'Source': 'sa',
+         'Depends': 'libabsent-not-in-scope (>= 1.0)',
+         'Filename': 'pool/c.deb', 'SHA256': 'x' * 64, 'Size': '0'},
+        # Consumer with target present but wrong version.
+        {'Package': 'consumer-b', 'Version': '1.0',
+         'Architecture': 'amd64', 'Source': 'sb',
+         'Depends': 'libpresent (= 99.99)',
+         'Filename': 'pool/c2.deb', 'SHA256': 'y' * 64, 'Size': '0'},
+        # The present target at a non-matching version.
+        {'Package': 'libpresent', 'Version': '1.0',
+         'Architecture': 'amd64', 'Source': 'sl',
+         'Filename': 'pool/l.deb', 'SHA256': 'z' * 64, 'Size': '0'},
+    ]
+    _, _f = _vb.virtual_repo_audit(
+        _recs,
+        install_corpus=frozenset({'consumer-a', 'consumer-b'}))
+    _kinds = sorted(_t[1] for _t in _f if _t[0] == 'CRITICAL')
+    assert _kinds == ['virtual_closure_break',
+                      'virtual_target_out_of_scope'], _kinds
+    _oos = [_t for _t in _f
+            if _t[1] == 'virtual_target_out_of_scope']
+    assert 'libabsent-not-in-scope' in _oos[0][2]
+    assert 'tunnel' in _oos[0][2]
+
+
+def test_virtual_build_extract_relation_targets_handles_alternatives():
+    """`_extract_relation_targets` returns every name in an OR-group
+    so out-of-scope classification only fires when ALL are absent.
+    `a | b` with `a` present should NOT be classified out_of_scope."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    assert _vb._extract_relation_targets('foo') == ['foo']
+    assert _vb._extract_relation_targets('foo (>= 1.0)') == ['foo']
+    _alt = _vb._extract_relation_targets('a | b (>= 1.0)')
+    assert sorted(_alt) == ['a', 'b']
+
+
 def test_virtual_build_recommends_suppressed_by_default():
     """Recommends are non-gating per Debian Policy §7.2.  virtual_repo_audit
     must NOT emit virtual_recommends_miss findings unless explicitly
@@ -19936,7 +19985,11 @@ def test_virtual_build_synthesize_repo_state_resolves_closed_graph():
 
 def test_virtual_build_closure_break_emits_critical():
     """Binary in consumer_set Depends on a name not in the synthesized
-    state → CRITICAL virtual_closure_break."""
+    state → CRITICAL.  Classification depends on whether the target
+    name appears in state at all: absent → `virtual_target_out_of_scope`
+    (operator action: scope expand / tunnel); present-but-wrong-version
+    → `virtual_closure_break` (potential synth bug).  Either way,
+    blocking."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import virtual_build as _vb
     _recs = [
@@ -19947,7 +20000,8 @@ def test_virtual_build_closure_break_emits_critical():
     _state, _f = _vb.virtual_repo_audit(
         _recs, install_corpus=frozenset({'a'}))
     _kinds = [_t[1] for _t in _f if _t[0] == 'CRITICAL']
-    assert 'virtual_closure_break' in _kinds
+    # Target is absent → out-of-scope classification.
+    assert 'virtual_target_out_of_scope' in _kinds
 
 
 def test_virtual_build_synthesize_repo_state_flags_duplicate_name():
@@ -29499,6 +29553,8 @@ def main() -> int:
         test_virtual_build_skips_binaries_from_other_canonical_source,
         test_virtual_build_prefix_source_dedup_prefers_base_over_signed,
         test_virtual_build_global_pin_rewrite_resolves_cross_source_pin,
+        test_virtual_build_classifies_out_of_scope_target_separately,
+        test_virtual_build_extract_relation_targets_handles_alternatives,
         test_virtual_build_recommends_suppressed_by_default,
         test_virtual_build_canonical_filter_off_when_peer_not_in_scope,
         test_virtual_publish_dry_run_skips_own_already_published_filenames,
