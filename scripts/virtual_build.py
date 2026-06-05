@@ -440,6 +440,87 @@ def synthesize_source_binaries(
     return _out
 
 
+def diagnose_out_of_scope_targets(
+    target_names: 'List[str]', selected_srcs: 'Dict[str, Any]',
+    package_universe: 'Dict[str, Dict[str, Any]]',
+    arch: str,
+) -> 'Dict[str, str]':
+    """For each out-of-scope target, return a one-line answer to
+    "why isn't this in scope?".
+
+    Walks every selected source's Build-Depends.  If the target
+    (or its `-dev` companion) appears as a build-dep of some
+    selected source, the answer is:
+      "<source> Build-Depends <target>-dev; cache parse does not
+       pull build-deps as sources, only the runtime closure"
+
+    If no selected source references it, the answer is:
+      "no selected source declares this as a build-dep"
+
+    Returns ``{target_name: explanation_string}``.  Uses upstream
+    Package's Source field where available to find each target's
+    canonical source name.
+    """
+    _out: Dict[str, str] = {}
+    # For each selected source, parse Build-Depends, collect binary
+    # names it declares as needed at build time.
+    _src_build_deps: Dict[str, set] = {}
+    for _name, _src in selected_srcs.items():
+        try:
+            _bd = _src.build_depends(arch, frozenset())
+        except Exception:
+            _bd = []
+        _names: set = set()
+        for _or_group in _bd:
+            for _rel in _or_group:
+                _n = _rel[0].strip() if _rel and _rel[0] else ''
+                if _n:
+                    _names.add(_n)
+        _src_build_deps[_name] = _names
+
+    for _t in target_names:
+        _hits: List[str] = []
+        # Direct hit?
+        for _src_name, _bd_set in _src_build_deps.items():
+            if _t in _bd_set:
+                _hits.append(f"{_src_name} Build-Depends {_t}")
+        # Common companion: <name>-dev → <name>0 / <name>X
+        # (typical Debian convention).  Check upstream's Source field
+        # for the target to find its canonical source.
+        if not _hits:
+            _entries = package_universe.get(_t, {})
+            _canon_src = ''
+            for _rec in _entries.values():
+                _canon_src = _upstream_canonical_source(_rec)
+                if _canon_src:
+                    break
+            if _canon_src:
+                # Find any source that build-depends on a binary
+                # produced by _canon_src.
+                _canon_binaries: set = set()
+                for _rec in package_universe.values():
+                    for _r in _rec.values():
+                        if _upstream_canonical_source(_r) == _canon_src:
+                            _canon_binaries.add(_r.get('Package', ''))
+                for _src_name, _bd_set in _src_build_deps.items():
+                    _common = _bd_set & _canon_binaries
+                    if _common:
+                        _hits.append(
+                            f"{_src_name} Build-Depends "
+                            f"{next(iter(sorted(_common)))} "
+                            f"(from source {_canon_src})")
+        if _hits:
+            _out[_t] = (
+                f"{_hits[0]}; cache parse walks runtime closure "
+                "only, not Build-Depends as a separate root")
+        else:
+            _out[_t] = (
+                "no selected source declares this as build-dep "
+                "(upstream cache has the runtime constraint from "
+                "a build context we don't share)")
+    return _out
+
+
 def from_cache(cache: Any) -> Dict[str, Dict[str, Any]]:
     """Project the Cache's package_hashtable into the shape
     `synthesize_source_binaries` expects.
@@ -784,28 +865,28 @@ def synthesize_repo_state(
         _packages[_name] = dict(_r)
     if _dup_count:
         _pair_preview = ', '.join(
-            f"{_a}+{_b}" for _a, _b in sorted(_dup_sources)[:3])
+            f"{_a}+{_b}" for _a, _b in sorted(_dup_sources)[:2])
         _more = ''
-        if len(_dup_sources) > 3:
-            _more = f" (+{len(_dup_sources) - 3} more pairs)"
+        if len(_dup_sources) > 2:
+            _more = f" +{len(_dup_sources) - 2}"
+        # Reframe: this counts BINARY-LIST DECLARATION overlaps
+        # between sources, NOT actual duplicates in the built repo.
+        # Real build's per-source debian/rules emits a subset of its
+        # declared Binary list; the end-state repo has no duplicates.
         _findings.append((
-            'INFO', 'virtual_duplicate_name',
-            f"deduped {_dup_count} cross-source binary name(s) "
-            f"across {len(_dup_sources)} source-pair(s): "
-            f"{_pair_preview}{_more} — kept highest version"))
+            'INFO', 'virtual_binary_list_overlap',
+            f"{_dup_count} binary names declared by 2+ sources "
+            f"[{_pair_preview}{_more}] - real builds emit subsets"))
     if _ambig_source_pairs:
         _ambig_preview = ', '.join(
-            f"{_a}+{_b}" for _a, _b in sorted(_ambig_source_pairs)[:3])
+            f"{_a}+{_b}" for _a, _b in sorted(_ambig_source_pairs)[:2])
         _ambig_more = (
-            f" (+{len(_ambig_source_pairs) - 3} more)"
-            if len(_ambig_source_pairs) > 3 else '')
+            f" +{len(_ambig_source_pairs) - 2}"
+            if len(_ambig_source_pairs) > 2 else '')
         _findings.append((
             'WARNING', 'virtual_dedup_ambiguous',
-            f"{len(_ambiguous_names)} binary name(s) collided across "
-            "sources WITHOUT upstream-canonical Source field "
-            f"({_ambig_preview}{_ambig_more}) — picked one record "
-            "by highest version, but closure findings against these "
-            "names will be downgraded to WARNING"))
+            f"{len(_ambiguous_names)} overlap(s) [{_ambig_preview}"
+            f"{_ambig_more}] lack upstream Source signal"))
     # Post-dedup cross-source pin reconciliation.  After dedup, the
     # state knows the FINAL Version of each binary; walk every record
     # and rewrite constraints where target's pristine matches but
@@ -886,26 +967,21 @@ def virtual_repo_audit(
         _target_names = _extract_relation_targets(_rel)
         _all_absent = bool(_target_names) and all(
             _t not in _state.packages for _t in _target_names)
+        _tgt_str = ','.join(sorted(_target_names)) or _rel
         if _all_absent:
             _findings.append((
                 'WARNING', 'virtual_target_out_of_scope',
-                f"{_pkg}: {_field} = {_rel!r} — "
-                f"{','.join(sorted(_target_names))} not in synth scope. "
-                "cache parse did not select these sources; real build's "
-                "dh_shlibdeps would also skip linking (no dev pkg "
-                "available), so the constraint is most likely vestigial"))
+                f"{_pkg} -> {_tgt_str}: source not selected"))
             continue
         _hit_ambig = any(_t in _ambiguous for _t in _target_names)
         if _hit_ambig:
             _findings.append((
                 'WARNING', 'virtual_closure_break_ambiguous',
-                f"{_pkg}: {_field} = {_rel!r} — target derived from "
-                "ambiguous cross-source collision; apparent break may "
-                "be a dedup artifact, not a real version drift"))
+                f"{_pkg} -> {_tgt_str}: target from ambiguous dedup"))
         else:
             _findings.append((
                 'CRITICAL', 'virtual_closure_break',
-                f"{_pkg}: {_field} = {_rel!r} — {_why}"))
+                f"{_pkg} -> {_rel}"))
     if report_recommends:
         for _pkg, _field, _rel in _weak:
             _findings.append((

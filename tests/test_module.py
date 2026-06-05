@@ -19807,6 +19807,56 @@ def test_virtual_build_global_pin_rewrite_resolves_cross_source_pin():
     assert _crit == [], _crit
 
 
+def test_virtual_build_diagnose_out_of_scope_traces_build_dep():
+    """`diagnose_out_of_scope_targets` walks selected sources'
+    Build-Depends and answers WHY a target isn't in scope.
+    The canonical case: ffmpeg Build-Depends libaribb24-dev; cache
+    parse walks runtime closure only, not Build-Depends — so
+    aribb24 source never gets pulled even though upstream binary
+    libaribb24-0 is referenced."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _FfmpegSrc:
+        package = 'ffmpeg'
+
+        def build_depends(self, arch, active_profiles):
+            # Mock parsed Build-Depends: list of OR-groups; each
+            # OR-group is a list of (name, ver, op) tuples.
+            return [
+                [('libaribb24-dev', '', '')],
+                [('libc-dev', '', '')],
+            ]
+    _selected = {'ffmpeg': _FfmpegSrc()}
+    _univ: dict = {}  # not exercised for this direct-hit path
+    _why = _vb.diagnose_out_of_scope_targets(
+        target_names=['libaribb24-dev'],
+        selected_srcs=_selected, package_universe=_univ,
+        arch='amd64')
+    assert 'ffmpeg' in _why['libaribb24-dev']
+    assert 'libaribb24-dev' in _why['libaribb24-dev']
+    assert 'cache parse' in _why['libaribb24-dev']
+
+
+def test_virtual_build_diagnose_no_build_dep_when_orphan():
+    """When NO selected source references the target in its
+    Build-Depends, surface the orphan case clearly."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _OtherSrc:
+        package = 'other'
+
+        def build_depends(self, arch, active_profiles):
+            return [[('libc-dev', '', '')]]
+
+    _why = _vb.diagnose_out_of_scope_targets(
+        target_names=['libnobody-cares'],
+        selected_srcs={'other': _OtherSrc()},
+        package_universe={}, arch='amd64')
+    assert 'no selected source' in _why['libnobody-cares']
+
+
 def test_virtual_build_out_of_scope_is_warning_not_critical():
     """Cache parse decides scope; real build's dh_shlibdeps follows
     that decision.  If a consumer's hard Depends references a target
@@ -20079,17 +20129,17 @@ def test_virtual_build_synthesize_repo_state_flags_duplicate_name():
     _state, _f, _ = _vb.synthesize_repo_state(_recs)
     assert _state.packages['a']['Version'] == '2.0'   # higher wins
     assert _state.packages['b']['Version'] == '2.0'
-    _infos = [_t for _t in _f if _t[1] == 'virtual_duplicate_name']
+    _infos = [_t for _t in _f if _t[1] == 'virtual_binary_list_overlap']
     # Exactly ONE summary line, not one per overlap.
     assert len(_infos) == 1
     # Summary mentions count + source pair.
     _msg = _infos[0][2]
-    assert 'deduped 2' in _msg
+    assert '2 binary names' in _msg
     assert 's1+s2' in _msg
 
 
 def test_virtual_build_no_duplicate_findings_when_no_overlap():
-    """Clean case — no duplicate names → no virtual_duplicate_name
+    """Clean case — no duplicate names → no virtual_binary_list_overlap
     finding at all (the summary line is conditional on
     _dup_count > 0)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -20103,7 +20153,7 @@ def test_virtual_build_no_duplicate_findings_when_no_overlap():
          'SHA256': 'y' * 64, 'Size': '0'},
     ]
     _state, _f, _ = _vb.synthesize_repo_state(_recs)
-    assert not any(_t[1] == 'virtual_duplicate_name' for _t in _f)
+    assert not any(_t[1] == 'virtual_binary_list_overlap' for _t in _f)
 
 
 def test_virtual_build_invalid_record_skipped_with_critical():
@@ -29605,6 +29655,8 @@ def main() -> int:
         test_virtual_build_unambiguous_dedup_no_ambiguity_warning,
         test_virtual_build_global_pin_rewrite_resolves_cross_source_pin,
         test_virtual_build_out_of_scope_is_warning_not_critical,
+        test_virtual_build_diagnose_out_of_scope_traces_build_dep,
+        test_virtual_build_diagnose_no_build_dep_when_orphan,
         test_virtual_build_classifies_out_of_scope_target_separately,
         test_virtual_build_extract_relation_targets_handles_alternatives,
         test_virtual_build_recommends_suppressed_by_default,

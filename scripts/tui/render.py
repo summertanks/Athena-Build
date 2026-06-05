@@ -111,8 +111,13 @@ class Renderer:
             pass
 
     def width(self) -> int:
-        """Current tab content width — used by dispatcher for wrap."""
-        return self._w if self._w > 0 else MIN_COLS
+        """Current writable tab content width — used by dispatcher for
+        wrap-row calculations.  Subtract 1: `_safe_addstr` reserves the
+        rightmost column to avoid bottom-right scroll triggers, so the
+        wrap layer must use the same effective width or wrapped chunks
+        get silently right-clipped."""
+        _raw = self._w if self._w > 0 else MIN_COLS
+        return max(1, _raw - 1)
 
     def content_rows(self) -> int:
         """Current tab content rows — used by dispatcher for scroll."""
@@ -235,7 +240,12 @@ class Renderer:
         i = len(tab.buffer) - 1
         while i >= 0 and len(display) < need:
             text, attr = tab.buffer[i]
-            wrapped = wrap.wrap_line(text.rstrip('\n'), max_x)
+            # `_safe_addstr` reserves one column on the right to avoid the
+            # bottom-right cell triggering a forced scroll, so the usable
+            # writable width is max_x - 1.  wrap_line MUST be told the
+            # same so the wrapped chunks fit without the renderer
+            # silently clipping the last character of every line.
+            wrapped = wrap.wrap_line(text.rstrip('\n'), max(1, max_x - 1))
             for chunk in reversed(wrapped):
                 display.append((chunk, attr))
             i -= 1
