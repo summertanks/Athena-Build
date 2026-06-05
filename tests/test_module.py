@@ -24493,129 +24493,80 @@ def test_coord_reconcile_detect_hash_conflicts_critical_and_info():
     assert 'reproducible' in _infos[0].kind
 
 
-def test_remote_publish_closure_gate_uses_binary_names_not_source_names():
-    """Regression 2026-06-05: the publish-time closure gate built its
-    consumer_set from claim.`.package` (the SOURCE name) but
-    `audit_dep_closure` iterates state.packages keyed by BINARY name.
-    For multi-binary sources (`bind9` produces `bind9-dnsutils`,
-    `bind9-host`, `bind9-dev`, ...), the source name `bind9` happened to
-    match a transitional meta whose Depends weren't pulled into the
-    install corpus — gate fired on a dep `repo audit` legitimately
-    passes.
+def test_publish_closure_gate_scope_matches_repo_audit_install_corpus():
+    """Regression 2026-06-05: the publish-time closure gate kept
+    flagging deps that `repo audit` legitimately passed on the same
+    on-disk state.  Two iterations failed:
 
-    Pin: derive the consumer set from claim.`.filename`'s pkg part.
-    Direct exercise via remote_publish + a fake repo state where the
-    source-name consumer_set would fire (bind9 → dns-root-data missing)
-    but the binary-name consumer_set wouldn't (bind9-dnsutils Depends
-    are all satisfied).
+      (a) consumer_set=source names → walked transitional metas (e.g.
+          `bind9` → dns-root-data) that the install corpus never pulls.
+      (b) consumer_set=binary names derived from claim filenames →
+          walked side artifacts (`apache2-dev`, `apparmor-notify`,
+          `2to3`, ...) whose Depends include build tools or optional
+          siblings (`debhelper`, `python3-notify2`) that the install
+          corpus also doesn't pull.
+
+    The contract: the closure gate MUST use the same install corpus
+    `repo audit`'s dep gate uses — `dep_tree.selected_pkgs ∪
+    udeb_dep_tree.selected_pkgs`.  Otherwise two valid runs against
+    identical state produce contradictory verdicts.
+
+    Three direct probes against a synthetic RepoState:
+      - install_corpus = {bind9-dnsutils}   (real install) → PASS
+      - install_corpus = {bind9}            (source name)  → FAIL (meta deps)
+      - install_corpus = {apache2-dev}      (side artifact) → FAIL (build deps)
     """
     import sys as _sys
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     _stub_tui()
-    import tempfile
-    import json
-    from unittest.mock import patch, MagicMock
-
-    import coord.publish as _pub
-    import coord.transport as _tx
-    import coord.schema as _sch
     import repo_audit as _ra
+    import mirror as _mir
 
-    with tempfile.TemporaryDirectory() as _td:
-        _coord_dir = os.path.join(_td, 'coord')
-        _claims = os.path.join(_coord_dir, 'claims')
-        _fetched = os.path.join(_coord_dir, 'fetched')
-        _buildlog = os.path.join(_td, 'log', 'build')
-        _repo = os.path.join(_td, 'repo')
-        for _d in (_claims, _fetched, _buildlog, _repo):
-            os.makedirs(_d, exist_ok=True)
-
-        # Build record: source `bind9`, one output `bind9-dnsutils_….deb`.
-        _rec = {
-            'package': 'bind9',
-            'intended_version': '9.18.49-1',
-            'built_version': '9.18.49-1',
-            'phase': 'done',
-            'status': 'PASS',
-            'finished': '2026-06-05T00:00:00Z',
-            'outputs': ['bind9-dnsutils_9.18.49-1_amd64.deb'],
-            'output_count': 1,
-            'output_hashes': {
-                'bind9-dnsutils_9.18.49-1_amd64.deb': 'a' * 64,
+    # Repo state mirroring the operator's actual shape:
+    # - bind9-dnsutils is in the install corpus, Depends resolvable.
+    # - bind9 is a transitional meta with unresolved Depends.
+    # - apache2-dev is a side artifact with build-tool Depends.
+    _state = _ra.RepoState(
+        packages={
+            'bind9-dnsutils': {
+                'Package': 'bind9-dnsutils', 'Version': '9.18.49-1',
+                'Depends': 'libc6',
             },
-            'republished_from': {},
-            'pulled_from': None,
-            'component': 'main',
-            'schema_version': 3,
-        }
-
-        # State: bind9-dnsutils has resolvable Depends.  A transitional
-        # `bind9` meta (NOT in our actual install corpus) has an
-        # un-resolvable Depends `dns-root-data`.  Under the buggy
-        # source-name consumer_set, the closure walk hits `bind9` →
-        # dns-root-data missing → FAIL.  Under the fixed binary-name
-        # consumer_set, only `bind9-dnsutils` is in scope → PASS.
-        _state = _ra.RepoState(
-            packages={
-                'bind9-dnsutils': {
-                    'Package': 'bind9-dnsutils',
-                    'Version': '9.18.49-1',
-                    'Depends': 'libc6',
-                },
-                'libc6': {'Package': 'libc6', 'Version': '2.36-9'},
-                'bind9': {
-                    'Package': 'bind9',
-                    'Version': '9.18.49-1',
-                    'Depends': 'dns-root-data',
-                },
+            'libc6': {'Package': 'libc6', 'Version': '2.36-9'},
+            'bind9': {
+                'Package': 'bind9', 'Version': '9.18.49-1',
+                'Depends': 'dns-root-data',
             },
-            provides_index={},
-            packages_file='',
-            repo_mtime=0.0,
-        )
+            'apache2-dev': {
+                'Package': 'apache2-dev', 'Version': '2.4.67-1',
+                'Depends': 'debhelper (>= 10), libpcre2-dev',
+            },
+        },
+        provides_index={},
+        packages_file='', repo_mtime=0.0,
+    )
 
-        _stub_pub = MagicMock(side_effect=lambda _bl, _pkg: _rec)
-        _stub_sha = MagicMock(return_value='a' * 64)
+    # Install-corpus scope (matches repo audit's input) → no breaks.
+    _breaks_install = _mir.find_publish_closure_breaks(
+        _state, {}, frozenset({'bind9-dnsutils'}))
+    assert _breaks_install == [], (
+        f"install-corpus scope produced false-positive breaks: "
+        f"{_breaks_install}")
 
-        with patch.object(_ra, 'scan_repo_state', return_value=_state), \
-             patch.object(_tx, 'pull_remote_coord',
-                          return_value=(True, '')), \
-             patch.object(_tx, 'push_jsonl', return_value=(True, '')), \
-             patch.object(_tx, 'push_single_deb',
-                          return_value=(True, '')), \
-             patch.object(_tx, 'push_coord_head', return_value=(True, '')), \
-             patch.object(_pub._head, 'read_coord_head', return_value=None), \
-             patch.object(_pub._head, 'write_coord_head', return_value=True), \
-             patch.object(_pub._identity, 'load_keyring', return_value={}):
+    # Source-name scope (the first wrong attempt) → DOES break.
+    _breaks_source = _mir.find_publish_closure_breaks(
+        _state, {}, frozenset({'bind9'}))
+    assert _breaks_source, (
+        "sanity: source-name scope walks transitional meta — "
+        "must produce break on dns-root-data")
 
-            class _Cfg:
-                dir_coord = _coord_dir
-                dir_coord_claims = _claims
-                dir_coord_fetched = _fetched
-                dir_log = os.path.join(_td, 'log')
-                dir_repo = _repo
-            # Create a build.json file so generate_pending_claims finds it.
-            with open(os.path.join(_buildlog, 'bind9.build.json'), 'w') as _fh:
-                json.dump({'__stub__': True}, _fh)
-
-            # Direct: invoke find_publish_closure_breaks with both
-            # consumer_set shapes and assert the binary-name one passes.
-            import mirror as _mir
-            _source_name_set = frozenset({'bind9'})
-            _binary_name_set = frozenset({'bind9-dnsutils'})
-
-            _breaks_source = _mir.find_publish_closure_breaks(
-                _state, {}, _source_name_set)
-            assert _breaks_source, (
-                "regression sanity: source-name set should walk "
-                "bind9's Depends → dns-root-data missing → break")
-
-            _breaks_binary = _mir.find_publish_closure_breaks(
-                _state, {}, _binary_name_set)
-            assert _breaks_binary == [], (
-                f"binary-name consumer_set should walk only "
-                f"bind9-dnsutils (Depends libc6, satisfied); "
-                f"got breaks: {_breaks_binary}")
+    # Side-artifact-included scope (the second wrong attempt) → DOES
+    # break on apache2-dev's build-tool Depends.
+    _breaks_side = _mir.find_publish_closure_breaks(
+        _state, {}, frozenset({'apache2-dev'}))
+    assert _breaks_side, (
+        "sanity: side-artifact scope walks build-tool Depends — "
+        "must produce break on debhelper / libpcre2-dev")
 
 
 def test_coord_reconcile_detect_hash_conflicts_multi_binary_same_source_no_false_positive():
@@ -28076,7 +28027,7 @@ def main() -> int:
         test_coord_store_project_owners_skips_retracted,
         test_coord_store_project_owners_handles_empty_input,
         test_coord_reconcile_detect_hash_conflicts_critical_and_info,
-        test_remote_publish_closure_gate_uses_binary_names_not_source_names,
+        test_publish_closure_gate_scope_matches_repo_audit_install_corpus,
         test_coord_reconcile_detect_hash_conflicts_multi_binary_same_source_no_false_positive,
         test_coord_reconcile_detect_hash_conflicts_same_filename_diff_sha_is_critical,
         test_coord_reconcile_publish_halt_round_trip,

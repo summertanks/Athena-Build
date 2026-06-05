@@ -406,6 +406,7 @@ def remote_publish(
     pool_remote_spec: 'Optional[str]' = None,
     on_progress: 'Optional[Callable]' = None,
     on_status: 'Optional[Callable[[str], None]]' = None,
+    install_corpus: 'Optional[frozenset[str]]' = None,
 ) -> Tuple[bool, str]:
     """11-step publish transaction (see module docstring).  Returns
     (ok, detail).  On failure detail explains the step that aborted.
@@ -604,38 +605,49 @@ def remote_publish(
         # scan_repo_state raises (missing attrs), the gate is
         # skipped with a logged warning — production callers always
         # have a real config so the gate always runs there.
-        if _pending:
+        if _pending and install_corpus is None:
+            logger.warning(
+                "closure gate: install_corpus not provided; skipping "
+                "installability check (caller is likely a test harness "
+                "— production cmd_mirror_publish always wires the "
+                "dep_tree's selected_pkgs union)")
+            _breaks = []
+        elif _pending:
             try:
                 import mirror as _mirror_mod
                 import repo_audit as _repo_audit
                 _local_state = _repo_audit.scan_repo_state(config)
-                # consumer_set MUST be BINARY package names — that's
-                # what `state.packages` is keyed by and what
-                # `audit_dep_closure` iterates.  Claim's `.package`
-                # field holds the SOURCE name (`'bind9'`), not the
-                # binary name (`'bind9-dnsutils'`).  Deriving the set
-                # from `.filename` (which encodes `<binpkg>_<ver>_<arch>`)
-                # gives the right scope — and matches what
-                # `repo_audit`'s own dep gate uses (binary names from
-                # dep_tree.selected_pkgs).  Caught 2026-06-05: a
-                # source-name consumer_set walked transitional meta
-                # `bind9`'s Depends (dns-root-data), which our install
-                # corpus doesn't actually pull in, leaving the gate
-                # complaining about deps `repo audit` legitimately
-                # passes.
-                _our_pkg_names = frozenset(
-                    _bn for _bn in (
-                        str(_c.get('filename') or '').split('_', 1)[0]
-                        for _c in _pending if _c.get('filename')
-                    ) if _bn
-                )
+                # consumer_set = the INSTALL CORPUS (binary names from
+                # dep_tree.selected_pkgs ∪ udeb_dep_tree.selected_pkgs)
+                # — exactly what `repo_audit`'s own dep gate uses.
+                # `audit_dep_closure`'s docstring is explicit:
+                #
+                #     "Anything OUTSIDE this set is a side artifact of
+                #     dpkg-buildpackage (libfoo-dev / libfoo-doc /
+                #     libfoo-tests / libfoo-dbgsym from a libfoo source
+                #     we built but never selected for install).  Their
+                #     hard deps are NOT install-correctness concerns."
+                #
+                # Deriving the set from pending claims' filenames (the
+                # previous attempt) over-counted: every -dev / -doc /
+                # -dbgsym artifact emitted by a build got walked, and
+                # their build-tool Depends (debhelper, python3-notify2,
+                # python3-psutil, ...) fired as false-positive breaks.
+                # `repo audit` correctly excludes those because it
+                # constrains to the install corpus.  Caught 2026-06-05
+                # the second time around — first try (source-names)
+                # under-walked the meta surface; this version walks
+                # exactly what apt at install time will resolve.
+                assert install_corpus is not None  # narrowed by outer guard
                 _breaks = _mirror_mod.find_publish_closure_breaks(
-                    _local_state, _by_builder, _our_pkg_names)
+                    _local_state, _by_builder, install_corpus)
             except (AttributeError, OSError) as _e:
                 logger.warning(
                     f"closure gate: skipped ({_e!r}); proceeding "
                     "without installability check (likely test harness)")
                 _breaks = []
+        else:
+            _breaks = []
             if _breaks:
                 _detail_lines = [
                     f"{_pkg}: {_field} {_rel} ({_why})"

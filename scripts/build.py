@@ -4610,6 +4610,19 @@ class BuildSession:
                 # round trips; without this the TUI just shows the
                 # initial banner until success/failure).
                 console.print(f"  · {_msg}", tui.COLOR_INFO)
+            # The publish-time closure gate needs the same install
+            # corpus that `repo audit`'s dep gate uses — binary names
+            # from dep_tree.selected_pkgs ∪ udeb_dep_tree.selected_pkgs.
+            # Without this, the gate either over- or under-walks the
+            # consumer surface and produces verdicts that contradict
+            # `repo audit` against identical on-disk state.
+            _install_corpus: 'frozenset[str]' = frozenset()
+            if self.dep_tree is not None:
+                _install_corpus |= frozenset(
+                    self.dep_tree.selected_pkgs.keys())
+            if self.udeb_dep_tree is not None:
+                _install_corpus |= frozenset(
+                    self.udeb_dep_tree.selected_pkgs.keys())
             try:
                 _ok, _detail = _publish.remote_publish(
                     builder_id=_bid, config=self.config,
@@ -4625,6 +4638,7 @@ class BuildSession:
                     pool_remote_spec=_pool_spec,
                     on_progress=_progress,
                     on_status=_on_status,
+                    install_corpus=_install_corpus or None,
                 )
             finally:
                 _bar.close()
