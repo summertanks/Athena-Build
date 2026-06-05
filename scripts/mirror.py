@@ -42,7 +42,7 @@ import json
 import logging
 import os
 import re
-from typing import List, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger('athena')
 
@@ -816,6 +816,265 @@ def find_publish_closure_breaks(
     _unresolved, _weak = _repo_audit.audit_dep_closure(
         _state, consumer_set=our_pending_pkg_names)
     return _unresolved
+
+
+# ─────────────────── audit gap (1) helpers: InRelease/Packages/ownership ──
+
+
+def audit_inrelease_against_head(
+    pool_url: str, codename: str, expected_sha256: str,
+    fetched_dir: str, ssh_key: 'Optional[str]' = None,
+) -> 'tuple[Any, list[tuple[str, str, str]]]':
+    """Pull the remote ``dists/<codename>/InRelease`` and verify its
+    SHA-256 matches what the coord-head pins.
+
+    Returns ``(parsed_release_or_None, findings)`` where each finding is
+    ``(severity, kind, message)``.  ``parsed_release_or_None`` is a
+    ``debian.deb822.Release`` instance on success (caller uses its
+    ``SHA256:`` block to verify Packages files), ``None`` on failure.
+    """
+    import hashlib as _hashlib
+    import os as _os
+    from coord import transport as _transport
+
+    _findings: 'list[tuple[str, str, str]]' = []
+    _remote = (pool_url.rstrip('/')
+               + f"/dists/{codename}/InRelease")
+    _rsync_spec, _ = rsync_spec_for_url(_remote)
+    _os.makedirs(fetched_dir, exist_ok=True)
+    _local = _os.path.join(fetched_dir, 'InRelease')
+    _ok, _detail = _transport.pull_single_file(
+        remote_spec=_rsync_spec, local_path=_local, ssh_key=ssh_key)
+    if not _ok:
+        _findings.append((
+            'CRITICAL', 'inrelease_unreachable',
+            f"could not pull {_remote}: {_detail}"))
+        return None, _findings
+    try:
+        with open(_local, 'rb') as _fh:
+            _bytes = _fh.read()
+    except OSError as _e:
+        _findings.append((
+            'CRITICAL', 'inrelease_unreadable',
+            f"local InRelease at {_local} unreadable: {_e}"))
+        return None, _findings
+    _actual = _hashlib.sha256(_bytes).hexdigest()
+    if expected_sha256 and _actual != expected_sha256:
+        _findings.append((
+            'CRITICAL', 'inrelease_sha_mismatch',
+            f"on-pool InRelease sha256={_actual[:12]} disagrees with "
+            f"coord-head pin={expected_sha256[:12]}"))
+        return None, _findings
+    from debian.deb822 import Release as _Release
+    try:
+        _release = _Release(_bytes)
+    except Exception as _e:
+        _findings.append((
+            'CRITICAL', 'inrelease_parse_failed',
+            f"could not parse InRelease: {type(_e).__name__}: {_e}"))
+        return None, _findings
+    return _release, _findings
+
+
+def audit_packages_chain(
+    pool_url: str, codename: str, release: 'Any',
+    fetched_dir: str, ssh_key: 'Optional[str]' = None,
+    components: 'tuple[str, ...]' = ('main',),
+    arches: 'tuple[str, ...]' = ('amd64',),
+) -> 'tuple[dict[str, dict], list[tuple[str, str, str]]]':
+    """For each ``<component>/binary-<arch>/Packages`` referenced in the
+    verified InRelease, pull and verify its SHA-256 against the
+    InRelease pin, then parse it.
+
+    Returns ``(packages_index, findings)`` where ``packages_index`` maps
+    on-disk filename (basename of ``Filename:`` field) → dict with
+    ``sha256``, ``version``, ``package``, ``size``.  Pulls only the
+    uncompressed ``Packages`` file (the apt-trusted index for the
+    cross-check); ``.gz`` / ``.xz`` are skipped — InRelease already
+    pins all of them and they're redundant for our purposes.
+    """
+    import hashlib as _hashlib
+    import os as _os
+    from coord import transport as _transport
+
+    _findings: 'list[tuple[str, str, str]]' = []
+    _index: 'dict[str, dict]' = {}
+
+    _sha256_block = release.get('SHA256') if release is not None else None
+    if not _sha256_block:
+        _findings.append((
+            'CRITICAL', 'inrelease_no_sha256_block',
+            "InRelease carries no SHA256: block — cannot verify "
+            "Packages chain"))
+        return _index, _findings
+
+    _by_name: 'dict[str, dict]' = {
+        str(_e.get('name')): _e for _e in _sha256_block
+        if _e.get('name')
+    }
+
+    for _comp in components:
+        for _arch in arches:
+            _rel = f"{_comp}/binary-{_arch}/Packages"
+            _pin = _by_name.get(_rel)
+            if _pin is None:
+                _findings.append((
+                    'WARNING', 'inrelease_missing_packages_pin',
+                    f"InRelease has no SHA256 entry for {_rel} — "
+                    "skipping that component/arch"))
+                continue
+            _remote = pool_url.rstrip('/') + f"/dists/{codename}/{_rel}"
+            _rsync_spec, _ = rsync_spec_for_url(_remote)
+            _local = _os.path.join(
+                fetched_dir, f"Packages.{_comp}.{_arch}")
+            _ok, _detail = _transport.pull_single_file(
+                remote_spec=_rsync_spec, local_path=_local,
+                ssh_key=ssh_key)
+            if not _ok:
+                _findings.append((
+                    'CRITICAL', 'packages_unreachable',
+                    f"could not pull {_rel}: {_detail}"))
+                continue
+            try:
+                with open(_local, 'rb') as _fh:
+                    _data = _fh.read()
+            except OSError as _e:
+                _findings.append((
+                    'CRITICAL', 'packages_unreadable',
+                    f"local {_local} unreadable: {_e}"))
+                continue
+            _actual = _hashlib.sha256(_data).hexdigest()
+            _expected = str(_pin.get('sha256', ''))
+            if _expected and _actual != _expected:
+                _findings.append((
+                    'CRITICAL', 'packages_sha_mismatch',
+                    f"on-pool {_rel} sha256={_actual[:12]} disagrees "
+                    f"with InRelease pin={_expected[:12]}"))
+                continue
+            # Parse entries — multi-section deb822 Packages format.
+            from debian.deb822 import Packages as _Packages
+            try:
+                _stream = iter(_Packages.iter_paragraphs(
+                    _data, use_apt_pkg=False))
+            except Exception as _e:
+                _findings.append((
+                    'CRITICAL', 'packages_parse_failed',
+                    f"could not parse {_rel}: "
+                    f"{type(_e).__name__}: {_e}"))
+                continue
+            for _para in _stream:
+                _fn_full = str(_para.get('Filename') or '')
+                if not _fn_full:
+                    continue
+                _basename = _os.path.basename(_fn_full)
+                _index[_basename] = {
+                    'package':  str(_para.get('Package') or ''),
+                    'version':  str(_para.get('Version') or ''),
+                    'sha256':   str(_para.get('SHA256') or ''),
+                    'size':     str(_para.get('Size') or ''),
+                    'component': _comp,
+                    'arch':      _arch,
+                }
+    return _index, _findings
+
+
+def audit_claims_vs_packages(
+    by_builder: 'dict[str, list[dict]]',
+    packages_index: 'dict[str, dict]',
+) -> 'list[tuple[str, str, str]]':
+    """Cross-check every non-retracted claim against the apt-trusted
+    Packages index built by :func:`audit_packages_chain`.
+
+    Findings:
+      ``claim_not_in_apt_index``  CRITICAL: claim references a filename
+                                  that's not in any Packages file
+      ``claim_apt_sha_mismatch``  CRITICAL: same filename appears in
+                                  both, but the SHAs disagree (a
+                                  re-indexed apt repo would serve
+                                  different bytes than the sidecar
+                                  pins)
+    """
+    _findings: 'list[tuple[str, str, str]]' = []
+    _seen_pairs: 'set[tuple[str, str]]' = set()
+    for _bid, _claims in by_builder.items():
+        for _c in _claims:
+            if _c.get('claim_state') == 'retracted':
+                continue
+            _fn = str(_c.get('filename') or '')
+            if not _fn:
+                continue
+            _claim_sha = str(_c.get('sha256') or '')
+            _idx = packages_index.get(_fn)
+            if _idx is None:
+                _key = ('not_in_apt', _fn)
+                if _key in _seen_pairs:
+                    continue
+                _seen_pairs.add(_key)
+                _findings.append((
+                    'CRITICAL', 'claim_not_in_apt_index',
+                    f"{_fn} (claim by {_bid}) is not in any "
+                    "Packages file under the verified InRelease"))
+                continue
+            _apt_sha = str(_idx.get('sha256') or '')
+            if _claim_sha and _apt_sha and _claim_sha != _apt_sha:
+                _key = ('sha_mismatch', _fn)
+                if _key in _seen_pairs:
+                    continue
+                _seen_pairs.add(_key)
+                _findings.append((
+                    'CRITICAL', 'claim_apt_sha_mismatch',
+                    f"{_fn}: claim sha={_claim_sha[:12]} "
+                    f"disagrees with Packages sha={_apt_sha[:12]} "
+                    f"(builder {_bid})"))
+    return _findings
+
+
+def audit_ownership_summary(
+    by_builder: 'dict[str, list[dict]]', our_builder_id: 'Optional[str]' = None,
+) -> 'tuple[dict, list[tuple[str, str, str]]]':
+    """Project the per-filename ownership view and bucket-count by
+    owner: ``we_own`` / ``peers_own`` / ``tunneled``.  Optionally
+    include a per-peer-builder breakdown.
+
+    Returns ``(summary_dict, findings)``.  ``summary_dict`` shape::
+
+      {
+        'total':       int,                    # distinct filenames
+        'we_own':      int,                    # builder == our_builder_id
+        'peers_own':   int,                    # builder is some other id
+        'tunneled':    int,                    # builder is None (republished)
+        'by_peer':     {builder_id: int, ...}, # peer-side breakdown
+      }
+
+    No findings are emitted at this layer — cross-builder hash
+    conflicts are :func:`coord.reconcile.detect_hash_conflicts`'s
+    responsibility.  The empty-list return keeps the signature
+    consistent with the other audit helpers.
+    """
+    from coord import store as _store
+    _owners = _store.project_owners(by_builder)
+    _we_own = 0
+    _peers_own = 0
+    _tunneled = 0
+    _by_peer: 'dict[str, int]' = {}
+    for _rec in _owners.values():
+        _builder = _rec.get('builder')
+        if _builder is None:
+            _tunneled += 1
+        elif our_builder_id is not None and _builder == our_builder_id:
+            _we_own += 1
+        else:
+            _peers_own += 1
+            _bid_str = str(_builder)
+            _by_peer[_bid_str] = _by_peer.get(_bid_str, 0) + 1
+    _summary: 'dict[str, Any]' = {
+        'total':     len(_owners),
+        'we_own':    _we_own,
+        'peers_own': _peers_own,
+        'tunneled':  _tunneled,
+        'by_peer':   _by_peer,
+    }
+    return _summary, []
 
 
 def all_mirror_neighbour_records(config) -> 'list[dict]':
