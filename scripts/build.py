@@ -10135,6 +10135,256 @@ class BuildSession:
             return self.cmd_clean_all(*args)
         return self._group_help('clean', _table, action)
 
+    def cmd_virtual(self, action: str = '', *args):
+        """Virtual build pipeline — static simulation of cache parse →
+        source build → repo + publish audit, without running any
+        builds.  Sub-actions:
+
+          build [all|indl|<src>...]   run virtual pipeline on scope
+          run                          alias for `virtual build`
+        """
+        if action in ('build', 'run', ''):
+            return self.cmd_virtual_build(*args)
+        _table = {
+            'build [scope]':     "virtual pipeline; scope = all|indl|<src>...",
+            'run':               "alias for `virtual build`",
+        }
+        return self._group_help('virtual', _table, action)
+
+    def cmd_virtual_build(self, *args):
+        """Run the virtual build pipeline for `scope` and report findings.
+
+        Scope:
+          (no arg) / `all`           every source in dep_tree.selected_srcs
+                                     (∪ udeb_dep_tree's)
+          `indl`                     names from config/build_pkg.list
+                                     (mirrors `source build indl`)
+          <src1> <src2> ...          explicit source names
+
+        Phases (mirrors the real pipeline):
+          1. cache parse  — REAL (operator-interactive).  We just read
+             the already-populated cache + dep_tree.
+          2. source sync  — virtual (trust cache.source_hashtable)
+          3. source build — virtual (compute_post_build_versions math
+             + per-binary upstream-inherit + sibling pin rewrite)
+          4. source audit — covered implicitly: every selected source
+             must have a synthesizable binary set
+          5. repo audit   — REAL audit_dep_closure + audit_conflict_cohort
+             against synthetic RepoState
+          6. publish dry-run — REAL detect_hash_conflicts +
+             project_owners + ownership rule check; remote state used
+             when available from the last `mirror pull`
+
+        Findings printed per-phase with the same severity convention as
+        `mirror audit`.  Returns True when no CRITICAL was emitted.
+
+        Substvar caveat: virtual build inherits upstream binary
+        `Depends:` verbatim.  Fork patches that change linked sonames
+        are a BLIND SPOT — see docs/virtual-build.md.
+        """
+        if self.cache is None:
+            console.print(
+                "virtual build: cache not parsed yet — run `cache build` "
+                "+ `cache parse` first.", tui.COLOR_ERROR)
+            return False
+        if self.dep_tree is None:
+            console.print(
+                "virtual build: dep_tree not populated — `cache parse` "
+                "must complete first.", tui.COLOR_ERROR)
+            return False
+        import virtual_build as _vb
+        import repo_audit as _ra
+        import mirror as _mirror
+        import coord.identity as _id
+        import coord.store as _store
+
+        # ---- Scope resolution -----------------------------------------
+        _selected_srcs: dict = dict(
+            getattr(self.dep_tree, 'selected_srcs', {}) or {})
+        if self.udeb_dep_tree is not None:
+            for _n, _s in (getattr(self.udeb_dep_tree, 'selected_srcs', {})
+                           or {}).items():
+                _selected_srcs.setdefault(_n, _s)
+        if not args or args[0] == 'all':
+            _scope_names = sorted(_selected_srcs.keys())
+            _scope_label = 'all'
+        elif args[0] == 'indl':
+            _scope_names = utils.parse_build_pkg_list(
+                getattr(self.config, 'build_pkg_list_path', '') or '')
+            _scope_label = f'indl ({len(_scope_names)} pkg)'
+        else:
+            _scope_names = list(args)
+            _scope_label = f'{len(_scope_names)} explicit src(s)'
+        if not _scope_names:
+            console.print(
+                "virtual build: scope is empty — nothing to simulate.",
+                tui.COLOR_WARNING)
+            return True
+
+        # ---- Release + asg ledger (real disk state) -------------------
+        try:
+            _release = int(str(self.config.build_version)
+                           .strip('"').strip("'"))
+        except (TypeError, ValueError):
+            _release = 1
+        _asg_ledger = _ra.published_ledger(self.config) or {}
+        _universe = _vb.from_cache(self.cache)
+        _arch = self.config.arch
+
+        # ---- Header ---------------------------------------------------
+        console.print(
+            f"virtual build: scope={_scope_label}  arch={_arch}  "
+            f"release={_release}", tui.COLOR_HIGHLIGHT)
+        console.print(
+            "  policy: conservative substvars (inherit upstream Depends; "
+            "rewrite sibling pins only).  Compile errors NOT detected.",
+            tui.COLOR_INFO)
+
+        # ---- Phase: synthesize binary records -------------------------
+        _records: 'list[dict]' = []
+        _missing_srcs: 'list[str]' = []
+        for _name in _scope_names:
+            _src = _selected_srcs.get(_name)
+            if _src is None:
+                # Try cache.source_hashtable for names not in selection
+                # (operator-explicit scope can reach beyond dep_tree).
+                _candidates = (getattr(self.cache, 'source_hashtable', {})
+                               .get(_name, []))
+                _src = _candidates[0] if _candidates else None
+            if _src is None:
+                _missing_srcs.append(_name)
+                continue
+            _was_patched = bool(getattr(_src, 'patch_list', None))
+            _records.extend(_vb.synthesize_source_binaries(
+                source=_src, package_universe=_universe,
+                asg_ledger=_asg_ledger, release=_release,
+                arch=_arch, was_patched=_was_patched,
+            ))
+        if _missing_srcs:
+            console.print(
+                f"  WARNING  {len(_missing_srcs)} source(s) not in cache: "
+                f"{', '.join(_missing_srcs[:5])}"
+                + (f" +{len(_missing_srcs) - 5} more"
+                   if len(_missing_srcs) > 5 else ''),
+                tui.COLOR_WARNING)
+        if not _records:
+            console.print(
+                "  CRITICAL  synthesized 0 binary records — nothing to "
+                "audit (every source missing or empty).",
+                tui.COLOR_ERROR)
+            return False
+        console.print(
+            f"  ok        synthesized {len(_records)} virtual binary "
+            f"record(s) across {len(_scope_names) - len(_missing_srcs)} "
+            "source(s)", tui.COLOR_INFO)
+
+        # ---- Phase: repo audit ----------------------------------------
+        _install_corpus: 'frozenset[str]' = frozenset()
+        if self.dep_tree is not None:
+            _install_corpus |= frozenset(
+                getattr(self.dep_tree, 'selected_pkgs', {}).keys())
+        if self.udeb_dep_tree is not None:
+            _install_corpus |= frozenset(
+                getattr(self.udeb_dep_tree, 'selected_pkgs', {}).keys())
+        _state, _audit_findings = _vb.virtual_repo_audit(
+            _records, install_corpus=_install_corpus or None,
+        )
+        _audit_crit = [_t for _t in _audit_findings if _t[0] == 'CRITICAL']
+        console.print(
+            "\nvirtual repo audit:", tui.COLOR_HIGHLIGHT)
+        if not _audit_findings:
+            console.print(
+                "  ok        synthetic closure clean", tui.COLOR_INFO)
+        for _sev, _kind, _msg in _audit_findings[:25]:
+            _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                      else (tui.COLOR_WARNING if _sev == 'WARNING'
+                            else tui.COLOR_INFO))
+            console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+        if len(_audit_findings) > 25:
+            console.print(
+                f"  …and {len(_audit_findings) - 25} more findings",
+                tui.COLOR_WARNING)
+
+        # ---- Phase: publish dry-run -----------------------------------
+        # Cross-mirror state — best-effort: read last-fetched sidecars
+        # under cache/mirror/<name>/fetched/claims/.  Operator should
+        # run `mirror pull` first for accuracy; we warn loudly when
+        # nothing's there.
+        _remote_by_builder: 'dict[str, list[dict]]' = {}
+        _signing_home = ''
+        try:
+            import signing as _signing
+            _signing_home = _signing.signing_home(self.config)
+        except Exception:
+            pass
+        _mirror_names = _mirror.list_mirrors(self.config)
+        for _mn in _mirror_names:
+            _fetched = os.path.join(
+                self.config.dir_cache, 'mirror', _mn, 'fetched')
+            _claims_dir = os.path.join(_fetched, 'claims')
+            if not os.path.isdir(_claims_dir):
+                continue
+            try:
+                import coord.head as _head_mod
+                _head = _head_mod.read_coord_head(_fetched, _signing_home)
+                if _head is None:
+                    continue
+                _keyring = _id.load_keyring(
+                    os.path.join(_fetched, 'keyring', 'builders'))
+                _revoked = _head.get('revoked_builders') or {}
+                _bb = _store.read_all_claims(_claims_dir, _keyring, _revoked)
+                for _bid, _cl in _bb.items():
+                    _remote_by_builder.setdefault(_bid, []).extend(_cl)
+            except Exception as _e:
+                logger.warning(
+                    f"virtual build: cannot read mirror {_mn} state: {_e}")
+        # Builder id — needed for ownership decision.  If absent (rare),
+        # default to a synthetic id so the merge still runs but every
+        # peer claim looks foreign (max ownership-pessimism).
+        try:
+            _our_bid = self._coord_builder_id() or 'athena-virtual'
+        except (AttributeError, OSError):
+            _our_bid = 'athena-virtual'
+        _snapshot = str(getattr(self.snapshot_state, 'current', '') or 'T')
+        console.print("\nvirtual publish dry-run:", tui.COLOR_HIGHLIGHT)
+        if not _remote_by_builder:
+            console.print(
+                "  WARNING  no cached remote state — run `mirror pull` "
+                "first for ownership / cross-builder checks.  Continuing "
+                "with intra-our-claims hash-conflict scan only.",
+                tui.COLOR_WARNING)
+        _merged, _pub_findings = _vb.virtual_publish_dry_run(
+            _records, our_builder_id=_our_bid, snapshot=_snapshot,
+            remote_by_builder=(_remote_by_builder or None),
+        )
+        _pub_crit = [_t for _t in _pub_findings if _t[0] == 'CRITICAL']
+        if not _pub_findings:
+            console.print(
+                "  ok        no cross-builder conflicts; no ownership "
+                "blocks", tui.COLOR_INFO)
+        for _sev, _kind, _msg in _pub_findings[:25]:
+            _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                      else (tui.COLOR_WARNING if _sev == 'WARNING'
+                            else tui.COLOR_INFO))
+            console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+        if len(_pub_findings) > 25:
+            console.print(
+                f"  …and {len(_pub_findings) - 25} more findings",
+                tui.COLOR_WARNING)
+
+        # ---- Summary --------------------------------------------------
+        _total_crit = len(_audit_crit) + len(_pub_crit)
+        console.print("")
+        if _total_crit == 0:
+            console.print(
+                "virtual build: PASS — pipeline projection clean.",
+                tui.COLOR_INFO)
+            return True
+        console.print(
+            f"virtual build: BLOCKED — {_total_crit} CRITICAL finding(s).",
+            tui.COLOR_ERROR)
+        return False
+
     def cmd_sbom(self, *args):
         """CONF-07: emit a CycloneDX 1.5 JSON Software Bill of Materials.
 
@@ -10916,6 +11166,7 @@ def main(banner: str) -> None:
     tui.register_command('iso',       session.cmd_iso,       'ISO:        \tiso build <live|installer>')
     tui.register_command('key',       session.cmd_key,       'Signing:    \tkey <generate|verify>')
     tui.register_command('mirror',    session.cmd_mirror,    'Mirror:     \tmirror <init|add|remove|list|summary|status|publish|pull|audit|query|builders|conflict|reconcile-neighbours>')
+    tui.register_command('virtual',   session.cmd_virtual,   'Virtual:    \tvirtual build [scope] — dry-run pipeline simulation')
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       \tsbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        \tcve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    \tautorun [live|installer]')
