@@ -594,6 +594,82 @@ def validate_against_build_records(
 # ─────────────────────────── RepoState assembly ──────────────────────
 
 
+def _prefix_source_dedup(prev_record: Dict[str, str],
+                          new_record: Dict[str, str]) -> 'Optional[str]':
+    """Decide which of two colliding records to keep based on the
+    "kernel signing chain" naming convention: source A whose name is
+    a prefix-with-dash of source B (e.g. ``linux`` is prefix of
+    ``linux-signed-amd64``) is the canonical producer.  B's
+    Binary: field over-declares A's binaries; B's synth emits at B's
+    own version, A's emits at A's version — dedup must prefer A or
+    cross-source sibling pins fail at apt resolution.
+
+    Returns ``'prev'``, ``'new'``, or ``None`` (no opinion → fall back
+    to highest-version dedup).
+    """
+    _prev_src = prev_record.get('Source', '')
+    _new_src = new_record.get('Source', '')
+    if not _prev_src or not _new_src or _prev_src == _new_src:
+        return None
+    if _new_src.startswith(_prev_src + '-'):
+        return 'prev'
+    if _prev_src.startswith(_new_src + '-'):
+        return 'new'
+    return None
+
+
+def _global_pin_rewrite(raw: str,
+                         packages: Dict[str, Dict[str, str]]) -> str:
+    """Cross-source pin reconciliation.  For each constraint in the
+    relation field whose target is in ``packages`` AND whose pristine
+    base matches the target's actual Version's pristine base, rewrite
+    the constraint to the target's Version.
+
+    Catches the gap that :func:`_rewrite_sibling_pins` misses: pins
+    targeting a binary produced by a DIFFERENT source.  Example:
+    ``linux-signed-amd64.linux-headers-amd64`` ships
+    ``Depends: linux-headers-6.1.0-49-amd64 (= 6.1.174-1)`` — the
+    target is from the ``linux`` source.  Real-build emits the
+    linux binary at ``6.1.174-1+asg1u1``; the pin's upstream-version
+    no longer matches.  Real apt only resolves the constraint because
+    BOTH sides happen to be at pristine ``6.1.174-1`` on the actual
+    mirror — but virtual-build's prediction lands the target at the
+    stamped version (predicting next publish), so the static pin
+    fails closure check.  Rewriting the pin to the actual target
+    version matches real apt's behaviour against the predicted state.
+    """
+    if not raw or not packages:
+        return raw
+    try:
+        from debian.deb822 import PkgRelation
+    except ImportError:
+        return raw
+    try:
+        _relations = PkgRelation.parse_relations(raw)
+    except Exception:
+        return raw
+    _changed = False
+    for _or_group in _relations:
+        for _rel in _or_group:
+            _name = _rel.get('name', '')
+            _target = packages.get(_name)
+            if _target is None:
+                continue
+            _vc = _rel.get('version')
+            if not _vc:
+                continue
+            _op, _cur = _vc
+            _target_ver = _target.get('Version', '')
+            if not _target_ver or _cur == _target_ver:
+                continue
+            _cur_pristine = utils.pristine_base(_cur)
+            _target_pristine = utils.pristine_base(_target_ver)
+            if _cur_pristine == _target_pristine:
+                _rel['version'] = (_op, _target_ver)
+                _changed = True
+    return PkgRelation.str(_relations) if _changed else raw
+
+
 def synthesize_repo_state(
     virtual_records: 'List[Dict[str, str]]',
 ) -> 'Tuple[Any, List[Tuple[str, str, str]]]':
@@ -636,16 +712,25 @@ def synthesize_repo_state(
         _prev = _packages.get(_name)
         if _prev is not None:
             _prev_ver = _prev.get('Version', '')
-            try:
-                _cmp = apt_pkg.version_compare(_ver, _prev_ver)
-            except Exception:
-                _cmp = 0
             _dup_count += 1
             _src_pair = tuple(sorted([
                 _prev.get('Source', '?'), _r.get('Source', '?')]))
             _dup_sources.add(_src_pair)  # type: ignore[arg-type]
-            if _cmp <= 0:
+            # Prefer-by-source-prefix runs BEFORE version comparison —
+            # the kernel signing chain (linux + linux-signed-amd64)
+            # has the suffix-source at HIGHER version but the prefix-
+            # source as canonical producer.  Highest-version dedup
+            # would pick the wrong record and break cross-source pins.
+            _decision = _prefix_source_dedup(_prev, _r)
+            if _decision == 'prev':
                 continue
+            if _decision != 'new':
+                try:
+                    _cmp = apt_pkg.version_compare(_ver, _prev_ver)
+                except Exception:
+                    _cmp = 0
+                if _cmp <= 0:
+                    continue
         _packages[_name] = dict(_r)
     if _dup_count:
         _pair_preview = ', '.join(
@@ -659,6 +744,21 @@ def synthesize_repo_state(
             f"across {len(_dup_sources)} source-pair(s): "
             f"{_pair_preview}{_more} — kept highest version "
             "(expected for kernel-signed / installer-udeb chains)"))
+    # Post-dedup cross-source pin reconciliation.  After dedup, the
+    # state knows the FINAL Version of each binary; walk every record
+    # and rewrite constraints where target's pristine matches but
+    # version differs.  Catches cross-source pins like
+    # `linux-signed.linux-headers-amd64 → linux-headers-6.1.0-49-amd64
+    # (= 6.1.174-1)` where the target's actual version is the
+    # asg-stamped `6.1.174-1+asg1u2`.
+    for _entry in _packages.values():
+        for _field in ('Depends', 'Pre-Depends', 'Recommends',
+                       'Suggests', 'Enhances', 'Conflicts', 'Breaks',
+                       'Replaces'):
+            _raw = _entry.get(_field, '')
+            if not _raw:
+                continue
+            _entry[_field] = _global_pin_rewrite(_raw, _packages)
     _provides = _build_provides_index(_packages)
     _state = RepoState(
         packages=_packages, provides_index=_provides,
@@ -672,6 +772,7 @@ def virtual_repo_audit(
     install_corpus: 'Optional[frozenset[str]]' = None,
     live_cohort: 'Optional[frozenset[str]]' = None,
     installer_cohort: 'Optional[frozenset[str]]' = None,
+    report_recommends: bool = False,
 ) -> 'Tuple[Any, List[Tuple[str, str, str]]]':
     """Assemble a virtual RepoState and run the real audit primitives
     against it.  Returns ``(repo_state, findings)`` so the caller can
@@ -688,10 +789,13 @@ def virtual_repo_audit(
     each cohort fire ``CRITICAL virtual_cohort_conflict``.  Omit either
     to skip its conflict pass.
 
+    `report_recommends` defaults to False: Recommends are non-gating
+    per Debian Policy §7.2; real `repo audit` reports them in a
+    separate weak-deps bucket that doesn't block publishes.  Virtual
+    build suppresses them by default to keep the actionable signal
+    visible; pass True to surface them as INFO.
+
     Closure breaks → ``CRITICAL virtual_closure_break``.
-    Weak (Recommends) misses → ``WARNING virtual_recommends_miss``
-    (informational only; matches real-pipeline policy where weak deps
-    don't gate publish).
     """
     from repo_audit import audit_dep_closure, audit_conflict_cohort
 
@@ -703,10 +807,11 @@ def virtual_repo_audit(
         _findings.append((
             'CRITICAL', 'virtual_closure_break',
             f"{_pkg}: {_field} = {_rel!r} — {_why}"))
-    for _pkg, _field, _rel in _weak:
-        _findings.append((
-            'WARNING', 'virtual_recommends_miss',
-            f"{_pkg}: {_field} = {_rel!r}"))
+    if report_recommends:
+        for _pkg, _field, _rel in _weak:
+            _findings.append((
+                'INFO', 'virtual_recommends_miss',
+                f"{_pkg}: {_field} = {_rel!r}"))
 
     if live_cohort:
         _live_conflicts = audit_conflict_cohort(_state, live_cohort)
