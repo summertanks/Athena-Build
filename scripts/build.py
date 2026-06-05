@@ -5319,6 +5319,24 @@ class BuildSession:
                 console.print(
                     f"  ok        {len(_seen)} filename(s) consistent "
                     "across mirrors")
+            # Cross-mirror coord-head federation-membership drift.
+            # Compares neighbours + revoked_builders sets pair-wise
+            # against the first reachable mirror as reference.  Catches
+            # the case where mirror A's coord-head claims federation
+            # = {A, B, C} but mirror B's coord-head claims = {A, B} —
+            # someone is operating on a stale or forked view.
+            _head_drift = _mirror.audit_cross_mirror_head_drift(
+                _per_mirror)
+            for _sev, _kind, _msg in _head_drift:
+                _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                          else tui.COLOR_WARNING)
+                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+            if any(_f[0] == 'CRITICAL' for _f in _head_drift):
+                _all_ok = False
+            elif _head_drift == []:
+                console.print(
+                    "  ok        coord-head federation membership "
+                    "consistent across mirrors")
         return _all_ok
 
     def cmd_mirror_query(self, *args):

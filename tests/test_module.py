@@ -24772,6 +24772,92 @@ def test_audit_own_claims_on_disk_no_our_builder_id_is_noop():
         our_builder_id=None, local_repo_dir='/nonexistent') == []
 
 
+def test_audit_cross_mirror_head_drift_silent_when_aligned():
+    """Two mirrors with identical neighbours + revocation sets emit
+    no findings.  inrelease_sha256 + snapshot.current ARE allowed to
+    differ — those are per-snapshot, not federation-wide."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    _per_mirror = [
+        {'name': 'm1', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://b/repo'],
+            'revoked_builders': {'bad': 'reason'},
+            'inrelease_sha256': 'a' * 64,
+            'snapshot': {'current': 't1'},
+        }, 'by_builder': {}},
+        {'name': 'm2', 'head': {
+            'neighbours': ['ssh://b/repo', 'ssh://a/repo'],  # order ok
+            'revoked_builders': {'bad': 'reason'},
+            'inrelease_sha256': 'b' * 64,  # different snapshot, fine
+            'snapshot': {'current': 't2'},
+        }, 'by_builder': {}},
+    ]
+    assert _mir.audit_cross_mirror_head_drift(_per_mirror) == []
+
+
+def test_audit_cross_mirror_head_drift_neighbours_diff_is_critical():
+    """Mirror B's coord-head lists a federation member that mirror A
+    doesn't → CRITICAL cross_mirror_neighbours_drift."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    _per_mirror = [
+        {'name': 'm1', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://b/repo'],
+            'revoked_builders': {},
+        }, 'by_builder': {}},
+        {'name': 'm2', 'head': {
+            'neighbours': ['ssh://a/repo', 'ssh://b/repo', 'ssh://c/repo'],
+            'revoked_builders': {},
+        }, 'by_builder': {}},
+    ]
+    _findings = _mir.audit_cross_mirror_head_drift(_per_mirror)
+    assert len(_findings) == 1
+    _sev, _kind, _msg = _findings[0]
+    assert _sev == 'CRITICAL'
+    assert _kind == 'cross_mirror_neighbours_drift'
+    assert 'ssh://c/repo' in _msg
+
+
+def test_audit_cross_mirror_head_drift_revocation_diff_is_critical():
+    """Revocation lists disagree → CRITICAL cross_mirror_revocation_drift."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    _per_mirror = [
+        {'name': 'm1', 'head': {
+            'neighbours': [],
+            'revoked_builders': {'bad-builder': 'compromised'},
+        }, 'by_builder': {}},
+        {'name': 'm2', 'head': {
+            'neighbours': [],
+            'revoked_builders': {},  # missing the revocation
+        }, 'by_builder': {}},
+    ]
+    _findings = _mir.audit_cross_mirror_head_drift(_per_mirror)
+    assert len(_findings) == 1
+    _sev, _kind, _ = _findings[0]
+    assert _sev == 'CRITICAL'
+    assert _kind == 'cross_mirror_revocation_drift'
+
+
+def test_audit_cross_mirror_head_drift_single_mirror_is_noop():
+    """One reachable mirror (or zero) → nothing to compare → silent."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir
+    assert _mir.audit_cross_mirror_head_drift([]) == []
+    _per_mirror = [
+        {'name': 'm1', 'head': {'neighbours': [],
+                                'revoked_builders': {}},
+         'by_builder': {}},
+        # Unreachable peer.
+        {'name': 'm2', 'head': None, 'by_builder': {}},
+    ]
+    assert _mir.audit_cross_mirror_head_drift(_per_mirror) == []
+
+
 def test_coord_reconcile_detect_hash_conflicts_critical_and_info():
     """Same (pkg, ver), different hash → CRITICAL; same hash → INFO."""
     _s, _i, _st, _p, _h, _r, *_ = _coord_modules()
@@ -28432,6 +28518,11 @@ def main() -> int:
         test_audit_sidecar_seq_integrity_flags_dup_gap_and_missing_one,
         test_audit_own_claims_on_disk_match_disk_silent_mismatch_critical,
         test_audit_own_claims_on_disk_no_our_builder_id_is_noop,
+        # MIRROR-01 audit gap (6) — cross-mirror head drift
+        test_audit_cross_mirror_head_drift_silent_when_aligned,
+        test_audit_cross_mirror_head_drift_neighbours_diff_is_critical,
+        test_audit_cross_mirror_head_drift_revocation_diff_is_critical,
+        test_audit_cross_mirror_head_drift_single_mirror_is_noop,
     ]
     failures = 0
     for t in tests:

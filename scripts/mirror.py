@@ -1077,6 +1077,65 @@ def audit_ownership_summary(
     return _summary, []
 
 
+def audit_cross_mirror_head_drift(
+    per_mirror: 'list[dict]',
+) -> 'list[tuple[str, str, str]]':
+    """Compare coord-head federation-membership and revocation lists
+    across every configured mirror.  All mirrors in a federation MUST
+    agree on:
+      - the neighbours set (federation membership)
+      - the revoked_builders set (federation-wide blocklist)
+
+    They may legitimately disagree on:
+      - inrelease_sha256 / snapshot.current — mirrors can be at
+        different snapshots at different moments (an indl-mode push
+        bumps one mirror's snapshot before the dist-mode mirror
+        catches up via a later publish)
+      - epoch — same reason, drifts as publishes happen
+
+    Strategy: pick the first reachable mirror as reference, compare
+    every other reachable mirror against it.  Diff against reference
+    is a CRITICAL.  Caller has already filtered ``per_mirror`` to the
+    reachable entries (``head is not None``); skip the unreachable.
+    """
+    from coord import schema as _sch
+    _findings: 'list[tuple[str, str, str]]' = []
+    _reachable = [_m for _m in per_mirror if _m.get('head') is not None]
+    if len(_reachable) < 2:
+        return _findings
+
+    def _nbrs_of(_h: dict) -> 'frozenset[str]':
+        _raw = _h.get('neighbours') or []
+        return frozenset(_sch.neighbour_urls(_raw))
+
+    _ref = _reachable[0]
+    _ref_name = _ref['name']
+    _ref_head = _ref['head']
+    _ref_nbrs = _nbrs_of(_ref_head)
+    _ref_rev = frozenset(_ref_head.get('revoked_builders') or {})
+    for _m in _reachable[1:]:
+        _h = _m['head']
+        _nbrs = _nbrs_of(_h)
+        _rev = frozenset(_h.get('revoked_builders') or {})
+        if _nbrs != _ref_nbrs:
+            _only_ref = sorted(_ref_nbrs - _nbrs)
+            _only_m = sorted(_nbrs - _ref_nbrs)
+            _findings.append((
+                'CRITICAL', 'cross_mirror_neighbours_drift',
+                f"{_m['name']} vs {_ref_name}: federation members "
+                f"disagree; only-on-{_ref_name}={_only_ref or '[]'}, "
+                f"only-on-{_m['name']}={_only_m or '[]'}"))
+        if _rev != _ref_rev:
+            _only_ref = sorted(_ref_rev - _rev)
+            _only_m = sorted(_rev - _ref_rev)
+            _findings.append((
+                'CRITICAL', 'cross_mirror_revocation_drift',
+                f"{_m['name']} vs {_ref_name}: revoked_builders "
+                f"disagree; only-on-{_ref_name}={_only_ref or '[]'}, "
+                f"only-on-{_m['name']}={_only_m or '[]'}"))
+    return _findings
+
+
 def audit_sidecar_seq_integrity(
     by_builder: 'dict[str, list[dict]]',
 ) -> 'list[tuple[str, str, str]]':
