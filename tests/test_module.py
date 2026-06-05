@@ -20361,6 +20361,76 @@ def test_virtual_build_from_cache_collapses_hashtable_shape():
     assert _ctrl['Depends'] == 'libc6'
 
 
+def test_virtual_build_build_profile_filter_skips_nodoc_when_active():
+    """`*-doc` binaries with `profile=!nodoc` must be filtered out of
+    synthesis when `nodoc` is in the active profile set.  Largest
+    class of false-predicted-extras in the operator's validate run."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    PROFILES = frozenset({'nodoc', 'nocheck', 'noinsttest'})
+    assert _vb._binary_active_under_profiles(
+        'apt deb admin important arch=any', PROFILES) is True
+    assert _vb._binary_active_under_profiles(
+        'apt-doc deb doc optional arch=all profile=!nodoc',
+        PROFILES) is False
+    assert _vb._binary_active_under_profiles(
+        'foo-tests deb test optional arch=any profile=!nocheck',
+        PROFILES) is False
+
+
+def test_virtual_build_build_profile_filter_positive_profile_required():
+    """`profile=stage1` (positive) requires the profile IS active.
+    Common in cross-compile / bootstrap chains.  With no `stage1` in
+    our profile set, such a binary must be filtered out."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    PROFILES = frozenset({'nodoc', 'nocheck'})
+    assert _vb._binary_active_under_profiles(
+        'foo-stage1 deb misc optional arch=any profile=stage1',
+        PROFILES) is False
+    assert _vb._binary_active_under_profiles(
+        'foo-stage1 deb misc optional arch=any profile=stage1',
+        frozenset({'stage1'})) is True
+
+
+def test_virtual_build_synthesize_source_filters_by_profile():
+    """End-to-end: synthesize_source_binaries with active profiles
+    drops binaries whose package_list profile annotation excludes
+    them.  Verified against the `apt` source's actual Package-List
+    shape: apt-doc and libapt-pkg-doc filtered, others kept."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _AptSrc:
+        package = 'apt'
+        version = '2.6.1'
+        binary = ['apt', 'apt-doc', 'apt-utils',
+                  'libapt-pkg-dev', 'libapt-pkg-doc', 'libapt-pkg6.0']
+        package_list = [
+            'apt deb admin important arch=any',
+            'apt-doc deb doc optional arch=all profile=!nodoc',
+            'apt-utils deb admin important arch=any',
+            'libapt-pkg-dev deb libdevel optional arch=any',
+            'libapt-pkg-doc deb doc optional arch=all profile=!nodoc',
+            'libapt-pkg6.0 deb libs optional arch=any',
+        ]
+
+    _univ = {b: {'2.6.1': {'Package': b, 'Version': '2.6.1',
+                            'Source': 'apt', 'Architecture': 'amd64'}}
+             for b in _AptSrc.binary}
+    _recs = _vb.synthesize_source_binaries(
+        source=_AptSrc(), package_universe=_univ, asg_ledger={},
+        release=1, arch='amd64', peer_sources={'apt'},
+        active_profiles=frozenset({'nodoc', 'nocheck', 'noinsttest'}))
+    _names = {_r['Package'] for _r in _recs}
+    # `*-doc` filtered by profile.
+    assert 'apt-doc' not in _names
+    assert 'libapt-pkg-doc' not in _names
+    # Rest kept (no profile gate or non-matching profile).
+    assert {'apt', 'apt-utils', 'libapt-pkg-dev',
+            'libapt-pkg6.0'} <= _names
+
+
 def test_virtual_build_from_cache_merges_udeb_hashtable():
     """from_cache MUST include cache.udeb_hashtable too.  Cache holds
     udebs (Section: debian-installer records) in a parallel
@@ -29648,6 +29718,9 @@ def main() -> int:
         test_virtual_publish_dry_run_same_sha_no_hash_conflict,
         test_virtual_build_from_cache_collapses_hashtable_shape,
         test_virtual_build_from_cache_merges_udeb_hashtable,
+        test_virtual_build_build_profile_filter_skips_nodoc_when_active,
+        test_virtual_build_build_profile_filter_positive_profile_required,
+        test_virtual_build_synthesize_source_filters_by_profile,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,
         test_tunnel_filenames_for_source_uses_upstream_not_stripped,

@@ -282,11 +282,81 @@ def synthesize_binary_record(
     return _rec
 
 
+def _binary_active_under_profiles(
+    package_list_entry: str, active_profiles: 'frozenset[str]',
+) -> bool:
+    """Decide whether a binary would be built by dpkg-buildpackage
+    given the active ``DEB_BUILD_PROFILES`` set, based on the binary's
+    ``package_list`` annotation.
+
+    Format example from ``apt`` source's Package-List::
+
+        apt-doc deb doc optional arch=all profile=!nodoc
+
+    Profile syntax (Debian Policy):
+      - ``profile=X``   — binary built ONLY when profile X is active
+      - ``profile=!X``  — binary built UNLESS profile X is active
+      - ``profile=A,B`` — AND inside a clause (all terms must match)
+      - Multiple ``profile=`` clauses — OR across clauses
+
+    A binary with no ``profile=`` clause is always built.
+
+    Catches the largest class of predicted-extras in the validator
+    output: every ``*-doc`` binary with ``profile=!nodoc`` is
+    correctly filtered out when our build has ``nodoc`` active.
+    Procedural skips (where ``debian/rules`` decides at runtime to
+    omit ``*-dev`` or ``*-udeb`` even though the static declaration
+    has no profile gate) remain a known blind spot — virtual cannot
+    inspect ``debian/rules`` without executing it.
+    """
+    if not package_list_entry:
+        return True
+    _clauses: 'List[str]' = []
+    for _tok in package_list_entry.split():
+        if _tok.startswith('profile='):
+            _clauses.append(_tok[len('profile='):])
+    if not _clauses:
+        return True
+    for _clause in _clauses:
+        _terms = [_t.strip() for _t in _clause.split(',') if _t.strip()]
+        _all_match = True
+        for _t in _terms:
+            if _t.startswith('!'):
+                if _t[1:] in active_profiles:
+                    _all_match = False
+                    break
+            else:
+                if _t not in active_profiles:
+                    _all_match = False
+                    break
+        if _all_match:
+            return True
+    return False
+
+
+def _package_list_index(source: 'Any') -> 'Dict[str, str]':
+    """Build ``{binary_name: package_list_entry_string}`` from a
+    Source's parsed ``package_list``.  Each entry's first whitespace-
+    separated token is the binary name; the rest carry the
+    section / priority / arch / profile annotations.
+    """
+    _idx: 'Dict[str, str]' = {}
+    for _entry in getattr(source, 'package_list', []) or []:
+        if not _entry:
+            continue
+        _parts = _entry.split(None, 1)
+        if not _parts:
+            continue
+        _idx[_parts[0]] = _entry
+    return _idx
+
+
 def synthesize_source_binaries(
     source: Any, package_universe: Dict[str, Dict[str, Any]],
     asg_ledger: Optional[Dict[str, List[str]]], release: int,
     arch: str, was_patched: bool = False,
     peer_sources: 'Optional[set[str]]' = None,
+    active_profiles: 'frozenset[str]' = frozenset(),
 ) -> List[Dict[str, str]]:
     """End-to-end: take one Source and return one synthesized RepoState
     record per binary it would emit.
@@ -332,10 +402,20 @@ def synthesize_source_binaries(
     # binary (kernel-ABI names, fork-only binaries).
     import apt_pkg
     apt_pkg.init_system()
+    # Build-Profile filter: skip binaries whose package_list entry
+    # declares profile constraints that exclude them under the active
+    # DEB_BUILD_PROFILES.  Catches every `*-doc` (profile=!nodoc),
+    # `*-tests` (profile=!nocheck), etc. that real-build's
+    # dpkg-buildpackage statically excludes.
+    _pkg_list_idx = _package_list_index(source)
     _upstream_per_binary: Dict[str, Optional[Dict[str, str]]] = {}
     _base_ver_per_binary: Dict[str, str] = {}
     _emit_binaries: List[str] = []
     for _b in _binaries:
+        # Build-Profile gate (static, declarative).
+        _pl_entry = _pkg_list_idx.get(_b, '')
+        if not _binary_active_under_profiles(_pl_entry, active_profiles):
+            continue
         _upstream_per_binary[_b] = None
         _name_entries = package_universe.get(_b)
         if _name_entries:
@@ -508,6 +588,7 @@ def validate_against_build_records(
     package_universe: 'Dict[str, Dict[str, Any]]',
     asg_ledger: 'Optional[Dict[str, List[str]]]', release: int,
     arch: str, buildlog_dir: str,
+    active_profiles: 'frozenset[str]' = frozenset(),
 ) -> 'Tuple[Dict[str, Any], List[Tuple[str, str, str]]]':
     """Run the synthesizer against each source for which a successful
     build.json exists on disk; compare the predicted filenames
@@ -560,6 +641,7 @@ def validate_against_build_records(
             asg_ledger=asg_ledger, release=release,
             arch=arch, was_patched=_was_patched,
             peer_sources=set(source_names),
+            active_profiles=active_profiles,
         )
         _pred_files: 'List[str]' = [
             os.path.basename(_r.get('Filename', '') or '')
