@@ -211,6 +211,7 @@ def synthesize_binary_record(
     upstream_record: Optional[Dict[str, str]],
     sibling_ver_map: Dict[str, str],
     sibling_pristine_map: Dict[str, str],
+    is_udeb: bool = False,
 ) -> Dict[str, str]:
     """Build one RepoState.packages-style record for a single virtual
     binary.
@@ -243,7 +244,15 @@ def synthesize_binary_record(
         _ua_raw = (upstream_record.get('Architecture') or '').strip()
         if _ua_raw == 'all':
             _filename_arch = 'all'
-    _fn = _stamped_filename(binary_name, virtual_version, _filename_arch)
+    # File extension follows the Package-List declaration:
+    # `deb` → `.deb`, `udeb` → `.udeb`.  Without this synth produces
+    # `acl-udeb_2.3.1-3_amd64.deb` while real-build correctly emits
+    # `acl-udeb_2.3.1-3_amd64.udeb`.  Per the same-name+different-ext
+    # mechanic, the validate signature compare ignores the extension
+    # and silently flags every udeb as asg drift.
+    _ext = '.udeb' if is_udeb else '.deb'
+    _fn = _stamped_filename(
+        binary_name, virtual_version, _filename_arch, ext=_ext)
     _sha = _virtual_sha256(binary_name, virtual_version, _filename_arch)
     _prefix = (binary_name[:4] if binary_name.startswith('lib')
                else binary_name[:1])
@@ -635,6 +644,12 @@ def synthesize_source_binaries(
     # cross-source pin rewriting still apply.
     _out: List[Dict[str, str]] = []
     for _b in _binaries:
+        # Read deb-vs-udeb classification from Package-List entry.
+        # Format: `<name> <type> <section> <priority> arch=...`.
+        # Second token is the type — `deb` or `udeb`.
+        _pl_entry = _pkg_list_idx.get(_b, '')
+        _pl_tokens = _pl_entry.split()
+        _is_udeb = len(_pl_tokens) >= 2 and _pl_tokens[1] == 'udeb'
         _rec = synthesize_binary_record(
             source_name=_src_name,
             binary_name=_b,
@@ -643,6 +658,7 @@ def synthesize_source_binaries(
             upstream_record=_upstream_per_binary[_b],
             sibling_ver_map=_virtual_ver_per_binary,
             sibling_pristine_map=_pristine_per_binary,
+            is_udeb=_is_udeb,
         )
         # Track whether this binary has an upstream-canonical Source
         # signal (used by synthesize_repo_state to detect ambiguous
