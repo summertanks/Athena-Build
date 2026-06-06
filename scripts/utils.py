@@ -2166,7 +2166,6 @@ class BuildConfig:
 
     dir_working: str
     dir_pkglist: str
-    dir_download: str
     dir_log: str
     dir_cache: str
     dir_temp: str
@@ -2529,7 +2528,6 @@ class BuildConfig:
                     return
 
             # NOTE: The directories are relative to the working directory
-            self.dir_download = os.path.join(self.working_dir, config_parser.get('Directories', 'Download'))
             self.dir_log = os.path.join(self.working_dir, config_parser.get('Directories', 'Log'))
             self.dir_cache = os.path.join(self.working_dir, config_parser.get('Directories', 'Cache'))
             self.dir_temp = os.path.join(self.working_dir, config_parser.get('Directories', 'Temp'))
@@ -2656,7 +2654,6 @@ class BuildConfig:
             if not os.access(self.working_dir, os.W_OK):
                 raise PermissionError(f'Working directory is not writable: {self.working_dir}')
 
-            pathlib.Path(self.dir_download).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
 
             pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
@@ -2745,7 +2742,7 @@ class BuildConfig:
             os.chmod(self.dir_gnupg, 0o700)
 
             for _dir in (
-                self.dir_download, self.dir_log, self.dir_cache, self.dir_temp,
+                self.dir_log, self.dir_cache, self.dir_temp,
                 self.dir_build_stage,
                 self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
@@ -3066,7 +3063,7 @@ def download_file(url: str, filename: str) -> tuple:
 
 
 def download_source(dependency_tree: 'dependencytree.DependencyTree',
-                    dir_download: str) -> int:
+                    dst_dir: str) -> int:
     from urllib.parse import urljoin, urlsplit, unquote
     from requests import Timeout, TooManyRedirects, HTTPError, RequestException
     import shutil as _shutil
@@ -3109,7 +3106,7 @@ def download_source(dependency_tree: 'dependencytree.DependencyTree',
         _url = urljoin(_base_url, _file_list[_file]['path'])
         _sha256 = _file_list[_file]['sha256']
         _expected_size = int(_file_list[_file]['size'])
-        _download_path = os.path.join(dir_download, _file)
+        _download_path = os.path.join(dst_dir, _file)
 
         if get_sha256(_download_path) != _sha256:
             # file:// fast-path for fork mirror — local copy via shutil

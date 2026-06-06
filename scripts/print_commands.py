@@ -180,7 +180,6 @@ def _print_paths(session, *_extras) -> None:
     tui.console.print(f"  Working dir       : {cfg.working_dir}")
     _attrs = [
         ('dir_cache',            'Cache             '),
-        ('dir_download',         'Download          '),
         ('dir_source',           'Source            '),
         ('dir_repo',             'Repo (.debs)      '),
         ('dir_chroot',           'Chroot            '),

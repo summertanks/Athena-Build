@@ -210,7 +210,6 @@ _BASE_CONF_BODY = """
     {mirror_block}
     [Directories]
     Log = log
-    Download = download
     Cache = cache
     Temp = tmp
     Source = source
@@ -2609,7 +2608,6 @@ def test_group_dispatchers_forward_to_underlying_cmd_methods():
         ('cmd_clean',     'repo',      'cmd_clean_repo'),
         ('cmd_clean',     'buildroot', 'cmd_clean_buildroot'),
         ('cmd_clean',     'image',     'cmd_clean_image'),
-        ('cmd_clean',     'download',  'cmd_clean_download'),
         ('cmd_clean',     'container', 'cmd_container_purge'),
         ('cmd_clean',     'all',       'cmd_clean_all'),
     ]
@@ -6805,7 +6803,7 @@ def test_cmd_clean_dispatcher_unknown_action_calls_no_handler():
     _called = []
     for _name in ('cmd_cache_purge', 'cmd_clean_source', 'cmd_clean_repo',
                   'cmd_clean_buildroot', 'cmd_clean_image',
-                  'cmd_clean_download', 'cmd_clean_all'):
+                  'cmd_clean_all'):
         setattr(_sess, _name, lambda *a, _n=_name, **kw: _called.append(_n))
     _sess.cmd_clean('wat')
     assert _called == [], (

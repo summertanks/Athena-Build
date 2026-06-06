@@ -769,25 +769,18 @@ class BuildSession:
         self.flags.iso_installer_ready = False
         self.flags.iso_disk_ready = False
 
-    def cmd_clean_download(self, *args):
-        """Wipe tunneled .deb downloads.  These are re-fetched on
-        demand by `source tunnel` so cleaning is safe."""
-        self._wipe_dir_contents(
-            'download', self.config.dir_download,
-            sudo=False, skip_prompt='force' in args)
-
     def cmd_clean_all(self, *args):
         """Wipe every working dir + reset every BuildFlag + drop every
         in-memory pipeline reference.  Equivalent to `clean cache` +
-        `clean source` + `clean repo` + `clean download` + `clean
-        image` + `clean buildroot`, but with a single up-front
+        `clean source` + `clean repo` + `clean image` + `clean
+        buildroot`, but with a single up-front
         confirmation and a single sudo unlock for the buildroot wipe.
         Preserved: gnupg/ (signing key), log/ (build history),
         patch/ (patch series)."""
         _force = 'force' in args
         if not _force:
             _resp = Prompt(PROMPT_YESNO,
-                "clean all: wipes cache/, source/, repo/, download/, "
+                "clean all: wipes cache/, source/, repo/, "
                 "image/, buildroot/{live,installer}, and athenalinux "
                 "Docker containers + images.  gnupg/ + log/ + patch/ "
                 "preserved.  Continue?"
@@ -804,7 +797,6 @@ class BuildSession:
         self.cmd_cache_purge('force')
         self._wipe_dir_contents('source',   self.config.dir_source,   sudo=False, skip_prompt=True)
         self._wipe_dir_contents('repo',     self.config.dir_repo,     sudo=False, skip_prompt=True)
-        self._wipe_dir_contents('download', self.config.dir_download, sudo=False, skip_prompt=True)
         self._wipe_dir_contents('image',    self.config.dir_image,    sudo=False, skip_prompt=True)
         # Sudo dirs: re-use the unlocked password.
         self._wipe_dir_contents('buildroot/live',
@@ -10202,7 +10194,6 @@ class BuildSession:
             'repo':      'wipe repo/ (rebuilt on next `source build`)',
             'buildroot': 'wipe buildroot/{live,installer} (sudo)',
             'image':     'wipe image/ (rebuilt on next `iso build`)',
-            'download':  'wipe download/ (tunnel debs, re-fetched on demand)',
             'container': 'stop+remove athenalinux Docker containers + images',
             'all':       'wipe all of the above + reset every flag (one prompt)',
         }
@@ -10216,8 +10207,6 @@ class BuildSession:
             return self.cmd_clean_buildroot(*args)
         if action == 'image':
             return self.cmd_clean_image(*args)
-        if action == 'download':
-            return self.cmd_clean_download(*args)
         if action == 'container':
             return self.cmd_container_purge(*args)
         if action == 'all':
