@@ -20442,6 +20442,76 @@ def test_virtual_build_reconstruct_historical_ledger_stamped_build():
     assert _hist['libfoo'] == ['1.0-1+asg1u1']
 
 
+def test_virtual_build_delta_uses_source_version_not_per_binary():
+    """bash-class bug: binary upstream Version is `5.2.15-2+b13`
+    (binNMU rebuild) while source.version is pristine `5.2.15-2`.
+    Real build emits at source.version (no +bN, no delta from this).
+    Synth's delta check MUST use source.version, NOT per-binary
+    upstream versions — otherwise every +bN binary triggers spurious
+    stamp on a build that was pristine."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _Bash:
+        package = 'bash'
+        version = '5.2.15-2'  # pristine source
+        binary = ['bash', 'bash-static']
+
+    # Upstream binaries carry +b13 binNMU; ledger has only pristine.
+    _universe = {
+        'bash':        {'5.2.15-2+b13': {'Package': 'bash',
+                        'Version': '5.2.15-2+b13', 'Source': 'bash',
+                        'Architecture': 'amd64'}},
+        'bash-static': {'5.2.15-2+b13': {'Package': 'bash-static',
+                        'Version': '5.2.15-2+b13', 'Source': 'bash',
+                        'Architecture': 'amd64'}},
+    }
+    _ledger = {'bash': ['5.2.15-2'], 'bash-static': ['5.2.15-2']}
+    _recs = _vb.synthesize_source_binaries(
+        source=_Bash(), package_universe=_universe,
+        asg_ledger=_ledger, release=1, arch='amd64',
+        peer_sources={'bash'})
+    # No delta (source is pristine), no lineage (ledger pristine
+    # entries don't trigger).  Synth must NOT stamp.
+    for _r in _recs:
+        assert '+asg' not in _r['Version'], _r['Version']
+
+
+def test_virtual_build_override_source_version_uses_at_build_pristine():
+    """For validate (historical comparison): today's source.version
+    may carry NMU suffix from a snapshot roll-forward AFTER the
+    original build (curl: cache today `7.88.1-10+deb12u14`, built
+    historically at `7.88.1-10` pristine).  `override_source_version`
+    kwarg lets validate pass the at-build-time pristine derived from
+    output_hashes — synth's delta check uses that, not today's
+    drifted version."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _Curl:
+        package = 'curl'
+        version = '7.88.1-10+deb12u14'  # today's NMU-stamped source
+        binary = ['curl']
+
+    _universe = {'curl': {'7.88.1-10+deb12u14': {
+        'Package': 'curl', 'Version': '7.88.1-10+deb12u14',
+        'Source': 'curl', 'Architecture': 'amd64'}}}
+    _ledger: 'dict' = {'curl': ['7.88.1-10']}
+    # Without override: today's source.version triggers delta → stamp.
+    _r1 = _vb.synthesize_source_binaries(
+        source=_Curl(), package_universe=_universe,
+        asg_ledger=_ledger, release=1, arch='amd64',
+        peer_sources={'curl'})
+    assert '+asg' in _r1[0]['Version']
+    # With override (at-build-time pristine '7.88.1-10'): no delta.
+    _r2 = _vb.synthesize_source_binaries(
+        source=_Curl(), package_universe=_universe,
+        asg_ledger=_ledger, release=1, arch='amd64',
+        peer_sources={'curl'},
+        override_source_version='7.88.1-10')
+    assert '+asg' not in _r2[0]['Version']
+
+
 def test_virtual_build_synthesize_lineage_matches_epoch_stripped_ledger():
     """Production ledger (via `parse_packages_to_ledger`) returns
     epoch-stripped entries.  Upstream Package records for epoched
@@ -29861,6 +29931,8 @@ def main() -> int:
         test_virtual_build_from_cache_merges_udeb_hashtable,
         test_virtual_build_build_profile_filter_skips_nodoc_when_active,
         test_virtual_build_build_profile_filter_positive_profile_required,
+        test_virtual_build_delta_uses_source_version_not_per_binary,
+        test_virtual_build_override_source_version_uses_at_build_pristine,
         test_virtual_build_synthesize_lineage_matches_epoch_stripped_ledger,
         test_virtual_build_reconstruct_historical_ledger_pristine_build,
         test_virtual_build_reconstruct_historical_ledger_stamped_build,
