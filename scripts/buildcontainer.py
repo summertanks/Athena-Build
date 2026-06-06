@@ -699,11 +699,6 @@ class BuildContainer:
         nodoc to actually produce -doc binaries that the default build
         would skip.
         """
-        logger.info(
-            f"build {src_pkg.package} v{src_pkg.version} "
-            f"(profiles={profiles_override}, options={options_override})"
-        )
-
         _plain_deps: 'list[str]' = []
         _or_groups: 'list[list[str]]' = []
         # ARCH-16: per-pkg override precedence —
@@ -718,6 +713,16 @@ class BuildContainer:
         _active_options = (frozenset(options_override)
                            if options_override is not None
                            else self.config.build_options_for(src_pkg.package))
+        # Log the EFFECTIVE values (post-precedence), not the raw override
+        # args — `profiles=None` used to read as "no profiles" when it
+        # actually meant "no override; config defaults in effect".
+        logger.info(
+            f"build {src_pkg.package} v{src_pkg.version} "
+            f"(profiles={' '.join(sorted(_active_profiles)) or '(none)'}"
+            f"{' [override]' if profiles_override is not None else ''}, "
+            f"options={' '.join(sorted(_active_options)) or '(none)'}"
+            f"{' [override]' if options_override is not None else ''})"
+        )
 
         for _grp in src_pkg.build_depends(self.arch, _active_profiles, cache=self.cache):
             if not _grp:
