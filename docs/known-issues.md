@@ -331,8 +331,10 @@ targets.  Verification pending next install on a VMware host.)*
      — quilt patch on `library.sh:configure_apt` that copies the
      keyring into `/target/etc/apt/trusted.gpg.d/` before
      `apt-cdrom add`.
-  4. `_refresh_patches` mtime-invalidates stale `.result` files so
-     autorun's source-build step rebuilds packages with new patches.
+  4. `_refresh_patches` deletes the build record (`<pkg>.build.json`)
+     when its stored `patch_set_hash` no longer matches the current
+     on-disk patch content, so autorun's source-build step rebuilds
+     packages with new patches.
 - **Verified 2026-05-13 in reference run**:
   - line 1501: `base-installer: gpgv: Good signature from "Athena Build"`
   - line 1519: `Hit:1 cdrom://... thor InRelease` (was `Err:2`)

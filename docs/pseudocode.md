@@ -95,7 +95,7 @@ with progress bar) and `file://` (shutil.copyfile fast path). Returns
 `(bytes_written, detail)`. Detailed error reasons are returned so the
 operator sees the actual failure cause rather than a generic message.
 
-### `download_source(dependency_tree, dir_download)`
+### `download_source(dependency_tree, dst_dir)`
 Iterate every selected source's files, route each download through its
 origin Mirror's pool URL (sources in bookworm-security live under a
 different `baseid` than main), verify expected-size and SHA256 before
@@ -151,7 +151,7 @@ Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
   every `[Mirror.*]` (constructing Mirror instances), `[Snapshot]`,
   `[Source]`, `[Security]`, and `[Directories]`.  The only `[Repo]`
   key still parsed is `SigningKeyUid`.
-- Computes the working tree layout: `dir_download`, `dir_log`,
+- Computes the working tree layout: `dir_log`,
   `dir_cache`, `dir_temp`, `dir_source`, `dir_repo` and its nested
   per-component subdirs (`dir_repo_main`, `dir_repo_main_udeb`,
   `dir_repo_main_source`, `dir_repo_doc`, `dir_repo_dbgsym`,
@@ -801,8 +801,11 @@ build, segregate outputs to component dirs, strip NMU and stamp
   - Copy *.deb and *.udeb into `/repo/` (mounted from host).
 - Run the container with `/source`, `/repo`, and `/patch` bind mounts.
 - Stream container logs to `log/build/<src>` file.
-- On exit: write `.result` (PASS/FAIL) and `.patchhash` sidecars.
-- On PASS: call `_segregate_built_artifacts` and `_normalize_built_artifacts`.
+- On exit: write the signed `<src>.build.json` record (phase, status,
+  intended/built version, output_hashes, patch_set_hash) — replaces the
+  legacy `.result`/`.patchhash` sidecars (OBS-01).
+- On PASS: call `_segregate_built_artifacts` and `_normalize_built_artifacts`,
+  then write the verbose `<src>.buildlog` narrative (OBS-04).
 - Container is always force-removed in `finally`.
 
 ### `_segregate_built_artifacts(src_pkg)`
@@ -1699,9 +1702,10 @@ or module writes it), and the consumer (what depends on it).
 | `fork/source/repo/<pkg>_<ver>.{dsc,tar.*}` | `dpkg-source -b` output | `fork_mirror._generate_source_packages` | Cache (via the file:// fork Mirror) | |
 | `fork/source/repo/<pkg>.tree-hash` + `.dep-hash` | sha256 sidecar | `fork_mirror._persist_tree_hash` | `_check_and_invalidate_fork_pkg` | Drives invalidation when a fork tree changes. |
 | `fork/Packages` + `Packages-udeb` + `Sources` (+ `.gz`) + `Release` | apt-ftparchive-shaped (hand-rolled) | `fork_mirror._build_*` + `_write_release` | Cache | Flat-layout file:// mirror; component=''. |
-| `log/build/<src>` | stdout/stderr stream | `BuildContainer.build` | operator post-mortem | Per-source build log. |
-| `log/build/<src>.result` | one-word: PASS / FAIL / TUNNELED | `BuildContainer.build` (or `_do_tunnel`) | `check_build` skip gate | Drives source_build idempotency. |
-| `log/build/<src>.patchhash` | hex sha256 | `BuildContainer.build` | `_refresh_patches` (build.py) | Distinguishes header-only patch edits (no rebuild) from content edits. |
+| `log/build/<src>` | raw container stdout/stderr stream | `BuildContainer.build` | operator post-mortem | Per-source dpkg-buildpackage transcript. |
+| `log/build/<src>.build.json` | signed structured record (phase, intended/built version, outputs, output_hashes, patch_set_hash, status) | `BuildContainer.build` / `_do_tunnel` (per-phase atomic writes) | `check_build` skip gate, `cmd_source_build` classifier, `coord.publish` claim-gen | OBS-01 — replaces the legacy `.result`/`.patchhash` sidecars; drives source_build idempotency. |
+| `log/build/<src>.buildlog` | OBS-04 verbose human narrative: build-depends, files emitted/expected/relocated/purged, NMU strips, +asg stamps, per-file hash+size, expected-vs-emitted delta | `BuildContainer._write_buildlog` / `_do_tunnel` (build + tunnel paths) | operator forensics | Best-effort + exception-isolated — a log failure never breaks a build. |
+| `log/build/<src>.vbuildlog` | OBS-04 PREDICTED artifact set (declared Package-List, synthesized filenames, filtered binaries) | `cmd_virtual_build._write_virtual_buildlog` | reference to diff against the real `.buildlog` | Written per source by `virtual build <src>`; the expected side of the virtual-vs-practical comparison. |
 | `log/build-YYYY-MM-DDTHH-MM-SS.log` | log output | `utils.setup_file_logging` | operator | One file per `build-system.sh` invocation. |
 | `gnupg/` (mode 0700) | gnupg homedir for InRelease verification | `BuildConfig` + `utils.verify_inrelease` | `Cache.__get_files` | Imports the Debian keyring; isolated from the host. |
 | `gnupg/signing/` (mode 0700) | gnupg homedir for the project key | `signing.generate_key` | `signing.verify_key`, `apt_repo.sign_release_files`, `repo_audit._write_signed_manifest` | Separate trust scope. |
@@ -1842,7 +1846,7 @@ To trace a typical build end-to-end:
 7. `cmd_init_container` constructs `BuildContainer(config, cache)` —
    pulls or rebuilds the Docker image.
 8. `cmd_source_build` iterates source packages. For each: check the
-   `.result` cache to skip; tunnel pristine binaries; or run
+   `.build.json` build record to skip; tunnel pristine binaries; or run
    `BuildContainer.build` which sets up a per-package container, applies
    patches + token-substitutions, runs `dpkg-buildpackage`, segregates
    the outputs to component dirs, and runs NMU strip + asg stamp.

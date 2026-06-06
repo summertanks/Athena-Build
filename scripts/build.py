@@ -1915,7 +1915,7 @@ class BuildSession:
         import time as _time
         _buildlog_path = os.path.join(self.config.dir_log, 'build')
         _t_tunnel_start = _time.monotonic()
-        # OBS-03 observability accumulators (tunnel path) — best-effort,
+        # OBS-04 observability accumulators (tunnel path) — best-effort,
         # consumed by the verbose .buildlog written at the terminal.
         _purged_stale: 'list[str]' = []
         _strip_events: 'list[tuple[str, str]]' = []
@@ -2144,7 +2144,7 @@ class BuildSession:
         except (OSError, FileNotFoundError) as _e:
             logger.warning(f"tunnel {src_pkg.package}: build-record terminal: {_e}")
 
-        # OBS-03: verbose tunnel narrative (log/build/<pkg>.buildlog).
+        # OBS-04: verbose tunnel narrative (log/build/<pkg>.buildlog).
         # Fully guarded — never reaches the tunnel control flow.
         try:
             _elapsed_t = round(_time.monotonic() - _t_tunnel_start, 3)
@@ -10333,6 +10333,56 @@ class BuildSession:
                 "real build artifacts.", tui.COLOR_INFO)
         return True
 
+    def _write_virtual_buildlog(self, name, src, records, arch, release):
+        """OBS-04 companion: write `log/build/<pkg>.vbuildlog` — the virtual
+        build's PREDICTED artifact set for one source, formatted to sit
+        alongside (and diff against) the real `<pkg>.buildlog` an actual
+        `source build` produces.
+
+        Sections: EXPECTED (declared Package-List), PREDICTED ARTIFACTS
+        (synthesized filenames = name_version_arch.ext), and FILTERED
+        (declared binaries the synthesizer dropped via arch/profile/
+        canonical-source gates).  Best-effort — never raises into the
+        virtual-build flow.
+        """
+        try:
+            _blog = BuildLog(
+                os.path.join(self.config.dir_log, 'build'),
+                name, kind='virtual', suffix='.vbuildlog')
+            _declared = sorted(getattr(src, 'binary', []) or [])
+            _predicted = sorted(
+                os.path.basename(_r.get('Filename', '') or '')
+                for _r in records if _r.get('Filename'))
+            _pred_names = {_f.split('_', 1)[0] for _f in _predicted}
+            _blog.header(
+                intended_version=str(getattr(src, 'version', '')),
+                arch=arch, release=release,
+                profiles=' '.join(sorted(
+                    getattr(self.config, 'build_profiles', frozenset())))
+                or '(none)')
+            _blog.section(
+                f"EXPECTED (Package-List declared: {len(_declared)})")
+            if _declared:
+                for _b in _declared:
+                    _blog.bullet(_b)
+            else:
+                _blog.empty('(no Binary: list)')
+            _blog.section(f"PREDICTED ARTIFACTS ({len(_predicted)})")
+            if _predicted:
+                for _f in _predicted:
+                    _blog.file(_f)
+            else:
+                _blog.empty()
+            _filtered = sorted(set(_declared) - _pred_names)
+            _blog.section(
+                f"FILTERED (declared but not predicted: {len(_filtered)})")
+            _blog.bullet(', '.join(_filtered) if _filtered else '(none)')
+            _blog.footer(
+                predicted=len(_predicted), declared=len(_declared))
+            _blog.write()
+        except Exception as _e:
+            logger.warning(f"virtual buildlog {name}: {_e}")
+
     def cmd_virtual_build(self, *args):
         """Run the virtual build pipeline for `scope` and report findings.
 
@@ -10436,14 +10486,20 @@ class BuildSession:
                 _missing_srcs.append(_name)
                 continue
             _was_patched = bool(getattr(_src, 'patch_list', None))
-            _records.extend(_vb.synthesize_source_binaries(
+            _src_records = _vb.synthesize_source_binaries(
                 source=_src, package_universe=_universe,
                 asg_ledger=_asg_ledger, release=_release,
                 arch=_arch, was_patched=_was_patched,
                 peer_sources=set(_scope_names),
                 active_profiles=frozenset(
                     getattr(self.config, 'build_profiles', frozenset())),
-            ))
+            )
+            _records.extend(_src_records)
+            # OBS-04 companion: persist the PREDICTED artifact set as
+            # log/build/<pkg>.vbuildlog — the reference to diff against the
+            # real <pkg>.buildlog after an actual source build.
+            self._write_virtual_buildlog(
+                _name, _src, _src_records, _arch, _release)
         if _missing_srcs:
             console.print(
                 f"  WARNING  {len(_missing_srcs)} source(s) not in cache: "

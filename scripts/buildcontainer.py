@@ -442,7 +442,7 @@ class BuildContainer:
                         seg_events: 'list[tuple]',
                         final_paths: 'list[str]',
                         output_hashes: 'dict[str, str]') -> None:
-        """OBS-03: compose + write the verbose per-package build narrative
+        """OBS-04: compose + write the verbose per-package build narrative
         to ``log/build/<pkg>.buildlog``.
 
         Strictly observability.  The entire body is wrapped so a formatting
@@ -959,7 +959,7 @@ class BuildContainer:
         _scratch_dir = os.path.join(
             self.config.dir_build_stage, uuid.uuid4().hex)
         os.makedirs(_scratch_dir, exist_ok=True)
-        # OBS-03 observability accumulators — populated through the build
+        # OBS-04 observability accumulators — populated through the build
         # and consumed by _write_buildlog at the terminal.  Initialised
         # here so they're in scope on every exit path.
         _seg_events: 'list[tuple]' = []
@@ -1087,7 +1087,7 @@ class BuildContainer:
                 #    in-place rewrites land at the final location.
                 #    Returns post-move absolute paths — fed to strip so
                 #    we don't rescan the whole repo (STA-19).
-                # OBS-03: snapshot what dpkg-buildpackage actually emitted
+                # OBS-04: snapshot what dpkg-buildpackage actually emitted
                 # into scratch BEFORE segregate moves it out — the ground
                 # truth of "files emitted", with sizes.  Best-effort.
                 try:
@@ -1521,7 +1521,7 @@ class BuildContainer:
         Failures are logged but don't propagate — best-effort normalisation;
         a missed strip surfaces later via `repo audit_nmu`.
 
-        OBS-03: when ``events`` is a list, this appends observability tuples
+        OBS-04: when ``events`` is a list, this appends observability tuples
         ``('strip', old_name, new_name)`` and
         ``('stamp', old_name, new_name, '+asgRuN')`` — purely additive,
         never alters the strip/stamp control flow.
@@ -1685,7 +1685,7 @@ class BuildContainer:
         Returns empty list on no-files-in-scratch (tunneled build,
         empty build, or rolled-back partial failure).
 
-        OBS-03: when ``events`` is a list, this appends observability
+        OBS-04: when ``events`` is a list, this appends observability
         tuples ``('relocate', filename, dest_dir)`` per moved file and
         ``('purge', filename, reason)`` per dropped duplicate — purely
         additive, never alters the move/rollback control flow.

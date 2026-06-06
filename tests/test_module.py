@@ -18337,7 +18337,7 @@ def test_comp03_segregate_signature_takes_source_dir():
         buildcontainer.BuildContainer._segregate_built_artifacts
     ).parameters.keys())
     # Leading positionals are pinned (source_dir must stay an explicit
-    # arg).  OBS-03 added a trailing optional `events` accumulator; allow
+    # arg).  OBS-04 added a trailing optional `events` accumulator; allow
     # additive params after the pinned three.
     assert _params[:3] == ['self', 'src_pkg', 'source_dir'], (
         f"signature regression: expected leading (self, src_pkg, "
@@ -18345,7 +18345,7 @@ def test_comp03_segregate_signature_takes_source_dir():
 
 
 def test_buildlog_writes_header_sections_and_files():
-    """OBS-03: BuildLog renders a verbose narrative to <pkg>.buildlog."""
+    """OBS-04: BuildLog renders a verbose narrative to <pkg>.buildlog."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import buildlog
     with tempfile.TemporaryDirectory() as _tmp:
@@ -18369,7 +18369,7 @@ def test_buildlog_writes_header_sections_and_files():
 
 
 def test_buildlog_write_never_raises_on_unwritable_dir():
-    """OBS-03 load-bearing safety invariant: a logging IO failure MUST
+    """OBS-04 load-bearing safety invariant: a logging IO failure MUST
     NOT propagate.  The 24-36h repo rebuild cannot be lost to a log write
     error — write() swallows everything."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -18382,7 +18382,7 @@ def test_buildlog_write_never_raises_on_unwritable_dir():
 
 
 def test_buildlog_methods_tolerate_bad_input_and_helpers():
-    """OBS-03 safety: accumulation methods + size helpers never raise on
+    """OBS-04 safety: accumulation methods + size helpers never raise on
     odd inputs (None, non-numeric, missing paths)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import buildlog
@@ -18402,7 +18402,7 @@ def test_buildlog_methods_tolerate_bad_input_and_helpers():
 
 
 def test_segregate_appends_relocate_and_purge_events():
-    """OBS-03: when an events list is passed, segregate records a
+    """OBS-04: when an events list is passed, segregate records a
     ('relocate', file, dst) per move and ('purge', file, reason) per
     dropped duplicate — additive, no change to the move/append-only
     behaviour the other segregate tests pin."""
@@ -18435,6 +18435,46 @@ def test_segregate_appends_relocate_and_purge_events():
         assert 'purge' in _kinds, _events
         assert any(e[0] == 'relocate' and e[1] == _fresh for e in _events)
         assert any(e[0] == 'purge' and e[1] == _dup for e in _events)
+
+
+def test_virtual_buildlog_writes_predicted_and_filtered():
+    """OBS-04 companion: `virtual build` writes `<pkg>.vbuildlog` with the
+    PREDICTED artifact set + a FILTERED (declared-but-not-predicted) list,
+    so it can be diffed against the real `<pkg>.buildlog`."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    with tempfile.TemporaryDirectory() as _tmp:
+        os.makedirs(os.path.join(_tmp, 'build'))
+        _sess = BuildSession.__new__(BuildSession)
+
+        class _Cfg:
+            dir_log = _tmp
+            build_profiles = frozenset({'nodoc'})
+
+        _sess.config = _Cfg()
+
+        class _Src:
+            version = '2.5.1-4'
+            binary = ['attr', 'libattr1', 'libattr1-dev',
+                      'attr-udeb', 'libattr1-udeb']
+
+        # libattr1-dev intentionally absent from records → must land in FILTERED
+        _records = [
+            {'Filename': 'pool/main/a/attr/attr_2.5.1-4_amd64.deb'},
+            {'Filename': 'libattr1_2.5.1-4_amd64.deb'},
+            {'Filename': 'attr-udeb_2.5.1-4_amd64.udeb'},
+            {'Filename': 'libattr1-udeb_2.5.1-4_amd64.udeb'},
+        ]
+        _sess._write_virtual_buildlog('attr', _Src(), _records, 'amd64', 1)
+        _p = os.path.join(_tmp, 'build', 'attr.vbuildlog')
+        assert os.path.isfile(_p), "vbuildlog not written"
+        _txt = open(_p).read()
+        assert 'VIRTUAL LOG: attr' in _txt
+        assert 'PREDICTED ARTIFACTS (4)' in _txt
+        assert 'attr_2.5.1-4_amd64.deb' in _txt          # basename, not pool path
+        assert 'libattr1-udeb_2.5.1-4_amd64.udeb' in _txt
+        assert 'FILTERED (declared but not predicted: 1)' in _txt
+        assert 'libattr1-dev' in _txt
 
 
 def test_comp03_segregate_does_not_read_self_repo_path():
@@ -29935,11 +29975,12 @@ def main() -> int:
         test_restamp_asg_deb_bumps_version_and_intra_source_deps,
         # UPD-01 step 2: append-only enforcement
         test_segregate_never_deletes_existing_published_deb,
-        # OBS-03: exhaustive per-package build/tunnel log
+        # OBS-04: exhaustive per-package build/tunnel log
         test_buildlog_writes_header_sections_and_files,
         test_buildlog_write_never_raises_on_unwritable_dir,
         test_buildlog_methods_tolerate_bad_input_and_helpers,
         test_segregate_appends_relocate_and_purge_events,
+        test_virtual_buildlog_writes_predicted_and_filtered,
         # COMP-03 Phase 1: per-worker scratch repo dir + segregate refactor
         test_comp03_segregate_signature_takes_source_dir,
         test_comp03_segregate_does_not_read_self_repo_path,
