@@ -10227,6 +10227,7 @@ class BuildSession:
             buildlog_dir=_buildlog,
             active_profiles=frozenset(
                 getattr(self.config, 'build_profiles', frozenset())),
+            repo_dir=self.config.dir_repo,
         )
         console.print(
             f"  checked={_stats['sources_checked']}  "
