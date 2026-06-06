@@ -622,82 +622,67 @@ def _reconstruct_historical_ledger(
     temporal boundary.  Eliminates the asg-drift class in validate
     output without requiring per-entry ledger timestamps.
 
-    The asg suffix on each output filename is, by construction, the
-    SAME `+asgRuN` across every binary the source emitted (uniform N
-    per source — see ``compute_post_build_versions``).  Algorithm:
+    Per-binary algorithm:
 
-    1. Find this source's stamp N from any one output filename.
-       - No asg suffix anywhere → at build time, no delta + no
-         lineage → ledger had no entries for any sibling at this
-         source's pristine base.
-       - Has asg suffix N → ledger had entries up to N-1 at build
-         time; entries with N' >= N were added AFTER.
+    1. For each binary B this source emitted (visible in output_hashes),
+       find the highest +asgRuN suffix on its filename (call it N_built).
+       That N IS this binary's build-time stamp; the at-build-time
+       ledger had entries with N strictly less than N_built.
 
-    2. For every binary this source produces, filter
-       ``current_ledger[name]`` keeping only entries whose pristine
-       base != this source's pristine OR whose parsed N is strictly
-       less than the build's N.
+    2. Filter ``current_ledger[B]`` keeping only entries whose pristine
+       base differs from B's pristine OR whose parsed N is strictly
+       less than N_built.
 
-    Returns the filtered ledger.  Pass it to
-    ``synthesize_source_binaries`` and the prediction will match the
-    historical artifact exactly (up to other synth bugs, which is
-    exactly what validate is meant to surface).
+    Comparison is **epoch-aware**: ledger entries can carry epochs
+    (``1:9.18.49-1+asg1u1`` from bind9), but filenames OMIT epoch
+    (``bind9_9.18.49-1+asg1u1_amd64.deb``).  Both sides are
+    epoch-stripped before comparison so the pristine match works
+    across the inconsistency.
+
+    Returns the filtered ledger.  Pass to
+    ``synthesize_source_binaries``; the prediction matches the
+    historical artifact exactly when synth's math is correct.
     """
-    _source_binaries = set(getattr(source, 'binary', []) or [])
-    if not _source_binaries:
-        return current_ledger
+    def _no_epoch(_v: str) -> str:
+        return _v.split(':', 1)[-1] if ':' in _v else _v
 
-    # Step 1 — extract this source's pristine base + stamped N from
-    # output_hashes.  Both are uniform across all siblings.
-    _source_pristine = ''
-    _source_n = 0
+    # Per-binary build state from output_hashes:
+    #   {binary_name: (pristine_no_epoch, highest_built_N)}
+    _per_binary: 'Dict[str, Tuple[str, int]]' = {}
     for _fn in output_hashes:
         _bn = _fn.rsplit('.', 1)[0]
         _parts = _bn.split('_')
         if len(_parts) != 3:
             continue
         _name, _ver, _arch = _parts
-        if _name not in _source_binaries:
-            continue
-        _source_pristine = utils.pristine_base(_ver)
+        _pristine = _no_epoch(utils.pristine_base(_ver))
         _asg = utils.parse_asg_suffix(_ver)
-        _n_here = _asg[1] if _asg is not None else 0
-        # Uniform N per source — take any non-zero, else 0.
-        if _n_here > _source_n:
-            _source_n = _n_here
-        # Don't break: scan a few more to confirm pristine consistent.
-    if not _source_pristine:
-        # No siblings appeared in output_hashes — caller's source.binary
-        # disagrees with what built.  Pass through current ledger
-        # unchanged; the validate path's `predicted_extra` /
-        # `predicted_missing` will surface the binary-list drift.
+        _n = _asg[1] if _asg is not None else 0
+        _prev = _per_binary.get(_name)
+        if _prev is None or _n > _prev[1]:
+            _per_binary[_name] = (_pristine, _n)
+
+    if not _per_binary:
         return current_ledger
 
-    # Step 2 — truncate ledger per binary at this source's pristine.
     _filtered: 'Dict[str, List[str]]' = dict(current_ledger)
-    for _binary in _source_binaries:
+    for _binary, (_b_pristine, _b_n) in _per_binary.items():
         _entries = current_ledger.get(_binary, [])
         if not _entries:
             continue
         _kept: 'List[str]' = []
         for _entry in _entries:
-            _entry_pristine = utils.pristine_base(_entry)
-            if _entry_pristine != _source_pristine:
-                # Different pristine base — unrelated to this build's
-                # lineage, keep as-is.
+            _entry_pristine = _no_epoch(utils.pristine_base(_entry))
+            if _entry_pristine != _b_pristine:
                 _kept.append(_entry)
                 continue
             _asg_parsed = utils.parse_asg_suffix(_entry)
             if _asg_parsed is None:
-                # Pristine entry (no asg suffix) — pre-asg-era,
-                # keep.
                 _kept.append(_entry)
                 continue
             _, _n_entry = _asg_parsed
-            if _n_entry < _source_n:
+            if _n_entry < _b_n:
                 _kept.append(_entry)
-            # Entries with _n_entry >= _source_n were added AT or
-            # AFTER this build → invisible to synth-as-of-then.
         _filtered[_binary] = _kept
     return _filtered
 

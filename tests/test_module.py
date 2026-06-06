@@ -20438,6 +20438,33 @@ def test_virtual_build_reconstruct_historical_ledger_stamped_build():
     assert _hist['libfoo'] == ['1.0-1+asg1u1']
 
 
+def test_virtual_build_reconstruct_historical_ledger_epoch_aware():
+    """Ledger entries can carry epoch (`1:9.18.49-1+asg1u1`) but
+    output_hashes filenames OMIT epoch (`bind9_9.18.49-1+asg1u1_amd64.deb`).
+    Reconstruction MUST epoch-strip both sides to compare pristines.
+    Without this, epoched sources see ALL entries kept (different
+    pristine) and asg drift is never filtered."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _Bind9:
+        binary = ['bind9', 'bind9-libs']
+
+    _outputs = {
+        'bind9_9.18.49-1+asg1u1_amd64.deb': 'a',
+        'bind9-libs_9.18.49-1+asg1u1_amd64.deb': 'b',
+    }
+    _current = {
+        'bind9':      ['1:9.18.49-1+asg1u1', '1:9.18.49-1+asg1u2'],
+        'bind9-libs': ['1:9.18.49-1+asg1u1', '1:9.18.49-1+asg1u2'],
+    }
+    _hist = _vb._reconstruct_historical_ledger(
+        _Bind9(), _outputs, _current)
+    # N_built=1 → keep N<1 (nothing).
+    assert _hist['bind9'] == []
+    assert _hist['bind9-libs'] == []
+
+
 def test_virtual_build_reconstruct_historical_ledger_preserves_other_pristine():
     """Entries at a DIFFERENT pristine base must pass through
     untouched — they're unrelated to this build's lineage."""
@@ -29787,6 +29814,7 @@ def main() -> int:
         test_virtual_build_build_profile_filter_positive_profile_required,
         test_virtual_build_reconstruct_historical_ledger_pristine_build,
         test_virtual_build_reconstruct_historical_ledger_stamped_build,
+        test_virtual_build_reconstruct_historical_ledger_epoch_aware,
         test_virtual_build_reconstruct_historical_ledger_preserves_other_pristine,
         test_virtual_build_synthesize_source_filters_by_profile,
         test_check_build_matches_asg_variant_of_prediction,
