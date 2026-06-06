@@ -126,7 +126,8 @@ without it.  See [`docs/architecture.md`](architecture.md#buildflags--the-stage-
 - `print state` — pipeline state, flag readout, counts.
 - `print summary` — per-stage timing once autorun completes.
 - `log/build/<pkg>` — raw container stdout per source build.
-- `log/build/<pkg>.result` — `PASS` / `FAIL`.
+- `log/build/<pkg>.build.json` — signed structured record (phase, intended/built version, outputs + hashes, status).
+- `log/build/<pkg>.buildlog` — verbose human narrative (OBS-04): files emitted/expected/relocated/purged, NMU strips, +asg stamps, per-file hash+size, expected-vs-emitted delta.
 - `log/build-YYYY-MM-DDTHH-MM-SS.log` — full structured log.
 
 ## 5. Verify the build
@@ -248,7 +249,7 @@ the append-only / publish-before-prune / per-file N derivation rules.
 |---|---|
 | `cache build` re-runs after snapshot change | Expected — snapshot pin changed, cache is invalidated.  Force is unnecessary. |
 | `mirror audit` flags signature failure | Pubkey on the consuming side is stale.  Re-roll the chroot (`chroot build` re-installs current keyring) or copy the keyring out manually. |
-| `source build` rebuilds the same package every run | Stale `.result` from a prior force; or pristine filename matches a previously-stamped `+asg uN` (see `find_matching_artifact`).  `package strip` + `package audit_nmu` confirms repo state. |
+| `source build` rebuilds the same package every run | Stale build record (`<pkg>.build.json`) from a prior force; or pristine filename matches a previously-stamped `+asg uN` (see `find_matching_artifact`).  `package strip` + `package audit_nmu` confirms repo state. |
 | Update mode lists more packages than `source audit` does | Expected — `source audit` reports needs_build via filename match; update mode adds bump-targets whose pristine filename collides with a prior build.  See `docs/pseudocode.md` "source audit vs source build all". |
 | `mirror publish` fails at the remote re-index step | `dpkg-dev` not installed on the mirror host.  `sudo apt-get install -y dpkg-dev`. |
 | `mirror publish` BLOCKs with "federation gate" | A peer's `coord-head.neighbours` differs from local config.  Run `mirror reconcile-neighbours` to align peers, then retry. |

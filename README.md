@@ -258,7 +258,7 @@ source build live                     # build live-exclusive sources only
 source build installer                # build udeb closure + installer-exclusive deb extras
 source build recommended              # build ONLY the extras-only sources
 source build foo                      # build a specific source
-source build force foo                # rebuild even if .result says PASS
+source build force foo                # rebuild even if the build record says PASS
 ```
 
 For a complete live ISO you need `source build` followed by `source build live`. autorun chains both before chroot build.
@@ -283,7 +283,7 @@ The bracket-token replaces *both* `DEB_BUILD_PROFILES` and `DEB_BUILD_OPTIONS` f
 | `source build [nocheck]` | rebuild all pkg-layer sources with the override |
 | `source build recommended [nocheck]` | rebuild all extras-only sources with the override |
 
-The override implies `force` — a prior `.result` file reflects the *old* profiles, so the cache check would falsely short-circuit the rebuild.  The TUI prints a clear note when this auto-flip happens so you're not surprised.
+The override implies `force` — a prior build record (`<pkg>.build.json`) reflects the *old* profiles, so the cache check would falsely short-circuit the rebuild.  The TUI prints a clear note when this auto-flip happens so you're not surprised.
 
 Multiple bracket-tokens in one invocation is an error (we don't try to merge or pick).  `recommended` and named packages are mutually exclusive — pick one mode.
 

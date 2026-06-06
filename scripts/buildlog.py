@@ -1,4 +1,4 @@
-"""OBS-03 — exhaustive per-package build/tunnel log.
+"""OBS-04 — exhaustive per-package build/tunnel log.
 
 Writes a verbose, human-readable narrative of EVERYTHING that happens to
 one source package during a build or a tunnel: resolved build-depends, the
@@ -65,14 +65,15 @@ class BuildLog:
         blog.write()
     """
 
-    def __init__(self, log_dir: str, package: str, kind: str = 'build'):
+    def __init__(self, log_dir: str, package: str, kind: str = 'build',
+                 suffix: str = '.buildlog'):
         self._dir = log_dir
         self._package = str(package)
         self._kind = str(kind)
         self._lines: 'list[str]' = []
         self._path = ''
         try:
-            self._path = os.path.join(log_dir, f"{self._package}.buildlog")
+            self._path = os.path.join(log_dir, f"{self._package}{suffix}")
         except Exception as _e:  # pragma: no cover — pathological inputs
             logger.warning(f"BuildLog init for {package!r}: {_e}")
 
