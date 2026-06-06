@@ -282,6 +282,30 @@ def synthesize_binary_record(
     return _rec
 
 
+def _binary_active_by_convention(
+    binary_name: str, active_profiles: 'frozenset[str]',
+) -> bool:
+    """Apply Debian dh_helper naming conventions for build-profile
+    skipping when upstream's Package-List entry lacks an explicit
+    `profile=` annotation.
+
+    `dh_install` / `dh_strip` / `dh_helper` honour these conventions
+    even without static annotation — many sources rely on the
+    convention rather than declaring `profile=!nodoc` explicitly
+    (bind9, ffmpeg, glibc, krb5, openssh, openssl, python3.11, …).
+
+    Returns True if the binary would be built under these profiles.
+    """
+    if 'nodoc' in active_profiles and binary_name.endswith('-doc'):
+        return False
+    if 'nocheck' in active_profiles and binary_name.endswith(
+            ('-tests', '-test')):
+        return False
+    if 'noudeb' in active_profiles and binary_name.endswith('-udeb'):
+        return False
+    return True
+
+
 def _binary_active_under_profiles(
     package_list_entry: str, active_profiles: 'frozenset[str]',
 ) -> bool:
@@ -414,9 +438,14 @@ def synthesize_source_binaries(
     _base_ver_per_binary: Dict[str, str] = {}
     _emit_binaries: List[str] = []
     for _b in _binaries:
-        # Build-Profile gate (static, declarative).
+        # Build-Profile gate: STATIC (declarative profile=! in
+        # Package-List entry) AND CONVENTIONAL (Debian dh_helper
+        # naming rules — sources frequently rely on the convention
+        # rather than declaring profile=!nodoc explicitly).
         _pl_entry = _pkg_list_idx.get(_b, '')
         if not _binary_active_under_profiles(_pl_entry, active_profiles):
+            continue
+        if not _binary_active_by_convention(_b, active_profiles):
             continue
         _upstream_per_binary[_b] = None
         _name_entries = package_universe.get(_b)
@@ -768,36 +797,40 @@ def validate_against_build_records(
         if _src is None:
             continue
         _was_patched = bool(getattr(_src, 'patch_list', None))
-        # Reconstruct ledger state at the time this source was built
-        # so synth's stamp prediction matches the historical artifact.
-        # Without this, validate flags every source whose ledger has
-        # advanced since the original build as "asg drift" — accurate
-        # but uninformative; the synth's MATH is correct, only the
-        # input (current ledger) has evolved.
         _historical_ledger = _reconstruct_historical_ledger(
             _src, _rec.get('output_hashes') or {}, asg_ledger or {})
-        # Also derive the SOURCE's pristine at build time from
-        # output_hashes.  Today's `source.version` may carry NMU
-        # suffixes that didn't exist when this source was built
-        # (snapshot has rolled forward since).  E.g. curl built at
-        # `7.88.1-10` pristine, cache today shows `7.88.1-10+deb12u14`
-        # → synth sees delta where real-build saw none → spurious
-        # stamp prediction.  Use the pristine extracted from any
-        # output filename as the effective at-build-time source
-        # version.  For asg-stamped historical builds the lineage
-        # trigger (filtered ledger) carries the stamp correctly.
+        # Derive at-build-time SOURCE state from output_hashes — the
+        # only authoritative record of what actually got built.
+        #   _src_pristine_at_build: pristine_base of any output's
+        #       filename version.  Used as source-version override so
+        #       synth's delta check uses the at-build pristine, not
+        #       today's drifted source.version.
+        #   _at_build_delta: True if ANY output carries an asg suffix.
+        #       That suffix is direct evidence that real-build's
+        #       delta-or-lineage check fired.  When N_built=1 with no
+        #       prior ledger entries (which reconstruction trims to
+        #       empty), lineage didn't fire — so delta must have.
+        #       Real-build's delta sources: source NMU (cache today
+        #       may show different NMU), was_patched (we read today),
+        #       binary NMU during build (transient).  We collapse all
+        #       three into a single "force delta=True" signal because
+        #       the output IS the receipt.
         _src_pristine_at_build = ''
+        _at_build_delta = False
         for _fn in (_rec.get('output_hashes') or {}):
             _bn = _fn.rsplit('.', 1)[0]
             _parts = _bn.split('_')
             if len(_parts) != 3:
                 continue
-            _src_pristine_at_build = utils.pristine_base(_parts[1])
-            break
+            if not _src_pristine_at_build:
+                _src_pristine_at_build = utils.pristine_base(_parts[1])
+            if utils.parse_asg_suffix(_parts[1]) is not None:
+                _at_build_delta = True
         _virt = synthesize_source_binaries(
             source=_src, package_universe=package_universe,
             asg_ledger=_historical_ledger, release=release,
-            arch=arch, was_patched=_was_patched,
+            arch=arch,
+            was_patched=_at_build_delta or _was_patched,
             peer_sources=set(source_names),
             active_profiles=active_profiles,
             override_source_version=_src_pristine_at_build or None,
