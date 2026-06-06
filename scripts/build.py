@@ -10211,10 +10211,15 @@ class BuildSession:
             return _candidates[0] if _candidates else None
 
         _buildlog = os.path.join(self.config.dir_log, 'build')
+        _profiles_set = sorted(getattr(
+            self.config, 'build_profiles', set()) or set())
         console.print(
             f"virtual validate: scope={len(_scope)} source(s)  "
             f"arch={self.config.arch}  release={_release}",
             tui.COLOR_HIGHLIGHT)
+        console.print(
+            f"  build_profiles: {','.join(_profiles_set) or '(none)'}",
+            tui.COLOR_INFO)
         _stats, _findings = _vb.validate_against_build_records(
             source_names=_scope, source_lookup=_lookup,
             package_universe=_universe, asg_ledger=_asg_ledger,
