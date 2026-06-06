@@ -345,27 +345,27 @@ def _binary_active_for_arch(
 def _binary_active_by_convention(
     binary_name: str, active_profiles: 'frozenset[str]',
 ) -> bool:
-    """Apply Debian dh_helper naming conventions for build-profile
-    skipping when upstream's Package-List entry lacks an explicit
-    `profile=` annotation.
+    """Naming-convention filter.  No-op by design — kept as a hook
+    for future per-pattern rules but NEVER skip a binary based on
+    name alone.
 
-    `dh_install` / `dh_strip` / `dh_helper` honour these conventions
-    even without static annotation — many sources rely on the
-    convention rather than declaring `profile=!nodoc` explicitly
-    (bind9, ffmpeg, glibc, krb5, openssh, openssl, python3.11, …).
+    Earlier this function applied "*-doc + nodoc → skip" / "*-udeb
+    + noudeb → skip" rules.  Both were WRONG: dh_helper only honors
+    the EXPLICIT `profile=!nodoc` (or `profile=!noudeb`) annotation
+    in the source's Package-List.  When the annotation is absent,
+    real-build emits the binary regardless of DEB_BUILD_PROFILES.
 
-    Returns True if the binary would be built under these profiles.
+    Verified against real Package-List entries:
+      apt:     `apt-doc ... profile=!nodoc`     → real skips    ✓
+      bind9:   `bind9-doc ... arch=all`         → real EMITS    (no annotation)
+      alsa-lib:`libasound2-doc ... arch=all`    → real EMITS    (no annotation)
+      ffmpeg:  `ffmpeg-doc ... arch=all`        → real EMITS    (no annotation)
+
+    The static-annotation filter (`_binary_active_under_profiles`)
+    correctly handles the apt case.  Convention-based skipping
+    would mis-skip the bind9/alsa-lib/ffmpeg class.
     """
-    if 'nodoc' in active_profiles and binary_name.endswith('-doc'):
-        return False
-    if 'noudeb' in active_profiles and binary_name.endswith('-udeb'):
-        return False
-    # NOTE: `nocheck` is intentionally NOT used to filter `-tests` /
-    # `-test` packages.  Per Debian Policy + dh_helper, `nocheck`
-    # skips RUNNING tests at build time, not building `-tests`
-    # packages which carry test data/files for end-users (e.g.
-    # libblas-test, liblapack-test).  Real-build emits them
-    # regardless.
+    del binary_name, active_profiles
     return True
 
 
@@ -1023,19 +1023,20 @@ def validate_against_build_records(
             "synth bug)"))
     if _stats.get('missing_sources'):
         _findings.append((
-            'WARNING', 'virtual_validate_predicted_missing',
+            'WARNING', 'virtual_validate_synth_under_predicted',
+            f"real build emitted "
             f"{_stats['missing_binaries']} binaries across "
-            f"{_stats['missing_sources']} source(s) emitted by real "
-            "build but synthesizer did NOT predict (procedural emit "
-            "from debian/rules — not statically derivable)"))
+            f"{_stats['missing_sources']} source(s) that synth did "
+            "NOT predict (synth missed; usually procedural emit from "
+            "debian/rules)"))
     if _stats.get('extra_sources'):
         _findings.append((
-            'WARNING', 'virtual_validate_predicted_extra',
+            'WARNING', 'virtual_validate_synth_over_predicted',
+            f"synth predicted "
             f"{_stats['extra_binaries']} binaries across "
-            f"{_stats['extra_sources']} source(s) predicted by "
-            "synthesizer but real build did NOT emit (procedural skip "
-            "in debian/rules — typically *-dev, *-udeb without "
-            "static profile gate)"))
+            f"{_stats['extra_sources']} source(s) that real build did "
+            "NOT emit (synth overshot; usually procedural skip in "
+            "debian/rules — `-dev`, conditional `-udeb`)"))
     return _stats, _findings
 
 
