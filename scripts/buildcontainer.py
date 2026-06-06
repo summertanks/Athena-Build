@@ -1530,12 +1530,25 @@ class BuildContainer:
                         # dup (which sits in the worker's scratch dir, a
                         # prunable intermediate that the build()
                         # finally-block rmtrees anyway).
+                        #
+                        # CRITICAL: still append `_dst` to `_moved_paths`
+                        # so the build flow (normalize, output_hashes,
+                        # repo audit downstream) SEES the artifact.
+                        # Without this, the build record's `outputs` /
+                        # `output_hashes` are silently incomplete:
+                        # the kept-existing file is real and downstream
+                        # treats absence-from-record as "wasn't built"
+                        # (caught 2026-06-06 — 497 udebs on disk, 0 of
+                        # 985 build.json records carried any udeb
+                        # reference, breaking virtual validate's
+                        # over-prediction analysis).
                         logger.warning(
                             f"segregate: {_f} already present in "
                             f"{_dst_dir} — keeping existing (append-only), "
                             f"dropping rebuilt dup"
                         )
                         os.remove(_src)
+                        _moved_paths.append(_dst)
                         continue
                     os.rename(_src, _dst)
                     _moved_paths.append(_dst)
