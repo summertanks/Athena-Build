@@ -812,6 +812,37 @@ def _reconstruct_historical_ledger(
     return _filtered
 
 
+def _index_repo_emissions(repo_dir: str) -> 'Dict[str, set]':
+    """One-shot walk of ``repo_dir`` (every subdir under dists/) →
+    ``{binary_name: set(basenames)}`` for every ``.deb`` and ``.udeb``
+    on disk.  Per-source emission lookup is then O(|source.binary|).
+
+    Authoritative emission source for `virtual validate`.  Replaces
+    reliance on `build.json`'s `output_hashes` which systematically
+    misses `.udeb` files (985 build records, 0 carry any udeb
+    reference — verified against operator's live state).
+    BuildContainer's hashing loop doesn't include udebs in
+    output_hashes even though the segregator correctly places them
+    on disk under `dists/<codename>/main/debian-installer/`.
+
+    Validates against actual on-disk artifacts the same way
+    `repo audit` does — they should agree on what was emitted.
+    """
+    _idx: 'Dict[str, set]' = {}
+    if not os.path.isdir(repo_dir):
+        return _idx
+    for _root, _dirs, _files in os.walk(repo_dir):
+        for _f in _files:
+            if not _f.endswith(('.deb', '.udeb')):
+                continue
+            _base = _f.rsplit('.', 1)[0]
+            _parts = _base.split('_')
+            if len(_parts) != 3:
+                continue
+            _idx.setdefault(_parts[0], set()).add(_f)
+    return _idx
+
+
 def validate_against_build_records(
     source_names: 'List[str]',
     source_lookup: 'Any',  # callable: name -> Source or dict
@@ -819,6 +850,7 @@ def validate_against_build_records(
     asg_ledger: 'Optional[Dict[str, List[str]]]', release: int,
     arch: str, buildlog_dir: str,
     active_profiles: 'frozenset[str]' = frozenset(),
+    repo_dir: 'Optional[str]' = None,
 ) -> 'Tuple[Dict[str, Any], List[Tuple[str, str, str]]]':
     """Run the synthesizer against each source for which a successful
     build.json exists on disk; compare the predicted filenames
@@ -853,22 +885,41 @@ def validate_against_build_records(
         'sources_matched': 0,
         'sources_drifted': 0,
     }
+    # One-shot repo walk for the AUTHORITATIVE emission set.
+    # Replaces build.json output_hashes which misses every .udeb.
+    _repo_idx: 'Dict[str, set]' = (
+        _index_repo_emissions(repo_dir) if repo_dir else {})
     for _name in source_names:
         _rec = _utils.read_build_record(buildlog_dir, _name)
         if _rec is None:
             continue
-        _real_files: 'List[str]' = list(
-            (_rec.get('output_hashes') or {}).keys())
-        if not _real_files:
-            continue
-        _stats['sources_checked'] += 1
         _src = source_lookup(_name)
         if _src is None:
             continue
+        _source_binaries = set(getattr(_src, 'binary', []) or [])
+        # Real-emission set: union of all files in repo/ whose binary
+        # name appears in this source's Binary: list.  Falls back to
+        # build.json output_hashes only when no repo_dir was provided
+        # (for tests).
+        if _repo_idx:
+            _real_files_set: set = set()
+            for _b in _source_binaries:
+                _real_files_set |= _repo_idx.get(_b, set())
+            _real_files: 'List[str]' = sorted(_real_files_set)
+        else:
+            _real_files = list(
+                (_rec.get('output_hashes') or {}).keys())
+        if not _real_files:
+            continue
+        _stats['sources_checked'] += 1
         _was_patched = bool(getattr(_src, 'patch_list', None))
+        # Use repo-walk-derived files (authoritative) for the
+        # at-build-time signals too.  `output_hashes` would miss
+        # udebs from the reconstruction's per-binary N detection.
+        _emission_dict = dict.fromkeys(_real_files, '')
         _historical_ledger = _reconstruct_historical_ledger(
-            _src, _rec.get('output_hashes') or {}, asg_ledger or {})
-        # Derive at-build-time SOURCE state from output_hashes — the
+            _src, _emission_dict, asg_ledger or {})
+        # Derive at-build-time SOURCE state from the same set — the
         # only authoritative record of what actually got built.
         #   _src_pristine_at_build: pristine_base of any output's
         #       filename version.  Used as source-version override so
@@ -886,7 +937,7 @@ def validate_against_build_records(
         #       the output IS the receipt.
         _src_pristine_at_build = ''
         _at_build_delta = False
-        for _fn in (_rec.get('output_hashes') or {}):
+        for _fn in _real_files:
             _bn = _fn.rsplit('.', 1)[0]
             _parts = _bn.split('_')
             if len(_parts) != 3:
