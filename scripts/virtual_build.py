@@ -282,6 +282,66 @@ def synthesize_binary_record(
     return _rec
 
 
+def _binary_active_for_arch(
+    package_list_entry: str, target_arch: str,
+) -> bool:
+    """Honour the ``arch=`` annotation in a source's Package-List
+    entry.  Real-build's ``dpkg-buildpackage -a <arch>`` only emits
+    binaries whose declared architecture matches the build arch.
+
+    Catches the linux-source class: it declares ~14k binaries in
+    `Binary:` across every supported Debian architecture
+    (acpi-modules-6.1.0-1-4kc-malta-di arch=mips,
+     affs-modules-6.1.0-1-m68k-di arch=m68k, etc.); we only build
+    amd64.  Without this filter the synth predicts every one of them.
+
+    Supported patterns:
+      arch=any           → always (any arch)
+      arch=all           → always (arch-independent)
+      arch=amd64         → only on amd64
+      arch=linux-any     → any linux arch (we're linux-amd64)
+      arch=any-amd64     → any kernel, amd64 CPU
+      arch=amd64,i386    → comma OR space list
+      arch=!hurd-any     → exclude pattern (negative match)
+    """
+    _arch_str = ''
+    for _tok in package_list_entry.split():
+        if _tok.startswith('arch='):
+            _arch_str = _tok[len('arch='):]
+            break
+    if not _arch_str:
+        return True
+    _terms = _arch_str.replace(',', ' ').split()
+    _any_neg_term = any(_t.startswith('!') for _t in _terms)
+    if _any_neg_term:
+        # Negative list: ALL terms must NOT exclude us.
+        for _t in _terms:
+            if not _t.startswith('!'):
+                continue
+            _excl = _t[1:]
+            if _excl == target_arch or _excl == 'any':
+                return False
+            if _excl == 'linux-any' and target_arch in ('amd64', 'i386'):
+                return False
+            if _excl.endswith(f'-{target_arch}'):
+                return False
+        return True
+    # Positive list: at least one term must match.
+    for _t in _terms:
+        if _t in ('any', 'all', target_arch):
+            return True
+        if _t == 'linux-any' and target_arch in (
+                'amd64', 'i386', 'arm64', 'armhf', 'armel',
+                'mips64el', 'ppc64el', 's390x'):
+            return True
+        if _t.endswith(f'-{target_arch}'):
+            return True
+        # `linux-<cpu>` matches when target_arch == cpu.
+        if _t.startswith('linux-') and _t[len('linux-'):] == target_arch:
+            return True
+    return False
+
+
 def _binary_active_by_convention(
     binary_name: str, active_profiles: 'frozenset[str]',
 ) -> bool:
@@ -298,11 +358,14 @@ def _binary_active_by_convention(
     """
     if 'nodoc' in active_profiles and binary_name.endswith('-doc'):
         return False
-    if 'nocheck' in active_profiles and binary_name.endswith(
-            ('-tests', '-test')):
-        return False
     if 'noudeb' in active_profiles and binary_name.endswith('-udeb'):
         return False
+    # NOTE: `nocheck` is intentionally NOT used to filter `-tests` /
+    # `-test` packages.  Per Debian Policy + dh_helper, `nocheck`
+    # skips RUNNING tests at build time, not building `-tests`
+    # packages which carry test data/files for end-users (e.g.
+    # libblas-test, liblapack-test).  Real-build emits them
+    # regardless.
     return True
 
 
@@ -446,6 +509,12 @@ def synthesize_source_binaries(
         if not _binary_active_under_profiles(_pl_entry, active_profiles):
             continue
         if not _binary_active_by_convention(_b, active_profiles):
+            continue
+        # Architecture gate: Package-List entry's arch=... annotation.
+        # Catches the linux-source class — declares modules for every
+        # supported Debian arch (mips, m68k, sparc, …); we only build
+        # the host arch.
+        if not _binary_active_for_arch(_pl_entry, arch):
             continue
         _upstream_per_binary[_b] = None
         _name_entries = package_universe.get(_b)
