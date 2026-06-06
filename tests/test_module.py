@@ -18316,8 +18316,14 @@ def test_segregate_never_deletes_existing_published_deb():
                 "published deb was overwritten — append-only violated!")
         assert not os.path.exists(os.path.join(_tmp, _fn)), (
             "rebuilt dup should be dropped from repo/ root")
-        assert os.path.join(_dest_dir, _fn) not in _moved, (
-            "a kept-existing collision must not be reported as freshly moved")
+        # The kept-existing destination MUST still appear in _moved so
+        # downstream tracking (output_hashes, build record outputs)
+        # sees the artifact.  Bug from 2026-06-06: the old code didn't
+        # add it, silently losing 497 udebs and any other byte-identical
+        # rebuild from build records.
+        assert os.path.join(_dest_dir, _fn) in _moved, (
+            "kept-existing collision must still be tracked in _moved so "
+            "downstream output_hashes / repo audit sees the artifact")
 
 
 def test_comp03_segregate_signature_takes_source_dir():

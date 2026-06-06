@@ -6220,6 +6220,10 @@ class BuildSession:
             'backfill-hashes': 'COORD-01: walk build.json records, hash any '
                                'emitted .deb/.udeb missing output_hashes, bump '
                                'schema_version v1→v2.  Idempotent.',
+            'rescan-outputs':  'Re-derive outputs/output_hashes from on-disk '
+                               'repo for each build.json record.  Catches '
+                               'files dropped by segregate\'s kept-existing '
+                               'branch (notably udebs).  Idempotent.',
         }
         if action == 'strip':
             return self.cmd_strip_repo(*args)
@@ -6227,7 +6231,46 @@ class BuildSession:
             return self.cmd_package_cleanup(*args)
         if action == 'backfill-hashes':
             return self.cmd_repo_backfill_hashes(*args)
+        if action == 'rescan-outputs':
+            return self.cmd_repo_rescan_outputs(*args)
         return self._group_help('repo repair', _table, action)
+
+    def cmd_repo_rescan_outputs(self, *args):
+        """For each build.json record, scan repo/ for files matching
+        the source's declared `Binary:` list and add any missing from
+        `outputs` / `output_hashes`.  Fixes records made incomplete by
+        the pre-2026-06-06 segregate bug (kept-existing files were
+        dropped from `_moved_paths`, silently losing them from
+        downstream tracking).
+
+        Usage: repo repair rescan-outputs
+
+        Idempotent — sources with no new files to add are unchanged.
+        """
+        del args
+        if self.cache is None:
+            console.print(
+                "repo repair rescan-outputs: cache not parsed yet — "
+                "run `cache build` + `cache parse` first.",
+                tui.COLOR_ERROR)
+            return False
+
+        _cache = self.cache
+        assert _cache is not None
+
+        def _lookup(_name: str):
+            _cands = _cache.source_hashtable.get(_name, [])
+            return _cands[0] if _cands else None
+
+        _stats = utils.rescan_outputs_from_repo(
+            os.path.join(self.config.dir_log, 'build'),
+            self.config.dir_repo, _lookup,
+        )
+        console.print(
+            f"rescan-outputs: scanned={_stats['scanned']} "
+            f"augmented={_stats['augmented']} "
+            f"files_added={_stats['files_added']}")
+        return True
 
     def cmd_repo_backfill_hashes(self, *args):
         """COORD-01 one-shot: walk cache/log/build/*.build.json and add
