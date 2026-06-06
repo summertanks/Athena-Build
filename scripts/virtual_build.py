@@ -357,6 +357,7 @@ def synthesize_source_binaries(
     arch: str, was_patched: bool = False,
     peer_sources: 'Optional[set[str]]' = None,
     active_profiles: 'frozenset[str]' = frozenset(),
+    override_source_version: 'Optional[str]' = None,
 ) -> List[Dict[str, str]]:
     """End-to-end: take one Source and return one synthesized RepoState
     record per binary it would emit.
@@ -384,7 +385,8 @@ def synthesize_source_binaries(
     has no `.binary` field (e.g. `<arch only>` source-only packages).
     """
     _src_name = getattr(source, 'package', None)
-    _src_ver = str(getattr(source, 'version', ''))
+    _src_ver = str(override_source_version
+                   or getattr(source, 'version', ''))
     if not _src_name or not _src_ver:
         return []
     _binaries: List[str] = list(getattr(source, 'binary', []) or [])
@@ -488,11 +490,17 @@ def synthesize_source_binaries(
         _b: _no_epoch(_pristine_per_binary[_b])
         for _b in _binaries
     }
-    _any_delta = was_patched
-    for _b in _binaries:
-        if _pristine_per_binary[_b] != _base_ver_per_binary[_b]:
-            _any_delta = True
-            break
+    # Delta detection mirrors real-build's `_normalize_built_artifacts`:
+    # uses the SOURCE's version, NOT the binary's upstream version.
+    # The two can differ — Debian binNMU (+bN) rebuilds bump the
+    # binary's Version while leaving source.version pristine
+    # (e.g. bash source 5.2.15-2 + binary 5.2.15-2+b13).  Real build
+    # takes the source, applies our patches, and dpkg-buildpackage
+    # emits at source.version — no +bN, no delta from this.  Synth
+    # walking per-binary versions would (incorrectly) trigger delta
+    # on every +bN binary and stamp pristine builds.
+    _src_pristine = utils.strip_nmu_suffix(_src_ver)
+    _any_delta = was_patched or (_src_pristine != _src_ver)
     _has_lineage = False
     for _b in _binaries:
         for _prev in _ledger.get(_b, []):
@@ -768,12 +776,31 @@ def validate_against_build_records(
         # input (current ledger) has evolved.
         _historical_ledger = _reconstruct_historical_ledger(
             _src, _rec.get('output_hashes') or {}, asg_ledger or {})
+        # Also derive the SOURCE's pristine at build time from
+        # output_hashes.  Today's `source.version` may carry NMU
+        # suffixes that didn't exist when this source was built
+        # (snapshot has rolled forward since).  E.g. curl built at
+        # `7.88.1-10` pristine, cache today shows `7.88.1-10+deb12u14`
+        # → synth sees delta where real-build saw none → spurious
+        # stamp prediction.  Use the pristine extracted from any
+        # output filename as the effective at-build-time source
+        # version.  For asg-stamped historical builds the lineage
+        # trigger (filtered ledger) carries the stamp correctly.
+        _src_pristine_at_build = ''
+        for _fn in (_rec.get('output_hashes') or {}):
+            _bn = _fn.rsplit('.', 1)[0]
+            _parts = _bn.split('_')
+            if len(_parts) != 3:
+                continue
+            _src_pristine_at_build = utils.pristine_base(_parts[1])
+            break
         _virt = synthesize_source_binaries(
             source=_src, package_universe=package_universe,
             asg_ledger=_historical_ledger, release=release,
             arch=arch, was_patched=_was_patched,
             peer_sources=set(source_names),
             active_profiles=active_profiles,
+            override_source_version=_src_pristine_at_build or None,
         )
         _pred_files: 'List[str]' = [
             os.path.basename(_r.get('Filename', '') or '')
