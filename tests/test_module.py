@@ -20393,6 +20393,71 @@ def test_virtual_build_build_profile_filter_positive_profile_required():
         frozenset({'stage1'})) is True
 
 
+def test_virtual_build_reconstruct_historical_ledger_pristine_build():
+    """Source built at pristine (no asg suffix), ledger has since
+    accumulated entries.  Reconstruction must strip ALL asg-stamped
+    entries at this pristine base so synth predicts the historical
+    pristine artifact."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _Src:
+        binary = ['libfoo', 'libfoo-data']
+
+    _outputs = {
+        'libfoo_1.0-1_amd64.deb': 'x',
+        'libfoo-data_1.0-1_all.deb': 'y',
+    }
+    _current = {
+        'libfoo':      ['1.0-1', '1.0-1+asg1u1', '1.0-1+asg1u2'],
+        'libfoo-data': ['1.0-1', '1.0-1+asg1u1'],
+    }
+    _hist = _vb._reconstruct_historical_ledger(
+        _Src(), _outputs, _current)
+    # Source N = 0 → keep entries with N < 0 (none) + non-asg entries.
+    assert _hist['libfoo'] == ['1.0-1']
+    assert _hist['libfoo-data'] == ['1.0-1']
+
+
+def test_virtual_build_reconstruct_historical_ledger_stamped_build():
+    """Source built at +asg1u2 → reconstruction keeps u1 entries,
+    drops u2 + u3+.  Synth then predicts u2, matching real build."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _Src:
+        binary = ['libfoo']
+
+    _outputs = {'libfoo_1.0-1+asg1u2_amd64.deb': 'x'}
+    _current = {'libfoo': [
+        '1.0-1+asg1u1', '1.0-1+asg1u2', '1.0-1+asg1u3',
+    ]}
+    _hist = _vb._reconstruct_historical_ledger(
+        _Src(), _outputs, _current)
+    # N=2 → keep N<2 (only u1).
+    assert _hist['libfoo'] == ['1.0-1+asg1u1']
+
+
+def test_virtual_build_reconstruct_historical_ledger_preserves_other_pristine():
+    """Entries at a DIFFERENT pristine base must pass through
+    untouched — they're unrelated to this build's lineage."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _Src:
+        binary = ['libfoo']
+
+    _outputs = {'libfoo_2.0-1_amd64.deb': 'x'}
+    _current = {'libfoo': [
+        '1.0-1+asg1u5',   # older pristine, keep
+        '2.0-1+asg1u1',   # this pristine, N>=0 → drop
+    ]}
+    _hist = _vb._reconstruct_historical_ledger(
+        _Src(), _outputs, _current)
+    # Old-pristine u5 kept; current-pristine u1 dropped (N=0 floor).
+    assert _hist['libfoo'] == ['1.0-1+asg1u5']
+
+
 def test_virtual_build_synthesize_source_filters_by_profile():
     """End-to-end: synthesize_source_binaries with active profiles
     drops binaries whose package_list profile annotation excludes
@@ -29720,6 +29785,9 @@ def main() -> int:
         test_virtual_build_from_cache_merges_udeb_hashtable,
         test_virtual_build_build_profile_filter_skips_nodoc_when_active,
         test_virtual_build_build_profile_filter_positive_profile_required,
+        test_virtual_build_reconstruct_historical_ledger_pristine_build,
+        test_virtual_build_reconstruct_historical_ledger_stamped_build,
+        test_virtual_build_reconstruct_historical_ledger_preserves_other_pristine,
         test_virtual_build_synthesize_source_filters_by_profile,
         test_check_build_matches_asg_variant_of_prediction,
         test_check_build_locates_non_main_component_deb,

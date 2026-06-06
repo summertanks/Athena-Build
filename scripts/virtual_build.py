@@ -613,6 +613,95 @@ _PIN_RE = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
 # ─────────────────────────── Self-validation against build records ──
 
 
+def _reconstruct_historical_ledger(
+    source: 'Any', output_hashes: 'Dict[str, str]',
+    current_ledger: 'Dict[str, List[str]]',
+) -> 'Dict[str, List[str]]':
+    """Reconstruct what `published_ledger()` saw at the time this
+    source was built, using the source's own ``output_hashes`` as the
+    temporal boundary.  Eliminates the asg-drift class in validate
+    output without requiring per-entry ledger timestamps.
+
+    The asg suffix on each output filename is, by construction, the
+    SAME `+asgRuN` across every binary the source emitted (uniform N
+    per source — see ``compute_post_build_versions``).  Algorithm:
+
+    1. Find this source's stamp N from any one output filename.
+       - No asg suffix anywhere → at build time, no delta + no
+         lineage → ledger had no entries for any sibling at this
+         source's pristine base.
+       - Has asg suffix N → ledger had entries up to N-1 at build
+         time; entries with N' >= N were added AFTER.
+
+    2. For every binary this source produces, filter
+       ``current_ledger[name]`` keeping only entries whose pristine
+       base != this source's pristine OR whose parsed N is strictly
+       less than the build's N.
+
+    Returns the filtered ledger.  Pass it to
+    ``synthesize_source_binaries`` and the prediction will match the
+    historical artifact exactly (up to other synth bugs, which is
+    exactly what validate is meant to surface).
+    """
+    _source_binaries = set(getattr(source, 'binary', []) or [])
+    if not _source_binaries:
+        return current_ledger
+
+    # Step 1 — extract this source's pristine base + stamped N from
+    # output_hashes.  Both are uniform across all siblings.
+    _source_pristine = ''
+    _source_n = 0
+    for _fn in output_hashes:
+        _bn = _fn.rsplit('.', 1)[0]
+        _parts = _bn.split('_')
+        if len(_parts) != 3:
+            continue
+        _name, _ver, _arch = _parts
+        if _name not in _source_binaries:
+            continue
+        _source_pristine = utils.pristine_base(_ver)
+        _asg = utils.parse_asg_suffix(_ver)
+        _n_here = _asg[1] if _asg is not None else 0
+        # Uniform N per source — take any non-zero, else 0.
+        if _n_here > _source_n:
+            _source_n = _n_here
+        # Don't break: scan a few more to confirm pristine consistent.
+    if not _source_pristine:
+        # No siblings appeared in output_hashes — caller's source.binary
+        # disagrees with what built.  Pass through current ledger
+        # unchanged; the validate path's `predicted_extra` /
+        # `predicted_missing` will surface the binary-list drift.
+        return current_ledger
+
+    # Step 2 — truncate ledger per binary at this source's pristine.
+    _filtered: 'Dict[str, List[str]]' = dict(current_ledger)
+    for _binary in _source_binaries:
+        _entries = current_ledger.get(_binary, [])
+        if not _entries:
+            continue
+        _kept: 'List[str]' = []
+        for _entry in _entries:
+            _entry_pristine = utils.pristine_base(_entry)
+            if _entry_pristine != _source_pristine:
+                # Different pristine base — unrelated to this build's
+                # lineage, keep as-is.
+                _kept.append(_entry)
+                continue
+            _asg_parsed = utils.parse_asg_suffix(_entry)
+            if _asg_parsed is None:
+                # Pristine entry (no asg suffix) — pre-asg-era,
+                # keep.
+                _kept.append(_entry)
+                continue
+            _, _n_entry = _asg_parsed
+            if _n_entry < _source_n:
+                _kept.append(_entry)
+            # Entries with _n_entry >= _source_n were added AT or
+            # AFTER this build → invisible to synth-as-of-then.
+        _filtered[_binary] = _kept
+    return _filtered
+
+
 def validate_against_build_records(
     source_names: 'List[str]',
     source_lookup: 'Any',  # callable: name -> Source or dict
@@ -667,9 +756,17 @@ def validate_against_build_records(
         if _src is None:
             continue
         _was_patched = bool(getattr(_src, 'patch_list', None))
+        # Reconstruct ledger state at the time this source was built
+        # so synth's stamp prediction matches the historical artifact.
+        # Without this, validate flags every source whose ledger has
+        # advanced since the original build as "asg drift" — accurate
+        # but uninformative; the synth's MATH is correct, only the
+        # input (current ledger) has evolved.
+        _historical_ledger = _reconstruct_historical_ledger(
+            _src, _rec.get('output_hashes') or {}, asg_ledger or {})
         _virt = synthesize_source_binaries(
             source=_src, package_universe=package_universe,
-            asg_ledger=asg_ledger, release=release,
+            asg_ledger=_historical_ledger, release=release,
             arch=arch, was_patched=_was_patched,
             peer_sources=set(source_names),
             active_profiles=active_profiles,
