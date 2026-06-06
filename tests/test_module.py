@@ -19621,9 +19621,13 @@ def test_virtual_build_metapackage_stamps_when_lineage_present():
             'Depends': 'cpp (= 4:12.2.0-3)',
         }},
     }
+    # Production ledger entries are epoch-stripped by
+    # `repo_audit.parse_packages_to_ledger` (matches real-build's
+    # filename-based comparison; filenames omit epoch).  Fixture
+    # mirrors that — no `4:` prefix on entries.
     _ledger = {
-        'cpp': ['4:12.2.0-3+asg1u1'],
-        'gcc': ['4:12.2.0-3+asg1u1', '4:12.2.0-3+asg1u2'],
+        'cpp': ['12.2.0-3+asg1u1'],
+        'gcc': ['12.2.0-3+asg1u1', '12.2.0-3+asg1u2'],
     }
     _recs = _vb.synthesize_source_binaries(
         source=_StubGccDefaults(), package_universe=_universe,
@@ -20436,6 +20440,51 @@ def test_virtual_build_reconstruct_historical_ledger_stamped_build():
         _Src(), _outputs, _current)
     # N=2 → keep N<2 (only u1).
     assert _hist['libfoo'] == ['1.0-1+asg1u1']
+
+
+def test_virtual_build_synthesize_lineage_matches_epoch_stripped_ledger():
+    """Production ledger (via `parse_packages_to_ledger`) returns
+    epoch-stripped entries.  Upstream Package records for epoched
+    sources (bind9, libcurl, openssl) carry epoch in their Version.
+    Synth's lineage scan + asg_next_n MUST epoch-strip the per-binary
+    pristine before comparing against the ledger or lineage NEVER
+    triggers for epoched sources → predicts pristine → asg drift on
+    every epoched binary."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    class _Bind9:
+        package = 'bind9'
+        version = '1:9.18.49-1'  # epoched source version
+        binary = ['bind9', 'bind9-libs']
+
+    _universe = {
+        'bind9': {'1:9.18.49-1+deb12u3': {
+            'Package': 'bind9', 'Version': '1:9.18.49-1+deb12u3',
+            'Source': 'bind9', 'Architecture': 'amd64'}},
+        'bind9-libs': {'1:9.18.49-1+deb12u3': {
+            'Package': 'bind9-libs', 'Version': '1:9.18.49-1+deb12u3',
+            'Source': 'bind9', 'Architecture': 'amd64'}},
+    }
+    # Production ledger: epoch-stripped.
+    _ledger = {
+        'bind9':      ['9.18.47-1', '9.18.49-1+asg1u1'],
+        'bind9-libs': ['9.18.47-1', '9.18.49-1+asg1u1'],
+    }
+    _recs = _vb.synthesize_source_binaries(
+        source=_Bind9(), package_universe=_universe,
+        asg_ledger=_ledger, release=1, arch='amd64',
+        peer_sources={'bind9'},
+    )
+    _by_name = {_r['Package']: _r for _r in _recs}
+    # Lineage triggered → uniform N = asg_next_n(...,9.18.49-1,1)=2
+    # → all binaries stamp at +asg1u2.  Internal Version retains
+    # epoch.
+    assert _by_name['bind9']['Version'] == '1:9.18.49-1+asg1u2'
+    assert _by_name['bind9-libs']['Version'] == '1:9.18.49-1+asg1u2'
+    # Filename is epoch-stripped.
+    assert _by_name['bind9']['Filename'].endswith(
+        'bind9_9.18.49-1+asg1u2_amd64.deb')
 
 
 def test_virtual_build_reconstruct_historical_ledger_epoch_aware():
@@ -29812,6 +29861,7 @@ def main() -> int:
         test_virtual_build_from_cache_merges_udeb_hashtable,
         test_virtual_build_build_profile_filter_skips_nodoc_when_active,
         test_virtual_build_build_profile_filter_positive_profile_required,
+        test_virtual_build_synthesize_lineage_matches_epoch_stripped_ledger,
         test_virtual_build_reconstruct_historical_ledger_pristine_build,
         test_virtual_build_reconstruct_historical_ledger_stamped_build,
         test_virtual_build_reconstruct_historical_ledger_epoch_aware,
