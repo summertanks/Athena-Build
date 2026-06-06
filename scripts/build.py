@@ -45,6 +45,7 @@ import apt_pkg
 # Local imports
 import utils
 from utils import BuildConfig
+from buildlog import BuildLog, human_size, safe_size
 from cache import Cache
 
 import buildcontainer
@@ -1922,6 +1923,11 @@ class BuildSession:
         import time as _time
         _buildlog_path = os.path.join(self.config.dir_log, 'build')
         _t_tunnel_start = _time.monotonic()
+        # OBS-03 observability accumulators (tunnel path) — best-effort,
+        # consumed by the verbose .buildlog written at the terminal.
+        _purged_stale: 'list[str]' = []
+        _strip_events: 'list[tuple[str, str]]' = []
+        _stamp_events: 'list[tuple[str, str, str]]' = []
         try:
             utils.write_build_record(
                 _buildlog_path,
@@ -1971,6 +1977,7 @@ class BuildSession:
                         f"{_target_pristine})")
                     try:
                         os.remove(_stale)
+                        _purged_stale.append(_existing)
                     except OSError as _e:
                         logger.warning(
                             f"tunnel {src_pkg.package}: rm {_stale}: {_e}")
@@ -2029,6 +2036,9 @@ class BuildSession:
                         logger.info(
                             f"tunnel strip_nmu: {os.path.basename(_ups_path)}"
                             f" → {os.path.basename(_new_path)}")
+                        _strip_events.append((
+                            os.path.basename(_ups_path),
+                            os.path.basename(_new_path)))
                 _post_strip.append((_new_path, _ups_fn))
 
             _ledger = (getattr(self.container, 'asg_ledger', None)
@@ -2090,6 +2100,9 @@ class BuildSession:
                                 f"tunnel asg-stamp: {_b} → "
                                 f"{os.path.basename(_new_path)} "
                                 f"(+asg{_release}u{_n_uniform})")
+                            _stamp_events.append((
+                                _b, os.path.basename(_new_path),
+                                f"+asg{_release}u{_n_uniform}"))
                         _stamped.append((_new_path, _ups_fn))
                     _current = _stamped
 
@@ -2138,6 +2151,78 @@ class BuildSession:
             )
         except (OSError, FileNotFoundError) as _e:
             logger.warning(f"tunnel {src_pkg.package}: build-record terminal: {_e}")
+
+        # OBS-03: verbose tunnel narrative (log/build/<pkg>.buildlog).
+        # Fully guarded — never reaches the tunnel control flow.
+        try:
+            _elapsed_t = round(_time.monotonic() - _t_tunnel_start, 3)
+            _tblog = BuildLog(_buildlog_path, src_pkg.package, kind='tunnel')
+            _tblog.header(
+                status=('TUNNELED' if _success else 'FAIL'),
+                intended_version=str(src_pkg.version),
+                arch=self.config.arch,
+                component=_comp,
+                base_url=_base,
+            )
+            _tblog.section(
+                f"EXPECTED (upstream binaries: {len(_upstream_files)})")
+            for _uf in sorted(_upstream_files):
+                _tblog.bullet(_uf)
+
+            _tblog.section(
+                f"DOWNLOADED ({len(_upstream_paths)})")
+            if _upstream_paths:
+                for _uf in sorted(_upstream_paths):
+                    _tblog.file(
+                        _uf, size=safe_size(_upstream_paths[_uf]),
+                        sha256=_upstream_sha256s.get(_uf, ''))
+            else:
+                _tblog.empty()
+
+            _tblog.section(f"PURGED stale ({len(_purged_stale)})")
+            if _purged_stale:
+                for _ps in sorted(_purged_stale):
+                    _tblog.bullet(_ps)
+            else:
+                _tblog.empty()
+
+            _tblog.section(f"NMU STRIP ({len(_strip_events)})")
+            if _strip_events:
+                for _old, _new in sorted(_strip_events):
+                    _tblog.bullet(f"{_old}  →  {_new}")
+            else:
+                _tblog.empty()
+
+            _tblog.section(f"ASG STAMP ({len(_stamp_events)})")
+            if _stamp_events:
+                for _old, _new, _tag in sorted(_stamp_events):
+                    _tblog.bullet(f"{_old}  →  {_new}  ({_tag})")
+            else:
+                _tblog.empty()
+
+            _tblog.section(
+                f"FINAL ARTIFACTS (post-normalize: {len(_final_paths)})")
+            _tot = 0
+            if _final_paths:
+                for _fn in sorted(_final_paths):
+                    _sz = safe_size(_final_paths[_fn])
+                    if _sz >= 0:
+                        _tot += _sz
+                    _prov = ' republished' if _fn in _republished_from else ''
+                    _tblog.file(
+                        _fn, size=_sz, sha256=_output_hashes.get(_fn, ''),
+                        detail=_prov.strip())
+            else:
+                _tblog.empty()
+
+            _tblog.footer(
+                status=('TUNNELED' if _success else 'FAIL'),
+                files=len(_final_paths),
+                size=human_size(_tot),
+                elapsed=f"{_elapsed_t}s")
+            _tblog.write()
+        except Exception as _e:
+            logger.warning(f"tunnel buildlog {src_pkg.package}: {_e}")
 
         if _success:
             _upstream_ver = str(src_pkg.version)
@@ -6220,10 +6305,6 @@ class BuildSession:
             'backfill-hashes': 'COORD-01: walk build.json records, hash any '
                                'emitted .deb/.udeb missing output_hashes, bump '
                                'schema_version v1→v2.  Idempotent.',
-            'rescan-outputs':  'Re-derive outputs/output_hashes from on-disk '
-                               'repo for each build.json record.  Catches '
-                               'files dropped by segregate\'s kept-existing '
-                               'branch (notably udebs).  Idempotent.',
         }
         if action == 'strip':
             return self.cmd_strip_repo(*args)
@@ -6231,46 +6312,7 @@ class BuildSession:
             return self.cmd_package_cleanup(*args)
         if action == 'backfill-hashes':
             return self.cmd_repo_backfill_hashes(*args)
-        if action == 'rescan-outputs':
-            return self.cmd_repo_rescan_outputs(*args)
         return self._group_help('repo repair', _table, action)
-
-    def cmd_repo_rescan_outputs(self, *args):
-        """For each build.json record, scan repo/ for files matching
-        the source's declared `Binary:` list and add any missing from
-        `outputs` / `output_hashes`.  Fixes records made incomplete by
-        the pre-2026-06-06 segregate bug (kept-existing files were
-        dropped from `_moved_paths`, silently losing them from
-        downstream tracking).
-
-        Usage: repo repair rescan-outputs
-
-        Idempotent — sources with no new files to add are unchanged.
-        """
-        del args
-        if self.cache is None:
-            console.print(
-                "repo repair rescan-outputs: cache not parsed yet — "
-                "run `cache build` + `cache parse` first.",
-                tui.COLOR_ERROR)
-            return False
-
-        _cache = self.cache
-        assert _cache is not None
-
-        def _lookup(_name: str):
-            _cands = _cache.source_hashtable.get(_name, [])
-            return _cands[0] if _cands else None
-
-        _stats = utils.rescan_outputs_from_repo(
-            os.path.join(self.config.dir_log, 'build'),
-            self.config.dir_repo, _lookup,
-        )
-        console.print(
-            f"rescan-outputs: scanned={_stats['scanned']} "
-            f"augmented={_stats['augmented']} "
-            f"files_added={_stats['files_added']}")
-        return True
 
     def cmd_repo_backfill_hashes(self, *args):
         """COORD-01 one-shot: walk cache/log/build/*.build.json and add

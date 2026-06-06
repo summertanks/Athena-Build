@@ -9,6 +9,7 @@ import uuid
 from typing import TYPE_CHECKING, Optional, Tuple
 import utils
 from utils import BuildConfig, version_no_epoch
+from buildlog import BuildLog, human_size, safe_size
 from package import Source
 
 import docker
@@ -432,6 +433,138 @@ class BuildContainer:
                 f"build-record write failed for {package} "
                 f"({fields.get('phase', 'initial')}): {_e}")
 
+    def _write_buildlog(self, src_pkg, *, kind: str, status: str,
+                        active_profiles, active_options,
+                        plain_deps, or_groups,
+                        container_name: str,
+                        exit_code, oom_killed, elapsed,
+                        emitted_scan: 'list[tuple[str, int]]',
+                        seg_events: 'list[tuple]',
+                        final_paths: 'list[str]',
+                        output_hashes: 'dict[str, str]') -> None:
+        """OBS-03: compose + write the verbose per-package build narrative
+        to ``log/build/<pkg>.buildlog``.
+
+        Strictly observability.  The entire body is wrapped so a formatting
+        or IO failure here can NEVER reach the build path — the worst case
+        is a missing/partial .buildlog, never a failed or skipped build.
+        """
+        try:
+            _blog = BuildLog(self.buildlog_path, src_pkg.package, kind=kind)
+            _blog.header(
+                status=status,
+                intended_version=str(getattr(src_pkg, 'version', '')),
+                arch=self.arch,
+                profiles=' '.join(sorted(active_profiles)) or '(none)',
+                options=' '.join(sorted(active_options)) or '(none)',
+                container=container_name or '(unknown)',
+            )
+
+            _blog.section('BUILD-DEPENDS (resolved, post-profile filter)')
+            if plain_deps or or_groups:
+                for _d in sorted(plain_deps):
+                    _blog.bullet(_d)
+                for _g in or_groups:
+                    _blog.bullet('(OR) ' + ' | '.join(_g))
+            else:
+                _blog.empty()
+
+            _declared = sorted(getattr(src_pkg, 'binary', []) or [])
+            _blog.section(
+                f"EXPECTED (Package-List declared: {len(_declared)})")
+            if _declared:
+                for _b in _declared:
+                    _blog.bullet(_b)
+            else:
+                _blog.empty('(no Binary: list on source)')
+
+            _blog.section('CONTAINER RESULT')
+            _blog.kv('exit_code', exit_code)
+            _blog.kv('oom_killed', oom_killed)
+            _blog.kv('elapsed', f"{elapsed}s" if elapsed is not None else '?')
+
+            _blog.section(
+                f"EMITTED (scratch scan, pre-segregate: {len(emitted_scan)})")
+            if emitted_scan:
+                for _name, _size in sorted(emitted_scan):
+                    _blog.file(_name, size=_size)
+            else:
+                _blog.empty()
+
+            _relocs = [e for e in seg_events if e and e[0] == 'relocate']
+            _purges = [e for e in seg_events if e and e[0] == 'purge']
+            _strips = [e for e in seg_events if e and e[0] == 'strip']
+            _stamps = [e for e in seg_events if e and e[0] == 'stamp']
+
+            _blog.section(f"RELOCATED (segregate: {len(_relocs)})")
+            if _relocs:
+                for _, _name, _dst in sorted(_relocs):
+                    _blog.relocation(_name, _dst)
+            else:
+                _blog.empty()
+
+            _blog.section(f"PURGED ({len(_purges)})")
+            if _purges:
+                for _, _name, _reason in sorted(_purges):
+                    _blog.bullet(f"{_name}  ({_reason})")
+            else:
+                _blog.empty()
+
+            _blog.section(f"NMU STRIP ({len(_strips)})")
+            if _strips:
+                for _, _old, _new in sorted(_strips):
+                    _blog.bullet(f"{_old}  →  {_new}")
+            else:
+                _blog.empty()
+
+            _blog.section(f"ASG STAMP ({len(_stamps)})")
+            if _stamps:
+                for _e in sorted(_stamps):
+                    _blog.bullet(f"{_e[1]}  →  {_e[2]}  ({_e[3]})")
+            else:
+                _blog.empty()
+
+            _blog.section(
+                f"FINAL ARTIFACTS (post-normalize, on disk: "
+                f"{len(final_paths)})")
+            _total = 0
+            if final_paths:
+                for _p in sorted(final_paths):
+                    _name = os.path.basename(_p)
+                    _sz = safe_size(_p)
+                    if _sz >= 0:
+                        _total += _sz
+                    _blog.file(_name, size=_sz,
+                               sha256=output_hashes.get(_name, ''))
+            else:
+                _blog.empty()
+
+            # Delta of declared (expected) vs scratch-emitted binary NAMES —
+            # the at-a-glance "did the build produce what the metadata says".
+            # Binary name = first '_'-delimited segment of the filename.
+            _declared_set = set(_declared)
+            _emitted_names = {_n.split('_', 1)[0] for _n, _ in emitted_scan}
+            _extra = sorted(_emitted_names - _declared_set)
+            _missing = sorted(_declared_set - _emitted_names)
+            _blog.section('DELTA (declared Package-List vs scratch-emitted)')
+            _blog.bullet(
+                'emitted-not-declared: '
+                + (', '.join(_extra) if _extra else '(none)'))
+            _blog.bullet(
+                'declared-not-emitted: '
+                + (', '.join(_missing) if _missing else '(none)'))
+
+            _blog.footer(
+                status=status,
+                files=len(final_paths),
+                size=human_size(_total),
+                elapsed=f"{elapsed}s" if elapsed is not None else '?')
+            _blog.write()
+        except Exception as _e:
+            logger.warning(
+                f"buildlog compose for "
+                f"{getattr(src_pkg, 'package', '?')}: {_e}")
+
     def reap_all_live(self) -> int:
         """COMP-03 Phase 3: force-remove every container currently in
         the live registry.  Iterates a snapshot of the registry (taken
@@ -826,6 +959,12 @@ class BuildContainer:
         _scratch_dir = os.path.join(
             self.config.dir_build_stage, uuid.uuid4().hex)
         os.makedirs(_scratch_dir, exist_ok=True)
+        # OBS-03 observability accumulators — populated through the build
+        # and consumed by _write_buildlog at the terminal.  Initialised
+        # here so they're in scope on every exit path.
+        _seg_events: 'list[tuple]' = []
+        _container_name = ''
+        _emitted_scan: 'list[tuple[str, int]]' = []
         try:
             src_patch_path = os.path.join(self.patch_path, src_pkg.package, version_no_epoch(src_pkg.version))
             if not os.path.exists(src_patch_path):
@@ -846,6 +985,11 @@ class BuildContainer:
                 **self._resource_kwargs(),
             )
             self._register_live(container)
+            try:
+                _container_name = (
+                    f"{container.name} ({container.short_id})")
+            except Exception:
+                _container_name = ''
             logger.info(
                 f"Build container {container.short_id} started for {src_pkg.package}"
             )
@@ -914,6 +1058,17 @@ class BuildContainer:
                 self._record_phase(
                     src_pkg.package, phase='failed', output_count=0,
                 )
+                self._write_buildlog(
+                    src_pkg, kind='build', status='FAIL',
+                    active_profiles=_active_profiles,
+                    active_options=_active_options,
+                    plain_deps=_plain_deps, or_groups=_or_groups,
+                    container_name=_container_name,
+                    exit_code=_exit_code, oom_killed=_oom_killed,
+                    elapsed=_elapsed,
+                    emitted_scan=_emitted_scan, seg_events=_seg_events,
+                    final_paths=[], output_hashes={},
+                )
 
             # On successful build: strip NMU/binNMU/backport suffixes
             # from every .deb/.udeb this build produced, in place.  This
@@ -932,8 +1087,20 @@ class BuildContainer:
                 #    in-place rewrites land at the final location.
                 #    Returns post-move absolute paths — fed to strip so
                 #    we don't rescan the whole repo (STA-19).
+                # OBS-03: snapshot what dpkg-buildpackage actually emitted
+                # into scratch BEFORE segregate moves it out — the ground
+                # truth of "files emitted", with sizes.  Best-effort.
+                try:
+                    for _ef in os.listdir(_scratch_dir):
+                        if _ef.endswith(('.deb', '.udeb')):
+                            _emitted_scan.append(
+                                (_ef, safe_size(
+                                    os.path.join(_scratch_dir, _ef))))
+                except OSError as _e:
+                    logger.warning(
+                        f"buildlog: scratch scan {src_pkg.package}: {_e}")
                 _emitted = self._segregate_built_artifacts(
-                    src_pkg, _scratch_dir)
+                    src_pkg, _scratch_dir, events=_seg_events)
                 # OBS-01 phase=segregated: outputs are now at their
                 # final paths; record filenames (basenames — full paths
                 # are noise across machines).
@@ -951,7 +1118,7 @@ class BuildContainer:
                 #    no longer points at real files post-normalize.
                 _was_patched = (src_patch_path != self.patch_empty)
                 _final_paths = self._normalize_built_artifacts(
-                    src_pkg, _emitted, _was_patched)
+                    src_pkg, _emitted, _was_patched, events=_seg_events)
                 if not _final_paths:
                     _final_paths = list(_emitted)
                 # Post-strip pristine version is the canonical
@@ -988,6 +1155,17 @@ class BuildContainer:
                     output_count=len(_final_basenames),
                     outputs=sorted(_final_basenames),
                     output_hashes=_output_hashes,
+                )
+                self._write_buildlog(
+                    src_pkg, kind='build', status='PASS',
+                    active_profiles=_active_profiles,
+                    active_options=_active_options,
+                    plain_deps=_plain_deps, or_groups=_or_groups,
+                    container_name=_container_name,
+                    exit_code=_exit_code, oom_killed=_oom_killed,
+                    elapsed=_elapsed,
+                    emitted_scan=_emitted_scan, seg_events=_seg_events,
+                    final_paths=_final_paths, output_hashes=_output_hashes,
                 )
 
             return _build_result
@@ -1308,7 +1486,9 @@ class BuildContainer:
 
     def _normalize_built_artifacts(self, src_pkg,
                                    built_files: 'list[str]',
-                                   was_patched: bool = False) -> 'list[str]':
+                                   was_patched: bool = False,
+                                   events: 'Optional[list]' = None
+                                   ) -> 'list[str]':
         """Normalise every just-emitted artifact: strip upstream NMU layers
         to pristine, then (when there's an asg lineage to continue OR this
         build is a fresh delta) stamp our `+asg<R>u<N>` update marker.
@@ -1340,6 +1520,11 @@ class BuildContainer:
 
         Failures are logged but don't propagate — best-effort normalisation;
         a missed strip surfaces later via `repo audit_nmu`.
+
+        OBS-03: when ``events`` is a list, this appends observability tuples
+        ``('strip', old_name, new_name)`` and
+        ``('stamp', old_name, new_name, '+asgRuN')`` — purely additive,
+        never alters the strip/stamp control flow.
         """
         if not built_files:
             return []
@@ -1356,6 +1541,10 @@ class BuildContainer:
                         logger.info(
                             f"strip_nmu: {_f} → "
                             f"{os.path.basename(_r['new_path'])}")
+                        if events is not None:
+                            events.append((
+                                'strip', _f,
+                                os.path.basename(_r['new_path'])))
                 _current_paths.append(_r.get('new_path', _path))
             except Exception as e:
                 logger.warning(f"strip_nmu: {_f} failed: {e}")
@@ -1446,6 +1635,10 @@ class BuildContainer:
                     logger.info(
                         f"asg-stamp: {_b} → "
                         f"{os.path.basename(_new)} (+asg{_release}u{_n})")
+                    if events is not None:
+                        events.append((
+                            'stamp', _b, os.path.basename(_new),
+                            f"+asg{_release}u{_n}"))
                 # Update tracked path so the caller can find the
                 # actual on-disk file post-normalize (essential for
                 # output_hashes — get_sha256 on the stale pre-stamp
@@ -1462,7 +1655,9 @@ class BuildContainer:
         return list(_current_paths)
 
     def _segregate_built_artifacts(self, src_pkg,
-                                   source_dir: str) -> 'list[str]':
+                                   source_dir: str,
+                                   events: 'Optional[list]' = None
+                                   ) -> 'list[str]':
         """After dpkg-buildpackage's `cp *.deb /repo/`, the binaries
         land in the worker's PER-BUILD scratch dir (`source_dir`,
         mounted as /repo inside the container — see build()).  This
@@ -1489,6 +1684,11 @@ class BuildContainer:
         repo + opening every .deb with DebFile to identify them).
         Returns empty list on no-files-in-scratch (tunneled build,
         empty build, or rolled-back partial failure).
+
+        OBS-03: when ``events`` is a list, this appends observability
+        tuples ``('relocate', filename, dest_dir)`` per moved file and
+        ``('purge', filename, reason)`` per dropped duplicate — purely
+        additive, never alters the move/rollback control flow.
         """
         _moved_paths: 'list[str]' = []
         try:
@@ -1549,9 +1749,15 @@ class BuildContainer:
                         )
                         os.remove(_src)
                         _moved_paths.append(_dst)
+                        if events is not None:
+                            events.append(
+                                ('purge', _f,
+                                 f"duplicate — kept existing in {_dst_dir}"))
                         continue
                     os.rename(_src, _dst)
                     _moved_paths.append(_dst)
+                    if events is not None:
+                        events.append(('relocate', _f, _dst_dir))
                 except OSError as e:
                     # All-or-nothing per source: roll back every move done
                     # for THIS call so the caller sees a clean empty list

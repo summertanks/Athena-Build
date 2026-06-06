@@ -18338,9 +18338,105 @@ def test_comp03_segregate_signature_takes_source_dir():
     _params = list(inspect.signature(
         buildcontainer.BuildContainer._segregate_built_artifacts
     ).parameters.keys())
-    assert _params == ['self', 'src_pkg', 'source_dir'], (
-        f"signature regression: expected (self, src_pkg, source_dir), "
-        f"got {_params}")
+    # Leading positionals are pinned (source_dir must stay an explicit
+    # arg).  OBS-03 added a trailing optional `events` accumulator; allow
+    # additive params after the pinned three.
+    assert _params[:3] == ['self', 'src_pkg', 'source_dir'], (
+        f"signature regression: expected leading (self, src_pkg, "
+        f"source_dir), got {_params}")
+
+
+def test_buildlog_writes_header_sections_and_files():
+    """OBS-03: BuildLog renders a verbose narrative to <pkg>.buildlog."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildlog
+    with tempfile.TemporaryDirectory() as _tmp:
+        _b = buildlog.BuildLog(_tmp, 'libzstd', kind='build')
+        _b.header(status='PASS', arch='amd64')
+        _b.section('EMITTED (2)')
+        _b.file('libzstd-dev_1.5.4_amd64.deb', size=4096,
+                sha256='deadbeef' * 8)
+        _b.relocation('zstd_1.5.4_amd64.deb', '/repo/main/binary-amd64')
+        _b.footer(status='PASS', files=2)
+        _b.write()
+        _p = os.path.join(_tmp, 'libzstd.buildlog')
+        assert os.path.isfile(_p)
+        _txt = open(_p).read()
+        assert 'BUILD LOG: libzstd' in _txt
+        assert 'EMITTED (2)' in _txt
+        assert 'libzstd-dev_1.5.4_amd64.deb' in _txt
+        assert 'size=4.0 KB' in _txt
+        assert 'zstd_1.5.4_amd64.deb' in _txt and '→' in _txt
+        assert 'END libzstd' in _txt
+
+
+def test_buildlog_write_never_raises_on_unwritable_dir():
+    """OBS-03 load-bearing safety invariant: a logging IO failure MUST
+    NOT propagate.  The 24-36h repo rebuild cannot be lost to a log write
+    error — write() swallows everything."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildlog
+    _b = buildlog.BuildLog('/nonexistent/dir/xyz123', 'pkg', kind='build')
+    _b.header(status='PASS')
+    _b.section('X')
+    _b.bullet('y')
+    _b.write()   # must not raise — no assertion needed; reaching here passes
+
+
+def test_buildlog_methods_tolerate_bad_input_and_helpers():
+    """OBS-03 safety: accumulation methods + size helpers never raise on
+    odd inputs (None, non-numeric, missing paths)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildlog
+    with tempfile.TemporaryDirectory() as _tmp:
+        _b = buildlog.BuildLog(_tmp, 'p')
+        _b.kv('k', object())
+        _b.file('f', size=None)
+        _b.file('f', size=-1)
+        _b.line(12345)
+        _b.empty()
+        _b.write()
+    assert buildlog.human_size('notanumber') == '?'
+    assert buildlog.safe_size('/nope/nope/xyz') == -1
+    assert buildlog.human_size(0) == '0 B'
+    assert buildlog.human_size(1536) == '1.5 KB'
+    assert buildlog.human_size(4096) == '4.0 KB'
+
+
+def test_segregate_appends_relocate_and_purge_events():
+    """OBS-03: when an events list is passed, segregate records a
+    ('relocate', file, dst) per move and ('purge', file, reason) per
+    dropped duplicate — additive, no change to the move/append-only
+    behaviour the other segregate tests pin."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    with tempfile.TemporaryDirectory() as _tmp:
+        _dest_dir = os.path.join(
+            _tmp, 'dists', 'test', 'main', 'binary-amd64')
+        os.makedirs(_dest_dir)
+        _fresh = 'libzstd1_1.5.4_amd64.deb'       # no collision → relocate
+        _dup = 'openssl_3.0.15-1+asg1u1_amd64.deb'  # collision → purge
+        with open(os.path.join(_dest_dir, _dup), 'w') as fh:
+            fh.write('PUBLISHED')
+        for _f in (_fresh, _dup):
+            with open(os.path.join(_tmp, _f), 'w') as fh:
+                fh.write('X')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+
+        class _FakeConfig:
+            def deb_dest_for_filename(self, _f, component='main'):
+                return _dest_dir
+
+        class _Src:
+            package = 'mix'
+
+        _bc.config = _FakeConfig()
+        _events: list = []
+        _bc._segregate_built_artifacts(_Src(), _tmp, events=_events)
+        _kinds = {e[0] for e in _events}
+        assert 'relocate' in _kinds, _events
+        assert 'purge' in _kinds, _events
+        assert any(e[0] == 'relocate' and e[1] == _fresh for e in _events)
+        assert any(e[0] == 'purge' and e[1] == _dup for e in _events)
 
 
 def test_comp03_segregate_does_not_read_self_repo_path():
@@ -29841,6 +29937,11 @@ def main() -> int:
         test_restamp_asg_deb_bumps_version_and_intra_source_deps,
         # UPD-01 step 2: append-only enforcement
         test_segregate_never_deletes_existing_published_deb,
+        # OBS-03: exhaustive per-package build/tunnel log
+        test_buildlog_writes_header_sections_and_files,
+        test_buildlog_write_never_raises_on_unwritable_dir,
+        test_buildlog_methods_tolerate_bad_input_and_helpers,
+        test_segregate_appends_relocate_and_purge_events,
         # COMP-03 Phase 1: per-worker scratch repo dir + segregate refactor
         test_comp03_segregate_signature_takes_source_dir,
         test_comp03_segregate_does_not_read_self_repo_path,
