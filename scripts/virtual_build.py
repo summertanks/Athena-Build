@@ -471,6 +471,23 @@ def synthesize_source_binaries(
     # Mirrors BuildContainer._normalize_built_artifacts exactly: any
     # binary triggers delta → all stamp; ledger entry at any sibling's
     # pristine → lineage trigger; N = max(per-binary asg_next_n).
+    #
+    # `parse_packages_to_ledger` epoch-strips its entries (matches
+    # real-build's filename-based comparison: filenames omit epoch,
+    # ledger does too).  So lineage scan + asg_next_n MUST compare
+    # against the epoch-stripped form of `_pristine_per_binary`,
+    # otherwise epoched sources (bind9 1:9.18.49-1, libcurl, openssl,
+    # perl, …) never match the ledger and lineage never triggers.
+    # The stored `_pristine_per_binary` keeps epoch so downstream
+    # consumers (sibling-pin rewriting, internal Version field)
+    # still get the epoched form they need.
+    def _no_epoch(_v: str) -> str:
+        return _v.split(':', 1)[-1] if ':' in _v else _v
+
+    _pristine_no_epoch_per_binary: Dict[str, str] = {
+        _b: _no_epoch(_pristine_per_binary[_b])
+        for _b in _binaries
+    }
     _any_delta = was_patched
     for _b in _binaries:
         if _pristine_per_binary[_b] != _base_ver_per_binary[_b]:
@@ -479,7 +496,8 @@ def synthesize_source_binaries(
     _has_lineage = False
     for _b in _binaries:
         for _prev in _ledger.get(_b, []):
-            if (utils.pristine_base(_prev) == _pristine_per_binary[_b]
+            if (utils.pristine_base(_prev)
+                    == _pristine_no_epoch_per_binary[_b]
                     and utils.parse_asg_suffix(_prev) is not None):
                 _has_lineage = True
                 break
@@ -490,7 +508,8 @@ def synthesize_source_binaries(
     if _any_delta or _has_lineage:
         _candidates = [
             utils.asg_next_n(
-                _ledger.get(_b, []), _pristine_per_binary[_b], release)
+                _ledger.get(_b, []),
+                _pristine_no_epoch_per_binary[_b], release)
             for _b in _binaries
         ]
         _n = max(_candidates) if _candidates else 1
