@@ -429,6 +429,7 @@ in CI for the same reason.
 - [`docs/virtual-build.md`](docs/virtual-build.md) — `virtual build` dry-run pipeline: predict bump arithmetic, closure breaks, and ownership blocks before running any source build.
 - [`docs/install-docker.md`](docs/install-docker.md) — Docker Engine install on the build host.
 - [`docs/build-quirks.md`](docs/build-quirks.md) — catalogue of Debian packaging/toolchain gotchas we've actually hit (Provides vs real packages, options vs profiles, arch wildcards, dh races, …) with the incident + the rule for each.
+- [`docs/api.md`](docs/api.md) — the key-protected HTTP API (`./build-system.sh --api`): state/records/sidecars/progress reads + the command dispatcher; the contract the separate web-UI repo consumes.
 - [`docs/pseudocode.md`](docs/pseudocode.md) — natural-English walkthrough of every module.
 - [`TODO.md`](TODO.md) — open work, with severity + status + history preserved.
 

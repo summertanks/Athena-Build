@@ -18501,6 +18501,275 @@ def test_virtual_buildlog_writes_predicted_and_filtered():
         assert 'libattr1-dev' in _txt
 
 
+def test_api01_key_lifecycle():
+    """API-01: api key autogenerates 0600, persists across loads, and
+    verification is fail-closed (empty/absent key NEVER verifies)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from webapi import auth
+    with tempfile.TemporaryDirectory() as _tmp:
+        _p = os.path.join(_tmp, 'api.key')
+        _k1 = auth.ensure_api_key(_p)
+        assert _k1 and len(_k1) >= 32
+        assert (os.stat(_p).st_mode & 0o777) == 0o600, oct(os.stat(_p).st_mode)
+        assert auth.ensure_api_key(_p) == _k1          # stable across calls
+        assert auth.load_api_key(_p) == _k1
+        assert auth.verify_key(_k1, _k1)
+        assert not auth.verify_key('wrong', _k1)
+        assert not auth.verify_key('', _k1)
+        assert not auth.verify_key(_k1, '')            # fail-closed
+        assert not auth.verify_key('', '')
+
+
+def test_api01_readers_index_get_and_tamper():
+    """API-01 readers: paginated index + phase filter; get_build reports
+    found/verified honestly — a tampered record is found=True
+    verified=False, never silently absent."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _pkg, _ph, _st in (('acme1', 'done', 'PASS'),
+                               ('acme2', 'failed', 'FAIL')):
+            utils.write_build_record(_tmp, utils.new_build_record(
+                package=_pkg, intended_version='1.0-1', patch_set_hash=''))
+            utils.update_build_record(_tmp, _pkg, phase=_ph, status=_st)
+        _idx = readers.list_builds(_tmp)
+        assert _idx['total'] == 2
+        assert {i['package'] for i in _idx['items']} == {'acme1', 'acme2'}
+        _done = readers.list_builds(_tmp, phase='done')
+        assert _done['total'] == 1 and _done['items'][0]['package'] == 'acme1'
+        _page = readers.list_builds(_tmp, limit=1, offset=1)
+        assert _page['total'] == 2 and len(_page['items']) == 1
+        _doc = readers.get_build(_tmp, 'acme1')
+        assert _doc['found'] and _doc['verified']
+        assert _doc['record']['phase'] == 'done'
+        # tamper → found but NOT verified
+        _path = os.path.join(_tmp, f"acme2{utils.BUILD_RECORD_SUFFIX}")
+        _raw = open(_path).read().replace('"FAIL"', '"PASS"')
+        with open(_path, 'w') as _fh:
+            _fh.write(_raw)
+        _doc = readers.get_build(_tmp, 'acme2')
+        assert _doc['found'] and not _doc['verified'], _doc
+        assert readers.get_build(_tmp, 'absent')['found'] is False
+        # traversal-shaped names are rejected before any fs access
+        assert not readers.valid_package_name('../etc/passwd')
+        assert not readers.valid_package_name('Foo')
+        assert not readers.valid_package_name('')
+        assert readers.valid_package_name('libzstd')
+
+
+def test_api01_http_endpoints_auth_and_payloads():
+    """API-01 endpoints via TestClient: 401 without/with-wrong key, 200
+    payloads for state/builds/build, 404 absent, 400 invalid name.
+    Skips cleanly when python3-fastapi (or httpx) is not installed."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    try:
+        from fastapi.testclient import TestClient  # noqa: F401
+    except Exception:
+        print('  SKIP — python3-fastapi/httpx not installed')
+        return
+    import json as _json
+    import utils
+    import webapi
+    with tempfile.TemporaryDirectory() as _tmp:
+        _bl = os.path.join(_tmp, 'build'); os.makedirs(_bl)
+        _flags = os.path.join(_tmp, 'buildflags.json')
+        with open(_flags, 'w') as _fh:
+            _json.dump({'_format_version': 1,
+                        'flags': {'cache_ready': True}}, _fh)
+        utils.write_build_record(_bl, utils.new_build_record(
+            package='acme1', intended_version='1.0-1', patch_set_hash=''))
+        utils.update_build_record(_bl, 'acme1', phase='done', status='PASS')
+        _keyp = os.path.join(_tmp, 'api.key')
+        _app = webapi.create_app(
+            buildlog_dir=_bl, flags_path=_flags, api_key_path=_keyp)
+        from webapi import auth
+        _key = auth.load_api_key(_keyp)
+        _c = TestClient(_app)
+        assert _c.get('/api/v1/state').status_code == 401
+        assert _c.get('/api/v1/state',
+                      headers={'X-Api-Key': 'nope'}).status_code == 401
+        _h = {'X-Api-Key': _key}
+        _r = _c.get('/api/v1/state', headers=_h)
+        assert _r.status_code == 200, _r.text
+        assert _r.json()['flags']['cache_ready'] is True
+        assert _r.json()['record_phases'] == {'done': 1}
+        _r = _c.get('/api/v1/builds', headers=_h)
+        assert _r.status_code == 200 and _r.json()['total'] == 1
+        _r = _c.get('/api/v1/builds/acme1', headers=_h)
+        assert _r.status_code == 200 and _r.json()['verified'] is True
+        assert _c.get('/api/v1/builds/absent', headers=_h).status_code == 404
+        assert _c.get('/api/v1/builds/Bad_Name', headers=_h).status_code == 400
+
+
+def test_api01_artifact_tail_windowing_and_guards():
+    """API-01 chunk 2: read_artifact serves the three sidecar kinds;
+    tail returns exactly the last N lines without full reads; oversize
+    full reads are refused; kind allowlist + name validation hold."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _tmp:
+        with open(os.path.join(_tmp, 'acme.buildlog'), 'w') as _fh:
+            _fh.write("=== BUILD LOG: acme ===\nline2\n")
+        with open(os.path.join(_tmp, 'acme'), 'w') as _fh:   # container log
+            _fh.write(''.join(f"l{i}\n" for i in range(1000)))
+        _doc = readers.read_artifact(_tmp, 'acme', 'buildlog')
+        assert _doc['found'] and 'BUILD LOG: acme' in _doc['text']
+        _doc = readers.read_artifact(_tmp, 'acme', 'log', tail=3)
+        assert _doc['found'] and _doc['lines'] == ['l997', 'l998', 'l999']
+        assert _doc['truncated'] is True and _doc['size'] > 0
+        _doc = readers.read_artifact(_tmp, 'acme', 'log', tail=5000)
+        assert len(_doc['lines']) == 1000          # asks-for-more → all
+        # oversize full read refused (cap), tail still allowed
+        readers_cap = readers._FULL_READ_CAP
+        try:
+            readers._FULL_READ_CAP = 10
+            _doc = readers.read_artifact(_tmp, 'acme', 'log')
+            assert _doc['found'] and _doc['truncated'] and 'error' in _doc
+        finally:
+            readers._FULL_READ_CAP = readers_cap
+        assert readers.read_artifact(_tmp, 'acme', 'sneaky')['found'] is False
+        assert readers.read_artifact(_tmp, '../x', 'buildlog')['found'] is False
+        assert readers.read_artifact(_tmp, 'ghost', 'buildlog')['found'] is False
+
+
+def test_api01_progress_aggregate():
+    """API-01 chunk 3: progress() ports the rebuild monitoring loop —
+    phases, rate over window, ETA vs total, in-flight log liveness,
+    failed list, and FILTERED-cross-referenced delta residue."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _pkg, _ph in (('done1', 'done'), ('fail1', 'failed'),
+                          ('fly1', 'entry')):
+            utils.write_build_record(_tmp, utils.new_build_record(
+                package=_pkg, intended_version='1.0-1', patch_set_hash=''))
+            utils.update_build_record(_tmp, _pkg, phase=_ph)
+        with open(os.path.join(_tmp, 'fly1'), 'w') as _fh:
+            _fh.write('building...\n')               # in-flight container log
+        # delta pair: done1 missing one binary; vbuildlog explains 'doc1'
+        # but NOT 'mystery1' → only mystery1 in residue
+        with open(os.path.join(_tmp, 'done1.buildlog'), 'w') as _fh:
+            _fh.write("--- DELTA ---\n"
+                      "  emitted-not-declared: (none)\n"
+                      "  declared-not-emitted: doc1, mystery1\n")
+        with open(os.path.join(_tmp, 'done1.vbuildlog'), 'w') as _fh:
+            _fh.write("--- FILTERED (declared but not predicted: 1) ---\n"
+                      "  doc1\n")
+        _doc = readers.progress(_tmp, total=10, window_s=3600)
+        assert _doc['records'] == 3 and _doc['remaining'] == 7
+        assert _doc['phases'] == {'done': 1, 'failed': 1, 'entry': 1}
+        assert _doc['failed'] == ['fail1']
+        assert _doc['rate_per_hour'] == 3.0          # 3 records in 1h window
+        assert _doc['eta_hours'] is not None
+        assert _doc['in_flight'][0]['package'] == 'fly1'
+        assert _doc['in_flight'][0]['log_bytes'] == len('building...\n')
+        assert _doc['deltas'] == [
+            {'package': 'done1', 'missing': ['mystery1'], 'extra': []}]
+
+
+def test_api01_jobs_backend_dispatch_capture_and_prompt():
+    """API-01 chunk 4: ApiBackend runs queued commands through the SAME
+    Cli dispatcher, captures console output per job, fails jobs on
+    handler errors, and converts prompts into fail-fast errors (no
+    interactive input over HTTP)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tui
+    from webapi.jobs import ApiBackend
+    _prev = tui.tui_instance
+    try:
+        _b = ApiBackend()              # registers as tui.tui_instance
+        # capture is asserted via the backend's own print seam — the
+        # global tui.console facade gets swapped by other tests'
+        # _stub_tui() and is deliberately not relied on here
+        _b.register_command(
+            'hello', lambda *a: _b.print('hi ' + ' '.join(a)),
+            'test')
+        _b.register_command('boom', lambda: 1 / 0, 'test')
+        _b.register_command('ask', lambda: _b.prompt('password?'), 'test')
+        assert _b.known_command('hello world')
+        assert not _b.known_command('nosuch')
+        _j1 = _b.submit('hello a b')
+        _j2 = _b.submit('boom')
+        _j3 = _b.submit('ask')
+        _b.shutdown()
+        _b.wait()                      # drains the three jobs, then exits
+        # output may carry logging-handler echo lines ('[INFO ] …')
+        # alongside the console line — assert membership, not equality
+        assert _j1.state == 'done' and 'hi a b' in _j1.output, _j1.as_dict()
+        assert _j2.state == 'error'
+        assert any('ZeroDivisionError' in _l for _l in _j2.output), _j2.output
+        assert _j3.state == 'error'
+        assert any('PromptRequired' in _l for _l in _j3.output), _j3.output
+        assert _j1.as_dict()['elapsed'] is not None
+        _ids = [j['id'] for j in _b.list_jobs()]
+        assert _ids == [_j1.id, _j2.id, _j3.id]   # submission order
+    finally:
+        tui.tui_instance = _prev
+
+
+def test_api01_config_redaction_and_command_routes():
+    """API-01 chunk 4: config endpoint redacts secret-bearing keys;
+    command routes validate verbs, queue jobs, and report results.
+    HTTP part skips without fastapi; redaction reader always runs."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from webapi import readers
+    with tempfile.TemporaryDirectory() as _tmp:
+        _conf = os.path.join(_tmp, 'build.conf')
+        with open(_conf, 'w') as _fh:
+            _fh.write("[Repo]\nSigningKeyUid = athena\n"
+                      "PublishSshKey = config/repo.key\n"
+                      "ARCH = amd64\nMyPassword = hunter2\n")
+        _doc = readers.read_config_redacted(_conf)
+        assert 'hunter2' not in _doc['text']
+        assert 'config/repo.key' not in _doc['text']
+        assert 'PublishSshKey = [REDACTED]' in _doc['text']
+        assert 'ARCH = amd64' in _doc['text']          # non-secret intact
+        try:
+            from fastapi.testclient import TestClient
+        except Exception:
+            print('  SKIP http part — python3-fastapi/httpx not installed')
+            return
+        import tui
+        import webapi
+        from webapi.jobs import ApiBackend
+        _prev = tui.tui_instance
+        try:
+            _b = ApiBackend()
+            _b.register_command(
+                'hello', lambda *a: _b.print('hi'), 'test')
+            _bl = os.path.join(_tmp, 'build'); os.makedirs(_bl)
+            _app = webapi.create_app(
+                buildlog_dir=_bl,
+                flags_path=os.path.join(_tmp, 'f.json'),
+                api_key_path=os.path.join(_tmp, 'api.key'),
+                conf_path=_conf, backend=_b)
+            from webapi import auth
+            _h = {'X-Api-Key': auth.load_api_key(
+                os.path.join(_tmp, 'api.key'))}
+            _c = TestClient(_app)
+            _r = _c.get('/api/v1/config', headers=_h)
+            assert _r.status_code == 200 and 'hunter2' not in _r.text
+            assert _c.post('/api/v1/command', headers=_h,
+                           json={'cmd': 'nosuch x'}).status_code == 400
+            assert _c.post('/api/v1/command', headers=_h,
+                           json={'cmd': 'quit'}).status_code == 400
+            _r = _c.post('/api/v1/command', headers=_h,
+                         json={'cmd': 'hello'})
+            assert _r.status_code == 202, _r.text
+            _jid = _r.json()['job_id']
+            _b.shutdown(); _b.wait()                  # drain queue
+            _r = _c.get(f'/api/v1/jobs/{_jid}', headers=_h)
+            assert _r.status_code == 200
+            assert _r.json()['state'] == 'done'
+            assert 'hi' in _r.json()['output']
+            assert _c.get('/api/v1/jobs/nope',
+                          headers=_h).status_code == 404
+        finally:
+            tui.tui_instance = _prev
+
+
 def test_comp03_segregate_does_not_read_self_repo_path():
     """COMP-03 Phase 1 invariant: _segregate_built_artifacts must
     read its files from the source_dir parameter, NOT
@@ -30006,6 +30275,14 @@ def main() -> int:
         test_buildlog_methods_tolerate_bad_input_and_helpers,
         test_segregate_appends_relocate_and_purge_events,
         test_virtual_buildlog_writes_predicted_and_filtered,
+        # API-01: HTTP API (chunk 1 — auth + read endpoints)
+        test_api01_key_lifecycle,
+        test_api01_readers_index_get_and_tamper,
+        test_api01_http_endpoints_auth_and_payloads,
+        test_api01_artifact_tail_windowing_and_guards,
+        test_api01_progress_aggregate,
+        test_api01_jobs_backend_dispatch_capture_and_prompt,
+        test_api01_config_redaction_and_command_routes,
         # COMP-03 Phase 1: per-worker scratch repo dir + segregate refactor
         test_comp03_segregate_signature_takes_source_dir,
         test_comp03_segregate_does_not_read_self_repo_path,
