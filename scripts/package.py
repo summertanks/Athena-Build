@@ -668,8 +668,13 @@ class Source(Sources):
         are returned unchanged — apt's `|` chain already handles them.
 
         A name is a "multi-provider virtual" iff `cache.get_packages(name)`
-        returns ≥ 2 distinct canonical Package: names that differ from
-        `name` itself.  Providers are sorted alphabetically for
+        returns ≥ 2 distinct canonical Package: names AND none of them is
+        `name` itself.  When a REAL package exists under the name (it may
+        additionally be Provided by others — libunwind-dev is real AND
+        provided by LLVM's libunwind-{14,15,16,19}-dev), the group is
+        returned VERBATIM: apt installs the real package directly, and
+        substituting a provider inverts Debian semantics (the 2026-06-07
+        gstreamer1.0 failure).  Providers are sorted alphabetically for
         determinism; the original virtual name is appended last so a
         host that *already* has any provider satisfies the dep without
         a redundant install attempt against the alphabetic-first
@@ -698,8 +703,19 @@ class Source(Sources):
             _candidates = cache.get_packages(_name)
         except (KeyError, AttributeError):
             return group
-        _providers = sorted({_pkg['Package'] for _pkg in _candidates
-                             if _pkg['Package'] != _name},
+        _canonical = {_pkg['Package'] for _pkg in _candidates}
+        if _name in _canonical:
+            # A REAL package exists under this exact name — apt installs
+            # it directly, and Debian semantics never substitute a
+            # concrete name with a Provides alias.  Expanding anyway put
+            # the providers FIRST in the ||-chain (alphabetic: LLVM's
+            # libunwind-14-dev before the real libunwind-dev), so the
+            # container installed llvm's libunwind (no libunwind.pc) and
+            # gstreamer1.0's meson hard-failed on the missing dependency
+            # (caught 2026-06-07 during the thor1 full rebuild).
+            # Expansion is ONLY for purely-virtual names.
+            return group
+        _providers = sorted(_canonical,
                             key=lambda _p: (not _p.startswith(_name), _p))
         if len(_providers) < 2:
             return group
