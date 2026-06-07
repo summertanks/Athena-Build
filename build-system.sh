@@ -21,6 +21,8 @@ HEADLESS="0"
 AUTO_YES="0"
 RESUME="0"
 ONESHOT_CMDS=()
+API_MODE="0"
+API_PORT=""
 
 usage() { \
         echo -e "Usage:"; \
@@ -31,6 +33,8 @@ usage() { \
         echo -e "\t --yes : Auto-answer informational YESNO prompts (UX-05a)"; \
         echo -e "\t --cmd \"<cmd>\" : Run one command then exit; repeat for multiple (UX-05e).  Implies --headless"; \
         echo -e "\t --resume : Restore Cache + DependencyTree from prior session (UX-04); fingerprint-gated"; \
+        echo -e "\t --api : Serve the HTTP API as the session frontend (API-01); localhost-only"; \
+        echo -e "\t --api-port <port> : API listen port (default 8765)"; \
 }
 
 BUILD_DIR=$(pwd)
@@ -43,7 +47,7 @@ set -o pipefail
 echo -e "Athena Build System Check..."
 
 # Parsing args
-ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless,yes,resume,cmd:' -- "$@") || exit
+ARGS=$(getopt -n Athena -o 'hc:p:v' --long 'help,config-file:,pkg-list:,verbose,headless,yes,resume,cmd:,api,api-port:' -- "$@") || exit
 eval "set -- $ARGS"
 
 while true; do
@@ -68,6 +72,12 @@ while true; do
 			shift;;
 		(--cmd)
 			ONESHOT_CMDS+=("$2");
+			shift 2;;
+		(--api)
+			API_MODE=1;
+			shift;;
+		(--api-port)
+			API_PORT=$2;
 			shift 2;;
 		(-h|--help)
 			usage;
@@ -409,6 +419,12 @@ fi
 for _cmd in "${ONESHOT_CMDS[@]}"; do
     PY_EXTRA+=(--cmd "$_cmd")
 done
+if [[ "$API_MODE" == "1" ]]; then
+    PY_EXTRA+=(--api)
+    if [[ -n "$API_PORT" ]]; then
+        PY_EXTRA+=(--api-port "$API_PORT")
+    fi
+fi
 
 python3 scripts/build.py --pkg-list=$PKG_REQ_FILE --working-dir=$BUILD_DIR --config-file=$CONFIG_FILE "${PY_EXTRA[@]}"
 

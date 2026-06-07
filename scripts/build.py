@@ -36,6 +36,7 @@ import glob
 import re
 import shutil
 import subprocess
+import threading
 import time
 import sys
 from typing import Callable, Optional
@@ -11276,6 +11277,24 @@ def main(banner: str) -> None:
     if _headless:
         sys.argv.remove('--headless')
 
+    # API-01: `--api [--api-port N]` starts the FastAPI server as the
+    # session's frontend (third backend besides Tui/Cli).  Commands
+    # arrive via POST /api/v1/command and run on the main thread's job
+    # loop — single-writer preserved.  Binds 127.0.0.1 only; see
+    # docs/plans/api-01-web-api.md for the exposure model.
+    _api = '--api' in sys.argv
+    if _api:
+        sys.argv.remove('--api')
+    _api_port = 8765
+    if '--api-port' in sys.argv:
+        _i = sys.argv.index('--api-port')
+        try:
+            _api_port = int(sys.argv[_i + 1])
+            del sys.argv[_i:_i + 2]
+        except (IndexError, ValueError):
+            print("ERROR: --api-port needs an integer argument, Exiting...")
+            sys.exit(1)
+
     # UX-05a: --yes auto-answers informational YESNO prompts (e.g.
     # "There are source build failures, Proceed?", "Generate a new
     # signing key now?").  Hard prompts (sudo password, conflict-
@@ -11335,7 +11354,19 @@ def main(banner: str) -> None:
     # so mypy isn't forced to inspect every consumer's narrow assumption.
     from typing import Any as _Any
     tui_inst: _Any
-    if _headless:
+    if _api:
+        print("Initialising API backend...")
+        try:
+            from webapi.jobs import ApiBackend
+            tui_inst = ApiBackend()
+            # ApiBackend extends Cli: registers as tui.tui_instance and
+            # binds logging in __init__; wait() runs the job loop on the
+            # main thread (where the REPL would sit).
+            signal.signal(signal.SIGINT, tui_inst.sig_shutdown)
+        except Exception as e:
+            print(f"FATAL: API backend initialisation failed: {e}")
+            sys.exit(1)
+    elif _headless:
         print("Initialising headless CLI backend...")
         try:
             from cli import Cli
@@ -11452,6 +11483,43 @@ def main(banner: str) -> None:
     # operator can `build-system.sh --resume` and get instant state.
     if _resume:
         session.cmd_resume()
+
+    # API-01: with the session + every command registered, raise the
+    # HTTP server (daemon thread) and hand the main thread to the job
+    # loop.  uvicorn only touches the queue; jobs execute HERE.
+    if _api:
+        try:
+            import uvicorn  # type: ignore[import-not-found]
+            import webapi
+        except ImportError:
+            from webapi import APT_HINT as _hint
+            print(f"FATAL: {_hint}")
+            sys.exit(1)
+        try:
+            _app = webapi.create_app(
+                buildlog_dir=os.path.join(config.dir_log, 'build'),
+                flags_path=os.path.join(config.dir_cache,
+                                        'buildflags.json'),
+                api_key_path=os.path.join(config.working_dir, 'config',
+                                          'api.key'),
+                conf_path=os.path.join(config.working_dir, 'config',
+                                       'build.conf'),
+                repo_dir=config.dir_repo,
+                config_dir=os.path.join(config.working_dir, 'config'),
+                coord_dir=getattr(config, 'dir_coord',
+                                  os.path.join(config.working_dir,
+                                               'coord')),
+                backend=tui_inst,
+            )
+        except RuntimeError as e:
+            print(f"FATAL: {e}")
+            sys.exit(1)
+        _server = uvicorn.Server(uvicorn.Config(
+            _app, host='127.0.0.1', port=_api_port, log_level='warning'))
+        threading.Thread(target=_server.run, daemon=True,
+                         name='webapi-uvicorn').start()
+        print(f"API listening on http://127.0.0.1:{_api_port} "
+              f"(docs: /docs; key: config/api.key)")
 
     tui_inst.wait()
     Exit(0)
