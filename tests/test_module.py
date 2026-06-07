@@ -1020,6 +1020,30 @@ def test_build_depends_real_package_name_not_expanded():
     assert [alt[0] for alt in groups[0]] == ['debhelper-compat']
 
 
+def test_build_depends_real_name_with_provider_aliases_not_expanded():
+    """A name that is BOTH a real package AND Provided by others must NOT
+    be expanded.  Real case: libunwind-dev is a real package (src
+    libunwind) while LLVM's libunwind-{14,15,16,19}-dev all
+    `Provides: libunwind-dev`.  Expansion sorted the LLVM providers
+    first in the ||-chain, the container installed libunwind-14-dev
+    (which ships no libunwind.pc), and gstreamer1.0's meson hard-failed
+    with `Dependency "libunwind" not found` (2026-06-07, thor1 full
+    rebuild).  apt semantics: a concrete name is never substituted by
+    a Provides alias — the group must pass through verbatim."""
+    cache = _StubProviderCache({
+        'libunwind-dev': [
+            {'Package': 'libunwind-14-dev'},
+            {'Package': 'libunwind-15-dev'},
+            {'Package': 'libunwind-dev'},      # the real package
+            {'Package': 'libunwind-19-dev'},
+        ],
+    })
+    src = _src_with_build_depends("libunwind-dev")
+    groups = src.build_depends('amd64', cache=cache)
+    assert len(groups) == 1
+    assert [alt[0] for alt in groups[0]] == ['libunwind-dev'], groups[0]
+
+
 def test_build_depends_already_alternative_group_untouched():
     """Multi-element groups (maintainer-authored `|` alternations) are
     already in the right shape — leave them alone, even if one of the
@@ -29385,6 +29409,7 @@ def main() -> int:
         test_build_depends_expands_multi_provider_virtual,
         test_build_depends_single_provider_virtual_not_expanded,
         test_build_depends_real_package_name_not_expanded,
+        test_build_depends_real_name_with_provider_aliases_not_expanded,
         test_build_depends_already_alternative_group_untouched,
         test_build_depends_version_constraint_inherited_by_synthetic_providers,
         test_build_depends_unknown_name_left_unchanged,
