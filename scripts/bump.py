@@ -1,0 +1,790 @@
+"""Version-suffix logic — the single, manually-reviewable home for every
+rule that decides what version string an artifact carries.
+
+Two concerns live here, and nothing else should touch their internals:
+
+  * **NMU strip** — remove Debian's build-environment suffixes
+    (`+bN` binNMU, `+debNuN`/`~debNuN` point-release, `~bpoN+N` backport,
+    `+rpiN`/`+rptN`) so every artifact lands on its pristine source
+    version.  `_NMU_SUFFIX_RE` is the one matcher; `strip_nmu_suffix`
+    (version string), `strip_nmu_from_control_text` (DEBIAN/control) and
+    `strip_nmu_from_deb` (a built .deb, in place) are the three apply
+    points.
+
+  * **+asg<R>u<N> stamp** — Athena's own update marker (the parallel to
+    Debian's `debNuN`), applied ONLY when a build is a genuine delta or
+    continues an existing asg lineage.  `compute_post_build_versions` is
+    the pure predictor that `BuildContainer._normalize_built_artifacts`
+    mirrors at build time; `asg_next_n` / `highest_asg_update` derive the
+    per-source uniform N from the published ledger; `restamp_asg_deb`
+    applies a chosen (R, N) to a built .deb.
+
+`utils` re-exports every public name here, so existing `utils.<name>`
+call sites keep working unchanged; new code may import from `bump`
+directly.  This module has NO dependency on `utils` (one-way:
+utils -> bump), which is what keeps the import graph acyclic.
+
+See docs/asg-bump-position-x.md for the bump-decision rationale and the
+four triggers (delta / lineage; dep-constraint-only strips do NOT bump).
+"""
+
+import os
+import re
+from typing import Dict, List, Optional
+
+
+def strip_build_version(file: str) -> str:
+    """Remove a Debian binNMU rebuild suffix `+bN` from a `.deb` filename.
+
+    Input must be `name_version_arch.ext` shape (e.g. `pkg_1.0-2+b1_amd64.deb`).
+    Strips `+bN` only when it sits at the *end* of the version field, leaving
+    legitimate point-release / security-update suffixes (`+deb12u1`) intact:
+
+        foo_1.0-2+b1_amd64.deb       → foo_1.0-2_amd64.deb
+        foo_1.0-2+deb12u1_amd64.deb  → foo_1.0-2+deb12u1_amd64.deb (unchanged)
+        foo_1.0-2+deb12u1+b3_amd64.deb → foo_1.0-2+deb12u1_amd64.deb
+        foo_1.0+b1-2_amd64.deb       → foo_1.0+b1-2_amd64.deb (binNMU embedded
+                                       in version, not at end → not a rebuild
+                                       suffix; left alone)
+
+    Used to map an APT-resolved `Filename` (which carries the buildd's binNMU
+    rebuild suffix) onto the file `dpkg-buildpackage` actually produced from
+    source (which uses the source version, never `+bN`).
+
+    Raises:
+        ValueError: filename is not in `name_version_arch.ext` shape.
+    """
+    _name, _ext = os.path.splitext(file)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        raise ValueError(f"Incorrectly formatted package filename: {file!r}")
+    _pkg_name, _version, _arch = _parts
+    _version = re.sub(r"\+b\d+$", "", _version)
+    return f"{_pkg_name}_{_version}_{_arch}{_ext}"
+
+
+# NMU/binNMU/backport suffix matcher — strips at END of a version string.
+# Matches in order (greedy from end), can stack:
+#   +debNuN       — Debian security/point-release update (sorts AFTER base)
+#   ~debNuN       — security update that sorts BEFORE base (rarer form;
+#                   used when upstream wants the security backport to
+#                   take a lower version slot — e.g. dnsmasq's
+#                   `2.90-4~deb12u2`)
+#   ~bpoN+N       — backport
+#   +rpiN, +rptN  — Raspberry Pi rebuilds
+#   +bN           — modern binNMU
+#   (?<=\d)b\d*   — legacy binNMU form (`-2b1`, `-2b`); requires a digit
+#                   immediately before `b` so we don't accidentally munch
+#                   into upstream-version letters like `2alpha`
+# Trailing `+` after the group means: strip MULTIPLE stacked layers
+# (`1.0-2+deb12u3+b1` → strip both → `1.0-2`).
+# Trailing `~?` consumes the pre-release tilde marker that constraint
+# versions commonly tack on AFTER the NMU suffix (e.g. libflatpak0's
+# `Depends: bubblewrap (>= 0.8.0-2+deb12u1~)` — the `~` means "any
+# build >= the pre-release of 0.8.0-2+deb12u1").  Without `~?`, the
+# regex required `$` immediately after the NMU group; the `~` blocked
+# the match and the constraint version survived strip unchanged,
+# producing spurious unresolved-dep findings against our stripped repo
+# (audit 2026-05-21 — libflatpak0 → bubblewrap).  Note: applies ONLY
+# when the `~` directly follows an NMU group; bare-version `~rc1`
+# pre-release markers (no NMU) are unaffected.
+_NMU_SUFFIX_RE = re.compile(
+    r'(?:\+deb\d+u\d+|~deb\d+u\d+|~bpo\d+\+\d+|\+rpi\d+|\+rpt\d+|'
+    r'\+b\d+|(?<=\d)b\d*)+~?$'
+)
+
+# Relation fields whose version constraints should also have NMU stripped.
+# Includes Conflicts/Breaks/Replaces — operator's intent per the rework
+# (we don't relax the relation SHAPE, just normalise the version
+# representation; if libfoo Conflicts: libbar (<< 1.0-2+deb12u3) the
+# strip yields Conflicts: libbar (<< 1.0-2) — broader-but-still-honest).
+_NMU_STRIP_FIELDS = (
+    'Depends', 'Pre-Depends', 'Recommends', 'Suggests',
+    'Enhances', 'Provides', 'Conflicts', 'Breaks', 'Replaces',
+)
+
+
+def normalize_repo_filename(filename: str) -> str:
+    """Map an upstream Packages-index Filename to its repo/main on-disk
+    form.  Strips both layers our build pipeline removes:
+
+      1. +bN — binNMU rebuild suffix (Debian buildd-only metadata)
+      2. +debNuN / ~bpoN+N / +rpiN / +rptN / legacy -Nb — upstream NMU
+         layers, removed by BuildContainer's post-`dpkg-buildpackage`
+         strip pass (utils.strip_nmu_from_deb).
+
+    Examples:
+        normalize_repo_filename('libc6_2.36-9+deb12u13_amd64.deb')
+            → 'libc6_2.36-9_amd64.deb'
+        normalize_repo_filename('libfoo_1.0-2+b1_amd64.deb')
+            → 'libfoo_1.0-2_amd64.deb'
+        normalize_repo_filename('libfoo_1.0-2+deb12u3+b1_amd64.deb')
+            → 'libfoo_1.0-2_amd64.deb'
+        normalize_repo_filename('libfoo_1.0-2_amd64.deb')
+            → 'libfoo_1.0-2_amd64.deb'  (no-op)
+
+    Use anywhere code resolves an upstream Filename onto a disk path
+    under repo/main: dep-tree filename prediction, chroot install
+    resolution, installer udeb lookup, dep-drift scan.
+
+    Malformed filenames (not in `name_version_arch.ext` shape) are
+    returned unchanged — best-effort, doesn't raise.
+    """
+    if not (filename.endswith(('.deb', '.udeb'))):
+        return filename
+    _name, _ext = os.path.splitext(filename)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        return filename
+    _pkg, _ver, _arch = _parts
+    _new_ver = strip_nmu_suffix(_ver)   # regex includes +bN, +debNuN, etc.
+    return f'{_pkg}_{_new_ver}_{_arch}{_ext}'
+
+
+def strip_nmu_suffix(version: str) -> str:
+    """Strip trailing NMU/binNMU/backport suffix layers from a Debian
+    version string.  Returns the pristine source version.
+
+        strip_nmu_suffix('1.0-2')                  → '1.0-2'
+        strip_nmu_suffix('1.0-2+b1')               → '1.0-2'
+        strip_nmu_suffix('1.0-2+deb12u3')          → '1.0-2'
+        strip_nmu_suffix('1.0-2+deb12u3+b1')       → '1.0-2'
+        strip_nmu_suffix('1.0-2~bpo12+1')          → '1.0-2'
+        strip_nmu_suffix('0.15.5-2b')              → '0.15.5-2'   (legacy form)
+        strip_nmu_suffix('0.15.5-2b1')             → '0.15.5-2'   (legacy form)
+        strip_nmu_suffix('2:1.0-2+b1')             → '2:1.0-2'    (epoch kept)
+        strip_nmu_suffix('1.0-2alpha')             → '1.0-2alpha' (no strip;
+                                                                  not an NMU)
+    """
+    return _NMU_SUFFIX_RE.sub('', version)
+
+
+# ---------------------------------------------------------------------------
+# Athena update-version suffix:  +asg<R>u<N>
+#
+# Mirrors Debian's `debNuN` shape but is distribution- not codename-derived,
+# so it stays monotonic across codename changes (thor→loki): the release
+# number R (from [Build] VERSION) orders the suffix, NEVER the codename
+# (`+thorN` was rejected because `loki1 < thor1` would silently break
+# release-upgrades).  `asg` is the FIXED Asgard build-origin tag — the
+# parallel to Debian's `deb` — not derived from the configurable
+# distribution name, so the suffix shape is stable regardless of config.
+#
+#   pristine upstream, built untouched :  3.0.15-1
+#   our delta (security/update/patch)  :  3.0.15-1+asg1u1, +asg1u2, …
+#
+# Sorts above pristine and is monotonic across releases (asg2u1 > asg1u9),
+# verified with `dpkg --compare-versions`.
+# ---------------------------------------------------------------------------
+ASG_SUFFIX_RE = re.compile(r'\+asg(\d+)u(\d+)$')
+
+
+def parse_asg_suffix(version: str) -> 'Optional[tuple[int, int]]':
+    """Return (release, n) parsed from a trailing +asg<R>u<N>, else None."""
+    _m = ASG_SUFFIX_RE.search(version)
+    if not _m:
+        return None
+    return int(_m.group(1)), int(_m.group(2))
+
+
+def pristine_base(version: str) -> str:
+    """Strip BOTH our +asg<R>u<N> marker and any upstream NMU layer,
+    yielding the pristine source base version — the grouping key for N.
+
+        pristine_base('3.0.15-1')             → '3.0.15-1'
+        pristine_base('3.0.15-1+asg1u2')      → '3.0.15-1'
+        pristine_base('3.0.15-1+deb12u2')     → '3.0.15-1'
+        pristine_base('1:2.38.1-5+asg1u1')    → '1:2.38.1-5'  (epoch kept)
+    """
+    return strip_nmu_suffix(ASG_SUFFIX_RE.sub('', version))
+
+
+def apply_asg_suffix(base: str, release: int, n: int) -> str:
+    """Stamp a pristine base version with our update marker → base+asg<R>u<N>.
+    Epoch (if any) is preserved — the suffix only appends to the end."""
+    return f'{base}+asg{release}u{n}'
+
+
+def asg_filename(filename: str, release: int, n: int) -> str:
+    """Map a pristine repo filename to its +asg<R>u<N> stamped form
+    (name_base_arch.ext → name_base+asgRuN_arch.ext).  No-op on a filename
+    not in name_version_arch shape."""
+    if not (filename.endswith(('.deb', '.udeb'))):
+        return filename
+    _name, _ext = os.path.splitext(filename)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        return filename
+    _pkg, _ver, _arch = _parts
+    return f'{_pkg}_{apply_asg_suffix(_ver, release, n)}_{_arch}{_ext}'
+
+
+def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
+    """True when an on-disk artifact is the dep-tree's predicted (pristine)
+    filename, optionally carrying a trailing +asg<R>u<N> on its version
+    segment.  Reconciles the pristine filename the predictor computes
+    (normalize_repo_filename) with a stamped on-disk .deb so the post-build
+    existence checks (check_build / _source_state) don't loop forever the way
+    the CONF-13 exact-filename match did.
+
+    Requires identical package name, architecture, and extension; the on-disk
+    version must equal the predicted version OR predicted+asg<R>u<N>.
+    """
+    if predicted_fn == ondisk_fn:
+        return True
+    if not (predicted_fn.endswith(('.deb', '.udeb'))
+            and ondisk_fn.endswith(('.deb', '.udeb'))):
+        return False
+    _pn, _pext = os.path.splitext(predicted_fn)
+    _on, _oext = os.path.splitext(ondisk_fn)
+    if _pext != _oext:
+        return False
+    _pp = _pn.split('_')
+    _op = _on.split('_')
+    if len(_pp) != 3 or len(_op) != 3:
+        return False
+    if _pp[0] != _op[0] or _pp[2] != _op[2]:          # name, arch must match
+        return False
+    if _op[1] == _pp[1]:                               # exact (pristine) match
+        return True
+    if parse_asg_suffix(_op[1]) is None:               # on-disk has no asg layer
+        return False
+    return ASG_SUFFIX_RE.sub('', _op[1]) == _pp[1]     # base equals prediction
+
+
+def find_matching_artifact(dst_dir: str,
+                           predicted_filename: str) -> 'Optional[str]':
+    """Return the on-disk path of `predicted_filename` in `dst_dir`, or of an
+    +asg<R>u<N>-stamped variant of it (match_pristine_base), else None.
+
+    Reconciles the dep-tree's pristine filename prediction with a possibly
+    stamped artifact so the post-build existence checks (check_build /
+    _source_state) don't loop the way the CONF-13 exact-filename match did.
+    The exact-name fast path avoids a listdir in the common pristine case;
+    only a missing exact file triggers the (single-version, single-snapshot
+    local) directory scan."""
+    _exact = os.path.join(dst_dir, predicted_filename)
+    if os.path.isfile(_exact):
+        return _exact
+    try:
+        for _cand in os.listdir(dst_dir):
+            if (_cand.endswith(('.deb', '.udeb'))
+                    and match_pristine_base(predicted_filename, _cand)
+                    and os.path.isfile(os.path.join(dst_dir, _cand))):
+                return os.path.join(dst_dir, _cand)
+    except OSError:
+        pass
+    return None
+
+
+def highest_asg_update(published_versions: 'List[str]',
+                       base: str, release: int) -> int:
+    """Highest N among already-published versions of the form
+    `base+asg<release>u<N>`.  `published_versions` is an iterable of version
+    strings published for THIS package (from the remote ledger).  Returns 0
+    when none match — so the next update is N+1 (first → +asg<release>u1).
+
+    Keyed on the pristine base + release: a different base, or a different
+    release R, does not count (R dominates ordering, so N resets per release).
+    """
+    _hi = 0
+    for _v in published_versions:
+        if pristine_base(_v) != base:
+            continue
+        _parsed = parse_asg_suffix(_v)
+        if _parsed is None:
+            continue
+        _r, _n = _parsed
+        if _r == release and _n > _hi:
+            _hi = _n
+    return _hi
+
+
+def asg_next_n(published_versions: 'List[str]',
+               base: str, release: int) -> int:
+    """The next +asg<release>u<N> number for a binary at pristine `base` —
+    one past the highest already published for THAT file (PER-FILE, from the
+    ledger), so a binary updated more often than its siblings carries a higher
+    N.  First update for a base/release → 1."""
+    return highest_asg_update(published_versions, base, release) + 1
+
+
+def compute_post_build_versions(
+    source_version: str, binaries: 'List[str]',
+    asg_ledger: 'Optional[dict]', release: int,
+    was_patched: bool = False,
+) -> 'Dict[str, str]':
+    """Pure version math: predict the Version field every binary built
+    from a source will carry post-normalisation, WITHOUT running a build.
+
+    Mirrors :meth:`buildcontainer.BuildContainer._normalize_built_artifacts`
+    exactly, but as a function of cache data only — so virtual-build and
+    audit code can ask "what version will dpkg-buildpackage land?" before
+    actually running it.
+
+    Decision tree (matches normalize_built_artifacts):
+      1. pristine = strip_nmu_suffix(source_version)
+      2. delta = (pristine != source_version) OR was_patched
+      3. lineage = asg_ledger has any +asg<*>u<*> entry at base=pristine
+         for any of `binaries`
+      4. if not (delta or lineage): every binary stays at `pristine`
+      5. else: N = max(asg_next_n(ledger[b], pristine, release)
+                       for each b in binaries that has a ledger entry,
+                       OR 1 if none).  Every binary stamps at base+asgRuN
+         — uniform N per source, see
+         [[asg-stamp-uniform-n-per-source]].
+
+    `asg_ledger` shape: ``{binary_name: [version_str, ...]}`` (the
+    published-versions ledger used by ``asg_next_n``).  None or empty →
+    no lineage continuation possible.
+
+    Returns ``{binary_name: predicted_version_str}`` for every name in
+    `binaries`.
+    """
+    _pristine = strip_nmu_suffix(source_version)
+    _is_delta = (_pristine != source_version) or was_patched
+    _ledger = asg_ledger or {}
+    _has_lineage = False
+    for _b in binaries:
+        for _prev in _ledger.get(_b, []):
+            if (pristine_base(_prev) == _pristine
+                    and parse_asg_suffix(_prev) is not None):
+                _has_lineage = True
+                break
+        if _has_lineage:
+            break
+    if not (_is_delta or _has_lineage):
+        return dict.fromkeys(binaries, _pristine)
+    # Uniform N per source: take the MAX of every sibling's individual
+    # asg_next_n candidate.  Binaries with no ledger entry contribute
+    # asg_next_n([], pristine, release) = 1 — the floor.
+    _candidates = [
+        asg_next_n(_ledger.get(_b, []), _pristine, release)
+        for _b in binaries
+    ]
+    _n = max(_candidates) if _candidates else 1
+    _stamped = apply_asg_suffix(_pristine, release, _n)
+    return dict.fromkeys(binaries, _stamped)
+
+
+def strip_nmu_from_control_text(content: str) -> 'tuple[str, int]':
+    """Return (new_text, strip_count) — strips NMU suffix from the
+    Version field AND every version constraint in dep-related fields
+    of a DEBIAN/control text.
+
+    When Version actually changes (i.e. an NMU suffix existed and got
+    stripped), an `X-Athena-Upstream-Version:` line is inserted right
+    after the new Version line carrying the original (pre-strip)
+    version.  This preserves CVE-tracking provenance: tools that read
+    the installed dpkg DB would otherwise misclassify our pristine-
+    versioned binaries as the pre-security-update upstream version
+    (see docs/cve-tracking.md).  The field is omitted when Version
+    didn't change — pristine sources need no record since their
+    Version IS the upstream version.
+
+    Walks fields line-by-line (handles multi-line continuation).
+    Idempotent: re-running on already-stripped text counts zero strips
+    and skips the X-field insertion (already present from the prior run).
+    """
+    _total = 0
+    _content = content
+
+    # Snapshot the original Version up front so we know what (if
+    # anything) to record in X-Athena-Upstream-Version.  Done before
+    # the strip rewrite so the value is the genuine pre-strip Version.
+    _orig_match = re.search(r'^Version: (\S+)\s*$', _content, re.MULTILINE)
+    _orig_version = _orig_match.group(1) if _orig_match else ''
+    _stripped_version = (
+        strip_nmu_suffix(_orig_version) if _orig_version else ''
+    )
+    _version_was_stripped = (
+        bool(_stripped_version) and _stripped_version != _orig_version
+    )
+
+    # Strip from the Version: field.
+    def _sub_version(_m: 're.Match') -> str:
+        nonlocal _total
+        _old = _m.group(1)
+        _new = strip_nmu_suffix(_old)
+        if _new != _old:
+            _total += 1
+        return f'Version: {_new}'
+
+    _content = re.sub(
+        r'^Version: (\S+)\s*$',
+        _sub_version, _content, count=1, flags=re.MULTILINE,
+    )
+
+    # Provenance: record the pre-strip upstream Version as an X-field
+    # right after the (now-stripped) Version line.  Only when the
+    # strip actually changed the Version (pristine packages need
+    # nothing) and only when the field isn't already present
+    # (idempotent re-runs).
+    if _version_was_stripped and 'X-Athena-Upstream-Version:' not in _content:
+        _content = re.sub(
+            r'^(Version: \S+)\s*$',
+            lambda _m: (
+                f'{_m.group(1)}\n'
+                f'X-Athena-Upstream-Version: {_orig_version}'
+            ),
+            _content, count=1, flags=re.MULTILINE,
+        )
+
+    # Per-relation version-constraint stripper: matches `(OP VERSION)`
+    # within a dep-field's value.  Operator is preserved verbatim.
+    _constraint_re = re.compile(
+        r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)'
+    )
+
+    def _sub_constraint(_m: 're.Match') -> str:
+        nonlocal _total
+        _op, _ver = _m.group(1), _m.group(2)
+        _new_ver = strip_nmu_suffix(_ver)
+        if _new_ver != _ver:
+            _total += 1
+        return f'({_op} {_new_ver})'
+
+    # Walk lines; only rewrite inside a relation field block.  Uses
+    # the deb822 wrap-on-continuation convention: a field starts at
+    # column 0 with `Name:`; continuation lines start with whitespace.
+    _new_lines: 'list[str]' = []
+    _in_target = False
+    for _line in _content.splitlines(keepends=True):
+        if _line and _line[0] not in (' ', '\t'):
+            _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
+            if _m:
+                _in_target = _m.group(1) in _NMU_STRIP_FIELDS
+            else:
+                _in_target = False
+        # (continuation lines inherit the surrounding _in_target state)
+        if _in_target:
+            _new_lines.append(_constraint_re.sub(_sub_constraint, _line))
+        else:
+            _new_lines.append(_line)
+
+    _content = ''.join(_new_lines)
+
+    # Pair-rewrite pass: detect the upstream "same-upstream-sibling"
+    # idiom (`X (>> V), X (<< V-.)`) and collapse it to `X (= our_version)`.
+    # See docs/strip-nmu-sibling-constraint-idiom.md for the full
+    # rationale + impact analysis.  Briefly: the >> half fails after
+    # strip-NMU because Policy §5.6.12 makes our `V-0` equal to bare `V`;
+    # the maintainer's intent was "any debrev of same upstream", which
+    # in our atomic-source-build pipeline reduces to "the exact sibling
+    # binary version we produce".
+    _our_version = _extract_version(_content)
+    if _our_version:
+        _content, _pairs = _rewrite_sibling_idiom_in_text(_content, _our_version)
+        _total += _pairs
+
+    return _content, _total
+
+
+def _extract_version(content: str) -> 'Optional[str]':
+    """Read the Version: field value from a control-file text."""
+    _m = re.search(r'^Version: (\S+)\s*$', content, re.MULTILINE)
+    return _m.group(1) if _m else None
+
+
+def _rewrite_sibling_idiom_in_text(content: str,
+                                    our_version: str) -> 'tuple[str, int]':
+    """Rewrite the upstream `X (>> V), X (<< V-.)` AND-pair idiom in
+    Depends / Pre-Depends to a single `X (= our_version)` entry.
+
+    Strictly bound to the four pair conditions — anything that doesn't
+    match the full signature is left untouched:
+
+      1. Field is Depends or Pre-Depends (Recommends/Suggests/etc skipped:
+         the idiom is a hard-link convention).
+      2. Both entries are at AND-level (each is its own single-entry
+         OR-group — Debian Policy forbids alternatives in the idiom).
+      3. Same target name X on both halves.
+      4. `>>` half's version is V; `<<` half's version is exactly `V-.`
+         (the canonical "any debrev of V" upper bound).
+
+    Returns (new_content, pairs_rewritten_count).  Idempotent: re-running
+    on already-rewritten content returns count=0.
+    """
+    from debian.deb822 import PkgRelation
+    _pairs_total = 0
+    _new_lines: 'list[str]' = []
+    _lines = content.splitlines(keepends=True)
+    _i = 0
+    while _i < len(_lines):
+        _line = _lines[_i]
+        # Field header detection: column 0 + Name: at the start.
+        _m = re.match(r'^(Depends|Pre-Depends):\s*(.*)$', _line)
+        if not _m or (_line and _line[0] in (' ', '\t')):
+            _new_lines.append(_line)
+            _i += 1
+            continue
+        _field = _m.group(1)
+        _value_parts = [_m.group(2).rstrip('\n')]
+        # Collect continuation lines (lead-with-whitespace).
+        _j = _i + 1
+        while _j < len(_lines) and _lines[_j] and _lines[_j][0] in (' ', '\t'):
+            _value_parts.append(_lines[_j].strip())
+            _j += 1
+        _full_value = ' '.join(p for p in _value_parts if p)
+        _new_value, _pairs = _collapse_sibling_pair(_full_value, our_version)
+        if _pairs > 0:
+            # Determine trailing newline shape from the original first line.
+            _eol = '\n' if _line.endswith('\n') else ''
+            _new_lines.append(f'{_field}: {_new_value}{_eol}')
+            _pairs_total += _pairs
+        else:
+            # No rewrite needed — preserve original line shape (including
+            # operator-authored continuation wrapping).
+            _new_lines.append(_line)
+            for _k in range(_i + 1, _j):
+                _new_lines.append(_lines[_k])
+        _i = _j
+    if _pairs_total == 0:
+        return content, 0
+    return ''.join(_new_lines), _pairs_total
+
+
+def _collapse_sibling_pair(value: str,
+                            our_version: str) -> 'tuple[str, int]':
+    """Parse a Depends-field value, collapse every `X (>> V), X (<< V-.)`
+    pair into `X (= our_version)`.  See _rewrite_sibling_idiom_in_text
+    docstring for the exact match criteria."""
+    from debian.deb822 import PkgRelation
+    try:
+        _relations = PkgRelation.parse_relations(value)
+    except Exception:
+        return value, 0
+    _skip: 'set[int]' = set()
+    _count = 0
+    _new_relations: 'list[list]' = []
+    for _i, _or_group in enumerate(_relations):
+        if _i in _skip:
+            continue
+        # Match guard 1: AND-level entries are single-element OR-groups.
+        # Alternatives like `(X >> V) | (Y >> V)` are not the idiom.
+        if len(_or_group) != 1:
+            _new_relations.append(_or_group)
+            continue
+        _entry_i = _or_group[0]
+        _ver_i = _entry_i.get('version')
+        if not _ver_i or _ver_i[0] != '>>':
+            _new_relations.append(_or_group)
+            continue
+        _name = _entry_i['name']
+        _v = _ver_i[1]
+        # Look forward for the matching `<<` half.  Architecture
+        # restrictions, arch-qualifiers, and build-profile restrictions
+        # must also match to confirm it's the same logical constraint.
+        _matched_j: 'Optional[int]' = None
+        for _j in range(_i + 1, len(_relations)):
+            if _j in _skip:
+                continue
+            if len(_relations[_j]) != 1:
+                continue
+            _entry_j = _relations[_j][0]
+            _ver_j = _entry_j.get('version')
+            if not _ver_j or _ver_j[0] != '<<':
+                continue
+            if _entry_j['name'] != _name:
+                continue
+            if _ver_j[1] != f'{_v}-.':
+                continue
+            if (_entry_j.get('arch') != _entry_i.get('arch')
+                    or _entry_j.get('archqual') != _entry_i.get('archqual')
+                    or _entry_j.get('restrictions') != _entry_i.get('restrictions')):
+                continue
+            _matched_j = _j
+            break
+        if _matched_j is None:
+            _new_relations.append(_or_group)
+            continue
+        # Pair confirmed.  Collapse to a single `(X = our_version)` entry
+        # in place of the `>>` half; drop the `<<` half.
+        _collapsed = {
+            'name':         _name,
+            'version':      ('=', our_version),
+            'arch':         _entry_i.get('arch'),
+            'archqual':     _entry_i.get('archqual'),
+            'restrictions': _entry_i.get('restrictions'),
+        }
+        _new_relations.append([_collapsed])
+        _skip.add(_matched_j)
+        _count += 1
+    if _count == 0:
+        return value, 0
+    return PkgRelation.str(_new_relations), _count
+
+
+def strip_nmu_from_deb(deb_path: str) -> dict:
+    """Strip NMU suffix layers from a .deb/.udeb in place.
+
+    Single dpkg-deb -R / -b cycle.  Updates:
+      - The filename (if its version segment had an NMU suffix)
+      - DEBIAN/control Version field
+      - Every version constraint in dep fields (incl. Conflicts/Breaks)
+
+    Returns dict:
+      {'status': 'rewritten' | 'unchanged' | 'malformed' | 'skipped',
+       'new_path': str,
+       'strips_count': int}
+
+    Idempotent: re-running on already-stripped .deb returns 'unchanged'
+    without I/O.  Cheap pre-check via DebFile (no data archive extract)
+    rules out the no-op case.
+    """
+    import subprocess
+    import tempfile
+    from debian.debfile import DebFile
+
+    _result = {
+        'status': 'unchanged', 'new_path': deb_path, 'strips_count': 0,
+    }
+    _base = os.path.basename(deb_path)
+    if not (_base.endswith(('.deb', '.udeb'))):
+        _result['status'] = 'skipped'
+        return _result
+    _name, _ext = os.path.splitext(_base)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        _result['status'] = 'malformed'
+        return _result
+    _pkg, _old_filename_ver, _arch = _parts
+
+    try:
+        with DebFile(deb_path) as _deb:
+            _ctrl_bytes = _deb.control.get_content('control')
+    except Exception:
+        _result['status'] = 'malformed'
+        return _result
+    if _ctrl_bytes is None:
+        _result['status'] = 'malformed'
+        return _result
+    _ctrl_text = _ctrl_bytes.decode('utf-8', errors='replace')
+
+    _new_ctrl_text, _strips = strip_nmu_from_control_text(_ctrl_text)
+    _new_filename_ver = strip_nmu_suffix(_old_filename_ver)
+    _filename_changed = _new_filename_ver != _old_filename_ver
+
+    if not _filename_changed and _strips == 0:
+        return _result      # 'unchanged'
+
+    if _filename_changed:
+        _new_base = f'{_pkg}_{_new_filename_ver}_{_arch}{_ext}'
+    else:
+        _new_base = _base
+    _new_path = os.path.join(os.path.dirname(deb_path), _new_base)
+
+    with tempfile.TemporaryDirectory(prefix='strip-nmu-') as _work:
+        subprocess.run(
+            ['dpkg-deb', '-R', deb_path, _work],
+            check=True, capture_output=True,
+        )
+        _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl_disk, 'w') as _fh:
+            _fh.write(_new_ctrl_text)
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _new_path],
+            check=True, capture_output=True,
+        )
+
+    if _new_path != deb_path:
+        os.remove(deb_path)
+    _result.update({
+        'status': 'rewritten',
+        'new_path': _new_path,
+        'strips_count': _strips + (1 if _filename_changed else 0),
+    })
+    return _result
+
+
+def _restamp_control_text(content: str, old_version: str,
+                          new_version: str) -> str:
+    """Rewrite the Version field old→new, and bump same-source sibling pins
+    `(= old_version)` → `(= new_version)` within dep-relation fields.  Only
+    `(=)` constraints whose version equals THIS binary's own version are
+    touched (the collapsed >>/<< sibling idiom); other constraints are left."""
+    content = re.sub(
+        r'^Version: \S+\s*$', lambda _m: f'Version: {new_version}',
+        content, count=1, flags=re.MULTILINE,
+    )
+    _pin_re = re.compile(r'\(\s*=\s*' + re.escape(old_version) + r'\s*\)')
+    _new_lines: 'list[str]' = []
+    _in_target = False
+    for _line in content.splitlines(keepends=True):
+        if _line and _line[0] not in (' ', '\t'):
+            _m = re.match(r'^([A-Za-z][A-Za-z0-9-]*):', _line)
+            _in_target = _m is not None and _m.group(1) in _NMU_STRIP_FIELDS
+        if _in_target:
+            _new_lines.append(_pin_re.sub(lambda _m: f'(= {new_version})', _line))
+        else:
+            _new_lines.append(_line)
+    return ''.join(_new_lines)
+
+
+def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
+    """Apply our +asg<R>u<N> update marker to a .deb/.udeb in place.
+
+    Runs AFTER strip_nmu_from_deb (the artifact is at its pristine base
+    version).  Single dpkg-deb -R / -b cycle; updates:
+      - the filename version segment   → base+asg<R>u<N>
+      - DEBIAN/control Version field    → [epoch:]base+asg<R>u<N>
+      - intra-source sibling pins that strip_nmu_from_control_text collapsed
+        to `(= <this binary's version>)`  → `(= <…+asg<R>u<N>>)`
+
+    No changelog entry is created (that would walk the kernel ABI counter —
+    the CONF-13 cascade); this is a pure binary relabel.  Returns
+    {'status': 'rewritten'|'malformed'|'skipped', 'new_path', 'version'}.
+    """
+    import subprocess
+    import tempfile
+    from debian.debfile import DebFile
+
+    _result = {'status': 'skipped', 'new_path': deb_path, 'version': None}
+    _base = os.path.basename(deb_path)
+    if not (_base.endswith(('.deb', '.udeb'))):
+        return _result
+    _name, _ext = os.path.splitext(_base)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        _result['status'] = 'malformed'
+        return _result
+    _pkg, _file_ver, _arch = _parts
+
+    try:
+        with DebFile(deb_path) as _deb:
+            _ctrl_bytes = _deb.control.get_content('control')
+    except Exception:
+        _result['status'] = 'malformed'
+        return _result
+    if _ctrl_bytes is None:
+        _result['status'] = 'malformed'
+        return _result
+    _ctrl_text = _ctrl_bytes.decode('utf-8', errors='replace')
+
+    _old_ctrl_ver = _extract_version(_ctrl_text)
+    if not _old_ctrl_ver:
+        _result['status'] = 'malformed'
+        return _result
+    _new_ctrl_ver = apply_asg_suffix(_old_ctrl_ver, release, n)
+    _new_file_ver = apply_asg_suffix(_file_ver, release, n)
+    _new_ctrl_text = _restamp_control_text(
+        _ctrl_text, _old_ctrl_ver, _new_ctrl_ver)
+    _new_base = f'{_pkg}_{_new_file_ver}_{_arch}{_ext}'
+    _new_path = os.path.join(os.path.dirname(deb_path), _new_base)
+
+    with tempfile.TemporaryDirectory(prefix='asg-stamp-') as _work:
+        subprocess.run(['dpkg-deb', '-R', deb_path, _work],
+                       check=True, capture_output=True)
+        _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl_disk, 'w') as _fh:
+            _fh.write(_new_ctrl_text)
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _new_path],
+            check=True, capture_output=True,
+        )
+
+    if _new_path != deb_path:
+        os.remove(deb_path)
+    _result.update({'status': 'rewritten', 'new_path': _new_path,
+                    'version': _new_ctrl_ver})
+    return _result
