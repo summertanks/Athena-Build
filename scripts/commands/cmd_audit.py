@@ -870,7 +870,7 @@ class AuditCommandsMixin(SessionState):
           - virtually provided in repo? (with provider + version)
           - which consumers reference it (with exact constraint)
         """
-        console.print(f"\n=== Gap drill-in: {target} ===")
+        console.print(f"\ngap drill-in  target={target}\n")
         if self.cache is None or self.dep_tree is None:
             console.print(
                 "  cache or dep_tree not built — run `build_cache` and "

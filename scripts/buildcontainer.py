@@ -873,7 +873,7 @@ class BuildContainer:
         # no way for them to know they need to re-run `dep parse force`
         # before `source build`.  Symptom: build re-runs with the same
         # error as before, looking like the patch silently didn't
-        # apply.  Closes the long-standing TODO that lived here.
+        # apply.
         _live_patch_dir = os.path.join(
             self.patch_path, src_pkg.package, version_no_epoch(src_pkg.version),
         )

@@ -2086,6 +2086,6 @@ class MirrorCommandsMixin(SessionState):
         except FileNotFoundError:
             console.print("  PUBLISH_HALT was already clear")
         except OSError as _e:
-            console.print(f"  WARN: could not remove {_halt_path}: {_e}",
+            console.print(f"  WARNING: could not remove {_halt_path}: {_e}",
                           tui.COLOR_WARNING)
         return True
