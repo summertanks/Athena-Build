@@ -1634,33 +1634,50 @@ class BuildContainer:
         """
         if not built_files:
             return []
-        # --- 1. strip NMU → pristine (track delta + post-strip paths) ---
-        _any_stripped = False
+        # --- 1. strip NMU → pristine (post-strip paths) ---
+        # The strip ALWAYS runs and is load-bearing: a cross-source `>=`
+        # floor that dpkg-shlibdeps captured against the build container's
+        # security-suffixed lib (e.g. `perl (>= 5.36.0-7+deb12u3)`) must be
+        # peeled to its pristine base, else our `+asg`-stamped dep targets
+        # sort BELOW the `+deb` floor (`+asg` < `+deb` lexically) and the
+        # whole repo becomes uninstallable.  But a strip that ONLY rewrites a
+        # dependency constraint (filename unchanged) is NOT a delta of THIS
+        # package — its bytes are identical to pristine upstream.  Per
+        # Position-X (docs/asg-bump-position-x.md) we strip but do NOT bump on
+        # dep-constraint-only strips.  (Under self-hosting the build container
+        # carries our own pristine/+asg deps, so these strips become no-ops
+        # and the case vanishes entirely.)
         _current_paths: 'list[str]' = []
         for _path in built_files:
             _f = os.path.basename(_path)
             try:
                 _r = utils.strip_nmu_from_deb(_path)
-                if _r['status'] == 'rewritten':
-                    _any_stripped = True
-                    if _r['new_path'] != _path:
-                        logger.info(
-                            f"strip_nmu: {_f} → "
-                            f"{os.path.basename(_r['new_path'])}")
-                        if events is not None:
-                            events.append((
-                                'strip', _f,
-                                os.path.basename(_r['new_path'])))
+                if _r['status'] == 'rewritten' and _r['new_path'] != _path:
+                    logger.info(
+                        f"strip_nmu: {_f} → "
+                        f"{os.path.basename(_r['new_path'])}")
+                    if events is not None:
+                        events.append((
+                            'strip', _f,
+                            os.path.basename(_r['new_path'])))
                 _current_paths.append(_r.get('new_path', _path))
             except Exception as e:
                 logger.warning(f"strip_nmu: {_f} failed: {e}")
                 _current_paths.append(_path)
 
         # --- 2. decide delta; stamp +asg<R>u<N> if delta AND ledger present ---
+        # Delta triggers (Position-X): A=patched, B=source version carried a
+        # strippable Debian suffix, D=lineage (below).  A dep-constraint-only
+        # strip (the former "Case C") is deliberately NOT a trigger: it bumped
+        # the perl-XS / C-lib consumers of security-updated build-deps with no
+        # content change, churned on every snapshot advance, and self-hosting
+        # removes it regardless.  This now matches
+        # utils.compute_post_build_versions and
+        # virtual_build.synthesize_source_binaries (neither ever had Case C).
         _ledger = getattr(self, 'asg_ledger', None)
         _src_is_delta = (
             utils.strip_nmu_suffix(str(src_pkg.version)) != str(src_pkg.version))
-        _was_delta = _any_stripped or was_patched or _src_is_delta
+        _was_delta = was_patched or _src_is_delta
         # Lineage-continuation trigger: even when nothing in THIS build looks
         # delta-shaped, if the manifest already has a `+asg<R>u<N>` entry for
         # any output at the same pristine base, we MUST continue stamping —

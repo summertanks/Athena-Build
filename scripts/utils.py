@@ -937,6 +937,80 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
     return _result
 
 
+def destamp_asg_deb(deb_path: str) -> dict:
+    """Inverse of :func:`restamp_asg_deb`: peel a `+asg<R>u<N>` marker back to
+    the pristine base in place.  Used by the out-of-band re-normaliser that
+    corrects artifacts which were spuriously stamped under the retired
+    dep-constraint-strip trigger ("Case C").  Single dpkg-deb -R / -b cycle;
+    updates the filename version segment, the DEBIAN/control Version field, and
+    any intra-source sibling pin `(= <this binary's +asg version>)` collapsed
+    back to `(= <pristine base>)`.
+
+    Idempotent: a .deb whose version carries no `+asg` suffix returns status
+    'skipped' untouched, so re-running the re-normaliser is safe.  Returns
+    {'status': 'rewritten'|'malformed'|'skipped', 'new_path', 'version'}.
+    """
+    import subprocess
+    import tempfile
+    from debian.debfile import DebFile
+
+    _result = {'status': 'skipped', 'new_path': deb_path, 'version': None}
+    _base = os.path.basename(deb_path)
+    if not (_base.endswith(('.deb', '.udeb'))):
+        return _result
+    _name, _ext = os.path.splitext(_base)
+    _parts = _name.split('_')
+    if len(_parts) != 3:
+        _result['status'] = 'malformed'
+        return _result
+    _pkg, _file_ver, _arch = _parts
+    # No +asg marker on the filename → nothing to peel (idempotent).
+    if ASG_SUFFIX_RE.search(_file_ver) is None:
+        return _result
+
+    try:
+        with DebFile(deb_path) as _deb:
+            _ctrl_bytes = _deb.control.get_content('control')
+    except Exception:
+        _result['status'] = 'malformed'
+        return _result
+    if _ctrl_bytes is None:
+        _result['status'] = 'malformed'
+        return _result
+    _ctrl_text = _ctrl_bytes.decode('utf-8', errors='replace')
+
+    _old_ctrl_ver = _extract_version(_ctrl_text)
+    if not _old_ctrl_ver:
+        _result['status'] = 'malformed'
+        return _result
+    # Strip ONLY the +asg suffix (the artifact is already NMU-pristine under
+    # the marker).  ASG_SUFFIX_RE is end-anchored, so the epoch and base are
+    # preserved.
+    _new_ctrl_ver = ASG_SUFFIX_RE.sub('', _old_ctrl_ver)
+    _new_file_ver = ASG_SUFFIX_RE.sub('', _file_ver)
+    _new_ctrl_text = _restamp_control_text(
+        _ctrl_text, _old_ctrl_ver, _new_ctrl_ver)
+    _new_base = f'{_pkg}_{_new_file_ver}_{_arch}{_ext}'
+    _new_path = os.path.join(os.path.dirname(deb_path), _new_base)
+
+    with tempfile.TemporaryDirectory(prefix='asg-destamp-') as _work:
+        subprocess.run(['dpkg-deb', '-R', deb_path, _work],
+                       check=True, capture_output=True)
+        _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
+        with open(_ctrl_disk, 'w') as _fh:
+            _fh.write(_new_ctrl_text)
+        subprocess.run(
+            ['dpkg-deb', '--root-owner-group', '-b', _work, _new_path],
+            check=True, capture_output=True,
+        )
+
+    if _new_path != deb_path:
+        os.remove(deb_path)
+    _result.update({'status': 'rewritten', 'new_path': _new_path,
+                    'version': _new_ctrl_ver})
+    return _result
+
+
 def version_no_epoch(version: object) -> str:
     """Return a Debian Version's string form with the epoch stripped.
 
@@ -1688,6 +1762,68 @@ def classify_build_record(record: 'Optional[dict]') -> str:
     if _status == 'TUNNELED':
         return 'tunneled'
     return 'fail'
+
+
+def verify_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
+    """Verify every terminal build.json record's recorded ``output_hashes``
+    against the on-disk artifact.  Catches RECORD↔DISK drift: a record whose
+    stored SHA-256 no longer matches the file in repo/ — e.g. a post-record
+    re-pack / re-stamp (non-reproducible ``dpkg-deb -b`` timestamps) left the
+    record stale.
+
+    Distinct from :func:`backfill_output_hashes`, which only FILLS missing
+    hashes and SKIPS any record that already has one — so it never notices a
+    stale-but-present hash.  Distinct from ``source audit``/``_source_state``,
+    which checks file existence + ar-validity but never hashes.
+
+    Uses the cached :func:`get_sha256` (size+mtime sidecar), so a clean repo
+    re-verifies in milliseconds and only files whose mtime moved since the
+    last hash are recomputed — which is exactly the drift case.
+
+    Note the repo is a PRUNED subset of the declared output set (see
+    [[project_virtual_drift_is_repo_pruning_not_synth]]): an output that is
+    simply absent from disk is NORMAL, not a fault.  Only a present file whose
+    hash disagrees with the record is an integrity violation.  Both are
+    returned, separated, so the caller can treat them differently.
+
+    Returns {'scanned': int, 'mismatched': [(pkg, output)],
+             'absent': [(pkg, output)]}.
+    """
+    _index: 'dict[str, str]' = {}
+    for _root, _dirs, _files in os.walk(repo_root):
+        for _f in _files:
+            if _f.endswith(('.deb', '.udeb')):
+                _index[_f] = os.path.join(_root, _f)
+
+    _stats: dict = {'scanned': 0, 'mismatched': [], 'absent': []}
+    try:
+        _entries = sorted(os.listdir(buildlog_dir))
+    except OSError:
+        return _stats
+    for _entry in _entries:
+        if not _entry.endswith(BUILD_RECORD_SUFFIX):
+            continue
+        _pkg = _entry[:-len(BUILD_RECORD_SUFFIX)]
+        _rec = read_build_record(buildlog_dir, _pkg)
+        if _rec is None:
+            continue
+        # Terminal, successful records only — failed/interrupted have no
+        # authoritative on-disk artifact to match against.
+        if _rec.get('status') != 'PASS' and _rec.get('phase') != 'done':
+            continue
+        _hashes = _rec.get('output_hashes') or {}
+        for _o in _rec.get('outputs') or []:
+            _stats['scanned'] += 1
+            _path = _index.get(_o)
+            if _path is None:
+                _stats['absent'].append((_pkg, _o))   # pruned — not a fault
+                continue
+            _rec_h = _hashes.get(_o)
+            if not _rec_h:
+                continue   # no recorded hash → backfill's job, not drift
+            if get_sha256(_path) != _rec_h:
+                _stats['mismatched'].append((_pkg, _o))
+    return _stats
 
 
 def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:

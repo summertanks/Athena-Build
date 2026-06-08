@@ -84,9 +84,9 @@ class BuildFlags:
     from running on stale or missing state without repeating the earlier work.
 
     UX-04: when constructed via `BuildFlags.load(path)`, every flag
-    transition autosaves to a JSON sidecar (cheap, ~1 ms).  Cross-restart
-    visibility — operator sees prior-state banner via `restored_summary()`
-    in main() even without running `resume`.
+    transition autosaves to a JSON sidecar (cheap, ~1 ms).  `restored_summary()`
+    remains (dormant) for a future relook; the startup banner that consumed
+    it was removed alongside the `resume` command 2026-06-08.
     """
 
     # Class-level annotations — mypy uses these to see the attributes that
@@ -117,8 +117,8 @@ class BuildFlags:
     # Flags whose meaning depends on in-memory state (Cache, DT,
     # BuildContainer, signing key validity) that has to be re-established
     # at session start.  Persisted to disk but reset to False on load —
-    # `cmd_resume` flips cache_ready / dep_check_ready True after the
-    # restore wires Cache + DT; `cmd_init_container` flips
+    # `cache parse` rebuilds Cache + DT and flips cache_ready /
+    # dep_check_ready True; `cmd_init_container` flips
     # build_container_ready; `_ensure_signing_key_verified` does the key.
     _IN_MEMORY_ONLY = frozenset((
         'cache_ready', 'dep_check_ready',
@@ -296,9 +296,8 @@ class BuildSession:
         self.container: 'Optional[buildcontainer.BuildContainer]' = None
         # UX-04: BuildFlags.load reads buildflags.json (created on every
         # flag transition) and resets _IN_MEMORY_ONLY flags to False —
-        # they need cmd_resume to actually rebuild Cache + DT before
-        # they're true again.  Operator sees prior state via the
-        # restored_summary banner in main() without needing `resume`.
+        # they need `cache parse` to actually rebuild Cache + DT before
+        # they're true again.
         self.flags: BuildFlags = BuildFlags.load(
             BuildFlags.default_path(config))
         self.last_source_build_counts: 'Optional[dict]' = None
@@ -2774,6 +2773,13 @@ class BuildSession:
         _unresolved, _ = repo_audit.audit_dep_closure(
             _state, consumer_set=_corpus,
         )
+        # Classify the actionable subclass of the unresolved set: bare
+        # pristine `=` pins whose repo target is +asg-stamped (the
+        # cross-source strip hazard).  A subset of _unresolved, so it is
+        # NOT added to the risk count — surfaced separately with a remedy.
+        _asg_pins = repo_audit.detect_dangling_asg_equals_pins(
+            _state, consumer_set=_corpus,
+        )
         _live = self._resolve_live_cohort()
         _installer = self._resolve_installer_cohort()
         _live_conflicts = (
@@ -2787,13 +2793,26 @@ class BuildSession:
             ) if _installer is not None else []
         )
 
+        # RECORD↔DISK integrity: every terminal build.json output_hashes
+        # entry must match the on-disk artifact.  Catches stale hashes from a
+        # post-record re-pack/re-stamp (mtime-cached, so a clean repo is near
+        # free).  'absent' outputs are NORMAL (repo is a pruned subset), so
+        # only 'mismatched' counts as a risk.
+        _hash_audit = utils.verify_output_hashes(
+            os.path.join(self.config.dir_log, 'build'), self.config.dir_repo,
+        )
+        _hash_drift = _hash_audit['mismatched']
+
         _bad = (
             len(_unresolved) + len(_live_conflicts) + len(_inst_conflicts)
+            + len(_hash_drift)
         )
         if _bad == 0:
             console.print(
                 f"Repo audit OK: {len(_state.packages)} pkgs, "
-                f"hard-dep closure clean, no install-cohort conflicts."
+                f"hard-dep closure clean, no install-cohort conflicts, "
+                f"build.json↔disk hashes match ({_hash_audit['scanned']} "
+                f"outputs checked)."
             )
             return True
         console.print(
@@ -2803,13 +2822,31 @@ class BuildSession:
             f"  CONFLICTS in LIVE cohort:                    "
             f"{len(_live_conflicts)}\n"
             f"  CONFLICTS in INSTALLER ramdisk cohort:       "
-            f"{len(_inst_conflicts)}"
+            f"{len(_inst_conflicts)}\n"
+            f"  build.json↔disk HASH MISMATCHES:             "
+            f"{len(_hash_drift)}"
         )
+        if _hash_drift:
+            _hshow = min(10, len(_hash_drift))
+            console.print(
+                f"\nFirst {_hshow} HASH MISMATCHES (record ≠ on-disk — "
+                f"re-pack drift; refresh the record or rebuild):")
+            for _pkg, _o in _hash_drift[:_hshow]:
+                console.print(f"  {_pkg}  {_o}")
         _show = min(10, len(_unresolved))
         if _show:
             console.print(f"\nFirst {_show} UNRESOLVED:")
             for _pkg, _field, _rel, _why in _unresolved[:_show]:
                 console.print(f"  {_pkg}  {_field}: {_rel}")
+        if _asg_pins:
+            _ashow = min(10, len(_asg_pins))
+            console.print(
+                f"\n{len(_asg_pins)} of these are dangling `=` pins on "
+                f"+asg-stamped targets (cross-source strip hazard); "
+                f"first {_ashow}:")
+            for _c, _f, _t, _pin, _av, _rem in _asg_pins[:_ashow]:
+                console.print(
+                    f"  {_c}  {_f}: {_t} (= {_pin})  → repo has {_av};  {_rem}")
         _show = min(10, len(_live_conflicts))
         if _show:
             console.print(f"\nFirst {_show} LIVE conflicts:")
@@ -6529,7 +6566,7 @@ class BuildSession:
         )
 
     def _superseded_binary_names(self) -> 'set[str]':
-        """Binary names a SELECTED package supersedes via Conflicts/Replaces
+        """Binary names a SELECTED FORK supersedes via Conflicts/Replaces
         (e.g. athena-setup-udeb Conflicts apt-setup-udeb), EXCLUDING names that
         are themselves selected (so genuine pool mutual-exclusions like
         grub-pc/grub-efi-amd64 are kept — both are selected pool extras).
@@ -6538,7 +6575,22 @@ class BuildSession:
         upstream binary (apt-setup-udeb) would otherwise ship + run alongside
         the fork — the security.debian.org install bug.  Used to drop such
         binaries from the cleanup AND to exclude them from the installer pool.
+
+        ONLY fork packages are scanned.  A normal upstream package's
+        Conflicts/Replaces is ordinary Debian metadata, NOT a supersession —
+        e.g. `usrmerge Conflicts: cryptsetup` (usr-merge transition),
+        `busybox Replaces: busybox-static` (package split),
+        `binutils-x86-64-linux-gnu Replaces: binutils-dev`.  Treating those as
+        supersessions wrongly marked 82 production-sibling binaries (from 49
+        selected sources) as removable orphans — fixed 2026-06-08 by gating on
+        the fork set.  Same-name forks are covered via the source check.
         """
+        _cache = getattr(self, 'cache', None)
+        _fork_names: 'set[str]' = (
+            set(getattr(_cache, '_fork_pkg_names', set()) or set())
+            | set(getattr(_cache, '_fork_src_names', set()) or set())
+            | set(getattr(_cache, '_fork_udeb_names', set()) or set())
+        ) if _cache is not None else set()
         _selected_names: 'set[str]' = set()
         _superseded: 'set[str]' = set()
         for _tree in (self.dep_tree, self.udeb_dep_tree):
@@ -6547,6 +6599,11 @@ class BuildSession:
             for _name, _pkgobj in (
                     getattr(_tree, 'selected_pkgs', None) or {}).items():
                 _selected_names.add(_name)
+                # Only a FORK's Conflicts/Replaces supersede an upstream
+                # binary; everything else is normal transitional metadata.
+                _src = (_pkgobj.get('Source') or _name).split(' ', 1)[0]
+                if not (_name in _fork_names or _src in _fork_names):
+                    continue
                 for _field in ('Conflicts', 'Replaces'):
                     _val = _pkgobj.get(_field) or ''
                     for _dep in _val.split(','):
@@ -11062,74 +11119,6 @@ class BuildSession:
         _value = _getter(self)
         console.print(f"  {_param}  =  {_value}")
 
-    def cmd_resume(self, *args) -> None:
-        """UX-04: restore Cache + DependencyTree + udeb_dep_tree from the
-        last persisted session, gated by a fingerprint of every input
-        that fed the saved state.
-
-        Sequence:
-          1. persistence.restore_session — verify fingerprint, unpickle
-             Cache + DT, rewire DT's __cache backref.  Returns None on
-             any failure (the operator gets a clear "what changed" or
-             "what's missing" message).
-          2. Best-effort cmd_init_container — re-init Docker client.
-             Failure here doesn't void the restore; cache_ready and
-             dep_check_ready stay True, only build_container_ready
-             stays False.
-
-        On success: cache_ready + dep_check_ready True in-memory (they
-        were reset by BuildFlags.load — UX-04 _IN_MEMORY_ONLY invariant).
-        Operator can immediately run any command without paying the
-        cache build + cache parse cost.
-
-        On failure: the session is left in the same shape as a fresh
-        BuildSession (cache/dep_tree None; the operator runs
-        `cache parse` to rebuild).
-        """
-        del args
-        if self.cache is not None and self.flags.cache_ready:
-            console.print(
-                "resume: already restored this session — no-op",
-                tui.COLOR_INFO)
-            return
-        # UX-05g: defensive reset on entry so a partial-restore failure
-        # never leaves a stale True from a prior attempt.
-        self.flags.cache_ready = False
-        self.flags.dep_check_ready = False
-        _restored = persistence.restore_session(
-            self.config,
-            lambda msg: console.print(msg, tui.COLOR_WARNING),
-        )
-        if _restored is None:
-            return
-        self.cache = _restored.cache
-        self.dep_tree = _restored.dep_tree
-        self.udeb_dep_tree = _restored.udeb_dep_tree
-        if _restored.last_source_build_counts is not None:
-            self.last_source_build_counts = _restored.last_source_build_counts
-        self.flags.cache_ready = True
-        self.flags.dep_check_ready = True
-        # Use the local _restored references for the print so mypy doesn't
-        # need to narrow self.cache / self.dep_tree out of their Optional.
-        _n_pkgs = sum(len(_v) for _v in _restored.cache.package_hashtable.values())
-        _n_srcs = sum(len(_v) for _v in _restored.cache.source_hashtable.values())
-        console.print(
-            f"resume: restored Cache ({_n_pkgs:,} pkgs / {_n_srcs:,} src) "
-            f"+ DependencyTree ({len(_restored.dep_tree.selected_pkgs):,} selected_pkgs / "
-            f"{len(_restored.dep_tree.selected_srcs):,} selected_srcs)",
-            tui.COLOR_HIGHLIGHT,
-        )
-        # Best-effort container re-init.  Failure → build_container_ready
-        # stays False; operator runs `container init` later.
-        try:
-            self.cmd_init_container()
-        except Exception as _e:  # noqa: BLE001 — Docker unreachable shouldn't void the resume
-            logger.warning(f"resume: container re-init failed: {_e}")
-            console.print(
-                f"resume: container re-init failed — {_e}.  "
-                "Run `container init` manually before building.",
-                tui.COLOR_WARNING)
-
     def cmd_auto_run(self, action: str = '', *args):
         """Group dispatcher: bare `autorun` → autorun live (preserves
         existing UX); explicit `autorun live` or `autorun installer`
@@ -11377,14 +11366,6 @@ def main(banner: str) -> None:
     if _auto_yes:
         sys.argv.remove('--yes')
 
-    # UX-04: `--resume` auto-fires cmd_resume after command registration
-    # so `build-system.sh --resume` lands the operator at the same place
-    # the prior session left off (Cache + DT restored from pickle,
-    # fingerprint-gated).
-    _resume = '--resume' in sys.argv
-    if _resume:
-        sys.argv.remove('--resume')
-
     # UX-05e: `--cmd <cmd>` queues one or more commands to run sequentially
     # then exit, no REPL.  Multiple --cmd allowed; order preserved.
     # Implies --headless (the TUI's curses screen makes no sense for one-
@@ -11514,7 +11495,6 @@ def main(banner: str) -> None:
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       \tsbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        \tcve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    \tautorun [live|installer]')
-    tui.register_command('resume',    session.cmd_resume,    'Resume:     \tresume — UX-04 restore Cache + DT from prior session')
     tui.register_command('set',       session.cmd_set,       'Set:        \tset <param> <value> — session-local config change')
     tui.register_command('get',       session.cmd_get,       'Get:        \tget [param] — show current config value(s)')
     tui.register_command('print',     session.cmd_print,     'Print:      \tprint build state — try `print help`')
@@ -11535,27 +11515,6 @@ def main(banner: str) -> None:
             _mode_color)
     else:
         console.print("\tMode\t\t\tdistribution", _mode_color)
-
-    # UX-04: announce persisted-flag state across restarts so the
-    # operator knows prior session left something behind without needing
-    # to ask.  When --resume is set, suppress the "not yet wired" hint
-    # since cmd_resume is about to fire and wire it — the hint would be
-    # immediately contradicted by the resume output.
-    _restored = session.flags.restored_summary()
-    if _restored:
-        console.print(
-            f"Restored from prior session: {_restored}", tui.COLOR_INFO)
-        if not _resume:
-            console.print(
-                "  in-memory state (cache + dep tree) not yet wired — run "
-                "`resume` to restore, or `cache parse` to rebuild.",
-                tui.COLOR_INFO,
-            )
-
-    # UX-04: `--resume` auto-fires cmd_resume after registration so the
-    # operator can `build-system.sh --resume` and get instant state.
-    if _resume:
-        session.cmd_resume()
 
     # API-01: with the session + every command registered, raise the
     # HTTP server (daemon thread) and hand the main thread to the job

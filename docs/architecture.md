@@ -195,8 +195,10 @@ The toolchain is 25 top-level Python modules under `scripts/`, plus a
   the parsed `Cache` + `DependencyTree` via pickle protocol 5 + gzip
   under `<dir_cache>/`; fingerprint-gated (config + mirror InReleases +
   fork tree-hashes + patch-set hashes + snapshot + arch + profiles)
-  so a `cache parse`-invalidating change refuses restore.  Drives
-  `cmd_resume` and `--resume` (UX-04).
+  so a `cache parse`-invalidating change refuses restore.  `save_session`
+  still writes the blob (dormant); the `resume` command / `--resume` flag
+  that consumed it were removed 2026-06-08 pending a relook, so the module
+  has no live restore consumer right now.
 - **`select_packages.py`** — curses-only interactive package picker
   behind `cache select`.
 

@@ -884,6 +884,71 @@ def audit_dep_closure(state: RepoState,
     return _unresolved, _weak
 
 
+def detect_dangling_asg_equals_pins(
+        state: RepoState,
+        consumer_set: 'Optional[frozenset]' = None) -> 'list[tuple]':
+    """Classify the install-breaking subclass of unresolved `=` pins.
+
+    A hard `Depends`/`Pre-Depends` exact pin `T (= V)` that nothing
+    satisfies BECAUSE the repo carries T at `V+asg<R>u<N>` (a stamped
+    target) rather than at the pristine `V` the pin was stripped down to.
+
+    This is the cross-source `=`-pin hazard: our build generates A's dep
+    against the upstream snapshot's T (`= V+debNuN`), the post-build strip
+    peels it to `= V`, but our published T is `V+asg<R>u<N>` — and since
+    `+asg` sorts BELOW `+deb` and `V+asg…` ≠ `V`, the pin dangles and A is
+    uninstallable.  Same-source SIBLING pins are NOT flagged: the uniform-N
+    restamp already rewrites them to `(= V+asg<R>u<N>)`, so an exact match
+    exists and they never reach this classifier.  `audit_dep_closure`
+    already reports these as generic unresolved deps; this surfaces the
+    specific, actionable subclass with a remedy.
+
+    Returns list of
+    (consumer, field, target, pinned_version, available_version, remedy).
+    """
+    _out: 'list[tuple]' = []
+    for _pkg, _entry in state.packages.items():
+        if consumer_set is not None and _pkg not in consumer_set:
+            continue
+        for _field in _HARD_DEP_FIELDS:
+            _raw = _entry.get(_field, '')
+            if not _raw:
+                continue
+            try:
+                _relations = PkgRelation.parse_relations(_raw)
+            except Exception:
+                continue
+            for _or_group in _relations:
+                # An OR-group with a working alternative is satisfiable a
+                # different way — not our bug.  Only single-alternative `=`
+                # pins can dangle this way.
+                if len(_or_group) != 1:
+                    continue
+                _vc = _or_group[0].get('version')
+                if not _vc:
+                    continue
+                _op, _wver = _vc
+                if _op != '=':
+                    continue
+                _target = _or_group[0].get('name', '')
+                _tentry = state.packages.get(_target)
+                if _tentry is None:
+                    continue
+                _avail = _tentry.get('Version', '')
+                if _avail == _wver:
+                    continue          # exact match → satisfied, fine
+                # The actionable subclass: same pristine base, the available
+                # target is +asg-stamped, and the pin is the bare pristine.
+                if (utils.pristine_base(_avail) == utils.pristine_base(_wver)
+                        and utils.parse_asg_suffix(_avail) is not None
+                        and utils.parse_asg_suffix(_wver) is None):
+                    _remedy = (f"relax to `{_target} (>= {_wver})` or rewrite "
+                               f"the pin to `(= {_avail})`")
+                    _out.append(
+                        (_pkg, _field, _target, _wver, _avail, _remedy))
+    return _out
+
+
 def audit_conflict_cohort(state: RepoState, cohort: frozenset,
                             progress_cb: Optional[Callable[[], None]] = None
                             ) -> list:

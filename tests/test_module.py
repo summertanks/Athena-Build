@@ -3711,30 +3711,47 @@ def test_iso_installer_select_pool_files_excludes_superseded():
 
 
 def test_superseded_binary_names_excludes_selected():
-    """_superseded_binary_names returns names a SELECTED pkg Conflicts/Replaces,
-    minus names that are themselves selected — so a rename fork's upstream
-    binary is flagged, but a genuine pool mutual-exclusion (grub-pc/grub-efi,
-    both selected) is not."""
+    """_superseded_binary_names returns names a SELECTED FORK Conflicts/Replaces,
+    minus names that are themselves selected.  ONLY fork packages count: a
+    rename fork's upstream binary is flagged, but a NON-fork's ordinary
+    transitional Conflicts/Replaces (usrmerge Conflicts cryptsetup) is NOT a
+    supersession — that over-broad scan wrongly flagged 82 production-sibling
+    binaries (fixed 2026-06-08)."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
     _sess = BuildSession.__new__(BuildSession)
 
+    # Fork registry the cache exposes (fork/source/ discovery).
+    class _Cache:
+        _fork_pkg_names = {'athena-setup-udeb'}
+        _fork_src_names: set = set()
+        _fork_udeb_names: set = set()
+    _sess.cache = _Cache()
+
     class _Tree:
         selected_pkgs = {
+            # FORK → its Conflicts/Replaces ARE supersessions.
             'athena-setup-udeb': {'Package': 'athena-setup-udeb',
                                   'Conflicts': 'apt-setup-udeb',
                                   'Replaces': 'apt-setup-udeb'},
+            # NON-fork pool mutual-exclusion (both selected) — not superseded.
             'grub-efi-amd64': {'Package': 'grub-efi-amd64',
                                'Conflicts': 'grub-pc'},
             'grub-pc': {'Package': 'grub-pc'},          # also a selected pool extra
+            # NON-fork ordinary transitional Conflicts — MUST be ignored.
+            'usrmerge': {'Package': 'usrmerge',
+                         'Conflicts': 'cryptsetup'},
         }
 
     _sess.dep_tree = _Tree()
     _sess.udeb_dep_tree = None
     _out = _sess._superseded_binary_names()
-    assert 'apt-setup-udeb' in _out
-    assert 'grub-pc' not in _out
+    assert 'apt-setup-udeb' in _out, "fork's superseded upstream binary"
+    assert 'grub-pc' not in _out, "selected pool extra not superseded"
+    assert 'cryptsetup' not in _out, (
+        "a NON-fork's transitional Conflicts must NOT be treated as a "
+        "supersession (the 82-false-orphan bug)")
 
 
 def test_iso_installer_select_pool_files_drops_dbgsym_unconditionally():
@@ -13035,6 +13052,48 @@ def test_audit_dep_closure_invokes_progress_cb_per_pkg():
     )
 
 
+def test_detect_dangling_asg_equals_pins_classifies_cross_source_pin():
+    """The `=`-pin detector flags ONLY the actionable subclass: a bare
+    pristine exact pin `T (= V)` whose repo target is `V+asg<R>u<N>`.
+    A pin that already carries +asg (a restamped sibling) is satisfied and
+    a pristine pin satisfied by a pristine target are both left alone."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from repo_audit import detect_dangling_asg_equals_pins, RepoState
+
+    _state = RepoState(
+        packages={
+            # consumer A: cross-source pin stripped to pristine; target is
+            # stamped → DANGLES → must be flagged.
+            'aconsumer': {'Package': 'aconsumer', 'Version': '1.0-1',
+                          'Depends': 'libfoo (= 2.0-1)'},
+            'libfoo':    {'Package': 'libfoo', 'Version': '2.0-1+asg1u3'},
+            # consumer B: sibling pin already restamped to +asg → satisfied,
+            # NOT flagged.
+            'bconsumer': {'Package': 'bconsumer', 'Version': '3.0-1+asg1u2',
+                          'Pre-Depends': 'libbar (= 3.0-1+asg1u2)'},
+            'libbar':    {'Package': 'libbar', 'Version': '3.0-1+asg1u2'},
+            # consumer C: pristine pin satisfied by a pristine target →
+            # NOT flagged (no asg involved).
+            'cconsumer': {'Package': 'cconsumer', 'Version': '4.0-1',
+                          'Depends': 'libbaz (= 5.0-1)'},
+            'libbaz':    {'Package': 'libbaz', 'Version': '5.0-1'},
+        },
+        provides_index={},
+        packages_file='',
+        repo_mtime=0.0,
+    )
+    _findings = detect_dangling_asg_equals_pins(_state)
+    assert len(_findings) == 1, f"expected exactly 1 finding, got {_findings}"
+    _consumer, _field, _target, _pinned, _avail, _remedy = _findings[0]
+    assert _consumer == 'aconsumer'
+    assert _field == 'Depends'
+    assert _target == 'libfoo'
+    assert _pinned == '2.0-1'
+    assert _avail == '2.0-1+asg1u3'
+    assert '>= 2.0-1' in _remedy and '2.0-1+asg1u3' in _remedy
+
+
 def test_audit_conflict_cohort_invokes_progress_cb_per_pkg():
     """Same plumbing as audit_dep_closure, for the conflict gate."""
     import sys
@@ -18300,6 +18359,114 @@ def test_restamp_asg_deb_bumps_version_and_intra_source_deps():
             f"foreign dep should stay pristine: {_deps!r}")
 
 
+def test_destamp_asg_deb_roundtrips_restamp_and_is_idempotent():
+    """destamp_asg_deb is the exact inverse of restamp_asg_deb: peel the
+    +asg marker off filename, Version, and the intra-source sibling pin,
+    landing back at the pristine base (epoch preserved, foreign `>=` dep
+    untouched).  A second destamp is a no-op ('skipped').  This is the
+    primitive the out-of-band re-normaliser uses to correct the 19
+    spuriously-stamped (former Case-C) artifacts."""
+    import subprocess, tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from utils import restamp_asg_deb, destamp_asg_deb
+    try:
+        subprocess.run(['dpkg-deb', '--version'],
+                       check=True, capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("SKIP test_destamp_asg_deb (no dpkg-deb)")
+        return
+    with tempfile.TemporaryDirectory() as _tmp:
+        _work = os.path.join(_tmp, 'src')
+        os.makedirs(os.path.join(_work, 'DEBIAN'))
+        os.makedirs(os.path.join(_work, 'usr', 'lib'))
+        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
+            fh.write(
+                'Package: openssl\n'
+                'Version: 1:3.0.15-1\n'
+                'Architecture: amd64\n'
+                'Maintainer: T <t@l>\n'
+                'Depends: libssl3 (= 1:3.0.15-1), libc6 (>= 2.36)\n'
+                'Description: destamp test\n'
+            )
+        with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as fh:
+            fh.write('x\n')
+        _orig = os.path.join(_tmp, 'openssl_3.0.15-1_amd64.deb')
+        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _orig],
+                       check=True, capture_output=True)
+
+        # restamp → +asg1u1, then destamp back to pristine.
+        _r = restamp_asg_deb(_orig, 1, 1)
+        assert _r['status'] == 'rewritten', _r
+        _stamped = _r['new_path']
+        assert os.path.basename(_stamped) == 'openssl_3.0.15-1+asg1u1_amd64.deb'
+
+        _d = destamp_asg_deb(_stamped)
+        assert _d['status'] == 'rewritten', _d
+        assert os.path.basename(_d['new_path']) == 'openssl_3.0.15-1_amd64.deb', _d
+        assert _d['version'] == '1:3.0.15-1', _d
+        assert not os.path.exists(_stamped), "stamped file must be removed on rename"
+        _ver = subprocess.run(['dpkg-deb', '-f', _d['new_path'], 'Version'],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        assert _ver == '1:3.0.15-1', f"version not peeled: {_ver!r}"
+        _deps = subprocess.run(['dpkg-deb', '-f', _d['new_path'], 'Depends'],
+                               check=True, capture_output=True, text=True).stdout.strip()
+        assert 'libssl3 (= 1:3.0.15-1)' in _deps, f"sibling pin not peeled: {_deps!r}"
+        assert 'libc6 (>= 2.36)' in _deps, f"foreign dep changed: {_deps!r}"
+
+        # Idempotent: destamping an already-pristine artifact is a no-op.
+        _again = destamp_asg_deb(_d['new_path'])
+        assert _again['status'] == 'skipped', _again
+        assert _again['new_path'] == _d['new_path']
+
+
+def test_verify_output_hashes_flags_only_present_drift_not_pruned_absent():
+    """verify_output_hashes flags a record output whose on-disk file's
+    SHA-256 disagrees with the recorded hash (re-pack drift), but does NOT
+    flag an output that is simply ABSENT from the pruned repo.  A matching
+    output is silent."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        _repo = os.path.join(_root, 'repo', 'main')
+        _log = os.path.join(_root, 'log', 'build')
+        os.makedirs(_repo)
+        os.makedirs(_log)
+        # Two real debs on disk: 'good' (hash will match) + 'drift' (we will
+        # record a WRONG hash for it).  A third output 'pruned' is named in
+        # the record but never written to disk.
+        _good = os.path.join(_repo, 'good_1.0-1_amd64.deb')
+        _drift = os.path.join(_repo, 'drift_1.0-1_amd64.deb')
+        _build_minimal_deb(_good, 'good', '1.0-1', 'amd64')
+        _build_minimal_deb(_drift, 'drift', '1.0-1', 'amd64')
+        _rec = _u.new_build_record(
+            package='src', intended_version='1.0-1',
+            patch_set_hash='', started='2026-06-08T00:00:00Z')
+        _rec.update({
+            'phase': 'done', 'status': 'PASS',
+            'outputs': ['good_1.0-1_amd64.deb', 'drift_1.0-1_amd64.deb',
+                        'pruned_1.0-1_amd64.deb'],
+            'output_hashes': {
+                'good_1.0-1_amd64.deb': _u.get_sha256(_good),     # correct
+                'drift_1.0-1_amd64.deb': 'f' * 64,                # WRONG
+                'pruned_1.0-1_amd64.deb': 'a' * 64,               # absent
+            },
+            'output_count': 3,
+        })
+        _u.write_build_record(_log, _rec)
+
+        _stats = _u.verify_output_hashes(_log, _repo)
+        assert _stats['scanned'] == 3, _stats
+        assert _stats['mismatched'] == [('src', 'drift_1.0-1_amd64.deb')], (
+            f"only the present-but-wrong file should be flagged: {_stats}")
+        assert ('src', 'pruned_1.0-1_amd64.deb') in _stats['absent'], _stats
+        # the matching + absent ones are NOT mismatched
+        assert ('src', 'good_1.0-1_amd64.deb') not in _stats['mismatched']
+        assert ('src', 'pruned_1.0-1_amd64.deb') not in _stats['mismatched']
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UPD-01 step 2 — append-only enforcement (additive publish + segregate)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21646,6 +21813,55 @@ def test_normalize_built_artifacts_no_stamp_without_ledger():
         assert os.path.exists(_p), "without a ledger the file must stay pristine"
 
 
+def test_normalize_built_artifacts_dep_only_strip_does_not_bump():
+    """Position-X: a strip that rewrites ONLY a dependency constraint
+    (the package's own filename/version is already pristine) is NOT a
+    delta.  The dep constraint is still normalised (the strip is
+    load-bearing — `+asg` < `+deb` lexically, so an unstripped floor would
+    make the repo uninstallable), but the binary ships pristine, no +asg
+    stamp.  This is the libclone-perl / perl-XS scenario (the former
+    "Case C"): building against a security-suffixed build-dep
+    (`perl (>= 5.36.0-7+deb12u3)`) must not mint a spurious +asg
+    generation on a byte-identical package, and must agree with
+    compute_post_build_versions / virtual_build (neither bumps here).
+    """
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from debian.debfile import DebFile
+    with tempfile.TemporaryDirectory() as _tmp:
+        _p = os.path.join(_tmp, 'libclone-perl_0.46-1_amd64.deb')
+        _build_minimal_deb(_p, 'libclone-perl', '0.46-1', 'amd64',
+                           depends='perl (>= 5.36.0-7+deb12u3)')
+        _bc = _make_buildcontainer_stub(repo=_tmp)
+        # Ledger present (a refresh build) but NO lineage at this base — so
+        # under the old Case-C logic ONLY the dep-strip could have bumped.
+        _bc.asg_ledger = {'libclone-perl': ['0.46-1']}
+
+        class _FakeConfig:
+            build_version = '1'
+
+        class _Src:
+            package = 'libclone-perl'
+            version = '0.46-1'
+
+        _bc.config = _FakeConfig()
+        _final = _bc._normalize_built_artifacts(_Src(), [_p], was_patched=False)
+        # (1) No +asg rename — the pristine artifact stays put.
+        assert os.path.exists(_p), (
+            "dep-only strip must NOT mint a +asg stamp (Position-X)")
+        assert not any('+asg' in os.path.basename(_f) for _f in _final), (
+            f"no sibling should be +asg-stamped, got {_final}")
+        # (2) The strip itself still ran — the +deb12u3 dep was normalised.
+        with DebFile(_p) as _deb:
+            _ctrl = _deb.control.get_content('control').decode()
+        assert 'perl (>= 5.36.0-7)' in _ctrl, (
+            f"dep constraint must be stripped to pristine, got: {_ctrl}")
+        assert '+deb12u3' not in _ctrl, (
+            "Debian suffix must be gone from the dep constraint")
+
+
 def test_postbuild_convergence_hard_fails_when_check_build_still_false():
     """Guard B: the per-source build path must re-check check_build
     after a PASS and hard-fail (not silently rebuild next run) on
@@ -23486,34 +23702,6 @@ def test_ux04_buildflags_restored_summary_excludes_in_memory_flags():
         assert 'signing_key' not in _summary, _summary
         assert 'download' in _summary, _summary
         assert 'source_build' in _summary, _summary
-
-
-def test_ux04_cmd_resume_registered():
-    """resume command is registered in main() (pin the wiring so a
-    refactor doesn't drop it silently)."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _b = fh.read()
-    assert "tui.register_command('resume'" in _b, (
-        "main() must register the resume command")
-    assert "session.cmd_resume" in _b
-
-
-def test_ux04_resume_flag_in_build_system_sh():
-    """--resume plumbed through build-system.sh, listed in usage, in
-    getopt long-options, parsed, appended to PY_EXTRA."""
-    _sh = os.path.join(_ROOT, 'build-system.sh')
-    with open(_sh) as fh:
-        _b = fh.read()
-    assert '--resume' in _b, "build-system.sh missing --resume"
-    assert 'RESUME=' in _b, "build-system.sh missing RESUME variable"
-    assert "PY_EXTRA+=(--resume)" in _b, (
-        "build-system.sh must forward --resume to build.py")
-    # getopt long-options includes 'resume'
-    import re
-    _m = re.search(r"--long\s+'([^']*)'", _b)
-    assert _m and 'resume' in _m.group(1), (
-        f"getopt long-options missing 'resume': {_m.group(1) if _m else '<no match>'}")
 
 
 def _sbom_test_buildconfig(tmp: str) -> object:
@@ -30430,6 +30618,7 @@ def main() -> int:
         test_resolve_live_cohort_subtracts_pool_and_installer,
         test_resolve_installer_cohort_uses_udeb_tree,
         test_audit_dep_closure_resolves_against_whole_repo,
+        test_detect_dangling_asg_equals_pins_classifies_cross_source_pin,
         test_audit_conflict_cohort_only_flags_within_cohort,
         test_dedupe_bidirectional_conflicts_collapses_pairs,
         test_audit_versioned_provides_satisfies_any_operator,
@@ -30520,6 +30709,8 @@ def main() -> int:
         test_asg_filename_maps_pristine_to_stamped,
         test_match_pristine_base_reconciles_stamped_artifact,
         test_restamp_asg_deb_bumps_version_and_intra_source_deps,
+        test_destamp_asg_deb_roundtrips_restamp_and_is_idempotent,
+        test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
         test_docker_stream_and_wait_backfills_log_on_timeout,
@@ -30654,6 +30845,7 @@ def main() -> int:
         test_normalize_built_artifacts_stamps_lineage_continuation_when_ledger_has_prior_asg,
         test_normalize_built_artifacts_no_stamp_when_ledger_has_no_lineage,
         test_normalize_built_artifacts_no_stamp_without_ledger,
+        test_normalize_built_artifacts_dep_only_strip_does_not_bump,
         test_postbuild_convergence_hard_fails_when_check_build_still_false,
         # UPD-01 step 4: remote ledger + version-aware local cleanup
         test_parse_packages_to_ledger_multiversion_epoch_stripped,
@@ -30719,8 +30911,6 @@ def main() -> int:
         test_ux04_buildflags_autosave_round_trip,
         test_ux04_buildflags_in_memory_only_reset_on_load,
         test_ux04_buildflags_restored_summary_excludes_in_memory_flags,
-        test_ux04_cmd_resume_registered,
-        test_ux04_resume_flag_in_build_system_sh,
         test_ux04_save_session_called_after_parse_dependency,
         # CONF-07 SBOM
         test_sbom_emits_valid_cyclonedx_skeleton,
