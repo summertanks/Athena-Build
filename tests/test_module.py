@@ -19887,6 +19887,68 @@ def test_virtual_arch_gate_dpkg_table_semantics():
         'amd64')
 
 
+def test_tunnel_filenames_full_set_arch_profile_filtered():
+    """Option A: _tunnel_filenames_for_source returns the source's FULL
+    declared binary set filtered by arch + active profiles (the same
+    gates virtual uses) — resolving non-closure binaries from the full
+    cache universe — not just the dep-closure subset.  arch-mismatched
+    and profile-dropped binaries are excluded."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_pkg
+    apt_pkg.init_system()
+    from build import BuildSession
+
+    class _Cfg:
+        arch = 'amd64'
+        build_profiles = frozenset({'nodoc'})
+        dir_fork_source_repo = None
+
+    class _Mirror:
+        id = 'main'
+
+    class _Src:
+        package = 'fw'
+        binary = ['fw-common', 'fw-amd64-only', 'fw-arm-only',
+                  'fw-doc', 'fw-udeb']
+        package_list = [
+            'fw-common deb libs optional arch=all',
+            'fw-amd64-only deb libs optional arch=amd64',
+            'fw-arm-only deb libs optional arch=arm64',
+            'fw-doc deb doc optional arch=all profile=!nodoc',
+            'fw-udeb udeb debian-installer optional arch=all',
+        ]
+        files: dict = {}
+        _mirror = _Mirror()
+
+    class _Cache:
+        source_hashtable = {'fw': [_Src()]}
+
+        def get_packages(self, name):
+            _m = {'fw-common': 'pool/f/fw-common_1_all.deb',
+                  'fw-amd64-only': 'pool/f/fw-amd64-only_1_amd64.deb'}
+            return ([{'Version': '1', 'Filename': _m[name]}]
+                    if name in _m else [])
+
+        def udeb_view(self):
+            class _V:
+                def get_packages(self, name):
+                    return ([{'Version': '1',
+                              'Filename': 'pool/f/fw-udeb_1_all.udeb'}]
+                            if name == 'fw-udeb' else [])
+            return _V()
+
+    _sess = BuildSession.__new__(BuildSession)
+    _sess.cache = _Cache()
+    _sess.config = _Cfg()
+    _sess.dep_tree = None
+    _sess.udeb_dep_tree = None
+    _fns = sorted(_sess._tunnel_filenames_for_source('fw'))
+    # fw-arm-only → arch-filtered; fw-doc → nodoc profile-filtered
+    assert _fns == ['fw-amd64-only_1_amd64.deb',
+                    'fw-common_1_all.deb',
+                    'fw-udeb_1_all.udeb'], _fns
+
+
 def test_virtual_fork_package_list_from_dsc():
     """FORK SOURCES ONLY: when source.package_list is empty (the
     locally-generated fork/Sources omits Package-List), the synth reads
@@ -30439,6 +30501,7 @@ def main() -> int:
         test_compute_post_build_versions_release_advances_resets_n,
         # virtual-build chunk 2 — binary record synthesizer
         test_virtual_arch_gate_dpkg_table_semantics,
+        test_tunnel_filenames_full_set_arch_profile_filtered,
         test_virtual_fork_package_list_from_dsc,
         test_virtual_build_synthesize_binary_record_inherits_upstream_deps,
         test_virtual_build_synthesize_record_no_upstream_minimal_skeleton,
