@@ -1976,6 +1976,48 @@ def test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits():
     assert _c._exit_code == 0
 
 
+def test_ux05e_one_shot_exit_code_nonzero_when_a_command_fails():
+    """UX-05e: a `-c` command that's unknown OR whose handler raises must
+    drive the process exit code to 1, so CI / scripted installs detect the
+    failure.  Regression: `_failed` was never incremented, so a broken
+    command silently exited 0."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from unittest.mock import patch
+    import cli
+    _c = object.__new__(cli.Cli)
+    _c._cmds = {}
+    _c._widget_ids = {}
+    _c._next_widget_id = 0
+    _c._exit_code = None
+    _c.auto_yes = False
+    _c._use_color = False
+
+    def _boom(*_a):
+        raise RuntimeError('handler blew up')
+    _c._cmds['ok'] = (lambda *a: None, '')
+    _c._cmds['boom'] = (_boom, '')
+
+    # (a) handler raises → exit 1
+    _c.one_shot_cmds = ['ok', 'boom']
+    with patch('builtins.print'):
+        _c.wait()
+    assert _c._exit_code == 1, _c._exit_code
+
+    # (b) unknown command → exit 1
+    _c._exit_code = None
+    _c.one_shot_cmds = ['ok', 'no-such-command']
+    with patch('builtins.print'):
+        _c.wait()
+    assert _c._exit_code == 1, _c._exit_code
+
+    # (c) all good → exit 0 (the happy path still holds)
+    _c._exit_code = None
+    _c.one_shot_cmds = ['ok', 'ok']
+    with patch('builtins.print'):
+        _c.wait()
+    assert _c._exit_code == 0, _c._exit_code
+
+
 def test_ux05g_cmd_methods_reset_flags_on_entry():
     """UX-05g: every cmd_* method that sets `self.flags.X = True` must
     ALSO reset `self.flags.X = False` somewhere in the same function
@@ -30210,6 +30252,7 @@ def main() -> int:
         test_ux05b_atena_sudo_password_env_var_picked_up,
         test_ux05d_cli_print_emits_ansi_when_tty,
         test_ux05e_one_shot_dispatch_runs_each_in_order_and_exits,
+        test_ux05e_one_shot_exit_code_nonzero_when_a_command_fails,
         test_ux05g_cmd_methods_reset_flags_on_entry,
         # SEC-05: opt-in build-dep audit gate
         test_sec05_audit_build_deps_default_false,
