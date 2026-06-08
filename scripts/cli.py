@@ -30,15 +30,18 @@ Design contract (intentionally minimal):
 - ``mark`` / ``trim_to``: no-ops.  Can't unprint stdout that's already
   out the door.
 
-What's NOT in this v1 (deferred until a real use case appears):
+Shipped since the first cut:
 
-- ``--yes`` flag to auto-answer YESNO prompts.
+- ``--yes`` auto-answers *informational* YESNO prompts (``self.auto_yes``);
+  hard prompts (sudo password, conflict OPTIONS) still wait for input.
+- ANSI color on stdout when attached to a TTY and ``NO_COLOR`` is unset.
+- ``-c <cmd>`` one-shot dispatch (``self.one_shot_cmds``): run each queued
+  command in order, then exit with a non-zero code if any failed.
+
+Still deferred until a real use case appears:
+
 - ``ATHENA_SUDO_PASSWORD`` env-var pickup for password prompts.
 - ProgressBar throttling (line every N steps / M seconds).
-- ANSI color codes when stdout is a TTY.
-- Headless ``-c <cmd>`` flag for one-shot command execution.
-
-All of those are easy add-ons once the bones are in place.
 """
 import getpass
 import logging
@@ -317,8 +320,14 @@ class Cli:
             print(f'{self._PROMPT_IDLE}{_cmd}')
             try:
                 _ok = self._dispatch_one(_cmd)
-                if not _ok and _cmd.strip() in ('quit', 'exit'):
-                    break
+                if not _ok:
+                    # quit/exit ends the queue cleanly; an unknown command
+                    # or a handler that raised counts as a failure so the
+                    # process exit code is non-zero (CI / scripted installs
+                    # rely on this).
+                    if _cmd.strip() in ('quit', 'exit'):
+                        break
+                    _failed += 1
             except KeyboardInterrupt:
                 # Ctrl+C aborts the remaining queue.
                 self._exit_code = 130
