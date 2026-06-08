@@ -2727,7 +2727,7 @@ class BuildSession(AuditCommandsMixin, MirrorCommandsMixin, SnapshotCommandsMixi
         without re-running the full audit.
         """
         _root = self.config.dir_repo
-        console.print("\n=== repo index summary ===")
+        console.print("\nrepo index summary\n")
         _total_files = 0
         _total_bytes = 0
         for _suite, _components in suites_spec.items():
@@ -8014,7 +8014,7 @@ def main(banner: str) -> None:
         _log_path = setup_file_logging(config.dir_log)
         console.print(f"Logging to {_log_path}", tui.COLOR_INFO)
     except OSError as e:
-        console.print(f"WARN: could not open run log ({e}); "
+        console.print(f"WARNING: could not open run log ({e}); "
                       f"continuing without file logging", tui.COLOR_WARNING)
 
     session = BuildSession(config, tui_inst)
