@@ -2493,14 +2493,56 @@ class BuildSession:
         downloaded the unsuffixed unstable build instead of the bookworm-
         security ~deb12u1 build).
 
-        For each predicted binary name, look up the binary in the dep tree's
-        selected_pkgs (cache Package record) and return os.path.basename of
-        its Filename.  Falls back to the predicted name if the binary isn't
-        resolvable — caller surfaces the resulting fetch failure.
+        OPTION A (2026-06-08): tunnel the source's FULL declared binary
+        set, filtered by arch + active build PROFILES — the SAME gates
+        virtual_build uses to predict — NOT just the dep-closure subset.
+        A built source emits (and we keep) its whole binary set; a
+        tunneled source must contribute the same complete set, so e.g.
+        every firmware-nonfree blob lands in /cdrom/pool (not only the
+        few the installed system happens to need) and the `.vbuildlog`
+        prediction matches the on-disk reality.  Binaries outside the
+        closure resolve against the FULL cache universe, not just
+        selected_pkgs.  Falls back to the closure subset when the cache
+        isn't loaded yet (tunnel still works pre-`cache parse`).
         """
-        _predicted = self._predicted_files_for_source(src_name)
+        import virtual_build as _vb
+        _cache = getattr(self, 'cache', None)
+        _src = None
+        if _cache is not None:
+            _cands = _cache.source_hashtable.get(src_name, [])
+            _src = _cands[0] if _cands else None
+        if _src is None:
+            return self._tunnel_filenames_subset(src_name)
+        _pl_idx = _vb._package_list_index(
+            _src, fork_dsc_dir=getattr(
+                self.config, 'dir_fork_source_repo', None))
+        _profiles = frozenset(
+            getattr(self.config, 'build_profiles', frozenset()))
+        _arch = self.config.arch
         _actual: 'list[str]' = []
-        for _f in _predicted:
+        _seen: 'set[str]' = set()
+        for _bin in (getattr(_src, 'binary', []) or []):
+            _entry = _pl_idx.get(_bin, _bin)
+            if not _vb._binary_active_for_arch(_entry, _arch):
+                continue
+            if not _vb._binary_active_under_profiles(_entry, _profiles):
+                continue
+            _fn = self._resolve_tunnel_filename(_bin, _entry)
+            if not _fn:
+                logger.warning(
+                    f"tunnel: binary {_bin!r} of source {src_name!r} "
+                    f"unresolvable in cache — skipped")
+                continue
+            if _fn not in _seen:
+                _seen.add(_fn)
+                _actual.append(_fn)
+        return _actual
+
+    def _tunnel_filenames_subset(self, src_name: str) -> 'list[str]':
+        """Pre-Option-A behaviour: upstream filenames for the dep-closure
+        binaries only.  Fallback path when the cache isn't loaded."""
+        _actual: 'list[str]' = []
+        for _f in self._predicted_files_for_source(src_name):
             _bin_name = _f.split('_', 1)[0]
             _pkg = None
             if self.dep_tree is not None:
@@ -2508,14 +2550,42 @@ class BuildSession:
             if _pkg is None and self.udeb_dep_tree is not None:
                 _pkg = self.udeb_dep_tree.selected_pkgs.get(_bin_name)
             if _pkg is None:
-                logger.warning(
-                    f"tunnel: no cached binary {_bin_name!r} for source "
-                    f"{src_name!r} — falling back to predicted {_f}")
                 _actual.append(_f)
                 continue
             _fn = (_pkg.get('Filename') or '').rsplit('/', 1)[-1]
             _actual.append(_fn or _f)
         return _actual
+
+    def _resolve_tunnel_filename(self, bin_name: str,
+                                pl_entry: str) -> str:
+        """Upstream Filename basename for one binary.  selected_pkgs
+        (closure — already version-resolved) first; otherwise the full
+        cache universe (the extra non-closure binaries Option A adds),
+        picking the highest-version record.  '' when unresolvable.
+
+        The Package-List type token (`deb`/`udeb`) routes the cache
+        lookup to the right table so a udeb resolves against the udeb
+        universe, not the deb one."""
+        _pkg = None
+        if self.dep_tree is not None:
+            _pkg = self.dep_tree.selected_pkgs.get(bin_name)
+        if _pkg is None and self.udeb_dep_tree is not None:
+            _pkg = self.udeb_dep_tree.selected_pkgs.get(bin_name)
+        _cache = getattr(self, 'cache', None)
+        if _pkg is None and _cache is not None:
+            _tokens = pl_entry.split()
+            _is_udeb = len(_tokens) >= 2 and _tokens[1] == 'udeb'
+            _view = _cache.udeb_view() if _is_udeb else _cache
+            _best = None
+            for _rec in _view.get_packages(bin_name):
+                if (_best is None or apt_pkg.version_compare(
+                        str(_rec.get('Version') or '0'),
+                        str(_best.get('Version') or '0')) > 0):
+                    _best = _rec
+            _pkg = _best
+        if _pkg is None:
+            return ''
+        return (_pkg.get('Filename') or '').rsplit('/', 1)[-1]
 
     def _resolve_deb_cohort(self) -> Optional[frozenset]:
         """Consumers audited as the .deb-cohort by package_audit's
