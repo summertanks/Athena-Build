@@ -2867,6 +2867,15 @@ class BuildSession:
         ).get_response()
         return _resp.lower() in ('y', 'yes')
 
+    def _audit_row(self, label: str, result: str, ok: bool = True) -> None:
+        """One aligned `repo audit` row: a left-justified section label and
+        its result, coloured green-ish (ok) or amber (attention).  Keeps the
+        audit's output consistent with the rest of the CLI (label + result,
+        no `=== … ===` banners)."""
+        console.print(
+            f"  {label:<38}{result}",
+            tui.COLOR_INFO if ok else tui.COLOR_WARNING)
+
     def cmd_audit(self, *args):
         """Single repo audit covering every install-correctness +
         content-integrity + policy-residue gate in repo/.  P3 absorbed
@@ -2985,47 +2994,47 @@ class BuildSession:
         _live = self._resolve_live_cohort()
         _installer = self._resolve_installer_cohort()
 
+        console.print(f"\nrepo audit  arch={self.config.arch}\n")
+        _row = self._audit_row
+
         if _deb_cohort is None and _udeb_cohort is None:
             # Whole-repo fallback path.
-            console.print(
-                f"\n=== DEP GATE (whole repo, "
-                f"{len(_state.packages)} pkgs) ===")
-            console.print(f"  unresolved: {len(_unresolved)}"
-                          + (f"  weak: {len(_weak)}" if _strict else ''))
+            _row(f"dep gate (whole repo, {len(_state.packages)} pkgs)",
+                 f"unresolved: {len(_unresolved)}"
+                 + (f"  weak: {len(_weak)}" if _strict else ''),
+                 ok=not _unresolved)
             self._report_unresolved(_unresolved, _weak, _state,
                                     verbose=_verbose, strict=_strict)
         else:
             for _label, _consumer_set, _u, _w in _per_cohort:
-                console.print(
-                    f"\n=== DEP GATE ({_label}, "
-                    f"{len(_consumer_set)} consumers) ===")
-                console.print(f"  unresolved: {len(_u)}"
-                              + (f"  weak: {len(_w)}" if _strict else ''))
+                _row(f"dep gate ({_label}, {len(_consumer_set)} consumers)",
+                     f"unresolved: {len(_u)}"
+                     + (f"  weak: {len(_w)}" if _strict else ''),
+                     ok=not _u)
                 self._report_unresolved(_u, _w, _state,
                                         verbose=_verbose, strict=_strict)
 
         if _live is None:
-            console.print(
-                "\n=== LIVE CONFLICTS === skipped (run `cache parse`)")
+            _row("live conflicts", "skipped — run `cache parse`", ok=False)
         else:
             _live_conflicts = _dedupe_bidirectional_conflicts(
                 repo_audit.audit_conflict_cohort(_state, _live)
             )
-            console.print(
-                f"\n=== LIVE CONFLICTS ({len(_live)} pkgs) ==="
-                f"  conflicts: {len(_live_conflicts)}")
+            _row(f"live conflicts ({len(_live)} pkgs)",
+                 f"conflicts: {len(_live_conflicts)}",
+                 ok=not _live_conflicts)
             self._report_conflicts(_live_conflicts, verbose=_verbose)
 
         if _installer is None:
-            console.print(
-                "\n=== INSTALLER CONFLICTS === skipped (run `cache parse`)")
+            _row("installer conflicts", "skipped — run `cache parse`",
+                 ok=False)
         else:
             _inst_conflicts = _dedupe_bidirectional_conflicts(
                 repo_audit.audit_conflict_cohort(_state, _installer)
             )
-            console.print(
-                f"\n=== INSTALLER CONFLICTS ({len(_installer)} udebs) ==="
-                f"  conflicts: {len(_inst_conflicts)}")
+            _row(f"installer conflicts ({len(_installer)} udebs)",
+                 f"conflicts: {len(_inst_conflicts)}",
+                 ok=not _inst_conflicts)
             self._report_conflicts(_inst_conflicts, verbose=_verbose)
 
         # Soft-warn section.  Doesn't gate the audit — these aren't broken
@@ -3040,10 +3049,7 @@ class BuildSession:
         if self.flags.dep_check_ready:
             self._report_stale_files_warning(verbose=_verbose)
         else:
-            console.print(
-                "\n=== STALE FILES ===\n  skipped — dep_tree not built; "
-                "run `cache parse` first"
-            )
+            _row("stale files", "skipped — run `cache parse` first", ok=False)
 
         # ── CONTENT INTEGRITY (was `source verify`) ─────────────────
         # Per-cohort deep walk: open each predicted .deb/.udeb with
@@ -3051,14 +3057,10 @@ class BuildSession:
         # filename + every hard Depends resolves against the cohort's
         # RepoState.  Slow (~30-40s on ~900 sources) — skip via `quick`.
         if _quick:
-            console.print(
-                "\n=== CONTENT INTEGRITY ===\n  skipped (`quick` flag)"
-            )
+            _row("content integrity", "skipped (`quick` flag)", ok=True)
         elif not self.flags.build_container_ready:
-            console.print(
-                "\n=== CONTENT INTEGRITY ===\n  skipped — container init "
-                "not run; `verify_pkg_artifact` lives on BuildContainer"
-            )
+            _row("content integrity",
+                 "skipped — run `container init`", ok=False)
         else:
             self._report_content_integrity(_state, verbose=_verbose,
                                             refresh=_refresh)
@@ -3098,11 +3100,8 @@ class BuildSession:
             if _tree is None or not _tree.selected_srcs:
                 continue
             if _state is None:
-                console.print(
-                    f"\n=== CONTENT INTEGRITY ({_label} cohort) ===\n"
-                    f"  skipped — repo state scan failed",
-                    tui.COLOR_ERROR,
-                )
+                self._audit_row(f"content integrity ({_label})",
+                                "skipped — repo state scan failed", ok=False)
                 continue
             _ok = 0
             _failed: 'list[tuple]' = []   # (src, binary, diag)
@@ -3175,30 +3174,15 @@ class BuildSession:
             finally:
                 _bar.close()
 
-            console.print(
-                f"\n=== CONTENT INTEGRITY ({_label} cohort) ==="
-            )
-            console.print(
-                f"  {_ok:5d}  pass (internal control matches filename + "
-                f"deps resolve)"
-            )
-            console.print(
-                f"  {len(_failed):5d}  FAIL — present in repo/ but "
-                f"verify rejected"
-            )
+            _parts = [f"{_ok} pass", f"{len(_failed)} fail"]
             if _skipped_tunneled:
-                console.print(
-                    f"  {_skipped_tunneled:5d}  skipped (TUNNELED)"
-                )
+                _parts.append(f"{_skipped_tunneled} tunneled")
             if _skipped_missing:
-                console.print(
-                    f"  {_skipped_missing:5d}  skipped (binaries missing "
-                    f"— `source build` / `source repair`)"
-                )
+                _parts.append(f"{_skipped_missing} missing")
             if _no_pkgs:
-                console.print(
-                    f"  {_no_pkgs:5d}  no {_ext} binaries declared"
-                )
+                _parts.append(f"{_no_pkgs} none-declared")
+            self._audit_row(f"content integrity ({_label})",
+                            ", ".join(_parts), ok=not _failed)
             if _failed:
                 from collections import Counter, defaultdict
                 _types: 'Counter[str]' = Counter()
@@ -3254,20 +3238,19 @@ class BuildSession:
         _scanned = len(state.packages) - _skipped
         _tail = (f" ({_skipped} tunneled binary/binaries skipped — "
                  f"pristine passthrough)" if _skipped else "")
-        console.print("\n=== NMU RESIDUE ===")
         if not _findings:
-            console.print(
-                f"  clean ({_scanned} pkgs scanned, "
-                f"no +bN / +debNuN / ~bpoN+N residue){_tail}"
-            )
+            self._audit_row(
+                f"nmu residue ({_scanned} pkgs)",
+                f"clean — no +bN / +debNuN / ~bpoN+N residue{_tail}")
             return
         from collections import Counter
         _by_field = Counter(f[1] for f in _findings)
         _pkgs_with_residue = sorted({f[0] for f in _findings})
-        console.print(
-            f"  {len(_findings):5d} finding(s) across "
-            f"{len(_pkgs_with_residue)} pkg(s){_tail}:"
-        )
+        self._audit_row(
+            f"nmu residue ({_scanned} pkgs)",
+            f"{len(_findings)} finding(s) across "
+            f"{len(_pkgs_with_residue)} pkg(s){_tail}",
+            ok=False)
         for _field, _count in _by_field.most_common():
             console.print(f"    {_count:5d}  {_field}")
         # Concise: list pkg NAMES wrapped to terminal width.  Verbose:
@@ -3300,32 +3283,19 @@ class BuildSession:
         """
         _orphan, _drift, _malformed, _total = self._scan_stale_files()
         _n_stale = len(_orphan) + len(_drift)
-        console.print(
-            f"\n=== STALE FILES (repo/ scan, {_total} file(s)) ==="
-        )
         if _n_stale == 0 and not _malformed:
-            console.print("  repo/ is clean — no orphan-source or drift residue")
+            self._audit_row(f"stale files ({_total} files)",
+                            "clean — no orphan-source or drift residue")
             return
         _bytes = (sum(s for *_, s in _orphan)
                   + sum(s for *_, s in _drift))
-        console.print(
-            f"  orphan-source : {len(_orphan)} file(s) "
-            f"(source not in selected_srcs)"
-        )
-        console.print(
-            f"  version-drift : {len(_drift)} file(s) "
-            f"(source selected but version mismatch)"
-        )
-        if _malformed:
-            console.print(
-                f"  malformed     : {len(_malformed)} file(s) "
-                f"(can't read control)"
-            )
+        _mal = f", {len(_malformed)} malformed" if _malformed else ""
+        self._audit_row(
+            f"stale files ({_total} files)",
+            f"{_n_stale} stale ({_bytes / 1024 / 1024:.1f} MB) — "
+            f"{len(_orphan)} orphan-source, {len(_drift)} version-drift{_mal}",
+            ok=(_n_stale == 0))
         if _n_stale:
-            console.print(
-                f"  TOTAL STALE   : {_n_stale} file(s), "
-                f"{_bytes / 1024 / 1024:.1f} MB"
-            )
             # Short preview — one line per source for orphans (collapses
             # the task-* family case), individual lines for drift.  Full
             # detail lives in `repo repair cleanup` (dry-run).
@@ -10403,6 +10373,28 @@ class BuildSession:
             _release = 1
         _asg_ledger = _ra.published_ledger(self.config) or {}
         _universe = _vb.from_cache(self.cache)
+        # Canonical-source map: binary_name -> upstream `Source:` (the REAL
+        # producer), built from the deb + udeb indices.  Lets validate
+        # attribute on-disk emissions to their true source rather than to
+        # whichever source declares them in `Binary:` — fixes the
+        # linux / linux-signed-amd64 installer-udeb attribution split.
+        import apt_pkg as _ap
+        _canon_map: 'dict[str, str]' = {}
+        for _table in (getattr(self.cache, 'package_hashtable', {}),
+                       getattr(self.cache, 'udeb_hashtable', {})):
+            for _bn, _vers in _table.items():
+                _best_v = _best_r = None
+                for _v, _rec in (_vers.items()
+                                 if hasattr(_vers, 'items') else []):
+                    _r = _rec[0] if isinstance(_rec, list) else _rec
+                    if (_best_v is None
+                            or _ap.version_compare(str(_v), str(_best_v)) > 0):
+                        _best_v, _best_r = _v, _r
+                if _best_r is not None:
+                    _canon_map[_bn] = (
+                        (_best_r.get('Source') or _bn).split(' ', 1)[0])
+        _tunnel_srcs = frozenset(
+            getattr(self.config, 'tunnel_packages', set()) or set())
 
         def _lookup(_name: str):
             _src = _selected_srcs.get(_name)
@@ -10431,16 +10423,30 @@ class BuildSession:
                 getattr(self.config, 'build_profiles', frozenset())),
             repo_dir=self.config.dir_repo,
             fork_dsc_dir=getattr(self.config, 'dir_fork_source_repo', None),
+            canonical_src_map=_canon_map,
+            tunnel_sources=_tunnel_srcs,
         )
         console.print(
             f"  checked={_stats['sources_checked']}  "
             f"matched={_stats['sources_matched']}  "
+            f"build_config_divergence={_stats.get('buildcfg_sources', 0)}  "
             f"drifted={_stats['sources_drifted']}",
             tui.COLOR_INFO)
         for _sev, _kind, _msg in _findings[:50]:
             _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                      else tui.COLOR_INFO if _sev == 'INFO'
                       else tui.COLOR_WARNING)
             console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+            # Per-source breakdown for the build-config divergence: list each
+            # source and the declared-but-not-built binaries under it.
+            if _kind == 'virtual_validate_build_config_divergence':
+                _detail = _stats.get('buildcfg_detail', {}) or {}
+                for _i, _s in enumerate(sorted(_detail)):
+                    if _i:
+                        console.print("")
+                    console.print(f"            {_s}", _color)
+                    for _b in _detail[_s]:
+                        console.print(f"              not built: {_b}", _color)
         if len(_findings) > 50:
             console.print(
                 f"  …and {len(_findings) - 50} more findings",
