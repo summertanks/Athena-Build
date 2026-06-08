@@ -21,6 +21,21 @@ _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
 
 
+def _session_source():
+    """Concatenated source of the BuildSession surface — build.py plus every
+    command mixin under commands/.  Source-scan tests use this so they survive
+    the god-class split: a handler/route asserted-present may now live in any
+    mixin module, while the dispatcher (register_command) stays in build.py."""
+    import glob
+    _parts = [os.path.join(_ROOT, 'scripts', 'build.py')]
+    _parts += sorted(glob.glob(os.path.join(_ROOT, 'scripts', 'commands', '*.py')))
+    _txt = ''
+    for _p in _parts:
+        with open(_p) as _fh:
+            _txt += _fh.read()
+    return _txt
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # v0.2 step 1 — Mirror class + multi-mirror BuildConfig parsing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -28703,9 +28718,7 @@ def test_mirror_update_state_merges_fields():
 def test_cmd_mirror_dispatch_routes_subcommands():
     """`cmd_mirror` routes add/remove/list/summary/status/reconcile-neighbours."""
     import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     assert 'def cmd_mirror(' in _body
     for _sub in ('cmd_mirror_add', 'cmd_mirror_remove', 'cmd_mirror_list',
                  'cmd_mirror_summary', 'cmd_mirror_status',
@@ -29163,9 +29176,7 @@ def test_reconcile_neighbours_no_mirrors_is_trivial_ok():
 def test_cmd_mirror_dispatch_routes_publish_and_pull():
     """`cmd_mirror` routes publish + pull subcommands."""
     import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     for _sub in ('cmd_mirror_publish', 'cmd_mirror_pull'):
         assert f'def {_sub}(' in _body, f"{_sub} missing"
     assert re.search(
@@ -29727,9 +29738,7 @@ def test_remote_publish_pushes_debs_per_file_and_calls_progress():
 def test_cmd_mirror_dispatch_routes_audit_and_query():
     """`cmd_mirror` routes audit + query subcommands; both handlers exist."""
     import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     for _sub in ('cmd_mirror_audit', 'cmd_mirror_query'):
         assert f'def {_sub}(' in _body, f"{_sub} missing"
     assert re.search(
