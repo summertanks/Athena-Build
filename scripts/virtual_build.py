@@ -189,23 +189,6 @@ def _virtual_sha256(name: str, version: str, arch: str) -> str:
     return hashlib.sha256(_key).hexdigest()
 
 
-def _control_lookup_from_upstream(
-    upstream_record: Dict[str, str], rename_map: Dict[str, str],
-) -> Dict[str, str]:
-    """Copy the upstream binary's control fields verbatim, then strip
-    NMU residue from every version constraint (so sibling pins read
-    pristine) and rewrite sibling-pin pristine vers → virtual vers.
-
-    `rename_map` is the source's `{sibling_name: virtual_version}`
-    map.  `upstream_record` shape matches RepoState.packages entries:
-    `{control_field: value_str}`.
-    """
-    _out: Dict[str, str] = {}
-    for _field, _val in upstream_record.items():
-        _out[_field] = _val
-    return _out
-
-
 def synthesize_binary_record(
     source_name: str, binary_name: str, virtual_version: str, arch: str,
     upstream_record: Optional[Dict[str, str]],
