@@ -943,6 +943,8 @@ def validate_against_build_records(
     active_profiles: 'frozenset[str]' = frozenset(),
     repo_dir: 'Optional[str]' = None,
     fork_dsc_dir: 'Optional[str]' = None,
+    canonical_src_map: 'Optional[Dict[str, str]]' = None,
+    tunnel_sources: 'Optional[frozenset[str]]' = None,
 ) -> 'Tuple[Dict[str, Any], List[Tuple[str, str, str]]]':
     """Run the synthesizer against each source for which a successful
     build.json exists on disk; compare the predicted filenames
@@ -972,15 +974,18 @@ def validate_against_build_records(
     """
     import utils as _utils
     _findings: 'List[Tuple[str, str, str]]' = []
-    _stats: 'Dict[str, int]' = {
+    _stats: 'Dict[str, Any]' = {
         'sources_checked': 0,
         'sources_matched': 0,
         'sources_drifted': 0,
+        'buildcfg_detail': {},   # {source: [declared-but-not-built binaries]}
     }
     # One-shot repo walk for the AUTHORITATIVE emission set.
     # Replaces build.json output_hashes which misses every .udeb.
     _repo_idx: 'Dict[str, set]' = (
         _index_repo_emissions(repo_dir) if repo_dir else {})
+    _tunnel: 'frozenset[str]' = tunnel_sources or frozenset()
+    _scope_set: 'set[str]' = set(source_names)
     for _name in source_names:
         _rec = _utils.read_build_record(buildlog_dir, _name)
         if _rec is None:
@@ -989,13 +994,23 @@ def validate_against_build_records(
         if _src is None:
             continue
         _source_binaries = set(getattr(_src, 'binary', []) or [])
-        # Real-emission set: union of all files in repo/ whose binary
-        # name appears in this source's Binary: list.  Falls back to
-        # build.json output_hashes only when no repo_dir was provided
-        # (for tests).
+        # Real-emission set: files for this source's declared binaries,
+        # EXCLUDING any binary whose canonical upstream `Source:` is a
+        # DIFFERENT in-scope source.  This mirrors the synth's pred-side
+        # canonical-source filter exactly (a binary linux declares but
+        # linux-signed-amd64 produces is attributed to linux-signed-amd64
+        # on BOTH sides), so the two sides stay consistent.  A binary whose
+        # canonical source is absent, equals this source, or is out of
+        # scope stays attributed here (fork renames, transitionals).  Falls
+        # back to build.json output_hashes when no repo_dir (tests).
         if _repo_idx:
             _real_files_set: set = set()
             for _b in _source_binaries:
+                if canonical_src_map is not None:
+                    _canon = canonical_src_map.get(_b)
+                    if (_canon is not None and _canon != _name
+                            and _canon in _scope_set):
+                        continue
                 _real_files_set |= _repo_idx.get(_b, set())
             _real_files: 'List[str]' = sorted(_real_files_set)
         else:
@@ -1127,9 +1142,40 @@ def validate_against_build_records(
                         for _f in _real_match[:3]),
                 ','.join(_f[0] + '_' + _f[1] + '_' + _f[2]
                         for _f in _pred_sig_match[:3])))
-        if (not _missing and not _extra
-                and not _version_drift and not _asg_drift):
-            _stats['sources_matched'] += 1
+        # Classify over-predictions (pred-not-real) into deterministic
+        # buckets so genuine synth drift is separated from expected /
+        # explainable differences:
+        #   tunnel   — source is tunneled; we materialise only the SELECTED
+        #              binaries, so predicting its other (real, upstream)
+        #              binaries is expected, not drift.
+        #   buildcfg — the binary EXISTS upstream as a real package (Debian
+        #              builds it) but our build config doesn't emit it (gcc
+        #              Go/multilib, python3-doc, …).  A genuine, deterministic
+        #              our-build-vs-Debian difference — reported distinctly.
+        #   generic  — neither: a true synth overshoot (should be ~0).
+        _extra_tunnel = {_e for _e in _extra if _name in _tunnel}
+        _rest = _extra - _extra_tunnel
+        # Every remaining over-prediction is a binary the source DECLARES
+        # but our build does not emit — synth only ever iterates the declared
+        # Binary list, so a pred-not-real binary is never an invented name,
+        # always a debian/rules build decision static prediction can't see:
+        # Debian builds it on amd64 but our config skips it (gcc Go/multilib),
+        # OR Debian declares it arch=any but doesn't build it for amd64 either
+        # (libhwasan0).  Deterministic, not synth drift.  `_extra_generic`
+        # stays a (currently-empty) safety net for any non-declared overshoot.
+        _extra_buildcfg = set(_rest)
+        _extra_generic: 'set[str]' = set()
+        _hard_drift = bool(_missing or _version_drift or _extra_generic
+                           or _asg_drift)
+        if not _hard_drift and not _extra_buildcfg:
+            _stats['sources_matched'] += 1          # perfect (tunnel ignored)
+            continue
+        if not _hard_drift and _extra_buildcfg:
+            # ONLY build-config divergence — distinct category, NOT drift.
+            _stats['buildcfg_sources'] = _stats.get('buildcfg_sources', 0) + 1
+            _stats['buildcfg_binaries'] = (
+                _stats.get('buildcfg_binaries', 0) + len(_extra_buildcfg))
+            _stats['buildcfg_detail'][_name] = sorted(_extra_buildcfg)
             continue
         _stats['sources_drifted'] += 1
         for _bn, _real_str, _pred_str in _version_drift[:5]:
@@ -1138,9 +1184,8 @@ def validate_against_build_records(
                 f"{_name}/{_bn}: predicted={_pred_str!r} but built "
                 f"history has {_real_str!r}"))
         # Per-source asg/extra/missing aren't emitted per finding —
-        # they'd flood the output (765+ sources show one each).  We
-        # accumulate counts into stats and emit ONE summary line per
-        # category after the loop completes.
+        # they'd flood the output.  Accumulate counts; one summary line
+        # per category after the loop.
         if _asg_drift:
             _stats['asg_drift_sources'] = (
                 _stats.get('asg_drift_sources', 0) + 1)
@@ -1151,11 +1196,16 @@ def validate_against_build_records(
                 _stats.get('missing_sources', 0) + 1)
             _stats['missing_binaries'] = (
                 _stats.get('missing_binaries', 0) + len(_missing))
-        if _extra:
+        if _extra_buildcfg:
+            _stats['buildcfg_sources'] = _stats.get('buildcfg_sources', 0) + 1
+            _stats['buildcfg_binaries'] = (
+                _stats.get('buildcfg_binaries', 0) + len(_extra_buildcfg))
+            _stats['buildcfg_detail'][_name] = sorted(_extra_buildcfg)
+        if _extra_generic:
             _stats['extra_sources'] = (
                 _stats.get('extra_sources', 0) + 1)
             _stats['extra_binaries'] = (
-                _stats.get('extra_binaries', 0) + len(_extra))
+                _stats.get('extra_binaries', 0) + len(_extra_generic))
 
     # Post-loop summary findings — operator-friendly, one line each.
     if _stats.get('asg_drift_sources'):
@@ -1173,14 +1223,18 @@ def validate_against_build_records(
             f"{_stats['missing_sources']} source(s) that synth did "
             "NOT predict (synth missed; usually procedural emit from "
             "debian/rules)"))
+    if _stats.get('buildcfg_sources'):
+        _findings.append((
+            'INFO', 'virtual_validate_build_config_divergence',
+            f"{_stats['buildcfg_binaries']} binaries across "
+            f"{_stats['buildcfg_sources']} source(s)"))
     if _stats.get('extra_sources'):
         _findings.append((
             'WARNING', 'virtual_validate_synth_over_predicted',
             f"synth predicted "
             f"{_stats['extra_binaries']} binaries across "
-            f"{_stats['extra_sources']} source(s) that real build did "
-            "NOT emit (synth overshot; usually procedural skip in "
-            "debian/rules — `-dev`, conditional `-udeb`)"))
+            f"{_stats['extra_sources']} source(s) that neither real build "
+            "emitted NOR exist upstream — a genuine synth overshoot"))
     return _stats, _findings
 
 

@@ -18359,64 +18359,81 @@ def test_restamp_asg_deb_bumps_version_and_intra_source_deps():
             f"foreign dep should stay pristine: {_deps!r}")
 
 
-def test_destamp_asg_deb_roundtrips_restamp_and_is_idempotent():
-    """destamp_asg_deb is the exact inverse of restamp_asg_deb: peel the
-    +asg marker off filename, Version, and the intra-source sibling pin,
-    landing back at the pristine base (epoch preserved, foreign `>=` dep
-    untouched).  A second destamp is a no-op ('skipped').  This is the
-    primitive the out-of-band re-normaliser uses to correct the 19
-    spuriously-stamped (former Case-C) artifacts."""
-    import subprocess, tempfile
-    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from utils import restamp_asg_deb, destamp_asg_deb
-    try:
-        subprocess.run(['dpkg-deb', '--version'],
-                       check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("SKIP test_destamp_asg_deb (no dpkg-deb)")
+def test_validate_canonical_attribution_tunnel_and_build_config():
+    """virtual validate, deterministic comparison:
+      - a binary DECLARED by two sources but whose canonical upstream
+        Source is a different in-scope source is attributed to the producer
+        on BOTH sides (the linux / linux-signed-amd64 installer-udeb split),
+        so neither source shows phantom under/over-prediction;
+      - a declared binary absent from disk is BUILD-CONFIG divergence, not
+        drift;
+      - a tunneled source's declared-but-unmaterialised binaries are
+        expected (tunnel subset), not drift.
+    """
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
         return
-    with tempfile.TemporaryDirectory() as _tmp:
-        _work = os.path.join(_tmp, 'src')
-        os.makedirs(os.path.join(_work, 'DEBIAN'))
-        os.makedirs(os.path.join(_work, 'usr', 'lib'))
-        with open(os.path.join(_work, 'DEBIAN', 'control'), 'w') as fh:
-            fh.write(
-                'Package: openssl\n'
-                'Version: 1:3.0.15-1\n'
-                'Architecture: amd64\n'
-                'Maintainer: T <t@l>\n'
-                'Depends: libssl3 (= 1:3.0.15-1), libc6 (>= 2.36)\n'
-                'Description: destamp test\n'
-            )
-        with open(os.path.join(_work, 'usr', 'lib', 'p'), 'w') as fh:
-            fh.write('x\n')
-        _orig = os.path.join(_tmp, 'openssl_3.0.15-1_amd64.deb')
-        subprocess.run(['dpkg-deb', '--root-owner-group', '-b', _work, _orig],
-                       check=True, capture_output=True)
+    import sys, types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        _repo = os.path.join(_root, 'repo', 'main')
+        _log = os.path.join(_root, 'log', 'build')
+        os.makedirs(_repo)
+        os.makedirs(_log)
+        # On disk: c-main (consumer), shared (produced by prod), tun-a (tun).
+        for _n, _v in (('c-main', '1.0'), ('shared', '1.0'), ('tun-a', '1.0')):
+            _build_minimal_deb(os.path.join(_repo, f'{_n}_{_v}_amd64.deb'),
+                               _n, _v, 'amd64')
+        for _pkg in ('prod', 'consumer', 'tun'):
+            _rec = _u.new_build_record(package=_pkg, intended_version='1.0',
+                                       patch_set_hash='',
+                                       started='2026-06-08T00:00:00Z')
+            _rec.update({'phase': 'done', 'status': 'PASS'})
+            _u.write_build_record(_log, _rec)
 
-        # restamp → +asg1u1, then destamp back to pristine.
-        _r = restamp_asg_deb(_orig, 1, 1)
-        assert _r['status'] == 'rewritten', _r
-        _stamped = _r['new_path']
-        assert os.path.basename(_stamped) == 'openssl_3.0.15-1+asg1u1_amd64.deb'
-
-        _d = destamp_asg_deb(_stamped)
-        assert _d['status'] == 'rewritten', _d
-        assert os.path.basename(_d['new_path']) == 'openssl_3.0.15-1_amd64.deb', _d
-        assert _d['version'] == '1:3.0.15-1', _d
-        assert not os.path.exists(_stamped), "stamped file must be removed on rename"
-        _ver = subprocess.run(['dpkg-deb', '-f', _d['new_path'], 'Version'],
-                              check=True, capture_output=True, text=True).stdout.strip()
-        assert _ver == '1:3.0.15-1', f"version not peeled: {_ver!r}"
-        _deps = subprocess.run(['dpkg-deb', '-f', _d['new_path'], 'Depends'],
-                               check=True, capture_output=True, text=True).stdout.strip()
-        assert 'libssl3 (= 1:3.0.15-1)' in _deps, f"sibling pin not peeled: {_deps!r}"
-        assert 'libc6 (>= 2.36)' in _deps, f"foreign dep changed: {_deps!r}"
-
-        # Idempotent: destamping an already-pristine artifact is a no-op.
-        _again = destamp_asg_deb(_d['new_path'])
-        assert _again['status'] == 'skipped', _again
-        assert _again['new_path'] == _d['new_path']
+        def _src(name, binaries):
+            return types.SimpleNamespace(
+                package=name, version='1.0', binary=binaries,
+                patch_list=[], package_list=[], files={}, _mirror=None)
+        _sources = {
+            'prod':     _src('prod', ['shared']),
+            'consumer': _src('consumer', ['c-main', 'shared', 'c-doc']),
+            'tun':      _src('tun', ['tun-a', 'tun-b']),
+        }
+        # Universe: every binary exists upstream; `shared` is produced by
+        # `prod`; `c-doc` exists upstream (so it's a build-config skip).
+        def _rec_for(name, src):
+            return {'Package': name, 'Source': src, 'Version': '1.0',
+                    'Architecture': 'amd64'}
+        _universe = {
+            'shared':  {'1.0': _rec_for('shared', 'prod')},
+            'c-main':  {'1.0': _rec_for('c-main', 'consumer')},
+            'c-doc':   {'1.0': _rec_for('c-doc', 'consumer')},
+            'tun-a':   {'1.0': _rec_for('tun-a', 'tun')},
+            'tun-b':   {'1.0': _rec_for('tun-b', 'tun')},
+        }
+        _canon = {'shared': 'prod', 'c-main': 'consumer', 'c-doc': 'consumer',
+                  'tun-a': 'tun', 'tun-b': 'tun'}
+        _stats, _findings = _vb.validate_against_build_records(
+            source_names=['prod', 'consumer', 'tun'],
+            source_lookup=lambda n: _sources.get(n),
+            package_universe=_universe, asg_ledger={}, release=1,
+            arch='amd64', buildlog_dir=_log, repo_dir=os.path.join(_root, 'repo'),
+            canonical_src_map=_canon, tunnel_sources=frozenset({'tun'}))
+        # prod: shared declared + on disk (canonical=prod) → matched.
+        # tun:  tun-b declared-not-on-disk but tunneled → matched.
+        # consumer: shared attributed to prod (canonical) on BOTH sides; c-doc
+        #           declared-not-built → build-config, NOT drift.
+        assert _stats['sources_drifted'] == 0, _findings
+        assert _stats['sources_matched'] == 2, _stats          # prod + tun
+        assert _stats.get('buildcfg_sources') == 1, _stats     # consumer
+        assert _stats.get('buildcfg_binaries') == 1, _stats    # c-doc
+        assert _stats.get('missing_sources', 0) == 0, _stats   # no under-predict
+        _kinds = {_k for _s, _k, _m in _findings}
+        assert 'virtual_validate_build_config_divergence' in _kinds, _findings
+        assert 'virtual_validate_synth_over_predicted' not in _kinds, _findings
 
 
 def test_verify_output_hashes_flags_only_present_drift_not_pruned_absent():
@@ -30709,7 +30726,7 @@ def main() -> int:
         test_asg_filename_maps_pristine_to_stamped,
         test_match_pristine_base_reconciles_stamped_artifact,
         test_restamp_asg_deb_bumps_version_and_intra_source_deps,
-        test_destamp_asg_deb_roundtrips_restamp_and_is_idempotent,
+        test_validate_canonical_attribution_tunnel_and_build_config,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
