@@ -7387,6 +7387,27 @@ def test_strip_nmu_suffix_strips_known_patterns():
         )
 
 
+def test_bump_is_canonical_home_for_version_logic():
+    """The version/bump primitives live in `bump`; `utils` only re-exports
+    them.  Assert identity so a future accidental redefinition in utils
+    (a divergent fork of the logic) is caught immediately."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump
+    import utils
+    for _name in ('strip_nmu_suffix', 'strip_nmu_from_deb', 'restamp_asg_deb',
+                  'compute_post_build_versions', 'asg_next_n',
+                  'apply_asg_suffix', 'normalize_repo_filename',
+                  'find_matching_artifact', 'parse_asg_suffix'):
+        assert getattr(utils, _name) is getattr(bump, _name), (
+            f"utils.{_name} is not bump.{_name} — version logic has forked "
+            f"out of its single reviewable home (scripts/bump.py)")
+    # bump must not depend on utils (keeps the import graph acyclic)
+    import inspect
+    _src = inspect.getsource(bump)
+    assert 'import utils' not in _src and 'from utils' not in _src, (
+        "bump.py must not import utils — dependency is one-way utils -> bump")
+
+
 def test_strip_nmu_suffix_idempotent():
     """Re-running on an already-stripped version is a no-op."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -30331,6 +30352,7 @@ def main() -> int:
         test_strip_build_version_no_change_when_no_binNMU,
         test_strip_build_version_rejects_malformed_filename,
         test_classify_repo_subdir_routes_dev_to_main,
+        test_bump_is_canonical_home_for_version_logic,
         test_strip_nmu_suffix_strips_known_patterns,
         test_strip_nmu_suffix_idempotent,
         test_strip_nmu_from_control_text_walks_relation_fields,
