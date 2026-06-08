@@ -14,7 +14,26 @@ from package import Source
 
 import docker
 import docker.errors  # noqa: F401 — explicit import so `docker.errors.X` resolves under mypy
+import requests.exceptions as _req_exc
 import tui
+
+# Docker client read-timeout.  docker-py's default is 60s, which is the
+# MAX silence on a single blocking read — and `container.wait()` returns
+# nothing until the container exits while `container.logs(stream=True)`
+# returns nothing during a quiet build phase.  On a multi-hour build
+# (linux ~5h, libreoffice ~9h, webkit ~5h) that 60s is exceeded and the
+# worker saw a spurious ReadTimeout 'failure' though the container was
+# alive and ultimately succeeded (thor1 rebuild, 2026-06-08).  Raise it
+# so normal quiet phases don't trip it AND live log-tailing survives;
+# _wait_for_exit's keep-polling makes the exact value non-critical (it
+# only sets poll granularity).  Override via [Build] DockerTimeout.
+_DOCKER_TIMEOUT_DEFAULT = 1800   # 30 min
+
+# docker-py raises these (requests-layer) on a read/connection timeout;
+# we treat them as 'container still running, keep polling', never as a
+# build failure.  A genuinely-gone container raises docker.errors.NotFound
+# (reap_all_live) which deliberately propagates.
+_DOCKER_TRANSIENT = (_req_exc.Timeout, _req_exc.ConnectionError)
 
 if TYPE_CHECKING:
     # Type-only import — verify_pkg_artifact takes an optional RepoState
@@ -57,6 +76,14 @@ class BuildContainer:
         self.log_path = config.dir_log
         self.repo_path = config.dir_repo
         self.arch = config.arch
+        # Docker client read-timeout (see _DOCKER_TIMEOUT_DEFAULT) — a
+        # generous floor so multi-hour builds' quiet phases don't trip
+        # the wait/log-stream reads; keep-polling makes it non-critical.
+        try:
+            self._docker_timeout = int(getattr(
+                config, 'docker_timeout', _DOCKER_TIMEOUT_DEFAULT))
+        except (TypeError, ValueError):
+            self._docker_timeout = _DOCKER_TIMEOUT_DEFAULT
         # Three-layer identity (see memory/project_three_layer_identity.md):
         #   build_distribution — display name ("Asgard"), substituted as
         #     @DISTRIBUTION@ in fork content before dpkg-buildpackage
@@ -116,7 +143,8 @@ class BuildContainer:
             # confirming the operator has set up cert auth.
             self._guard_docker_server(docker_server)
             try:
-                _client = docker.DockerClient(base_url=docker_server)
+                _client = docker.DockerClient(
+                    base_url=docker_server, timeout=self._docker_timeout)
                 _client.ping()
                 self.client = _client
             except docker.errors.APIError:
@@ -124,7 +152,7 @@ class BuildContainer:
 
         if self.client is None:
             try:
-                self.client = docker.from_env()
+                self.client = docker.from_env(timeout=self._docker_timeout)
                 self.client.ping()
             except docker.errors.APIError as e:
                 logger.error(f"Athena Build Docker: Error {e}")
@@ -683,6 +711,72 @@ class BuildContainer:
             f"{_apt_pin}EOF\n"
         )
 
+    def _wait_for_exit(self, container) -> dict:
+        """``container.wait()`` resilient to docker-py read timeouts.
+
+        On a multi-hour build a quiet phase exceeds the client read
+        timeout and ``wait()`` raises a requests-layer Timeout though the
+        container is alive — treat that as 'still running, keep polling',
+        NOT a failure: reload the container's state and re-wait until it
+        actually exits.  A genuinely-gone container (``NotFound``, raised
+        by reap_all_live's force-remove) propagates so the caller's
+        existing teardown runs.
+        """
+        while True:
+            try:
+                return container.wait()
+            except docker.errors.NotFound:
+                raise
+            except _DOCKER_TRANSIENT as _e:
+                try:
+                    container.reload()
+                except docker.errors.APIError:
+                    pass
+                _state = container.attrs.get('State', {}) or {}
+                if (_state.get('Status') in ('exited', 'dead')
+                        or _state.get('Running') is False):
+                    return {'StatusCode': _state.get('ExitCode', 1)}
+                logger.debug(
+                    f"container {getattr(container, 'short_id', '?')} still "
+                    f"running after wait timeout ({type(_e).__name__}) — "
+                    f"continuing to poll")
+
+    def _stream_and_wait(self, container, log_path: str) -> dict:
+        """Stream a container's stdout/stderr to ``log_path`` and return
+        its exit info, resilient to docker-py read timeouts.
+
+        Log streaming is best-effort operator visibility: a read timeout
+        during a quiet build phase NEVER fails the build — we stop
+        tailing, poll the container to exit via _wait_for_exit, then dump
+        the COMPLETE logs (non-streaming) so nothing is lost.  Only a
+        real non-zero container exit is a failure.
+        """
+        _streamed = False
+        try:
+            with open(log_path, 'w') as _fh:
+                for _line in container.logs(stream=True):
+                    _fh.write(_line.decode('utf-8', errors='replace'))
+            _streamed = True   # stream closed naturally → container exited
+        except _DOCKER_TRANSIENT as _e:
+            logger.info(
+                f"build log stream for "
+                f"{getattr(container, 'short_id', '?')} interrupted "
+                f"({type(_e).__name__}) during a quiet phase — not a "
+                f"failure; logs re-dumped at exit")
+        except docker.errors.NotFound:
+            pass   # reaped externally; _wait_for_exit surfaces it
+        _exit = self._wait_for_exit(container)
+        if not _streamed:
+            try:
+                with open(log_path, 'w') as _fh:
+                    _fh.write(container.logs(stream=False).decode(
+                        'utf-8', errors='replace'))
+            except Exception as _e:
+                logger.warning(
+                    f"final log dump for "
+                    f"{getattr(container, 'short_id', '?')}: {_e}")
+        return _exit
+
     def build(self, src_pkg: Source, *,
               profiles_override=None, options_override=None) -> bool:
         """Build a single source package inside the container.
@@ -999,11 +1093,10 @@ class BuildContainer:
                 f"Build container {container.short_id} started for {src_pkg.package}"
             )
 
-            with open(os.path.join(self.buildlog_path, _filename_prefix), 'w') as fh:
-                for line in container.logs(stream=True):
-                    fh.write(line.decode("utf-8"))
-
-            _exit_code = container.wait()['StatusCode']
+            _exit_code = self._stream_and_wait(
+                container,
+                os.path.join(self.buildlog_path, _filename_prefix),
+            )['StatusCode']
 
             # OBS-01: refresh container attrs so OOMKilled is current,
             # then capture both signals.  Docker exposes the OOM-killed
@@ -1332,9 +1425,17 @@ class BuildContainer:
             )
             self._register_live(container)
             _buf: bytes = b''
-            for _line in container.logs(stream=True):
-                _buf += _line
-            _exit = container.wait()['StatusCode']
+            try:
+                for _line in container.logs(stream=True):
+                    _buf += _line
+            except _DOCKER_TRANSIENT:
+                pass   # short audit-gate op; fall through to the wait poll
+            _exit = self._wait_for_exit(container)['StatusCode']
+            if not _buf:
+                try:
+                    _buf = container.logs(stream=False)
+                except Exception:
+                    _buf = b''
             _text = _buf.decode('utf-8', errors='replace')
             if _exit != 0:
                 logger.warning(
@@ -1459,7 +1560,7 @@ class BuildContainer:
                 f"grub-mkrescue container {container.short_id} started "
                 f"(staging={staging_dir}, output={output_iso})"
             )
-            _result = container.wait()
+            _result = self._wait_for_exit(container)
             _exit_code = _result.get('StatusCode', -1)
             _stdout = container.logs(stdout=True,  stderr=False).decode(
                 'utf-8', errors='replace')

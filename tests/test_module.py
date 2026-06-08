@@ -18305,6 +18305,98 @@ def test_restamp_asg_deb_bumps_version_and_intra_source_deps():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def test_docker_wait_for_exit_survives_read_timeouts():
+    """A multi-hour build's quiet phase makes container.wait() raise a
+    requests Timeout though the container is alive.  _wait_for_exit must
+    keep polling (reload + re-wait) and return the real exit code — never
+    propagate the timeout as a build failure.  NotFound (reaped) still
+    propagates."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import requests.exceptions as _rexc
+    import docker
+    import buildcontainer
+
+    class _Flaky:
+        """wait() times out N times, then the container has exited."""
+        short_id = 'abc123'
+
+        def __init__(self, timeouts):
+            self._left = timeouts
+            self.attrs = {'State': {'Status': 'running', 'Running': True}}
+
+        def wait(self):
+            if self._left > 0:
+                self._left -= 1
+                raise _rexc.ReadTimeout('read timeout=60')
+            return {'StatusCode': 0}
+
+        def reload(self):
+            if self._left == 0:
+                self.attrs = {'State': {'Status': 'exited',
+                                        'Running': False, 'ExitCode': 0}}
+
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    # 3 timeouts then exited(0) — must return 0, not raise
+    assert _bc._wait_for_exit(_Flaky(3)) == {'StatusCode': 0}
+    # non-zero exit code is preserved
+    _f = _Flaky(1)
+
+    def _reload_fail():
+        _f.attrs = {'State': {'Status': 'exited', 'Running': False,
+                              'ExitCode': 137}}
+    _f.reload = _reload_fail
+    assert _bc._wait_for_exit(_f) == {'StatusCode': 137}
+
+    # NotFound (container reaped externally) propagates, never swallowed
+    class _Gone:
+        short_id = 'x'
+
+        def wait(self):
+            raise docker.errors.NotFound('gone')
+    _propagated = False
+    try:
+        _bc._wait_for_exit(_Gone())
+    except docker.errors.NotFound:
+        _propagated = True
+    assert _propagated, "NotFound should propagate, not be swallowed"
+
+
+def test_docker_stream_and_wait_backfills_log_on_timeout():
+    """Log streaming is best-effort: a read timeout mid-stream must NOT
+    fail the build — _stream_and_wait stops tailing, waits for exit, then
+    dumps the complete logs (non-streaming) so nothing is lost."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import requests.exceptions as _rexc
+    import buildcontainer
+
+    class _C:
+        short_id = 'c1'
+        attrs = {'State': {'Status': 'exited', 'Running': False,
+                           'ExitCode': 0}}
+
+        def logs(self, stream=False, **_kw):
+            if stream:
+                def _gen():
+                    yield b'building...\n'
+                    raise _rexc.ReadTimeout('quiet phase')
+                return _gen()
+            return b'building...\ndone, full transcript\n'   # backfill
+
+        def reload(self):
+            pass
+
+        def wait(self):
+            return {'StatusCode': 0}
+
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    with tempfile.TemporaryDirectory() as _tmp:
+        _log = os.path.join(_tmp, 'pkg')
+        _exit = _bc._stream_and_wait(_C(), _log)
+        assert _exit == {'StatusCode': 0}, _exit
+        # the streamed partial was replaced by the complete backfill dump
+        assert 'full transcript' in open(_log).read()
+
+
 def test_segregate_never_deletes_existing_published_deb():
     """An exact-name collision in a published dir KEEPs the existing artifact
     (append-only) and drops the freshly-built dup at repo/ root — never
@@ -30428,6 +30520,9 @@ def main() -> int:
         test_asg_filename_maps_pristine_to_stamped,
         test_match_pristine_base_reconciles_stamped_artifact,
         test_restamp_asg_deb_bumps_version_and_intra_source_deps,
+        # docker read-timeout robustness on multi-hour builds
+        test_docker_wait_for_exit_survives_read_timeouts,
+        test_docker_stream_and_wait_backfills_log_on_timeout,
         # UPD-01 step 2: append-only enforcement
         test_segregate_never_deletes_existing_published_deb,
         # OBS-04: exhaustive per-package build/tunnel log
