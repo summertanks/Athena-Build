@@ -10303,6 +10303,7 @@ class BuildSession:
             active_profiles=frozenset(
                 getattr(self.config, 'build_profiles', frozenset())),
             repo_dir=self.config.dir_repo,
+            fork_dsc_dir=getattr(self.config, 'dir_fork_source_repo', None),
         )
         console.print(
             f"  checked={_stats['sources_checked']}  "
@@ -10494,6 +10495,8 @@ class BuildSession:
                 peer_sources=set(_scope_names),
                 active_profiles=frozenset(
                     getattr(self.config, 'build_profiles', frozenset())),
+                fork_dsc_dir=getattr(
+                    self.config, 'dir_fork_source_repo', None),
             )
             _records.extend(_src_records)
             # OBS-04 companion: persist the PREDICTED artifact set as
