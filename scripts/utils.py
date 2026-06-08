@@ -2328,6 +2328,12 @@ class BuildConfig:
             # the full operator-facing rationale.
             self.include_recommends = config_parser.getboolean(
                 'Build', 'IncludeRecommends', fallback=True)
+            # Docker client read-timeout (seconds).  Optional; the floor
+            # below is generous so a multi-hour build's quiet phases
+            # don't trip container.wait()/logs reads (the worker survives
+            # via keep-polling regardless — see buildcontainer._wait_for_exit).
+            self.docker_timeout = config_parser.getint(
+                'Build', 'DockerTimeout', fallback=1800)
             # Build-mode switch.  `distribution` (default) drives the
             # full corpus through pkg.list/live.list/installer.list/pool.list
             # with runtime dep closure.  `build` works against just
