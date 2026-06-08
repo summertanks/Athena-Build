@@ -8034,9 +8034,7 @@ def test_cmd_audit_nmu_residue_absorbed_into_cmd_audit():
     final section of every `repo audit` invocation.  Pin both:
     (a) the standalone verb is gone, (b) the absorbed helper is
     called from cmd_audit."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     # (a) Standalone verb gone.
     assert 'def cmd_audit_nmu(' not in _body, (
         "cmd_audit_nmu must be removed — its logic was absorbed into "
@@ -15736,9 +15734,7 @@ def test_cmd_audit_runs_three_checks():
       - audit_conflict_cohort × 2 (live cohort + installer cohort)
     Hard-coded into the cmd body so a single command surfaces all three
     install-correctness checks."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r'def cmd_audit\(self, \*args\):.*?(?=\n    def )',
@@ -15849,7 +15845,7 @@ def test_dedupe_bidirectional_conflicts_collapses_pairs():
     apparent conflict count for the common symmetric pattern."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    from build import _dedupe_bidirectional_conflicts
+    from commands.cmd_audit import _dedupe_bidirectional_conflicts
     _input = [
         ('grub-pc', 'Conflicts', 'grub-efi-amd64', 'grub-efi-amd64'),
         ('grub-efi-amd64', 'Conflicts', 'grub-pc', 'grub-pc'),
@@ -16092,9 +16088,7 @@ def test_content_integrity_absorbed_into_cmd_audit_per_cohort():
     Its per-cohort deep-verify logic moved into cmd_audit's
     _report_content_integrity helper.  Pin both the absence of the
     old verb AND the per-cohort separation in the new home."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     # Old verb gone.
     assert 'def cmd_source_verify(' not in _body, (
         "cmd_source_verify must be removed — absorbed into cmd_audit "
@@ -17050,9 +17044,7 @@ def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
     pre-flight `source audit` AND `repo audit`, and both must honour
     a `no-gate` arg to bypass the gates.  Pin the structural shape
     of both methods."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     # Both audit helpers must exist.
     assert 'def _preflight_audit_source(' in _body, (
