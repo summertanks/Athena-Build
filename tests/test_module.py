@@ -22432,6 +22432,7 @@ def test_snapshot_select_interactive_sets_chosen_current():
     chosen one as the new current (forward-only, cautioned)."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_snapshot
     import utils
     from build import BuildSession, BuildFlags
     with tempfile.TemporaryDirectory() as _tmp:
@@ -22461,14 +22462,14 @@ def test_snapshot_select_interactive_sets_chosen_current():
         _sl = utils.list_snapshots_between
         utils.list_snapshots_between = lambda _c, _a, _u: [
             '20260518T000000Z', '20260526T134919Z']
-        _sp, _sc = build.Prompt, build.console.print
-        build.Prompt = _FakePrompt
+        _sp, _sc = cmd_snapshot.Prompt, build.console.print
+        cmd_snapshot.Prompt = _FakePrompt
         build.console.print = lambda *a, **k: None
         try:
             _sess._snapshot_select_interactive()
         finally:
             utils.list_snapshots_between = _sl
-            build.Prompt, build.console.print = _sp, _sc
+            cmd_snapshot.Prompt, build.console.print = _sp, _sc
         assert utils.read_snapshot_state(_sess.config)['current'] == \
             '20260518T000000Z', "picker must set the chosen ts as current"
 
@@ -22513,6 +22514,7 @@ def test_snapshot_select_force_accepts_backtrack():
     timestamp (bypassing forward-only).  Writes current + appends history."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_snapshot
     import utils
     from build import BuildSession, BuildFlags
 
@@ -22532,13 +22534,13 @@ def test_snapshot_select_force_accepts_backtrack():
                 pass
             def get_response(self):
                 return next(_answers)
-        _sp, _sc = build.Prompt, build.console.print
-        build.Prompt = _FakePrompt
+        _sp, _sc = cmd_snapshot.Prompt, build.console.print
+        cmd_snapshot.Prompt = _FakePrompt
         build.console.print = lambda *a, **k: None
         try:
             _sess.cmd_snapshot('select', 'force')
         finally:
-            build.Prompt, build.console.print = _sp, _sc
+            cmd_snapshot.Prompt, build.console.print = _sp, _sc
         _st = utils.read_snapshot_state(_sess.config)
         assert _st['current'] == '20260514T083402Z', _st
         _h = utils.read_snapshot_history(_sess.config)
@@ -22552,6 +22554,7 @@ def test_snapshot_select_force_cancels_on_empty_or_no():
     """Empty timestamp OR 'n' confirmation → no write."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_snapshot
     import utils
     from build import BuildSession, BuildFlags
 
@@ -22571,13 +22574,13 @@ def test_snapshot_select_force_cancels_on_empty_or_no():
                     pass
                 def get_response(self):
                     return next(_it)
-            _sp, _sc = build.Prompt, build.console.print
-            build.Prompt = _FakePrompt
+            _sp, _sc = cmd_snapshot.Prompt, build.console.print
+            cmd_snapshot.Prompt = _FakePrompt
             build.console.print = lambda *a, **k: None
             try:
                 _sess.cmd_snapshot('select', 'force')
             finally:
-                build.Prompt, build.console.print = _sp, _sc
+                cmd_snapshot.Prompt, build.console.print = _sp, _sc
             return utils.read_snapshot_state(_sess.config)
     # Empty input cancels
     assert _run(['', 'y']) == {}
@@ -22589,6 +22592,7 @@ def test_snapshot_select_force_rejects_malformed_timestamp():
     """force prompt validates YYYYMMDDTHHMMSSZ shape; garbage input → no write."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_snapshot
     import utils
     from build import BuildSession, BuildFlags
     with tempfile.TemporaryDirectory() as _tmp:
@@ -22606,13 +22610,13 @@ def test_snapshot_select_force_rejects_malformed_timestamp():
                 pass
             def get_response(self):
                 return next(_answers)
-        _sp, _sc = build.Prompt, build.console.print
-        build.Prompt = _FakePrompt
+        _sp, _sc = cmd_snapshot.Prompt, build.console.print
+        cmd_snapshot.Prompt = _FakePrompt
         build.console.print = lambda *a, **k: None
         try:
             _sess.cmd_snapshot('select', 'force')
         finally:
-            build.Prompt, build.console.print = _sp, _sc
+            cmd_snapshot.Prompt, build.console.print = _sp, _sc
         assert utils.read_snapshot_state(_sess.config) == {}
 
 
@@ -22624,6 +22628,7 @@ def test_ensure_snapshot_pins_prompts_and_writes_when_unset():
     state in Phase 4); only `current` is prompted."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_snapshot
     import utils
     from build import BuildSession
     with tempfile.TemporaryDirectory() as _tmp:
@@ -22649,13 +22654,13 @@ def test_ensure_snapshot_pins_prompts_and_writes_when_unset():
             def get_response(self):
                 return next(_answers)
 
-        _sp, _sc = build.Prompt, build.console.print
-        build.Prompt = _FakePrompt
+        _sp, _sc = cmd_snapshot.Prompt, build.console.print
+        cmd_snapshot.Prompt = _FakePrompt
         build.console.print = lambda *a, **k: None
         try:
             assert _sess._ensure_snapshot_pins() is True
         finally:
-            build.Prompt, build.console.print = _sp, _sc
+            cmd_snapshot.Prompt, build.console.print = _sp, _sc
         _st = utils.read_snapshot_state(_sess.config)
         assert _st['current'] == '20260514T083402Z', _st
         assert 'base' not in _st, "MIRROR-01: base must NOT be written"
@@ -22671,6 +22676,7 @@ def test_ensure_snapshot_pins_aborts_when_no_selection():
     (returns False) rather than silently building at an undefined snapshot."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_snapshot
     import utils
     from build import BuildSession
     with tempfile.TemporaryDirectory() as _tmp:
@@ -22695,8 +22701,8 @@ def test_ensure_snapshot_pins_aborts_when_no_selection():
             def get_response(self):
                 return ''                            # always default → 'latest'
 
-        _sp, _sc = build.Prompt, build.console.print
-        build.Prompt = _FakePrompt
+        _sp, _sc = cmd_snapshot.Prompt, build.console.print
+        cmd_snapshot.Prompt = _FakePrompt
         build.console.print = lambda *a, **k: None
         try:
             assert _sess._ensure_snapshot_pins() is False

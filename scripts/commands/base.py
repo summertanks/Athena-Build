@@ -1,0 +1,56 @@
+"""Shared typed surface for the BuildSession command mixins.
+
+``BuildSession`` (build.py) is split into functional ``*CommandsMixin``
+classes, one per command cluster.  Every mixin inherits ``SessionState``,
+which declares — *for the type checker only* — the instance attributes
+that ``BuildSession.__init__`` sets.  Without this, mypy would flag
+``self.config`` / ``self.cache`` / … inside a mixin's typed method bodies
+as unknown attributes (the ``__init__`` that defines them lives on the
+final class, not the mixin).
+
+Runtime: ``SessionState`` has NO behaviour and sets nothing — the
+declarations live under ``TYPE_CHECKING`` so they never shadow the real
+values ``BuildSession.__init__`` assigns.  The mixins contribute methods;
+MRO assembles them onto the one ``BuildSession`` instance, so a typed
+method in one cluster calling ``self._helper()`` defined in another
+resolves normally at runtime.  Cross-cluster helper signatures that the
+checker needs are declared below as they arise.
+"""
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    import buildcontainer
+    import dependencytree
+    from cache import Cache
+    from utils import BuildConfig
+    from build import BuildFlags
+
+
+class SessionState:
+    """Type-only declaration of BuildSession's shared instance state.
+
+    Inherited by every command mixin so their typed method bodies see the
+    attributes ``BuildSession.__init__`` populates.  Carries no runtime
+    behaviour.
+    """
+
+    if TYPE_CHECKING:
+        config: 'BuildConfig'
+        tui: Any                       # Tui | Cli — duck-typed, intentionally Any
+        cache: 'Optional[Cache]'
+        dep_tree: 'Optional[dependencytree.DependencyTree]'
+        udeb_dep_tree: 'Optional[dependencytree.DependencyTree]'
+        container: 'Optional[buildcontainer.BuildContainer]'
+        flags: 'BuildFlags'
+        last_source_build_counts: 'Optional[dict]'
+        _in_update_build: bool
+        selected_srcs: dict
+        download_size: int
+
+        # Cross-cluster helpers — defined in another mixin (or BuildSession
+        # itself) but called from this mixin's typed method bodies, so the
+        # checker needs their signatures here.  Listed as they arise; the
+        # real implementations override these declarations via MRO.
+        def _group_help(self, group: str, table: dict,
+                        unknown: str = ...) -> None: ...
+        def _update_build_pending(self) -> bool: ...
