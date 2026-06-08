@@ -1,6 +1,6 @@
 # internal modules
 from debian.deb822 import Packages, Sources
-from debian.debian_support import Version, DpkgArchTable
+from debian.debian_support import Version
 
 import logging
 import apt_pkg
@@ -22,21 +22,6 @@ _DEB822_INTERNAL_PREFIXES = ('_Deb822', '_PkgRelationMixin',
 _DEB822_INTERNAL_ATTRS = frozenset({
     'encoding', 'decoder', 'gpg_info', '_err_str',
 })
-
-
-_arch_table: Optional[DpkgArchTable] = None
-
-def _load_arch_table() -> Optional[DpkgArchTable]:
-    global _arch_table
-    if _arch_table is None:
-        try:
-            _arch_table = DpkgArchTable.load_arch_table()
-        except (OSError, RuntimeError, ValueError, KeyError):
-            # Best-effort load — None is a documented return; arch checks
-            # downstream fall through to wildcard handling when this is None.
-            pass
-    return _arch_table
-
 
 
 class VersionConstraint:

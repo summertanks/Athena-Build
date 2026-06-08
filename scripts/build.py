@@ -3769,26 +3769,6 @@ class BuildSession:
             f"index built on the remote at publish time)")
         return True
 
-    def _print_publish_size_summary(self) -> None:
-        """Summarise publish/ (the local staging dir for `repo index minimal`).
-        File count + total size — useful for a quick "what am I about to
-        ship?" before invoking `mirror publish` on the minimal staging."""
-        _root = self.config.dir_publish
-        _total = 0
-        _n = 0
-        for _dp, _dirs, _files in os.walk(_root):
-            for _f in _files:
-                _p = os.path.join(_dp, _f)
-                if not os.path.isfile(_p):
-                    continue
-                _total += os.path.getsize(_p)
-                _n += 1
-        console.print(
-            f"publish/: {_n} file(s), {_total // 2 ** 20} MB total",
-            tui.COLOR_HIGHLIGHT,
-        )
-
-
     def cmd_repo(self, action: str = '', *args):
         """Dispatcher for `repo <action>` — LOCAL .deb pool lifecycle.
 
