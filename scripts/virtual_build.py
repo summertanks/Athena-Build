@@ -291,6 +291,25 @@ def synthesize_binary_record(
     return _rec
 
 
+_ARCH_TABLE: 'Any' = None
+
+
+def _arch_table() -> 'Any':
+    """Lazily load + cache dpkg's architecture table — the same
+    ``DpkgArchTable`` ``cache.py`` uses.  Loaded once per process
+    (~ms); ``None`` if python-debian can't provide it, in which case
+    callers fall back to permissive behaviour."""
+    global _ARCH_TABLE
+    if _ARCH_TABLE is None:
+        try:
+            from debian.debian_support import DpkgArchTable
+            _ARCH_TABLE = DpkgArchTable.load_arch_table()
+        except Exception as _e:   # pragma: no cover — python-debian present
+            logger.warning(f"virtual: dpkg arch table unavailable: {_e}")
+            _ARCH_TABLE = False   # sentinel: tried, failed
+    return _ARCH_TABLE or None
+
+
 def _binary_active_for_arch(
     package_list_entry: str, target_arch: str,
 ) -> bool:
@@ -298,20 +317,29 @@ def _binary_active_for_arch(
     entry.  Real-build's ``dpkg-buildpackage -a <arch>`` only emits
     binaries whose declared architecture matches the build arch.
 
-    Catches the linux-source class: it declares ~14k binaries in
-    `Binary:` across every supported Debian architecture
-    (acpi-modules-6.1.0-1-4kc-malta-di arch=mips,
-     affs-modules-6.1.0-1-m68k-di arch=m68k, etc.); we only build
-    amd64.  Without this filter the synth predicts every one of them.
+    Matching delegates to dpkg's own ``DpkgArchTable.matches_architecture``
+    (== ``Dpkg::Arch::debarch_is``) — the ONLY correct authority for the
+    full Debian arch grammar.  The previous hand-rolled ``endswith``
+    logic got two whole families wrong, both surfaced by the thor1
+    rebuild's per-binary delta:
+      * ``kfreebsd-amd64`` / ``hurd-amd64`` wrongly matched target
+        ``amd64`` (it's a FOREIGN kernel, not a flavour of amd64) →
+        glibc's six ``libc0.1*`` over-predicted;
+      * 3-component tuples like ``gnu-any-any`` / ``musl-any-any`` were
+        unparsed → libxcrypt's ``libcrypt1`` (real, needed) wrongly
+        FILTERED → UNDER-prediction (the dangerous direction).
 
-    Supported patterns:
-      arch=any           → always (any arch)
-      arch=all           → always (arch-independent)
-      arch=amd64         → only on amd64
-      arch=linux-any     → any linux arch (we're linux-amd64)
-      arch=any-amd64     → any kernel, amd64 CPU
-      arch=amd64,i386    → comma OR space list
-      arch=!hurd-any     → exclude pattern (negative match)
+    matches_architecture(target, alias) returns True / False / None
+    (unrecognised).  We bias toward INCLUSION on uncertainty — over-
+    prediction is annoying, under-prediction silently drops a real
+    binary — mirroring cache.py's `is not False` convention:
+      * positive list → active unless EVERY term definitively fails;
+      * negative list (``!x``) → active unless our arch DEFINITELY
+        matches an excluded term.
+
+    Examples (target=amd64): ``any``/``all`` → True; ``amd64,i386`` →
+    True; ``kfreebsd-amd64`` → False; ``gnu-any-any`` → True;
+    ``musl-any-any`` → False; ``linux-any`` → True; ``!hurd-any`` → True.
     """
     _arch_str = ''
     for _tok in package_list_entry.split():
@@ -321,34 +349,29 @@ def _binary_active_for_arch(
     if not _arch_str:
         return True
     _terms = _arch_str.replace(',', ' ').split()
-    _any_neg_term = any(_t.startswith('!') for _t in _terms)
-    if _any_neg_term:
-        # Negative list: ALL terms must NOT exclude us.
-        for _t in _terms:
-            if not _t.startswith('!'):
-                continue
-            _excl = _t[1:]
-            if _excl == target_arch or _excl == 'any':
-                return False
-            if _excl == 'linux-any' and target_arch in ('amd64', 'i386'):
-                return False
-            if _excl.endswith(f'-{target_arch}'):
-                return False
+    # arch:all (arch-independent) and the `any` wildcard build everywhere.
+    if 'all' in _terms or 'any' in _terms:
         return True
-    # Positive list: at least one term must match.
-    for _t in _terms:
-        if _t in ('any', 'all', target_arch):
-            return True
-        if _t == 'linux-any' and target_arch in (
-                'amd64', 'i386', 'arm64', 'armhf', 'armel',
-                'mips64el', 'ppc64el', 's390x'):
-            return True
-        if _t.endswith(f'-{target_arch}'):
-            return True
-        # `linux-<cpu>` matches when target_arch == cpu.
-        if _t.startswith('linux-') and _t[len('linux-'):] == target_arch:
-            return True
-    return False
+    _tbl = _arch_table()
+    if _tbl is None:
+        # No arch table → permissive (predict it; let the build/repo
+        # be the authority).  Better an extra prediction than a dropped
+        # real binary.
+        return True
+
+    def _match(_term: str) -> 'Optional[bool]':
+        try:
+            return _tbl.matches_architecture(target_arch, _term)
+        except Exception:
+            return None
+
+    _neg = [_t for _t in _terms if _t.startswith('!')]
+    if _neg:
+        # All-negative list ("built everywhere EXCEPT these"): exclude
+        # only on a DEFINITIVE match; None/unknown → don't exclude.
+        return not any(_match(_t[1:]) is True for _t in _neg)
+    # Positive list: active unless every term definitively fails to match.
+    return any(_match(_t) is not False for _t in _terms)
 
 
 def _binary_active_by_convention(

@@ -19842,6 +19842,51 @@ def test_compute_post_build_versions_uniform_n_across_siblings():
     }
 
 
+def test_virtual_arch_gate_dpkg_table_semantics():
+    """virtual_build._binary_active_for_arch delegates to dpkg's
+    DpkgArchTable.matches_architecture — pins the two delta families the
+    thor1 rebuild exposed in the old hand-rolled endswith logic:
+      * kfreebsd-amd64 / hurd-amd64 are FOREIGN arches, must NOT match
+        target amd64 (glibc libc0.1* over-prediction);
+      * 3-component tuples gnu-any-any (match) / musl-any-any (no match)
+        must parse (libxcrypt libcrypt1 under-prediction)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+
+    def active(arch_field, target='amd64'):
+        # entry shape: "<name> <type> <section> <pri> arch=<field> [profile=…]"
+        return _vb._binary_active_for_arch(
+            f"foo deb libs optional arch={arch_field}", target)
+
+    # baseline patterns
+    assert active('any') and active('all') and active('amd64')
+    assert active('amd64,i386') and active('linux-any') and active('any-amd64')
+    assert not active('i386') and not active('arm64') and not active('mips')
+    # no arch= → always active
+    assert _vb._binary_active_for_arch('foo deb libs optional', 'amd64')
+    # FAMILY 1 — foreign-kernel amd64 must NOT match (the glibc bug)
+    assert not active('kfreebsd-amd64,kfreebsd-i386')
+    assert not active('hurd-amd64')
+    assert not active('hurd-i386')
+    # FAMILY 2 — 3-component abi tuples (the libxcrypt bug)
+    assert active('gnu-any-any'), 'gnu-any-any must match a glibc amd64'
+    assert not active('musl-any-any'), 'musl-any-any must NOT match glibc amd64'
+    # negative lists: built everywhere except excluded
+    assert active('!hurd-any')                   # amd64 not excluded
+    assert active('!alpha,!hppa,!ia64')
+    assert not active('!linux-any')              # amd64 IS linux → excluded
+    # the actual glibc + libxcrypt Package-List rows, verbatim
+    assert not _vb._binary_active_for_arch(
+        'libc0.1 deb libs optional arch=kfreebsd-amd64,kfreebsd-i386 '
+        'profile=!stage1', 'amd64')
+    assert _vb._binary_active_for_arch(
+        'libcrypt1 deb libs optional arch=gnu-any-any protected=yes',
+        'amd64')
+    assert not _vb._binary_active_for_arch(
+        'libcrypt2 deb libs optional arch=musl-any-any protected=yes',
+        'amd64')
+
+
 def test_virtual_build_synthesize_binary_record_inherits_upstream_deps():
     """Synthesized record carries upstream Depends/Conflicts/Provides
     verbatim except for sibling pins, which rewrite to virtual ver."""
@@ -30339,6 +30384,7 @@ def main() -> int:
         test_compute_post_build_versions_uniform_n_across_siblings,
         test_compute_post_build_versions_release_advances_resets_n,
         # virtual-build chunk 2 — binary record synthesizer
+        test_virtual_arch_gate_dpkg_table_semantics,
         test_virtual_build_synthesize_binary_record_inherits_upstream_deps,
         test_virtual_build_synthesize_record_no_upstream_minimal_skeleton,
         test_virtual_build_sibling_pin_only_rewritten_when_pristine_matches,
