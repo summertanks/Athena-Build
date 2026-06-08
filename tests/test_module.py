@@ -19887,6 +19887,60 @@ def test_virtual_arch_gate_dpkg_table_semantics():
         'amd64')
 
 
+def test_virtual_fork_package_list_from_dsc():
+    """FORK SOURCES ONLY: when source.package_list is empty (the
+    locally-generated fork/Sources omits Package-List), the synth reads
+    the fork's .dsc so udeb binaries keep their 'udeb' type token —
+    athena-installer-data / choose-mirror were predicting .deb before.
+    Upstream sources are never touched."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    with tempfile.TemporaryDirectory() as _tmp:
+        _dsc = os.path.join(_tmp, 'athena-installer-data_1.3.0.dsc')
+        with open(_dsc, 'w') as _fh:
+            _fh.write("Format: 3.0 (native)\n"
+                      "Source: athena-installer-data\n"
+                      "Version: 1.3.0\n"
+                      "Package-List:\n"
+                      " athena-installer-data udeb debian-installer "
+                      "optional arch=all\n"
+                      "Checksums-Sha1:\n abc 1 x\n")
+
+        class _ForkMirror:
+            id = 'fork'
+
+        class _Src:
+            package = 'athena-installer-data'
+            version = '1.3.0'
+            package_list: list = []          # fork/Sources carries none
+            files = {'athena-installer-data_1.3.0.dsc': {}}
+            _mirror = _ForkMirror()
+
+        # no fork_dsc_dir → no fallback (legacy behaviour preserved)
+        assert _vb._package_list_index(_Src()) == {}
+        # with fork_dsc_dir → reads the .dsc, udeb type recovered
+        _idx = _vb._package_list_index(_Src(), fork_dsc_dir=_tmp)
+        assert 'athena-installer-data' in _idx, _idx
+        assert _idx['athena-installer-data'].split()[1] == 'udeb', _idx
+        # construct-from-pkg_version path (no .dsc in files) still resolves
+        class _SrcNoFiles(_Src):
+            files: dict = {}
+        assert _vb._package_list_index(
+            _SrcNoFiles(), fork_dsc_dir=_tmp)['athena-installer-data'
+                                             ].split()[1] == 'udeb'
+        # UPSTREAM (non-fork) source is NOT read from the fork dir
+        class _UpMirror:
+            id = 'main'
+
+        class _Up:
+            package = 'zlib'
+            version = '1.0'
+            package_list: list = []
+            files: dict = {}
+            _mirror = _UpMirror()
+        assert _vb._package_list_index(_Up(), fork_dsc_dir=_tmp) == {}
+
+
 def test_virtual_build_synthesize_binary_record_inherits_upstream_deps():
     """Synthesized record carries upstream Depends/Conflicts/Provides
     verbatim except for sibling pins, which rewrite to virtual ver."""
@@ -30385,6 +30439,7 @@ def main() -> int:
         test_compute_post_build_versions_release_advances_resets_n,
         # virtual-build chunk 2 — binary record synthesizer
         test_virtual_arch_gate_dpkg_table_semantics,
+        test_virtual_fork_package_list_from_dsc,
         test_virtual_build_synthesize_binary_record_inherits_upstream_deps,
         test_virtual_build_synthesize_record_no_upstream_minimal_skeleton,
         test_virtual_build_sibling_pin_only_rewritten_when_pristine_matches,

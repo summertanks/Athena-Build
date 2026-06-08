@@ -453,14 +453,65 @@ def _binary_active_under_profiles(
     return False
 
 
-def _package_list_index(source: 'Any') -> 'Dict[str, str]':
+def _is_fork_source(source: 'Any') -> bool:
+    """A fork source is the one ingested from the local ``file://`` fork
+    Mirror (id ``'fork'``; see fork_mirror.register_fork_mirror)."""
+    return getattr(getattr(source, '_mirror', None), 'id', '') == 'fork'
+
+
+def _fork_dsc_path(source: 'Any', fork_dsc_dir: str) -> str:
+    """Locate a fork source's ``.dsc`` under ``fork_dsc_dir``
+    (config.dir_fork_source_repo).  Prefer the actual ``.dsc`` name from
+    ``source.files``; fall back to ``<pkg>_<version-no-epoch>.dsc``."""
+    for _fn in (getattr(source, 'files', {}) or {}):
+        if _fn.endswith('.dsc'):
+            return os.path.join(fork_dsc_dir, os.path.basename(_fn))
+    _pkg = getattr(source, 'package', '')
+    _ver = utils.version_no_epoch(str(getattr(source, 'version', '')))
+    return os.path.join(fork_dsc_dir, f"{_pkg}_{_ver}.dsc") if _pkg and _ver \
+        else ''
+
+
+def _dsc_package_list(dsc_path: str) -> 'List[str]':
+    """Parse the ``Package-List:`` field of a ``.dsc`` into a list of
+    entry strings (one per binary).  '' / unreadable → empty list."""
+    try:
+        with open(dsc_path, errors='replace') as _fh:
+            _txt = _fh.read()
+    except OSError:
+        return []
+    _m = re.search(r'^Package-List:\n((?: .*\n?)+)', _txt, re.M)
+    if not _m:
+        return []
+    return [_ln.strip() for _ln in _m.group(1).splitlines() if _ln.strip()]
+
+
+def _package_list_index(
+    source: 'Any', fork_dsc_dir: 'Optional[str]' = None,
+) -> 'Dict[str, str]':
     """Build ``{binary_name: package_list_entry_string}`` from a
     Source's parsed ``package_list``.  Each entry's first whitespace-
     separated token is the binary name; the rest carry the
     section / priority / arch / profile annotations.
+
+    FORK SOURCES ONLY: the locally-generated ``fork/Sources`` omits the
+    ``Package-List:`` field (we don't want the overhead of keeping it
+    current at every invocation), so ``source.package_list`` is empty
+    for forks.  When ``fork_dsc_dir`` is given and this is a fork source
+    with no parsed package_list, read the authoritative ``Package-List:``
+    straight from the fork's ``.dsc`` on disk.  Without this, a fork
+    udeb (athena-installer-data, choose-mirror, …) loses its ``udeb``
+    type token and synth predicts a ``.deb`` extension the real build
+    never emits.  Upstream sources are untouched — they carry
+    package_list from the cache.
     """
+    _entries = list(getattr(source, 'package_list', []) or [])
+    if not _entries and fork_dsc_dir and _is_fork_source(source):
+        _dsc = _fork_dsc_path(source, fork_dsc_dir)
+        if _dsc:
+            _entries = _dsc_package_list(_dsc)
     _idx: 'Dict[str, str]' = {}
-    for _entry in getattr(source, 'package_list', []) or []:
+    for _entry in _entries:
         if not _entry:
             continue
         _parts = _entry.split(None, 1)
@@ -477,6 +528,7 @@ def synthesize_source_binaries(
     peer_sources: 'Optional[set[str]]' = None,
     active_profiles: 'frozenset[str]' = frozenset(),
     override_source_version: 'Optional[str]' = None,
+    fork_dsc_dir: 'Optional[str]' = None,
 ) -> List[Dict[str, str]]:
     """End-to-end: take one Source and return one synthesized RepoState
     record per binary it would emit.
@@ -528,7 +580,7 @@ def synthesize_source_binaries(
     # DEB_BUILD_PROFILES.  Catches every `*-doc` (profile=!nodoc),
     # `*-tests` (profile=!nocheck), etc. that real-build's
     # dpkg-buildpackage statically excludes.
-    _pkg_list_idx = _package_list_index(source)
+    _pkg_list_idx = _package_list_index(source, fork_dsc_dir=fork_dsc_dir)
     _upstream_per_binary: Dict[str, Optional[Dict[str, str]]] = {}
     _base_ver_per_binary: Dict[str, str] = {}
     _emit_binaries: List[str] = []
@@ -890,6 +942,7 @@ def validate_against_build_records(
     arch: str, buildlog_dir: str,
     active_profiles: 'frozenset[str]' = frozenset(),
     repo_dir: 'Optional[str]' = None,
+    fork_dsc_dir: 'Optional[str]' = None,
 ) -> 'Tuple[Dict[str, Any], List[Tuple[str, str, str]]]':
     """Run the synthesizer against each source for which a successful
     build.json exists on disk; compare the predicted filenames
@@ -993,6 +1046,7 @@ def validate_against_build_records(
             peer_sources=set(source_names),
             active_profiles=active_profiles,
             override_source_version=_src_pristine_at_build or None,
+            fork_dsc_dir=fork_dsc_dir,
         )
         _pred_files: 'List[str]' = [
             os.path.basename(_r.get('Filename', '') or '')
