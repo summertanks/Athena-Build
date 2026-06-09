@@ -30386,6 +30386,95 @@ def test_remote_publish_drops_claim_when_push_fails():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SELECT-LOCK — signed selection lockfile (Chunk 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _selection_lock_cfg(root):
+    """Minimal config stub for selection_lock — needs dir_config + dir_log,
+    and log/build/ (the HMAC key lives there, shared with build records)."""
+    import types
+    _cfg_dir = os.path.join(root, 'config')
+    _log_dir = os.path.join(root, 'log')
+    os.makedirs(_cfg_dir, exist_ok=True)
+    os.makedirs(os.path.join(_log_dir, 'build'), exist_ok=True)
+    return types.SimpleNamespace(dir_config=_cfg_dir, dir_log=_log_dir)
+
+
+def test_selection_lock_roundtrip_signs_and_verifies():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    with tempfile.TemporaryDirectory() as _root:
+        _cfg = _selection_lock_cfg(_root)
+        _state = {
+            'arch': 'amd64', 'snapshot': '20260602T173733Z',
+            'flags': {'IncludeRecommends': True, 'IncludeBuildDep': False},
+            'seeds': {'pkg': {'base': ['a', 'b']}, 'pool': ['c']},
+            'closure': {'bins': {'a': ['base']}, 'srcs': {'asrc': ['base']}},
+            'pins': {'awk': 'mawk'},
+        }
+        _sl.write_selection_state(_cfg, _state)
+        _back, _status = _sl.read_selection_state(_cfg)
+        assert _status == _sl.STATUS_OK, _status
+        assert _back is not None
+        assert _back['arch'] == 'amd64'
+        assert _back['pins'] == {'awk': 'mawk'}
+        assert _back['schema_version'] == _sl.SELECTION_STATE_SCHEMA_VERSION
+        # write must not mutate the caller's dict
+        assert 'sig' not in _state and 'schema_version' not in _state
+
+
+def test_selection_lock_missing_is_distinct_from_tamper():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    with tempfile.TemporaryDirectory() as _root:
+        _cfg = _selection_lock_cfg(_root)
+        _back, _status = _sl.read_selection_state(_cfg)
+        assert _back is None and _status == _sl.STATUS_MISSING, _status
+
+
+def test_selection_lock_tamper_detected_as_badsig():
+    import json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    with tempfile.TemporaryDirectory() as _root:
+        _cfg = _selection_lock_cfg(_root)
+        _sl.write_selection_state(_cfg, {'arch': 'amd64', 'closure': {}})
+        _path = _sl.selection_state_path(_cfg)
+        _doc = json.loads(open(_path).read())
+        _doc['arch'] = 'arm64'                       # mutate a signed field
+        open(_path, 'w').write(json.dumps(_doc, sort_keys=True, indent=2))
+        _back, _status = _sl.read_selection_state(_cfg)
+        assert _back is None and _status == _sl.STATUS_BADSIG, _status
+
+
+def test_selection_lock_malformed_json_is_malformed():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    with tempfile.TemporaryDirectory() as _root:
+        _cfg = _selection_lock_cfg(_root)
+        open(_sl.selection_state_path(_cfg), 'w').write('{not json')
+        _back, _status = _sl.read_selection_state(_cfg)
+        assert _back is None and _status == _sl.STATUS_MALFORMED, _status
+        # a valid-JSON non-dict is also malformed
+        open(_sl.selection_state_path(_cfg), 'w').write('[1, 2, 3]')
+        assert _sl.read_selection_state(_cfg)[1] == _sl.STATUS_MALFORMED
+
+
+def test_selection_lock_preserves_unknown_future_keys():
+    """Forward-compat: a key this version doesn't know (e.g. a future
+    IncludeBuildDep closure section) survives a read and re-verifies."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    with tempfile.TemporaryDirectory() as _root:
+        _cfg = _selection_lock_cfg(_root)
+        _sl.write_selection_state(
+            _cfg, {'arch': 'amd64', 'future_section': {'x': 1}})
+        _back, _status = _sl.read_selection_state(_cfg)
+        assert _status == _sl.STATUS_OK, _status
+        assert _back['future_section'] == {'x': 1}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -31022,6 +31111,15 @@ def main() -> int:
         test_match_pristine_base_reconciles_stamped_artifact,
         test_restamp_asg_deb_bumps_version_and_intra_source_deps,
         test_validate_canonical_attribution_tunnel_and_build_config,
+        # SELECT-LOCK asg determinism (seeded reconstruction)
+        test_validate_asg_seeded_reconstruction_matches_after_publish_advance,
+        test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n,
+        # SELECT-LOCK Chunk 1 — signed selection lockfile
+        test_selection_lock_roundtrip_signs_and_verifies,
+        test_selection_lock_missing_is_distinct_from_tamper,
+        test_selection_lock_tamper_detected_as_badsig,
+        test_selection_lock_malformed_json_is_malformed,
+        test_selection_lock_preserves_unknown_future_keys,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
