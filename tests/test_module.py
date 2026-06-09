@@ -9676,9 +9676,7 @@ def test_cohort_resolvers_route_through_canonical_names():
     Anti-regression for any future resolver that re-introduces raw
     selected_pkgs.keys() and brings back the virtual-alias false
     positives."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     for _fn in ('_resolve_live_cohort',
                 '_resolve_deb_cohort',
@@ -15799,9 +15797,7 @@ def test_cmd_audit_runs_three_checks():
 def test_resolve_live_cohort_subtracts_pool_and_installer():
     """live cohort = dep_tree.selected_pkgs − pool_extras −
     installer_exclusive.  Pin via code inspection."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r'def _resolve_live_cohort\(self.*?(?=\n    def )',
@@ -15819,9 +15815,7 @@ def test_resolve_live_cohort_subtracts_pool_and_installer():
 def test_resolve_installer_cohort_uses_udeb_tree():
     """installer cohort = udeb_dep_tree.selected_pkgs (the d-i ramdisk).
     Pin via code inspection."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r'def _resolve_installer_cohort\(self.*?(?=\n    def )',
