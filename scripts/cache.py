@@ -272,7 +272,8 @@ class Cache:
                     f"{_detail or 'empty response'}"
                 )
                 return -1
-            tui.console.print(f'Downloaded {_release_file}')
+            tui.console.print(f'Downloaded {os.path.basename(_release_url)}')
+            logger.info(f'Downloaded {_release_file}')
 
             # Verify the InRelease GPG signature *before* parsing — once
             # the signature is good the SHA256 entries inside can be
@@ -326,7 +327,7 @@ class Cache:
                 _dst = os.path.join(self.cache_dir, apt_pkg.uri_to_filename(_base_url + _path))
 
                 if _expected_uncompressed_sha and utils.get_sha256(_dst) == _expected_uncompressed_sha:
-                    tui.console.print(f'Skipping download for {os.path.basename(_dst)}')
+                    logger.debug(f'Skipping download (cached) for {os.path.basename(_dst)}')
                     _mirror_files[_path.rsplit('/', 1)[-1]] = _dst
                     continue
 
@@ -355,7 +356,8 @@ class Cache:
                         f"{_detail or 'empty response'}"
                     )
                     return -1
-                tui.console.print(f'Downloaded {_src_url}')
+                tui.console.print(f'Downloaded {os.path.basename(_path)}')
+                logger.info(f'Downloaded {_src_url}')
 
                 # Wrap in a Spinner — Python's lzma module is single-threaded
                 # and CPU-bound; a 9 MB Packages.xz → 50 MB Packages takes
@@ -424,7 +426,7 @@ class Cache:
 
         # Already on disk + sha matches: no re-download.
         if _expected_uncompressed_sha and utils.get_sha256(_dst) == _expected_uncompressed_sha:
-            tui.console.print(f'Skipping download for {os.path.basename(_dst)}')
+            logger.debug(f'Skipping download (cached) for {os.path.basename(_dst)}')
             return _dst
 
         # Find a compressed variant that this mirror's Release lists.
@@ -467,7 +469,8 @@ class Cache:
                 f"{_src_url}: {_detail or 'empty response'}"
             )
             return None
-        tui.console.print(f'Downloaded {_src_url}')
+        tui.console.print(f'Downloaded {os.path.basename(_path)}')
+        logger.info(f'Downloaded {_src_url}')
 
         _decompress_spinner = Spinner(f"Decompressing {os.path.basename(_compressed_dst)}")
         # Guaranteed by the matching loop above's None-check; assert for mypy.
