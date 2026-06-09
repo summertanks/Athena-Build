@@ -345,6 +345,38 @@ def restore_list_files(config: 'Any', lock: dict) -> 'Dict[str, str]':
     return _written
 
 
+# closure_matches_lock outcomes.
+COHERENCE_MATCH = 'match'      # in-memory closure == signed lockfile
+COHERENCE_DELTA = 'delta'      # lockfile OK but the resolved closure differs
+COHERENCE_NOLOCK = 'nolock'    # no lockfile yet (force-through / pre-bootstrap)
+COHERENCE_BADLOCK = 'badlock'  # lockfile present but untrusted (badsig/malformed)
+
+
+def closure_matches_lock(
+    dep_tree: 'Any', udeb_dep_tree: 'Any', config: 'Any',
+) -> 'Tuple[str, Dict[str, set], Dict[str, set]]':
+    """Defensive check for consumers that act on the in-memory selection
+    (ISO staging, audits): does the resolved closure match the signed
+    selection.state?  Returns ``(status, added, removed)`` where status is one
+    of COHERENCE_MATCH / _DELTA / _NOLOCK / _BADLOCK.
+
+    Lets a stale RAM tree never silently disagree with the authority a
+    publish/ISO would ship against — a genuine DELTA is a hard error for the
+    caller, while NOLOCK (authority not written yet) is typically a soft warn."""
+    _empty: 'Dict[str, set]' = {'bins': set(), 'srcs': set()}
+    _lock, _status = read_selection_state(config)
+    if _status in (STATUS_BADSIG, STATUS_MALFORMED):
+        return COHERENCE_BADLOCK, dict(_empty), dict(_empty)
+    _fresh = build_closure(dep_tree, udeb_dep_tree, config)
+    if _status == STATUS_MISSING or _lock is None:
+        return COHERENCE_NOLOCK, {'bins': set(_fresh['bins']),
+                                  'srcs': set(_fresh['srcs'])}, dict(_empty)
+    _added, _removed = diff_closure(_lock.get('closure', {}), _fresh)
+    if _added['bins'] or _added['srcs'] or _removed['bins'] or _removed['srcs']:
+        return COHERENCE_DELTA, _added, _removed
+    return COHERENCE_MATCH, _added, _removed
+
+
 def audit_selection_coherence(
     closure_bins: 'set', by_builder: 'Dict[str, list]', builder_id: str,
 ) -> 'list':

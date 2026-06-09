@@ -30778,6 +30778,39 @@ def test_audit_selection_coherence_flags_owned_outside_closure():
     assert _sl.audit_selection_coherence({'foo'}, {'b1': [_owned]}, 'b1') == []
 
 
+def test_selection_lock_closure_matches_lock_statuses():
+    """SELECT-LOCK Chunk 9: closure_matches_lock distinguishes match / delta /
+    nolock / badlock so ISO + audits can refuse a stale RAM tree."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    import types
+    with tempfile.TemporaryDirectory() as _root:
+        _cfg = _selection_lock_cfg(_root)
+        _cfg.arch = 'amd64'
+        _cfg.snapshot_timestamp_config = ''
+        _cfg.include_recommends = True
+        _cfg.pkglist_path = _cfg.livelist_path = ''
+        _cfg.installerlist_path = _cfg.poollist_path = ''
+        _deb = _sl_tree({'a': 'a', 'b': 'b'}, {'asrc'})
+        _udeb = None
+        # nolock — no lockfile yet
+        _st, _, _ = _sl.closure_matches_lock(_deb, _udeb, _cfg)
+        assert _st == _sl.COHERENCE_NOLOCK, _st
+        # write the lockfile from this exact closure → match
+        _sl.write_selection_state(_cfg, _sl.assemble_state(_deb, _udeb, _cfg))
+        _st, _, _ = _sl.closure_matches_lock(_deb, _udeb, _cfg)
+        assert _st == _sl.COHERENCE_MATCH, _st
+        # resolve a SHRUNK tree (drop b) → delta
+        _deb2 = _sl_tree({'a': 'a'}, {'asrc'})
+        _st, _add, _rem = _sl.closure_matches_lock(_deb2, _udeb, _cfg)
+        assert _st == _sl.COHERENCE_DELTA and _rem['bins'] == {'b'}, (_st, _rem)
+        # corrupt the lockfile → badlock
+        _p = _sl.selection_state_path(_cfg)
+        open(_p, 'w').write('{not json')
+        _st, _, _ = _sl.closure_matches_lock(_deb, _udeb, _cfg)
+        assert _st == _sl.COHERENCE_BADLOCK, _st
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31442,6 +31475,8 @@ def main() -> int:
         # SELECT-LOCK Chunk 8 — publish deprecation emission + coherence audit
         test_emit_deprecation_claims_keys_off_closure,
         test_audit_selection_coherence_flags_owned_outside_closure,
+        # SELECT-LOCK Chunk 9 — closure-matches-lock authority check
+        test_selection_lock_closure_matches_lock_statuses,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
