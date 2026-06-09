@@ -939,6 +939,13 @@ def validate_against_build_records(
       ``sources_matched``  — synthesizer predictions == real filenames
       ``sources_drifted``  — at least one predicted filename absent
                              from real output, or vice versa
+      ``asg_published_sources`` / ``asg_published_binaries`` — recorded
+                             build's +asgRuN equals the highest in
+                             published.manifest (the build IS the published
+                             generation), so the at-build ledger reconstruction
+                             loses the prior generation and the synthesizer
+                             under-predicts N.  Deterministic + benign: a publish
+                             advanced the ledger to the build; NOT drift.
 
     Findings (per drifted source):
       ``virtual_validate_predicted_missing``  WARNING — real build
@@ -1077,6 +1084,18 @@ def validate_against_build_records(
             _name, _ver, _arch = _parts
             return (_name, _strip_asg(utils.pristine_base(_ver)), _arch)
 
+        def _max_asg_n(_fns: 'List[str]') -> int:
+            """Highest +asgRuN N across a set of filenames (0 if none)."""
+            _hi = 0
+            for _f in _fns:
+                _p = _f.rsplit('.', 1)[0].split('_')
+                if len(_p) != 3:
+                    continue
+                _a = utils.parse_asg_suffix(_p[1])
+                if _a is not None and _a[1] > _hi:
+                    _hi = _a[1]
+            return _hi
+
         _real_names: 'set[str]' = {_binary_name(_f) for _f in _real_files}
         _pred_names: 'set[str]' = {_binary_name(_f) for _f in _pred_files}
         _missing = _real_names - _pred_names   # real has, pred doesn't
@@ -1097,6 +1116,12 @@ def validate_against_build_records(
 
         _version_drift: 'List[Tuple[str, str, str]]' = []
         _asg_drift: 'List[Tuple[str, str, str]]' = []
+        # Published-generation advance: recorded build IS the highest
+        # published +asgRuN and the predictor mints N+1 — deterministic,
+        # expected after a publish advanced published.manifest.  Kept
+        # SEPARATE from _asg_drift so virtual validate can name the cause
+        # instead of reporting opaque "drift".  Entries: (binary, recN, predN).
+        _asg_published: 'List[Tuple[str, int, int]]' = []
         for _bn in _real_names & _pred_names:
             _pred_match = [_f for _f in _pred_files
                            if _binary_name(_f) == _bn]
@@ -1114,10 +1139,34 @@ def validate_against_build_records(
                 _pred_full = sorted(
                     _f for _f in _pred_files if _binary_name(_f) == _bn)
                 if not (set(_real_full) & set(_pred_full)):
-                    _asg_drift.append((
-                        _bn,
-                        ','.join(_real_full[:3]),
-                        ','.join(_pred_full[:3])))
+                    # Filenames differ ONLY in +asgRuN.  Decide between two
+                    # deterministic causes:
+                    #   published advance — the recorded build's N equals the
+                    #     highest N for this binary in published.manifest, i.e.
+                    #     the build IS the published generation.  After a publish
+                    #     advances the manifest to this build's generation, the
+                    #     at-build-ledger reconstruction (which keeps only ledger
+                    #     entries with N < N_built) can no longer see the PRIOR
+                    #     generation it built against, so the synthesizer resets
+                    #     N and UNDER-predicts (predicted N < recorded N).  This
+                    #     is fully explained by the publish, not a synth bug.
+                    #   genuine drift — any other asg-suffix divergence
+                    #     (recorded N disagrees with the published ledger, or the
+                    #     synth OVER-predicts).  Worth an operator's attention.
+                    _rec_n = _max_asg_n(_real_full)
+                    _pred_n = _max_asg_n(_pred_full)
+                    _rv = _real_full[0].rsplit('.', 1)[0].split('_')
+                    _base = (utils.pristine_base(_rv[1])
+                             if len(_rv) == 3 else '')
+                    _pub_n = utils.highest_asg_update(
+                        (asg_ledger or {}).get(_bn, []), _base, release)
+                    if (_pub_n and _rec_n == _pub_n and _pred_n < _rec_n):
+                        _asg_published.append((_bn, _rec_n, _pred_n))
+                    else:
+                        _asg_drift.append((
+                            _bn,
+                            ','.join(_real_full[:3]),
+                            ','.join(_pred_full[:3])))
                 continue
             _version_drift.append((
                 _bn,
@@ -1148,6 +1197,14 @@ def validate_against_build_records(
         # stays a (currently-empty) safety net for any non-declared overshoot.
         _extra_buildcfg = set(_rest)
         _extra_generic: 'set[str]' = set()
+        # Published-generation advance is deterministic + benign — record it
+        # for every source it touches, independent of any genuine drift the
+        # same source may also carry, and DON'T let it count as drift.
+        if _asg_published:
+            _stats['asg_published_sources'] = (
+                _stats.get('asg_published_sources', 0) + 1)
+            _stats['asg_published_binaries'] = (
+                _stats.get('asg_published_binaries', 0) + len(_asg_published))
         _hard_drift = bool(_missing or _version_drift or _extra_generic
                            or _asg_drift)
         if not _hard_drift and not _extra_buildcfg:
@@ -1191,6 +1248,17 @@ def validate_against_build_records(
                 _stats.get('extra_binaries', 0) + len(_extra_generic))
 
     # Post-loop summary findings — operator-friendly, one line each.
+    if _stats.get('asg_published_sources'):
+        _findings.append((
+            'INFO', 'virtual_validate_asg_published_generation',
+            f"{_stats['asg_published_binaries']} binaries across "
+            f"{_stats['asg_published_sources']} source(s) are at the "
+            "published asg generation — the recorded build's +asgRuN equals "
+            "the highest in published.manifest, so the at-build ledger "
+            "reconstruction can no longer see the prior generation and the "
+            "synthesizer under-predicts N.  Deterministic consequence of a "
+            "publish advancing the ledger to this build; in sync with the "
+            "mirror, not synth drift"))
     if _stats.get('asg_drift_sources'):
         _findings.append((
             'INFO', 'virtual_validate_asg_drift',
