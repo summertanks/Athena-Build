@@ -361,6 +361,33 @@ class BuildCommandsMixin(SessionState):
             )
             return
 
+        # SELECT-LOCK: refuse to master an ISO whose in-memory selection
+        # disagrees with the signed selection.state (catches a force-through
+        # parse or a stale resume shipping a set the authority never approved).
+        if self.dep_tree is not None:
+            import selection_lock as _sl
+            _coh, _add, _rem = _sl.closure_matches_lock(
+                self.dep_tree, self.udeb_dep_tree, self.config)
+            if _coh == _sl.COHERENCE_DELTA:
+                console.print(
+                    "iso build: REFUSED — the resolved selection disagrees "
+                    f"with the signed selection.state "
+                    f"({len(_add['bins']) + len(_add['srcs'])} added / "
+                    f"{len(_rem['bins']) + len(_rem['srcs'])} removed).  Run "
+                    "`cache parse` to reconcile (or `cache restore` / "
+                    "`cache purge-state`).", tui.COLOR_ERROR)
+                return
+            if _coh == _sl.COHERENCE_BADLOCK:
+                console.print(
+                    "iso build: REFUSED — selection.state is untrusted "
+                    "(badsig/malformed).  `cache purge-state` to re-baseline.",
+                    tui.COLOR_ERROR)
+                return
+            if _coh == _sl.COHERENCE_NOLOCK:
+                console.print(
+                    "iso build: WARNING — no selection.state authority yet; "
+                    "run `cache parse` to bootstrap it.", tui.COLOR_WARNING)
+
         # Verify the project signing key BEFORE any sudo work — apt on the
         # installed target verifies our Release against this key, and
         # _sign_release_files inside build_installer_iso will fail loud if
