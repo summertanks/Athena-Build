@@ -7455,6 +7455,44 @@ def test_strip_nmu_suffix_strips_known_patterns():
         )
 
 
+def test_repack_deb_clamps_to_source_date_epoch_for_reproducibility():
+    """Regression (2026-06): the strip/restamp repack MUST clamp the ar
+    member + data.tar root timestamps to SOURCE_DATE_EPOCH, not build time.
+
+    Without it, `dpkg-deb -b` stamped wrapper timestamps with the current
+    time, so every NMU/asg rebuild produced different bytes than the
+    published mirror even though the package content was identical — a mass
+    hash-divergence that blocks a clean re-publish.  Assert (a) same epoch →
+    identical bytes (reproducible) and (b) the epoch actually drives the
+    output (different epoch → different bytes)."""
+    import hashlib
+    import os
+    import tempfile
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import bump
+
+    def _sha(p):
+        return hashlib.sha256(open(p, 'rb').read()).hexdigest()
+
+    with tempfile.TemporaryDirectory() as _w:
+        _tree = os.path.join(_w, 'pkg')
+        os.makedirs(os.path.join(_tree, 'DEBIAN'))
+        os.makedirs(os.path.join(_tree, 'usr', 'share', 'foo'))
+        with open(os.path.join(_tree, 'usr', 'share', 'foo', 'data'), 'w') as _f:
+            _f.write('x' * 256)
+        with open(os.path.join(_tree, 'DEBIAN', 'control'), 'w') as _f:
+            _f.write('Package: foo\nVersion: 1.0-1\nArchitecture: amd64\n'
+                     'Maintainer: t <t@t>\nDescription: t\n')
+        _epoch = 1673995855          # 2023-01-17
+        _a1 = os.path.join(_w, 'a1.deb'); bump._repack_deb(_tree, _a1, _epoch)
+        _a2 = os.path.join(_w, 'a2.deb'); bump._repack_deb(_tree, _a2, _epoch)
+        _b = os.path.join(_w, 'b.deb'); bump._repack_deb(_tree, _b, _epoch + 10**6)
+        assert _sha(_a1) == _sha(_a2), (
+            "repack not reproducible: same SOURCE_DATE_EPOCH gave different bytes")
+        assert _sha(_a1) != _sha(_b), (
+            "SOURCE_DATE_EPOCH not honoured: wrapper timestamp ignores the epoch")
+
+
 def test_bump_is_canonical_home_for_version_logic():
     """The version/bump primitives live in `bump`; `utils` only re-exports
     them.  Assert identity so a future accidental redefinition in utils
@@ -30356,6 +30394,7 @@ def main() -> int:
         test_strip_build_version_no_change_when_no_binNMU,
         test_strip_build_version_rejects_malformed_filename,
         test_classify_repo_subdir_routes_dev_to_main,
+        test_repack_deb_clamps_to_source_date_epoch_for_reproducibility,
         test_bump_is_canonical_home_for_version_logic,
         test_strip_nmu_suffix_strips_known_patterns,
         test_strip_nmu_suffix_idempotent,

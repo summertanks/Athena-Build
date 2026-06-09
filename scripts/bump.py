@@ -615,6 +615,51 @@ def _collapse_sibling_pair(value: str,
     return PkgRelation.str(_new_relations), _count
 
 
+def _content_date_epoch(work_dir: str) -> int:
+    """Newest file mtime under an extracted .deb tree, as an integer epoch.
+
+    `dpkg-buildpackage` clamps every file's mtime to SOURCE_DATE_EPOCH
+    (derived from debian/changelog), so the newest file mtime equals that
+    changelog date.  Reusing it as the repack's SOURCE_DATE_EPOCH makes the
+    strip/restamp output byte-identical to the original build's clamping and
+    independent of WHEN the repack runs.
+
+    Call BEFORE rewriting DEBIAN/control — the rewrite re-dates control to
+    `now`, which would otherwise win the max and defeat the clamp.
+    """
+    _sde = 0
+    for _dp, _dirs, _files in os.walk(work_dir):
+        for _n in _files:
+            try:
+                _m = int(os.lstat(os.path.join(_dp, _n)).st_mtime)
+            except OSError:
+                continue
+            if _m > _sde:
+                _sde = _m
+    return _sde
+
+
+def _repack_deb(work_dir: str, out_path: str, source_date_epoch: int) -> None:
+    """`dpkg-deb --root-owner-group -b work_dir out_path`, clamped to
+    SOURCE_DATE_EPOCH so the repack is byte-reproducible.
+
+    Without a fixed epoch, dpkg-deb stamps the ar member + data.tar root
+    timestamps with the current build time, so every strip/restamp of the
+    same input produced different bytes — the cause of the 2026-06 mass
+    hash-divergence between rebuilds and the published mirror (the package
+    CONTENT was identical; only the wrapper timestamps moved).  See
+    docs/asg-bump-position-x.md / docs/build-quirks.md.
+    """
+    import subprocess
+    _env = dict(os.environ)
+    if source_date_epoch > 0:
+        _env['SOURCE_DATE_EPOCH'] = str(source_date_epoch)
+    subprocess.run(
+        ['dpkg-deb', '--root-owner-group', '-b', work_dir, out_path],
+        check=True, capture_output=True, env=_env,
+    )
+
+
 def strip_nmu_from_deb(deb_path: str) -> dict:
     """Strip NMU suffix layers from a .deb/.udeb in place.
 
@@ -679,13 +724,11 @@ def strip_nmu_from_deb(deb_path: str) -> dict:
             ['dpkg-deb', '-R', deb_path, _work],
             check=True, capture_output=True,
         )
+        _sde = _content_date_epoch(_work)   # before the control rewrite
         _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
         with open(_ctrl_disk, 'w') as _fh:
             _fh.write(_new_ctrl_text)
-        subprocess.run(
-            ['dpkg-deb', '--root-owner-group', '-b', _work, _new_path],
-            check=True, capture_output=True,
-        )
+        _repack_deb(_work, _new_path, _sde)
 
     if _new_path != deb_path:
         os.remove(deb_path)
@@ -775,13 +818,11 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
     with tempfile.TemporaryDirectory(prefix='asg-stamp-') as _work:
         subprocess.run(['dpkg-deb', '-R', deb_path, _work],
                        check=True, capture_output=True)
+        _sde = _content_date_epoch(_work)   # before the control rewrite
         _ctrl_disk = os.path.join(_work, 'DEBIAN', 'control')
         with open(_ctrl_disk, 'w') as _fh:
             _fh.write(_new_ctrl_text)
-        subprocess.run(
-            ['dpkg-deb', '--root-owner-group', '-b', _work, _new_path],
-            check=True, capture_output=True,
-        )
+        _repack_deb(_work, _new_path, _sde)
 
     if _new_path != deb_path:
         os.remove(deb_path)
