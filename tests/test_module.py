@@ -18590,6 +18590,72 @@ def test_validate_canonical_attribution_tunnel_and_build_config():
         assert 'virtual_validate_synth_over_predicted' not in _kinds, _findings
 
 
+def test_validate_asg_published_generation_is_deterministic_not_drift():
+    """When a publish advances published.manifest to a build's OWN +asgRuN
+    generation, the at-build ledger reconstruction loses the prior generation,
+    so the synthesizer under-predicts N (real u2, predicted u1).  This must be
+    classified DETERMINISTICALLY as `asg_published_generation` — recorded N ==
+    highest published N AND synth under-predicted — NOT as opaque asg_drift,
+    and the source must NOT count as drifted.  Mirrors the live python3.11
+    state (real u2, manifest u2, synth predicts u1)."""
+    import shutil as _sh
+    if not _sh.which('dpkg-deb'):
+        return
+    import sys, types
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        _repo = os.path.join(_root, 'repo', 'main')
+        _log = os.path.join(_root, 'log', 'build')
+        os.makedirs(_repo)
+        os.makedirs(_log)
+        # On disk: foosrc emitted two binaries at +asg1u2 (the published gen).
+        for _n in ('foo', 'foo-lib'):
+            _build_minimal_deb(
+                os.path.join(_repo, f'{_n}_1.0-1+asg1u2_amd64.deb'),
+                _n, '1.0-1+asg1u2', 'amd64')
+        _rec = _u.new_build_record(package='foosrc', intended_version='1.0-1',
+                                   patch_set_hash='',
+                                   started='2026-06-08T00:00:00Z')
+        _rec.update({'phase': 'done', 'status': 'PASS'})
+        _u.write_build_record(_log, _rec)
+
+        _sources = {
+            'foosrc': types.SimpleNamespace(
+                package='foosrc', version='1.0-1', binary=['foo', 'foo-lib'],
+                patch_list=[], package_list=[], files={}, _mirror=None),
+        }
+        _universe = {
+            'foo':     {'1.0-1+asg1u2': {'Package': 'foo', 'Source': 'foosrc',
+                                         'Version': '1.0-1+asg1u2',
+                                         'Architecture': 'amd64'}},
+            'foo-lib': {'1.0-1+asg1u2': {'Package': 'foo-lib',
+                                         'Source': 'foosrc',
+                                         'Version': '1.0-1+asg1u2',
+                                         'Architecture': 'amd64'}},
+        }
+        # published.manifest holds exactly this build's generation (u2 only) —
+        # the prior generation (u1) is gone, which is what breaks reconstruction.
+        _led = {'foo': ['1.0-1+asg1u2'], 'foo-lib': ['1.0-1+asg1u2']}
+        _canon = {'foo': 'foosrc', 'foo-lib': 'foosrc'}
+        _stats, _findings = _vb.validate_against_build_records(
+            source_names=['foosrc'],
+            source_lookup=lambda n: _sources.get(n),
+            package_universe=_universe, asg_ledger=_led, release=1,
+            arch='amd64', buildlog_dir=_log,
+            repo_dir=os.path.join(_root, 'repo'),
+            canonical_src_map=_canon)
+        # Deterministic published-generation classification, NOT drift.
+        assert _stats['sources_drifted'] == 0, (_stats, _findings)
+        assert _stats.get('asg_published_sources') == 1, _stats
+        assert _stats.get('asg_published_binaries') == 2, _stats
+        assert _stats.get('asg_drift_sources', 0) == 0, _stats
+        _kinds = {_k for _s, _k, _m in _findings}
+        assert 'virtual_validate_asg_published_generation' in _kinds, _findings
+        assert 'virtual_validate_asg_drift' not in _kinds, _findings
+
+
 def test_verify_output_hashes_flags_only_present_drift_not_pruned_absent():
     """verify_output_hashes flags a record output whose on-disk file's
     SHA-256 disagrees with the recorded hash (re-pack drift), but does NOT

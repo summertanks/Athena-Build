@@ -141,6 +141,7 @@ class VirtualCommandsMixin(SessionState):
             f"  checked={_stats['sources_checked']}  "
             f"matched={_stats['sources_matched']}  "
             f"build_config_divergence={_stats.get('buildcfg_sources', 0)}  "
+            f"published_generation={_stats.get('asg_published_sources', 0)}  "
             f"drifted={_stats['sources_drifted']}",
             tui.COLOR_INFO)
         for _sev, _kind, _msg in _findings[:50]:
