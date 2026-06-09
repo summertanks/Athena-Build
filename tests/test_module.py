@@ -30532,6 +30532,38 @@ def test_selection_lock_diff_closure_add_remove_and_tier_only():
     assert not _added['bins'] and not _removed['bins'], (_added, _removed)
 
 
+def test_dependencytree_pins_resolve_silently_and_record_picks():
+    """SELECT-LOCK Chunk 3: a pinned dep auto-selects its candidate (no
+    prompt) and records the pick; an unsatisfiable/absent pin returns None
+    (caller re-prompts); a fresh prompt pick is recorded for first-run seed."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from dependencytree import DependencyTree
+    # cache=None is safe: __init__ only touches cache when lookahead is given.
+    _dt = DependencyTree(cache=None, select_recommended=False, arch='amd64',
+                         pins={'awk': 'mawk'})
+    _collapsed = [{'Package': 'gawk'}, {'Package': 'mawk'}]
+    _picked = _dt._apply_pin('awk', _collapsed)
+    assert _picked == {'Package': 'mawk'}, _picked
+    assert _dt._pinned_chosen == {'awk': 'mawk'}, _dt._pinned_chosen
+    # pinned package no longer among candidates ⇒ None (→ re-baseline path)
+    assert _dt._apply_pin('awk', [{'Package': 'gawk'}]) is None
+    # no pin configured ⇒ None
+    _dt2 = DependencyTree(cache=None, select_recommended=False, arch='amd64')
+    assert _dt2._pins == {}
+    assert _dt2._apply_pin('awk', _collapsed) is None
+    # a genuine prompt pick is recorded for first-run lockfile seeding
+    _dt2._record_prompt_pick('telnet-client', {'Package': 'telnet'})
+    assert _dt2._pinned_chosen == {'telnet-client': 'telnet'}, _dt2._pinned_chosen
+
+
+def test_persistence_format_version_bumped_for_pins():
+    """A pre-pins (v1) session blob must be refused, not resumed without
+    _pins/_pinned_chosen."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import persistence
+    assert persistence._FORMAT_VERSION >= 2
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31181,6 +31213,9 @@ def main() -> int:
         # SELECT-LOCK Chunk 2 — closure extract + diff
         test_selection_lock_build_closure_canonical_and_tiers,
         test_selection_lock_diff_closure_add_remove_and_tier_only,
+        # SELECT-LOCK Chunk 3 — pinned-picks plumbing
+        test_dependencytree_pins_resolve_silently_and_record_picks,
+        test_persistence_format_version_bumped_for_pins,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,

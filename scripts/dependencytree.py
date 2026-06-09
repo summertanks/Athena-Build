@@ -68,10 +68,21 @@ class DependencyTree:
 
     def __init__(self, cache: Cache, select_recommended: bool, arch: str,
                  build_profiles: frozenset = frozenset(), lookahead=None,
-                 auto_pick_highest_when_ambiguous: bool = False):
+                 auto_pick_highest_when_ambiguous: bool = False,
+                 pins=None):
 
         self.__recommended = select_recommended
         self.__cache = cache
+        # SELECT-LOCK: pinned alternative picks fed from selection.state so a
+        # genuine multi-provider prompt (mawk vs gawk for `awk`, telnet vs
+        # inetutils-telnet for `telnet-client`) resolves deterministically and
+        # NEVER re-prompts — otherwise a different pick would false-trigger the
+        # closure guard.  `_pins`: {dep_name: chosen_Package_name} (authority).
+        # `_pinned_chosen`: every genuinely-ambiguous pick this run made (pin
+        # hit OR fresh prompt), harvested by the parse to auto-seed the lockfile
+        # on first run.  Plain dicts → pickle-safe for `resume`.
+        self._pins: Dict[str, str] = dict(pins) if pins else {}
+        self._pinned_chosen: Dict[str, str] = {}
         # When True, multi-Package-name candidates that
         # _auto_pick_candidate refuses to auto-pick (different names) get
         # an additional fallback — pick the candidate with the highest
@@ -184,6 +195,25 @@ class DependencyTree:
         if lookahead is not None:
             self.add_lookahead(lookahead)
 
+    def _apply_pin(self, name: str, collapsed: list):
+        """If selection.state pins `name` to a candidate present in
+        `collapsed`, return that Package (and record it as this run's chosen
+        pick).  Returns None when there is no pin or the pinned package is no
+        longer among the candidates (vanished upstream → caller re-prompts and
+        the resulting closure delta flows through the guard / re-baseline)."""
+        _want = self._pins.get(name)
+        if _want:
+            for _c in collapsed:
+                if _c['Package'] == _want:
+                    self._pinned_chosen[name] = _want
+                    return _c
+        return None
+
+    def _record_prompt_pick(self, name: str, selected):
+        """Record a genuinely-ambiguous pick (a real operator prompt) so the
+        parse can auto-seed it into selection.state on first run."""
+        self._pinned_chosen[name] = selected['Package']
+
     def add_lookahead(self, lookahead: List[str], check_conflicts: bool = True):
         """When `check_conflicts=False`, step 3 (lookahead-time conflict
         check) is skipped — the caller is asserting that conflicts among
@@ -231,6 +261,12 @@ class DependencyTree:
                         f"{_selected.version} from {len(_candidates)} candidates "
                         f"(collapsed {len(_candidates)}→{len(_collapsed)}) of '{_pkg_name}'"
                     )
+            elif (_pinned := self._apply_pin(_pkg_name, _collapsed)) is not None:
+                _selected = _pinned
+                logger.info(
+                    f"add_lookahead: pinned-pick {_selected.package} "
+                    f"{_selected.version} for '{_pkg_name}' (selection.state)"
+                )
             else:
                 _mark = tui.console.mark()
                 tui.console.print(f"Multiple providers for '{_pkg_name}':")
@@ -244,6 +280,7 @@ class DependencyTree:
                 _options = [str(_i) for _i in range(1, len(_collapsed) + 1)]
                 _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_collapsed)}]", _options).get_response()
                 _selected = _collapsed[int(_choice) - 1]
+                self._record_prompt_pick(_pkg_name, _selected)
                 tui.console.trim_to(_mark)
                 tui.console.print(f"Multiple providers for '{_pkg_name}': Selected {_selected.package} ({_selected.version})")
 
@@ -465,6 +502,12 @@ class DependencyTree:
                     f"from {len(_pkg_candidates)} candidates "
                     f"(collapsed {len(_pkg_candidates)}→{len(_collapsed)}) of '{package_name}'"
                 )
+            elif (_pinned := self._apply_pin(package_name, _collapsed)) is not None:
+                _selected_pkg = _pinned
+                logger.info(
+                    f"pinned-pick {_selected_pkg.package} {_selected_pkg.version} "
+                    f"for '{package_name}' (selection.state)"
+                )
             else:
                 _mark = tui.console.mark()
                 tui.console.print(f"Multiple packages satisfy '{package_name}':")
@@ -478,6 +521,7 @@ class DependencyTree:
                 _options = [str(_i) for _i in range(1, len(_collapsed) + 1)]
                 _choice  = Prompt(PROMPT_OPTIONS, f"Select [1-{len(_collapsed)}]", _options).get_response()
                 _selected_pkg = _collapsed[int(_choice) - 1]
+                self._record_prompt_pick(package_name, _selected_pkg)
                 tui.console.trim_to(_mark)
                 tui.console.print(f"Multiple packages satisfy '{package_name}': Selected {_selected_pkg.package} ({_selected_pkg.version})")
 
