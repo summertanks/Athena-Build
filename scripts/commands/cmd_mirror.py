@@ -1567,6 +1567,14 @@ class MirrorCommandsMixin(SessionState):
                     pool_url=_url, codename=_codename, release=_release,
                     fetched_dir=os.path.join(_fetched, 'apt'),
                     ssh_key=_ssh_key,
+                    # Every published component + the udeb (debian-installer)
+                    # tree — must mirror cmd_index_repo's suite spec, else
+                    # claims for udebs / -doc / -tests / firmware (which live
+                    # OUTSIDE main) all false-flag as claim_not_in_apt_index.
+                    # Empty components have no InRelease pin → WARNING+skip.
+                    components=('main', 'main/debian-installer', 'doc',
+                                'tests', 'contrib', 'non-free',
+                                'non-free-firmware'),
                     arches=(self.config.arch,),
                 )
             _pkg_crit = [_f for _f in _pkg_findings if _f[0] == 'CRITICAL']
