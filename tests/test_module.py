@@ -24000,9 +24000,7 @@ def test_cve_skips_when_grype_absent():
     so the command should be a friendly no-op rather than a stack trace.
     Source-level pin since exercising the full method requires a
     BuildSession + Config + dir_image fixture."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r'def cmd_cve\(self.*?(?=\n    def )', _body, re.DOTALL,
