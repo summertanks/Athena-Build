@@ -24788,7 +24788,7 @@ def test_humansize_thresholds():
     formatting matches the tunnel-output spec."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build as _b
+    from commands import cmd_tunnel as _b
     assert _b._humansize(0) == '0 B'
     assert _b._humansize(1023) == '1023 B'
     assert _b._humansize(1024) == '1.0 KiB'
@@ -24801,7 +24801,7 @@ def test_shorten_origin_compacts_long_pool_url():
     `host/.../<last 5 parts>`; short URLs pass through."""
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
-    import build as _b
+    from commands import cmd_tunnel as _b
     _long = (
         'https://snapshot.debian.org/archive/debian-security/'
         '20260602T173733Z/pool/updates/main/f/firefox-esr'
