@@ -366,8 +366,19 @@ def status_lines(session) -> 'list[tuple[str, int]]':
     _code = getattr(cfg, 'build_codename', '?')
     add(f"{_distro} {_ver} ({_code})    MODE: {_mode}", tui.COLOR_HIGHLIGHT)
     if getattr(cfg, 'snapshot_enabled', False):
-        add(f"snapshot: {getattr(cfg, 'snapshot_timestamp_config', '?')} "
-            "(pinned)", tui.COLOR_INFO)
+        # Authoritative pin = snapshot.state 'current' (operator override via
+        # `snapshot select`, takes precedence over [Snapshot] Timestamp).
+        # Fall back to the config value only when the state file is absent.
+        # Cheap file read — never the networked resolve_snapshot_timestamp.
+        _ts = getattr(cfg, 'snapshot_timestamp_config', '?')
+        try:
+            import utils as _utils
+            _cur = (_utils.read_snapshot_state(cfg) or {}).get('current')
+            if _cur:
+                _ts = _cur
+        except Exception:
+            pass
+        add(f"snapshot: {_ts} (pinned)", tui.COLOR_INFO)
     add()
 
     if session.cache is not None:
