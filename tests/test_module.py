@@ -18590,14 +18590,14 @@ def test_validate_canonical_attribution_tunnel_and_build_config():
         assert 'virtual_validate_synth_over_predicted' not in _kinds, _findings
 
 
-def test_validate_asg_published_generation_is_deterministic_not_drift():
+def test_validate_asg_seeded_reconstruction_matches_after_publish_advance():
     """When a publish advances published.manifest to a build's OWN +asgRuN
-    generation, the at-build ledger reconstruction loses the prior generation,
-    so the synthesizer under-predicts N (real u2, predicted u1).  This must be
-    classified DETERMINISTICALLY as `asg_published_generation` — recorded N ==
-    highest published N AND synth under-predicted — NOT as opaque asg_drift,
-    and the source must NOT count as drifted.  Mirrors the live python3.11
-    state (real u2, manifest u2, synth predicts u1)."""
+    generation, the local manifest holds only u2 (u1 dropped).  The at-build
+    ledger reconstruction must SEED the prior generation from the build's own
+    recorded N (u2 ⇒ at-build high-water u1) so the synthesizer deterministically
+    reproduces the real u2 artifact — manifest-independent.  Result: the source
+    MATCHES; no asg_drift, no special bucket.  Mirrors the live python3.11 state
+    (real u2, manifest u2 only, prior u1 gone)."""
     import shutil as _sh
     if not _sh.which('dpkg-deb'):
         return
@@ -18626,17 +18626,16 @@ def test_validate_asg_published_generation_is_deterministic_not_drift():
                 package='foosrc', version='1.0-1', binary=['foo', 'foo-lib'],
                 patch_list=[], package_list=[], files={}, _mirror=None),
         }
+        # The cache universe holds PRISTINE upstream versions (our +asgRuN
+        # stamps live only on built .debs, never in the upstream index).
         _universe = {
-            'foo':     {'1.0-1+asg1u2': {'Package': 'foo', 'Source': 'foosrc',
-                                         'Version': '1.0-1+asg1u2',
-                                         'Architecture': 'amd64'}},
-            'foo-lib': {'1.0-1+asg1u2': {'Package': 'foo-lib',
-                                         'Source': 'foosrc',
-                                         'Version': '1.0-1+asg1u2',
-                                         'Architecture': 'amd64'}},
+            'foo':     {'1.0-1': {'Package': 'foo', 'Source': 'foosrc',
+                                  'Version': '1.0-1', 'Architecture': 'amd64'}},
+            'foo-lib': {'1.0-1': {'Package': 'foo-lib', 'Source': 'foosrc',
+                                  'Version': '1.0-1', 'Architecture': 'amd64'}},
         }
         # published.manifest holds exactly this build's generation (u2 only) —
-        # the prior generation (u1) is gone, which is what breaks reconstruction.
+        # the prior generation (u1) is gone.  Seeding must recover it.
         _led = {'foo': ['1.0-1+asg1u2'], 'foo-lib': ['1.0-1+asg1u2']}
         _canon = {'foo': 'foosrc', 'foo-lib': 'foosrc'}
         _stats, _findings = _vb.validate_against_build_records(
@@ -18646,14 +18645,36 @@ def test_validate_asg_published_generation_is_deterministic_not_drift():
             arch='amd64', buildlog_dir=_log,
             repo_dir=os.path.join(_root, 'repo'),
             canonical_src_map=_canon)
-        # Deterministic published-generation classification, NOT drift.
+        # Seeded reconstruction → synth predicts u2 → MATCH, not drift.
         assert _stats['sources_drifted'] == 0, (_stats, _findings)
-        assert _stats.get('asg_published_sources') == 1, _stats
-        assert _stats.get('asg_published_binaries') == 2, _stats
+        assert _stats['sources_matched'] == 1, (_stats, _findings)
         assert _stats.get('asg_drift_sources', 0) == 0, _stats
         _kinds = {_k for _s, _k, _m in _findings}
-        assert 'virtual_validate_asg_published_generation' in _kinds, _findings
         assert 'virtual_validate_asg_drift' not in _kinds, _findings
+
+
+def test_reconstruct_historical_ledger_seeds_prior_generation_from_recorded_n():
+    """Unit test for the seed step: when the current manifest has been advanced
+    to the build's own generation (only u2 present, u1 gone), reconstruction
+    must synthesize the u1 entry from the recorded N so asg_next_n predicts u2."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import virtual_build as _vb
+    import utils as _u
+    from bump import asg_next_n
+    import types
+    _src = types.SimpleNamespace(package='python3.11')
+    # Manifest advanced past the build: only u2 present, u1 dropped.
+    _cur = {'python3.11': ['3.11.2-6+asg1u2']}
+    _emis = {'python3.11_3.11.2-6+asg1u2_amd64.deb': ''}
+    _hist = _vb._reconstruct_historical_ledger(_src, _emis, _cur)
+    # Seed recovers u1 → asg_next_n predicts u2 (== reality), manifest-independent.
+    assert '3.11.2-6+asg1u1' in _hist['python3.11'], _hist
+    assert asg_next_n(_hist['python3.11'], '3.11.2-6', 1) == 2, _hist
+    # First-generation build (u1) seeds nothing — at-build high-water was empty.
+    _hist1 = _vb._reconstruct_historical_ledger(
+        _src, {'python3.11_3.11.2-6+asg1u1_amd64.deb': ''},
+        {'python3.11': ['3.11.2-6+asg1u1']})
+    assert asg_next_n(_hist1['python3.11'], '3.11.2-6', 1) == 1, _hist1
 
 
 def test_verify_output_hashes_flags_only_present_drift_not_pruned_absent():

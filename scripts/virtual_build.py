@@ -825,12 +825,24 @@ def _reconstruct_historical_ledger(
 
     1. For each binary B this source emitted (visible in output_hashes),
        find the highest +asgRuN suffix on its filename (call it N_built).
-       That N IS this binary's build-time stamp; the at-build-time
-       ledger had entries with N strictly less than N_built.
+       That N IS this binary's build-time stamp.  By construction (asg_next_n
+       = highest_published + 1) a build that stamped uN was built when the
+       at-build ledger's high-water for B's base was exactly u(N-1).
 
     2. Filter ``current_ledger[B]`` keeping only entries whose pristine
        base differs from B's pristine OR whose parsed N is strictly
        less than N_built.
+
+    3. SEED the at-build high-water deterministically: ensure the kept
+       set contains B's base at u(N_built-1) when N_built>=2.  This is the
+       load-bearing step.  ``current_ledger`` is the LOCAL signed manifest,
+       which holds ONE version per package; once a publish advances it to
+       uN_built it drops u(N_built-1), so step 2's filter alone comes up
+       empty and the synthesizer resets N to 1 — predicting u1 for a real
+       u2 build.  Seeding from N_built (the build's own receipt) makes the
+       prediction reproduce the real artifact regardless of how far the
+       manifest has since advanced.  No-op when the filter already kept the
+       u(N_built-1) entry (manifest not yet advanced past the build).
 
     Comparison is **epoch-aware**: ledger entries can carry epochs
     (``1:9.18.49-1+asg1u1`` from bind9), but filenames OMIT epoch
@@ -838,7 +850,7 @@ def _reconstruct_historical_ledger(
     epoch-stripped before comparison so the pristine match works
     across the inconsistency.
 
-    Returns the filtered ledger.  Pass to
+    Returns the filtered + seeded ledger.  Pass to
     ``synthesize_source_binaries``; the prediction matches the
     historical artifact exactly when synth's math is correct.
     """
@@ -846,8 +858,8 @@ def _reconstruct_historical_ledger(
         return _v.split(':', 1)[-1] if ':' in _v else _v
 
     # Per-binary build state from output_hashes:
-    #   {binary_name: (pristine_no_epoch, highest_built_N)}
-    _per_binary: 'Dict[str, Tuple[str, int]]' = {}
+    #   {binary_name: (pristine_no_epoch, highest_built_N, release)}
+    _per_binary: 'Dict[str, Tuple[str, int, int]]' = {}
     for _fn in output_hashes:
         _bn = _fn.rsplit('.', 1)[0]
         _parts = _bn.split('_')
@@ -857,18 +869,17 @@ def _reconstruct_historical_ledger(
         _pristine = _no_epoch(utils.pristine_base(_ver))
         _asg = utils.parse_asg_suffix(_ver)
         _n = _asg[1] if _asg is not None else 0
+        _r = _asg[0] if _asg is not None else 0
         _prev = _per_binary.get(_name)
         if _prev is None or _n > _prev[1]:
-            _per_binary[_name] = (_pristine, _n)
+            _per_binary[_name] = (_pristine, _n, _r)
 
     if not _per_binary:
         return current_ledger
 
     _filtered: 'Dict[str, List[str]]' = dict(current_ledger)
-    for _binary, (_b_pristine, _b_n) in _per_binary.items():
+    for _binary, (_b_pristine, _b_n, _b_r) in _per_binary.items():
         _entries = current_ledger.get(_binary, [])
-        if not _entries:
-            continue
         _kept: 'List[str]' = []
         for _entry in _entries:
             _entry_pristine = _no_epoch(utils.pristine_base(_entry))
@@ -882,6 +893,17 @@ def _reconstruct_historical_ledger(
             _, _n_entry = _asg_parsed
             if _n_entry < _b_n:
                 _kept.append(_entry)
+        # Deterministic seed (step 3): a build stamped at u(_b_n) was built
+        # when the at-build high-water for this base was u(_b_n - 1).  Ensure
+        # that entry is present so asg_next_n predicts _b_n even after a
+        # publish advanced the local manifest past the build (dropping the
+        # prior generation).  Manifest-independent — the build's own N is the
+        # authority, not the volatile single-version manifest.
+        if _b_n >= 2 and not any(
+                utils.parse_asg_suffix(_e) == (_b_r, _b_n - 1)
+                and _no_epoch(utils.pristine_base(_e)) == _b_pristine
+                for _e in _kept):
+            _kept.append(utils.apply_asg_suffix(_b_pristine, _b_r, _b_n - 1))
         _filtered[_binary] = _kept
     return _filtered
 
@@ -939,13 +961,6 @@ def validate_against_build_records(
       ``sources_matched``  — synthesizer predictions == real filenames
       ``sources_drifted``  — at least one predicted filename absent
                              from real output, or vice versa
-      ``asg_published_sources`` / ``asg_published_binaries`` — recorded
-                             build's +asgRuN equals the highest in
-                             published.manifest (the build IS the published
-                             generation), so the at-build ledger reconstruction
-                             loses the prior generation and the synthesizer
-                             under-predicts N.  Deterministic + benign: a publish
-                             advanced the ledger to the build; NOT drift.
 
     Findings (per drifted source):
       ``virtual_validate_predicted_missing``  WARNING — real build
@@ -1084,18 +1099,6 @@ def validate_against_build_records(
             _name, _ver, _arch = _parts
             return (_name, _strip_asg(utils.pristine_base(_ver)), _arch)
 
-        def _max_asg_n(_fns: 'List[str]') -> int:
-            """Highest +asgRuN N across a set of filenames (0 if none)."""
-            _hi = 0
-            for _f in _fns:
-                _p = _f.rsplit('.', 1)[0].split('_')
-                if len(_p) != 3:
-                    continue
-                _a = utils.parse_asg_suffix(_p[1])
-                if _a is not None and _a[1] > _hi:
-                    _hi = _a[1]
-            return _hi
-
         _real_names: 'set[str]' = {_binary_name(_f) for _f in _real_files}
         _pred_names: 'set[str]' = {_binary_name(_f) for _f in _pred_files}
         _missing = _real_names - _pred_names   # real has, pred doesn't
@@ -1116,12 +1119,6 @@ def validate_against_build_records(
 
         _version_drift: 'List[Tuple[str, str, str]]' = []
         _asg_drift: 'List[Tuple[str, str, str]]' = []
-        # Published-generation advance: recorded build IS the highest
-        # published +asgRuN and the predictor mints N+1 — deterministic,
-        # expected after a publish advanced published.manifest.  Kept
-        # SEPARATE from _asg_drift so virtual validate can name the cause
-        # instead of reporting opaque "drift".  Entries: (binary, recN, predN).
-        _asg_published: 'List[Tuple[str, int, int]]' = []
         for _bn in _real_names & _pred_names:
             _pred_match = [_f for _f in _pred_files
                            if _binary_name(_f) == _bn]
@@ -1139,34 +1136,16 @@ def validate_against_build_records(
                 _pred_full = sorted(
                     _f for _f in _pred_files if _binary_name(_f) == _bn)
                 if not (set(_real_full) & set(_pred_full)):
-                    # Filenames differ ONLY in +asgRuN.  Decide between two
-                    # deterministic causes:
-                    #   published advance — the recorded build's N equals the
-                    #     highest N for this binary in published.manifest, i.e.
-                    #     the build IS the published generation.  After a publish
-                    #     advances the manifest to this build's generation, the
-                    #     at-build-ledger reconstruction (which keeps only ledger
-                    #     entries with N < N_built) can no longer see the PRIOR
-                    #     generation it built against, so the synthesizer resets
-                    #     N and UNDER-predicts (predicted N < recorded N).  This
-                    #     is fully explained by the publish, not a synth bug.
-                    #   genuine drift — any other asg-suffix divergence
-                    #     (recorded N disagrees with the published ledger, or the
-                    #     synth OVER-predicts).  Worth an operator's attention.
-                    _rec_n = _max_asg_n(_real_full)
-                    _pred_n = _max_asg_n(_pred_full)
-                    _rv = _real_full[0].rsplit('.', 1)[0].split('_')
-                    _base = (utils.pristine_base(_rv[1])
-                             if len(_rv) == 3 else '')
-                    _pub_n = utils.highest_asg_update(
-                        (asg_ledger or {}).get(_bn, []), _base, release)
-                    if (_pub_n and _rec_n == _pub_n and _pred_n < _rec_n):
-                        _asg_published.append((_bn, _rec_n, _pred_n))
-                    else:
-                        _asg_drift.append((
-                            _bn,
-                            ','.join(_real_full[:3]),
-                            ','.join(_pred_full[:3])))
+                    # Signature matches but full filenames still differ — the
+                    # at-build ledger reconstruction is seeded from each build's
+                    # recorded N, so the synthesizer reproduces the real +asgRuN
+                    # deterministically regardless of how far the manifest has
+                    # advanced.  Anything reaching here is a GENUINE asg-suffix
+                    # divergence (the seed disagrees with reality), worth a look.
+                    _asg_drift.append((
+                        _bn,
+                        ','.join(_real_full[:3]),
+                        ','.join(_pred_full[:3])))
                 continue
             _version_drift.append((
                 _bn,
@@ -1197,14 +1176,6 @@ def validate_against_build_records(
         # stays a (currently-empty) safety net for any non-declared overshoot.
         _extra_buildcfg = set(_rest)
         _extra_generic: 'set[str]' = set()
-        # Published-generation advance is deterministic + benign — record it
-        # for every source it touches, independent of any genuine drift the
-        # same source may also carry, and DON'T let it count as drift.
-        if _asg_published:
-            _stats['asg_published_sources'] = (
-                _stats.get('asg_published_sources', 0) + 1)
-            _stats['asg_published_binaries'] = (
-                _stats.get('asg_published_binaries', 0) + len(_asg_published))
         _hard_drift = bool(_missing or _version_drift or _extra_generic
                            or _asg_drift)
         if not _hard_drift and not _extra_buildcfg:
@@ -1248,17 +1219,6 @@ def validate_against_build_records(
                 _stats.get('extra_binaries', 0) + len(_extra_generic))
 
     # Post-loop summary findings — operator-friendly, one line each.
-    if _stats.get('asg_published_sources'):
-        _findings.append((
-            'INFO', 'virtual_validate_asg_published_generation',
-            f"{_stats['asg_published_binaries']} binaries across "
-            f"{_stats['asg_published_sources']} source(s) are at the "
-            "published asg generation — the recorded build's +asgRuN equals "
-            "the highest in published.manifest, so the at-build ledger "
-            "reconstruction can no longer see the prior generation and the "
-            "synthesizer under-predicts N.  Deterministic consequence of a "
-            "publish advancing the ledger to this build; in sync with the "
-            "mirror, not synth drift"))
     if _stats.get('asg_drift_sources'):
         _findings.append((
             'INFO', 'virtual_validate_asg_drift',
