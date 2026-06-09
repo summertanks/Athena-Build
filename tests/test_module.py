@@ -4918,8 +4918,7 @@ def test_iso_pool_staging_includes_non_main_component_dirs():
     apt-install of intel-microcode failed with 'Unable to locate'.
     Pinned via source-inspection because _stage_pool needs sudo + a real
     repo to exercise end-to-end."""
-    with open(os.path.join(_ROOT, 'scripts', 'build.py')) as fh:
-        _body = fh.read()
+    _body = _session_source()
     # The build_installer_iso call must forward the non-main component dirs.
     for _attr in ('dir_repo_non_free_firmware', 'dir_repo_non_free',
                   'dir_repo_contrib'):
@@ -18267,9 +18266,7 @@ def test_iso_installer_call_site_passes_audit_flag():
     reaches iso_installer.  Source-level pin — otherwise the kwarg
     silently defaults to True and the operator-disabled audit still
     runs."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     assert 'audit_identity_scan=self.config.audit_identity_scan' in _body, (
         'build.py must thread self.config.audit_identity_scan into '
         'iso_installer.build_installer_iso — otherwise [Audit] '
@@ -23050,9 +23047,7 @@ def test_iso_filenames_carry_snapshot_tag():
         _ib = fh.read()
     assert 'utils.snapshot_iso_tag(cfg)' in _ib
     assert 'athena-{_version}-{_snap}-amd64.iso' in _ib
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _bb = fh.read()
+    _bb = _session_source()
     assert 'utils.snapshot_iso_tag(self.config)' in _bb
     assert 'athena-installer-{_version}-{_snap}-amd64.iso' in _bb
     # snapshot threaded into the installer ISO build

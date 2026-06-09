@@ -1,0 +1,900 @@
+"""Artifact builders — the chroot / ISO build command surface.
+
+Builds the live + installer chroots (cmd_build_chroot_*), the live /
+installer / disk ISOs (cmd_build_iso_*), and runs the post-build chroot
+verification suite (_verify_chroot / cmd_verify_chroot).  Extracted
+verbatim from build.py's BuildSession; see commands/base.py for how the
+mixin shares session state.
+"""
+import glob
+import logging
+import os
+import re
+import subprocess
+
+import buildsystem
+import installer_chroot
+import iso_installer
+import tui
+import utils
+from cache import Cache
+from tui import console, Prompt, PROMPT_PASSWORD
+
+from commands.base import SessionState
+
+logger = logging.getLogger('athena.build')
+
+
+class BuildCommandsMixin(SessionState):
+    def cmd_build_chroot_live(self, *args):
+        """Assemble the resolved package set into a bootable live chroot.
+
+        Usage: chroot build live [with_debug]   (or bare `chroot build [with_debug]`)
+
+          with_debug — write /etc/systemd/journald.conf.d/50-console.conf so all
+                       journal entries forward to /dev/console (ttyS0 in serial
+                       boots).  Off by default — production images should not leak
+                       logs onto the console.
+
+        Takes the .deb files produced by source build from dir_repo and installs
+        them into a chroot tree at dir_chroot using dpkg.  The resulting chroot
+        can be packaged into a live ISO via `iso build live`.
+
+        Prerequisites: source build must have completed (source_build_ready flag)
+        AND the signing key must verify (signing_key_verified flag, gated up
+        front via _ensure_signing_key_verified — see CONF-02 phase 3 for why).
+        The sudo password is collected interactively at the start of this command.
+        """
+        if self._refuse_in_build_mode("chroot build live"):
+            return
+        if not self.flags.source_build_ready:
+            console.print("Run 'source build' first")
+            return
+
+        # UX-05g: reset flags on entry so a Ctrl+C / exception during this
+        # run can't leave stale True values from a previous successful
+        # run.  Re-set to True only on the success-tail (line ~5001 for
+        # chroot_ready, the verify call sets chroot_verified separately).
+        self.flags.chroot_ready = False
+        self.flags.chroot_verified = False
+
+        # Verify the project signing key before any sudo / mount / dpkg work
+        if not self._ensure_signing_key_verified():
+            return
+
+        # Pre-flight audit gates (P5 2026-05-23).  Two layers, both
+        # ABORT on red unless `no-gate` is in args:
+        #   1. source audit — build-state per source (binaries present,
+        #      .result fresh, patches not drifted)
+        #   2. repo audit — install-time risks (unresolved Depends,
+        #      conflict cohorts)
+        # Operator can bypass both with `chroot build live no-gate`
+        # for emergency / debugging — when the audits are noisy in a
+        # known-acceptable way but you want to push through.
+        _no_gate = 'no-gate' in args or '--no-gate' in args
+        if not _no_gate:
+            if not self._preflight_audit_source():
+                console.print("Aborted by source audit pre-flight")
+                return
+            if not self._preflight_audit_repo():
+                console.print("Aborted by repo audit pre-flight")
+                return
+        else:
+            console.print(
+                "chroot build live: pre-flight audits BYPASSED "
+                "(no-gate)",
+                tui.COLOR_WARNING,
+            )
+
+        # MIRROR-01 Phase 8: auto-index the repo if InRelease is
+        # missing.  `repo index` is no longer operator-visible —
+        # chroot build (and mirror publish) own the side-effect.
+        # The chroot bring-up needs a signed InRelease so apt under
+        # `--no-check-valid-until` can install built packages.
+        self._ensure_repo_indexed_for_chroot()
+
+        _debug = 'with_debug' in args
+        if _debug:
+            console.print("Debug mode: journald will forward to ttyS0 in built chroot")
+
+        console.print("Initialising build system...")
+        try:
+            build_system = buildsystem.BuildSystem(self.dep_tree, self.config)
+        except RuntimeError as e:
+            console.print(f"ERROR: build system initialisation failed — {e}")
+            logger.error(f"BuildSystem() raised: {e}")
+            return
+
+        # Bracket the BuildSystem's lifetime so the cached sudo password is
+        # scrubbed on every exit path — success, build failure,
+        try:
+            console.print("Building chroot environment...")
+            _result = build_system.build_chroot(debug=_debug)
+            if not _result:
+                console.print("ERROR: chroot build failed — check logs for details")
+                logger.error("build_chroot() returned False")
+                return
+
+            self.flags.chroot_ready = True
+
+            # Run verification immediately — chroot_verified gates build_iso
+            _passed, _failed = self._verify_chroot(build_system.password, self.config.dir_chroot)
+            self.flags.chroot_verified = (_failed == 0)
+            if _failed > 0:
+                logger.error(f"chroot verification: {_failed} of {_passed + _failed} checks failed")
+        finally:
+            build_system.scrub_password()
+
+
+    def cmd_build_chroot_installer(self, *args):
+        """Build the d-i installer chroot from the udeb closure.
+
+        Usage: chroot build installer
+
+        Wipes + (re)creates dir_chroot_installer, then `dpkg --unpack`s
+        every udeb in udeb_dep_tree.selected_pkgs into it.  Postinsts
+        are NOT run at chroot-build time — they run at first boot under
+        rootskel + main-menu (this matches how d-i itself works; see
+        project memory project_installer_from_source).
+
+        After unpack, applies the data-layer overlays from installer/
+        per the engine mapping in installer_chroot._OVERLAY_MAP.  All
+        configuration (preseed, cdebconf overrides, branding) lives in
+        installer/ and can be edited without touching this engine code.
+
+        Prerequisites:
+          - dep_check_ready (so udeb_dep_tree is populated)
+          - source_build_ready (so the .udeb files exist in repo/)
+        Collects sudo password — dpkg --root + the wipe/bootstrap need
+        root to set file ownerships correctly inside the chroot.
+
+        On success sets self.flags.chroot_installer_ready.
+        """
+        if self._refuse_in_build_mode("chroot build installer"):
+            return
+        if not self.flags.dep_check_ready:
+            console.print("Run 'cache parse' first")
+            return
+        if not self.flags.source_build_ready:
+            console.print(
+                "Run 'source build installer' first (need .udeb files in repo/)"
+            )
+            return
+        if self.udeb_dep_tree is None:
+            console.print(
+                "Udeb dep tree not built — re-run 'cache parse' (it populates "
+                "udeb_dep_tree alongside the deb tree)"
+            )
+            return
+        if not self.udeb_dep_tree.selected_pkgs:
+            console.print(
+                "Udeb closure is empty — check installer.list contains udeb "
+                "names and cache has the d-i Packages index"
+            )
+            return
+
+        # Pre-flight closure audit — scoped to the installer (udeb)
+        # selection.  Installer chroot uses dpkg --unpack (no apt),
+        # so unmet deps don't fail until the installer runs on the
+        # target — catch them here.  Two-layer gate (P5 2026-05-23) —
+        # source audit first, then repo audit.  Bypass with `no-gate`.
+        _no_gate = 'no-gate' in args or '--no-gate' in args
+        if not _no_gate:
+            if not self._preflight_audit_source():
+                console.print("Aborted by source audit pre-flight")
+                return
+            if not self._preflight_audit_repo():
+                console.print("Aborted by repo audit pre-flight")
+                return
+        else:
+            console.print(
+                "chroot build installer: pre-flight audits BYPASSED "
+                "(no-gate)",
+                tui.COLOR_WARNING,
+            )
+
+        self.flags.chroot_installer_ready = False  # reset before work
+
+        # Sudo password — same pattern as cmd_build_chroot_live's BuildSystem.
+        # Collect once + validate via `sudo -v`; scrub on every exit path.
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _r = subprocess.run(
+            ['sudo', '-S', '-v'],
+            input=_password + '\n',
+            capture_output=True, text=True,
+        )
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("chroot build installer: sudo -v failed")
+            _password = '*' * len(_password)
+            return
+
+        try:
+            console.print("Building installer chroot from udeb closure...")
+            _codename = self.config.build_codename.strip('"').strip("'")
+            # CONF-10 S2: pool_pkg_names = the set of pkg names the
+            # installed system's apt will see at /cdrom/pool.  Union of
+            # the canonical deb closure + the pool_extras additions;
+            # passed to installer_chroot so the apt-install audit in
+            # pre-pkgsel.d / finish-install.d can cross-reference each
+            # apt-install target against what actually ships.  Empty/None
+            # = skip audit (legacy compat).
+            _pool_pkg_names: 'set[str]' = set()
+            if self.dep_tree is not None:
+                _pool_pkg_names = set(self.dep_tree.canonical_pkgs.keys())
+                _pool_pkg_names |= self.dep_tree.pool_extras_pkg_names
+            _ok = installer_chroot.build_installer_chroot(
+                udeb_tree=self.udeb_dep_tree,
+                dir_udebs=self.config.dir_repo_main_udeb,
+                dir_chroot_installer=self.config.dir_chroot_installer,
+                installer_dir=os.path.join(self.config.working_dir, 'installer'),
+                password=_password,
+                codename=_codename,
+                pool_pkg_names=_pool_pkg_names,
+            )
+            if not _ok:
+                console.print(
+                    "ERROR: installer chroot build failed — check log for details"
+                )
+                logger.error("build_installer_chroot returned False")
+                return
+
+            self.flags.chroot_installer_ready = True
+            console.print(
+                f"Installer chroot ready at {self.config.dir_chroot_installer}",
+                tui.COLOR_HIGHLIGHT,
+            )
+        finally:
+            # Single-use credential; overwrite the in-memory copy.
+            _password = '*' * len(_password)  # noqa: F841
+
+
+    # -------------------------------Command: build_iso---------------------
+
+    def cmd_build_iso_live(self, *args):
+        """Build a bootable hybrid BIOS/EFI live ISO from the assembled chroot.
+
+        Usage: iso build live [force]
+
+          force — skip the chroot_verified flag check.  After a manual
+                  edit of the chroot tree (e.g. dropping in extra config
+                  files between `chroot build` and `iso build live`) the
+                  in-memory chroot_verified flag is stale even though the
+                  on-disk chroot may still be valid.  With force, we
+                  re-run verify_chroot against the on-disk chroot using
+                  the password just collected for ISO assembly, and
+                  proceed only if all 8 checks still pass.
+
+        Packages the chroot produced by chroot build into a squashfs live
+        image, writes a GRUB configuration, and runs grub-mkrescue to
+        produce a bootable ISO at dir_image/athena-VERSION-amd64.iso.
+
+        Requires on the host: squashfs-tools, grub-pc-bin, grub-efi-amd64-bin,
+        xorriso.  These are checked by build-system.sh at startup.
+
+        Prerequisites: chroot must be built AND verified (chroot_verified
+        flag), unless `force` is given in which case verify is re-run.
+        """
+        if self._refuse_in_build_mode("iso build live"):
+            return
+        _force = 'force' in args
+        if not _force and not self.flags.chroot_verified:
+            if self.flags.chroot_ready:
+                console.print("Chroot built but verification failed — re-run 'chroot verify' after fixing")
+            else:
+                console.print("Run 'chroot build' first")
+            return
+
+        self.flags.iso_live_ready = False  # reset before work; set True only on success
+        console.print("Initialising build system for ISO...")
+        try:
+            build_system = buildsystem.BuildSystem.for_iso(self.config)
+        except RuntimeError as e:
+            console.print(f"ERROR: build system initialisation failed — {e}")
+            logger.error(f"BuildSystem.for_iso() raised: {e}")
+            return
+
+        # Same try/finally pattern as cmd_build_chroot_live — scrub the cached
+        # sudo password on every exit path so it does not outlive the ISO
+        # build command.
+        try:
+            if _force:
+                console.print("Force mode: re-verifying chroot before ISO...")
+                _passed, _failed = self._verify_chroot(
+                    build_system.password, self.config.dir_chroot)
+                if _failed > 0:
+                    console.print(
+                        f"ERROR: chroot verification failed "
+                        f"({_failed} of {_passed + _failed} checks) — "
+                        f"refusing to build ISO"
+                    )
+                    logger.error(
+                        f"build_iso force: verify failed "
+                        f"{_failed}/{_passed + _failed}"
+                    )
+                    return
+                # Refresh the flag so subsequent (non-force) calls work
+                # without re-verifying.
+                self.flags.chroot_verified = True
+
+            console.print("Building ISO...")
+            _result = build_system.build_iso(container=self.container)
+            if not _result:
+                console.print("ERROR: ISO build failed — check logs for details")
+                logger.error("build_iso() returned False")
+                return
+            self.flags.iso_live_ready = True
+        finally:
+            build_system.scrub_password()
+
+
+    def cmd_build_iso_installer(self, *args):
+        """Build the installer ISO from buildroot/installer/ + repo/.
+
+        Usage: iso build installer
+
+        Mastering steps (delegated to iso_installer.build_installer_iso):
+          1. Wipe + create dir_image/staging-installer/
+          2. Find kernel — first try installer chroot's /boot/vmlinuz-*,
+             fall back to extracting from repo/linux-image-*-amd64*.deb
+          3. Build monolithic cpio.gz initrd from buildroot/installer/
+          4. Copy installer/boot/grub.cfg → staging/boot/grub/grub.cfg
+          5. Copy repo/ → staging/pool/ (for /cdrom/pool runtime read)
+          6. grub-mkrescue produces hybrid BIOS+EFI ISO
+
+        All configurable bits (boot menu, kernel cmdline) live in
+        installer/boot/grub.cfg — operator edits there without touching
+        engine code.
+
+        Prerequisites:
+          - chroot_installer_ready (so buildroot/installer/ exists)
+
+        Collects sudo password — initrd cpio reads root-owned chroot
+        content, pool copy preserves ownership.
+        """
+        if self._refuse_in_build_mode("iso build installer"):
+            return
+        if not self.flags.chroot_installer_ready:
+            console.print(
+                "Run 'chroot build installer' first (need "
+                "buildroot/installer/ populated with the udeb closure)"
+            )
+            return
+
+        # Verify the project signing key BEFORE any sudo work — apt on the
+        # installed target verifies our Release against this key, and
+        # _sign_release_files inside build_installer_iso will fail loud if
+        # the key isn't present.  Failing here is cheaper.
+        import signing
+        if not self._ensure_signing_key_verified():
+            return
+
+        self.flags.iso_installer_ready = False  # reset before work; set True only on success
+
+        # Sudo password — same pattern as cmd_build_chroot_installer.
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _r = subprocess.run(
+            ['sudo', '-S', '-v'],
+            input=_password + '\n',
+            capture_output=True, text=True,
+        )
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("iso build installer: sudo -v failed")
+            _password = '*' * len(_password)
+            return
+
+        try:
+            _version  = self.config.build_version.strip('"').strip("'")
+            _codename = self.config.build_codename.strip('"').strip("'")
+            # Suite == codename for our single-suite distro.  If we ever
+            # ship multiple suites (e.g. athena-stable / athena-testing),
+            # the suite would come from a separate config field.
+            _suite    = _codename
+            # Tag the filename with the snapshot pin so an installer ISO from
+            # the base snapshot is distinguishable from one built after
+            # stepping the snapshot (UPD-01).  Empty when snapshots off.
+            _snap = utils.snapshot_iso_tag(self.config)
+            _iso_basename = (
+                f"athena-installer-{_version}-{_snap}-amd64.iso" if _snap
+                else f"athena-installer-{_version}-amd64.iso")
+            console.print(
+                f"Building installer ISO {_iso_basename}..."
+            )
+            # base_include and pool_whitelist for the installer ISO
+            # both drop `live_exclusive_pkg_names` — packages that
+            # only exist in selected_pkgs because Pass IV resolved
+            # `live.list` and pulled them in transitively.  The
+            # installer ISO has nothing to do with live boot; those
+            # binaries (live-boot, live-config, live-tools, etc.)
+            # should not ship on the installer disc or end up on the
+            # installed target.
+            #
+            # This was wrong earlier when pkg.list was incomplete:
+            # busybox isn't in stock Debian's required/important set,
+            # we didn't list it explicitly, so it got pulled in only
+            # via live.list's transitive deps and got classified as
+            # live-exclusive — base-installer's install_kernel then
+            # failed when this filter dropped it from the target set
+            # (caught 2026-05-12).  Fix: pkg.list now lists every
+            # binary d-i actually apt-installs at install time (audit
+            # walked buildroot/installer/ for apt-install callsites);
+            # busybox is in pkg_closure after Pass III; Pass IV's
+            # live.list resolution finds it already present and
+            # doesn't add it to live_exclusive.
+            _live_excl = self.dep_tree.live_exclusive_pkg_names
+            _extras    = self.dep_tree.extras_pkg_names
+            # COMP-02 phase D follow-up: pool extras (from pool.list,
+            # resolved in Pass VII) ship in /cdrom/pool but are NOT
+            # installed in any chroot — drop them from base_include so
+            # debootstrap doesn't pull them onto the target.  They
+            # remain in _pool_whitelist so they're indexed in the
+            # cdrom apt pool, available for `apt-get install` on the
+            # target post-install (or by grub-installer at install
+            # time, the case that motivated the file).
+            _pool_extras = self.dep_tree.pool_extras_pkg_names
+            # GROUPS-01: pkg.list groups other than [base] ship in the
+            # cdrom pool but are NOT installed at target debootstrap
+            # time — tasksel apt-installs the operator-chosen groups
+            # at install time from /cdrom/pool.
+            _group_extras = self.dep_tree.pkg_group_extras_pkg_names
+
+            # Pre-flight integrity check: catch operator mistakes that
+            # would manifest as a silent install-time UX bug (e.g.
+            # tasksel shows a checkbox for an empty task, or a group
+            # silently has zero packages because every seed was a
+            # typo).
+            #
+            # `pkg_group_pkg_names[g]` is the DELTA of canonical names
+            # added by group `g` — it's empty in two distinct cases:
+            #   (a) every seed name was already in selected_pkgs from an
+            #       earlier group / required / important.  Not a typo;
+            #       the group is REDUNDANT but the tasksel task still
+            #       works because its Key entries resolve from elsewhere.
+            #       Canonical example: [ssh-server] = openssh-server when
+            #       openssh-server is also in [base].
+            #   (b) one or more seeds failed to resolve (typo, missing
+            #       from cache).  Genuine bug — operator must fix.
+            # Distinguish the two by re-parsing pkg.list and checking
+            # whether each seed is reachable in selected_pkgs.
+            _group_pkgs = self.dep_tree.pkg_group_pkg_names
+            try:
+                _raw_pkg_groups = utils.parse_pkg_list_groups(
+                    self.config.pkglist_path,
+                )
+            except Exception:
+                _raw_pkg_groups = {}
+            for _g, _names in _group_pkgs.items():
+                if _names:
+                    continue
+                _seeds = list(_raw_pkg_groups.get(_g, []))
+                _unresolved = [
+                    _s for _s in _seeds
+                    if _s not in self.dep_tree.selected_pkgs
+                ]
+                if _seeds and not _unresolved:
+                    console.print(
+                        f"INFO: pkg.list group [{_g}] adds 0 unique "
+                        f"packages — all {len(_seeds)} seed(s) already "
+                        "pulled in by an earlier group or required/"
+                        "important.  Tasksel task remains valid (Key "
+                        "entries resolve from elsewhere).",
+                        tui.COLOR_INFO,
+                    )
+                    logger.info(
+                        f"iso build installer: group [{_g}] redundant "
+                        f"with earlier groups (all {len(_seeds)} seed(s) "
+                        "already selected)"
+                    )
+                else:
+                    _detail = (', '.join(_unresolved)
+                               if _unresolved else '(empty seed list)')
+                    console.print(
+                        f"WARNING: pkg.list group [{_g}] resolved to ZERO "
+                        "canonical packages — "
+                        f"{len(_unresolved)}/{max(1, len(_seeds))} seed(s) "
+                        f"not in cache: {_detail}.  Check seed names "
+                        "against your cache.",
+                        tui.COLOR_WARNING,
+                    )
+                    logger.warning(
+                        f"iso build installer: group [{_g}] has empty "
+                        f"closure; unresolved seeds: {_detail}"
+                    )
+            _non_base_groups = [
+                _g for _g in _group_pkgs.keys() if _g != 'base'
+            ]
+            if _non_base_groups and not _group_extras:
+                console.print(
+                    f"WARNING: {len(_non_base_groups)} non-[base] group(s) "
+                    "declared but pkg_group_extras_pkg_names is empty — every "
+                    "package got credited to an earlier group (probably "
+                    "[base]).  The non-base group(s) will be empty in tasksel.",
+                    tui.COLOR_WARNING,
+                )
+                logger.warning(
+                    "iso build installer: non-base groups exist but all "
+                    "packages credited to earlier groups"
+                )
+            _canonical = {
+                _name for _name in self.dep_tree.selected_pkgs
+                if _name == self.dep_tree.selected_pkgs[_name]['Package']
+            }
+            _base_include = sorted(
+                _canonical - _extras - _live_excl - _pool_extras - _group_extras
+            )
+            # Pool keeps Recommends-only extras, pool extras, AND
+            # group extras so the operator (or grub-installer /
+            # tasksel) can apt-install them post-install via the
+            # cdrom: source.
+            _pool_whitelist = _canonical - _live_excl
+
+            # Snapshot-aware kernel pick: tell _find_kernel which
+            # linux-image-<ABI>-amd64 the cache expects.  Without
+            # this, _find_kernel falls back to highest sorted on
+            # disk — which can be a stale higher-ABI .deb left over
+            # from a pre-rollback snapshot, breaking the installer
+            # because the ramdisk's modules won't match (CONF-13
+            # symptom from 2026-05-19).
+            import re as _re
+            _kernel_pat = _re.compile(
+                r'^linux-image-\d+\.\d+\.\d+-\d+-amd64$'
+            )
+            _kernel_candidates = sorted(
+                _n for _n in self.cache.package_hashtable.keys()
+                if _kernel_pat.match(_n)
+            )
+            _expected_kernel = _kernel_candidates[-1] if _kernel_candidates else None
+            if _expected_kernel:
+                console.print(
+                    f"Cache predicts kernel binary: {_expected_kernel}",
+                    tui.COLOR_INFO,
+                )
+
+            _ok = iso_installer.build_installer_iso(
+                dir_chroot_installer=self.config.dir_chroot_installer,
+                dir_repo=self.config.dir_repo_main,
+                dir_repo_main_udeb=self.config.dir_repo_main_udeb,
+                dir_image=self.config.dir_image,
+                installer_dir=os.path.join(self.config.working_dir, 'installer'),
+                password=_password,
+                iso_basename=_iso_basename,
+                container=self.container,
+                suite=_suite,
+                codename=_codename,
+                version=_version,
+                snapshot=_snap,
+                base_include_pkgs=_base_include,
+                deb_whitelist=_pool_whitelist,
+                signing_homedir=signing.signing_home(self.config),
+                signing_pubkey_path=signing.signing_pubkey_path(self.config),
+                pkg_groups=self.dep_tree.pkg_group_pkg_names,
+                group_meta=self.dep_tree.pkg_group_meta,
+                expected_kernel_pkg=_expected_kernel,
+                # Drop upstream binaries a shipped fork supersedes (e.g.
+                # apt-setup-udeb vs athena-setup-udeb) from the pool — anna
+                # ignores Conflicts, so leaving them ships + runs both.
+                exclude_names=self._superseded_binary_names(),
+                # Non-main component dirs (tunneled firmware/microcode and
+                # any future contrib/non-free binaries) so they reach the
+                # cdrom pool — finish-install.d/08hw-detect apt-installs
+                # microcode from cdrom on offline/no-mirror installs.
+                dir_repo_extras=[
+                    self.config.dir_repo_non_free_firmware,
+                    self.config.dir_repo_non_free,
+                    self.config.dir_repo_contrib,
+                ],
+                # [Audit] IdentityScan — gates the S3 staged-ISO scan.
+                audit_identity_scan=self.config.audit_identity_scan,
+            )
+            if not _ok:
+                console.print(
+                    "ERROR: installer ISO build failed — check log for details"
+                )
+                logger.error("build_installer_iso returned False")
+                return
+            self.flags.iso_installer_ready = True
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
+
+
+    def cmd_build_iso_disk(self, *args):
+        """COMP-09 — Build a pre-installed bootable qcow2 disk image
+        from the LIVE chroot.
+
+        Usage: iso build disk [size_gb] [force]
+
+          size_gb — disk image size in GB (default from
+                    `[Build] DiskImageSizeGB`, fallback 5).  Sparse
+                    qcow2 — actual on-disk footprint depends on the
+                    chroot's payload, not this number.
+          force   — bypass chroot_verified gate, same semantics as
+                    `iso build live force`.
+
+        Output: image/<distribution>-<version>-<arch>.qcow2
+
+        Boots directly into the running OS (no installer step).
+        Suitable for VM / cloud deployment.
+
+        Prerequisites:
+          - Chroot built + verified (chroot_verified flag).
+          - Host packages: rsync, dosfstools (mkfs.fat), qemu-utils
+            (qemu-img).  Plus losetup/sfdisk/mkfs.ext4/grub-install/
+            blkid from util-linux + grub-* (all in default Debian
+            install).  Helper checks at entry and surfaces the first
+            missing tool with an actionable message.
+
+        Known v1 limitation: grub-install runs on the build host, so
+        the produced disk image's GRUB binaries reflect the host's
+        GRUB version (analogous to pre-COMP-14 ISO leakage).  Follow-
+        up will move grub-install into the build container.
+        """
+        if self._refuse_in_build_mode("iso build disk"):
+            return
+        import disk_image
+
+        _force = 'force' in args
+        # First non-flag arg is the size; ignore unknown flags.
+        _size_gb = self.config.disk_image_size_gb
+        for _a in args:
+            if _a == 'force':
+                continue
+            try:
+                _size_gb = int(_a)
+                break
+            except ValueError:
+                console.print(
+                    f"Ignoring unknown arg: {_a!r} (expected size_gb "
+                    f"integer or `force`)"
+                )
+
+        if not _force and not self.flags.chroot_verified:
+            if self.flags.chroot_ready:
+                console.print(
+                    "Chroot built but verification failed — re-run "
+                    "`chroot verify` after fixing, or pass `force`"
+                )
+            else:
+                console.print("Run `chroot build` first")
+            return
+
+        self.flags.iso_disk_ready = False  # reset before work; set True only on success
+
+        # Cache sudo password — same pattern as cmd_build_iso_live.
+        _password = Prompt(
+            PROMPT_PASSWORD, "Enter sudo password",
+        ).get_response()
+        _r = subprocess.run(
+            ['sudo', '-S', '-v'],
+            input=_password + '\n',
+            capture_output=True, text=True,
+        )
+        if _r.returncode != 0:
+            console.print("ERROR: incorrect sudo password")
+            logger.error("cmd_build_iso_disk: sudo -v failed")
+            _password = '*' * len(_password)
+            return
+
+        try:
+            # Force mode re-verifies the on-disk chroot before building —
+            # same contract as `iso build live force`.  Without this, force
+            # would master an UNVERIFIED chroot into a bootable image (the
+            # gate above is bypassed but nothing re-checks the 8 invariants).
+            if _force:
+                console.print("Force mode: re-verifying chroot before disk image...")
+                _passed, _failed = self._verify_chroot(
+                    _password, self.config.dir_chroot)
+                if _failed > 0:
+                    console.print(
+                        f"ERROR: chroot verification failed "
+                        f"({_failed} of {_passed + _failed} checks) — "
+                        f"refusing to build disk image"
+                    )
+                    logger.error(
+                        f"build_iso_disk force: verify failed "
+                        f"{_failed}/{_passed + _failed}"
+                    )
+                    return
+                # Truthful: we just ran the 8 checks, so refresh the flag
+                # for subsequent (non-force) calls — mirrors iso build live.
+                self.flags.chroot_verified = True
+
+            _version  = self.config.build_version.strip('"').strip("'")
+            _distro   = self.config.build_distribution.strip('"').strip("'")
+            _arch     = self.config.arch
+            _out_name = f'{_distro.lower()}-{_version}-{_arch}.qcow2'
+            _out_path = os.path.join(self.config.dir_image, _out_name)
+
+            console.print(
+                f"Building {_size_gb} GB pre-installed disk image: "
+                f"{_out_path}"
+            )
+            _ok = disk_image.build_disk_image(
+                dir_chroot=self.config.dir_chroot,
+                output_qcow2=_out_path,
+                size_gb=_size_gb,
+                password=_password,
+                container=self.container,
+            )
+            if not _ok:
+                console.print(
+                    "ERROR: disk image build failed — see logs for details"
+                )
+                logger.error("cmd_build_iso_disk: build_disk_image returned False")
+                return
+            self.flags.iso_disk_ready = True
+        finally:
+            _password = '*' * len(_password)  # noqa: F841
+
+    # ---------------------------------------------------------------------------
+    # Command: verify_chroot
+    # ---------------------------------------------------------------------------
+
+    def _verify_chroot(self, password: str, chroot: str) -> tuple:
+        """Run the 8-check chroot verification suite. Returns (passed, failed).
+
+        Caller is responsible for prerequisite checks, password validation, and
+        setting any progress flags. Prints per-check PASS/FAIL lines and a summary.
+        """
+        # Checks performed:
+        #   1. dpkg --audit          — no packages in a broken state
+        #   2. dpkg --get-selections — all packages fully installed (none half-configured)
+        #   3. Kernel present        — at least one vmlinuz-* in /boot/
+        #   4. Initramfs present     — at least one initrd.img-* in /boot/
+        #   5. bash --version        — shell is executable inside the chroot
+        #   6. systemctl --version   — systemd is present and executable
+        #   7. live-boot installed   — required for live ISO boot
+        #   8. /etc/os-release       — OS identity file written by generate_system_configs
+        console.print(f"Verifying chroot at {chroot}...")
+
+        _passed = 0
+        _failed = 0
+
+        def _check(label: str, ok: bool, detail: str = ''):
+            nonlocal _passed, _failed
+            _status = '[PASS]' if ok else '[FAIL]'
+            _color  = tui.COLOR_HIGHLIGHT if ok else tui.COLOR_ERROR
+            _suffix = f' — {detail}' if detail else ''
+            console.print(f'  {label:<45} {_status}{_suffix}', _color)
+            if ok:
+                _passed += 1
+            else:
+                _failed += 1
+
+        def _chroot_run(*cmd):
+            return subprocess.run(
+                ['sudo', '-S', 'chroot', chroot] + list(cmd),
+                input=password + '\n', capture_output=True, text=True
+            )
+
+        # ── Check 1: dpkg --audit ────────────────────────────────────────────────
+        _r = _chroot_run('dpkg', '--audit')
+        _audit_out = _r.stdout.strip()
+        _check('dpkg audit — no broken packages',
+               _r.returncode == 0 and not _audit_out,
+               'clean' if not _audit_out else _audit_out.splitlines()[0][:60])
+
+        # ── Check 2: all packages fully configured ───────────────────────────────
+        _r = _chroot_run('dpkg', '--get-selections')
+        _lines      = _r.stdout.splitlines()
+        _total      = len(_lines)
+        _incomplete = [l.split()[0] for l in _lines if l and not l.endswith('\tinstall')]
+        _check('All packages fully installed',
+               not _incomplete,
+               f'{_total} packages installed' if not _incomplete
+               else f'{len(_incomplete)} incomplete: {", ".join(_incomplete[:4])}')
+
+        # ── Check 3: kernel ──────────────────────────────────────────────────────
+        _kernels = sorted(glob.glob(os.path.join(chroot, 'boot', 'vmlinuz-*')))
+        _check('Kernel present in /boot/',
+               bool(_kernels),
+               os.path.basename(_kernels[-1]) if _kernels else 'no vmlinuz-* found')
+
+        # ── Check 4: initramfs ───────────────────────────────────────────────────
+        _initrds = sorted(glob.glob(os.path.join(chroot, 'boot', 'initrd.img-*')))
+        _check('Initramfs present in /boot/',
+               bool(_initrds),
+               os.path.basename(_initrds[-1]) if _initrds else 'no initrd.img-* found')
+
+        # ── Check 5: bash ────────────────────────────────────────────────────────
+        _r = _chroot_run('bash', '--version')
+        _ver = _r.stdout.splitlines()[0] if _r.stdout else ''
+        _check('Bash executable inside chroot',
+               _r.returncode == 0,
+               _ver[:60] if _ver else _r.stderr.strip()[:60])
+
+        # ── Check 6: systemd ─────────────────────────────────────────────────────
+        _r = _chroot_run('systemctl', '--version')
+        _ver = _r.stdout.splitlines()[0] if _r.stdout else ''
+        _check('systemd present and executable',
+               _r.returncode == 0,
+               _ver[:60] if _ver else _r.stderr.strip()[:60])
+
+        # ── Check 7: live-boot ───────────────────────────────────────────────────
+        _r = _chroot_run('dpkg', '-l', 'live-boot')
+        _live_ok = _r.returncode == 0 and any(l.startswith('ii') for l in _r.stdout.splitlines())
+        _check('live-boot installed',
+               _live_ok,
+               'installed' if _live_ok else 'not installed or unconfigured')
+
+        # ── Check 8: /etc/os-release ─────────────────────────────────────────────
+        _os_release = os.path.join(chroot, 'etc', 'os-release')
+        _os_ok = os.path.exists(_os_release)
+        _os_detail = ''
+        if _os_ok:
+            try:
+                with open(_os_release) as _osf:
+                    _os_lines = _osf.read().splitlines()
+                _os_detail = next(
+                    (l.split('=', 1)[1].strip('"') for l in _os_lines
+                     if l.startswith('PRETTY_NAME=')), 'present')
+            except OSError:
+                _os_detail = 'present'
+        _check('/etc/os-release written',
+               _os_ok,
+               _os_detail if _os_ok else 'missing — run build_bootable again')
+
+        # ── CONF-02 phase 3: signing keyring present? (informational) ──────────
+        # Not a check — non-gating because the chroot is still a valid live
+        # ISO without our keyring; the keyring matters for trusting future
+        # apt sources pointing at the Athena repo.  Surfaced here so the
+        # operator sees presence/absence at verify time without having to
+        # poke at the chroot tree manually.
+        _keyring = os.path.join(
+            chroot, 'usr/share/keyrings/athena-archive-keyring.gpg')
+        if os.path.exists(_keyring):
+            console.print(
+                '  Athena signing keyring                        present',
+                tui.COLOR_INFO,
+            )
+        else:
+            console.print(
+                '  Athena signing keyring                        absent  '
+                '(run `generate_signing_key` then re-run `build_chroot`)'
+            )
+
+        # ── Summary ──────────────────────────────────────────────────────────────
+        _total_checks = _passed + _failed
+        console.print('')
+        if _failed == 0:
+            console.print(
+                f'Verification complete: {_passed}/{_total_checks} passed'
+                f' — chroot is ready for ISO build',
+                tui.COLOR_HIGHLIGHT
+            )
+        else:
+            console.print(
+                f'Verification complete: {_passed}/{_total_checks} passed,'
+                f' {_failed} failed — build_iso blocked until verify passes',
+                tui.COLOR_ERROR
+            )
+
+        return _passed, _failed
+
+    def cmd_verify_chroot(self):
+        """Re-run the chroot verification suite against an existing chroot.
+
+        Useful after a manual edit of the chroot to re-establish the
+        chroot_verified flag without rebuilding from scratch.
+
+        Prerequisites: chroot must already be built (chroot_ready flag).
+        """
+        if not self.flags.chroot_ready:
+            console.print("Run 'chroot build' first")
+            return
+
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        try:
+            _proc = subprocess.run(['sudo', '-S', '-v'],
+                                   input=_password + '\n', capture_output=True, text=True)
+            if _proc.returncode != 0:
+                console.print("ERROR: incorrect sudo password")
+                logger.error("verify_chroot: sudo -v failed")
+                return
+
+            _passed, _failed = self._verify_chroot(_password, self.config.dir_chroot)
+            self.flags.chroot_verified = (_failed == 0)
+        finally:
+            # Drop the local reference as soon as we are done — same caveat
+            # as BuildSystem.scrub_password (Python strings are immutable).
+            _password = ''
