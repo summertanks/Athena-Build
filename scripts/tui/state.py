@@ -25,7 +25,8 @@ MAX_BUFFER_LINES = 10000
 
 # ── Default tabs (insertion order = F1..Fn mapping) ──────────────────────
 DEFAULT_TABS: Tuple[str, ...] = (
-    'console', 'cache', 'build', 'chroot', 'iso',
+    # Three-tab layout: operator output / consolidated log / live status.
+    'console', 'log', 'status',
 )
 
 

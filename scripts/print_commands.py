@@ -330,6 +330,94 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print("  Dep tree                 : not built (run parse_dependency)")
 
 
+def status_lines(session) -> 'list[tuple[str, int]]':
+    """Compact, always-current build-environment snapshot for the TUI
+    'status' tab — pipeline state + key counts + artifact locations.
+
+    Returns ``(text, COLOR_* constant)`` rows; the TUI resolves the colour
+    and replaces the status tab buffer after every command, so the operator
+    can flip to the tab and see where the build is and what's been produced.
+    Read-only over session state."""
+    import os as _os
+    cfg = session.config
+    flags = session.flags
+    rows: 'list[tuple[str, int]]' = []
+
+    def add(text: str = '', color: int = tui.COLOR_NORMAL) -> None:
+        rows.append((text, color))
+
+    _mode = getattr(cfg, 'build_mode', 'distribution')
+    _distro = str(getattr(cfg, 'build_distribution', '?'))
+    _ver = getattr(cfg, 'build_version', '?')
+    _code = getattr(cfg, 'build_codename', '?')
+    add(f"{_distro} {_ver} ({_code})    MODE: {_mode}", tui.COLOR_HIGHLIGHT)
+    if getattr(cfg, 'snapshot_enabled', False):
+        add(f"snapshot: {getattr(cfg, 'snapshot_timestamp_config', '?')} "
+            "(pinned)", tui.COLOR_INFO)
+    add()
+
+    if session.cache is not None:
+        _c = session.cache
+        add(f"cache       {len(_c.package_hashtable)} pkgs / "
+            f"{len(_c.source_hashtable)} srcs indexed")
+    else:
+        add("cache       not built", tui.COLOR_WARNING)
+    if session.dep_tree is not None and flags.dep_check_ready:
+        _dt = session.dep_tree
+        _canon = sum(1 for _k, _v in _dt.selected_pkgs.items()
+                     if _k == _v['Package'])
+        add(f"dep tree    {_canon} pkgs / {len(_dt.selected_srcs)} "
+            "srcs selected")
+    else:
+        add("dep tree    not built", tui.COLOR_WARNING)
+    add()
+
+    add("Pipeline:", tui.COLOR_INFO)
+    _stages = [
+        ('cache_ready',            'cache_build'),
+        ('dep_check_ready',        'dep_parse'),
+        ('download_ready',         'source_download'),
+        ('build_container_ready',  'container_init'),
+        ('source_build_ready',     'source_build'),
+        ('signing_key_verified',   'signing_key'),
+        (None,                     None),
+        ('chroot_ready',           'chroot_build_live'),
+        ('chroot_verified',        'chroot_verify'),
+        ('iso_live_ready',         'iso_build_live'),
+        ('iso_disk_ready',         'iso_build_disk'),
+        (None,                     None),
+        ('chroot_installer_ready', 'chroot_build_installer'),
+        ('iso_installer_ready',    'iso_build_installer'),
+    ]
+    for _attr, _label in _stages:
+        if _attr is None:
+            add("  " + "─" * 24)
+            continue
+        _ok = bool(getattr(flags, _attr, False))
+        add(f"  [{'✓' if _ok else '·'}] {_label}",
+            tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_NORMAL)
+    add()
+
+    add("Artifacts:", tui.COLOR_INFO)
+    _img = getattr(cfg, 'dir_image', 'image')
+    _arch = getattr(cfg, 'arch', 'amd64')
+
+    def _art(label: str, fname: str, ready_flag: str, gate: str) -> None:
+        _p = _os.path.join(_img, fname)
+        if getattr(flags, ready_flag, False):
+            add(f"  {label:<14}{_p}  (built)", tui.COLOR_HIGHLIGHT)
+        else:
+            add(f"  {label:<14}{_p}  ({gate})")
+
+    _art('ISO live', f"athena-{_ver}-{_arch}.iso",
+         'iso_live_ready', 'pending chroot verify')
+    _art('ISO installer', f"athena-installer-{_ver}-{_arch}.iso",
+         'iso_installer_ready', 'pending installer chroot')
+    _art('Disk image', f"{_distro.lower()}-{_ver}-{_arch}.qcow2",
+         'iso_disk_ready', 'pending chroot verify')
+    return rows
+
+
 def summary(session, *, timing: Optional[AutorunTiming] = None) -> None:
     """Render the full pipeline summary used by cmd_auto_run and operator-
     invoked ``print summary``.

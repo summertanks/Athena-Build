@@ -87,6 +87,10 @@ class Tui:
         self.dispatcher = Dispatcher(self._renderer)
         self.dispatcher.state.banner = self._banner
         self.dispatcher.set_command_names_source(lambda: list(self._cmd_registry))
+        # Status-tab content provider: a callable returning (text, COLOR_*)
+        # rows.  Wired by build.py:main() to print_commands.status_lines.
+        # Re-rendered after every command so the 'status' tab is current.
+        self._status_provider: 'Optional[Callable[[], list]]' = None
 
         # Register as the singleton tui_instance — exposed at the
         # package level via tui/__init__.py.  Console / Prompt /
@@ -299,6 +303,31 @@ class Tui:
                 import logging
                 logging.getLogger(LOGGER_NAME).error(
                     f'{type(e).__name__}: {e}')
+            # Refresh the status tab after every command — build-environment
+            # actions (cache/parse/build/iso) settle into flag + state
+            # changes the operator can review by flipping to F3.
+            self._refresh_status()
+
+    def set_status_provider(self, provider: 'Callable[[], list]') -> None:
+        """Register the status-tab content source (build.py:main wires
+        print_commands.status_lines bound to the session) and render once."""
+        self._status_provider = provider
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        """Regenerate the 'status' tab: clear it, then post the provider's
+        (text, COLOR_*) rows.  No-op when no provider is wired or the
+        provider raises (status is a convenience view, never load-bearing)."""
+        if self._status_provider is None:
+            return
+        try:
+            _rows = self._status_provider()
+        except Exception:
+            return
+        self.dispatcher.post(ClearTab('status'))
+        for _text, _color in _rows:
+            _attr = self._renderer.attr_for_color(_color)
+            self.dispatcher.post(PrintEvent(_text, _attr, tab='status'))
 
     # ─── Built-in commands ──────────────────────────────────────────────
     def _cmd_help(self) -> None:
