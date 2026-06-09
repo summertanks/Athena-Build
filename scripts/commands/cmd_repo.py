@@ -73,7 +73,7 @@ class RepoCommandsMixin(SessionState):
             console.print("ERROR: incorrect sudo password")
             logger.error("cmd_index_repo: sudo -v failed")
             _password = '*' * len(_password)
-            return
+            return False
 
         try:
             _ok = apt_repo.generate_repo_indexes(
@@ -93,7 +93,7 @@ class RepoCommandsMixin(SessionState):
                     "check log for details"
                 )
                 logger.error("cmd_index_repo: generate_repo_indexes returned False")
-                return
+                return False
             console.print(
                 f"apt-repo indexed: {self.config.dir_repo}/dists/"
                 f"{{{_codename},{_codename}-debug}}/",
@@ -102,6 +102,9 @@ class RepoCommandsMixin(SessionState):
             self._print_repo_index_summary(_codename, _suites_spec)
         finally:
             _password = '*' * len(_password)  # noqa: F841
+        # mirror publish's auto-index path gates on this bool; without it
+        # a fully-successful index returned None and was misread as failure.
+        return True
 
     def _print_repo_index_summary(
         self, codename: str,
