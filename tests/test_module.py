@@ -30650,6 +30650,82 @@ def test_selection_lock_restore_roundtrips_lists_with_meta():
         assert open(_cfg.livelist_path).read().strip() == 'live-boot'
 
 
+def test_claim_schema_deprecated_state_and_new_deprecation():
+    """SELECT-LOCK Chunk 7: 'deprecated' is a valid + inactive claim state;
+    new_deprecation keeps the file identity (unlike a tombstone) + records
+    deprecates_seq; the schema version bumped to >=2."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    assert _sch.CLAIM_STATE_DEPRECATED in _sch.CLAIM_STATES
+    assert _sch.CLAIM_STATE_DEPRECATED in _sch.INACTIVE_CLAIM_STATES
+    assert _sch.CLAIM_STATE_RETRACTED in _sch.INACTIVE_CLAIM_STATES
+    assert _sch.CLAIM_RECORD_SCHEMA_VERSION >= 2
+    _dep = _sch.new_deprecation(
+        builder='b1', seq=10, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
+        size=42, snapshot='s', built_at='t', deprecates_seq=5)
+    assert _dep['claim_state'] == _sch.CLAIM_STATE_DEPRECATED
+    assert _dep['deprecates_seq'] == 5
+    # KEEPS identity (unlike new_retraction which strips it)
+    assert _dep['filename'] == 'foo_1.0_amd64.deb' and _dep['sha256'] == 'aa'
+    assert _dep['size'] == 42 and _dep['built_version'] == '1.0'
+
+
+def test_claim_from_jsonl_accepts_deprecated_and_v1_lines():
+    """A v2 deprecated line and a v1 published line both fold (claim_from_jsonl
+    never version-compares; it gates on required fields + valid state)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    # v1 published line (manually stamped v:1 + a sig field)
+    _v1 = _sch.new_claim(
+        builder='b1', seq=1, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
+        size=1, snapshot='s', built_at='t',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _v1['v'] = 1
+    _v1['sig'] = 'deadbeef'
+    assert _sch.claim_from_jsonl(_sch.claim_to_jsonl(_v1)) is not None
+    # v2 deprecated line
+    _dep = _sch.new_deprecation(
+        builder='b1', seq=2, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
+        size=1, snapshot='s', built_at='t', deprecates_seq=1)
+    _dep['sig'] = 'deadbeef'
+    _parsed = _sch.claim_from_jsonl(_sch.claim_to_jsonl(_dep))
+    assert _parsed is not None
+    assert _parsed['claim_state'] == _sch.CLAIM_STATE_DEPRECATED
+
+
+def test_project_owners_deprecated_releases_ownership():
+    """A deprecated claim (higher seq) supersedes the published claim for the
+    same filename and reports builder=None — no-owner, like tunneled — so
+    another builder can take it over."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    from coord import store as _store
+    _pub = _sch.new_claim(
+        builder='b1', seq=5, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
+        size=1, snapshot='s', built_at='t',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _dep = _sch.new_deprecation(
+        builder='b1', seq=10, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
+        size=1, snapshot='s', built_at='t', deprecates_seq=5)
+    _owners = _store.project_owners({'b1': [_pub, _dep]})
+    _o = _owners['foo_1.0_amd64.deb']
+    assert _o['builder'] is None, _o
+    assert _o['claim_state'] == _sch.CLAIM_STATE_DEPRECATED, _o
+    # A still-published, non-deprecated claim keeps its owner.
+    _pub2 = _sch.new_claim(
+        builder='b1', seq=3, package='bar', intended_version='1.0',
+        built_version='1.0', filename='bar_1.0_amd64.deb', sha256='bb',
+        size=1, snapshot='s', built_at='t',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _owners2 = _store.project_owners({'b1': [_pub2]})
+    assert _owners2['bar_1.0_amd64.deb']['builder'] == 'b1'
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31307,6 +31383,10 @@ def main() -> int:
         test_selection_lock_assemble_state_shape_and_pin_union,
         # SELECT-LOCK Chunk 5 — cache restore / purge-state
         test_selection_lock_restore_roundtrips_lists_with_meta,
+        # SELECT-LOCK Chunk 7 — mirror deprecated claim state
+        test_claim_schema_deprecated_state_and_new_deprecation,
+        test_claim_from_jsonl_accepts_deprecated_and_v1_lines,
+        test_project_owners_deprecated_releases_ownership,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,

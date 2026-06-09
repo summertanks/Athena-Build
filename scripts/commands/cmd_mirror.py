@@ -655,6 +655,7 @@ class MirrorCommandsMixin(SessionState):
         import coord.schema as _schema
         _live = 0
         _retracted = 0
+        _deprecated = 0
         try:
             with open(_claims_path) as _fh:
                 for _line in _fh:
@@ -667,14 +668,22 @@ class MirrorCommandsMixin(SessionState):
                         continue
                     if not isinstance(_c, dict):
                         continue
-                    if _c.get('claim_state') == _schema.CLAIM_STATE_RETRACTED:
+                    _cs = _c.get('claim_state')
+                    if _cs == _schema.CLAIM_STATE_RETRACTED:
                         _retracted += 1
+                    elif _cs == _schema.CLAIM_STATE_DEPRECATED:
+                        _deprecated += 1
                     else:
                         _live += 1
         except OSError as _e:
             return f"(unreadable: {_e})"
-        _retracted_str = (f" ({_retracted} retracted)" if _retracted else '')
-        return f"{_live} pkg(s){_retracted_str}"
+        _extra = []
+        if _deprecated:
+            _extra.append(f"{_deprecated} deprecated")
+        if _retracted:
+            _extra.append(f"{_retracted} retracted")
+        _extra_str = f" ({', '.join(_extra)})" if _extra else ''
+        return f"{_live} pkg(s){_extra_str}"
 
     def _mirror_audit_disk_vs_claims(
         self, mirror_name: str, mirror_state: dict,
@@ -705,7 +714,7 @@ class MirrorCommandsMixin(SessionState):
         _claimed: set = set()
         for _bid, _claims in by_builder.items():
             for _c in _claims:
-                if _c.get('claim_state') == 'retracted':
+                if _c.get('claim_state') in ('retracted', 'deprecated'):
                     continue
                 _fn = _c.get('filename')
                 if isinstance(_fn, str) and _fn:
@@ -1138,7 +1147,7 @@ class MirrorCommandsMixin(SessionState):
             _per_pkg_downloads: 'dict[str, list[tuple[dict, str]]]' = {}
             for _builder, _claims in _by_builder.items():
                 for _c in _claims:
-                    if _c.get('claim_state') == 'retracted':
+                    if _c.get('claim_state') in ('retracted', 'deprecated'):
                         continue
                     if _c.get('builder') == _bid:
                         _skip_own += 1
@@ -1295,8 +1304,12 @@ class MirrorCommandsMixin(SessionState):
                     _r = _c.get('retracts_seq')
                     if isinstance(_r, int):
                         _retracted_seqs.add(_r)
+                elif _c.get('claim_state') == 'deprecated':
+                    _d = _c.get('deprecates_seq')
+                    if isinstance(_d, int):
+                        _retracted_seqs.add(_d)
             for _c in _claims:
-                if _c.get('claim_state') == 'retracted':
+                if _c.get('claim_state') in ('retracted', 'deprecated'):
                     continue
                 if int(_c.get('seq', 0)) in _retracted_seqs:
                     continue
@@ -1679,7 +1692,7 @@ class MirrorCommandsMixin(SessionState):
             for _m in _per_mirror:
                 for _bid, _claims in _m['by_builder'].items():
                     for _c in _claims:
-                        if _c.get('claim_state') == 'retracted':
+                        if _c.get('claim_state') in ('retracted', 'deprecated'):
                             continue
                         _fn = _c.get('filename')
                         _sha = _c.get('sha256') or ''
@@ -1797,7 +1810,7 @@ class MirrorCommandsMixin(SessionState):
                 for _c in _claims:
                     if _c.get('package') != _pkg:
                         continue
-                    if _c.get('claim_state') == 'retracted':
+                    if _c.get('claim_state') in ('retracted', 'deprecated'):
                         continue
                     if _hits == 0:
                         console.print(

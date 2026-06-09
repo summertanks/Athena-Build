@@ -68,7 +68,7 @@ def generate_pending_claims(
     _known: set = {
         _c.get('filename') for _c in _existing
         if isinstance(_c.get('filename'), str)
-        and _c.get('claim_state') != _schema.CLAIM_STATE_RETRACTED
+        and _c.get('claim_state') not in _schema.INACTIVE_CLAIM_STATES
     }
     _pending: List[dict] = []
     try:
@@ -480,7 +480,7 @@ def remote_publish(
         _remote_known = {
             _c.get('filename') for _c in _remote_self_claims
             if isinstance(_c.get('filename'), str)
-            and _c.get('claim_state') != _schema.CLAIM_STATE_RETRACTED
+            and _c.get('claim_state') not in _schema.INACTIVE_CLAIM_STATES
         }
         _status("generating pending claims from build records")
         _pending = generate_pending_claims(
@@ -794,7 +794,7 @@ def retract_claim(
         config.dir_coord_claims, builder_id, public_key_path)
     _live = [
         _c for _c in _claims
-        if _c.get('claim_state') != _schema.CLAIM_STATE_RETRACTED
+        if _c.get('claim_state') not in _schema.INACTIVE_CLAIM_STATES
         and _c.get('package') == package
     ]
     if not _live:
