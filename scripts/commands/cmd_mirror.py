@@ -1655,6 +1655,28 @@ class MirrorCommandsMixin(SessionState):
                 console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
             if _own_disk_crit:
                 _all_ok = False
+            # SELECT-LOCK coherence: the signed selection.state closure ⟷ our
+            # published claims.  CRITICAL when we still own+publish a file
+            # whose binary left the selection but was never deprecated.
+            if _our_bid:
+                import selection_lock as _sl
+                _lock, _lstatus = _sl.read_selection_state(self.config)
+                if _lstatus == _sl.STATUS_OK and _lock is not None:
+                    _closure_bins = set(
+                        (_lock.get('closure') or {}).get('bins', {}))
+                    _coh_findings = _sl.audit_selection_coherence(
+                        _closure_bins, _by_builder, _our_bid)
+                    for _sev, _kind, _msg in _coh_findings:
+                        console.print(f"  {_sev:8s}  {_kind}: {_msg}",
+                                      tui.COLOR_ERROR)
+                    if _coh_findings:
+                        _all_ok = False
+                elif _lstatus in (_sl.STATUS_BADSIG, _sl.STATUS_MALFORMED):
+                    console.print(
+                        f"  CRITICAL  selection_state_{_lstatus}: the signed "
+                        "selection authority is untrusted — `cache purge-state` "
+                        "to re-baseline", tui.COLOR_ERROR)
+                    _all_ok = False
             _own_summary, _ = _mirror.audit_ownership_summary(
                 _by_builder, our_builder_id=_our_bid)
             _own_line = (

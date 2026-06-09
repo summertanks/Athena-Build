@@ -130,6 +130,58 @@ def generate_pending_claims(
     return _pending
 
 
+def emit_deprecation_claims(
+    *,
+    builder_id: str,
+    by_builder: Dict[str, List[dict]],
+    closure_bins: 'set',
+    snapshot_pin: str,
+    built_at: str,
+    start_seq: int,
+) -> List[dict]:
+    """SELECT-LOCK: build unsigned `deprecated` claims for every file we
+    currently OWN+publish whose binary is no longer in the selection closure.
+
+    The authority is the selection lockfile's closure (`closure_bins` = the
+    set of selected canonical binary names) — NOT build.json, which lingers
+    after a package is dropped.  Deprecating releases ownership to the commons
+    (project_owners then reports builder=None) while the .deb stays in the pool.
+
+    Idempotent: a file already deprecated is not re-emitted (project_owners
+    reports it builder=None, so it fails the `owner == us` test).  Caller
+    signs + appends each returned claim, assigning seqs from `start_seq`.
+    """
+    _owners = _store.project_owners(by_builder)
+    _out: List[dict] = []
+    _seq = start_seq
+    for _fn in sorted(_owners):
+        _owner = _owners[_fn]
+        if _owner.get('builder') != builder_id:
+            continue   # not ours / already released (deprecated / tunneled)
+        if _owner.get('claim_state') != _schema.CLAIM_STATE_PUBLISHED:
+            continue
+        _binname = _fn.split('_', 1)[0] if '_' in _fn else _fn
+        if _binname in closure_bins:
+            continue   # still selected — keep owning it
+        _claim = _owner.get('claim') or {}
+        _seq += 1
+        _out.append(_schema.new_deprecation(
+            builder=builder_id,
+            seq=_seq,
+            package=str(_claim.get('package') or ''),
+            intended_version=str(_claim.get('intended_version') or ''),
+            built_version=str(_claim.get('built_version') or ''),
+            filename=_fn,
+            sha256=str(_claim.get('sha256') or ''),
+            size=int(_claim.get('size') or 0),
+            snapshot=snapshot_pin,
+            built_at=built_at,
+            deprecates_seq=int(_claim.get('seq') or 0),
+            component=str(_claim.get('component') or 'main'),
+        ))
+    return _out
+
+
 def filter_pending_by_ownership(
     builder_id: str,
     candidates: List[dict],
@@ -677,6 +729,44 @@ def remote_publish(
         _status(
             f"signed + appended {_appended} claim(s) to local jsonl "
             f"(seq → {_seq})")
+
+        # Step 6b — SELECT-LOCK: deprecate files we own+published but no longer
+        # select.  Authority = the signed selection.state closure (NOT
+        # build.json, which lingers after a drop).  Releases ownership to the
+        # commons; the .deb stays in the pool for takeover.  Best-effort — a
+        # missing/unreadable lockfile just skips emission (no spurious release).
+        try:
+            import selection_lock as _sl
+            _lock, _lstatus = _sl.read_selection_state(config)
+            if _lstatus == _sl.STATUS_OK and _lock is not None:
+                _closure_bins = set((_lock.get('closure') or {}).get('bins', {}))
+                _dep_claims = emit_deprecation_claims(
+                    builder_id=builder_id,
+                    by_builder=_by_builder,
+                    closure_bins=_closure_bins,
+                    snapshot_pin=snapshot_pin,
+                    built_at=_utc_now(),
+                    start_seq=_seq,
+                )
+                _dep_appended = 0
+                for _dc in _dep_claims:
+                    _seq = max(_seq, int(_dc.get('seq', _seq)))
+                    try:
+                        _store.append_claim(
+                            config.dir_coord_claims, builder_id, _dc,
+                            private_key_path,
+                        )
+                        _dep_appended += 1
+                    except (OSError, ValueError) as _e:
+                        logger.warning(
+                            "coord.publish: deprecation append failed for "
+                            f"{_dc.get('filename')}: {_e}")
+                if _dep_appended:
+                    _status(
+                        f"deprecated {_dep_appended} owned file(s) no longer "
+                        "in the selection (ownership released)")
+        except Exception as _e:   # never let deprecation break a publish
+            logger.warning(f"coord.publish: deprecation emission skipped: {_e}")
 
         # Step 7 — push the updated jsonl to the remote
         _local_jsonl = _store.claims_path(
