@@ -30564,6 +30564,58 @@ def test_persistence_format_version_bumped_for_pins():
     assert persistence._FORMAT_VERSION >= 2
 
 
+def test_selection_lock_classify_asymmetric_guard():
+    """SELECT-LOCK Chunk 4 policy: missing→bootstrap, badsig/malformed→
+    hardstop, removal→block, additions-only/unchanged→refresh."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    _lock = {'closure': {'bins': {'a': ['base'], 'b': ['base']},
+                         'srcs': {'asrc': ['deb']}}}
+    # missing → bootstrap
+    _act, _, _ = _sl.classify(_sl.STATUS_MISSING, None, {'bins': {}, 'srcs': {}})
+    assert _act == _sl.ACTION_BOOTSTRAP, _act
+    # tamper → hardstop
+    for _s in (_sl.STATUS_BADSIG, _sl.STATUS_MALFORMED):
+        _act, _, _ = _sl.classify(_s, _lock, _lock['closure'])
+        assert _act == _sl.ACTION_HARDSTOP, (_s, _act)
+    # removal → block (b + asrc dropped)
+    _shrunk = {'bins': {'a': ['base']}, 'srcs': {}}
+    _act, _added, _removed = _sl.classify(_sl.STATUS_OK, _lock, _shrunk)
+    assert _act == _sl.ACTION_BLOCK, _act
+    assert _removed['bins'] == {'b'} and _removed['srcs'] == {'asrc'}, _removed
+    # additions-only → refresh
+    _grown = {'bins': {'a': ['base'], 'b': ['base'], 'c': ['base']},
+              'srcs': {'asrc': ['deb']}}
+    _act, _added, _removed = _sl.classify(_sl.STATUS_OK, _lock, _grown)
+    assert _act == _sl.ACTION_REFRESH and _added['bins'] == {'c'}, (_act, _added)
+    # unchanged → refresh (no add/remove)
+    _act, _added, _removed = _sl.classify(_sl.STATUS_OK, _lock, _lock['closure'])
+    assert _act == _sl.ACTION_REFRESH
+    assert not _added['bins'] and not _removed['bins']
+
+
+def test_selection_lock_assemble_state_shape_and_pin_union():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    import types
+    _cfg = types.SimpleNamespace(
+        arch='amd64', snapshot_timestamp_config='20260602T173733Z',
+        include_recommends=True, pkglist_path='', livelist_path='',
+        installerlist_path='', poollist_path='')
+    _deb = _sl_tree({'a': 'a'}, {'asrc'})
+    _deb._pinned_chosen = {'awk': 'mawk'}
+    _udeb = _sl_tree({'anna': 'anna'}, {'anna'})
+    _udeb._pinned_chosen = {'telnet-client': 'telnet'}
+    _state = _sl.assemble_state(_deb, _udeb, _cfg)
+    assert _state['arch'] == 'amd64'
+    assert _state['flags']['IncludeRecommends'] is True
+    assert _state['flags']['IncludeBuildDep'] is False
+    # pins union across both trees
+    assert _state['pins'] == {'awk': 'mawk', 'telnet-client': 'telnet'}, _state['pins']
+    assert 'a' in _state['closure']['bins'] and 'anna' in _state['closure']['bins']
+    assert set(_state['seeds']) == {'pkg', 'live', 'installer', 'pool'}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31216,6 +31268,9 @@ def main() -> int:
         # SELECT-LOCK Chunk 3 — pinned-picks plumbing
         test_dependencytree_pins_resolve_silently_and_record_picks,
         test_persistence_format_version_bumped_for_pins,
+        # SELECT-LOCK Chunk 4 — two-stage parse + asymmetric guard
+        test_selection_lock_classify_asymmetric_guard,
+        test_selection_lock_assemble_state_shape_and_pin_union,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,

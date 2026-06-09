@@ -202,3 +202,90 @@ def diff_closure(
     _added = {'bins': _nb - _ob, 'srcs': _ns - _os}
     _removed = {'bins': _ob - _nb, 'srcs': _os - _ns}
     return _added, _removed
+
+
+# ───────────────────────── full-state assembly + policy ──────────────────────
+
+
+def _read_flat_seeds(path: str) -> list:
+    """Raw seed names from a flat list file (one per line, # comments and
+    blanks ignored).  Order-preserving — used to round-trip a file on
+    `cache restore`."""
+    try:
+        _raw = utils.readfile(path).split('\n')
+    except OSError:
+        return []
+    _out = []
+    for _line in _raw:
+        _name = _line.strip()
+        if _name and not _name.startswith('#'):
+            _out.append(_name)
+    return _out
+
+
+def assemble_state(
+    dep_tree: 'Any', udeb_dep_tree: 'Any', config: 'Any',
+    closure: 'Optional[dict]' = None,
+) -> dict:
+    """Build the full signed-state document from the resolved trees + config.
+    `closure` may be passed to avoid recomputation; otherwise built here.
+
+    Pins are the UNION of both trees' `_pinned_chosen` (every genuinely
+    ambiguous resolution this run made).  Flags lock IncludeRecommends (the
+    closure guard enforces it — flipping it off shrinks the closure ⇒ blocks).
+    """
+    if closure is None:
+        closure = build_closure(dep_tree, udeb_dep_tree, config)
+    _pins: 'Dict[str, str]' = {}
+    _pins.update(getattr(dep_tree, '_pinned_chosen', {}) or {})
+    if udeb_dep_tree is not None:
+        _pins.update(getattr(udeb_dep_tree, '_pinned_chosen', {}) or {})
+    return {
+        'schema_version': SELECTION_STATE_SCHEMA_VERSION,
+        'arch': getattr(config, 'arch', ''),
+        'snapshot': getattr(config, 'snapshot_timestamp_config', ''),
+        'flags': {
+            'IncludeRecommends': bool(getattr(config, 'include_recommends', False)),
+            'IncludeBuildDep': False,   # reserved — see module docstring
+        },
+        'seeds': {
+            'pkg': utils.parse_pkg_list_groups(
+                getattr(config, 'pkglist_path', '')) if getattr(
+                config, 'pkglist_path', '') else {},
+            'live': _read_flat_seeds(getattr(config, 'livelist_path', '')),
+            'installer': _read_flat_seeds(
+                getattr(config, 'installerlist_path', '')),
+            'pool': _read_flat_seeds(getattr(config, 'poollist_path', '')),
+        },
+        'closure': closure,
+        'pins': _pins,
+    }
+
+
+# Parse-guard outcomes (Chunk 4 consumes these; the IO/console lives in
+# cmd_parse_dependency).
+ACTION_BOOTSTRAP = 'bootstrap'   # no lockfile yet → write fresh, proceed
+ACTION_REFRESH = 'refresh'       # closure unchanged or additions-only → write, proceed
+ACTION_BLOCK = 'block'           # closure SHRANK → deprecation candidates, refuse
+ACTION_HARDSTOP = 'hardstop'     # lockfile present but badsig/malformed → refuse
+
+
+def classify(
+    read_status: str, lock: 'Optional[dict]', fresh_closure: dict,
+) -> 'Tuple[str, Dict[str, set], Dict[str, set]]':
+    """Pure policy: given the lockfile read status, the loaded lockfile (or
+    None), and the freshly-resolved closure, decide the parse-guard action.
+
+    Returns ``(action, added, removed)`` where added/removed are
+    ``{'bins': set, 'srcs': set}``.  Asymmetric: ANY removal ⇒ BLOCK
+    (deprecation candidates); additions alone ⇒ REFRESH (low-impact).
+    """
+    _empty: 'Dict[str, set]' = {'bins': set(), 'srcs': set()}
+    if read_status == STATUS_MISSING:
+        return ACTION_BOOTSTRAP, dict(_empty), dict(_empty)
+    if read_status in (STATUS_BADSIG, STATUS_MALFORMED):
+        return ACTION_HARDSTOP, dict(_empty), dict(_empty)
+    _added, _removed = diff_closure((lock or {}).get('closure', {}), fresh_closure)
+    if _removed['bins'] or _removed['srcs']:
+        return ACTION_BLOCK, _added, _removed
+    return ACTION_REFRESH, _added, _removed
