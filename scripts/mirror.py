@@ -879,7 +879,7 @@ def audit_inrelease_against_head(
 def audit_packages_chain(
     pool_url: str, codename: str, release: 'Any',
     fetched_dir: str, ssh_key: 'Optional[str]' = None,
-    components: 'tuple[str, ...]' = ('main',),
+    components: 'tuple[str, ...]' = (),     # () = all components in InRelease
     arches: 'tuple[str, ...]' = ('amd64',),
 ) -> 'tuple[dict[str, dict], list[tuple[str, str, str]]]':
     """For each ``<component>/binary-<arch>/Packages`` referenced in the
@@ -913,68 +913,82 @@ def audit_packages_chain(
         if _e.get('name')
     }
 
-    for _comp in components:
-        for _arch in arches:
-            _rel = f"{_comp}/binary-{_arch}/Packages"
-            _pin = _by_name.get(_rel)
-            if _pin is None:
-                _findings.append((
-                    'WARNING', 'inrelease_missing_packages_pin',
-                    f"InRelease has no SHA256 entry for {_rel} — "
-                    "skipping that component/arch"))
+    # Self-discover the binary Packages indices the InRelease declares —
+    # both deb components (main, doc, …) and the udeb debian-installer
+    # tree (main/debian-installer).  Auditing exactly what's published
+    # means intentionally-empty components (contrib/non-free with nothing
+    # built) produce no spurious "missing pin" warnings — they simply
+    # aren't in InRelease.  A non-empty `components` narrows to that
+    # subset; `arches` always filters.
+    import re as _re
+    _arch_set = set(arches)
+    _comp_filter = set(components)
+    _targets: 'list[tuple[str, str, str]]' = []
+    for _name in sorted(_by_name):
+        _m = _re.match(r'^(.+)/binary-([^/]+)/Packages$', _name)
+        if not _m:
+            continue
+        _comp, _arch = _m.group(1), _m.group(2)
+        if _arch not in _arch_set:
+            continue
+        if _comp_filter and _comp not in _comp_filter:
+            continue
+        _targets.append((_comp, _arch, _name))
+
+    for _comp, _arch, _rel in _targets:
+        _pin = _by_name[_rel]
+        _remote = pool_url.rstrip('/') + f"/dists/{codename}/{_rel}"
+        _rsync_spec, _ = rsync_spec_for_url(_remote)
+        _local = _os.path.join(
+            fetched_dir, f"Packages.{_comp.replace('/', '_')}.{_arch}")
+        _ok, _detail = _transport.pull_single_file(
+            remote_spec=_rsync_spec, local_path=_local,
+            ssh_key=ssh_key)
+        if not _ok:
+            _findings.append((
+                'CRITICAL', 'packages_unreachable',
+                f"could not pull {_rel}: {_detail}"))
+            continue
+        try:
+            with open(_local, 'rb') as _fh:
+                _data = _fh.read()
+        except OSError as _e:
+            _findings.append((
+                'CRITICAL', 'packages_unreadable',
+                f"local {_local} unreadable: {_e}"))
+            continue
+        _actual = _hashlib.sha256(_data).hexdigest()
+        _expected = str(_pin.get('sha256', ''))
+        if _expected and _actual != _expected:
+            _findings.append((
+                'CRITICAL', 'packages_sha_mismatch',
+                f"on-pool {_rel} sha256={_actual[:12]} disagrees "
+                f"with InRelease pin={_expected[:12]}"))
+            continue
+        # Parse entries — multi-section deb822 Packages format.
+        from debian.deb822 import Packages as _Packages
+        try:
+            _stream = iter(_Packages.iter_paragraphs(
+                _data, use_apt_pkg=False))
+        except Exception as _e:
+            _findings.append((
+                'CRITICAL', 'packages_parse_failed',
+                f"could not parse {_rel}: "
+                f"{type(_e).__name__}: {_e}"))
+            continue
+        for _para in _stream:
+            _fn_full = str(_para.get('Filename') or '')
+            if not _fn_full:
                 continue
-            _remote = pool_url.rstrip('/') + f"/dists/{codename}/{_rel}"
-            _rsync_spec, _ = rsync_spec_for_url(_remote)
-            _local = _os.path.join(
-                fetched_dir, f"Packages.{_comp}.{_arch}")
-            _ok, _detail = _transport.pull_single_file(
-                remote_spec=_rsync_spec, local_path=_local,
-                ssh_key=ssh_key)
-            if not _ok:
-                _findings.append((
-                    'CRITICAL', 'packages_unreachable',
-                    f"could not pull {_rel}: {_detail}"))
-                continue
-            try:
-                with open(_local, 'rb') as _fh:
-                    _data = _fh.read()
-            except OSError as _e:
-                _findings.append((
-                    'CRITICAL', 'packages_unreadable',
-                    f"local {_local} unreadable: {_e}"))
-                continue
-            _actual = _hashlib.sha256(_data).hexdigest()
-            _expected = str(_pin.get('sha256', ''))
-            if _expected and _actual != _expected:
-                _findings.append((
-                    'CRITICAL', 'packages_sha_mismatch',
-                    f"on-pool {_rel} sha256={_actual[:12]} disagrees "
-                    f"with InRelease pin={_expected[:12]}"))
-                continue
-            # Parse entries — multi-section deb822 Packages format.
-            from debian.deb822 import Packages as _Packages
-            try:
-                _stream = iter(_Packages.iter_paragraphs(
-                    _data, use_apt_pkg=False))
-            except Exception as _e:
-                _findings.append((
-                    'CRITICAL', 'packages_parse_failed',
-                    f"could not parse {_rel}: "
-                    f"{type(_e).__name__}: {_e}"))
-                continue
-            for _para in _stream:
-                _fn_full = str(_para.get('Filename') or '')
-                if not _fn_full:
-                    continue
-                _basename = _os.path.basename(_fn_full)
-                _index[_basename] = {
-                    'package':  str(_para.get('Package') or ''),
-                    'version':  str(_para.get('Version') or ''),
-                    'sha256':   str(_para.get('SHA256') or ''),
-                    'size':     str(_para.get('Size') or ''),
-                    'component': _comp,
-                    'arch':      _arch,
-                }
+            _basename = _os.path.basename(_fn_full)
+            _index[_basename] = {
+                'package':  str(_para.get('Package') or ''),
+                'version':  str(_para.get('Version') or ''),
+                'sha256':   str(_para.get('SHA256') or ''),
+                'size':     str(_para.get('Size') or ''),
+                'component': _comp,
+                'arch':      _arch,
+            }
     return _index, _findings
 
 
