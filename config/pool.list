@@ -122,10 +122,13 @@ apt-listchanges
 bind9-dnsutils
 bind9-host
 dbus-system-bus
-debian-faq
+# debian-faq        # TEMP-REMOVED 2026-06-09: Debian-identity doc pkg, not a
+#                   # tasksel/d-i default; only puller was doc-debian Recommends.
+#                   # Re-add as an asgard-faq fork if the function is wanted.
 dh-sequence-bash-completion
 dnsutils
-doc-debian
+# doc-debian        # TEMP-REMOVED 2026-06-09: Debian-identity doc pkg, no
+#                   # reverse-deps; fork asgard-doc equivalent if wanted.
 host
 inetutils-telnet
 libansicolor-perl
@@ -170,8 +173,9 @@ mime-support
 netcat
 netcat-traditional
 podlators-perl
-python3-reportbug
-reportbug
+# python3-reportbug  # TEMP-REMOVED 2026-06-09: Debian bug-reporting (sends to
+# reportbug          # bugs.debian.org) — conflicts with Athena identity.  Fork
+#                    # asgard-reportbug pointed at our tracker if wanted.
 telnet
 telnet-client
 wget
