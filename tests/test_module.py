@@ -23148,6 +23148,50 @@ def test_published_manifest_roundtrip_and_ledger():
             repo_audit.subprocess.run = _orig_run
 
 
+def test_local_published_packages_text_concatenates_component_indices():
+    """local_published_packages_text() aggregates every binary-*/Packages
+    under repo/dists/<codename>/ (the text written to published.manifest as
+    the +asg bump authority on publish)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    with tempfile.TemporaryDirectory() as _tmp:
+        _repo = os.path.join(_tmp, 'repo')
+
+        class _Cfg:
+            dir_repo = _repo
+            build_codename = 'thor'
+
+        for _comp, _pkg in (('main', 'openssl'), ('non-free-firmware', 'amd64-microcode')):
+            _d = os.path.join(_repo, 'dists', 'thor', _comp, 'binary-amd64')
+            os.makedirs(_d)
+            with open(os.path.join(_d, 'Packages'), 'w') as _f:
+                _f.write(f'Package: {_pkg}\nVersion: 1.0+asg1u3\n\n')
+        # a non-binary dir with no Packages must be ignored
+        os.makedirs(os.path.join(_repo, 'dists', 'thor', 'main', 'source'))
+        _txt = repo_audit.local_published_packages_text(_Cfg())
+        assert 'Package: openssl' in _txt
+        assert 'Package: amd64-microcode' in _txt
+        assert '+asg1u3' in _txt
+
+
+def test_mirror_publish_refreshes_local_asg_manifest():
+    """Regression (2026-06): MIRROR-01 removed the old repo-publish finalize
+    path (8cc803b) that wrote the signed published.manifest, leaving the
+    +asg bump ledger frozen — every rebuild re-derived the same uN.  Pin
+    that cmd_mirror_publish refreshes the manifest from the just-published
+    index after a successful publish."""
+    _body = _session_source()
+    import re as _re
+    _m = _re.search(r'def cmd_mirror_publish\(self.*?(?=\n    def )',
+                    _body, _re.DOTALL)
+    assert _m, 'cmd_mirror_publish not found'
+    _b = _m.group(0)
+    assert 'write_published_manifest' in _b, (
+        "cmd_mirror_publish must refresh the local +asg manifest after a "
+        "successful publish (bump-number authority)")
+    assert 'local_published_packages_text' in _b
+
+
 def test_write_signed_manifest_fails_closed_when_signing_missing():
     """STA-21: when the signing module / homedir is unavailable, the
     writer must NOT leave an unsigned manifest behind — the local manifest
@@ -30968,6 +31012,8 @@ def main() -> int:
         test_iso_filenames_carry_snapshot_tag,
         # UPD-01 decomposition: manifest, external on/off, update-mode plumbing
         test_published_manifest_roundtrip_and_ledger,
+        test_local_published_packages_text_concatenates_component_indices,
+        test_mirror_publish_refreshes_local_asg_manifest,
         # STA-21: fail-closed signing manifest
         test_write_signed_manifest_fails_closed_when_signing_missing,
         test_read_signed_manifest_refuses_when_signing_setup_fails,
