@@ -1502,6 +1502,21 @@ def main(banner: str) -> None:
     else:
         console.print("\tMode\t\t\tdistribution", _mode_color)
 
+    # Keep build.conf honest: if the durable snapshot.state pin (set via
+    # `snapshot select`) differs from [Snapshot] Timestamp, rewrite the
+    # config to match — the state pin is authoritative at build time — and
+    # warn the operator that build.conf changed.  No state file → build.conf
+    # stays authoritative as-is.
+    _snap_recon = utils.reconcile_snapshot_pin(config)
+    if _snap_recon is not None:
+        _old_ts, _new_ts = _snap_recon
+        console.print(
+            f"WARNING: snapshot.state pin ({_new_ts}) differs from "
+            f"build.conf [Snapshot] Timestamp ({_old_ts}) — updated "
+            "build.conf to match.  snapshot.state (set via `snapshot "
+            "select`) is the authoritative durable pin.",
+            tui.COLOR_WARNING)
+
     # API-01: with the session + every command registered, raise the
     # HTTP server (daemon thread) and hand the main thread to the job
     # loop.  uvicorn only touches the queue; jobs execute HERE.

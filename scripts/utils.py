@@ -1333,6 +1333,55 @@ def read_snapshot_state(config: 'BuildConfig') -> dict:
         return {}
 
 
+def reconcile_snapshot_pin(config: 'BuildConfig') -> 'Optional[tuple[str, str]]':
+    """Make build.conf [Snapshot] Timestamp mirror the authoritative pin.
+
+    snapshot.state 'current' (set by `snapshot select`, survives `clean
+    cache`) takes precedence over [Snapshot] Timestamp at build time
+    (`resolve_snapshot_timestamp`).  This keeps the *visible* config from
+    lying about which snapshot the build actually uses:
+
+      - state 'current' set AND != build.conf Timestamp → rewrite the
+        build.conf line in place (comments preserved), update the in-memory
+        value, and return ``(old, new)`` so the caller can warn the operator
+        that build.conf changed.
+      - state 'current' absent → return None; build.conf is authoritative.
+      - already in sync / file unreadable / no Timestamp line → return None.
+    """
+    _cur = (read_snapshot_state(config) or {}).get('current')
+    if not isinstance(_cur, str) or not _cur:
+        return None
+    _old = config.snapshot_timestamp_config
+    if _cur == _old:
+        return None
+    try:
+        with open(config.config_path, 'r', encoding='utf-8') as _fh:
+            _lines = _fh.readlines()
+    except OSError:
+        return None
+    _in_snapshot = False
+    _done = False
+    for _i, _line in enumerate(_lines):
+        _stripped = _line.strip()
+        if _stripped.startswith('[') and _stripped.endswith(']'):
+            _in_snapshot = (_stripped.lower() == '[snapshot]')
+            continue
+        if _in_snapshot and re.match(r'\s*Timestamp\s*=', _line):
+            _indent = _line[:len(_line) - len(_line.lstrip())]
+            _lines[_i] = f"{_indent}Timestamp = {_cur}\n"
+            _done = True
+            break
+    if not _done:
+        return None
+    try:
+        with open(config.config_path, 'w', encoding='utf-8') as _fh:
+            _fh.writelines(_lines)
+    except OSError:
+        return None
+    config.snapshot_timestamp_config = _cur
+    return (_old, _cur)
+
+
 def write_snapshot_state(config: 'BuildConfig',
                          base: 'Optional[str]' = None,
                          current: 'Optional[str]' = None,
