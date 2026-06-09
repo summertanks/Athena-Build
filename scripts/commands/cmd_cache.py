@@ -11,10 +11,12 @@ commands/base.py for how the mixin shares session state.
 """
 import logging
 import os
+from typing import Optional
 
 import buildcontainer
 import dependencytree
 import persistence
+import selection_lock
 import tui
 import utils
 from cache import Cache
@@ -334,9 +336,35 @@ class CacheCommandsMixin(SessionState):
         _spiner = Spinner("Parsing Dependencies")
         self.flags.dep_check_ready = False  # reset before the long parse
 
+        # ── SELECT-LOCK: load the signed selection lockfile up front ────────
+        # `_lock`/`_lstatus` drive the post-resolve closure guard; `_pins` feed
+        # the resolver so a genuine multi-provider prompt resolves the SAME way
+        # it did at baseline (no re-prompt, no false closure delta).  A present-
+        # but-tampered lockfile HARD-STOPS before the expensive resolve — never
+        # silently rebuilt (would erase deprecation history).  Distribution mode
+        # only; build mode (build_pkg.list) has its own selection model.
+        _lock: 'Optional[dict]' = None
+        _lstatus = selection_lock.STATUS_MISSING
+        _pins: dict = {}
+        if self.config.build_mode != 'build':
+            _lock, _lstatus = selection_lock.read_selection_state(self.config)
+            if _lstatus in (selection_lock.STATUS_BADSIG,
+                            selection_lock.STATUS_MALFORMED):
+                _spiner.done()
+                console.print(
+                    f"cache parse: selection.state is {_lstatus} — refusing to "
+                    "resolve against an untrusted selection authority.  "
+                    "Restore the file/key, or `cache purge-state` to "
+                    "re-baseline.", tui.COLOR_ERROR)
+                self.flags.dep_check_ready = False
+                return
+            if _lstatus == selection_lock.STATUS_OK and _lock:
+                _pins = _lock.get('pins', {}) or {}
+
         console.print("Preparing Parsing Tree...", tui.COLOR_INFO)
         self.dep_tree = dependencytree.DependencyTree(self.cache, select_recommended=False,
-                    arch=self.config.arch, build_profiles=self.config.build_profiles)
+                    arch=self.config.arch, build_profiles=self.config.build_profiles,
+                    pins=_pins)
 
         # ── MIRROR-02 build-mode branch ─────────────────────────────────
         # In build mode the build host targets just the packages named in
@@ -582,6 +610,7 @@ class CacheCommandsMixin(SessionState):
             # same module (ext4-modules-6.1.0-{NN}-amd64-di etc.).  Auto-
             # pick the highest version across names instead of prompting.
             auto_pick_highest_when_ambiguous=True,
+            pins=_pins,
         )
         _udeb_seeds_required = list(self.cache.udeb_required)
         _udeb_seeds_important = list(self.cache.udeb_important)
@@ -750,6 +779,63 @@ class CacheCommandsMixin(SessionState):
             return
 
         console.print(f"Selected {len(self.dep_tree.selected_srcs)} source packages", tui.COLOR_HIGHLIGHT)
+
+        # ── SELECT-LOCK: two-stage closure guard ────────────────────────────
+        # Stage (a) = the closure we just resolved; stage (b) = the signed
+        # lockfile loaded up front.  Asymmetric: a closure SHRINK (seed edit,
+        # snapshot dropping a dep, or IncludeRecommends off) BLOCKS — the
+        # removed packages are mirror-deprecation candidates the operator must
+        # acknowledge via `cache select` / `cache restore` / `cache purge-state`.
+        # Additions are low-impact (absorbed + warned).  First run bootstraps.
+        if self.config.build_mode != 'build':
+            _fresh = selection_lock.build_closure(
+                self.dep_tree, self.udeb_dep_tree, self.config)
+            _action, _added, _removed = selection_lock.classify(
+                _lstatus, _lock, _fresh)
+            if _action == selection_lock.ACTION_BLOCK:
+                _rb = sorted(_removed['bins'])
+                _rs = sorted(_removed['srcs'])
+                console.print(
+                    f"cache parse: BLOCKED — the selection closure SHRANK vs "
+                    f"the signed selection.state: {len(_rb)} binary(ies) and "
+                    f"{len(_rs)} source(s) would be dropped.", tui.COLOR_ERROR)
+                for _n in _rb[:20]:
+                    console.print(f"    - bin {_n}", tui.COLOR_ERROR)
+                if len(_rb) > 20:
+                    console.print(f"    … (+{len(_rb) - 20} more bins)",
+                                  tui.COLOR_ERROR)
+                for _n in _rs[:20]:
+                    console.print(f"    - src {_n}", tui.COLOR_ERROR)
+                if len(_rs) > 20:
+                    console.print(f"    … (+{len(_rs) - 20} more srcs)",
+                                  tui.COLOR_ERROR)
+                console.print(
+                    "  These are mirror-deprecation candidates.  Choose one:\n"
+                    "    1. `cache select` — accept the removal (updates the "
+                    "lockfile + marks them deprecated on publish)\n"
+                    "    2. `cache restore` — regenerate the list files from "
+                    "the lockfile (undo the edit)\n"
+                    "    3. `cache purge-state` — re-baseline the selection "
+                    "authority (heavy mirror impact)", tui.COLOR_WARNING)
+                self.flags.dep_check_ready = False
+                _spiner.done()
+                return
+            _state = selection_lock.assemble_state(
+                self.dep_tree, self.udeb_dep_tree, self.config, closure=_fresh)
+            if _action == selection_lock.ACTION_BOOTSTRAP:
+                selection_lock.write_selection_state(self.config, _state)
+                console.print(
+                    f"selection.state: created — {len(_fresh['bins'])} "
+                    f"binary(ies) / {len(_fresh['srcs'])} source(s) locked",
+                    tui.COLOR_HIGHLIGHT)
+            else:  # ACTION_REFRESH (unchanged or additions-only)
+                if _added['bins'] or _added['srcs']:
+                    console.print(
+                        f"selection.state: absorbed {len(_added['bins'])} new "
+                        f"binary(ies) / {len(_added['srcs'])} new source(s) "
+                        "(additions are low-impact)", tui.COLOR_WARNING)
+                selection_lock.write_selection_state(self.config, _state)
+
         self.flags.dep_check_ready = True
         # UX-04: persist Cache + DT to dir_cache/session.pkl.gz so
         # `resume` (next process) can skip cache build + cache parse.
