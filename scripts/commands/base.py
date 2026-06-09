@@ -46,6 +46,11 @@ class SessionState:
         _in_update_build: bool
         selected_srcs: dict
         download_size: int
+        # set/get registries — late-bound on BuildSession at module scope
+        # in build.py (BuildSession._SETTABLE = {...}); declared here so the
+        # cmd_set / cmd_get mixin methods type-check.
+        _SETTABLE: dict
+        _GETTABLE: dict
 
         # Cross-cluster helpers — defined in another mixin (or BuildSession
         # itself) but called from this mixin's typed method bodies, so the
