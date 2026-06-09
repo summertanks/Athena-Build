@@ -1661,12 +1661,16 @@ class MirrorCommandsMixin(SessionState):
                     and not _ir_crit and not _pkg_crit
                     and not _claim_idx_crit and not _seq_crit
                     and not _own_disk_crit):
-                console.print(
-                    f"  ok        {_total} claim(s) across "
-                    f"{len(_by_builder)} builder(s); neighbours "
-                    "match; on-disk pool matches sidecar; "
-                    "InRelease + Packages chain verified; "
-                    "sidecar seq integrity ok")
+                console.print("  audit ok", tui.COLOR_HIGHLIGHT)
+                for _label, _result in (
+                    ('claims',       f"{_total} across "
+                                     f"{len(_by_builder)} builder(s)"),
+                    ('federation',   "neighbours match local config"),
+                    ('pool/sidecar', "on-disk pool matches sidecar"),
+                    ('apt index',    "InRelease + Packages chain verified"),
+                    ('sidecar seq',  "integrity ok"),
+                ):
+                    console.print(f"    {_label:<14}{_result}")
         # Cross-mirror pool-SHA consistency
         if len(_per_mirror) > 1:
             console.print("\ncross-mirror pool-SHA consistency:",
