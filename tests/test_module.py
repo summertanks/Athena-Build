@@ -14212,6 +14212,18 @@ def test_status_lines_compact_snapshot():
     assert 'athena-1-amd64.iso' in _text
     assert 'asgard-1-amd64.qcow2' in _text
 
+    # signing_key_verified is an in-memory flag (False here), but when the
+    # key is PREPARED on disk the row shows ✓ (prepared), not a bare "·".
+    import unittest.mock as _mock
+    with _mock.patch.object(print_commands, '_signing_key_present',
+                            return_value=True):
+        _t2 = '\n'.join(_t for _t, _ in print_commands.status_lines(_Sess()))
+    assert '[✓] signing_key  (prepared)' in _t2, _t2
+    with _mock.patch.object(print_commands, '_signing_key_present',
+                            return_value=False):
+        _t3 = '\n'.join(_t for _t, _ in print_commands.status_lines(_Sess()))
+    assert '[·] signing_key  (run `key generate`)' in _t3, _t3
+
 
 def test_render_failure_one_shot_capture_writes_post_mortem():
     """When the renderer raises, the dispatcher's _safe_render captures

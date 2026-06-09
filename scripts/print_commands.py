@@ -330,6 +330,20 @@ def _print_stats(session, *_extras) -> None:
         tui.console.print("  Dep tree                 : not built (run parse_dependency)")
 
 
+def _signing_key_present(cfg) -> bool:
+    """Cheap on-disk check for a usable signing secret key — a `.key` file
+    under the signing homedir's private-keys-v1.d/.  Avoids spawning gpg on
+    every status refresh."""
+    import os as _os
+    try:
+        import signing as _signing
+        _pk = _os.path.join(_signing.signing_home(cfg), 'private-keys-v1.d')
+        return _os.path.isdir(_pk) and any(
+            _f.endswith('.key') for _f in _os.listdir(_pk))
+    except Exception:
+        return False
+
+
 def status_lines(session) -> 'list[tuple[str, int]]':
     """Compact, always-current build-environment snapshot for the TUI
     'status' tab — pipeline state + key counts + artifact locations.
@@ -394,7 +408,18 @@ def status_lines(session) -> 'list[tuple[str, int]]':
             add("  " + "─" * 24)
             continue
         _ok = bool(getattr(flags, _attr, False))
-        add(f"  [{'✓' if _ok else '·'}] {_label}",
+        _note = ''
+        if _attr == 'signing_key_verified' and not _ok:
+            # signing_key_verified is an in-memory flag — it resets to False
+            # each session and only flips True after a sign+verify roundtrip
+            # this session.  But the key may already be PREPARED on disk (and
+            # signing verifies it on first use), so surface that instead of a
+            # bare "not done".
+            if _signing_key_present(cfg):
+                _ok, _note = True, '  (prepared)'
+            else:
+                _note = '  (run `key generate`)'
+        add(f"  [{'✓' if _ok else '·'}] {_label}{_note}",
             tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_NORMAL)
     add()
 
