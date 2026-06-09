@@ -30474,6 +30474,64 @@ def test_selection_lock_preserves_unknown_future_keys():
         assert _back['future_section'] == {'x': 1}
 
 
+def _sl_tree(pkgs, srcs, **tiers):
+    """Synthetic dep-tree stub for selection_lock closure tests.
+    `pkgs`: {name: real_name} (canonical iff name==real_name)."""
+    import types
+    return types.SimpleNamespace(
+        selected_pkgs={_n: {'Package': _r} for _n, _r in pkgs.items()},
+        selected_srcs=dict.fromkeys(srcs),
+        extras_pkg_names=set(tiers.get('extras', ())),
+        live_exclusive_pkg_names=set(tiers.get('live', ())),
+        installer_exclusive_pkg_names=set(tiers.get('installer', ())),
+        pool_extras_pkg_names=set(tiers.get('pool', ())),
+        pkg_group_pkg_names={_g: set(_m) for _g, _m in tiers.get('groups', {}).items()},
+    )
+
+
+def test_selection_lock_build_closure_canonical_and_tiers():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    # 'libfoo0' is a real pkg; 'foo-virtual' is a Provides alias of libfoo0.
+    _deb = _sl_tree(
+        {'base-files': 'base-files', 'grub-pc': 'grub-pc',
+         'foo-virtual': 'libfoo0', 'libfoo0': 'libfoo0'},
+        {'base-files', 'grub2'},
+        pool=['grub-pc'], groups={'gnome': ['libfoo0']})
+    _udeb = _sl_tree({'anna': 'anna'}, {'anna', 'debootstrap'})
+    _clo = _sl.build_closure(_deb, _udeb, None)
+    # virtual alias dropped
+    assert 'foo-virtual' not in _clo['bins'], _clo['bins']
+    assert set(_clo['bins']) == {'base-files', 'grub-pc', 'libfoo0', 'anna'}
+    assert _clo['bins']['base-files'] == ['base']
+    assert _clo['bins']['grub-pc'] == ['pool']
+    assert _clo['bins']['libfoo0'] == ['group:gnome']
+    assert 'udeb' in _clo['bins']['anna']
+    # udeb sources unioned in (the installer-only sources)
+    assert {'base-files', 'grub2', 'anna', 'debootstrap'} == set(_clo['srcs'])
+    assert _clo['srcs']['debootstrap'] == ['udeb']
+
+
+def test_selection_lock_diff_closure_add_remove_and_tier_only():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    _old = {'bins': {'a': ['base'], 'b': ['base']}, 'srcs': {'asrc': ['deb']}}
+    # add-only
+    _new_add = {'bins': {'a': ['base'], 'b': ['base'], 'c': ['base']},
+                'srcs': {'asrc': ['deb']}}
+    _added, _removed = _sl.diff_closure(_old, _new_add)
+    assert _added['bins'] == {'c'} and not _removed['bins'], (_added, _removed)
+    # remove-only (the dangerous case)
+    _new_rm = {'bins': {'a': ['base']}, 'srcs': {}}
+    _added, _removed = _sl.diff_closure(_old, _new_rm)
+    assert _removed['bins'] == {'b'} and _removed['srcs'] == {'asrc'}, _removed
+    assert not _added['bins'], _added
+    # tier-only change ⇒ NO add/remove (names identical, only tags differ)
+    _new_tier = {'bins': {'a': ['pool'], 'b': ['base']}, 'srcs': {'asrc': ['deb']}}
+    _added, _removed = _sl.diff_closure(_old, _new_tier)
+    assert not _added['bins'] and not _removed['bins'], (_added, _removed)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31120,6 +31178,9 @@ def main() -> int:
         test_selection_lock_tamper_detected_as_badsig,
         test_selection_lock_malformed_json_is_malformed,
         test_selection_lock_preserves_unknown_future_keys,
+        # SELECT-LOCK Chunk 2 — closure extract + diff
+        test_selection_lock_build_closure_canonical_and_tiers,
+        test_selection_lock_diff_closure_add_remove_and_tier_only,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
