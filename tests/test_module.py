@@ -33,6 +33,11 @@ def _session_source():
     for _p in _parts:
         with open(_p) as _fh:
             _txt += _fh.read()
+    # Sentinel terminator: many source-scan tests extract a method body with
+    # `... .*?(?=\n    def )`.  The last real method in the last concatenated
+    # mixin has no following `    def ` to anchor that lookahead — append a
+    # harmless one so those regexes still terminate at EOF.
+    _txt += '\n\n    def _source_scan_eof_sentinel(self):\n        pass\n'
     return _txt
 
 
@@ -16656,9 +16661,7 @@ def test_cmd_source_repair_dispatch_and_method_present():
     """source repair must be wired in cmd_source's dispatch table +
     have a matching cmd_source_repair method.  Sanity guard so
     `source repair` isn't a phantom command."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     assert "'repair'" in _body, "repair not advertised in source help"
     assert 'def cmd_source_repair(' in _body, (
         "cmd_source_repair method missing or wrong name")
@@ -17221,9 +17224,7 @@ def test_cmd_source_audit_classifies_rebuilds_by_subset():
     Operator needs to know which command to run to address each bucket.
     (Was cmd_source_rescan's responsibility before P2 — folded into
     cmd_source_audit which is the read-only superset.)"""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r'def cmd_source_audit\(self, \*args\):.*?(?=\n    def )',
@@ -17251,9 +17252,7 @@ def test_cmd_source_audit_verbose_lists_tunneled_and_failed_names():
     non-verbose run and asked verbose to print the names too.
     Source-grep test pins the contract (the method does subprocess +
     dep-tree work that's too heavy to fixture into a unit-level run)."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r'def cmd_source_audit\(self, \*args\):.*?(?=\n    def )',
@@ -19568,9 +19567,7 @@ def test_comp03_phase4_parallel_path_uses_thread_pool_executor():
     so a future refactor that switches to multiprocessing or asyncio
     (each carry distinct subtle bugs around Docker SDK handle sharing)
     must update the test deliberately."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -19596,9 +19593,7 @@ def test_comp03_phase4_serial_path_kept_for_max_parallel_builds_one():
     take a serial for-loop path (no executor, no scoped signal
     handler), so the existing serial behaviour is preserved verbatim
     as the debugging mode + zero-risk fallback."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -19614,9 +19609,7 @@ def test_comp03_phase4_installs_scoped_sigint_handler_around_executor():
     """COMP-03 Phase 4: the SIGINT handler is installed JUST around
     the executor block (not globally) so REPL Ctrl+C semantics
     elsewhere are unaffected; restored in a finally."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -19651,9 +19644,7 @@ def test_comp03_phase4_executor_shutdown_uses_wait_true_and_cancel_futures():
     on the way out — wait=True so workers drain their finally blocks
     (container reap, scratch-dir rmtree); cancel_futures=True so queued
     builds don't run after shutdown."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -19672,9 +19663,7 @@ def test_comp03_phase4_pool_breaks_on_shutdown_event():
     self.container.shutdown_event between completions, breaking out
     once SIGINT-driven request_shutdown has fired so we don't tally
     more results than we'll actually wait for."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -19690,9 +19679,7 @@ def test_comp03_phase4_tunnel_sub_phase_runs_serial_before_parallel():
     locked) run as a SERIAL pre-phase, before the parallel build
     pool.  Avoids parallel tunneling racing on rsync into the same
     component dir + simplifies progress reporting."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -19947,9 +19934,7 @@ def test_comp03_phase6_scheduler_reads_heavy_packages_from_config():
     set from self.config.heavy_packages (parsed in Phase 0).  Pinned
     so a future refactor that renames the attribute or hardcodes the
     list breaks the test."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -19964,9 +19949,7 @@ def test_comp03_phase6_heavy_in_flight_blocks_new_submissions():
     """COMP-03 Phase 6 contract: while a heavy build is in flight,
     NO new builds start (pause-new-during).  _can_submit_next must
     short-circuit when _heavy_active() returns True."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -19983,9 +19966,7 @@ def test_comp03_phase6_heavy_in_flight_blocks_new_submissions():
 def test_comp03_phase6_heavy_waits_for_drain_before_starting():
     """COMP-03 Phase 6 contract: a heavy build does NOT start while
     any lights are in flight (drain-before-start)."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -20004,9 +19985,7 @@ def test_comp03_phase6_uses_cf_wait_first_completed_for_drain():
     future to complete via concurrent.futures.wait(return_when=
     FIRST_COMPLETED), NOT as_completed (which doesn't compose with
     the staged submit-then-wait scheduler shape)."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _src = fh.read()
+    _src = _session_source()
     import re as _re
     _m = _re.search(
         r'def cmd_source_build\(self.*?(?=\n    def )',
@@ -21955,9 +21934,7 @@ def test_postbuild_convergence_hard_fails_when_check_build_still_false():
     non-convergence.  Logic lives in _build_one_source (COMP-03 Phase 4
     extracted the per-source unit from the cmd_source_build loop body)."""
     import re as _re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     _m = _re.search(r'def _build_one_source\(.*?(?=\n    def )',
                     _body, _re.DOTALL)
     assert _m, "_build_one_source not found"
@@ -22783,9 +22760,7 @@ def test_source_build_autodetects_update_mode():
     aware (already-built skipped; same-base re-spins rebuilt as bump-targets).
     COMP-03 Phase 4 extracted the per-source unit into _build_one_source."""
     import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     _m = re.search(r'def cmd_source_build\(self.*?(?=\n    def )', _body, re.DOTALL)
     _b = _m.group(0)
     assert '_update_build_pending()' in _b and '_do_update_build()' in _b, (
@@ -22824,9 +22799,7 @@ def test_do_update_build_sets_source_build_ready_on_nothing_to_build():
     the _do_update_build body for the up-to-date branch and verify
     the success flag gets set there."""
     import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     _u = re.search(r'def _do_update_build\(self.*?(?=\n    def )',
                     _body, re.DOTALL)
     assert _u, '_do_update_build not found'
