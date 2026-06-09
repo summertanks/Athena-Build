@@ -28,7 +28,12 @@ def _session_source():
     mixin module, while the dispatcher (register_command) stays in build.py."""
     import glob
     _parts = [os.path.join(_ROOT, 'scripts', 'build.py')]
-    _parts += sorted(glob.glob(os.path.join(_ROOT, 'scripts', 'commands', '*.py')))
+    # Only the real command implementations — NOT base.py (type-only stub
+    # declarations like `def cmd_audit(self, *args): ...`, which would let a
+    # body-extraction regex match the stub) nor the package __init__.
+    _parts += [_p for _p in sorted(
+        glob.glob(os.path.join(_ROOT, 'scripts', 'commands', '*.py')))
+        if os.path.basename(_p) not in ('base.py', '__init__.py')]
     _txt = ''
     for _p in _parts:
         with open(_p) as _fh:
@@ -8109,9 +8114,7 @@ def test_cmd_audit_nmu_residue_absorbed_into_cmd_audit():
 def test_cmd_strip_repo_registered_in_repo_dispatcher():
     """`repo repair strip` must route to cmd_strip_repo via the repair
     sub-dispatcher (post 2026-05-23 rename: was `repo strip`)."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     # repo repair sub-dispatcher body
     _m = re.search(
@@ -8133,9 +8136,7 @@ def test_cmd_package_cleanup_registered_in_repo_dispatcher():
     The command identifies obsolete .debs (orphan source or version
     drift) and ships in dry-run by default — `force` triggers actual
     delete after a YESNO prompt."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r'def cmd_repo_repair\(self.*?(?=\n    def \w)',
@@ -8161,9 +8162,7 @@ def test_cmd_package_cleanup_dry_run_default_force_flag_required():
 
     Source-text inspection because exercising the full method end-to-
     end needs a fixture'd BuildSession + repo dir + control files."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     # Find the method body.
     _m = re.search(
@@ -8213,9 +8212,7 @@ def test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source():
     (refactored 2026-05-21 to also serve `repo audit`'s STALE
     section as a warn-only surface).  cmd_package_cleanup delegates
     to it and adds the dry-run/force/delete machinery."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     # Helper holds the scan logic.
     _m_scan = re.search(
@@ -15761,9 +15758,7 @@ def test_cmd_audit_registered_under_repo_dispatcher():
     from build import BuildSession
     assert hasattr(BuildSession, 'cmd_audit'), (
         "BuildSession is missing cmd_audit")
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     # `repo audit` routes to cmd_audit (an `external` sub-route may sit in
     # between, dispatching `repo audit external` to cmd_audit_external).
