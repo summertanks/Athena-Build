@@ -22402,6 +22402,46 @@ def test_preflight_stamp_invariant_roundtrips_and_flags_bad_version():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def test_reconcile_snapshot_pin_syncs_build_conf_to_state():
+    """snapshot.state 'current' is authoritative — reconcile_snapshot_pin
+    rewrites build.conf [Snapshot] Timestamp to match (preserving comments
+    + other sections), updates the in-memory value, and reports (old, new).
+    No state file → None (build.conf stays authoritative)."""
+    import json
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils
+    with tempfile.TemporaryDirectory() as _t:
+        _cfgdir = os.path.join(_t, 'config')
+        os.makedirs(_cfgdir)
+        _conf = os.path.join(_cfgdir, 'build.conf')
+        with open(_conf, 'w') as _f:
+            _f.write("[Snapshot]\n# keep this comment\n"
+                     "Timestamp = 20260514T083402Z\nBaseUrl = https://x\n\n"
+                     "[Other]\nFoo = bar\n")
+
+        class _Cfg:
+            config_path = _conf
+            dir_config = _cfgdir
+            snapshot_timestamp_config = '20260514T083402Z'
+
+        _cfg = _Cfg()
+        # no state file → no change
+        assert utils.reconcile_snapshot_pin(_cfg) is None
+        assert 'Timestamp = 20260514T083402Z' in open(_conf).read()
+
+        with open(os.path.join(_cfgdir, 'snapshot.state'), 'w') as _f:
+            json.dump({'current': '20260602T173733Z'}, _f)
+        _r = utils.reconcile_snapshot_pin(_cfg)
+        assert _r == ('20260514T083402Z', '20260602T173733Z'), _r
+        _body = open(_conf).read()
+        assert 'Timestamp = 20260602T173733Z' in _body   # rewritten
+        assert '# keep this comment' in _body             # comments preserved
+        assert 'Foo = bar' in _body                       # other sections intact
+        assert _cfg.snapshot_timestamp_config == '20260602T173733Z'
+        # already in sync → None
+        assert utils.reconcile_snapshot_pin(_cfg) is None
+
+
 def test_snapshot_state_roundtrip_and_resolve_precedence():
     """The durable pin lives in config/snapshot.state (NOT cache), and
     resolve_snapshot_timestamp prefers state.current over [Snapshot]
@@ -31047,6 +31087,7 @@ def main() -> int:
         test_needs_bump_build_per_file_exact_un,
         test_preflight_stamp_invariant_roundtrips_and_flags_bad_version,
         # UPD-01 steps 7-8: snapshot commands + repo refresh orchestrator
+        test_reconcile_snapshot_pin_syncs_build_conf_to_state,
         test_snapshot_state_roundtrip_and_resolve_precedence,
         test_snapshot_state_writer_drops_legacy_fields_from_old_files,
         test_snapshot_base_subcommand_fully_removed,
