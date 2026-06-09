@@ -1563,18 +1563,16 @@ class MirrorCommandsMixin(SessionState):
             _pkg_idx: 'dict[str, dict]' = {}
             _pkg_findings: 'list[tuple[str, str, str]]' = []
             if _release is not None:
+                # No components= → audit every binary Packages index the
+                # verified InRelease declares (main + the udeb
+                # debian-installer tree + doc/tests/firmware/…).  Self-
+                # discovery means claims for files outside main no longer
+                # false-flag, and intentionally-empty components produce no
+                # spurious "missing pin" warnings.
                 _pkg_idx, _pkg_findings = _mirror.audit_packages_chain(
                     pool_url=_url, codename=_codename, release=_release,
                     fetched_dir=os.path.join(_fetched, 'apt'),
                     ssh_key=_ssh_key,
-                    # Every published component + the udeb (debian-installer)
-                    # tree — must mirror cmd_index_repo's suite spec, else
-                    # claims for udebs / -doc / -tests / firmware (which live
-                    # OUTSIDE main) all false-flag as claim_not_in_apt_index.
-                    # Empty components have no InRelease pin → WARNING+skip.
-                    components=('main', 'main/debian-installer', 'doc',
-                                'tests', 'contrib', 'non-free',
-                                'non-free-firmware'),
                     arches=(self.config.arch,),
                 )
             _pkg_crit = [_f for _f in _pkg_findings if _f[0] == 'CRITICAL']
