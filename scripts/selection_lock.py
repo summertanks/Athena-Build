@@ -36,7 +36,7 @@ State document shape (extensible — readers MUST preserve unknown keys):
 
 import json
 import os
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import utils
 
@@ -119,3 +119,86 @@ def write_selection_state(config: 'utils.BuildConfig', state: dict) -> None:
     _signed = utils._sign_record(_doc, _lock_hmac_key(config))
     _data = (json.dumps(_signed, sort_keys=True, indent=2) + '\n').encode('utf-8')
     utils._atomic_write_bytes(selection_state_path(config), _data)
+
+
+# ───────────────────────── closure extraction + diff ─────────────────────────
+
+
+def _canonical_bin_tiers(dep_tree: 'Any') -> 'Dict[str, list]':
+    """Canonical binary names of one deb tree → sorted tier tags.
+
+    Canonical = the key equals the Package object's own ``Package:`` field
+    (virtual ``Provides:`` aliases are dropped — exactly the filter
+    ``cmd_parse_dependency`` uses when it writes selected_packages.list).
+    Tiers are membership in the tree's classification sets; a name in none of
+    them is ``base`` (installed everywhere).
+    """
+    _out: 'Dict[str, list]' = {}
+    _extras: set = getattr(dep_tree, 'extras_pkg_names', set())
+    _live: set = getattr(dep_tree, 'live_exclusive_pkg_names', set())
+    _inst: set = getattr(dep_tree, 'installer_exclusive_pkg_names', set())
+    _pool: set = getattr(dep_tree, 'pool_extras_pkg_names', set())
+    _groups: dict = getattr(dep_tree, 'pkg_group_pkg_names', {}) or {}
+    for _name, _pkg in dep_tree.selected_pkgs.items():
+        if _name != _pkg['Package']:          # virtual alias — skip
+            continue
+        _tiers: set = set()
+        if _name in _extras:
+            _tiers.add('extras')
+        if _name in _live:
+            _tiers.add('live')
+        if _name in _inst:
+            _tiers.add('installer')
+        if _name in _pool:
+            _tiers.add('pool')
+        for _g, _members in _groups.items():
+            if _name in _members:
+                _tiers.add(f'group:{_g}')
+        if not _tiers:
+            _tiers.add('base')
+        _out[_name] = sorted(_tiers)
+    return _out
+
+
+def build_closure(
+    dep_tree: 'Any', udeb_dep_tree: 'Any', config: 'Any',
+) -> dict:
+    """The resolved selection as a closure document fragment:
+
+        {"bins": {name: [tier, ...]}, "srcs": {name: [origin, ...]}}
+
+    Unions the deb tree and (if present) the udeb tree — the udeb sources
+    (anna, cdrom-detect, debootstrap, choose-mirror…) live ONLY in the udeb
+    tree, so any single-tree view would falsely orphan the entire installer.
+    udeb-tree entries carry a ``udeb`` origin tag so the two tiers stay
+    distinguishable.  Canonical names only.
+    """
+    _bins: 'Dict[str, list]' = _canonical_bin_tiers(dep_tree)
+    _srcs: 'Dict[str, list]' = {
+        _s: ['deb'] for _s in dep_tree.selected_srcs
+    }
+    if udeb_dep_tree is not None:
+        for _name, _tiers in _canonical_bin_tiers(udeb_dep_tree).items():
+            _merged = sorted(set(_bins.get(_name, [])) | set(_tiers) | {'udeb'})
+            _bins[_name] = _merged
+        for _s in udeb_dep_tree.selected_srcs:
+            _merged_s = sorted(set(_srcs.get(_s, [])) | {'udeb'})
+            _srcs[_s] = _merged_s
+    return {'bins': _bins, 'srcs': _srcs}
+
+
+def diff_closure(
+    old: dict, new: dict,
+) -> 'Tuple[Dict[str, set], Dict[str, set]]':
+    """Compare two closures by NAME SET only (tier-tag changes are
+    non-blocking metadata).  Returns ``(added, removed)`` where each is
+    ``{'bins': set, 'srcs': set}``.
+
+    The parse guard blocks on any non-empty ``removed`` (deprecation
+    candidates); ``added`` is low-impact (refresh + warn).
+    """
+    _ob, _nb = set((old or {}).get('bins', {})), set((new or {}).get('bins', {}))
+    _os, _ns = set((old or {}).get('srcs', {})), set((new or {}).get('srcs', {}))
+    _added = {'bins': _nb - _ob, 'srcs': _ns - _os}
+    _removed = {'bins': _ob - _nb, 'srcs': _os - _ns}
+    return _added, _removed
