@@ -565,6 +565,34 @@ def read_published_manifest(config: 'BuildConfig') -> str:
     return _read_signed_manifest(local_manifest_path(config), config)
 
 
+def local_published_packages_text(config: 'BuildConfig') -> str:
+    """Concatenate every binary `Packages` index under the locally-published
+    tree (``repo/dists/<codename>/**/binary-*/Packages``, incl. the udeb
+    ``debian-installer`` trees).
+
+    This is the text written to the signed ``published.manifest`` after a
+    successful ``mirror publish`` — the authority for +asg uN bump
+    derivation (``published_ledger``).  Must be read AFTER the publish has
+    (auto-)indexed the repo, so the Packages files exist and reflect the
+    versions actually pushed."""
+    _root = os.path.join(config.dir_repo, 'dists', config.build_codename)
+    _parts: 'list[str]' = []
+    for _dp, _dirs, _files in os.walk(_root):
+        if 'Packages' not in _files:
+            continue
+        if not os.path.basename(_dp).startswith('binary-'):
+            continue
+        try:
+            with open(os.path.join(_dp, 'Packages'),
+                      encoding='utf-8', errors='replace') as _fh:
+                _t = _fh.read()
+        except OSError:
+            continue
+        if _t.strip():
+            _parts.append(_t if _t.endswith('\n') else _t + '\n')
+    return '\n'.join(_parts)
+
+
 def published_ledger(config: 'BuildConfig') -> 'dict[str, list[str]]':
     """The authoritative {package: [version,...]} ledger for +asg bump
     derivation + merge-index — from the LOCAL signed manifest (works offline).

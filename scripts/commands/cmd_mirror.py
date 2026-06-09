@@ -871,6 +871,7 @@ class MirrorCommandsMixin(SessionState):
         # to different mirrors would conflict locally on the staging
         # dir; serial keeps the semantics simple in this phase).
         _all_ok = True
+        _published_any = False
         for _n in _names:
             _st = _mirror.read_mirror_state(self.config, _n)
             assert _st is not None  # checked above / by list_mirrors
@@ -990,6 +991,7 @@ class MirrorCommandsMixin(SessionState):
             if not _ok:
                 _all_ok = False
                 continue
+            _published_any = True
             # Success → bump mirror state
             import coord.schema as _schema
             # MIRROR-02 chunk 12: recompute mirror.base from the
@@ -1011,6 +1013,29 @@ class MirrorCommandsMixin(SessionState):
             if _new_base:
                 _base_update['base'] = _new_base
             _mirror.update_mirror_state(self.config, _n, **_base_update)
+
+        # Refresh the local +asg uN authority from the just-published index.
+        # The published.manifest is the bump ledger (published_ledger reads
+        # it); without this it stays frozen and N can never advance past its
+        # last value — the regression that left every asg package stuck at
+        # u2 after MIRROR-01 removed the old repo-publish finalize path
+        # (commit 8cc803b).  Sign failure is loud: a silent/empty manifest
+        # corrupts the next publish's N derivation.
+        if _published_any:
+            import repo_audit
+            _pkgs_text = repo_audit.local_published_packages_text(self.config)
+            if _pkgs_text.strip():
+                if repo_audit.write_published_manifest(self.config, _pkgs_text):
+                    console.print(
+                        "  refreshed local +asg manifest (bump authority)",
+                        tui.COLOR_INFO)
+                else:
+                    console.print(
+                        "  WARNING: published OK but the local +asg manifest "
+                        "sign FAILED — next publish's N derivation may be "
+                        "wrong.  Run `key verify`, then re-publish.",
+                        tui.COLOR_WARNING)
+                    _all_ok = False
         return _all_ok
 
     def cmd_mirror_pull(self, *args):
