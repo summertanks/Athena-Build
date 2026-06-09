@@ -343,3 +343,32 @@ def restore_list_files(config: 'Any', lock: dict) -> 'Dict[str, str]':
         utils._atomic_write_bytes(_path, _text.encode('utf-8'))
         _written[_label] = _path
     return _written
+
+
+def audit_selection_coherence(
+    closure_bins: 'set', by_builder: 'Dict[str, list]', builder_id: str,
+) -> 'list':
+    """Coherence check: the lockfile closure ⟷ our published claims.
+
+    Returns findings ``[(severity, kind, message)]``.  CRITICAL when we still
+    OWN+PUBLISH a file whose binary is NOT in the selection closure and it was
+    NOT deprecated — the signed selection and the mirror disagree (a drop that
+    never reached `mirror publish`, or a publish that didn't emit the
+    deprecation).  Pure; `mirror audit` / `audit` wire it in."""
+    from coord import store as _store
+    _owners = _store.project_owners(by_builder)
+    _findings: list = []
+    for _fn in sorted(_owners):
+        _owner = _owners[_fn]
+        if _owner.get('builder') != builder_id:
+            continue
+        if _owner.get('claim_state') != 'published':
+            continue
+        _binname = _fn.split('_', 1)[0] if '_' in _fn else _fn
+        if _binname not in closure_bins:
+            _findings.append((
+                'CRITICAL', 'selection_claim_not_in_closure',
+                f"{_fn}: owned+published but binary {_binname!r} is not in the "
+                "selection closure and not deprecated — `mirror publish` to "
+                "release it, or `cache select` to re-add it"))
+    return _findings
