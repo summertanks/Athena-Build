@@ -213,6 +213,16 @@ def project_live_claims(
                 if isinstance(_retracts, int):
                     _retracted_seqs.add(_retracts)
                 continue
+            if _c.get('claim_state') == _schema.CLAIM_STATE_DEPRECATED:
+                # SELECT-LOCK: deprecation RELEASES ownership — like a
+                # retraction it drops the superseded published claim, and the
+                # deprecated claim itself is not "live-owned" here (the file
+                # stays in the pool, but it's no longer ours).  project_owners
+                # surfaces it as no-owner separately.
+                _dep = _c.get('deprecates_seq')
+                if isinstance(_dep, int):
+                    _retracted_seqs.add(_dep)
+                continue
             _seq = _c.get('seq')
             if isinstance(_seq, int) and _seq in _retracted_seqs:
                 continue
@@ -268,6 +278,13 @@ def iter_live_claims_by_filename(
                 _r = _c.get('retracts_seq')
                 if isinstance(_r, int):
                     _retracted.add(_r)
+            elif _c.get('claim_state') == _schema.CLAIM_STATE_DEPRECATED:
+                # The published claim a deprecation supersedes is dropped, but
+                # the deprecated claim itself is YIELDED so project_owners can
+                # report the filename as no-owner (released to the commons).
+                _d = _c.get('deprecates_seq')
+                if isinstance(_d, int):
+                    _retracted.add(_d)
         for _c in _claims:
             if _c.get('claim_state') == _schema.CLAIM_STATE_RETRACTED:
                 continue
@@ -333,8 +350,14 @@ def project_owners(
         _winner = _sorted[0]
         _republished = _winner.get('republished_from')
         _is_tunneled = bool(_republished)
+        # SELECT-LOCK: a deprecated winner has RELEASED ownership — same
+        # no-owner treatment as a tunneled claim, so another builder may take
+        # the file over by republishing (filter_pending_by_ownership rule).
+        _is_deprecated = (_winner.get('claim_state')
+                          == _schema.CLAIM_STATE_DEPRECATED)
+        _no_owner = _is_tunneled or _is_deprecated
         _out[_fn] = {
-            'builder':          None if _is_tunneled
+            'builder':          None if _no_owner
                                 else _winner.get('builder'),
             'version':          str(_winner.get('built_version') or ''),
             'sha256':           str(_winner.get('sha256') or ''),

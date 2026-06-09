@@ -755,7 +755,7 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
         _packages.update(local_state.packages)
     for _bid, _claims in (remote_by_builder or {}).items():
         for _c in _claims:
-            if _c.get('claim_state') == 'retracted':
+            if _c.get('claim_state') in ('retracted', 'deprecated'):
                 continue
             _pkg = str(_c.get('package') or '')
             _ver = str(_c.get('built_version') or '')
@@ -1012,7 +1012,7 @@ def audit_claims_vs_packages(
     _seen_pairs: 'set[tuple[str, str]]' = set()
     for _bid, _claims in by_builder.items():
         for _c in _claims:
-            if _c.get('claim_state') == 'retracted':
+            if _c.get('claim_state') in ('retracted', 'deprecated'):
                 continue
             _fn = str(_c.get('filename') or '')
             if not _fn:
@@ -1414,7 +1414,7 @@ def audit_own_claims_on_disk(
         return _on_disk_sha in set(_oh.values())
 
     for _c in _claims:
-        if _c.get('claim_state') == 'retracted':
+        if _c.get('claim_state') in ('retracted', 'deprecated'):
             continue
         if _c.get('republished_from'):
             continue

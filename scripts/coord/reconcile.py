@@ -234,7 +234,7 @@ def audit_cross(
     # Index claims by (package, filename)
     _claim_by_fn: Dict[str, dict] = {}
     for _c in _my_claims:
-        if _c.get('claim_state') == _schema.CLAIM_STATE_RETRACTED:
+        if _c.get('claim_state') in _schema.INACTIVE_CLAIM_STATES:
             continue
         _fn = _c.get('filename')
         if isinstance(_fn, str):
@@ -341,8 +341,12 @@ def detect_hash_conflicts(
                 _r = _c.get('retracts_seq')
                 if isinstance(_r, int):
                     _retracted.add(_r)
+            elif _c.get('claim_state') == _schema.CLAIM_STATE_DEPRECATED:
+                _d = _c.get('deprecates_seq')
+                if isinstance(_d, int):
+                    _retracted.add(_d)
         for _c in _claims:
-            if _c.get('claim_state') == _schema.CLAIM_STATE_RETRACTED:
+            if _c.get('claim_state') in _schema.INACTIVE_CLAIM_STATES:
                 continue
             if int(_c.get('seq', 0)) in _retracted:
                 continue
@@ -444,7 +448,7 @@ def audit_repo(
     _fn_owners: Dict[str, set] = {}
     for _bid, _claims in by_builder.items():
         for _c in _claims:
-            if _c.get('claim_state') == _schema.CLAIM_STATE_RETRACTED:
+            if _c.get('claim_state') in _schema.INACTIVE_CLAIM_STATES:
                 continue
             _fn = _c.get('filename')
             if isinstance(_fn, str) and _fn:

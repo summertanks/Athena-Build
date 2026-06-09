@@ -34,7 +34,13 @@ from typing import Any, Dict, Optional
 # Pinned at v1; bump on any breaking field change.  Readers tolerate
 # unknown future keys (preserve in dict; ignore semantics they don't
 # know).  Removing a key is a v2.
-CLAIM_RECORD_SCHEMA_VERSION = 1
+# v1 → v2 (SELECT-LOCK): adds claim_state 'deprecated' + the optional
+# `deprecates_seq` field.  Back-compat: claim_from_jsonl never compares `v`,
+# so v2 PUBLISHED/PENDING/RETRACTED lines parse on a v1 reader unchanged; only
+# a 'deprecated' line is rejected by a v1 reader (unknown state → None), which
+# is a SAFE degrade — the v1 peer keeps treating the file as owned/published
+# (stale, not corrupt) until it upgrades.
+CLAIM_RECORD_SCHEMA_VERSION = 2
 COORD_HEAD_SCHEMA_VERSION = 3
 # v1 → v2 (MIRROR-01 Phase 2): adds `neighbours: list[str]` — the
 # federation membership list (every mirror's coord-head carries the
@@ -59,11 +65,28 @@ SNAPSHOT_STATE_SCHEMA_VERSION = 1
 # see it until the next reindex+sign.  `published` is the steady
 # state.  `retracted` is a signed tombstone — only the owner can
 # write it; references the seq of the claim being retracted.
+# `deprecated` (SELECT-LOCK) — the owner published this file but the
+# package is no longer in their selection (dropped via `cache select`).
+# UNLIKE retracted (a tombstone that strips the file's metadata), a
+# deprecated claim KEEPS the filename/sha/size so the .deb stays
+# resolvable in the pool — it just RELEASES ownership: project_owners
+# reports builder=None (like a tunneled claim), so any other builder may
+# take the file over by republishing.  References `deprecates_seq`.
 CLAIM_STATE_PENDING = 'pending'
 CLAIM_STATE_PUBLISHED = 'published'
 CLAIM_STATE_RETRACTED = 'retracted'
+CLAIM_STATE_DEPRECATED = 'deprecated'
 CLAIM_STATES = frozenset({
     CLAIM_STATE_PENDING, CLAIM_STATE_PUBLISHED, CLAIM_STATE_RETRACTED,
+    CLAIM_STATE_DEPRECATED,
+})
+# States that are NOT an active, asserted ownership of a present-in-our-index
+# file.  Audit/reconcile/index sites skip these: a retracted claim's file is
+# gone, and a deprecated claim's file was dropped from our local repo (its pool
+# copy may linger for takeover, but we no longer ASSERT it).  project_owners is
+# the deliberate exception — it surfaces a deprecated claim as no-owner.
+INACTIVE_CLAIM_STATES = frozenset({
+    CLAIM_STATE_RETRACTED, CLAIM_STATE_DEPRECATED,
 })
 
 # Required keys on every well-formed claim line.  `republished_from`
@@ -162,6 +185,50 @@ def new_retraction(
         'claim_state':  CLAIM_STATE_RETRACTED,
         'retracts_seq': retracts_seq,
     }
+
+
+def new_deprecation(
+    *,
+    builder: str,
+    seq: int,
+    package: str,
+    intended_version: str,
+    built_version: str,
+    filename: str,
+    sha256: str,
+    size: int,
+    snapshot: str,
+    built_at: str,
+    deprecates_seq: int,
+    component: str = 'main',
+) -> dict:
+    """A signed ownership-release for a file the builder published but no
+    longer selects (SELECT-LOCK).  `deprecates_seq` is the seq of the prior
+    published claim.
+
+    Unlike `new_retraction` (a stripped tombstone), a deprecation KEEPS the
+    file's identity (filename/sha256/size/version) so the .deb stays
+    resolvable in the pool — apt clients can still install it, and another
+    builder can take ownership by republishing.  `project_owners` reports
+    builder=None for the winning deprecated claim (same no-owner treatment
+    as a tunneled claim)."""
+    _rec: Dict[str, Any] = {
+        'v':                 CLAIM_RECORD_SCHEMA_VERSION,
+        'builder':           builder,
+        'seq':                seq,
+        'package':           package,
+        'intended_version':  intended_version,
+        'built_version':     built_version,
+        'filename':          filename,
+        'sha256':            sha256,
+        'size':              size,
+        'snapshot':          snapshot,
+        'built_at':          built_at,
+        'claim_state':       CLAIM_STATE_DEPRECATED,
+        'deprecates_seq':    deprecates_seq,
+        'component':         component,
+    }
+    return _rec
 
 
 def canonical_bytes(record: dict) -> bytes:

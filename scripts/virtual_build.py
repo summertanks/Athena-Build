@@ -1670,7 +1670,7 @@ def virtual_publish_dry_run(
     _existing_fns: 'set[str]' = {
         str(_c.get('filename') or '')
         for _c in _existing
-        if _c.get('claim_state') != 'retracted'
+        if _c.get('claim_state') not in ('retracted', 'deprecated')
     }
     _new_records = [
         _r for _r in virtual_records
