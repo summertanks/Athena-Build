@@ -6537,6 +6537,7 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_cache
     import tui as _tui
     from build import BuildSession, BuildFlags
 
@@ -6572,12 +6573,12 @@ def test_cmd_build_cache_runs_when_force_passed_even_if_ready():
             _ctor_calls.append(cfg)
             self.is_valid = False
             self.error_str = 'stub'
-    _orig_Cache = build.Cache
-    build.Cache = _StubCache
+    _orig_Cache = cmd_cache.Cache
+    cmd_cache.Cache = _StubCache
     try:
         _sess.cmd_build_cache('force')
     finally:
-        build.Cache = _orig_Cache
+        cmd_cache.Cache = _orig_Cache
         _tui.tui_instance = _saved_tui
     assert len(_ctor_calls) == 1, (
         "cmd_build_cache with force MUST run Cache() even if cache_ready, "
@@ -6622,6 +6623,7 @@ def test_cmd_parse_dependency_runs_when_force_passed_even_if_ready():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_cache
     from build import BuildSession, BuildFlags
 
     _sess = BuildSession.__new__(BuildSession)
@@ -6632,20 +6634,20 @@ def test_cmd_parse_dependency_runs_when_force_passed_even_if_ready():
     _sess.dep_tree = object()
 
     _spinner_calls = []
-    _orig_Spinner = build.Spinner
+    _orig_Spinner = cmd_cache.Spinner
     class _StubSpinner:
         def __init__(self, *a, **kw):
             _spinner_calls.append((a, kw))
             raise RuntimeError("stop here — guard was bypassed, that's all we wanted to check")
         def done(self): pass
-    build.Spinner = _StubSpinner
+    cmd_cache.Spinner = _StubSpinner
     try:
         try:
             _sess.cmd_parse_dependency('force')
         except RuntimeError as e:
             assert 'guard was bypassed' in str(e)
     finally:
-        build.Spinner = _orig_Spinner
+        cmd_cache.Spinner = _orig_Spinner
     assert len(_spinner_calls) == 1, (
         "force should bypass the guard and reach Spinner construction, "
         f"got {len(_spinner_calls)} Spinner call(s)")
@@ -6967,7 +6969,7 @@ def test_cache_purge_deletes_files_and_resets_flags():
 
         _prompt_inst = MagicMock()
         _prompt_inst.get_response.return_value = 'y'
-        with patch('build.Prompt', return_value=_prompt_inst):
+        with patch('commands.cmd_cache.Prompt', return_value=_prompt_inst):
             sess.cmd_cache_purge()
 
         # Top-level files gone.
@@ -14657,6 +14659,7 @@ def test_cmd_cache_info_prints_identity_and_relations():
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
+    from commands import cmd_cache
     from build import BuildSession
 
     class _Pkg(dict):
@@ -14693,8 +14696,8 @@ def test_cmd_cache_info_prints_identity_and_relations():
     # Patch the module-level console facade build.py uses directly —
     # deterministic regardless of the global tui_instance state left
     # by prior tests in the suite.
-    saved_console = build.console
-    build.console = _RecConsole()
+    saved_console = cmd_cache.console
+    cmd_cache.console = _RecConsole()
     try:
         sess = BuildSession.__new__(BuildSession)
         sess.cache = _Cache()
@@ -14720,7 +14723,7 @@ def test_cmd_cache_info_prints_identity_and_relations():
         sess.cmd_cache_info()
         assert any('Usage' in p for p in prints)
     finally:
-        build.console = saved_console
+        cmd_cache.console = saved_console
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22733,9 +22736,7 @@ def test_cache_build_gates_on_snapshot_pins():
     """cmd_build_cache must call _ensure_snapshot_pins (and abort if it returns
     False) before building."""
     import re
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _body = fh.read()
+    _body = _session_source()
     _m = re.search(r'def cmd_build_cache\(self.*?(?=\n    def )', _body, re.DOTALL)
     assert _m, "cmd_build_cache not found"
     assert re.search(r'if not self\._ensure_snapshot_pins\(\):\s*\n\s+return',
@@ -24058,9 +24059,7 @@ def test_sbom_command_registered():
 def test_ux04_save_session_called_after_parse_dependency():
     """cmd_parse_dependency calls persistence.save_session at the tail
     so the next process can `resume` without re-parsing."""
-    _bp = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bp) as fh:
-        _b = fh.read()
+    _b = _session_source()
     import re
     _m = re.search(
         r'def cmd_parse_dependency\(self.*?(?=\n    def )', _b, re.DOTALL)
