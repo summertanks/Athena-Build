@@ -788,11 +788,17 @@ class CacheCommandsMixin(SessionState):
         # acknowledge via `cache select` / `cache restore` / `cache purge-state`.
         # Additions are low-impact (absorbed + warned).  First run bootstraps.
         if self.config.build_mode != 'build':
+            # `accept-removals` (set by `cache select`) turns the shrink BLOCK
+            # into an accepted re-baseline: the lockfile is rewritten to the new
+            # (smaller) closure and the dropped packages become mirror-
+            # deprecation candidates on the next publish.  A raw `cache parse`
+            # never accepts a shrink.
+            _accept = 'accept-removals' in args
             _fresh = selection_lock.build_closure(
                 self.dep_tree, self.udeb_dep_tree, self.config)
             _action, _added, _removed = selection_lock.classify(
                 _lstatus, _lock, _fresh)
-            if _action == selection_lock.ACTION_BLOCK:
+            if _action == selection_lock.ACTION_BLOCK and not _accept:
                 _rb = sorted(_removed['bins'])
                 _rs = sorted(_removed['srcs'])
                 console.print(
@@ -811,8 +817,8 @@ class CacheCommandsMixin(SessionState):
                                   tui.COLOR_ERROR)
                 console.print(
                     "  These are mirror-deprecation candidates.  Choose one:\n"
-                    "    1. `cache select` — accept the removal (updates the "
-                    "lockfile + marks them deprecated on publish)\n"
+                    "    1. `cache select accept` — accept the removal (updates "
+                    "the lockfile + marks them deprecated on publish)\n"
                     "    2. `cache restore` — regenerate the list files from "
                     "the lockfile (undo the edit)\n"
                     "    3. `cache purge-state` — re-baseline the selection "
@@ -822,6 +828,18 @@ class CacheCommandsMixin(SessionState):
                 return
             _state = selection_lock.assemble_state(
                 self.dep_tree, self.udeb_dep_tree, self.config, closure=_fresh)
+            if _action == selection_lock.ACTION_BLOCK and _accept:
+                selection_lock.write_selection_state(self.config, _state)
+                console.print(
+                    f"cache select accept: re-baselined selection.state — "
+                    f"{len(_removed['bins'])} binary(ies) / "
+                    f"{len(_removed['srcs'])} source(s) DROPPED; they become "
+                    "mirror-deprecation candidates on the next `mirror "
+                    "publish`.", tui.COLOR_HIGHLIGHT)
+                self.flags.dep_check_ready = True
+                _spiner.done()
+                persistence.save_session(self, self.config.dir_cache)
+                return
             if _action == selection_lock.ACTION_BOOTSTRAP:
                 selection_lock.write_selection_state(self.config, _state)
                 console.print(
@@ -849,7 +867,20 @@ class CacheCommandsMixin(SessionState):
         `config/pkg.list` and adds new ones from the cache, then saves.
         Requires the cache (for metadata) — gate on cache_ready.
         Interactive-only: needs the curses tab + key-interceptor API,
-        absent on the headless Cli backend."""
+        absent on the headless Cli backend.
+
+        `cache select accept` — the sanctioned way to ACCEPT a selection
+        SHRINK after an edit: re-resolves and rewrites selection.state to the
+        new (smaller) closure, so the dropped packages become mirror-
+        deprecation candidates on the next publish.  This is the only path
+        that accepts a shrink (a raw `cache parse` BLOCKs on one)."""
+        if args and args[0] == 'accept':
+            if not self.flags.cache_ready or self.cache is None:
+                console.print("Run 'cache build' first (accept re-resolves the "
+                              "selection)")
+                return
+            # Re-resolve + accept the shrink (impact is printed by the guard).
+            return self.cmd_parse_dependency('force', 'accept-removals')
         if not self.flags.cache_ready or self.cache is None:
             console.print("Run 'cache build' first (selector needs package metadata)")
             return
@@ -860,6 +891,14 @@ class CacheCommandsMixin(SessionState):
             return
         from select_packages import SelectPackages
         SelectPackages(self.config, self.cache, tui.tui_instance).activate()
+        # The edit changed the seeds under the resolved tree — force a re-parse
+        # so the closure guard recomputes the impact.  A shrink will BLOCK with
+        # the dropped packages listed; `cache select accept` then re-baselines.
+        self.flags.dep_check_ready = False
+        console.print(
+            "cache select: pkg.list edited — run `cache parse` to see the "
+            "closure impact (a shrink lists the dropped packages); "
+            "`cache select accept` to accept a shrink.", tui.COLOR_INFO)
 
     def cmd_cache_restore(self, *args):
         """`cache restore` — regenerate config/{pkg,live,installer,pool}.list
