@@ -30613,7 +30613,41 @@ def test_selection_lock_assemble_state_shape_and_pin_union():
     # pins union across both trees
     assert _state['pins'] == {'awk': 'mawk', 'telnet-client': 'telnet'}, _state['pins']
     assert 'a' in _state['closure']['bins'] and 'anna' in _state['closure']['bins']
-    assert set(_state['seeds']) == {'pkg', 'live', 'installer', 'pool'}
+    assert set(_state['seeds']) == {'pkg', 'pkg_meta', 'live', 'installer', 'pool'}
+
+
+def test_selection_lock_restore_roundtrips_lists_with_meta():
+    """SELECT-LOCK Chunk 5: restore regenerates the four list files from the
+    lockfile seeds; pkg.list round-trips through the parsers INCLUDING the
+    `## Description:` tasksel metadata, and flat lists match seed order."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    import utils as _u
+    import types
+    with tempfile.TemporaryDirectory() as _root:
+        _cfgdir = os.path.join(_root, 'config')
+        os.makedirs(_cfgdir)
+        _cfg = types.SimpleNamespace(
+            pkglist_path=os.path.join(_cfgdir, 'pkg.list'),
+            livelist_path=os.path.join(_cfgdir, 'live.list'),
+            installerlist_path=os.path.join(_cfgdir, 'installer.list'),
+            poollist_path=os.path.join(_cfgdir, 'pool.list'))
+        _lock = {'seeds': {
+            'pkg': {'base': ['a', 'b'], 'desktop': ['x']},
+            'pkg_meta': {'desktop': {'description': 'Desktop environment'}},
+            'live': ['live-boot'], 'installer': ['anna'],
+            'pool': ['grub-pc', 'grub-efi-amd64']}}
+        _written = _sl.restore_list_files(_cfg, _lock)
+        assert set(_written) == {'pkg', 'live', 'installer', 'pool'}, _written
+        # pkg.list round-trips groups + names
+        _groups = _u.parse_pkg_list_groups(_cfg.pkglist_path)
+        assert _groups == {'base': ['a', 'b'], 'desktop': ['x']}, _groups
+        # and the tasksel description survives
+        _meta = _u.parse_pkg_list_group_meta(_cfg.pkglist_path)
+        assert _meta.get('desktop', {}).get('description') == 'Desktop environment', _meta
+        # flat lists preserve order
+        assert open(_cfg.poollist_path).read().split() == ['grub-pc', 'grub-efi-amd64']
+        assert open(_cfg.livelist_path).read().strip() == 'live-boot'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31271,6 +31305,8 @@ def main() -> int:
         # SELECT-LOCK Chunk 4 — two-stage parse + asymmetric guard
         test_selection_lock_classify_asymmetric_guard,
         test_selection_lock_assemble_state_shape_and_pin_union,
+        # SELECT-LOCK Chunk 5 — cache restore / purge-state
+        test_selection_lock_restore_roundtrips_lists_with_meta,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,

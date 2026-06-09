@@ -1122,6 +1122,8 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             'parse':  'resolve full dep closure for selected packages',
             'select': 'interactively toggle packages in pkg.list (curses only)',
             'info':   'show concise info + relations for a package: cache info <pkg>',
+            'restore':     'regenerate the list files from the signed selection.state',
+            'purge-state': 'delete selection.state to re-baseline the selection (heavy mirror impact)',
         }
         if action == 'build':
             return self.cmd_build_cache(*args)
@@ -1133,6 +1135,10 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             return self.cmd_cache_select(*args)
         if action == 'info':
             return self.cmd_cache_info(*args)
+        if action == 'restore':
+            return self.cmd_cache_restore(*args)
+        if action == 'purge-state':
+            return self.cmd_cache_purge_state(*args)
         return self._group_help('cache', _table, action)
 
     def cmd_patch(self, action: str = '', *args):

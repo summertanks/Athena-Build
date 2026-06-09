@@ -861,6 +861,74 @@ class CacheCommandsMixin(SessionState):
         from select_packages import SelectPackages
         SelectPackages(self.config, self.cache, tui.tui_instance).activate()
 
+    def cmd_cache_restore(self, *args):
+        """`cache restore` — regenerate config/{pkg,live,installer,pool}.list
+        from the signed selection.state (the selection AUTHORITY).
+
+        The escape hatch when a list edit caused the parse to BLOCK: it
+        reverts the files to exactly what the lockfile pins, so a re-parse
+        shows zero closure delta.  Requires a verified lockfile — there is
+        nothing to restore from if it's missing/tampered."""
+        _force = 'force' in args
+        _lock, _status = selection_lock.read_selection_state(self.config)
+        if _status != selection_lock.STATUS_OK or _lock is None:
+            console.print(
+                f"cache restore: selection.state is {_status} — nothing "
+                "trustworthy to restore from.  Run `cache parse` to bootstrap "
+                "it, or fix/restore the file.", tui.COLOR_ERROR)
+            return
+        if not _force:
+            _resp = Prompt(
+                PROMPT_YESNO,
+                "Overwrite config/{pkg,live,installer,pool}.list from "
+                "selection.state?  Operator edits to those files are LOST.",
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print("cache restore: aborted — no files changed.")
+                return
+        _written = selection_lock.restore_list_files(self.config, _lock)
+        console.print(
+            f"cache restore: regenerated {len(_written)} list file(s) from "
+            "selection.state.  Run `cache parse` to confirm zero delta.",
+            tui.COLOR_HIGHLIGHT)
+        # The on-disk lists changed under any resolved tree — force a re-parse.
+        self.flags.dep_check_ready = False
+
+    def cmd_cache_purge_state(self, *args):
+        """`cache purge-state` — delete selection.state to re-baseline the
+        selection authority.  DISTINCT from `cache purge` (which clears the
+        re-downloadable apt cache).
+
+        HEAVY: the next `cache parse` bootstraps a brand-new lockfile from
+        whatever the lists currently resolve to, so any package the lockfile
+        was tracking as owned-but-dropped is FORGOTTEN as a deprecation
+        candidate — the mirror keeps owning it with no signal to release.
+        Use only to intentionally re-baseline."""
+        _force = 'force' in args
+        _path = selection_lock.selection_state_path(self.config)
+        if not os.path.exists(_path):
+            console.print(f"cache purge-state: no lockfile at {_path} "
+                          "(already re-baselined).")
+            return
+        if not _force:
+            _resp = Prompt(
+                PROMPT_YESNO,
+                "Delete selection.state?  This re-baselines the selection "
+                "authority; packages it tracked as dropped will NOT be marked "
+                "deprecated on the mirror.  Proceed?",
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print("cache purge-state: aborted — lockfile kept.")
+                return
+        try:
+            os.remove(_path)
+            console.print(
+                "cache purge-state: selection.state deleted — next `cache "
+                "parse` re-bootstraps it.", tui.COLOR_HIGHLIGHT)
+        except OSError as _e:
+            console.print(f"cache purge-state: cannot delete {_path}: {_e}",
+                          tui.COLOR_ERROR)
+
     def cmd_cache_info(self, *args):
         """`cache info <pkg>` — concise package facts + relations.
 

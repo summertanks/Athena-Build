@@ -252,6 +252,11 @@ def assemble_state(
             'pkg': utils.parse_pkg_list_groups(
                 getattr(config, 'pkglist_path', '')) if getattr(
                 config, 'pkglist_path', '') else {},
+            # pkg-group descriptions — preserved so `cache restore` can
+            # faithfully regenerate the `## Description:` lines tasksel needs.
+            'pkg_meta': utils.parse_pkg_list_group_meta(
+                getattr(config, 'pkglist_path', '')) if getattr(
+                config, 'pkglist_path', '') else {},
             'live': _read_flat_seeds(getattr(config, 'livelist_path', '')),
             'installer': _read_flat_seeds(
                 getattr(config, 'installerlist_path', '')),
@@ -289,3 +294,52 @@ def classify(
     if _removed['bins'] or _removed['srcs']:
         return ACTION_BLOCK, _added, _removed
     return ACTION_REFRESH, _added, _removed
+
+
+# ───────────────────── list-file regeneration (cache restore) ────────────────
+
+
+def render_pkg_list(seeds: dict) -> str:
+    """Render the grouped pkg.list text from a lockfile's seeds — INI groups
+    with their `## Description:` metadata preserved, so a re-parse reproduces
+    the same groups + tasksel descriptions.  Round-trips through
+    ``utils.parse_pkg_list_groups`` / ``parse_pkg_list_group_meta``."""
+    _pkg = (seeds or {}).get('pkg', {}) or {}
+    _meta = (seeds or {}).get('pkg_meta', {}) or {}
+    _lines: list = []
+    for _group, _names in _pkg.items():
+        _lines.append(f'[{_group}]')
+        _desc = (_meta.get(_group, {}) or {}).get('description')
+        if _desc:
+            _lines.append(f'## Description: {_desc}')
+        _lines.extend(_names)
+        _lines.append('')
+    return ('\n'.join(_lines).rstrip('\n') + '\n') if _lines else ''
+
+
+def render_flat_list(names: list) -> str:
+    """Render a flat list file (pool/live/installer) — one seed per line."""
+    return ('\n'.join(names) + '\n') if names else ''
+
+
+def restore_list_files(config: 'Any', lock: dict) -> 'Dict[str, str]':
+    """Regenerate config/{pkg,live,installer,pool}.list from a lockfile's
+    seeds (the authoritative selection).  Returns {label: path} for the files
+    written.  IO — caller confirms with the operator first."""
+    _seeds = (lock or {}).get('seeds', {}) or {}
+    _written: 'Dict[str, str]' = {}
+    _targets = [
+        ('pkg', getattr(config, 'pkglist_path', ''), render_pkg_list(_seeds)),
+        ('live', getattr(config, 'livelist_path', ''),
+         render_flat_list(_seeds.get('live', []))),
+        ('installer', getattr(config, 'installerlist_path', ''),
+         render_flat_list(_seeds.get('installer', []))),
+        ('pool', getattr(config, 'poollist_path', ''),
+         render_flat_list(_seeds.get('pool', []))),
+    ]
+    for _label, _path, _text in _targets:
+        if not _path:
+            continue
+        utils._atomic_write_bytes(_path, _text.encode('utf-8'))
+        _written[_label] = _path
+    return _written
