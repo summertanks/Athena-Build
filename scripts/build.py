@@ -1478,6 +1478,13 @@ def main(banner: str) -> None:
     tui.register_command('get',       session.cmd_get,       'Get:        \tget [param] — show current config value(s)')
     tui.register_command('print',     session.cmd_print,     'Print:      \tprint build state — try `print help`')
 
+    # Status tab (curses TUI only): a live build-environment snapshot
+    # refreshed after every command.  Cli / API backends have no tabs, so
+    # gate on the method's presence.
+    if hasattr(tui_inst, 'set_status_provider'):
+        import print_commands as _pc
+        tui_inst.set_status_provider(lambda: _pc.status_lines(session))
+
     console.print(asciiart_logo, tui.COLOR_ERROR)
     console.print("Starting Athena Build System...", tui.COLOR_HIGHLIGHT)
     console.print(f"\tArch\t\t\t{config.arch}")

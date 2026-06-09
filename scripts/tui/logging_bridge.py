@@ -22,17 +22,22 @@ logging.addLevelName(DISPLAY, 'DISPLAY')
 
 
 def _tab_for_logger(name: str) -> str:
-    """athena.<stage> -> '<stage>'; bare athena / unknown -> 'build'.
+    """All log records land in the single 'log' tab (three-tab UX:
+    console / log / status).  The per-stage origin is preserved as a
+    bracketed prefix on the message (see `_stage_prefix`), so a single
+    scrollback still shows which stage emitted each line."""
+    return 'log'
 
-    The 'build' fallback covers cross-stage helper modules (signing,
-    apt_repo, repo_audit, persistence, cli) that don't bind to a
-    specific pipeline stage — their records live with the orchestrator's
-    tab since build.py drives the dispatch.  utils.py is its own
-    case: rerouted to 'athena.cache' explicitly since download / sha256
-    / snapshot resolution all happen at cache-build time."""
+
+def _stage_prefix(name: str) -> str:
+    """`athena.<stage>` -> '[<stage>] '; bare athena / unknown -> ''.
+
+    Prepended to every log line now that all stages share one tab, so
+    the operator can still tell cache from build from chroot at a glance."""
     if name.startswith(LOGGER_NAME + '.'):
-        return name[len(LOGGER_NAME) + 1:].split('.', 1)[0]
-    return 'build'
+        _stage = name[len(LOGGER_NAME) + 1:].split('.', 1)[0]
+        return f'[{_stage}] '
+    return ''
 
 
 class _LogTabHandler(logging.Handler):
@@ -55,7 +60,7 @@ class _LogTabHandler(logging.Handler):
             b = self._backend
             if b is None:
                 return
-            msg = self.format(record)
+            msg = _stage_prefix(record.name) + self.format(record)
             if hasattr(b, 'post'):
                 if record.levelno >= logging.ERROR:
                     sev = SEVERITY_ERROR

@@ -13951,7 +13951,7 @@ def test_v2_state_append_and_scroll():
     from tui.state import State
 
     s = State()
-    assert 'console' in s.tabs and 'cache' in s.tabs
+    assert 'console' in s.tabs and 'log' in s.tabs
     assert s.active_tab_name() == 'console'
 
     # At-bottom: scroll stays 0 after append.
@@ -13964,9 +13964,9 @@ def test_v2_state_append_and_scroll():
     assert s.tabs['console'].scroll_offset == 7
 
     # Long line wraps to 3 rows at w=10; offset increments by 3.
-    s.tabs['cache'].scroll_offset = 1
-    s.tabs['cache'].append([('x' * 25, 0)], width=10)
-    assert s.tabs['cache'].scroll_offset == 1 + 3
+    s.tabs['log'].scroll_offset = 1
+    s.tabs['log'].append([('x' * 25, 0)], width=10)
+    assert s.tabs['log'].scroll_offset == 1 + 3
 
 
 def test_v2_cmdline_edit_and_history():
@@ -14059,12 +14059,12 @@ def test_v2_dispatcher_tab_switch_by_index():
     d = Dispatcher(_v2_fake_renderer())
     threading.Thread(target=d.run, daemon=True).start()
     time.sleep(0.02)
-    d.post(KeyEvent('KEY_F(2)'))   # cache (index 1, post log-tab removal)
+    d.post(KeyEvent('KEY_F(2)'))   # log (index 1)
     time.sleep(0.05)
-    assert d.state.active_tab_name() == 'cache'
+    assert d.state.active_tab_name() == 'log'
     d.post(KeyEvent('KEY_F(99)'))  # out of range — no change
     time.sleep(0.05)
-    assert d.state.active_tab_name() == 'cache'
+    assert d.state.active_tab_name() == 'log'
     d.post(Shutdown(0))
 
 
@@ -14136,8 +14136,9 @@ def test_v2_dispatcher_adaptive_idle_no_widgets():
     d.post(Shutdown(0))
 
 
-def test_v2_logging_bridge_routes_by_stage():
-    """LogTabHandler emits LogEvents tagged with the right tab."""
+def test_v2_logging_bridge_consolidates_to_log_tab_with_stage_prefix():
+    """Three-tab UX: every log record lands in the single 'log' tab, with
+    the originating stage preserved as a bracketed prefix on the message."""
     import sys, threading, time, logging as _logging
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from tui.dispatcher import Dispatcher
@@ -14154,17 +14155,62 @@ def test_v2_logging_bridge_routes_by_stage():
     _logging.getLogger('athena.iso').error('iso stage')
     time.sleep(0.1)
 
-    build_buf = [t for t, _ in d.state.tabs['build'].buffer]
-    cache_buf = [t for t, _ in d.state.tabs['cache'].buffer]
-    iso_buf   = [t for t, _ in d.state.tabs['iso'].buffer]
-    # bare 'athena' routes to the 'build' fallback (post log-tab removal).
-    assert any('plain athena' in line for line in build_buf), build_buf
-    assert any('cache stage'  in line for line in cache_buf), cache_buf
-    assert any('iso stage'    in line for line in iso_buf), iso_buf
-
-    # Bare athena should NOT have leaked into cache/iso.
-    assert not any('plain athena' in line for line in cache_buf)
+    log_buf = [t for t, _ in d.state.tabs['log'].buffer]
+    # all three in the single log tab, stages prefixed
+    assert any('plain athena' in line for line in log_buf), log_buf
+    assert any('[cache] cache stage' in line for line in log_buf), log_buf
+    assert any('[iso] iso stage' in line for line in log_buf), log_buf
+    # bare athena gets no prefix
+    assert not any('[athena]' in line for line in log_buf), log_buf
     d.post(Shutdown(0))
+
+
+def test_status_lines_compact_snapshot():
+    """print_commands.status_lines renders the compact status-tab snapshot:
+    header + per-flag pipeline (✓/·) + artifact locations."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import print_commands
+
+    class _Flags:
+        cache_ready = True
+        dep_check_ready = False
+        download_ready = True
+        build_container_ready = False
+        source_build_ready = True
+        signing_key_verified = False
+        chroot_ready = False
+        chroot_verified = False
+        iso_live_ready = False
+        iso_disk_ready = False
+        chroot_installer_ready = False
+        iso_installer_ready = False
+
+    class _Cfg:
+        build_mode = 'distribution'
+        build_distribution = 'Asgard'
+        build_version = '1'
+        build_codename = 'thor'
+        snapshot_enabled = True
+        snapshot_timestamp_config = '20260602T173733Z'
+        dir_image = 'image'
+        arch = 'amd64'
+
+    class _Sess:
+        config = _Cfg()
+        flags = _Flags()
+        cache = None
+        dep_tree = None
+
+    _rows = print_commands.status_lines(_Sess())
+    _text = '\n'.join(_t for _t, _ in _rows)
+    assert 'MODE: distribution' in _text
+    assert '20260602T173733Z (pinned)' in _text
+    assert '[✓] cache_build' in _text      # ✓ for a ready flag
+    assert '[·] dep_parse' in _text         # · for a not-ready flag
+    assert '[✓] source_build' in _text
+    assert 'ISO live' in _text and 'Disk image' in _text
+    assert 'athena-1-amd64.iso' in _text
+    assert 'asgard-1-amd64.qcow2' in _text
 
 
 def test_render_failure_one_shot_capture_writes_post_mortem():
@@ -14276,10 +14322,10 @@ def test_logging_bridge_splits_multiline_records():
     )
     time.sleep(0.1)
 
-    chroot_buf = [t for t, _ in d.state.tabs['chroot'].buffer]
+    chroot_buf = [t for t, _ in d.state.tabs['log'].buffer]
     # Each \n-separated line should be its own buffer entry — and no
     # entry should contain a literal \n character.
-    assert any(line == 'Selecting previously unselected package libc6-udeb.'
+    assert any(line == '[chroot] Selecting previously unselected package libc6-udeb.'
                for line in chroot_buf), chroot_buf
     assert any(line.startswith('Preparing to unpack ') for line in chroot_buf), chroot_buf
     assert any(line == 'Unpacking libc6-udeb (2.36-9) ...'
@@ -30681,7 +30727,8 @@ def main() -> int:
         test_v2_dispatcher_tab_switch_by_index,
         test_v2_dispatcher_progressbar_widget_lifecycle,
         test_v2_dispatcher_adaptive_idle_no_widgets,
-        test_v2_logging_bridge_routes_by_stage,
+        test_v2_logging_bridge_consolidates_to_log_tab_with_stage_prefix,
+        test_status_lines_compact_snapshot,
         # COMP-06 — package-set selector
         test_select_loads_groups_all_selected,
         test_select_toggle_and_save_round_trip,

@@ -333,7 +333,7 @@ class Renderer:
         bold = bar | curses.A_BOLD
         _safe_addstr(self._footer, 1, 0, ' ' * max_x, bar)
 
-        hint    = '  F1-F6: tab  PgUp/Dn: scroll'
+        hint    = '  F1-F3: tab  PgUp/Dn: scroll'
         right_x = max_x
         if len(hint) + 4 < max_x:
             right_x -= len(hint)
@@ -348,8 +348,9 @@ class Renderer:
         _safe_addstr(self._footer, 1, 0, banner_text, bold)
 
         x = len(banner_text) + 1
-        for name, tab in state.tabs.items():
-            tag = f'[{name}]' if tab.selected else f' {name} '
+        for _i, (name, tab) in enumerate(state.tabs.items(), start=1):
+            _lbl = f'F{_i}: {name.capitalize()}'
+            tag = f'[{_lbl}]' if tab.selected else f' {_lbl} '
             if x + len(tag) + 1 >= right_x:
                 break
             attr = bold if tab.selected else bar
