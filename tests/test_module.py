@@ -31299,6 +31299,130 @@ def test_obsolete_cascade_audits_skip_and_no_findings():
     assert _findings == [], _findings
 
 
+def test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent():
+    """LEDGER-01 Chunk 6: within a (binary, arch) group only the older
+    version(s) obsolete; same version across DIFFERENT arches never
+    obsolete each other; once obsoleted the second run emits nothing."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    from coord import publish as _pub
+    def _claim(seq, ver, fn):
+        return _sch.new_claim(
+            builder='b1', seq=seq, package='foo', intended_version='1.0',
+            built_version=ver, filename=fn, sha256='aa', size=1,
+            snapshot='s', built_at='t',
+            claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _old = _claim(5, '1.0-1+asg1u1', 'foo_1.0-1+asg1u1_amd64.deb')
+    _new = _claim(6, '1.0-1+asg1u2', 'foo_1.0-1+asg1u2_amd64.deb')
+    # same version, different arch — must NOT obsolete each other
+    _all_a = _claim(7, '2.0-1', 'bar_2.0-1_all.deb')
+    _amd_a = _claim(8, '2.0-1', 'bar_2.0-1_amd64.deb')
+    _by = {'b1': [_old, _new, _all_a, _amd_a]}
+    _obs = _pub.emit_obsolescence_claims(
+        builder_id='b1', by_builder=_by, snapshot_pin='snap',
+        built_at='now', start_seq=8)
+    assert len(_obs) == 1, _obs
+    assert _obs[0]['filename'] == 'foo_1.0-1+asg1u1_amd64.deb'
+    assert _obs[0]['claim_state'] == _sch.CLAIM_STATE_OBSOLETE
+    assert _obs[0]['obsoletes_seq'] == 5 and _obs[0]['seq'] == 9
+    # idempotent: append the obsolescence, re-run → nothing new
+    _obs[0]['sig'] = 'x'
+    _by['b1'].append(_obs[0])
+    assert _pub.emit_obsolescence_claims(
+        builder_id='b1', by_builder=_by, snapshot_pin='snap',
+        built_at='now', start_seq=9) == []
+    # a peer's claims are never touched
+    assert _pub.emit_obsolescence_claims(
+        builder_id='b2', by_builder=_by, snapshot_pin='snap',
+        built_at='now', start_seq=0) == []
+
+
+def test_remote_publish_on_published_only_on_full_success():
+    """on_published fires with the published package set ONLY after pool +
+    jsonl + coord-head pushes ALL succeed; any failure path skips it."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.store as _store
+    import coord.identity as _identity
+    import coord.reconcile as _reconcile
+    from unittest.mock import patch
+
+    def _run(jsonl_ok: bool):
+        with tempfile.TemporaryDirectory() as _td:
+            class _Cfg:
+                dir_coord = _td
+                dir_coord_fetched = os.path.join(_td, 'fetched')
+                dir_coord_claims = os.path.join(_td, 'claims')
+                dir_log = _td
+                dir_repo = os.path.join(_td, 'repo')
+                dir_gnupg = _td
+            os.makedirs(_Cfg.dir_coord_fetched)
+            os.makedirs(_Cfg.dir_coord_claims)
+            _bin = os.path.join(_Cfg.dir_repo, 'dists/thor/main/binary-amd64')
+            os.makedirs(_bin)
+            open(os.path.join(_bin, 'ok_1.0_amd64.deb'), 'wb').write(b'x')
+            _inrelease = os.path.join(_td, 'InRelease')
+            open(_inrelease, 'wb').write(b'Date: D\n')
+            # jsonl must exist for the Step 7 push branch to run
+            open(os.path.join(_Cfg.dir_coord_claims, 'alice.jsonl'),
+                 'wb').write(b'')
+            _head = {'v': 2, 'inrelease_sha256': 'a' * 64, 'snapshot': {},
+                     'last_seqs': {}, 'head_time': 'T',
+                     'neighbours': ['file:///srv/m1']}
+            _pending = [{'builder': 'alice', 'package': 'ok',
+                         'intended_version': '1', 'built_version': '1',
+                         'filename': 'ok_1.0_amd64.deb', 'sha256': 'x' * 64,
+                         'size': 0, 'snapshot': 'S', 'built_at': 'T',
+                         'claim_state': 'pending', 'seq': 0, 'v': 1}]
+            _seen: 'list[set]' = []
+            with patch.object(_transport, 'remote_flock_acquire',
+                              return_value=object()), \
+                 patch.object(_transport, 'remote_flock_release'), \
+                 patch.object(_transport, 'pull_remote_coord',
+                              return_value=(True, '')), \
+                 patch.object(_head_mod, 'read_coord_head',
+                              return_value=_head), \
+                 patch.object(_identity, 'load_keyring', return_value={}), \
+                 patch.object(_store, 'read_all_claims', return_value={}), \
+                 patch.object(_store, 'max_seq', return_value=0), \
+                 patch.object(_store, 'append_claim',
+                              side_effect=lambda *a, **k: 1), \
+                 patch.object(_reconcile, 'publish_halt_reason',
+                              return_value=None), \
+                 patch.object(_transport, 'push_single_deb',
+                              return_value=(True, '')), \
+                 patch.object(_transport, 'push_jsonl',
+                              return_value=(jsonl_ok, 'x')), \
+                 patch.object(_head_mod, 'write_coord_head',
+                              return_value=True), \
+                 patch.object(_transport, 'push_coord_head',
+                              return_value=(True, '')), \
+                 patch.object(_publish, 'generate_pending_claims',
+                              return_value=_pending):
+                _ok, _detail = _publish.remote_publish(
+                    builder_id='alice', config=_Cfg(),
+                    private_key_path='/fake/priv',
+                    public_key_path='/fake/pub',
+                    snapshot_pin='20260601T000000Z',
+                    remote_coord_spec='file:///srv/m1-coord',
+                    pool_remote_spec='file:///srv/m1',
+                    inrelease_local_path=_inrelease,
+                    read_build_record=lambda *_: None,
+                    get_sha256=lambda *_: '',
+                    local_mirror_urls=['file:///srv/m1'],
+                    ssh_host=None,
+                    on_published=lambda pkgs: _seen.append(pkgs),
+                )
+            return _ok, _seen
+    _ok, _seen = _run(jsonl_ok=True)
+    assert _ok and _seen == [{'ok'}], (_ok, _seen)
+    _ok, _seen = _run(jsonl_ok=False)
+    assert not _ok and _seen == [], (_ok, _seen)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31988,6 +32112,9 @@ def main() -> int:
         test_project_owners_obsolete_retains_ownership,
         # LEDGER-01 Chunk 5 — obsolete cascade across consumers
         test_obsolete_cascade_audits_skip_and_no_findings,
+        # LEDGER-01 Chunk 6 — publish Step 6c + on_published
+        test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent,
+        test_remote_publish_on_published_only_on_full_success,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
