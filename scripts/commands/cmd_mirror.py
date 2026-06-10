@@ -1695,11 +1695,18 @@ class MirrorCommandsMixin(SessionState):
                     _closure_srcs = set(
                         (_lock.get('closure') or {}).get('srcs', {}))
                     _coh_findings = _sl.audit_selection_coherence(
-                        _closure_srcs, _by_builder, _our_bid)
+                        _closure_srcs, _by_builder, _our_bid,
+                        buildlog_dir=os.path.join(
+                            self.config.dir_log, 'build'),
+                        read_build_record=utils.read_build_record)
                     for _sev, _kind, _msg in _coh_findings:
-                        console.print(f"  {_sev:8s}  {_kind}: {_msg}",
-                                      tui.COLOR_ERROR)
-                    if _coh_findings:
+                        console.print(
+                            f"  {_sev:8s}  {_kind}: {_msg}",
+                            tui.COLOR_ERROR if _sev == 'CRITICAL'
+                            else tui.COLOR_WARNING)
+                    # Pending deprecations (WARNING) are the expected
+                    # accept→publish window — only CRITICALs fail the audit.
+                    if any(_f[0] == 'CRITICAL' for _f in _coh_findings):
                         _all_ok = False
                 elif _lstatus in (_sl.STATUS_BADSIG, _sl.STATUS_MALFORMED):
                     console.print(

@@ -379,14 +379,24 @@ def closure_matches_lock(
 
 def audit_selection_coherence(
     closure_srcs: 'set', by_builder: 'Dict[str, list]', builder_id: str,
+    buildlog_dir: str = '',
+    read_build_record: 'Optional[Any]' = None,
 ) -> 'list':
     """Coherence check: the lockfile selection ⟷ our published claims.
 
-    Returns findings ``[(severity, kind, message)]``.  CRITICAL when we still
-    OWN+PUBLISH a file whose SOURCE is no longer selected and it was NOT
-    deprecated — the signed selection and the mirror disagree (a source drop
-    that never reached `mirror publish`, or a publish that didn't emit the
-    deprecation).
+    For a file we still OWN+PUBLISH whose SOURCE is no longer selected:
+
+      * LEDGER-01 — when the source's build record says
+        ``selection='deprecated'`` (the operator accepted the removal at
+        `cache select accept`, intent recorded locally), this is the
+        EXPECTED window before the next publish propagates it →
+        **WARNING** ``selection_deprecation_pending``.
+      * otherwise the signed selection and the mirror disagree with NO
+        recorded intent (a drop that bypassed accept, or a publish that
+        failed to emit) → **CRITICAL** ``selection_claim_not_in_closure``.
+
+    Pass ``buildlog_dir`` + ``read_build_record`` to enable the pending
+    refinement; without them every mismatch stays CRITICAL (back-compat).
 
     Keyed on the SOURCE (the claim's `package`), NOT the binary name: a source
     build publishes ALL its binaries (-dev/-doc/-udeb/-source variants), most
@@ -397,6 +407,17 @@ def audit_selection_coherence(
     from coord import store as _store
     _owners = _store.project_owners(by_builder)
     _findings: list = []
+    _pending_cache: 'Dict[str, bool]' = {}
+
+    def _intent_recorded(_src: str) -> bool:
+        if read_build_record is None or not buildlog_dir:
+            return False
+        if _src not in _pending_cache:
+            _rec = read_build_record(buildlog_dir, _src)
+            _pending_cache[_src] = bool(
+                _rec and _rec.get('selection') == 'deprecated')
+        return _pending_cache[_src]
+
     for _fn in sorted(_owners):
         _owner = _owners[_fn]
         if _owner.get('builder') != builder_id:
@@ -405,9 +426,16 @@ def audit_selection_coherence(
             continue
         _src = str((_owner.get('claim') or {}).get('package') or '')
         if _src and _src not in closure_srcs:
-            _findings.append((
-                'CRITICAL', 'selection_claim_not_in_closure',
-                f"{_fn}: owned+published but its source {_src!r} is no longer "
-                "selected and not deprecated — `mirror publish` to release it, "
-                "or `cache select` to re-add it"))
+            if _intent_recorded(_src):
+                _findings.append((
+                    'WARNING', 'selection_deprecation_pending',
+                    f"{_fn}: source {_src!r} deprecated at accept (intent "
+                    "recorded on its build record) — pending `mirror "
+                    "publish` to propagate the release"))
+            else:
+                _findings.append((
+                    'CRITICAL', 'selection_claim_not_in_closure',
+                    f"{_fn}: owned+published but its source {_src!r} is no "
+                    "longer selected and not deprecated — `mirror publish` "
+                    "to release it, or `cache select` to re-add it"))
     return _findings
