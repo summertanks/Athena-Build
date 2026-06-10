@@ -755,7 +755,7 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
         _packages.update(local_state.packages)
     for _bid, _claims in (remote_by_builder or {}).items():
         for _c in _claims:
-            if _c.get('claim_state') in ('retracted', 'deprecated'):
+            if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
                 continue
             _pkg = str(_c.get('package') or '')
             _ver = str(_c.get('built_version') or '')
@@ -992,6 +992,20 @@ def audit_packages_chain(
     return _index, _findings
 
 
+def _superseded_seqs(claims: 'list[dict]') -> 'set[int]':
+    """Per-builder supersession fold: the seqs that a retraction /
+    deprecation / obsolescence line TARGETS.  A claim whose seq is in this
+    set has been replaced by its successor record and must not be audited
+    as a live assertion (its file may legitimately be gone)."""
+    _out: 'set[int]' = set()
+    for _c in claims:
+        for _field in ('retracts_seq', 'deprecates_seq', 'obsoletes_seq'):
+            _t = _c.get(_field)
+            if isinstance(_t, int):
+                _out.add(_t)
+    return _out
+
+
 def audit_claims_vs_packages(
     by_builder: 'dict[str, list[dict]]',
     packages_index: 'dict[str, dict]',
@@ -1011,8 +1025,14 @@ def audit_claims_vs_packages(
     _findings: 'list[tuple[str, str, str]]' = []
     _seen_pairs: 'set[tuple[str, str]]' = set()
     for _bid, _claims in by_builder.items():
+        _superseded = _superseded_seqs(_claims)
         for _c in _claims:
-            if _c.get('claim_state') in ('retracted', 'deprecated'):
+            if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
+                continue
+            # A published claim a later deprecation/obsolescence targets is
+            # no longer the live assertion for its filename — skip it (the
+            # successor line above already carries the current state).
+            if int(_c.get('seq', 0)) in _superseded:
                 continue
             _fn = str(_c.get('filename') or '')
             if not _fn:
@@ -1413,8 +1433,13 @@ def audit_own_claims_on_disk(
             return True
         return _on_disk_sha in set(_oh.values())
 
+    _superseded = _superseded_seqs(_claims)
     for _c in _claims:
-        if _c.get('claim_state') in ('retracted', 'deprecated'):
+        if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
+            continue
+        # Skip claims a later deprecation/obsolescence superseded — the
+        # old file may legitimately be pruned from the local repo.
+        if int(_c.get('seq', 0)) in _superseded:
             continue
         if _c.get('republished_from'):
             continue

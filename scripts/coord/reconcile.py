@@ -345,8 +345,14 @@ def detect_hash_conflicts(
                 _d = _c.get('deprecates_seq')
                 if isinstance(_d, int):
                     _retracted.add(_d)
+            elif _c.get('claim_state') == _schema.CLAIM_STATE_OBSOLETE:
+                _o = _c.get('obsoletes_seq')
+                if isinstance(_o, int):
+                    _retracted.add(_o)
         for _c in _claims:
-            if _c.get('claim_state') in _schema.INACTIVE_CLAIM_STATES:
+            # PRESENCE_SKIP: an obsolete (old-version) file may be pruned —
+            # don't scan an identity nobody asserts anymore.
+            if _c.get('claim_state') in _schema.PRESENCE_SKIP_CLAIM_STATES:
                 continue
             if int(_c.get('seq', 0)) in _retracted:
                 continue
@@ -448,7 +454,9 @@ def audit_repo(
     _fn_owners: Dict[str, set] = {}
     for _bid, _claims in by_builder.items():
         for _c in _claims:
-            if _c.get('claim_state') in _schema.INACTIVE_CLAIM_STATES:
+            # PRESENCE_SKIP: an obsolete claim is not an asserted ownership
+            # for uniqueness purposes — avoids noise once old files prune.
+            if _c.get('claim_state') in _schema.PRESENCE_SKIP_CLAIM_STATES:
                 continue
             _fn = _c.get('filename')
             if isinstance(_fn, str) and _fn:
