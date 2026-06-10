@@ -673,6 +673,11 @@ BUILD_RECORD_SUFFIX = '.build.json'
 # non-terminal phase 'selected', which classify_build_record maps to
 # 'missing' so every phase-gate consumer (publish claims, check_build,
 # audits) behaves exactly as if the record did not exist.
+# TRANSIENT v4 field `prior_build` {built_version, outputs}: stashed by
+# preserve_lifecycle at the entry-phase rewrite (which resets the build
+# fields) and resolved by roll_prior_build_history at build completion —
+# version superseded → 'obsolete' history roll; same-version rebuild →
+# stash dropped.  Lingers only across an unfinished rebuild.
 _BUILD_RECORD_LEGACY_VERSIONS = frozenset({1, 2, 3})
 _BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
 
@@ -1011,13 +1016,62 @@ def preserve_lifecycle(old: 'Optional[dict]', new: dict) -> dict:
     selection/history layer the parse wrote.  Copy every LIFECYCLE_FIELD
     present on `old` into `new` unless `new` explicitly set it.  Returns
     `new` (mutated copy semantics match callers building a fresh dict).
+
+    Also STASHES the prior build episode as the transient `prior_build`
+    field ({built_version, outputs}) — the entry write resets
+    built_version/outputs, so this is the only carrier that lets the
+    done-phase decide whether the new build SUPERSEDED the old version
+    (roll an 'obsolete' history entry via roll_prior_build_history) or
+    merely rebuilt the same one (drop the stash).  An unresolved stash
+    from an earlier failed rebuild is carried forward unchanged.
     """
     if old is None:
         return new
     for _f in LIFECYCLE_FIELDS:
-        if _f in old and _f not in new:
+        if _f not in old:
+            continue
+        # Carry old when new lacks the field OR only has the empty
+        # baseline a fresh new_build_record seeds (history=[]) — a
+        # creator never intends the baseline to ERASE the lived layer.
+        if _f not in new or not new[_f]:
             new[_f] = old[_f]
+    if 'prior_build' not in new:
+        if old.get('built_version'):
+            new['prior_build'] = {
+                'built_version': old.get('built_version'),
+                'outputs': list(old.get('outputs') or []),
+            }
+        elif old.get('prior_build'):
+            new['prior_build'] = old['prior_build']
     return new
+
+
+def roll_prior_build_history(buildlog_dir: str, package: str,
+                             new_built_version: 'Optional[str]') -> bool:
+    """LEDGER-01: resolve a `prior_build` stash at build completion.
+
+    If the prior episode's built_version differs from the new one (a
+    snapshot move or +asg bump superseded it), roll an 'obsolete'
+    history entry carrying the OLD built_version/outputs.  A same-version
+    rebuild just drops the stash.  Returns True iff a roll happened.
+    Best-effort — callers wrap like _record_phase (never mask a build).
+    """
+    _rec = read_build_record(buildlog_dir, package)
+    if _rec is None:
+        return False
+    _pb = _rec.pop('prior_build', None)
+    if not isinstance(_pb, dict) or not _pb:
+        return False
+    _old_v = _pb.get('built_version')
+    _rolled = False
+    if _old_v and str(_old_v) != str(new_built_version or ''):
+        roll_lifecycle_history(
+            _rec, state='obsolete',
+            extra={'built_version': _old_v,
+                   'outputs': list(_pb.get('outputs') or [])})
+        _rolled = True
+    write_build_record(buildlog_dir, _rec)
+    return _rolled
 
 
 def roll_lifecycle_history(record: dict, *, state: str,

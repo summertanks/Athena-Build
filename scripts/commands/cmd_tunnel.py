@@ -221,13 +221,18 @@ class TunnelCommandsMixin(SessionState):
         _strip_events: 'list[tuple[str, str]]' = []
         _stamp_events: 'list[tuple[str, str, str]]' = []
         try:
+            # LEDGER-01: the tunnel entry record RECREATES the file —
+            # carry the lifecycle layer (+ prior-build stash) through.
             utils.write_build_record(
                 _buildlog_path,
-                utils.new_build_record(
-                    package=src_pkg.package,
-                    intended_version=str(src_pkg.version),
-                    patch_set_hash='',
-                    component=_comp,
+                utils.preserve_lifecycle(
+                    utils.read_build_record(_buildlog_path, src_pkg.package),
+                    utils.new_build_record(
+                        package=src_pkg.package,
+                        intended_version=str(src_pkg.version),
+                        patch_set_hash='',
+                        component=_comp,
+                    ),
                 ),
             )
         except OSError as _e:
@@ -428,6 +433,12 @@ class TunnelCommandsMixin(SessionState):
         _outputs_sorted = sorted(_final_paths.keys()) if _final_paths \
             else sorted(_upstream_files)
         try:
+            # LEDGER-01: resolve the prior-build stash — a re-tunnel at a
+            # new version rolls the old episode into history as 'obsolete'.
+            if _success:
+                utils.roll_prior_build_history(
+                    _buildlog_path, src_pkg.package,
+                    utils.strip_nmu_suffix(str(src_pkg.version)))
             utils.update_build_record(
                 _buildlog_path, src_pkg.package,
                 phase=('tunneled' if _success else 'failed'),

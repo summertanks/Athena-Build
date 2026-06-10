@@ -453,6 +453,12 @@ class BuildContainer:
         """
         try:
             if initial is not None:
+                # LEDGER-01: the entry-phase write RECREATES the record;
+                # carry the lifecycle layer (selection/history/...) the
+                # parse stamped on the prior record through the rewrite.
+                initial = utils.preserve_lifecycle(
+                    utils.read_build_record(self.buildlog_path, package),
+                    initial)
                 utils.write_build_record(self.buildlog_path, initial)
             else:
                 utils.update_build_record(self.buildlog_path, package, **fields)
@@ -1247,6 +1253,17 @@ class BuildContainer:
                 # Also refresh the `outputs` list to the post-normalize
                 # filenames — the segregated-phase write captured
                 # pre-strip names which no longer exist on disk.
+                # LEDGER-01: resolve the prior-build stash first — when the
+                # new built_version supersedes the old (snapshot move /
+                # +asg bump) the old episode rolls into history as
+                # 'obsolete'; a same-version rebuild just drops the stash.
+                try:
+                    utils.roll_prior_build_history(
+                        self.buildlog_path, src_pkg.package, _built_version)
+                except OSError as _e:
+                    logger.warning(
+                        f"prior-build history roll failed for "
+                        f"{src_pkg.package}: {_e}")
                 self._record_phase(
                     src_pkg.package, phase='done',
                     built_version=_built_version,
