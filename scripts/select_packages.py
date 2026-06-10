@@ -1,10 +1,13 @@
 """COMP-06 — interactive package-set selector TUI.
 
-Lets the operator toggle packages in `config/pkg.list` (and add new
-ones from the apt cache) without hand-editing the file.  Runs in a
-dedicated `select` tab; the dispatcher routes keystrokes to this
-controller's `handle_key` while that tab is active (F-keys still
-switch tabs, so the operator can always leave).
+Lets the operator toggle packages in `config/pkg.list` AND `config/pool.list`
+(and add new ones from the apt cache) without hand-editing the files.  The
+pool.list tier appears as the reserved `(pool)` group at the end of the list —
+toggle/add/drop work identically, and save routes pool entries to pool.list
+(comment-preserving) and the rest to pkg.list.  Runs in a dedicated `select`
+tab; the dispatcher routes keystrokes to this controller's `handle_key` while
+that tab is active (F-keys still switch tabs, so the operator can always
+leave).
 
 Key bindings (while the `select` tab is active):
     ↑ / ↓        move the row cursor
@@ -40,6 +43,13 @@ import utils
 _HEADER = 'header'
 _PKG    = 'pkg'
 
+# Reserved pseudo-group key for the pool.list tier.  pool.list is a FLAT
+# file (no INI sections), but we surface it inside the same selector as one
+# more group so the operator toggles/adds/drops pool-only packages with the
+# identical UI.  On save it routes to config/pool.list (not pkg.list).  The
+# parenthesised name can't collide with a real pkg.list `[group]` header.
+POOL_GROUP = '(pool)'
+
 
 class _Row:
     """One display row — a group header or a package entry."""
@@ -65,9 +75,11 @@ class SelectPackages:
         self._cache  = cache
         self._tui    = tui_inst
         self._path   = config.pkglist_path
+        self._poolpath = config.poollist_path
 
         # Editable model: group → ordered list of [name, selected].
         # Selection defaults True for every name already in pkg.list.
+        # The reserved POOL_GROUP holds config/pool.list entries.
         self._groups: Dict[str, List[List]] = {}
         self._meta:   Dict[str, Dict[str, str]] = {}
         self._load_model()
@@ -102,6 +114,12 @@ class SelectPackages:
         self._meta = utils.parse_pkg_list_group_meta(self._path)
         for gname, names in groups.items():
             self._groups[gname] = [[n, True] for n in names]
+        # Append the pool.list tier as the reserved POOL_GROUP (flat file →
+        # one synthetic group, rendered last).
+        self._groups[POOL_GROUP] = [[n, True] for n in _read_flat(self._poolpath)]
+        self._meta[POOL_GROUP] = {
+            'description': 'config/pool.list — ships in /cdrom/pool, '
+                           'never installed in a chroot'}
 
     def _rows(self) -> List[_Row]:
         """Flatten the model into display rows (header + entries)."""
@@ -228,7 +246,7 @@ class SelectPackages:
         total_sel = sum(1 for es in self._groups.values() for _n, s in es if s)
         total_all = sum(len(es) for es in self._groups.values())
         out.append((f'  Package selector — {total_sel}/{total_all} selected'
-                    f'   (config/pkg.list)', info_a))
+                    f'   (pkg.list + pool.list)', info_a))
 
         visible = rows[self._scroll:self._scroll + height]
         for i, row in enumerate(visible):
@@ -448,9 +466,18 @@ class SelectPackages:
         self._render()
 
     def _save(self) -> None:
-        write_pkg_list(self._path, self._groups, self._meta)
+        # Route the reserved POOL_GROUP to pool.list; everything else is
+        # pkg.list.  Both writers do a minimal, comment-preserving diff.
+        _pkg_groups = {g: e for g, e in self._groups.items() if g != POOL_GROUP}
+        _pkg_meta = {g: m for g, m in self._meta.items() if g != POOL_GROUP}
+        write_pkg_list(self._path, _pkg_groups, _pkg_meta)
+        _saved = self._path
+        if POOL_GROUP in self._groups:
+            _pool_sel = [n for n, s in self._groups[POOL_GROUP] if s]
+            write_flat_list(self._poolpath, _pool_sel)
+            _saved = f'{self._path} + {self._poolpath}'
         self._unsaved = False
-        self._tui.print(f'  select: saved {self._path}')
+        self._tui.print(f'  select: saved {_saved}')
         self._render()
 
     def _quit(self) -> None:
@@ -460,6 +487,53 @@ class SelectPackages:
         # Enter inline y/n confirm — handled by _handle_input_key.
         self._input_mode = 'quit'
         self._render()
+
+
+def _read_flat(path: str) -> List[str]:
+    """Ordered seed names from a flat list file (one per line, `#` comments
+    and blanks ignored).  Missing/unreadable → empty."""
+    out: List[str] = []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                s = line.strip()
+                if s and not s.startswith('#'):
+                    out.append(s)
+    except OSError:
+        return []
+    return out
+
+
+def write_flat_list(path: str, selected: List[str]) -> None:
+    """Serialise a flat list (pool.list) back to `path` — MINIMAL DIFF,
+    mirroring write_pkg_list's flat branch: re-read the original, keep every
+    comment/blank line and every still-selected package in place, drop
+    unselected packages, append newly-added selected packages at EOF.  Atomic.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            orig = f.read().splitlines()
+    except OSError:
+        orig = []
+    _sel_set = set(selected)
+    _seen: set = set()
+    out: List[str] = []
+    for line in orig:
+        s = line.strip()
+        if not s or s.startswith('#'):
+            out.append(line)
+        elif s in _sel_set:
+            out.append(line)
+            _seen.add(s)
+        # else: unselected package → drop
+    for n in selected:
+        if n not in _seen:
+            out.append(n)
+    body = '\n'.join(out).rstrip('\n') + '\n'
+    tmp = f'{path}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(body)
+    os.replace(tmp, path)
 
 
 def write_pkg_list(path: str, groups: Dict[str, List[List]],

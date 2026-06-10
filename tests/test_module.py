@@ -14464,7 +14464,7 @@ def _select_controller(tmp_pkglist_body: str):
         def prompt(self, message, masked=False, keymode=False): return ''
 
     from types import SimpleNamespace
-    cfg = SimpleNamespace(pkglist_path=path)
+    cfg = SimpleNamespace(pkglist_path=path, poollist_path=path + ".pool")
     ctl = select_packages.SelectPackages(cfg, _FakeCache(), _FakeTui())
     return ctl, ctl._tui, path
 
@@ -14472,9 +14472,11 @@ def _select_controller(tmp_pkglist_body: str):
 def test_select_loads_groups_all_selected():
     """Model loads every pkg.list entry as selected=True, groups in
     declaration order."""
+    import select_packages
     ctl, _t, _p = _select_controller(
         '[base]\n## Description: core\nbash\ncoreutils\n\n[devel]\ngit\nvim\n')
-    assert list(ctl._groups.keys()) == ['base', 'devel']
+    # pkg.list groups in declaration order, plus the reserved pool tier.
+    assert list(ctl._groups.keys()) == ['base', 'devel', select_packages.POOL_GROUP]
     assert [n for n, s in ctl._groups['base']] == ['bash', 'coreutils']
     assert all(s for _n, s in ctl._groups['base'])
     assert ctl._meta['base']['description'] == 'core'
@@ -14566,7 +14568,7 @@ def test_select_add_rejects_package_not_in_cache():
         def attr_color(self, i): return i << 8
         def print(self, msg, attr=None): self.prints.append(msg)
 
-    cfg = SimpleNamespace(pkglist_path=path)
+    cfg = SimpleNamespace(pkglist_path=path, poollist_path=path + ".pool")
     ft = _T()
     ctl = select_packages.SelectPackages(cfg, _Cache(), ft)
 
@@ -14679,8 +14681,11 @@ def test_select_flat_file_round_trips_without_header():
     no spurious [base] header injected."""
     import select_packages, utils
     ctl, _t, path = _select_controller('bash\ncoreutils\nvim\n')
-    assert list(ctl._groups.keys()) == ['base']
-    select_packages.write_pkg_list(path, ctl._groups, ctl._meta)
+    assert list(ctl._groups.keys()) == ['base', select_packages.POOL_GROUP]
+    # mirror _save: pkg.list gets only the non-pool groups
+    _pkg_only = {g: e for g, e in ctl._groups.items()
+                 if g != select_packages.POOL_GROUP}
+    select_packages.write_pkg_list(path, _pkg_only, ctl._meta)
     with open(path) as f:
         body = f.read()
     assert '[base]' not in body          # stayed flat
@@ -14736,7 +14741,7 @@ def test_select_approx_closure_sums_first_provider_bfs():
     path = os.path.join(d, 'pkg.list')
     with open(path, 'w') as f:
         f.write('[base]\na\n')
-    cfg = SimpleNamespace(pkglist_path=path)
+    cfg = SimpleNamespace(pkglist_path=path, poollist_path=path + ".pool")
 
     class _T:
         COLOR_HIGHLIGHT = 5
@@ -30811,6 +30816,64 @@ def test_selection_lock_closure_matches_lock_statuses():
         assert _st == _sl.COHERENCE_BADLOCK, _st
 
 
+def test_select_packages_pool_tier_load_save_and_comments():
+    """cache select extension: pool.list loads as the reserved (pool) group;
+    save routes pool entries to pool.list (comment-preserving) and the rest to
+    pkg.list, untouched."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import select_packages as _sp
+    import utils as _u
+    import types
+
+    class _T:   # minimal tui stub for _save → _render
+        def print(self, *a): pass
+        def set_tab_buffer(self, *a): pass
+        def viewport_rows(self): return 24
+        def attr_reverse(self): return 0
+        def attr_color(self, c): return 0
+
+    with tempfile.TemporaryDirectory() as _root:
+        _cfgdir = os.path.join(_root, 'config'); os.makedirs(_cfgdir)
+        _pkg = os.path.join(_cfgdir, 'pkg.list')
+        _pool = os.path.join(_cfgdir, 'pool.list')
+        open(_pkg, 'w').write('[base]\n## Description: Base\na\nb\n[desktop]\nx\n')
+        open(_pool, 'w').write('# header comment\ngrub-pc\nreportbug\n# trailing\n')
+        _cfg = types.SimpleNamespace(pkglist_path=_pkg, poollist_path=_pool)
+        _sel = _sp.SelectPackages(_cfg, None, _T())
+        # pool.list loaded as the reserved group
+        assert _sp.POOL_GROUP in _sel._groups, list(_sel._groups)
+        assert [n for n, s in _sel._groups[_sp.POOL_GROUP]] == ['grub-pc', 'reportbug']
+        # drop reportbug from the pool tier, then save
+        for _e in _sel._groups[_sp.POOL_GROUP]:
+            if _e[0] == 'reportbug':
+                _e[1] = False
+        _sel._save()
+        # pool.list: reportbug gone, comments + grub-pc preserved
+        _pool_txt = open(_pool).read()
+        assert '# header comment' in _pool_txt and '# trailing' in _pool_txt
+        assert 'grub-pc' in _pool_txt
+        assert 'reportbug' not in _pool_txt.replace('# ', '')  # not as a pkg line
+        # pkg.list untouched (groups + description intact)
+        assert _u.parse_pkg_list_groups(_pkg) == {'base': ['a', 'b'], 'desktop': ['x']}
+        assert _u.parse_pkg_list_group_meta(_pkg).get('base', {}).get('description') == 'Base'
+
+
+def test_select_packages_write_flat_list_minimal_diff():
+    """write_flat_list keeps comments + still-selected lines in place, drops
+    unselected, appends new at EOF."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import select_packages as _sp
+    with tempfile.TemporaryDirectory() as _root:
+        _p = os.path.join(_root, 'pool.list')
+        open(_p, 'w').write('# c1\nkeep-me\ndrop-me\n# c2\nalso-keep\n')
+        _sp.write_flat_list(_p, ['keep-me', 'also-keep', 'brand-new'])
+        _lines = open(_p).read().splitlines()
+        assert '# c1' in _lines and '# c2' in _lines        # comments preserved
+        assert 'drop-me' not in _lines                       # unselected dropped
+        assert _lines.index('keep-me') < _lines.index('# c2')  # order preserved
+        assert _lines[-1] == 'brand-new'                     # new appended at EOF
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31477,6 +31540,9 @@ def main() -> int:
         test_audit_selection_coherence_flags_owned_outside_closure,
         # SELECT-LOCK Chunk 9 — closure-matches-lock authority check
         test_selection_lock_closure_matches_lock_statuses,
+        # cache select — pool.list tier
+        test_select_packages_pool_tier_load_save_and_comments,
+        test_select_packages_write_flat_list_minimal_diff,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
