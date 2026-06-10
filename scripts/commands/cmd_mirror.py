@@ -1704,6 +1704,16 @@ class MirrorCommandsMixin(SessionState):
                             f"  {_sev:8s}  {_kind}: {_msg}",
                             tui.COLOR_ERROR if _sev == 'CRITICAL'
                             else tui.COLOR_WARNING)
+                    # One crisp action line instead of repeating the remedy
+                    # on every pending finding.
+                    _n_pending = sum(
+                        1 for _f in _coh_findings
+                        if _f[1] == 'selection_deprecation_pending')
+                    if _n_pending:
+                        console.print(
+                            f"  {_n_pending} deprecation(s) pending — "
+                            "`mirror publish` to propagate the release",
+                            tui.COLOR_WARNING)
                     # Pending deprecations (WARNING) are the expected
                     # accept→publish window — only CRITICALs fail the audit.
                     if any(_f[0] == 'CRITICAL' for _f in _coh_findings):
