@@ -31207,6 +31207,63 @@ def test_lifecycle_deprecate_then_reselect_round_trip():
         assert _u.read_build_record(_root, 'ghost')['selection'] == 'deprecated'
 
 
+def test_claim_schema_obsolete_state_and_new_obsolescence():
+    """LEDGER-01 Chunk 4: 'obsolete' is a valid claim state that is NOT
+    inactive (ownership retained) but IS presence-skipped; new_obsolescence
+    keeps file identity + obsoletes_seq; schema v3; jsonl round-trips."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    assert _sch.CLAIM_RECORD_SCHEMA_VERSION >= 3
+    assert _sch.CLAIM_STATE_OBSOLETE in _sch.CLAIM_STATES
+    assert _sch.CLAIM_STATE_OBSOLETE not in _sch.INACTIVE_CLAIM_STATES
+    assert _sch.CLAIM_STATE_OBSOLETE in _sch.PRESENCE_SKIP_CLAIM_STATES
+    assert _sch.CLAIM_STATE_DEPRECATED in _sch.PRESENCE_SKIP_CLAIM_STATES
+    _obs = _sch.new_obsolescence(
+        builder='b1', seq=10, package='foo', intended_version='1.0',
+        built_version='1.0-1+asg1u1', filename='foo_1.0-1+asg1u1_amd64.deb',
+        sha256='aa', size=42, snapshot='s', built_at='t', obsoletes_seq=5)
+    assert _obs['claim_state'] == _sch.CLAIM_STATE_OBSOLETE
+    assert _obs['obsoletes_seq'] == 5
+    assert _obs['filename'] == 'foo_1.0-1+asg1u1_amd64.deb'
+    assert _obs['sha256'] == 'aa' and _obs['size'] == 42
+    _obs['sig'] = 'deadbeef'
+    assert _sch.claim_from_jsonl(_sch.claim_to_jsonl(_obs)) is not None
+
+
+def test_project_owners_obsolete_retains_ownership():
+    """An obsolescence (higher seq) supersedes the old version's published
+    claim for that filename, and the winner KEEPS its builder — unlike a
+    deprecated winner which reports builder=None."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    from coord import store as _store
+    _pub_old = _sch.new_claim(
+        builder='b1', seq=5, package='foo', intended_version='1.0',
+        built_version='1.0-1+asg1u1', filename='foo_1.0-1+asg1u1_amd64.deb',
+        sha256='aa', size=1, snapshot='s', built_at='t',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _pub_new = _sch.new_claim(
+        builder='b1', seq=6, package='foo', intended_version='1.0',
+        built_version='1.0-1+asg1u2', filename='foo_1.0-1+asg1u2_amd64.deb',
+        sha256='bb', size=1, snapshot='s', built_at='t',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _obs = _sch.new_obsolescence(
+        builder='b1', seq=7, package='foo', intended_version='1.0',
+        built_version='1.0-1+asg1u1', filename='foo_1.0-1+asg1u1_amd64.deb',
+        sha256='aa', size=1, snapshot='s', built_at='t', obsoletes_seq=5)
+    _owners = _store.project_owners({'b1': [_pub_old, _pub_new, _obs]})
+    _old = _owners['foo_1.0-1+asg1u1_amd64.deb']
+    assert _old['claim_state'] == _sch.CLAIM_STATE_OBSOLETE
+    assert _old['builder'] == 'b1', "obsolete must RETAIN ownership"
+    _new = _owners['foo_1.0-1+asg1u2_amd64.deb']
+    assert _new['claim_state'] == _sch.CLAIM_STATE_PUBLISHED
+    assert _new['builder'] == 'b1'
+    # fold: the live (pkg,ver) map drops the obsoleted published claim
+    _live = _store.project_live_claims({'b1': [_pub_old, _pub_new, _obs]})
+    assert ('foo', '1.0-1+asg1u1') not in _live
+    assert ('foo', '1.0-1+asg1u2') in _live
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31891,6 +31948,9 @@ def main() -> int:
         test_lifecycle_touch_selected_bootstrap_and_idempotent,
         test_lifecycle_touch_version_change_rolls_obsolete,
         test_lifecycle_deprecate_then_reselect_round_trip,
+        # LEDGER-01 Chunk 4 — claim schema v3 obsolete state
+        test_claim_schema_obsolete_state_and_new_obsolescence,
+        test_project_owners_obsolete_retains_ownership,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
