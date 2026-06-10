@@ -134,18 +134,23 @@ def emit_deprecation_claims(
     *,
     builder_id: str,
     by_builder: Dict[str, List[dict]],
-    closure_bins: 'set',
+    closure_srcs: 'set',
     snapshot_pin: str,
     built_at: str,
     start_seq: int,
 ) -> List[dict]:
     """SELECT-LOCK: build unsigned `deprecated` claims for every file we
-    currently OWN+publish whose binary is no longer in the selection closure.
+    currently OWN+publish whose SOURCE is no longer selected.
 
-    The authority is the selection lockfile's closure (`closure_bins` = the
-    set of selected canonical binary names) — NOT build.json, which lingers
-    after a package is dropped.  Deprecating releases ownership to the commons
-    (project_owners then reports builder=None) while the .deb stays in the pool.
+    The authority is the selection lockfile (`closure_srcs` = the set of
+    selected source names) — NOT build.json, which lingers after a drop.
+    Keyed on the SOURCE (the claim's `package`), NOT the binary: a source build
+    publishes ALL its binaries (-dev/-doc/-udeb/-source), most of which are
+    legitimately absent from the install closure — so the deprecation unit is
+    the source.  While a source stays selected every binary it built is kept;
+    when the source leaves the selection, all its binaries deprecate together.
+    Deprecating releases ownership to the commons (project_owners then reports
+    builder=None) while the .deb stays in the pool.
 
     Idempotent: a file already deprecated is not re-emitted (project_owners
     reports it builder=None, so it fails the `owner == us` test).  Caller
@@ -160,10 +165,9 @@ def emit_deprecation_claims(
             continue   # not ours / already released (deprecated / tunneled)
         if _owner.get('claim_state') != _schema.CLAIM_STATE_PUBLISHED:
             continue
-        _binname = _fn.split('_', 1)[0] if '_' in _fn else _fn
-        if _binname in closure_bins:
-            continue   # still selected — keep owning it
         _claim = _owner.get('claim') or {}
+        if str(_claim.get('package') or '') in closure_srcs:
+            continue   # source still selected — keep owning every binary it builds
         _seq += 1
         _out.append(_schema.new_deprecation(
             builder=builder_id,
@@ -739,11 +743,11 @@ def remote_publish(
             import selection_lock as _sl
             _lock, _lstatus = _sl.read_selection_state(config)
             if _lstatus == _sl.STATUS_OK and _lock is not None:
-                _closure_bins = set((_lock.get('closure') or {}).get('bins', {}))
+                _closure_srcs = set((_lock.get('closure') or {}).get('srcs', {}))
                 _dep_claims = emit_deprecation_claims(
                     builder_id=builder_id,
                     by_builder=_by_builder,
-                    closure_bins=_closure_bins,
+                    closure_srcs=_closure_srcs,
                     snapshot_pin=snapshot_pin,
                     built_at=_utc_now(),
                     start_seq=_seq,

@@ -30731,55 +30731,60 @@ def test_project_owners_deprecated_releases_ownership():
     assert _owners2['bar_1.0_amd64.deb']['builder'] == 'b1'
 
 
-def test_emit_deprecation_claims_keys_off_closure():
-    """SELECT-LOCK Chunk 8: a file we own+publish whose binary left the closure
-    gets a deprecation; one still in the closure does not; one already released
-    (no owner) is not re-emitted."""
+def test_emit_deprecation_claims_keys_off_source_not_binary():
+    """SELECT-LOCK Chunk 8 (fixed): deprecation is keyed on the SOURCE, not the
+    binary.  A -dev binary whose SOURCE is still selected is KEPT (a source
+    build publishes many binaries outside the install closure); a binary whose
+    SOURCE left the selection deprecates; already-released ⇒ no re-emit."""
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from coord import schema as _sch
     from coord import publish as _pub
-    _owned_dropped = _sch.new_claim(
+    # source 'foo' dropped → its binaries deprecate (incl a -dev not installed)
+    _foo_dev = _sch.new_claim(
         builder='b1', seq=5, package='foo', intended_version='1.0',
-        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
+        built_version='1.0', filename='foo-dev_1.0_amd64.deb', sha256='aa',
         size=7, snapshot='s', built_at='t',
         claim_state=_sch.CLAIM_STATE_PUBLISHED)
-    _owned_kept = _sch.new_claim(
+    # source 'bar' still selected → its -dev binary is KEPT even though the
+    # binary name is not in the install closure
+    _bar_dev = _sch.new_claim(
         builder='b1', seq=6, package='bar', intended_version='1.0',
-        built_version='1.0', filename='bar_1.0_amd64.deb', sha256='bb',
+        built_version='1.0', filename='bar-dev_1.0_amd64.deb', sha256='bb',
         size=7, snapshot='s', built_at='t',
         claim_state=_sch.CLAIM_STATE_PUBLISHED)
-    _by_builder = {'b1': [_owned_dropped, _owned_kept]}
+    _by_builder = {'b1': [_foo_dev, _bar_dev]}
     _dep = _pub.emit_deprecation_claims(
         builder_id='b1', by_builder=_by_builder,
-        closure_bins={'bar'},        # foo dropped, bar kept
+        closure_srcs={'bar'},        # source foo dropped, bar kept
         snapshot_pin='snap', built_at='now', start_seq=6)
     assert len(_dep) == 1, _dep
-    assert _dep[0]['filename'] == 'foo_1.0_amd64.deb'
+    assert _dep[0]['filename'] == 'foo-dev_1.0_amd64.deb'
+    assert _dep[0]['package'] == 'foo'
     assert _dep[0]['claim_state'] == _sch.CLAIM_STATE_DEPRECATED
     assert _dep[0]['deprecates_seq'] == 5 and _dep[0]['seq'] == 7
     # idempotent: re-run with the deprecation already present ⇒ no re-emit
     _dep[0]['sig'] = 'x'
     _by_builder['b1'].append(_dep[0])
     _again = _pub.emit_deprecation_claims(
-        builder_id='b1', by_builder=_by_builder, closure_bins={'bar'},
+        builder_id='b1', by_builder=_by_builder, closure_srcs={'bar'},
         snapshot_pin='snap', built_at='now', start_seq=8)
     assert _again == [], _again
 
 
-def test_audit_selection_coherence_flags_owned_outside_closure():
+def test_audit_selection_coherence_flags_owned_with_dropped_source():
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import selection_lock as _sl
     from coord import schema as _sch
+    # a -dev binary whose SOURCE 'foo' is gone from the selection → CRITICAL
     _owned = _sch.new_claim(
         builder='b1', seq=5, package='foo', intended_version='1.0',
-        built_version='1.0', filename='foo_1.0_amd64.deb', sha256='aa',
+        built_version='1.0', filename='foo-dev_1.0_amd64.deb', sha256='aa',
         size=1, snapshot='s', built_at='t',
         claim_state=_sch.CLAIM_STATE_PUBLISHED)
-    # binary 'foo' NOT in closure → CRITICAL
     _f = _sl.audit_selection_coherence({'bar'}, {'b1': [_owned]}, 'b1')
     assert len(_f) == 1 and _f[0][0] == 'CRITICAL'
     assert _f[0][1] == 'selection_claim_not_in_closure', _f
-    # in closure → clean
+    # source still selected → clean, even though the BINARY name isn't a source
     assert _sl.audit_selection_coherence({'foo'}, {'b1': [_owned]}, 'b1') == []
 
 
@@ -31612,8 +31617,8 @@ def main() -> int:
         test_claim_from_jsonl_accepts_deprecated_and_v1_lines,
         test_project_owners_deprecated_releases_ownership,
         # SELECT-LOCK Chunk 8 — publish deprecation emission + coherence audit
-        test_emit_deprecation_claims_keys_off_closure,
-        test_audit_selection_coherence_flags_owned_outside_closure,
+        test_emit_deprecation_claims_keys_off_source_not_binary,
+        test_audit_selection_coherence_flags_owned_with_dropped_source,
         # SELECT-LOCK Chunk 9 — closure-matches-lock authority check
         test_selection_lock_closure_matches_lock_statuses,
         # cache select — pool.list tier

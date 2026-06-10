@@ -378,15 +378,22 @@ def closure_matches_lock(
 
 
 def audit_selection_coherence(
-    closure_bins: 'set', by_builder: 'Dict[str, list]', builder_id: str,
+    closure_srcs: 'set', by_builder: 'Dict[str, list]', builder_id: str,
 ) -> 'list':
-    """Coherence check: the lockfile closure ⟷ our published claims.
+    """Coherence check: the lockfile selection ⟷ our published claims.
 
     Returns findings ``[(severity, kind, message)]``.  CRITICAL when we still
-    OWN+PUBLISH a file whose binary is NOT in the selection closure and it was
-    NOT deprecated — the signed selection and the mirror disagree (a drop that
-    never reached `mirror publish`, or a publish that didn't emit the
-    deprecation).  Pure; `mirror audit` / `audit` wire it in."""
+    OWN+PUBLISH a file whose SOURCE is no longer selected and it was NOT
+    deprecated — the signed selection and the mirror disagree (a source drop
+    that never reached `mirror publish`, or a publish that didn't emit the
+    deprecation).
+
+    Keyed on the SOURCE (the claim's `package`), NOT the binary name: a source
+    build publishes ALL its binaries (-dev/-doc/-udeb/-source variants), most
+    of which are legitimately NOT in the install closure (`closure.bins`).  The
+    deprecation unit is the source — while a source stays selected every binary
+    it builds is a valid published artifact.  Pure; `mirror audit` wires it in.
+    """
     from coord import store as _store
     _owners = _store.project_owners(by_builder)
     _findings: list = []
@@ -396,11 +403,11 @@ def audit_selection_coherence(
             continue
         if _owner.get('claim_state') != 'published':
             continue
-        _binname = _fn.split('_', 1)[0] if '_' in _fn else _fn
-        if _binname not in closure_bins:
+        _src = str((_owner.get('claim') or {}).get('package') or '')
+        if _src and _src not in closure_srcs:
             _findings.append((
                 'CRITICAL', 'selection_claim_not_in_closure',
-                f"{_fn}: owned+published but binary {_binname!r} is not in the "
-                "selection closure and not deprecated — `mirror publish` to "
-                "release it, or `cache select` to re-add it"))
+                f"{_fn}: owned+published but its source {_src!r} is no longer "
+                "selected and not deprecated — `mirror publish` to release it, "
+                "or `cache select` to re-add it"))
     return _findings
