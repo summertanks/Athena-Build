@@ -40,7 +40,12 @@ from typing import Any, Dict, Optional
 # a 'deprecated' line is rejected by a v1 reader (unknown state → None), which
 # is a SAFE degrade — the v1 peer keeps treating the file as owned/published
 # (stale, not corrupt) until it upgrades.
-CLAIM_RECORD_SCHEMA_VERSION = 2
+# v2 → v3 (LEDGER-01): adds claim_state 'obsolete' + the optional
+# `obsoletes_seq` field — a version-superseded marker the owner stamps on
+# their own older-version claims at publish (Step 6c).  Same degrade: a v2
+# peer rejects only the 'obsolete' lines and keeps treating the old file as
+# published — stale, not corrupt, until it upgrades.
+CLAIM_RECORD_SCHEMA_VERSION = 3
 COORD_HEAD_SCHEMA_VERSION = 3
 # v1 → v2 (MIRROR-01 Phase 2): adds `neighbours: list[str]` — the
 # federation membership list (every mirror's coord-head carries the
@@ -72,21 +77,41 @@ SNAPSHOT_STATE_SCHEMA_VERSION = 1
 # resolvable in the pool — it just RELEASES ownership: project_owners
 # reports builder=None (like a tunneled claim), so any other builder may
 # take the file over by republishing.  References `deprecates_seq`.
+# `obsolete` (LEDGER-01) — this exact file (an OLD version) has been
+# superseded by a newer version of the same binary published by the SAME
+# owner.  Natural aging, not abandonment: ownership is RETAINED
+# (project_owners keeps the builder, unlike deprecated), the file stays
+# in the append-only pool as a LABELED prune candidate (UPD-01
+# publish-before-prune), and presence/index audits skip it because the
+# old file may legitimately drop out of the local repo and the apt
+# index.  References `obsoletes_seq`.
 CLAIM_STATE_PENDING = 'pending'
 CLAIM_STATE_PUBLISHED = 'published'
 CLAIM_STATE_RETRACTED = 'retracted'
 CLAIM_STATE_DEPRECATED = 'deprecated'
+CLAIM_STATE_OBSOLETE = 'obsolete'
 CLAIM_STATES = frozenset({
     CLAIM_STATE_PENDING, CLAIM_STATE_PUBLISHED, CLAIM_STATE_RETRACTED,
-    CLAIM_STATE_DEPRECATED,
+    CLAIM_STATE_DEPRECATED, CLAIM_STATE_OBSOLETE,
 })
 # States that are NOT an active, asserted ownership of a present-in-our-index
 # file.  Audit/reconcile/index sites skip these: a retracted claim's file is
 # gone, and a deprecated claim's file was dropped from our local repo (its pool
 # copy may linger for takeover, but we no longer ASSERT it).  project_owners is
 # the deliberate exception — it surfaces a deprecated claim as no-owner.
+# NOTE: 'obsolete' is deliberately NOT here — an obsolete claim still asserts
+# ownership (and stays in publish `_known` sets: a superseded filename never
+# re-claims, versions only move forward).
 INACTIVE_CLAIM_STATES = frozenset({
     CLAIM_STATE_RETRACTED, CLAIM_STATE_DEPRECATED,
+})
+# States whose FILE may legitimately be absent from the local repo and the
+# apt index (retracted: withdrawn; deprecated: dropped from selection;
+# obsolete: old version pruned).  Presence/index audits skip these so a
+# pruned old file never fires a false CRITICAL; ownership semantics stay
+# governed by INACTIVE_CLAIM_STATES above.
+PRESENCE_SKIP_CLAIM_STATES = frozenset({
+    CLAIM_STATE_RETRACTED, CLAIM_STATE_DEPRECATED, CLAIM_STATE_OBSOLETE,
 })
 
 # Required keys on every well-formed claim line.  `republished_from`
@@ -226,6 +251,50 @@ def new_deprecation(
         'built_at':          built_at,
         'claim_state':       CLAIM_STATE_DEPRECATED,
         'deprecates_seq':    deprecates_seq,
+        'component':         component,
+    }
+    return _rec
+
+
+def new_obsolescence(
+    *,
+    builder: str,
+    seq: int,
+    package: str,
+    intended_version: str,
+    built_version: str,
+    filename: str,
+    sha256: str,
+    size: int,
+    snapshot: str,
+    built_at: str,
+    obsoletes_seq: int,
+    component: str = 'main',
+) -> dict:
+    """A version-superseded marker (LEDGER-01) the owner stamps on their
+    OWN older-version claim when a newer version of the same binary is
+    published.  `obsoletes_seq` is the seq of the superseded published
+    claim (erased in the fold, this record stands in its place).
+
+    Keeps the file's full identity — the old .deb stays in the append-only
+    pool as a LABELED prune candidate.  Ownership is RETAINED (unlike a
+    deprecation): project_owners keeps the builder, presence/index audits
+    skip the file (PRESENCE_SKIP_CLAIM_STATES) because the old version may
+    legitimately be pruned locally and drop out of the apt index."""
+    _rec: Dict[str, Any] = {
+        'v':                 CLAIM_RECORD_SCHEMA_VERSION,
+        'builder':           builder,
+        'seq':                seq,
+        'package':           package,
+        'intended_version':  intended_version,
+        'built_version':     built_version,
+        'filename':          filename,
+        'sha256':            sha256,
+        'size':              size,
+        'snapshot':          snapshot,
+        'built_at':          built_at,
+        'claim_state':       CLAIM_STATE_OBSOLETE,
+        'obsoletes_seq':     obsoletes_seq,
         'component':         component,
     }
     return _rec
