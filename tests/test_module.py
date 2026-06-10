@@ -24365,17 +24365,18 @@ def test_build_record_schema_v3_field_set():
         package='libwmf', intended_version='0.2.12-5.1',
         patch_set_hash='abc123', started='2026-06-02T14:00:00Z',
     )
-    assert _u.BUILD_RECORD_SCHEMA_VERSION == 3
-    assert _rec['schema_version'] == 3
+    assert _u.BUILD_RECORD_SCHEMA_VERSION == 4
+    assert _rec['schema_version'] == 4
     _required = {
         'schema_version', 'package', 'intended_version', 'built_version',
         'patch_set_hash', 'phase', 'status', 'started', 'finished',
         'elapsed_seconds', 'exit_code', 'oom_killed', 'output_count', 'outputs',
         'output_hashes',
         'republished_from', 'pulled_from', 'component',
+        'lifecycle_v', 'history',   # LEDGER-01 v4 baseline
     }
     assert set(_rec.keys()) == _required, (
-        f"v3 schema drift: {set(_rec.keys()) ^ _required}")
+        f"v4 schema drift: {set(_rec.keys()) ^ _required}")
     assert _rec['phase'] == 'entry'
     assert _rec['status'] is None
     assert _rec['republished_from'] == {}
@@ -25887,7 +25888,7 @@ def test_backfill_output_hashes_upgrades_v1_record():
         # Verify the upgraded record.
         _rec = _u.read_build_record(_log, 'libfoo')
         assert _rec is not None
-        assert _rec['schema_version'] == 3
+        assert _rec['schema_version'] == 4
         import hashlib as _hashlib
         _h1 = _hashlib.sha256(b'fake-deb-1').hexdigest()
         _h2 = _hashlib.sha256(b'fake-deb-2').hexdigest()
@@ -25933,10 +25934,12 @@ def test_backfill_output_hashes_reports_missing_files():
         assert _stats['upgraded'] == 1
         _rec = _u.read_build_record(_log, 'ghost')
         assert _rec is not None
-        assert _rec['schema_version'] == 3
+        assert _rec['schema_version'] == 4
         assert _rec['output_hashes'] == {}  # nothing on disk to hash
         assert _rec['republished_from'] == {}  # MIRROR-02 v3 default
         assert _rec['pulled_from'] is None    # MIRROR-02 v3 default
+        assert _rec['lifecycle_v'] == 1       # LEDGER-01 v4 default
+        assert _rec['history'] == []          # LEDGER-01 v4 default
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -30956,6 +30959,81 @@ def test_select_packages_write_flat_list_minimal_diff():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LEDGER-01 — build.json super schema (lifecycle layer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_upsert_build_record_creates_selected_classified_missing():
+    """upsert on an absent record synthesizes a phase='selected' lifecycle
+    record that HMAC round-trips and classifies 'missing' — so publish/
+    check_build/audit consumers treat it exactly like no record."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        _rec = _u.upsert_build_record(
+            _root, 'newpkg',
+            selection='selected', selected_version='1.0-1',
+            snapshot='20260602T173733Z', selected_at='2026-06-10T00:00:00Z')
+        assert _rec['phase'] == 'selected'
+        assert _rec['lifecycle_v'] == 1 and _rec['history'] == []
+        assert _rec['selected_version'] == '1.0-1'
+        _back = _u.read_build_record(_root, 'newpkg')
+        assert _back is not None, "HMAC round-trip failed"
+        assert _u.classify_build_record(_back) == 'missing'
+        # intended_version seeded from selected_version on synthesis
+        assert _back['intended_version'] == '1.0-1'
+
+
+def test_upsert_build_record_preserves_build_fields_on_existing():
+    """upsert on an EXISTING done record overlays lifecycle fields without
+    touching build fields (phase/outputs/hashes), and re-signs."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        _rec = _u.new_build_record(package='foo', intended_version='1.0-1',
+                                   patch_set_hash='abc')
+        _rec.update({'phase': 'done', 'status': 'PASS',
+                     'built_version': '1.0-1',
+                     'outputs': ['foo_1.0-1_amd64.deb'],
+                     'output_hashes': {'foo_1.0-1_amd64.deb': 'aa'}})
+        _u.write_build_record(_root, _rec)
+        _up = _u.upsert_build_record(
+            _root, 'foo', selection='selected', selected_version='1.0-1',
+            snapshot='snap')
+        assert _up['phase'] == 'done' and _up['status'] == 'PASS'
+        assert _up['outputs'] == ['foo_1.0-1_amd64.deb']
+        assert _up['selection'] == 'selected'
+        assert _u.classify_build_record(_u.read_build_record(_root, 'foo')) == 'ok'
+
+
+def test_preserve_lifecycle_and_roll_history():
+    """preserve_lifecycle carries the lifecycle layer through a record
+    re-creation; roll_lifecycle_history snapshots the current episode."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    _old = {'selection': 'selected', 'selected_version': '1.0-1',
+            'snapshot': 's1', 'selected_at': 't0', 'lifecycle_v': 1,
+            'history': [{'state': 'obsolete', 'version': '0.9'}],
+            'built_version': '1.0-1', 'outputs': ['a.deb']}
+    _new = _u.new_build_record(package='foo', intended_version='1.1-1',
+                               patch_set_hash='')
+    # new_build_record now seeds lifecycle_v/history; preserve must keep
+    # the OLD history (new didn't explicitly set meaningful values…)
+    _new.pop('lifecycle_v'), _new.pop('history')
+    _merged = _u.preserve_lifecycle(_old, _new)
+    assert _merged['selection'] == 'selected'
+    assert _merged['history'] == [{'state': 'obsolete', 'version': '0.9'}]
+    assert _merged['selected_version'] == '1.0-1'
+    # roll: current episode → history with build info snapshotted
+    _u.roll_lifecycle_history(_merged, state='obsolete', now='t1')
+    assert len(_merged['history']) == 2
+    _ep = _merged['history'][-1]
+    assert _ep['state'] == 'obsolete' and _ep['rolled_at'] == 't1'
+    assert _ep['version'] == '1.0-1' and _ep['outputs'] == []
+    # preserve with old=None is a no-op
+    assert _u.preserve_lifecycle(None, {'x': 1}) == {'x': 1}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -31627,6 +31705,10 @@ def main() -> int:
         # cache select — save&apply transaction intents
         test_select_packages_save_and_quit_apply_intent,
         test_select_packages_discard_intent_reverts_nothing_written_by_finish,
+        # LEDGER-01 Chunk 1 — build.json super schema core
+        test_upsert_build_record_creates_selected_classified_missing,
+        test_upsert_build_record_preserves_build_fields_on_existing,
+        test_preserve_lifecycle_and_roll_history,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
