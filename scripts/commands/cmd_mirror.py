@@ -981,6 +981,21 @@ class MirrorCommandsMixin(SessionState):
                 _install_corpus |= frozenset(
                     self.udeb_dep_tree.selected_pkgs.keys())
             try:
+                # LEDGER-01: after a FULLY successful publish, stamp
+                # published_at on each published source's build record.
+                _lc_buildlog = os.path.join(self.config.dir_log, 'build')
+
+                def _stamp_published(_pkgs: set,
+                                     _bl: str = _lc_buildlog) -> None:
+                    _now = utils._utc_now_iso()
+                    for _pkg in sorted(_pkgs):
+                        try:
+                            utils.upsert_build_record(
+                                _bl, _pkg, published_at=_now)
+                        except OSError as _e:
+                            logger.warning(
+                                f"published_at stamp {_pkg}: {_e}")
+
                 _ok, _detail = _publish.remote_publish(
                     builder_id=_bid, config=self.config,
                     private_key_path=_priv, public_key_path=_pub,
@@ -996,6 +1011,7 @@ class MirrorCommandsMixin(SessionState):
                     on_progress=_progress,
                     on_status=_on_status,
                     install_corpus=_install_corpus or None,
+                    on_published=_stamp_published,
                 )
             finally:
                 _bar.close()
@@ -2154,6 +2170,23 @@ class MirrorCommandsMixin(SessionState):
                 tui.COLOR_HIGHLIGHT if _ok else tui.COLOR_ERROR)
             if not _ok:
                 return False
+            # LEDGER-01: the build record mirrors the retraction (the
+            # current episode is archived to history first).
+            try:
+                _bl = os.path.join(self.config.dir_log, 'build')
+                _rec = utils.read_build_record(_bl, _pkg)
+                if _rec is not None:
+                    utils.roll_lifecycle_history(
+                        _rec, state='retracted')
+                    _rec.update({'selection': 'retracted',
+                                 'retracted_at': utils._utc_now_iso()})
+                    utils.write_build_record(_bl, _rec)
+                else:
+                    utils.upsert_build_record(
+                        _bl, _pkg, selection='retracted',
+                        retracted_at=utils._utc_now_iso())
+            except OSError as _e:
+                logger.warning(f"retract lifecycle stamp {_pkg}: {_e}")
         else:
             console.print(
                 f"mirror conflict resolve: keep={_keep or _bid} (us); "

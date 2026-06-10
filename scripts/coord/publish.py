@@ -186,6 +186,82 @@ def emit_deprecation_claims(
     return _out
 
 
+def emit_obsolescence_claims(
+    *,
+    builder_id: str,
+    by_builder: Dict[str, List[dict]],
+    snapshot_pin: str,
+    built_at: str,
+    start_seq: int,
+) -> List[dict]:
+    """LEDGER-01: build unsigned `obsolete` claims for every OLD-version
+    file we own+publish that a NEWER version of the same binary (same
+    name + arch) supersedes.
+
+    Grouping is by (binary name, arch) parsed from the filename via
+    rsplit('_', 2) — same-version different-arch files never obsolete
+    each other.  Within a group with >1 distinct version, every claim
+    but the newest (apt_pkg.version_compare, the same convention as
+    filter_pending_by_ownership) gets a new_obsolescence referencing it.
+
+    Only the owner marks; idempotent — once obsoleted, the obsolete
+    claim is the filename winner and fails the PUBLISHED test below.
+    Caller signs + appends, assigning seqs from `start_seq`.
+    """
+    import apt_pkg
+    try:
+        apt_pkg.init_system()
+    except Exception:
+        pass
+    _owners = _store.project_owners(by_builder)
+    # (name, arch) → list of (built_version, filename, claim)
+    _groups: 'Dict[Tuple[str, str], List[Tuple[str, str, dict]]]' = {}
+    for _fn in sorted(_owners):
+        _owner = _owners[_fn]
+        if _owner.get('builder') != builder_id:
+            continue
+        if _owner.get('claim_state') != _schema.CLAIM_STATE_PUBLISHED:
+            continue
+        _base = _fn.rsplit('.', 1)[0]
+        _parts = _base.rsplit('_', 2)
+        if len(_parts) != 3:
+            continue
+        _name, _ver, _arch = _parts
+        _claim = _owner.get('claim') or {}
+        _bv = str(_claim.get('built_version') or _ver)
+        _groups.setdefault((_name, _arch), []).append((_bv, _fn, _claim))
+    _out: List[dict] = []
+    _seq = start_seq
+
+    def _ver_cmp(_a: 'Tuple[str, str, dict]',
+                 _b: 'Tuple[str, str, dict]') -> int:
+        return int(apt_pkg.version_compare(_a[0], _b[0]))
+
+    import functools
+    for (_name, _arch), _entries in sorted(_groups.items()):
+        if len(_entries) < 2:
+            continue
+        _entries.sort(key=functools.cmp_to_key(_ver_cmp))
+        # every entry but the newest (last) gets an obsolescence
+        for _bv, _fn, _claim in _entries[:-1]:
+            _seq += 1
+            _out.append(_schema.new_obsolescence(
+                builder=builder_id,
+                seq=_seq,
+                package=str(_claim.get('package') or ''),
+                intended_version=str(_claim.get('intended_version') or ''),
+                built_version=_bv,
+                filename=_fn,
+                sha256=str(_claim.get('sha256') or ''),
+                size=int(_claim.get('size') or 0),
+                snapshot=snapshot_pin,
+                built_at=built_at,
+                obsoletes_seq=int(_claim.get('seq') or 0),
+                component=str(_claim.get('component') or 'main'),
+            ))
+    return _out
+
+
 def filter_pending_by_ownership(
     builder_id: str,
     candidates: List[dict],
@@ -380,6 +456,7 @@ def remote_publish(
     on_progress: 'Optional[Callable]' = None,
     on_status: 'Optional[Callable[[str], None]]' = None,
     install_corpus: 'Optional[frozenset[str]]' = None,
+    on_published: 'Optional[Callable[[set], None]]' = None,
 ) -> Tuple[bool, str]:
     """11-step publish transaction (see module docstring).  Returns
     (ok, detail).  On failure detail explains the step that aborted.
@@ -772,6 +849,41 @@ def remote_publish(
         except Exception as _e:   # never let deprecation break a publish
             logger.warning(f"coord.publish: deprecation emission skipped: {_e}")
 
+        # Step 6c — LEDGER-01: mark OUR superseded old-version files
+        # obsolete.  The grouping must see the claims just appended in
+        # Step 6 (the NEW versions), so merge _pending into our slice of
+        # the fetched view.  Ownership retained; the old .deb stays in the
+        # append-only pool as a labeled prune candidate.  Best-effort.
+        try:
+            _view = dict(_by_builder)
+            _view[builder_id] = list(_view.get(builder_id, [])) + list(_pending)
+            _obs_claims = emit_obsolescence_claims(
+                builder_id=builder_id,
+                by_builder=_view,
+                snapshot_pin=snapshot_pin,
+                built_at=_utc_now(),
+                start_seq=_seq,
+            )
+            _obs_appended = 0
+            for _oc in _obs_claims:
+                _seq = max(_seq, int(_oc.get('seq', _seq)))
+                try:
+                    _store.append_claim(
+                        config.dir_coord_claims, builder_id, _oc,
+                        private_key_path,
+                    )
+                    _obs_appended += 1
+                except (OSError, ValueError) as _e:
+                    logger.warning(
+                        "coord.publish: obsolescence append failed for "
+                        f"{_oc.get('filename')}: {_e}")
+            if _obs_appended:
+                _status(
+                    f"obsoleted {_obs_appended} superseded old-version "
+                    "file(s) (ownership retained; prune candidates)")
+        except Exception as _e:   # never let obsolescence break a publish
+            logger.warning(f"coord.publish: obsolescence emission skipped: {_e}")
+
         # Step 7 — push the updated jsonl to the remote
         _local_jsonl = _store.claims_path(
             config.dir_coord_claims, builder_id)
@@ -850,6 +962,15 @@ def remote_publish(
             f"; pushed {_pushed_count} .deb(s)"
             + (f" ({_push_fail_count} failed)" if _push_fail_count else "")
             if pool_remote_spec is not None else "")
+        # LEDGER-01: every failure path returned earlier — pool, jsonl AND
+        # coord-head pushes all succeeded.  Only NOW report the published
+        # package set so the caller can stamp published_at on records.
+        if on_published is not None:
+            try:
+                on_published({str(_c.get('package') or '')
+                              for _c in _pending if _c.get('package')})
+            except Exception as _e:
+                logger.warning(f"coord.publish: on_published callback: {_e}")
         return True, (
             f"published {_appended} claim(s){_push_summary}; "
             f"coord-head re-signed @ seq={_seq}")
