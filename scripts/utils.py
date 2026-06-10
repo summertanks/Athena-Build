@@ -15,7 +15,7 @@ import argparse
 import requests
 import tui
 from tui import Prompt, Spinner, ProgressBar
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 # Re-exported from bump (the versioning module).  Explicit `as` aliases
 # mark these as intentional re-exports so `utils.<name>` call sites keep
@@ -1072,6 +1072,107 @@ def roll_prior_build_history(buildlog_dir: str, package: str,
         _rolled = True
     write_build_record(buildlog_dir, _rec)
     return _rolled
+
+
+def lifecycle_touch_selected(buildlog_dir: str, selected: 'Dict[str, str]',
+                             snapshot: str) -> dict:
+    """LEDGER-01: the `cache parse` lifecycle touch — tracking starts HERE.
+
+    `selected` maps every selected SOURCE name (deb ∪ udeb trees) to its
+    version string.  Per source:
+
+      - no record            → create a phase='selected' lifecycle record
+      - selection deprecated/retracted (re-selection round trip)
+                             → roll the episode into history, back to selected
+      - selected_version moved (snapshot change / bump)
+                             → roll an 'obsolete' history entry, update current
+                               (phase/built_version untouched — check_build
+                               re-triggers the rebuild naturally)
+      - legacy record (no lifecycle layer yet)
+                             → stamp it once
+      - already current      → SKIP THE WRITE entirely, so steady-state
+                               parses re-sign nothing (mtime-stable)
+
+    Returns {'created','reselected','rolled','stamped','unchanged'} counts.
+    Best-effort per record — one bad record never aborts the parse.
+    """
+    _now = _utc_now_iso()
+    _stats = {'created': 0, 'reselected': 0, 'rolled': 0,
+              'stamped': 0, 'unchanged': 0}
+    for _name in sorted(selected):
+        _v = str(selected[_name])
+        try:
+            _rec = read_build_record(buildlog_dir, _name)
+            if _rec is None:
+                upsert_build_record(
+                    buildlog_dir, _name,
+                    selection=SELECTION_SELECTED, selected_version=_v,
+                    snapshot=snapshot, selected_at=_now)
+                _stats['created'] += 1
+                continue
+            _sel = _rec.get('selection')
+            if _sel in (SELECTION_DEPRECATED, SELECTION_RETRACTED):
+                roll_lifecycle_history(
+                    _rec, state=str(_sel), now=_now,
+                    extra={'deprecated_at': _rec.get('deprecated_at')})
+                _rec.update({
+                    'selection': SELECTION_SELECTED,
+                    'selected_version': _v, 'snapshot': snapshot,
+                    'selected_at': _now,
+                    'deprecated_at': None, 'retracted_at': None,
+                })
+                _rec.setdefault('lifecycle_v', 1)
+                write_build_record(buildlog_dir, _rec)
+                _stats['reselected'] += 1
+                continue
+            _cur_v = _rec.get('selected_version')
+            if _cur_v and str(_cur_v) != _v:
+                roll_lifecycle_history(_rec, state='obsolete', now=_now)
+                _rec.update({'selected_version': _v, 'snapshot': snapshot,
+                             'selected_at': _now})
+                _rec.setdefault('selection', SELECTION_SELECTED)
+                _rec.setdefault('lifecycle_v', 1)
+                write_build_record(buildlog_dir, _rec)
+                _stats['rolled'] += 1
+                continue
+            if (_rec.get('selection') == SELECTION_SELECTED
+                    and _cur_v == _v
+                    and _rec.get('snapshot') == snapshot):
+                _stats['unchanged'] += 1          # steady state — no write
+                continue
+            # Legacy record (or partial lifecycle layer) — stamp once.
+            _rec.update({'selection': SELECTION_SELECTED,
+                         'selected_version': _v, 'snapshot': snapshot,
+                         'selected_at': _now})
+            _rec.setdefault('lifecycle_v', 1)
+            _rec.setdefault('history', [])
+            write_build_record(buildlog_dir, _rec)
+            _stats['stamped'] += 1
+        except OSError as _e:
+            logger.warning(f"lifecycle touch {_name}: {_e}")
+    return _stats
+
+
+def lifecycle_mark_deprecated(buildlog_dir: str, srcs: 'Iterable[str]',
+                              snapshot: str) -> int:
+    """LEDGER-01 intent-at-accept: record `selection='deprecated'` the
+    moment the operator ACCEPTS a closure shrink (`cache select accept`) —
+    before any mirror publish.  The mirror-side deprecation claim (publish
+    Step 6b) then PROPAGATES this intent; until it does, the coherence
+    audit shows the source as 'deprecation pending publish' instead of a
+    CRITICAL untracked drop.  Returns the number of records marked."""
+    _now = _utc_now_iso()
+    _n = 0
+    for _name in sorted(set(srcs)):
+        try:
+            upsert_build_record(
+                buildlog_dir, _name,
+                selection=SELECTION_DEPRECATED,
+                deprecated_at=_now, snapshot=snapshot)
+            _n += 1
+        except OSError as _e:
+            logger.warning(f"lifecycle deprecate {_name}: {_e}")
+    return _n
 
 
 def roll_lifecycle_history(record: dict, *, state: str,

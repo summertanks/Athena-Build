@@ -798,6 +798,34 @@ class CacheCommandsMixin(SessionState):
                 self.dep_tree, self.udeb_dep_tree, self.config)
             _action, _added, _removed = selection_lock.classify(
                 _lstatus, _lock, _fresh)
+            # ── LEDGER-01: lifecycle layer inputs ───────────────────────
+            # Source→version union across BOTH trees (udeb-only sources
+            # like anna/debootstrap included) + the snapshot pin.  The
+            # touch itself runs on the non-blocked branches below.
+            _lc_sel = {n: str(s.version)
+                       for n, s in self.dep_tree.selected_srcs.items()}
+            if self.udeb_dep_tree is not None:
+                for _n, _s in self.udeb_dep_tree.selected_srcs.items():
+                    _lc_sel.setdefault(_n, str(_s.version))
+            _lc_pin = getattr(self.config, 'snapshot_timestamp_config', '')
+            if _lc_pin == 'latest':
+                try:
+                    _lc_pin = utils.resolve_snapshot_timestamp(
+                        self.config) or 'latest'
+                except Exception:
+                    _lc_pin = 'latest'
+            _lc_log = os.path.join(self.config.dir_log, 'build')
+
+            def _lc_touch():
+                _st = utils.lifecycle_touch_selected(_lc_log, _lc_sel, _lc_pin)
+                _changed = sum(_v for _k, _v in _st.items()
+                               if _k != 'unchanged')
+                if _changed:
+                    console.print(
+                        f"lifecycle: {_st['created']} created, "
+                        f"{_st['stamped']} stamped, {_st['rolled']} version-"
+                        f"roll(s), {_st['reselected']} re-selected "
+                        f"({_st['unchanged']} unchanged)", tui.COLOR_INFO)
             if _action == selection_lock.ACTION_BLOCK and not _accept:
                 _rb = sorted(_removed['bins'])
                 _rs = sorted(_removed['srcs'])
@@ -830,10 +858,17 @@ class CacheCommandsMixin(SessionState):
                 self.dep_tree, self.udeb_dep_tree, self.config, closure=_fresh)
             if _action == selection_lock.ACTION_BLOCK and _accept:
                 selection_lock.write_selection_state(self.config, _state)
+                # LEDGER-01 intent-at-accept: record the deprecation on the
+                # dropped sources' build records NOW (before any publish),
+                # then touch the still-selected set.
+                _dep_n = utils.lifecycle_mark_deprecated(
+                    _lc_log, _removed['srcs'], _lc_pin)
+                _lc_touch()
                 console.print(
                     f"cache select accept: re-baselined selection.state — "
                     f"{len(_removed['bins'])} binary(ies) / "
-                    f"{len(_removed['srcs'])} source(s) DROPPED; they become "
+                    f"{len(_removed['srcs'])} source(s) DROPPED "
+                    f"({_dep_n} record(s) marked deprecated); they become "
                     "mirror-deprecation candidates on the next `mirror "
                     "publish`.", tui.COLOR_HIGHLIGHT)
                 self.flags.dep_check_ready = True
@@ -853,6 +888,9 @@ class CacheCommandsMixin(SessionState):
                         f"binary(ies) / {len(_added['srcs'])} new source(s) "
                         "(additions are low-impact)", tui.COLOR_WARNING)
                 selection_lock.write_selection_state(self.config, _state)
+            # LEDGER-01: stamp the lifecycle layer on every selected source
+            # (bootstrap + refresh paths; the accept path touched above).
+            _lc_touch()
 
         self.flags.dep_check_ready = True
         # UX-04: persist Cache + DT to dir_cache/session.pkl.gz so
