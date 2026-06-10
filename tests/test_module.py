@@ -31459,6 +31459,54 @@ def test_coherence_audit_pending_deprecation_vs_untracked_drop():
     assert _sl.audit_selection_coherence({'foo'}, _by, 'b1') == []
 
 
+def test_generate_pending_claims_skips_deprecated_records():
+    """LEDGER-01 resurrection guard: a phase=done record whose lifecycle says
+    selection='deprecated' must NOT regenerate claims (the deprecation
+    excluded its old claims from _known — without the guard the next publish
+    would re-claim the files and silently undo the deprecation).  Flipping
+    back to 'selected' restores the re-claim path."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    from coord import publish as _pub
+    with tempfile.TemporaryDirectory() as _root:
+        _claims = os.path.join(_root, 'claims'); os.makedirs(_claims)
+        _rec = _u.new_build_record(package='foo', intended_version='1.0',
+                                   patch_set_hash='')
+        _rec.update({'phase': 'done', 'status': 'PASS', 'built_version': '1.0',
+                     'outputs': ['foo_1.0_amd64.deb'],
+                     'output_hashes': {'foo_1.0_amd64.deb': 'aa'},
+                     'selection': 'deprecated',
+                     'deprecated_at': '2026-06-10T00:00:00Z'})
+        _u.write_build_record(_root, _rec)
+        _pending = _pub.generate_pending_claims(
+            builder_id='b1', buildlog_dir=_root, claims_dir=_claims,
+            public_key_path='/fake', snapshot_pin='s',
+            read_build_record=_u.read_build_record)
+        assert _pending == [], f"deprecated record regenerated claims: {_pending}"
+        # re-selected → claims regenerate (the legitimate re-claim path)
+        _u.update_build_record(_root, 'foo', selection='selected',
+                               deprecated_at=None)
+        _pending = _pub.generate_pending_claims(
+            builder_id='b1', buildlog_dir=_root, claims_dir=_claims,
+            public_key_path='/fake', snapshot_pin='s',
+            read_build_record=_u.read_build_record)
+        assert [c['filename'] for c in _pending] == ['foo_1.0_amd64.deb']
+        # legacy record (no selection field) keeps publishing as before
+        _legacy = _u.new_build_record(package='bar', intended_version='1.0',
+                                      patch_set_hash='')
+        _legacy.update({'phase': 'done', 'status': 'PASS',
+                        'built_version': '1.0',
+                        'outputs': ['bar_1.0_amd64.deb'],
+                        'output_hashes': {'bar_1.0_amd64.deb': 'bb'}})
+        _legacy.pop('lifecycle_v'); _legacy.pop('history')
+        _u.write_build_record(_root, _legacy)
+        _pending = _pub.generate_pending_claims(
+            builder_id='b1', buildlog_dir=_root, claims_dir=_claims,
+            public_key_path='/fake', snapshot_pin='s',
+            read_build_record=_u.read_build_record)
+        assert 'bar_1.0_amd64.deb' in [c['filename'] for c in _pending]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32153,6 +32201,8 @@ def main() -> int:
         test_remote_publish_on_published_only_on_full_success,
         # LEDGER-01 Chunk 7 — coherence audit pending refinement
         test_coherence_audit_pending_deprecation_vs_untracked_drop,
+        # LEDGER-01 — publish resurrection guard
+        test_generate_pending_claims_skips_deprecated_records,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,

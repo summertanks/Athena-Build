@@ -85,6 +85,15 @@ def generate_pending_claims(
         _phase = _rec.get('phase')
         if _phase not in ('done', 'tunneled'):
             continue
+        # LEDGER-01: a deprecated/retracted source must NOT regenerate
+        # claims — its build record stays phase=done (the receipt is
+        # kept), but the deprecation excluded its old claims from
+        # `_known`, so without this guard the next publish would
+        # resurrect them as fresh no-owner re-claims and silently UNDO
+        # the deprecation.  Re-selection flips the record back to
+        # 'selected' (cache parse), restoring the re-claim path.
+        if _rec.get('selection') in ('deprecated', 'retracted'):
+            continue
         _outputs = _rec.get('outputs') or []
         _hashes = _rec.get('output_hashes') or {}
         # MIRROR-02: per-output upstream provenance for tunneled
