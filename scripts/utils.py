@@ -639,7 +639,7 @@ def patch_set_hash(patch_dir: str, patch_files: list) -> str:
 # fsync → os.replace.  POSIX rename(2) guarantees readers see either the
 # old valid file or the new valid file, never a torn write.
 
-BUILD_RECORD_SCHEMA_VERSION = 3
+BUILD_RECORD_SCHEMA_VERSION = 4
 BUILD_RECORD_SUFFIX = '.build.json'
 # v1 → v2 (COORD-01): adds output_hashes {filename: sha256_hex}, the
 # per-emitted-binary digest that the coord layer pins into its claim
@@ -657,7 +657,23 @@ BUILD_RECORD_SUFFIX = '.build.json'
 #     Distinguishes "we built it" from "we pulled it" in
 #     `source audit` without losing the record.
 # v2 records survive unchanged (defaults: {} and None respectively).
-_BUILD_RECORD_LEGACY_VERSIONS = frozenset({1, 2})
+# v3 → v4 (LEDGER-01): the record becomes the per-source LIFECYCLE
+# document — tracking starts at `cache parse`, not at build.  Additive
+# fields (absent = legacy v3, all consumers unchanged):
+#   - `lifecycle_v` 1
+#   - `selection`   'selected' | 'deprecated' | 'retracted'
+#   - `selected_version` / `snapshot` — what the parse selected, under
+#     which snapshot pin (str(Source.version) at last parse touch)
+#   - `selected_at` / `deprecated_at` / `retracted_at` / `published_at`
+#   - `history` — list of superseded episodes rolled in place when the
+#     version moves (state 'obsolete') or the selection state flips
+#     (state 'deprecated'/'retracted'):
+#       {state, version, snapshot, rolled_at, built_version?, outputs?}
+# A parse-created record for a never-built source carries the new
+# non-terminal phase 'selected', which classify_build_record maps to
+# 'missing' so every phase-gate consumer (publish claims, check_build,
+# audits) behaves exactly as if the record did not exist.
+_BUILD_RECORD_LEGACY_VERSIONS = frozenset({1, 2, 3})
 _BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
 
 # Phase state machine.  Linear progression on the happy path:
@@ -667,7 +683,12 @@ _BUILD_RECORD_HMAC_KEY_BASENAME = '.metrics.hmac.key'
 #   tunneled — package was passthrough-copied from upstream, no container
 # A phase string not in {done, failed, tunneled} means the build was
 # interrupted mid-flight; the record's `status` will be None.
+# LEDGER-01: 'selected' is the parse-created pre-build phase — the source
+# entered the selection but no build has started.  classify_build_record
+# maps it to 'missing' (NOT 'interrupted') so build/publish/audit
+# consumers treat it exactly like an absent record.
 BUILD_PHASES = (
+    'selected',
     'entry',
     'container_exited',
     'segregated',
@@ -676,6 +697,24 @@ BUILD_PHASES = (
     'failed',
     'tunneled',
 )
+
+# LEDGER-01 lifecycle fields — the v4 additive layer.  Record CREATORS
+# (build-start, tunnel-entry) must carry these through a rewrite via
+# preserve_lifecycle(); upsert_build_record() merges them in place.
+LIFECYCLE_FIELDS = (
+    'lifecycle_v',
+    'selection',
+    'selected_version',
+    'snapshot',
+    'selected_at',
+    'deprecated_at',
+    'retracted_at',
+    'published_at',
+    'history',
+)
+SELECTION_SELECTED = 'selected'
+SELECTION_DEPRECATED = 'deprecated'
+SELECTION_RETRACTED = 'retracted'
 _TERMINAL_PHASES = frozenset({'done', 'failed', 'tunneled'})
 _PHASE_TO_STATUS = {
     'done':     'PASS',
@@ -854,6 +893,12 @@ def new_build_record(*, package: str,
         # Apt component for the source's binaries on disk —
         # determines repo/dists/<codename>/<comp>/binary-<arch>/.
         'component':        component,
+        # LEDGER-01 v4 lifecycle baseline.  The selection/version/
+        # snapshot/timestamps layer is stamped by `cache parse`
+        # (upsert_build_record / lifecycle_touch_selected); a fresh
+        # record only carries the migrated markers.
+        'lifecycle_v':      1,
+        'history':          [],
     }
 
 
@@ -929,6 +974,82 @@ def update_build_record(buildlog_dir: str, package: str,
     return _current
 
 
+def upsert_build_record(buildlog_dir: str, package: str,
+                        **fields: object) -> dict:
+    """LEDGER-01: read-merge-resign-write that NEVER raises on a missing
+    record — the lifecycle layer's entry point.
+
+    When no record exists (or HMAC verify fails — same treat-as-missing
+    degrade the rest of the codebase uses), synthesizes a minimal
+    phase='selected' record: the source entered the selection but no
+    build has run.  classify_build_record maps that to 'missing', so
+    publish/check_build/audit consumers behave as if the record were
+    absent.  Existing records keep every build field; `fields` overlay.
+
+    Defaults `lifecycle_v` / `history` on first lifecycle touch.
+    """
+    _current = read_build_record(buildlog_dir, package)
+    if _current is None:
+        _current = new_build_record(
+            package=package,
+            intended_version=str(fields.get('selected_version', '') or ''),
+            patch_set_hash='',
+        )
+        _current['phase'] = 'selected'
+    _current.update(fields)
+    _current.setdefault('lifecycle_v', 1)
+    _current.setdefault('history', [])
+    write_build_record(buildlog_dir, _current)
+    return _current
+
+
+def preserve_lifecycle(old: 'Optional[dict]', new: dict) -> dict:
+    """LEDGER-01: carry the lifecycle layer through a record RE-CREATION.
+
+    Record creators (build-start entry record, tunnel entry record)
+    historically overwrite the whole record; that would wipe the
+    selection/history layer the parse wrote.  Copy every LIFECYCLE_FIELD
+    present on `old` into `new` unless `new` explicitly set it.  Returns
+    `new` (mutated copy semantics match callers building a fresh dict).
+    """
+    if old is None:
+        return new
+    for _f in LIFECYCLE_FIELDS:
+        if _f in old and _f not in new:
+            new[_f] = old[_f]
+    return new
+
+
+def roll_lifecycle_history(record: dict, *, state: str,
+                           now: 'Optional[str]' = None,
+                           extra: 'Optional[dict]' = None) -> dict:
+    """LEDGER-01: append the record's CURRENT lifecycle episode to its
+    `history` list — the single shape used for every roll:
+
+      obsolete   — the selected version moved (snapshot change / +asg bump)
+      deprecated — the source left the selection (episode archived on
+                   re-selection)
+      retracted  — artifact withdrawn (episode archived likewise)
+
+    Mutates + returns `record`; caller updates the current fields and
+    writes.  Build info (built_version/outputs) is snapshotted so the
+    superseded episode stays reconstructable after the next build
+    overwrites the top-level fields.
+    """
+    _entry: dict = {
+        'state': state,
+        'version': record.get('selected_version'),
+        'snapshot': record.get('snapshot'),
+        'rolled_at': now or _utc_now_iso(),
+        'built_version': record.get('built_version'),
+        'outputs': list(record.get('outputs') or []),
+    }
+    if extra:
+        _entry.update(extra)
+    record.setdefault('history', []).append(_entry)
+    return record
+
+
 def classify_build_record(record: 'Optional[dict]') -> str:
     """Translate a loaded record into the audit-classifier vocabulary.
 
@@ -947,6 +1068,11 @@ def classify_build_record(record: 'Optional[dict]') -> str:
     if record is None:
         return 'missing'
     _phase = record.get('phase')
+    if _phase == 'selected':
+        # LEDGER-01 parse-created record: source selected, never built.
+        # 'missing' (not 'interrupted') so build/publish/audit treat it
+        # exactly like an absent record.
+        return 'missing'
     if _phase not in _TERMINAL_PHASES:
         return 'interrupted'
     _status = record.get('status')
@@ -1065,9 +1191,10 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         _has_v3_fields = ('republished_from' in _rec
                           and 'pulled_from' in _rec
                           and 'component' in _rec)
+        _has_v4_fields = 'lifecycle_v' in _rec and 'history' in _rec
         if (_current_version >= BUILD_RECORD_SCHEMA_VERSION
                 and all(_o in _existing for _o in _outputs)
-                and _has_v3_fields):
+                and _has_v3_fields and _has_v4_fields):
             _stats['skipped'] += 1
             continue
         _new_hashes = dict(_existing)
@@ -1100,6 +1227,11 @@ def backfill_output_hashes(buildlog_dir: str, repo_root: str) -> dict:
         # writes the source's actual component.
         if 'component' not in _rec:
             _rec['component'] = 'main'
+        # LEDGER-01 v4 fields — initialise the lifecycle layer.  The
+        # selection/version/snapshot fields are stamped by the next
+        # `cache parse` touch; here we only mark the record migrated.
+        _rec.setdefault('lifecycle_v', 1)
+        _rec.setdefault('history', [])
         try:
             write_build_record(buildlog_dir, _rec)
             _stats['upgraded'] += 1
