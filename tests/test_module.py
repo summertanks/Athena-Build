@@ -31423,6 +31423,42 @@ def test_remote_publish_on_published_only_on_full_success():
     assert not _ok and _seen == [], (_ok, _seen)
 
 
+def test_coherence_audit_pending_deprecation_vs_untracked_drop():
+    """LEDGER-01 Chunk 7: a dropped source with intent recorded on its build
+    record (selection='deprecated') is a WARNING pending-publish window; the
+    same drop with NO recorded intent (or no reader wired) stays CRITICAL."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import selection_lock as _sl
+    import utils as _u
+    from coord import schema as _sch
+    _owned = _sch.new_claim(
+        builder='b1', seq=5, package='foo', intended_version='1.0',
+        built_version='1.0', filename='foo-dev_1.0_amd64.deb', sha256='aa',
+        size=1, snapshot='s', built_at='t',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _by = {'b1': [_owned]}
+    with tempfile.TemporaryDirectory() as _root:
+        # intent recorded → WARNING selection_deprecation_pending
+        _u.lifecycle_mark_deprecated(_root, {'foo'}, 'snapA')
+        _f = _sl.audit_selection_coherence(
+            {'bar'}, _by, 'b1',
+            buildlog_dir=_root, read_build_record=_u.read_build_record)
+        assert len(_f) == 1 and _f[0][0] == 'WARNING', _f
+        assert _f[0][1] == 'selection_deprecation_pending', _f
+        # no intent (record says selected) → CRITICAL
+        _u.lifecycle_touch_selected(_root, {'foo': '1.0'}, 'snapB')
+        _f = _sl.audit_selection_coherence(
+            {'bar'}, _by, 'b1',
+            buildlog_dir=_root, read_build_record=_u.read_build_record)
+        assert len(_f) == 1 and _f[0][0] == 'CRITICAL', _f
+        assert _f[0][1] == 'selection_claim_not_in_closure', _f
+    # back-compat: no reader wired → CRITICAL
+    _f = _sl.audit_selection_coherence({'bar'}, _by, 'b1')
+    assert len(_f) == 1 and _f[0][0] == 'CRITICAL', _f
+    # source in closure → clean either way
+    assert _sl.audit_selection_coherence({'foo'}, _by, 'b1') == []
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32115,6 +32151,8 @@ def main() -> int:
         # LEDGER-01 Chunk 6 — publish Step 6c + on_published
         test_emit_obsolescence_claims_groups_by_name_arch_and_idempotent,
         test_remote_publish_on_published_only_on_full_success,
+        # LEDGER-01 Chunk 7 — coherence audit pending refinement
+        test_coherence_audit_pending_deprecation_vs_untracked_drop,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
