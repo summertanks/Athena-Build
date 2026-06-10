@@ -31264,6 +31264,41 @@ def test_project_owners_obsolete_retains_ownership():
     assert ('foo', '1.0-1+asg1u2') in _live
 
 
+def test_obsolete_cascade_audits_skip_and_no_findings():
+    """LEDGER-01 Chunk 5 sweep: a published+obsolete pair (old version
+    superseded, old file possibly pruned) produces NO findings in
+    detect_hash_conflicts or audit_claims_vs_packages, and the obsolete
+    line is not an asserted owner for filename-uniqueness."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    from coord import reconcile as _rc
+    import mirror as _mirror
+    _pub_old = _sch.new_claim(
+        builder='b1', seq=5, package='foo', intended_version='1.0',
+        built_version='1.0-1+asg1u1', filename='foo_1.0-1+asg1u1_amd64.deb',
+        sha256='aa', size=1, snapshot='20260101T000000Z', built_at='t',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _pub_new = _sch.new_claim(
+        builder='b1', seq=6, package='foo', intended_version='1.0',
+        built_version='1.0-1+asg1u2', filename='foo_1.0-1+asg1u2_amd64.deb',
+        sha256='bb', size=1, snapshot='20260201T000000Z', built_at='t',
+        claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _obs = _sch.new_obsolescence(
+        builder='b1', seq=7, package='foo', intended_version='1.0',
+        built_version='1.0-1+asg1u1', filename='foo_1.0-1+asg1u1_amd64.deb',
+        sha256='aa', size=1, snapshot='20260101T000000Z', built_at='t',
+        obsoletes_seq=5)
+    _by = {'b1': [_pub_old, _pub_new, _obs]}
+    # hash-conflict scan: the obsolete line shares the OLD filename with the
+    # published claim it supersedes — must NOT read as a conflict.
+    assert _rc.detect_hash_conflicts(_by) == []
+    # apt-index audit: index only carries the NEW version (old pruned from
+    # Packages) — the obsolete claim must not fire claim_not_in_apt_index.
+    _idx = {'foo_1.0-1+asg1u2_amd64.deb': {'sha256': 'bb'}}
+    _findings = _mirror.audit_claims_vs_packages(_by, _idx)
+    assert _findings == [], _findings
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31951,6 +31986,8 @@ def main() -> int:
         # LEDGER-01 Chunk 4 — claim schema v3 obsolete state
         test_claim_schema_obsolete_state_and_new_obsolescence,
         test_project_owners_obsolete_retains_ownership,
+        # LEDGER-01 Chunk 5 — obsolete cascade across consumers
+        test_obsolete_cascade_audits_skip_and_no_findings,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
