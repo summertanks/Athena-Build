@@ -21,39 +21,23 @@
 #      target.  They stay in `_pool_whitelist` so the .debs ship in
 #      the cdrom pool.
 #
-# What this is for:
-#   - Mutually-exclusive packages where install-time selection
-#     happens on the target (not at build time).  Canonical example:
-#     bootloader metas where grub-installer picks `grub-pc` (BIOS) or
-#     `grub-efi-amd64` (EFI) based on firmware mode.
-#   - Optional packages we want available on a fresh install without
-#     network access — operator can `apt-get install <name>` from the
-#     cdrom source post-install.
-#
-# History (2026-05-13 / -14):
-#   - Phase D (commit 875200e) swapped `grub-pc` (META) for
-#     `grub-pc-bin` + `grub-efi-amd64-bin` in `pkg.list` so an EFI
-#     install would have both `-bin` packages available.  Side
-#     effect: the META .debs (built by the grub2 source build, so
-#     present in `repo/`) stopped getting copied into
-#     `staging/pool/` because `_pool_whitelist = selected_pkgs -
-#     live_excl` no longer included them.  Both BIOS
-#     (`apt-install grub-pc`) and EFI (`apt-install grub-efi-amd64`)
-#     `grub-installer` runs failed with "no installation candidate".
-#   - First fix attempt (the file existed in an earlier shape) was a
-#     manifest of names whose `.deb`s already happened to be in
-#     `repo/` — bypassed the resolver entirely.  Worked for the grub
-#     case but had no path to add packages whose source we hadn't
-#     built yet (e.g. open-vm-tools).  Redesigned 2026-05-14 to go
-#     through the resolver with conflicts disabled — same dep
-#     resolution as everything else in the build, plus the conflict
-#     bypass for genuinely-pool-only entries.
+# CONSOLIDATION (2026-06-09): this file lists ONLY packages that are
+# genuinely pool-ROOTED — i.e. not already pulled into the closure by
+# pkg.list / live.list / installer.list dependencies.  55 redundant
+# entries were removed: a package already selected (and therefore
+# already in /cdrom/pool via `_pool_whitelist`) gains nothing from a
+# pool.list line.  The removed set was the perl-lib cluster, the whole
+# `laptop`/`desktop` task blocks (covered by the pkg.list [laptop]/
+# [desktop] groups), and assorted standard-task packages reachable
+# transitively (man, wget, dnsutils, dbus-system-bus, …).  Removing
+# them is closure-neutral (verified: 1580 → 1580, +0/-0).
 
 # ─── Bootloader metas ──────────────────────────────────────────────
 # grub-installer apt-installs whichever fits the target's firmware
 # mode at install time.  The Conflict between them is enforced by
 # apt on the target — both .debs sit indexed in /cdrom/pool side by
-# side here.
+# side here.  (Genuinely pool-only: pkg.list ships grub-*-bin, not the
+# metas.)
 grub-pc
 grub-efi-amd64
 # NOTE: shim-signed is intentionally OMITTED — Athena has no Secure Boot
@@ -70,158 +54,61 @@ grub-efi-amd64
 # `finish-install`'s `hw-detect` runs `apt-install open-vm-tools` on
 # VMware hypervisors.  Available in the pool here so that probe
 # succeeds on VMware targets (no-op on bare-metal / non-VMware
-# hypervisors).  Source builds normally — small dependency closure
-# (libdrm2, libmspack0, libtirpc3, libxmlsec1, ethtool, zerofree on
-# top of what we already ship).
+# hypervisors).
 open-vm-tools
 open-vm-tools-desktop
 
 # ─── Console keymap configuration ──────────────────────────────────
 # `base-installer`'s `apt-install` queues `console-setup` for /target
-# so the installed system has a working console keymap matching the
-# locale picked at install time.  Without this in the pool,
-# base-installer logs `Failed to install console-setup into
-# /target/: 100` (verified 2026-05-18 install).  Not pre-installed
-# in pkg.list because the live image doesn't need it — target-side
-# only.
-#
-# History: removed 2026-05-17 in a pool-audit cleanup with the
-# justification "reaches transitively via kbd".  That was correct
-# for keyboard-configuration + xkb-data (kbd → keyboard-configuration
-# → xkb-data) — they still reach the pool transitively today.  But
-# it was WRONG for console-setup: base-installer apt-installs
-# console-setup as a SEPARATE step on /target, independent of the
-# kbd dep chain.  Re-added 2026-05-18 after the install failure.
+# so the installed system has a working console keymap.  Without this
+# in the pool, base-installer logs `Failed to install console-setup
+# into /target/: 100` (verified 2026-05-18 install).  base-installer
+# apt-installs it as a SEPARATE /target step, independent of the kbd
+# dep chain — so it is genuinely pool-rooted.
 console-setup
 
-# ─── FORK-01 Step 5 follow-up: tasksel task availability ─────────────
-# Each section below makes a kept tasksel task's hard Depends
-# reachable in /cdrom/pool so apt-install at install time succeeds
-# when the operator selects the task.  Our fork (athena-tasksel-data,
-# coming in next sub-step) ships the .desc that maps task → these
-# package sets.  None of these are installed by default — only when
-# the matching task is ticked in tasksel's UI.
-
-# ─── Debian "standard" task — Priority: standard packages ────────────
-# Replicates Debian's `Packages: standard` semantic so apt-get can
-# satisfy the standard task selection.  87 Priority: standard pkgs
-# total (4 already in our explicit lists); 83 added here.
-#
-# Our own athena-tasksel-data fork's `standard` task will use a
-# CURATED Key: subset (~30 of the most-useful ones) rather than the
-# blanket `Packages: standard` sigil — so default install stays
-# trim, but operator who wants the full Debian-standard experience
-# can `apt install <name>` for any of these post-install.
+# ─── Debian "standard" task — pool-rooted residue ────────────────────
+# The non-redundant remainder of the `Packages: standard` set — the
+# entries NOT already pulled by our explicit lists.  Our
+# athena-tasksel-data fork's `standard` task uses a curated Key:
+# subset; these stay in the pool so `apt install <name>` works
+# post-install.
 #
 # DEBIAN RESIDUE NOTE: `debian-faq`, `doc-debian`, `reportbug`,
 # `python3-reportbug` are Debian-specific (FAQ docs, BTS-submission
-# tooling).  They are Priority: standard so they ship in pool.  They
-# are already PUBLISHED on the mirror (live coord claims), so they stay
-# selected here — dropping a published package leaves orphaned claims +
-# a CRITICAL `claim_not_in_apt_index` audit (no withdraw/retract flow
-# exists yet).  Strip Debian identity by FORKING (asgard-reportbug etc.):
-# a fork claim cleanly supersedes the upstream claim; deletion does not.
+# tooling).  They are already PUBLISHED on the mirror (live coord
+# claims), so they stay selected here — dropping a published package
+# leaves orphaned claims + a CRITICAL `claim_not_in_apt_index` audit
+# (no withdraw/retract flow exists yet).  Strip Debian identity by
+# FORKING (asgard-reportbug etc.): a fork claim cleanly supersedes the
+# upstream claim; deletion does not.
 apt-listchanges
-bind9-dnsutils
-bind9-host
-dbus-system-bus
 debian-faq
-dh-sequence-bash-completion
-dnsutils
 doc-debian
-host
 inetutils-telnet
-libansicolor-perl
-libarchive-tar-perl
-libattribute-handlers-perl
-libautodie-perl
-libcompress-zlib-perl
-libcpan-meta-perl
-libdigest-md5-perl
-libdigest-perl
-libextutils-command-perl
-libextutils-install-perl
-libextutils-parsexs-perl
-libfile-spec-perl
-libi18n-langtags-perl
-libio-compress-base-perl
-libio-compress-bzip2-perl
-libio-compress-zlib-perl
-libio-zlib-perl
-liblocale-maketext-perl
-liblocale-maketext-simple-perl
 liblockfile-bin
-libmath-complex-perl
-libmime-base64-perl
-libmodule-load-perl
-libnet-ping-perl
-libparams-check-perl
-libparent-perl
-libparse-cpan-meta-perl
-libperl-ostype-perl
-libpod-escapes-perl
-libstorable-perl
-libsys-syslog-perl
-libthread-queue-perl
-libthreads-perl
-libthreads-shared-perl
-libtime-hires-perl
-libtime-piece-perl
-libversion-requirements-perl
-man
 mime-support
 netcat
 netcat-traditional
-podlators-perl
 python3-reportbug
 reportbug
 telnet
 telnet-client
-wget
 
-# ─── Debian "laptop" task — hard Depends + key Recommends ────────────
-# task-laptop pulls `anacron` (Depends) + bluetooth, powertop, iw,
-# wireless-tools, wpasupplicant, avahi-autoipd (Recommends).  Recs
-# would be silently skipped if missing from pool, but most laptops
-# expect them — ship all in pool.  Operator picks "laptop" task and
-# all install (or laptop-detect auto-flags it).
-anacron
-avahi-autoipd
-bluetooth
-iw
-powertop
-wireless-tools
-
-# ─── Debian "desktop" task — hard Depends + key Recommends ───────────
-# task-desktop pulls xorg + xserver-xorg-* drivers + desktop-base
-# (Debian theme — see TODO) + key system services (cups for
-# printing, alsa-utils for audio, avahi+mdns for network discovery,
-# xdg-utils for desktop integration, fonts-symbola for emoji
-# fallback).  task-gnome-desktop further Recommends-on top of these
-# via task-desktop's chain.
-#
-# TODO (folds into FORK-01 Step 7 athena-branding): replace
-# `desktop-base` with Athena-branded theme/wallpaper package via
-# Provides+Conflicts+Replaces or dpkg-divert.  Today's
-# desktop-base ships Debian-themed wallpaper, GRUB theme, plymouth
-# splash.  Tracked in fork-source.md plan.
-alsa-utils
-cups
-fonts-symbola
-xorg
+# ─── laptop / desktop tasks — REMOVED (covered by pkg.list groups) ───
+# task-laptop (anacron, bluetooth, powertop, iw, wireless-tools,
+# avahi-autoipd) and task-desktop (xorg, cups, alsa-utils,
+# fonts-symbola) packages are all pulled into the closure by the
+# pkg.list [laptop] / [desktop] / [gnome-desktop] groups, so they are
+# already in /cdrom/pool.  Their former pool.list entries were
+# redundant and were removed in the 2026-06-09 consolidation.
 
 # ─── Asgard operator-facing metapackages ──────────────────────────
 # Empty-payload `.deb`s whose Depends: list is a curated group.
 # Ship in the pool so operators can `apt install asgard-<group>` on
 # a booted system and pull the whole group atomically.  Built from
-# fork/source/asgard-<group>/.  Pattern B per docs/branding-
-# methodology.md — coexists with the pkg.list group + tasksel Key
-# list, replaces neither.
-#
-# Hierarchy: asgard-gnome-desktop is the base.  Every subcategory
-# metapackage below Depends on asgard-gnome-desktop so installing
-# any subcategory pulls the full GNOME base automatically — a
-# single `apt install asgard-office` brings up "GNOME + office".
+# fork/source/asgard-<group>/.  asgard-gnome-desktop is the base;
+# every subcategory Depends on it.
 asgard-gnome-desktop
 # Subcategories — alphabetical
 asgard-accessibility
@@ -234,12 +121,9 @@ asgard-printing-extras
 
 # ─── Non-free firmware + CPU microcode (non-free-firmware component) ──
 # Curated subset of Debian's non-free-firmware, TUNNELED (prebuilt binaries,
-# see [Source] Tunneled in build.conf — sources intel-microcode /
-# amd64-microcode / firmware-nonfree).  Available in the pool so hw-detect's
-# install-time firmware machinery (post-base-installer.d/50install-firmware +
-# finish-install.d/08hw-detect) can apt-install the matching microcode/firmware
-# for the target's hardware.  These ship in the pool and publish under the
-# non-free-firmware component; NOT pre-installed in any chroot.
+# see [Source] Tunneled in build.conf).  Available in the pool so hw-detect's
+# install-time firmware machinery can apt-install the matching microcode/
+# firmware for the target's hardware.  NOT pre-installed in any chroot.
 #   microcode — apt-installed by hw-detect for the matching CPU vendor
 intel-microcode
 amd64-microcode
