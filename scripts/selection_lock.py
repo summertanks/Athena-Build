@@ -429,9 +429,7 @@ def audit_selection_coherence(
             if _intent_recorded(_src):
                 _findings.append((
                     'WARNING', 'selection_deprecation_pending',
-                    f"{_fn}: source {_src!r} deprecated at accept (intent "
-                    "recorded on its build record) — pending `mirror "
-                    "publish` to propagate the release"))
+                    f"{_fn}: source {_src!r} deprecated"))
             else:
                 _findings.append((
                     'CRITICAL', 'selection_claim_not_in_closure',
