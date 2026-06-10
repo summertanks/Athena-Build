@@ -31120,6 +31120,93 @@ def test_mirror_pull_record_writer_preserves_lifecycle_pin():
             "it would clobber the parse-stamped layer")
 
 
+def test_lifecycle_touch_selected_bootstrap_and_idempotent():
+    """First touch creates/stamps records; a second identical touch writes
+    NOTHING (steady-state parses must not re-sign 985 records)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        # one legacy built record + one brand-new source
+        _legacy = _u.new_build_record(package='oldpkg',
+                                      intended_version='1.0', patch_set_hash='')
+        _legacy.update({'phase': 'done', 'status': 'PASS',
+                        'built_version': '1.0'})
+        # strip the v4 baseline to simulate a true legacy record
+        _legacy.pop('lifecycle_v'); _legacy.pop('history')
+        _u.write_build_record(_root, _legacy)
+        _sel = {'oldpkg': '1.0', 'newpkg': '2.0'}
+        _st = _u.lifecycle_touch_selected(_root, _sel, 'snapA')
+        assert _st['created'] == 1 and _st['stamped'] == 1, _st
+        _old = _u.read_build_record(_root, 'oldpkg')
+        assert _old['selection'] == 'selected'
+        assert _old['selected_version'] == '1.0' and _old['snapshot'] == 'snapA'
+        assert _u.classify_build_record(_old) == 'ok'      # build state intact
+        _new = _u.read_build_record(_root, 'newpkg')
+        assert _new['phase'] == 'selected'
+        assert _u.classify_build_record(_new) == 'missing'
+        # steady state: identical touch → all unchanged, mtimes stable
+        _m1 = {p: os.path.getmtime(os.path.join(_root, p))
+               for p in os.listdir(_root) if p.endswith('.build.json')}
+        _st2 = _u.lifecycle_touch_selected(_root, _sel, 'snapA')
+        assert _st2['unchanged'] == 2 and sum(
+            _v for _k, _v in _st2.items() if _k != 'unchanged') == 0, _st2
+        _m2 = {p: os.path.getmtime(os.path.join(_root, p))
+               for p in os.listdir(_root) if p.endswith('.build.json')}
+        assert _m1 == _m2, "steady-state touch re-wrote records"
+
+
+def test_lifecycle_touch_version_change_rolls_obsolete():
+    """A snapshot move (selected_version changes) rolls the old episode into
+    history as 'obsolete' and updates the current fields."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        _u.lifecycle_touch_selected(_root, {'foo': '1.0-1'}, 'snapA')
+        # build completes at 1.0-1
+        _u.update_build_record(_root, 'foo', phase='done', status='PASS',
+                               built_version='1.0-1',
+                               outputs=['foo_1.0-1_amd64.deb'])
+        # snapshot moves → 1.0-2
+        _st = _u.lifecycle_touch_selected(_root, {'foo': '1.0-2'}, 'snapB')
+        assert _st['rolled'] == 1, _st
+        _rec = _u.read_build_record(_root, 'foo')
+        assert _rec['selected_version'] == '1.0-2'
+        assert _rec['snapshot'] == 'snapB'
+        _ep = _rec['history'][-1]
+        assert _ep['state'] == 'obsolete'
+        assert _ep['version'] == '1.0-1' and _ep['snapshot'] == 'snapA'
+        assert _ep['built_version'] == '1.0-1'
+        assert _ep['outputs'] == ['foo_1.0-1_amd64.deb']
+        # build state untouched by the parse roll — rebuild decided elsewhere
+        assert _rec['phase'] == 'done' and _rec['built_version'] == '1.0-1'
+
+
+def test_lifecycle_deprecate_then_reselect_round_trip():
+    """Intent-at-accept marks deprecated; re-selection archives the episode
+    and returns to selected."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        _u.lifecycle_touch_selected(_root, {'foo': '1.0'}, 'snapA')
+        assert _u.lifecycle_mark_deprecated(_root, {'foo'}, 'snapA') == 1
+        _rec = _u.read_build_record(_root, 'foo')
+        assert _rec['selection'] == 'deprecated'
+        assert _rec['deprecated_at']
+        _dep_at = _rec['deprecated_at']
+        # re-selection (operator re-adds the package, next parse)
+        _st = _u.lifecycle_touch_selected(_root, {'foo': '1.0'}, 'snapB')
+        assert _st['reselected'] == 1, _st
+        _rec = _u.read_build_record(_root, 'foo')
+        assert _rec['selection'] == 'selected'
+        assert _rec['deprecated_at'] is None
+        _ep = _rec['history'][-1]
+        assert _ep['state'] == 'deprecated'
+        assert _ep['deprecated_at'] == _dep_at   # episode archived
+        # deprecating an ABSENT record synthesizes one (still works)
+        assert _u.lifecycle_mark_deprecated(_root, {'ghost'}, 'snapB') == 1
+        assert _u.read_build_record(_root, 'ghost')['selection'] == 'deprecated'
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31800,6 +31887,10 @@ def main() -> int:
         test_record_phase_entry_preserves_lifecycle_and_stashes_prior_build,
         test_roll_prior_build_history_supersede_vs_same_version,
         test_mirror_pull_record_writer_preserves_lifecycle_pin,
+        # LEDGER-01 Chunk 3 — parse lifecycle wiring
+        test_lifecycle_touch_selected_bootstrap_and_idempotent,
+        test_lifecycle_touch_version_change_rolls_obsolete,
+        test_lifecycle_deprecate_then_reselect_round_trip,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
