@@ -31016,9 +31016,8 @@ def test_preserve_lifecycle_and_roll_history():
             'built_version': '1.0-1', 'outputs': ['a.deb']}
     _new = _u.new_build_record(package='foo', intended_version='1.1-1',
                                patch_set_hash='')
-    # new_build_record now seeds lifecycle_v/history; preserve must keep
-    # the OLD history (new didn't explicitly set meaningful values…)
-    _new.pop('lifecycle_v'), _new.pop('history')
+    # new_build_record seeds the EMPTY baseline (lifecycle_v=1, history=[]);
+    # preserve must still carry the OLD lived history over that baseline.
     _merged = _u.preserve_lifecycle(_old, _new)
     assert _merged['selection'] == 'selected'
     assert _merged['history'] == [{'state': 'obsolete', 'version': '0.9'}]
@@ -31031,6 +31030,94 @@ def test_preserve_lifecycle_and_roll_history():
     assert _ep['version'] == '1.0-1' and _ep['outputs'] == []
     # preserve with old=None is a no-op
     assert _u.preserve_lifecycle(None, {'x': 1}) == {'x': 1}
+
+
+def test_record_phase_entry_preserves_lifecycle_and_stashes_prior_build():
+    """LEDGER-01 Chunk 2: the build-start entry rewrite (via
+    _record_phase(initial=...)) carries the parse-stamped lifecycle layer
+    AND stashes the prior build episode for the done-phase roll."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    from buildcontainer import BuildContainer
+    with tempfile.TemporaryDirectory() as _root:
+        # Prior record: built at 1.0-1, lifecycle-stamped by the parse.
+        _prior = _u.new_build_record(package='foo', intended_version='1.0-1',
+                                     patch_set_hash='old')
+        _prior.update({'phase': 'done', 'status': 'PASS',
+                       'built_version': '1.0-1+asg1u1',
+                       'outputs': ['foo_1.0-1+asg1u1_amd64.deb'],
+                       'selection': 'selected', 'selected_version': '1.0-2',
+                       'snapshot': 'snapA', 'lifecycle_v': 1,
+                       'history': [{'state': 'obsolete', 'version': '0.9'}]})
+        _u.write_build_record(_root, _prior)
+        # Drive the real entry path with a minimal BuildContainer.
+        _bc = BuildContainer.__new__(BuildContainer)
+        _bc.buildlog_path = _root
+        _entry = _u.new_build_record(package='foo', intended_version='1.0-2',
+                                     patch_set_hash='new')
+        _bc._record_phase('foo', initial=_entry)
+        _rec = _u.read_build_record(_root, 'foo')
+        assert _rec is not None and _rec['phase'] == 'entry'
+        # lifecycle carried through the rewrite
+        assert _rec['selection'] == 'selected'
+        assert _rec['selected_version'] == '1.0-2' and _rec['snapshot'] == 'snapA'
+        assert _rec['history'] == [{'state': 'obsolete', 'version': '0.9'}]
+        # prior build stashed for the done-phase supersession decision
+        assert _rec['prior_build'] == {
+            'built_version': '1.0-1+asg1u1',
+            'outputs': ['foo_1.0-1+asg1u1_amd64.deb']}
+
+
+def test_roll_prior_build_history_supersede_vs_same_version():
+    """A new built_version that DIFFERS rolls an 'obsolete' history entry
+    carrying the OLD episode; a same-version rebuild just drops the stash."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        # supersession: +asg bump u1 → u2
+        _rec = _u.new_build_record(package='foo', intended_version='1.0-1',
+                                   patch_set_hash='')
+        _rec.update({'selected_version': '1.0-1', 'snapshot': 'snapB',
+                     'prior_build': {'built_version': '1.0-1+asg1u1',
+                                     'outputs': ['foo_1.0-1+asg1u1_amd64.deb']}})
+        _u.write_build_record(_root, _rec)
+        assert _u.roll_prior_build_history(_root, 'foo', '1.0-1+asg1u2') is True
+        _back = _u.read_build_record(_root, 'foo')
+        assert 'prior_build' not in _back
+        _ep = _back['history'][-1]
+        assert _ep['state'] == 'obsolete'
+        assert _ep['built_version'] == '1.0-1+asg1u1'
+        assert _ep['outputs'] == ['foo_1.0-1+asg1u1_amd64.deb']
+        assert _ep['snapshot'] == 'snapB'
+        # same-version rebuild: stash dropped, NO history entry
+        _rec2 = _u.new_build_record(package='bar', intended_version='2.0',
+                                    patch_set_hash='')
+        _rec2['prior_build'] = {'built_version': '2.0', 'outputs': ['b.deb']}
+        _u.write_build_record(_root, _rec2)
+        assert _u.roll_prior_build_history(_root, 'bar', '2.0') is False
+        _back2 = _u.read_build_record(_root, 'bar')
+        assert 'prior_build' not in _back2 and _back2['history'] == []
+        # absent record / absent stash → False, no crash
+        assert _u.roll_prior_build_history(_root, 'ghost', '1.0') is False
+
+
+def test_mirror_pull_record_writer_preserves_lifecycle_pin():
+    """PIN: _mirror_pull_write_build_records read-merges the existing record
+    and its update dict must never clobber lifecycle keys."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    # Source-level pin: the writer merges from the EXISTING record and the
+    # literal update dict must not name any lifecycle field.
+    import inspect
+    import commands.cmd_mirror as _cm
+    _src = inspect.getsource(_cm)
+    _block = _src[_src.index('_mirror_pull_write_build_records'):]
+    _block = _block[:_block.index('def cmd_mirror_audit')]
+    assert '_rec = dict(_existing)' in _block, "pull writer no longer merges"
+    for _f in _u.LIFECYCLE_FIELDS:
+        assert f"'{_f}':" not in _block, (
+            f"mirror-pull update dict now writes lifecycle field {_f!r} — "
+            "it would clobber the parse-stamped layer")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31709,6 +31796,10 @@ def main() -> int:
         test_upsert_build_record_creates_selected_classified_missing,
         test_upsert_build_record_preserves_build_fields_on_existing,
         test_preserve_lifecycle_and_roll_history,
+        # LEDGER-01 Chunk 2 — creator-site preservation + prior-build roll
+        test_record_phase_entry_preserves_lifecycle_and_stashes_prior_build,
+        test_roll_prior_build_history_supersede_vs_same_version,
+        test_mirror_pull_record_writer_preserves_lifecycle_pin,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
