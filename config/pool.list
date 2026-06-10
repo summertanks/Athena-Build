@@ -74,14 +74,19 @@ console-setup
 # subset; these stay in the pool so `apt install <name>` works
 # post-install.
 #
-# DEBIAN RESIDUE NOTE: `debian-faq`, `doc-debian`, `reportbug`,
-# `python3-reportbug` are Debian-specific (FAQ docs, BTS-submission
-# tooling).  They are already PUBLISHED on the mirror (live coord
-# claims), so they stay selected here — dropping a published package
-# leaves orphaned claims + a CRITICAL `claim_not_in_apt_index` audit
-# (no withdraw/retract flow exists yet).  Strip Debian identity by
-# FORKING (asgard-reportbug etc.): a fork claim cleanly supersedes the
-# upstream claim; deletion does not.
+# DEBIAN RESIDUE NOTE: `debian-faq` and `doc-debian` are Debian-specific
+# doc packages that remain selected FOR NOW; strip Debian identity by
+# FORKING (asgard-faq etc.) — a fork claim cleanly supersedes the
+# upstream claim.
+#
+# The `reportbug` stack (reportbug, python3-reportbug + transitive
+# python-debian/pycurl/python-debianbts/pysimplesoap) was REMOVED
+# 2026-06-10 via `cache select` + accept and DEPRECATED on the mirror
+# at publish (LEDGER-01): ownership released, the .debs stay in the
+# append-only pool as adoptable/prune candidates, claims seq 4816-4823.
+# Re-adding `reportbug` here re-claims the stack on the next publish.
+# Fork asgard-reportbug (pointed at our tracker) if the function is
+# ever wanted.
 apt-listchanges
 debian-faq
 doc-debian
@@ -90,8 +95,6 @@ liblockfile-bin
 mime-support
 netcat
 netcat-traditional
-python3-reportbug
-reportbug
 telnet
 telnet-client
 
