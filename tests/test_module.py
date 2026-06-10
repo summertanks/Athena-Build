@@ -30858,6 +30858,82 @@ def test_select_packages_pool_tier_load_save_and_comments():
         assert _u.parse_pkg_list_group_meta(_pkg).get('base', {}).get('description') == 'Base'
 
 
+def test_select_packages_save_and_quit_apply_intent():
+    """save & apply (W): writes the lists then signals 'apply' so the shell
+    thread runs the parse/accept transaction; teardown happens before the
+    shell thread is released."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import select_packages as _sp
+    import types
+
+    class _T:
+        def __init__(self): self.cleared = False; self.removed = []
+        def print(self, *a): pass
+        def set_tab_buffer(self, *a): pass
+        def viewport_rows(self): return 24
+        def attr_reverse(self): return 0
+        def attr_color(self, c): return 0
+        def add_tab(self, n): pass
+        def activate_tab(self, n): pass
+        def set_tab_key_handler(self, n, f): pass
+        def clear_tab_key_handler(self): self.cleared = True
+        def remove_tab(self, n): self.removed.append(n)
+
+    with tempfile.TemporaryDirectory() as _root:
+        _cfgdir = os.path.join(_root, 'config'); os.makedirs(_cfgdir)
+        _pkg = os.path.join(_cfgdir, 'pkg.list')
+        _pool = os.path.join(_cfgdir, 'pool.list')
+        open(_pkg, 'w').write('[base]\na\n')
+        open(_pool, 'w').write('# keep\ngrub-pc\nreportbug\n')
+        _cfg = types.SimpleNamespace(pkglist_path=_pkg, poollist_path=_pool)
+        _t = _T()
+        _sel = _sp.SelectPackages(_cfg, None, _t)
+        # drop reportbug from pool, then save & apply
+        for _e in _sel._groups[_sp.POOL_GROUP]:
+            if _e[0] == 'reportbug':
+                _e[1] = False
+        _sel._save_and_quit()                 # writes lists + _finish('apply')
+        assert _sel.wait_for_done() == 'apply'
+        assert _t.cleared and _t.removed == ['select']   # torn down
+        _pool_txt = open(_pool).read()
+        assert '# keep' in _pool_txt and 'grub-pc' in _pool_txt
+        assert 'reportbug' not in _pool_txt.replace('# ', '')   # dropped
+
+
+def test_select_packages_discard_intent_reverts_nothing_written_by_finish():
+    """quit + discard signals 'discard' (the caller reverts the files); a clean
+    quit with no edits signals 'quit'."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import select_packages as _sp
+    import types
+
+    class _T:
+        def print(self, *a): pass
+        def set_tab_buffer(self, *a): pass
+        def viewport_rows(self): return 24
+        def attr_reverse(self): return 0
+        def attr_color(self, c): return 0
+        def clear_tab_key_handler(self): pass
+        def remove_tab(self, n): pass
+
+    with tempfile.TemporaryDirectory() as _root:
+        _pkg = os.path.join(_root, 'pkg.list'); open(_pkg, 'w').write('[base]\na\n')
+        _pool = os.path.join(_root, 'pool.list'); open(_pool, 'w').write('grub-pc\n')
+        _cfg = types.SimpleNamespace(pkglist_path=_pkg, poollist_path=_pool)
+        # clean quit (no edits) → 'quit'
+        _s1 = _sp.SelectPackages(_cfg, None, _T())
+        _s1._quit()
+        assert _s1.wait_for_done() == 'quit'
+        # edit then discard → 'discard'
+        _s2 = _sp.SelectPackages(_cfg, None, _T())
+        _s2._groups['base'][0][1] = False     # toggle off → unsaved
+        _s2._unsaved = True
+        _s2._quit()                            # → input_mode 'quit'
+        assert _s2._input_mode == 'quit'
+        _s2._handle_input_key('n')             # discard
+        assert _s2.wait_for_done() == 'discard'
+
+
 def test_select_packages_write_flat_list_minimal_diff():
     """write_flat_list keeps comments + still-selected lines in place, drops
     unselected, appends new at EOF."""
@@ -31543,6 +31619,9 @@ def main() -> int:
         # cache select — pool.list tier
         test_select_packages_pool_tier_load_save_and_comments,
         test_select_packages_write_flat_list_minimal_diff,
+        # cache select — save&apply transaction intents
+        test_select_packages_save_and_quit_apply_intent,
+        test_select_packages_discard_intent_reverts_nothing_written_by_finish,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,

@@ -890,15 +890,93 @@ class CacheCommandsMixin(SessionState):
                           f"{self.config.pkglist_path} by hand")
             return
         from select_packages import SelectPackages
-        SelectPackages(self.config, self.cache, tui.tui_instance).activate()
-        # The edit changed the seeds under the resolved tree — force a re-parse
-        # so the closure guard recomputes the impact.  A shrink will BLOCK with
-        # the dropped packages listed; `cache select accept` then re-baselines.
-        self.flags.dep_check_ready = False
-        console.print(
-            "cache select: pkg.list edited — run `cache parse` to see the "
-            "closure impact (a shrink lists the dropped packages); "
-            "`cache select accept` to accept a shrink.", tui.COLOR_INFO)
+        # Back up the editable lists up front so a cancelled apply (or discard)
+        # is a true rollback — "cancel = no changes".
+        _backup = self._backup_select_lists()
+        _sel = SelectPackages(self.config, self.cache, tui.tui_instance)
+        _sel.activate()
+        # Block the shell thread while the operator edits on the dispatcher
+        # thread; resume with their exit intent.  The selector wrote the lists
+        # already (on save / save&apply); we run the parse + accept prompt here
+        # in normal console context.
+        _intent = _sel.wait_for_done()
+        try:
+            if _intent == 'apply':
+                self._select_apply_transaction(_backup)
+            elif _intent == 'discard':
+                self._restore_select_lists(_backup)
+                console.print("cache select: discarded — list files reverted, "
+                              "no changes.", tui.COLOR_INFO)
+            else:   # 'quit' — no pending in-memory edits
+                console.print("cache select: closed (no changes).",
+                              tui.COLOR_INFO)
+        finally:
+            self._cleanup_select_backup(_backup)
+
+    # ─── cache select save&apply transaction ─────────────────────────────
+    def _backup_select_lists(self) -> 'dict':
+        """Copy pkg.list + pool.list to temp files for transactional rollback.
+        Returns {label: (orig_path, backup_path)} for files that exist."""
+        import shutil
+        import tempfile
+        _out: dict = {}
+        for _label, _path in (('pkg', self.config.pkglist_path),
+                              ('pool', self.config.poollist_path)):
+            if os.path.exists(_path):
+                _fd, _tmp = tempfile.mkstemp(prefix='.select-bak.')
+                os.close(_fd)
+                try:
+                    shutil.copy2(_path, _tmp)
+                    _out[_label] = (_path, _tmp)
+                except OSError as _e:
+                    logger.warning(f"cache select backup {_path}: {_e}")
+        return _out
+
+    def _restore_select_lists(self, backup: 'dict') -> None:
+        import shutil
+        for _label, (_path, _tmp) in backup.items():
+            try:
+                shutil.copy2(_tmp, _path)
+            except OSError as _e:
+                logger.error(f"cache select restore {_path}: {_e}")
+
+    def _cleanup_select_backup(self, backup: 'dict') -> None:
+        for _label, (_path, _tmp) in backup.items():
+            try:
+                os.remove(_tmp)
+            except OSError:
+                pass
+
+    def _select_apply_transaction(self, backup: 'dict') -> None:
+        """Re-parse after a `cache select` save&apply, preview the closure
+        impact, and require a typed `accept` for a closure SHRINK (large
+        impact = mirror deprecations).  Cancel reverts the list files."""
+        console.print("cache select: re-resolving the selection…",
+                      tui.COLOR_INFO)
+        self.cmd_parse_dependency('force')
+        if self.flags.dep_check_ready:
+            # REFRESH — additions-only or no closure change; already applied.
+            console.print("cache select: applied — selection.state updated "
+                          "(no closure shrink).", tui.COLOR_HIGHLIGHT)
+            return
+        # BLOCKED — the guard already listed the dropped packages as
+        # mirror-deprecation candidates above.  Require an explicit typed
+        # accept (large impact), else roll the edit back.
+        _resp = Prompt(
+            tui.PROMPT_INPUT,
+            "Type 'accept' to apply this removal (the dropped packages are "
+            "deprecated on the mirror at next publish), or anything else to "
+            "cancel",
+        ).get_response()
+        if _resp.strip().lower() == 'accept':
+            self.cmd_parse_dependency('force', 'accept-removals')
+            console.print("cache select: ACCEPTED — selection.state "
+                          "re-baselined.", tui.COLOR_HIGHLIGHT)
+        else:
+            self._restore_select_lists(backup)
+            self.flags.dep_check_ready = False
+            console.print("cache select: CANCELLED — list files reverted, "
+                          "no changes.", tui.COLOR_WARNING)
 
     def cmd_cache_restore(self, *args):
         """`cache restore` — regenerate config/{pkg,live,installer,pool}.list
