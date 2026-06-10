@@ -16,8 +16,9 @@ Key bindings (while the `select` tab is active):
     a            add a package (input prompt; tab-completes cache names)
     d            deselect the package on the cursor row
     [ / ]        previous / next group
-    s            save → write config/pkg.list
-    q            quit the selector (prompts if there are unsaved edits)
+    s            save → write config/pkg.list + pool.list (stay in selector)
+    W            save & apply → write, re-parse, preview impact, accept/cancel
+    q            quit the selector (prompts apply/discard if unsaved edits)
 
 Each row shows: `[*]` / `[ ]`, name, installed size, direct-dep
 count, transitive-closure footprint (approximate — first-provider
@@ -107,6 +108,16 @@ class SelectPackages:
         self._pkgmeta: Dict[str, Dict] = {}
         self._closure_inflight: set = set()
         self._closure_lock = threading.Lock()
+
+        # Save&quit handoff.  cmd_cache_select blocks on wait_for_done() (shell
+        # thread) while this selector runs on the dispatcher thread; an exit
+        # path sets _intent + _done, so the shell thread resumes and runs the
+        # parse/accept transaction in normal console context.  Intents:
+        #   'apply'   — save & quit: re-parse, preview impact, accept/cancel
+        #   'discard' — quit, revert all edits (transactional rollback)
+        #   'quit'    — quit, leave disk as-is (no pending in-memory edits)
+        self._done = threading.Event()
+        self._intent = 'quit'
 
     # ─── Model load / build ──────────────────────────────────────────────
     def _load_model(self) -> None:
@@ -220,6 +231,19 @@ class SelectPackages:
         self._tui.clear_tab_key_handler()
         self._tui.remove_tab(self.TAB)
 
+    def wait_for_done(self) -> str:
+        """Block the calling (shell) thread until the operator exits the
+        selector; return the exit intent ('apply' / 'discard' / 'quit')."""
+        self._done.wait()
+        return self._intent
+
+    def _finish(self, intent: str) -> None:
+        """Single exit point — tear the tab down and release the shell
+        thread with the operator's intent."""
+        self._intent = intent
+        self._teardown()
+        self._done.set()
+
     # ─── Rendering ───────────────────────────────────────────────────────
     def _render(self) -> None:
         rows = self._rows()
@@ -267,11 +291,11 @@ class SelectPackages:
             group = self._add_group or '?'
             out.append((f'  add to [{group}]: {self._input_buffer}_', rev))
         elif self._input_mode == 'quit':
-            out.append(('  Unsaved changes — save before quit?  '
-                        'y = save+quit   n/Esc = discard+quit', rev))
+            out.append(('  Unsaved changes —  y = apply (save + re-parse + '
+                        'accept)   n/Esc = discard (revert all)', rev))
         else:
             out.append(('  ↑↓ move  SPACE toggle  a add  d drop  [ ] group  '
-                        's save  q quit', info_a))
+                        's save  W save&apply  q quit', info_a))
         self._tui.set_tab_buffer(self.TAB, out)
 
     def _format_pkg_row(self, row: _Row, is_cursor: bool) -> str:
@@ -326,7 +350,7 @@ class SelectPackages:
         rows = self._rows()
         if not rows:
             if key in ('q', 'Q'):
-                self._teardown()
+                self._finish('quit')
             return True
 
         if key == 'KEY_UP':
@@ -349,6 +373,8 @@ class SelectPackages:
             self._begin_add(rows)
         elif key in ('s', 'S'):
             self._save()
+        elif key in ('W',):
+            self._save_and_quit()
         elif key in ('q', 'Q'):
             self._quit()
         # Any other key is swallowed (kept out of the shell cmdline).
@@ -359,13 +385,13 @@ class SelectPackages:
         if self._input_mode == 'quit':
             # y/n confirm — single keystroke.
             ch = key.lower()
-            if ch == 'y':
+            if ch == 'y':                 # apply — save + run the transaction
                 self._input_mode = None
                 self._save()
-                self._teardown()
-            elif ch in ('n', '\x1b'):   # n or Esc → discard + quit
+                self._finish('apply')
+            elif ch in ('n', '\x1b'):     # n or Esc → discard (revert all)
                 self._input_mode = None
-                self._teardown()
+                self._finish('discard')
             # any other key: ignore, keep waiting.
             return
 
@@ -480,11 +506,17 @@ class SelectPackages:
         self._tui.print(f'  select: saved {_saved}')
         self._render()
 
+    def _save_and_quit(self) -> None:
+        """Save the lists then hand off to the apply transaction (re-parse +
+        preview + accept/cancel, run by cmd_cache_select on the shell thread)."""
+        self._save()
+        self._finish('apply')
+
     def _quit(self) -> None:
         if not self._unsaved:
-            self._teardown()
+            self._finish('quit')
             return
-        # Enter inline y/n confirm — handled by _handle_input_key.
+        # Unsaved edits — inline confirm: apply (parse) or discard (revert).
         self._input_mode = 'quit'
         self._render()
 
