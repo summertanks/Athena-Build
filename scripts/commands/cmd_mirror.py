@@ -715,15 +715,41 @@ class MirrorCommandsMixin(SessionState):
         if not _url:
             return []
 
-        # 1. Claim-side: every non-retracted claim's filename
+        # 1. Claim-side: every LIVE claim's filename.  Same two-step
+        # fold as _mirror_recompute_base: drop state-marker claims
+        # (retracted/deprecated/obsolete) AND the published claims they
+        # supersede via *_seq back-refs.  Without the fold the ORIGINAL
+        # published claim of an obsoleted/deprecated file keeps the
+        # filename "expected on disk" and a legitimately-pruned file
+        # false-CRITICALs as missing_on_disk (17 hits, 2026-06-11).
+        # Filenames under marker claims land in _state_marked instead:
+        # those bytes may be pruned (no finding) or retained
+        # (prune-candidate, not an orphan).
         _claimed: set = set()
+        _state_marked: set = set()
         for _bid, _claims in by_builder.items():
+            _dead_seqs: set = set()
             for _c in _claims:
-                if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
-                    continue
+                for _k in ('retracts_seq', 'deprecates_seq',
+                           'obsoletes_seq'):
+                    _s = _c.get(_k)
+                    if isinstance(_s, int):
+                        _dead_seqs.add(_s)
+            for _c in _claims:
                 _fn = _c.get('filename')
-                if isinstance(_fn, str) and _fn:
-                    _claimed.add(_fn)
+                if not (isinstance(_fn, str) and _fn):
+                    continue
+                _seq = _c.get('seq')
+                if (_c.get('claim_state') in
+                        ('retracted', 'deprecated', 'obsolete')
+                        or (isinstance(_seq, int) and _seq in _dead_seqs)):
+                    _state_marked.add(_fn)
+                    continue
+                _claimed.add(_fn)
+        # A filename can be both (old version marked, new version live)
+        # — live wins for the missing check; marked only suppresses
+        # orphan warnings.
+        _state_marked -= _claimed
 
         # 2. Disk-side
         _on_disk: 'Optional[set]' = self._mirror_audit_pool_listing(
@@ -737,7 +763,7 @@ class MirrorCommandsMixin(SessionState):
                      "claim-vs-disk cross-check skipped")]
 
         _missing = sorted(_claimed - _on_disk)
-        _orphan = sorted(_on_disk - _claimed)
+        _orphan = sorted(_on_disk - _claimed - _state_marked)
         _findings: 'list[tuple[str, str, str]]' = []
         for _fn in _missing[:20]:
             _findings.append((

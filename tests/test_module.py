@@ -17460,6 +17460,96 @@ def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
         )
 
 
+def test_push_dist_tree_protects_pool_artifacts_from_delete():
+    """push_dist_tree rsyncs dists/<codename>/ with --delete, and since
+    CONF-01 the pool .debs live INSIDE that tree — a bare --delete
+    mirrors local prunes onto the remote (17 obsolete/deprecated files
+    vanished from the append-only pool, 2026-06-11).  The rsync argv
+    must protect .deb/.udeb from receiver-side deletion."""
+    import sys as _sys
+    import types as _types
+    import tempfile
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _tr
+
+    _captured = {}
+
+    def _fake_run(argv, **k):
+        _captured['argv'] = argv
+        return _types.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    _orig = _tr.subprocess
+    _tr.subprocess = _types.SimpleNamespace(run=_fake_run)
+    try:
+        with tempfile.TemporaryDirectory() as _tmp:
+            _ok, _detail = _tr.push_dist_tree(
+                local_dist_dir=_tmp,
+                remote_dir_spec='user@host:/srv/asgard/dists/thor')
+    finally:
+        _tr.subprocess = _orig
+    assert _ok, _detail
+    _argv = _captured['argv']
+    assert '--delete' in _argv, _argv
+    assert '--filter=P *.deb' in _argv, _argv
+    assert '--filter=P *.udeb' in _argv, _argv
+
+
+def test_mirror_audit_disk_vs_claims_folds_superseded_claims():
+    """_mirror_audit_disk_vs_claims must fold marker claims (retracted/
+    deprecated/obsolete) AND the published claims their *_seq back-refs
+    supersede: a pruned obsolete/deprecated file is NOT missing_on_disk
+    (17 false CRITICALs, 2026-06-11), and a RETAINED superseded file is
+    NOT orphan_on_disk (append-only pool keeps the bytes)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    _by_builder = {'athena-primary': [
+        # old version: original published claim + obsolescence marker
+        {'claim_state': 'published', 'seq': 704,
+         'filename': 'e2fsprogs_1.47.0-2+asg1u1_amd64.deb'},
+        {'claim_state': 'obsolete', 'seq': 4844, 'obsoletes_seq': 704,
+         'filename': 'e2fsprogs_1.47.0-2+asg1u1_amd64.deb'},
+        # deprecated: original + deprecation marker
+        {'claim_state': 'published', 'seq': 900,
+         'filename': 'reportbug_12.0.0_all.deb'},
+        {'claim_state': 'deprecated', 'seq': 4816, 'deprecates_seq': 900,
+         'filename': 'reportbug_12.0.0_all.deb'},
+        # live current-version claim
+        {'claim_state': 'published', 'seq': 4831,
+         'filename': 'e2fsprogs_1.47.0-2+asg1u2_amd64.deb'},
+    ]}
+
+    def _mk(pool: set):
+        _sess = BuildSession.__new__(BuildSession)
+        _sess._mirror_audit_pool_listing = lambda url, key: set(pool)
+        return _sess
+
+    _orig = build.console.print
+    build.console.print = lambda *a, **k: None
+    try:
+        # Case 1: superseded files pruned remotely — only the live file
+        # on disk.  No findings at all.
+        _f = _mk({'e2fsprogs_1.47.0-2+asg1u2_amd64.deb'})._mirror_audit_disk_vs_claims(
+            'm', {'url': 'ssh://x/y'}, _by_builder)
+        assert _f == [], _f
+        # Case 2: superseded files RETAINED remotely (append-only) —
+        # not orphans, still no findings.
+        _f = _mk({'e2fsprogs_1.47.0-2+asg1u2_amd64.deb',
+                  'e2fsprogs_1.47.0-2+asg1u1_amd64.deb',
+                  'reportbug_12.0.0_all.deb'})._mirror_audit_disk_vs_claims(
+            'm', {'url': 'ssh://x/y'}, _by_builder)
+        assert _f == [], _f
+        # Case 3: the LIVE file missing → still a real CRITICAL.
+        _f = _mk(set())._mirror_audit_disk_vs_claims(
+            'm', {'url': 'ssh://x/y'}, _by_builder)
+        assert len(_f) == 1 and _f[0][1] == 'missing_on_disk', _f
+        assert '+asg1u2' in _f[0][2], _f
+    finally:
+        build.console.print = _orig
+
+
 def test_mirror_publish_reindexes_stale_local_index():
     """mirror publish must re-index when any pool artifact is newer than
     the local InRelease, not only when InRelease is missing.  Publish
@@ -32771,6 +32861,8 @@ def main() -> int:
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_preflight_repo_audit_blocks_on_stale_artifacts,
         test_mirror_publish_reindexes_stale_local_index,
+        test_push_dist_tree_protects_pool_artifacts_from_delete,
+        test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
         test_cmd_source_fork_enable_removes_marker,
         test_fork_mirror_discover_skips_disabled_trees,
