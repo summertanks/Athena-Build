@@ -1,3 +1,15 @@
+athena-pkgsel (0.79+athena2) thor; urgency=low
+
+  * SURFACES-01: add pre-pkgsel.d/05athena-tasks hook — installs the
+    build-generated tasksel menu (/cdrom/.disk/athena-tasks.desc,
+    derived from the signed selection lockfile at ISO mastering) onto
+    /target/usr/share/tasksel/descs/ before pkgsel invokes tasksel.
+    athena-tasksel-data's packaged desc remains the fallback when the
+    ISO carries no generated copy.  Shipped via the existing
+    `pre-pkgsel.d usr/lib` dir-level install entry.
+
+ -- Athena Linux <athena@local>  Thu, 11 Jun 2026 12:36:00 -0400
+
 athena-pkgsel (0.79+athena1) thor; urgency=low
 
   * FORK-01 Step 5b: Athena fork of upstream pkgsel 0.79.

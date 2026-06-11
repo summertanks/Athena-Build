@@ -1,3 +1,17 @@
+athena-tasksel (3.73+athena3) thor; urgency=low
+
+  * debian/control: rebrand athena-tasksel-data task descriptions —
+    drop the Debian references from the gnome-desktop and standard
+    task blurbs (identity policy: shipped artifacts speak as
+    @DISTRIBUTION@; factual fork-provenance statements retained).
+  * Note: since SURFACES-01 the packaged athena-tasks.desc is the
+    FALLBACK — the installer prefers the build-generated desc staged
+    at /cdrom/.disk/athena-tasks.desc (installed by athena-pkgsel's
+    pre-pkgsel.d/05athena-tasks hook), so pkg.list group edits reach
+    the menu without rebuilding this package.
+
+ -- Athena Linux <athena@local>  Thu, 11 Jun 2026 12:36:00 -0400
+
 athena-tasksel (3.73+athena2) thor; urgency=low
 
   * FORK-01 Step 5b: extend fork to also produce athena-tasksel-data
