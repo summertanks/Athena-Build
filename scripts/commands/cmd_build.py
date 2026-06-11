@@ -543,6 +543,34 @@ class BuildCommandsMixin(SessionState):
                     "iso build installer: non-base groups exist but all "
                     "packages credited to earlier groups"
                 )
+            # ── SURFACES-01 pre-flight: surface config sanity ──────────
+            # [Live]/[Disk] Groups must name real pkg.list groups; every
+            # installer-defaults root must be in the selection (it ships
+            # in the ISO pool for a d-i hook to install).
+            import surfaces
+            _valid_groups = set(_raw_pkg_groups.keys())
+            for _surf, _gset in (('Live', self.config.live_groups),
+                                 ('Disk', self.config.disk_groups)):
+                _bad = _gset - _valid_groups
+                if _bad:
+                    console.print(
+                        f"ERROR: [{_surf}] Groups references unknown pkg.list "
+                        f"group(s): {', '.join(sorted(_bad))} — valid: "
+                        f"{', '.join(sorted(_valid_groups))}",
+                        tui.COLOR_ERROR)
+                    return
+            _di_roots = surfaces.read_flat_roots(
+                self.config.installer_defaults_path)
+            _di_missing = [_r for _r in _di_roots
+                           if _r not in self.dep_tree.selected_pkgs]
+            if _di_missing:
+                console.print(
+                    "ERROR: installer-defaults.list entries not in the "
+                    f"selection: {', '.join(_di_missing)} — add them to "
+                    "pool.list (build/publish roots) or remove from "
+                    "installer-defaults.list.", tui.COLOR_ERROR)
+                return
+
             _canonical = {
                 _name for _name in self.dep_tree.selected_pkgs
                 if _name == self.dep_tree.selected_pkgs[_name]['Package']
