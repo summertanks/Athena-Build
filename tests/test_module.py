@@ -31628,6 +31628,42 @@ def test_buildconfig_surface_group_knobs():
     assert not _missing, f'installer-defaults not in pool.list: {_missing}'
 
 
+def test_compute_install_batches_install_set_param():
+    """SURFACES-01 Chunk 3: install_set REPLACES the legacy exclusion math
+    (a group-extras member inside the set IS installed; one outside is not);
+    None keeps the historic [base]-only behavior."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import types
+    from chroot import _ChrootMixin
+    _pkgs = {
+        'base-a':   _SurfPkg('base-a'),
+        'gnome-b':  _SurfPkg('gnome-b', depends=['base-a']),
+        'pool-c':   _SurfPkg('pool-c'),
+    }
+    _dt = types.SimpleNamespace(
+        selected_pkgs=_pkgs,
+        extras_pkg_names=set(),
+        pkg_group_extras_pkg_names={'gnome-b'},
+        pool_extras_pkg_names={'pool-c'},
+    )
+    _mix = _ChrootMixin.__new__(_ChrootMixin)
+    _mix._dependencytree = _dt
+    # legacy (None): group/pool extras excluded → base-a only
+    _legacy = [p for batch, _f in
+               _mix._compute_install_batches(set()) for p in batch]
+    assert _legacy == ['base-a'], _legacy
+    # surface set including the gnome member: installed, pool-c still out
+    _surface = {'base-a', 'gnome-b'}
+    _batches = _mix._compute_install_batches(set(), install_set=_surface)
+    _flat = [p for batch, _f in _batches for p in batch]
+    assert set(_flat) == {'base-a', 'gnome-b'}, _flat
+    # dep order: base-a before gnome-b
+    assert _flat.index('base-a') < _flat.index('gnome-b')
+    # libc seed still subtracted under install_set
+    _b2 = _mix._compute_install_batches({'base-a'}, install_set=_surface)
+    assert [p for batch, _f in _b2 for p in batch] == ['gnome-b']
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32330,6 +32366,8 @@ def main() -> int:
         test_surfaces_group_seed_names_and_flat_roots,
         # SURFACES-01 Chunk 2 — config knobs + installer-defaults
         test_buildconfig_surface_group_knobs,
+        # SURFACES-01 Chunk 3 — live chroot composition
+        test_compute_install_batches_install_set_param,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
