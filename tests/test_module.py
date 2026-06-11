@@ -10104,26 +10104,21 @@ def test_athena_tasksel_depends_on_athena_tasksel_data_directly():
 
 
 def test_athena_tasksel_task_keys_mirror_pkg_list_groups():
-    """FORK-01 Step 5b architectural invariant: each non-`[base]`
-    group in config/pkg.list MUST have a matching task file in
-    fork/source/athena-tasksel/tasks/<group>, and that file's Key:
-    list MUST exactly equal the pkg.list group's seed list.
+    """SURFACES-01 rework of the FORK-01 5b invariant: the AUTHORITATIVE
+    menu is now GENERATED from the lockfile groups at ISO mastering
+    (tasksel_desc.generate_desc) and installed by the athena-pkgsel
+    pre-pkgsel.d hook — so the fork's static tasks/* are a FALLBACK,
+    no longer required to mirror pkg.list exactly.
 
-    Why this matters: tasksel's task_avail() runs
-    `apt-cache dumpavail` on every Key entry and silently hides the
-    task if any package is missing.  The pkg.list group is also the
-    source-of-truth that drives `resolve_packages` → `selected_pkgs`
-    → source build, so a Key entry not listed in the pkg.list group
-    won't be built / shipped.  Sync enforced both directions.
+    Relaxed invariant (still load-bearing): every EXISTING fork task
+    file's Key set must be a SUBSET of its pkg.list group's seeds —
+    a Key referencing a package we don't build would make tasksel
+    silently hide the task when the fallback desc is in play (the
+    2026-05-18 failure class).  A pkg.list group WITHOUT a fork task
+    file is fine now (the generated desc covers it); fork Keys the
+    group dropped are NOT fine (unbuilt reference).
 
-    Caught 2026-05-18 install: tasks/desktop, tasks/laptop,
-    tasks/ssh-server had `Key: task-<name>` referencing upstream
-    Debian meta-packages we don't build (athena-tasksel-data is a
-    single binary, not multi-binary with task-* meta packages).
-    Three tasks silently dropped from the menu.
-
-    [base] is exempt — it's installed via debootstrap, doesn't
-    surface as a tasksel task.
+    [base] is exempt — debootstrapped, never a task.
     """
     import sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
@@ -10132,14 +10127,12 @@ def test_athena_tasksel_task_keys_mirror_pkg_list_groups():
     _tasks_dir = os.path.join(_ROOT, 'fork', 'source',
                               'athena-tasksel', 'tasks')
     _groups = parse_pkg_list_groups(_pkglist)
-    _non_base = {_g: _seeds for _g, _seeds in _groups.items() if _g != 'base'}
-    for _group, _seeds in _non_base.items():
+    for _group, _seeds in _groups.items():
+        if _group == 'base':
+            continue
         _task_file = os.path.join(_tasks_dir, _group)
-        assert os.path.isfile(_task_file), (
-            f"pkg.list defines [{_group}] but tasks/{_group} is missing.  "
-            f"Create fork/source/athena-tasksel/tasks/{_group} with a "
-            f"Key: list mirroring the pkg.list group's seeds."
-        )
+        if not os.path.isfile(_task_file):
+            continue   # generated desc covers groups without a fallback file
         # Extract the Key: list from the task file.
         _key_seeds = []
         with open(_task_file) as fh:
@@ -10155,12 +10148,11 @@ def test_athena_tasksel_task_keys_mirror_pkg_list_groups():
                     _name = _stripped.strip()
                     if _name:
                         _key_seeds.append(_name)
-        assert set(_key_seeds) == set(_seeds), (
-            f"tasks/{_group} Key: list out of sync with pkg.list [{_group}].\n"
-            f"  in pkg.list only: {sorted(set(_seeds) - set(_key_seeds))}\n"
-            f"  in tasks only:    {sorted(set(_key_seeds) - set(_seeds))}\n"
-            f"Mirror the lists (Path β manual-sync workflow per "
-            f"docs/plans/fork-source.md)."
+        _orphans = sorted(set(_key_seeds) - set(_seeds))
+        assert not _orphans, (
+            f"fallback tasks/{_group} Key entries not in pkg.list "
+            f"[{_group}] (would reference unbuilt packages → tasksel "
+            f"silently hides the task): {_orphans}"
         )
 
 

@@ -21,6 +21,16 @@
 #      target.  They stay in `_pool_whitelist` so the .debs ship in
 #      the cdrom pool.
 #
+# SURFACES-01 (2026-06-11): the installer ISO's /cdrom/pool is now
+# MANIFEST-DRIVEN — it stages only the closure of ([base] ∪ task groups
+# ∪ config/installer-defaults.list ∪ installer.list).  pool.list entries
+# remain BUILD/PUBLISH roots (selected, built, on the mirror), but an
+# entry reachable by nothing on the ISO (asgard-* metas, the standard
+# residue below) does NOT ship on the ISO — install post-boot via the
+# network mirror.  d-i-installed entries (grub metas, microcode,
+# firmware, console-setup, open-vm-tools) reach the ISO via
+# installer-defaults.list, which must stay in sync with this file.
+#
 # CONSOLIDATION (2026-06-09): this file lists ONLY packages that are
 # genuinely pool-ROOTED — i.e. not already pulled into the closure by
 # pkg.list / live.list / installer.list dependencies.  55 redundant
