@@ -17460,6 +17460,77 @@ def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
         )
 
 
+def test_preflight_repo_audit_blocks_on_stale_artifacts():
+    """The chroot pre-flight repo audit includes the stale-file scan and
+    GATES on it: a superseded .deb lingering in repo/ is silently
+    consumable by the chroot installer (find_matching_artifact accepts
+    any +asg-stamped variant — stale e2fsprogs +asg1u1 poisoned the disk
+    image while the fixed +asg1u2 sat beside it, 2026-06-11).  Clean
+    scan → proceeds without prompting; any version-drift artifact →
+    prompts (answer n → abort)."""
+    import sys as _sys
+    import types as _types
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    import commands.cmd_audit as _ca
+    import utils as _utils
+
+    class _Flags:
+        dep_check_ready = True
+
+    class _Cfg:
+        dir_log = '/nonexistent'
+        dir_repo = '/nonexistent'
+
+    _state = _types.SimpleNamespace(packages={'a': object()})
+    _fake_repo_audit = _types.SimpleNamespace(
+        scan_repo_state=lambda cfg: _state,
+        audit_dep_closure=lambda st, consumer_set=None: ([], None),
+        detect_dangling_asg_equals_pins=lambda st, consumer_set=None: [],
+        audit_conflict_cohort=lambda st, cohort: [],
+    )
+
+    _prompted = []
+
+    class _FakePrompt:
+        def __init__(self, *a, **k):
+            _prompted.append(a)
+
+        def get_response(self):
+            return 'n'
+
+    _orig_ra, _ca.repo_audit = _ca.repo_audit, _fake_repo_audit
+    _orig_pr, _ca.Prompt = _ca.Prompt, _FakePrompt
+    _orig_vh = _utils.verify_output_hashes
+    _utils.verify_output_hashes = (
+        lambda *a, **k: {'mismatched': [], 'scanned': 0})
+    _orig_print = build.console.print
+    build.console.print = lambda *a, **k: None
+    try:
+        _drift_file = ('main', 'e2fsprogs_1.47.0-2+asg1u1_amd64.deb',
+                       'e2fsprogs', 100)
+        for _drift, _expect in (([], True), ([_drift_file], False)):
+            _sess = BuildSession.__new__(BuildSession)
+            _sess.flags = _Flags()
+            _sess.config = _Cfg()
+            _sess._resolve_install_corpus = lambda: None
+            _sess._resolve_live_cohort = lambda: None
+            _sess._resolve_installer_cohort = lambda: None
+            _sess._scan_stale_files = (
+                lambda _d=_drift: ([], list(_d), [], 1))
+            _prompted.clear()
+            _r = _sess._preflight_audit_repo()
+            assert _r is _expect, (_drift, _r)
+            # gate prompts ONLY when stale files exist
+            assert bool(_prompted) == (not _expect), (_drift, _prompted)
+    finally:
+        _ca.repo_audit = _orig_ra
+        _ca.Prompt = _orig_pr
+        _utils.verify_output_hashes = _orig_vh
+        build.console.print = _orig_print
+
+
 def test_cmd_source_fork_disable_writes_marker_and_invalidates_state():
     """source fork <pkg> disabled — writes `.disabled` marker at
     fork/source/<pkg>/ AND clears cache_ready + dep_check_ready so the
@@ -32618,6 +32689,7 @@ def main() -> int:
         test_repo_audit_closure_handles_conflicts_and_provides,
         test_print_wrapped_names_keeps_lines_under_wrap_width,
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
+        test_preflight_repo_audit_blocks_on_stale_artifacts,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
         test_cmd_source_fork_enable_removes_marker,
         test_fork_mirror_discover_skips_disabled_trees,

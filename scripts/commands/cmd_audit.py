@@ -143,6 +143,12 @@ class AuditCommandsMixin(SessionState):
           - any unresolved hard Depends/Pre-Depends in the whole repo
           - any conflict within the live cohort
           - any conflict within the installer cohort
+          - any build.json↔disk output-hash mismatch
+          - any stale artifact in repo/ (version-drift / orphan-source /
+            malformed) — version-drift files are silently consumable by
+            the chroot installer (superseded e2fsprogs poisoned the disk
+            image, 2026-06-11), so obsolete files BLOCK until
+            `repo repair cleanup`
 
         When dep_tree / udeb_dep_tree aren't populated, the relevant
         cohort check is skipped with a hint to run `cache parse`.  Dep
@@ -194,16 +200,38 @@ class AuditCommandsMixin(SessionState):
         )
         _hash_drift = _hash_audit['mismatched']
 
+        # STALE-FILE gate (2026-06-11): a superseded .deb lingering in
+        # repo/ is SILENTLY consumed — find_matching_artifact accepts any
+        # +asg-stamped variant of the predicted pristine name, so a
+        # version-drift artifact from a pre-fix build can poison the
+        # chroot.  Caught live: e2fsprogs +asg1u1 (broken Pre-Depends)
+        # was installed while the fixed +asg1u2 sat beside it; the disk
+        # image reboot-looped and nothing flagged it.  Orphan-source and
+        # malformed files gate too — all are one `repo repair cleanup`
+        # away from gone.
+        _stale_orphan: list = []
+        _stale_drift: list = []
+        _stale_malformed: list = []
+        if self.flags.dep_check_ready:
+            _stale_orphan, _stale_drift, _stale_malformed, _ = (
+                self._scan_stale_files())
+        else:
+            console.print(
+                "Repo audit: stale-file gate SKIPPED — run `cache parse` "
+                "to enable (needs selected_srcs)")
+
+        _n_stale = (len(_stale_orphan) + len(_stale_drift)
+                    + len(_stale_malformed))
         _bad = (
             len(_unresolved) + len(_live_conflicts) + len(_inst_conflicts)
-            + len(_hash_drift)
+            + len(_hash_drift) + _n_stale
         )
         if _bad == 0:
             console.print(
                 f"Repo audit OK: {len(_state.packages)} pkgs, "
                 f"hard-dep closure clean, no install-cohort conflicts, "
                 f"build.json↔disk hashes match ({_hash_audit['scanned']} "
-                f"outputs checked)."
+                f"outputs checked), no stale artifacts."
             )
             return True
         console.print(
@@ -215,8 +243,26 @@ class AuditCommandsMixin(SessionState):
             f"  CONFLICTS in INSTALLER ramdisk cohort:       "
             f"{len(_inst_conflicts)}\n"
             f"  build.json↔disk HASH MISMATCHES:             "
-            f"{len(_hash_drift)}"
+            f"{len(_hash_drift)}\n"
+            f"  STALE artifacts (version-drift):             "
+            f"{len(_stale_drift)}\n"
+            f"  STALE artifacts (orphan-source/malformed):   "
+            f"{len(_stale_orphan) + len(_stale_malformed)}"
         )
+        if _stale_drift:
+            _sshow = min(5, len(_stale_drift))
+            console.print(
+                f"\nFirst {_sshow} VERSION-DRIFT artifacts (older build of "
+                f"a selected source — the chroot installer can pick these "
+                f"up SILENTLY instead of the current build; "
+                f"`repo repair cleanup` removes them):")
+            for _sub, _fn, _src, _sz in _stale_drift[:_sshow]:
+                console.print(f"  {_sub}/{_fn}  (source: {_src})")
+        if _stale_orphan or _stale_malformed:
+            console.print(
+                f"\n{len(_stale_orphan)} orphan-source / "
+                f"{len(_stale_malformed)} malformed artifact(s) — "
+                f"`repo repair cleanup` to review/remove.")
         if _hash_drift:
             _hshow = min(10, len(_hash_drift))
             console.print(
