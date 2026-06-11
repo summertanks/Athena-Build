@@ -200,7 +200,7 @@ strace
 
 
 [gnome-desktop]
-## Description: GNOME desktop environment — Athena's curated GNOME suite, merged from Debian gnome-core/gnome metas.
+## Description: GNOME desktop environment — the Asgard curated GNOME suite.
 ##
 ## FORK-01 Step 5b note: this group's package list is the SOURCE of
 ## TRUTH for what gets shipped in /cdrom/pool to support the
@@ -330,7 +330,7 @@ athena-branding
 
 
 [standard]
-## Description: Curated CLI utilities — Athena's subset of Debian Priority: standard.
+## Description: Curated standard command line utilities for Asgard systems.
 ##
 ## Source-of-truth for the `standard` tasksel task; mirrors the Key:
 ## list in fork/source/athena-tasksel/tasks/standard.  Curated from
