@@ -206,7 +206,20 @@ def push_dist_tree(
             "before pushing")
     _src = local_dist_dir.rstrip('/') + '/'
     _dst = remote_dir_spec.rstrip('/') + '/'
-    _argv = list(_RSYNC_BASE) + ['--delete']
+    # Append-only pool guard (2026-06-11): the pool .debs live INSIDE
+    # dists/<codename>/ (CONF-01 Stage D — this docstring's "under
+    # pool/..." predates that), so a bare --delete mirrors any local
+    # prune onto the remote: 17 obsolete/deprecated files vanished from
+    # the append-only pool on publish.  Protect pool artifacts from
+    # receiver-side deletion; --delete still reaps stale index files
+    # and removed-component dirs.  Remote pruning, when it comes, is an
+    # explicit operator action (UPD-01 publish-before-prune), never a
+    # dist-tree push side effect.
+    _argv = list(_RSYNC_BASE) + [
+        '--delete',
+        '--filter=P *.deb',
+        '--filter=P *.udeb',
+    ]
     _ssh = _ssh_arg(ssh_key)
     if _ssh is not None:
         _argv += _ssh
