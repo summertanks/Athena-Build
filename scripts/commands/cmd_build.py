@@ -238,8 +238,10 @@ class BuildCommandsMixin(SessionState):
             self.flags.chroot_disk_ready = True
             # Informational verify — does NOT gate (chroot_verified is the
             # live surface's gate); failures logged for the operator.
+            # No live-boot on this surface by design.
             _passed, _failed = self._verify_chroot(
-                build_system.password, self.config.dir_chroot_disk)
+                build_system.password, self.config.dir_chroot_disk,
+                require_live_boot=False)
             if _failed > 0:
                 logger.error(
                     f"disk chroot verification: {_failed} of "
@@ -910,8 +912,12 @@ class BuildCommandsMixin(SessionState):
             # gate above is bypassed but nothing re-checks the 8 invariants).
             if _force:
                 console.print("Force mode: re-verifying chroot before disk image...")
+                # SURFACES-01: the disk image masters dir_chroot_disk —
+                # verify THAT chroot (pre-decoupling this pointed at the
+                # live dir_chroot), and live-boot doesn't apply here.
                 _passed, _failed = self._verify_chroot(
-                    _password, self.config.dir_chroot)
+                    _password, self.config.dir_chroot_disk,
+                    require_live_boot=False)
                 if _failed > 0:
                     console.print(
                         f"ERROR: chroot verification failed "
@@ -923,9 +929,9 @@ class BuildCommandsMixin(SessionState):
                         f"{_failed}/{_passed + _failed}"
                     )
                     return
-                # Truthful: we just ran the 8 checks, so refresh the flag
-                # for subsequent (non-force) calls — mirrors iso build live.
-                self.flags.chroot_verified = True
+                # NOTE: deliberately does NOT touch chroot_verified —
+                # that flag belongs to the LIVE surface; this verify ran
+                # against dir_chroot_disk (SURFACES-01 decoupling).
 
             _version  = self.config.build_version.strip('"').strip("'")
             _distro   = self.config.build_distribution.strip('"').strip("'")
@@ -958,11 +964,17 @@ class BuildCommandsMixin(SessionState):
     # Command: verify_chroot
     # ---------------------------------------------------------------------------
 
-    def _verify_chroot(self, password: str, chroot: str) -> tuple:
+    def _verify_chroot(self, password: str, chroot: str,
+                       require_live_boot: bool = True) -> tuple:
         """Run the 8-check chroot verification suite. Returns (passed, failed).
 
         Caller is responsible for prerequisite checks, password validation, and
         setting any progress flags. Prints per-check PASS/FAIL lines and a summary.
+
+        require_live_boot: the live-boot check (7) applies to the LIVE
+        surface only — the disk-image chroot ships without live-boot by
+        design (SURFACES-01), so disk call sites pass False and the
+        check is reported as SKIP without counting either way.
         """
         # Checks performed:
         #   1. dpkg --audit          — no packages in a broken state
@@ -971,7 +983,7 @@ class BuildCommandsMixin(SessionState):
         #   4. Initramfs present     — at least one initrd.img-* in /boot/
         #   5. bash --version        — shell is executable inside the chroot
         #   6. systemctl --version   — systemd is present and executable
-        #   7. live-boot installed   — required for live ISO boot
+        #   7. live-boot installed   — required for live ISO boot (live surface only)
         #   8. /etc/os-release       — OS identity file written by generate_system_configs
         console.print(f"Verifying chroot at {chroot}...")
 
@@ -1038,12 +1050,17 @@ class BuildCommandsMixin(SessionState):
                _r.returncode == 0,
                _ver[:60] if _ver else _r.stderr.strip()[:60])
 
-        # ── Check 7: live-boot ───────────────────────────────────────────────────
-        _r = _chroot_run('dpkg', '-l', 'live-boot')
-        _live_ok = _r.returncode == 0 and any(l.startswith('ii') for l in _r.stdout.splitlines())
-        _check('live-boot installed',
-               _live_ok,
-               'installed' if _live_ok else 'not installed or unconfigured')
+        # ── Check 7: live-boot (live surface only) ───────────────────────────────
+        if require_live_boot:
+            _r = _chroot_run('dpkg', '-l', 'live-boot')
+            _live_ok = _r.returncode == 0 and any(l.startswith('ii') for l in _r.stdout.splitlines())
+            _check('live-boot installed',
+                   _live_ok,
+                   'installed' if _live_ok else 'not installed or unconfigured')
+        else:
+            console.print(
+                f'  {"live-boot installed":<45} [SKIP] — '
+                'not required for the disk surface')
 
         # ── Check 8: /etc/os-release ─────────────────────────────────────────────
         _os_release = os.path.join(chroot, 'etc', 'os-release')

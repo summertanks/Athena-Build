@@ -646,6 +646,55 @@ def test_iso_builds_gate_on_container_up_front():
         assert _r in (None, False), (_method_name, _r)
 
 
+def test_verify_chroot_disk_surface_skips_live_boot():
+    """SURFACES-01: the disk chroot ships without live-boot by design,
+    so _verify_chroot(require_live_boot=False) reports the live-boot
+    check as SKIP (not FAIL) and the surface verifies clean.  The first
+    disk chroot build failed 7/8 on this (2026-06-11)."""
+    import sys as _sys
+    import types as _types
+    import tempfile
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    import commands.cmd_build as _cb
+
+    with tempfile.TemporaryDirectory() as _td:
+        os.makedirs(os.path.join(_td, 'boot'))
+        open(os.path.join(_td, 'boot', 'vmlinuz-6.1.0-1'), 'w').close()
+        open(os.path.join(_td, 'boot', 'initrd.img-6.1.0-1'), 'w').close()
+        os.makedirs(os.path.join(_td, 'etc'))
+        with open(os.path.join(_td, 'etc', 'os-release'), 'w') as _f:
+            _f.write('PRETTY_NAME="Asgard Linux 1 (thor)"\n')
+
+        def _fake_run(cmd, **k):
+            _p = _types.SimpleNamespace(returncode=0, stdout='', stderr='')
+            if '--get-selections' in cmd:
+                _p.stdout = 'pkg\tinstall\n'
+            elif 'bash' in cmd or 'systemctl' in cmd:
+                _p.stdout = 'version 1.0\n'
+            return _p
+
+        _orig_sp = _cb.subprocess
+        _cb.subprocess = _types.SimpleNamespace(run=_fake_run)
+        _sess = BuildSession.__new__(BuildSession)
+        _lines: 'list[str]' = []
+        _orig_print = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _passed, _failed = _sess._verify_chroot(
+                'pw', _td, require_live_boot=False)
+        finally:
+            _cb.subprocess = _orig_sp
+            build.console.print = _orig_print
+
+        _joined = '\n'.join(_lines)
+        assert _failed == 0, (_passed, _failed, _joined)
+        assert '[SKIP]' in _joined and 'live-boot' in _joined, _joined
+        assert 'blocked' not in _joined, _joined
+
+
 def test_cache_parse_build_mode_resolves_named_pkgs_only():
     """MIRROR-02 chunk 2: in build mode, cache parse populates
     selected_pkgs directly from build_pkg.list lookups (no transitive
@@ -32032,6 +32081,7 @@ def main() -> int:
         test_source_audit_naturally_scopes_to_indl_in_build_mode,
         test_chroot_iso_builds_refuse_in_build_mode,
         test_iso_builds_gate_on_container_up_front,
+        test_verify_chroot_disk_surface_skips_live_boot,
         test_refuse_in_build_mode_is_a_no_op_in_distribution,
         test_cache_parse_build_mode_resolves_named_pkgs_only,
         test_cache_parse_build_mode_warns_on_missing_pkg,
