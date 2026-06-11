@@ -163,7 +163,20 @@ class _IsoMixin:
             # boot=live   — triggers live-boot to find and mount the squashfs root
             # components  — tells live-boot to activate all its hook scripts
             # console=tty0 — ensures kernel messages go to the screen (visible in QEMU)
-            # nomodeset   — disables KMS; prevents blank/garbled screen in QEMU/VMs
+            #
+            # NO nomodeset on the default entry: GNOME requires KMS — with
+            # nomodeset there is no DRM device, gdm's Wayland AND Xorg
+            # attempts both die and the screen just flashes (caught live
+            # 2026-06-11, SURFACES-01 first GNOME boot).  VMs get KMS via
+            # virtio-gpu/qxl/vmwgfx/bochs-simpledrm; the era this flag
+            # protected (console-only live image) is over.  The
+            # safe-graphics entry below keeps nomodeset for hardware with
+            # genuinely broken KMS — console boot only, no GNOME.
+            f'    linux  /boot/vmlinuz boot=live components username={_live_user} console=tty0\n'
+            '    initrd /boot/initrd.img\n'
+            '}\n'
+            '\n'
+            f'menuentry "{_name} {_version} (live, safe graphics — console only)" {{\n'
             f'    linux  /boot/vmlinuz boot=live components username={_live_user} console=tty0 nomodeset\n'
             '    initrd /boot/initrd.img\n'
             '}\n'
