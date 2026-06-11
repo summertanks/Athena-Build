@@ -1,0 +1,23 @@
+#!/bin/sh
+
+set -e
+
+# SURFACES-01: prefer the BUILD-GENERATED tasksel menu over the packaged
+# fallback.  The ISO stages /.disk/athena-tasks.desc at mastering time,
+# derived from the signed selection lockfile's pkg.list groups — so a
+# group edit reaches this menu via `cache parse` + `iso build installer`
+# alone, with no athena-tasksel fork rebuild.  athena-tasksel-data's
+# packaged desc (already debootstrapped onto /target) remains the
+# fallback when the ISO carries no generated copy.
+#
+# Runs in the d-i environment BEFORE pkgsel invokes tasksel, which reads
+# /target's /usr/share/tasksel/descs/.  Plain runtime file copy — the
+# packaged desc is restored by any later athena-tasksel-data upgrade,
+# and the next ISO regenerates this copy, so ownership stays coherent.
+if [ -e /cdrom/.disk/athena-tasks.desc ]; then
+    mkdir -p /target/usr/share/tasksel/descs
+    cp /cdrom/.disk/athena-tasks.desc \
+       /target/usr/share/tasksel/descs/athena-tasks.desc
+    logger -t athena-pkgsel \
+        "installed generated athena-tasks.desc from /cdrom/.disk" || true
+fi
