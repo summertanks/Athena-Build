@@ -673,11 +673,42 @@ class BuildCommandsMixin(SessionState):
             _base_include = sorted(
                 _canonical - _extras - _live_excl - _pool_extras - _group_extras
             )
-            # Pool keeps Recommends-only extras, pool extras, AND
-            # group extras so the operator (or grub-installer /
-            # tasksel) can apt-install them post-install via the
-            # cdrom: source.
-            _pool_whitelist = _canonical - _live_excl
+            # ── SURFACES-01 manifest-driven pool: /cdrom/pool ships ONLY
+            # what something on the ISO can install —
+            #   closure( [base] ∪ every non-base task group (the tasksel
+            #            Keys) ∪ installer-defaults roots (d-i hooks)
+            #            ∪ required/important, WITH Recommends extras )
+            # Pool.list packages stay selected/built/published; entries
+            # reachable by nothing on the ISO (asgard metas, the standard
+            # residue) simply don't stage — install them post-boot via the
+            # network mirror.  udebs are unaffected (_select_pool_files
+            # keeps every .udeb for the installer ramdisk).
+            _manifest_seeds = set(_raw_pkg_groups.get('base', []))
+            for _g, _seeds_list in _raw_pkg_groups.items():
+                if _g != 'base':
+                    _manifest_seeds.update(_seeds_list)
+            _manifest_seeds.update(_di_roots)
+            # installer.list deb-arm roots (e.g. efibootmgr) — debs d-i
+            # itself needs on /target; udeb names in the file are simply
+            # not in the deb tree and fall out of the closure.
+            _manifest_seeds.update(
+                surfaces.read_flat_roots(self.config.installerlist_path))
+            _manifest_seeds |= set(self.cache.required)
+            _manifest_seeds |= set(self.cache.important)
+            _pool_whitelist = surfaces.surface_closure(
+                self.dep_tree, _manifest_seeds,
+                include_recommends_extras=True)
+            _legacy_pool = _canonical - _live_excl
+            _dropped = sorted(_legacy_pool - _pool_whitelist)
+            console.print(
+                f"ISO pool manifest: {len(_pool_whitelist)} package(s) "
+                f"(legacy formula {len(_legacy_pool)}; "
+                f"{len(_dropped)} not reachable by tasksel/d-i — "
+                "mirror-only)", tui.COLOR_INFO)
+            if _dropped:
+                logger.info(
+                    "iso pool manifest dropped (mirror-only): "
+                    + ', '.join(_dropped))
 
             # Snapshot-aware kernel pick: tell _find_kernel which
             # linux-image-<ABI>-amd64 the cache expects.  Without
