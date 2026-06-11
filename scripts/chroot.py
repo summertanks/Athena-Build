@@ -1485,11 +1485,15 @@ class _ChrootMixin:
             )
             tui.console.print("journald console forwarding configured (ttyS0) — debug mode")
 
+        # Hostname = distribution id (asgard) — same value as the
+        # /etc/hostname write above.  This was hardcoded 'athena'
+        # (toolchain identity) and silently overwrote the correct file
+        # (caught on the disk image serial log, 2026-06-11).
         _proc = subprocess.run(
             ['sudo', '-S', 'systemd-firstboot',
              f'--root={self._dir_chroot}',
              '--root-password=root',
-             '--hostname=athena',
+             f'--hostname={_id}',
              '--timezone=UTC',
              '--locale=C.UTF-8',
              '--setup-machine-id',
