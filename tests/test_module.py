@@ -31780,6 +31780,29 @@ def test_iso_installer_accepts_tasks_desc_text():
     assert 'parse_pkg_list_groups' in _gen       # fallback path
 
 
+def test_athena_pkgsel_pre_pkgsel_hook_installs_generated_desc():
+    """SURFACES-01 Chunk 7: the 05athena-tasks pre-pkgsel.d hook exists,
+    is executable, runs BEFORE the existing hooks (05 < 10), copies the
+    ISO-staged desc onto /target, and the dh install file ships the dir
+    under the binary package name."""
+    _fork = os.path.join(_ROOT, 'fork', 'source', 'athena-pkgsel')
+    _hook = os.path.join(_fork, 'pre-pkgsel.d', '05athena-tasks')
+    assert os.path.isfile(_hook), _hook
+    assert os.access(_hook, os.X_OK), "hook must be executable"
+    _src = open(_hook).read()
+    assert _src.startswith('#!/bin/sh')
+    assert '/cdrom/.disk/athena-tasks.desc' in _src      # ISO staging path
+    assert '/target/usr/share/tasksel/descs/athena-tasks.desc' in _src
+    assert '[ -e /cdrom/.disk/athena-tasks.desc ]' in _src  # fallback-safe
+    # dh install file uses the BINARY package name (dh-helper-files memory)
+    _install = os.path.join(_fork, 'debian', 'athena-pkgsel.install')
+    assert os.path.isfile(_install)
+    assert 'pre-pkgsel.d usr/lib' in open(_install).read()
+    # ordering: 05 sorts before the existing 10laptop-detect
+    _hooks = sorted(os.listdir(os.path.join(_fork, 'pre-pkgsel.d')))
+    assert _hooks[0] == '05athena-tasks', _hooks
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32491,6 +32514,8 @@ def main() -> int:
         # SURFACES-01 Chunk 6 — tasksel desc generator + staging
         test_tasksel_desc_generator_shape_and_sanitization,
         test_iso_installer_accepts_tasks_desc_text,
+        # SURFACES-01 Chunk 7 — athena-pkgsel pre-pkgsel.d hook
+        test_athena_pkgsel_pre_pkgsel_hook_installs_generated_desc,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
