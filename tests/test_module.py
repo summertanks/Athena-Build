@@ -31508,6 +31508,104 @@ def test_generate_pending_claims_skips_deprecated_records():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SURFACES-01 — per-surface composition
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _SurfPkg:
+    """Package stub for surfaces tests: mapping access for ['Package'] +
+    dep attribute lists."""
+    def __init__(self, name, depends=(), pre_depends=(), alt_depends=(),
+                 recommends=()):
+        self._name = name
+        self.depends = [(d, '', '') for d in depends]
+        self.pre_depends = [(d, '', '') for d in pre_depends]
+        self.alt_depends = [[(a, '', '') for a in grp] for grp in alt_depends]
+        self.alt_pre_depends = []
+        self.recommends = [(r, '', '') for r in recommends]
+    def __getitem__(self, key):
+        assert key == 'Package'
+        return self._name
+
+
+def _surf_tree(pkgs, extras=()):
+    """dep-tree stub: selected_pkgs {name_or_virtual: _SurfPkg} + extras."""
+    import types
+    return types.SimpleNamespace(selected_pkgs=pkgs,
+                                 extras_pkg_names=set(extras))
+
+
+def test_surface_closure_credit_trap_and_or_groups():
+    """The credit-trap pin: a dep shared by two groups is reachable from
+    EITHER group's seeds via the closure (never lost to delta crediting).
+    OR groups follow the first SELECTED alternative; virtual seeds
+    canonicalize."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import surfaces as _sf
+    _shared = _SurfPkg('libshared')
+    _pkgs = {
+        'devtool':  _SurfPkg('devtool', depends=['libshared']),
+        'gnome-app': _SurfPkg('gnome-app', depends=['libshared'],
+                              alt_depends=[['xterm', 'x-terminal-emulator']]),
+        'libshared': _shared,
+        # xterm NOT selected; the provider gnome-terminal IS, via virtual
+        'x-terminal-emulator': _SurfPkg('gnome-terminal'),
+        'gnome-terminal': _SurfPkg('gnome-terminal'),
+        # virtual alias for seed canonicalization
+        'editor': _SurfPkg('nano'),
+        'nano': _SurfPkg('nano'),
+    }
+    _dt = _surf_tree(_pkgs)
+    # closure from gnome-app alone MUST include the shared dep (even though
+    # a delta-credit model could have credited it to devtool's group)
+    _c = _sf.surface_closure(_dt, ['gnome-app'])
+    assert 'libshared' in _c, _c
+    # OR group: xterm absent → first SELECTED alt = x-terminal-emulator →
+    # canonicalized to gnome-terminal
+    assert 'gnome-terminal' in _c and 'xterm' not in _c, _c
+    # virtual seed canonicalizes
+    assert _sf.surface_closure(_dt, ['editor']) == {'nano'}
+    # absent seed silently skipped
+    assert _sf.surface_closure(_dt, ['ghost']) == set()
+
+
+def test_surface_closure_extras_fixpoint():
+    """extras=True pulls only extras RECOMMENDED BY closure members, plus
+    their hard deps, to fixpoint; unrecommended extras stay out."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import surfaces as _sf
+    _pkgs = {
+        'app':      _SurfPkg('app', recommends=['codec']),
+        'codec':    _SurfPkg('codec', depends=['libcodec']),
+        'libcodec': _SurfPkg('libcodec', recommends=['codec-extra']),
+        'codec-extra': _SurfPkg('codec-extra'),
+        'lonely-extra': _SurfPkg('lonely-extra'),
+    }
+    _dt = _surf_tree(_pkgs, extras=['codec', 'codec-extra', 'lonely-extra'])
+    # hard closure only — no extras
+    assert _sf.surface_closure(_dt, ['app']) == {'app'}
+    # with extras: app→(rec)codec→(dep)libcodec→(rec)codec-extra (fixpoint);
+    # lonely-extra recommended by nobody in the surface stays out
+    _c = _sf.surface_closure(_dt, ['app'], include_recommends_extras=True)
+    assert _c == {'app', 'codec', 'libcodec', 'codec-extra'}, _c
+
+
+def test_surfaces_group_seed_names_and_flat_roots():
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import surfaces as _sf
+    with tempfile.TemporaryDirectory() as _root:
+        _pkg = os.path.join(_root, 'pkg.list')
+        open(_pkg, 'w').write('[base]\na\nb\n[gnome-desktop]\nc\n')
+        assert _sf.group_seed_names(_pkg, ['base']) == {'a', 'b'}
+        assert _sf.group_seed_names(_pkg, ['base', 'gnome-desktop']) == \
+            {'a', 'b', 'c'}
+        assert _sf.group_seed_names(_pkg, ['nope']) == set()
+        _flat = os.path.join(_root, 'installer-defaults.list')
+        open(_flat, 'w').write('# d-i roots\ngrub-pc\n\nintel-microcode\n')
+        assert _sf.read_flat_roots(_flat) == ['grub-pc', 'intel-microcode']
+        assert _sf.read_flat_roots(_flat + '.missing') == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -32203,6 +32301,10 @@ def main() -> int:
         test_coherence_audit_pending_deprecation_vs_untracked_drop,
         # LEDGER-01 — publish resurrection guard
         test_generate_pending_claims_skips_deprecated_records,
+        # SURFACES-01 Chunk 1 — surface-closure helper
+        test_surface_closure_credit_trap_and_or_groups,
+        test_surface_closure_extras_fixpoint,
+        test_surfaces_group_seed_names_and_flat_roots,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
