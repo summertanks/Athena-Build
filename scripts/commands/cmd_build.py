@@ -142,6 +142,35 @@ class BuildCommandsMixin(SessionState):
             build_system.scrub_password()
 
 
+    def _generate_tasks_desc(self) -> 'str':
+        """SURFACES-01: derive the tasksel `.desc` text from the SIGNED
+        lockfile's groups (the selection authority); fall back to a fresh
+        pkg.list parse with a warning when the lockfile isn't trustworthy.
+        Returns '' (skip staging) only when both sources fail."""
+        import selection_lock
+        import tasksel_desc
+        _lock, _status = selection_lock.read_selection_state(self.config)
+        if _status == selection_lock.STATUS_OK and _lock is not None:
+            _groups = (_lock.get('seeds') or {}).get('pkg', {}) or {}
+            _meta = (_lock.get('seeds') or {}).get('pkg_meta', {}) or {}
+        else:
+            console.print(
+                f"iso build: selection.state {_status} — generating the "
+                "tasksel menu from pkg.list directly (run `cache parse` to "
+                "restore the signed authority)", tui.COLOR_WARNING)
+            try:
+                _groups = utils.parse_pkg_list_groups(self.config.pkglist_path)
+                _meta = utils.parse_pkg_list_group_meta(
+                    self.config.pkglist_path)
+            except (OSError, ValueError) as _e:
+                logger.error(f"_generate_tasks_desc: {_e}")
+                return ''
+        _text = tasksel_desc.generate_desc(_groups, _meta)
+        console.print(
+            f"Generated tasksel menu: {max(0, _text.count('Task: '))} "
+            "task(s) → /.disk/athena-tasks.desc", tui.COLOR_INFO)
+        return _text
+
     def cmd_build_chroot_disk(self, *args):
         """SURFACES-01: assemble the DISK surface chroot — the minimal
         pre-installed system ([Disk] Groups closure, hard deps only, no
@@ -767,6 +796,9 @@ class BuildCommandsMixin(SessionState):
                 ],
                 # [Audit] IdentityScan — gates the S3 staged-ISO scan.
                 audit_identity_scan=self.config.audit_identity_scan,
+                # SURFACES-01: the generated tasksel menu (from the signed
+                # lockfile's groups) staged at /.disk/athena-tasks.desc.
+                tasks_desc_text=self._generate_tasks_desc(),
             )
             if not _ok:
                 console.print(

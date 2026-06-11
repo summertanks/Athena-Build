@@ -80,6 +80,7 @@ def build_installer_iso(
     exclude_names: Optional[set] = None,        # fork-superseded upstream bins
     dir_repo_extras: Optional['list[str]'] = None,  # non-main component dirs
     audit_identity_scan: bool = True,            # [Audit] IdentityScan
+    tasks_desc_text: Optional[str] = None,       # SURFACES-01 generated .desc
 ) -> bool:
     """Build the installer ISO end to end.
 
@@ -138,16 +139,27 @@ def build_installer_iso(
                             snapshot):
         return False
 
-    # FORK-01 Step 5b (2026-05-17): the synthetic athena-tasksel-data
-    # .deb generation that USED to live here was retired — the fork
-    # at fork/source/athena-tasksel/ now produces both athena-tasksel
-    # AND athena-tasksel-data via a multi-binary debian/control.  The
-    # fork ships /usr/share/tasksel/descs/athena-tasks.desc with the
-    # full chosen task set (standard curated, ssh-server, laptop,
-    # desktop, gnome-desktop, development-tools) statically — no
-    # per-build .desc generation, no pkg.list-group-derived synthetic.
-    # athena-tasksel-data flows through normal source-build → pool
-    # → debootstrap base_include via cache.
+    # FORK-01 Step 5b retired the synthetic athena-tasksel-data .deb
+    # generation in favor of the fork's static tasks/* → .desc.
+    # SURFACES-01 re-introduces GENERATION — but as DATA, not a package:
+    # the .desc derived from the signed lockfile's groups is staged at
+    # /.disk/athena-tasks.desc, and the athena-pkgsel pre-pkgsel.d hook
+    # copies it over /target's packaged (fallback) desc before tasksel
+    # renders the menu.  pkg.list group edits reach the menu via
+    # parse + iso build alone — no fork rebuild.
+    if tasks_desc_text:
+        _desc_path = os.path.join(_staging, '.disk', 'athena-tasks.desc')
+        try:
+            os.makedirs(os.path.dirname(_desc_path), exist_ok=True)
+            with open(_desc_path, 'w', encoding='ascii') as _fh:
+                _fh.write(tasks_desc_text)
+            logger.info(
+                f"staged generated tasksel desc → {_desc_path} "
+                f"({len(tasks_desc_text)} bytes)")
+        except (OSError, UnicodeEncodeError) as _e:
+            logger.error(f"stage athena-tasks.desc: {_e}")
+            return False
+
     if not _stage_base_include(_staging, base_include_pkgs):
         return False
 
