@@ -1376,7 +1376,7 @@ def test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds():
     _unpacked: set = set()   # truly-unpacked packages
     _sweeps = []
 
-    def _unpack(pkgs):
+    def _unpack(pkgs, quiet=False):
         _ok = {p for p in pkgs
                if (p == 'B' and 'A' in _full)
                or (p == 'C' and 'B' in _full)
