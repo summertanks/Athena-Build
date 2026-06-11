@@ -607,6 +607,45 @@ def test_refuse_in_build_mode_is_a_no_op_in_distribution():
     assert _lines == [], _lines
 
 
+def test_iso_builds_gate_on_container_up_front():
+    """iso build live/installer must refuse BEFORE any staging work when
+    the build container is absent.  grub-mkrescue — the LAST mastering
+    step — runs inside the container; without an up-front gate the
+    operator pays the full ~10-minute pool/squashfs staging before the
+    failure surfaces (hit live 2026-06-11)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    class _Cfg:
+        build_mode = 'distribution'
+
+    class _Flags:
+        chroot_verified = True
+        chroot_ready = True
+        chroot_installer_ready = True
+
+    for _method_name in ('cmd_build_iso_live', 'cmd_build_iso_installer'):
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess.flags = _Flags()
+        _sess.container = None
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, _buf=_lines, **k: _buf.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _r = getattr(_sess, _method_name)()
+        finally:
+            build.console.print = _orig
+        _joined = '\n'.join(_lines)
+        assert 'container init' in _joined, (_method_name, _joined)
+        assert 'grub-mkrescue' in _joined, (_method_name, _joined)
+        # None / False both signal "did not proceed"
+        assert _r in (None, False), (_method_name, _r)
+
+
 def test_cache_parse_build_mode_resolves_named_pkgs_only():
     """MIRROR-02 chunk 2: in build mode, cache parse populates
     selected_pkgs directly from build_pkg.list lookups (no transitive
@@ -31992,6 +32031,7 @@ def main() -> int:
         test_cmd_source_build_indl_subset_rejected_in_dist_mode,
         test_source_audit_naturally_scopes_to_indl_in_build_mode,
         test_chroot_iso_builds_refuse_in_build_mode,
+        test_iso_builds_gate_on_container_up_front,
         test_refuse_in_build_mode_is_a_no_op_in_distribution,
         test_cache_parse_build_mode_resolves_named_pkgs_only,
         test_cache_parse_build_mode_warns_on_missing_pkg,

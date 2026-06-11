@@ -409,6 +409,15 @@ class BuildCommandsMixin(SessionState):
                 console.print("Run 'chroot build' first")
             return
 
+        # grub-mkrescue — the FINAL mastering step — runs inside the
+        # build container.  Gate up front, before squashfs packing
+        # (same late-failure trap as iso build installer, 2026-06-11).
+        if self.container is None:
+            console.print(
+                "Run 'container init' first — grub-mkrescue (the final "
+                "ISO mastering step) runs inside the build container")
+            return
+
         self.flags.iso_live_ready = False  # reset before work; set True only on success
         console.print("Initialising build system for ISO...")
         try:
@@ -483,6 +492,16 @@ class BuildCommandsMixin(SessionState):
                 "Run 'chroot build installer' first (need "
                 "buildroot/installer/ populated with the udeb closure)"
             )
+            return
+
+        # grub-mkrescue — the FINAL mastering step — runs inside the
+        # build container.  Gate up front: failing there costs the
+        # operator the full ~10-minute pool staging first (hit live
+        # 2026-06-11).
+        if self.container is None:
+            console.print(
+                "Run 'container init' first — grub-mkrescue (the final "
+                "ISO mastering step) runs inside the build container")
             return
 
         # SELECT-LOCK: refuse to master an ISO whose in-memory selection

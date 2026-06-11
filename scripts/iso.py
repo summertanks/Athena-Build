@@ -288,7 +288,7 @@ class _IsoMixin:
         if container is None:
             tui.console.print(
                 "ERROR: grub-mkrescue requires the build container "
-                "(run `cache build` first to initialise it)"
+                "(run `container init` first)"
             )
             logger.error("build_iso: container is None")
             return False
