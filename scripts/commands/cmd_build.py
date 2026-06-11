@@ -105,11 +105,27 @@ class BuildCommandsMixin(SessionState):
             logger.error(f"BuildSystem() raised: {e}")
             return
 
+        # ── SURFACES-01: the live surface = closure([Live] Groups seeds ∪
+        # live.list ∪ required/important), WITH Recommends extras.  The
+        # closure (not the credit-based group deltas) decides membership.
+        import surfaces
+        _live_seeds = surfaces.group_seed_names(
+            self.config.pkglist_path, self.config.live_groups)
+        _live_seeds |= set(surfaces.read_flat_roots(self.config.livelist_path))
+        _live_seeds |= set(self.cache.required) | set(self.cache.important)
+        _live_set = surfaces.surface_closure(
+            self.dep_tree, _live_seeds, include_recommends_extras=True)
+        console.print(
+            f"Live surface: groups {sorted(self.config.live_groups)} → "
+            f"{len(_live_set)} package(s) (closure incl. Recommends)",
+            tui.COLOR_INFO)
+
         # Bracket the BuildSystem's lifetime so the cached sudo password is
         # scrubbed on every exit path — success, build failure,
         try:
             console.print("Building chroot environment...")
-            _result = build_system.build_chroot(debug=_debug)
+            _result = build_system.build_chroot(
+                debug=_debug, install_set=_live_set)
             if not _result:
                 console.print("ERROR: chroot build failed — check logs for details")
                 logger.error("build_chroot() returned False")

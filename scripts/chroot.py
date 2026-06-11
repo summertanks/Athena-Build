@@ -20,7 +20,7 @@ import re
 import shlex
 import subprocess
 import tempfile
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Optional
 
 import tui
 import utils
@@ -51,7 +51,8 @@ class _ChrootMixin:
     strip_build_version: Callable[[str], str]
     normalize_repo_filename: Callable[[str], str]
 
-    def build_chroot(self, debug: bool = False) -> bool:
+    def build_chroot(self, debug: bool = False,
+                     install_set: 'Optional[set]' = None) -> bool:
         """Install all selected packages into the chroot in dependency order.
 
         Computes a topo-sorted batch sequence over Pre-Depends ∪ Depends
@@ -66,6 +67,11 @@ class _ChrootMixin:
             debug: When True, generate_system_configs() also writes a
                 journald drop-in to forward all entries to /dev/console.
                 Off by default — opt in for serial-debug builds only.
+            install_set: SURFACES-01 — explicit canonical package set for
+                THIS surface (a surfaces.surface_closure result).  When
+                given it replaces the legacy internal exclusion math in
+                _compute_install_batches; None keeps the historic
+                "[base]-only" behavior.
 
         Returns:
             True on completion, False on a fatal error during install
@@ -79,7 +85,8 @@ class _ChrootMixin:
         all_pkgs = [p for p in selected if p == selected[p]['Package']]
         logger.info(
             f"build_chroot: {self._dir_chroot} ← {len(all_pkgs)} pkgs "
-            f"(debug={debug})"
+            f"(debug={debug}, install_set="
+            f"{len(install_set) if install_set is not None else 'legacy'})"
         )
 
         # gcc-NN-base bootstrap: libc6 → libgcc-s1 → gcc-NN-base forms a
@@ -105,7 +112,8 @@ class _ChrootMixin:
         # before touching the chroot so the operator sees the dep problem
         # without first sitting through unrelated dpkg activity.
         try:
-            batches = self._compute_install_batches(libc_seed_set)
+            batches = self._compute_install_batches(
+                libc_seed_set, install_set=install_set)
         except RuntimeError as e:
             tui.console.print(f"ERROR: cannot order packages — {e}")
             logger.error(f"_compute_install_batches: {e}")
@@ -534,7 +542,8 @@ class _ChrootMixin:
                     break
         return result
 
-    def _compute_install_batches(self, libc_seed_set: set) -> list:
+    def _compute_install_batches(self, libc_seed_set: set,
+                                 install_set: 'Optional[set]' = None) -> list:
         """Topologically sort selected packages over Pre-Depends ∪ Depends.
 
         Returns a list of (batch, needs_force) tuples.  Each batch is a
@@ -596,14 +605,29 @@ class _ChrootMixin:
         # part of the libc seed AND NOT in any of the exclusion sets
         # above.  Aliases would inflate the graph with redundant nodes
         # and Kahn would never be able to retire them.
-        all_pkgs = [
-            p for p in selected
-            if p == selected[p]['Package']
-            and p not in libc_seed_set
-            and p not in _extras
-            and p not in _group_extras
-            and p not in _pool_extras
-        ]
+        #
+        # SURFACES-01: when `install_set` is given (a surfaces.
+        # surface_closure result — e.g. live = closure(base ∪ gnome-desktop
+        # ∪ live.list, +extras)), it REPLACES the legacy exclusion math:
+        # the graph is exactly canonical ∩ install_set − libc_seed.  The
+        # closure already decided extras/group membership per surface, so
+        # the historic filters must not re-subtract from it.
+        if install_set is not None:
+            all_pkgs = [
+                p for p in selected
+                if p == selected[p]['Package']
+                and p in install_set
+                and p not in libc_seed_set
+            ]
+        else:
+            all_pkgs = [
+                p for p in selected
+                if p == selected[p]['Package']
+                and p not in libc_seed_set
+                and p not in _extras
+                and p not in _group_extras
+                and p not in _pool_extras
+            ]
         in_scope = set(all_pkgs)
 
         # deps[pkg] = set of canonical names that pkg depends on AND are
