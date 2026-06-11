@@ -189,7 +189,7 @@ class _ChrootMixin:
                         f"unpack(s) post-configure: "
                         f"{', '.join(_failed[:5])}"
                         f"{'…' if len(_failed) > 5 else ''}")
-                    _retry_ok = self._unpack_packages(_failed)
+                    _retry_ok = self._unpack_packages(_failed, quiet=True)
                     if _retry_ok:
                         configured |= self._configure_packages(
                             sorted(_retry_ok), force_deps=_force)
@@ -237,7 +237,7 @@ class _ChrootMixin:
             for _round in range(1, 6):
                 if not _still:
                     break
-                _retry_ok = self._unpack_packages(sorted(_still))
+                _retry_ok = self._unpack_packages(sorted(_still), quiet=True)
                 if not _retry_ok:
                     break
                 _progress = True
@@ -1051,7 +1051,7 @@ class _ChrootMixin:
             file_list.append(_filepath)
         return file_list
 
-    def _unpack_packages(self, pkg_list: list) -> set:
+    def _unpack_packages(self, pkg_list: list, quiet: bool = False) -> set:
         """Run dpkg --unpack for pkg_list inside the chroot.
 
         --force-script-chrootless lets maintainer scripts run without a
@@ -1066,7 +1066,9 @@ class _ChrootMixin:
 
         Failure routing:
           - Total failure (rc != 0, nothing unpacked) — console error
-            with the LAST line of stderr (dpkg's real message).
+            with the LAST line of stderr (dpkg's real message), unless
+            quiet (retry call sites, where total failure is an expected
+            transient — log-tab warning only).
           - Partial failure (some unpacked) — log-tab warning only;
             the configure step will produce the actionable error.
         """
@@ -1115,11 +1117,21 @@ class _ChrootMixin:
                     l for l in _proc.stderr.strip().splitlines() if l.strip()
                 ]
                 _stderr_tail = _stderr_lines[-1] if _stderr_lines else 'no stderr'
-                tui.console.print(
+                _msg = (
                     f'Error unpacking {pkg_list[:3]}'
                     f'{"…" if len(pkg_list) > 3 else ""}: '
                     f'{_stderr_tail[:200]}'
                 )
+                if quiet:
+                    # Retry call sites: total failure is the EXPECTED
+                    # transient (pre-dep not configured yet) and the
+                    # post-sweep rounds are the recovery — the loud
+                    # console signal is build_chroot's NEVER-unpacked
+                    # ERROR, not each intermediate attempt (operator
+                    # read a recovered build as failed, 2026-06-11).
+                    logger.warning(f'_unpack_packages (retry): {_msg}')
+                else:
+                    tui.console.print(_msg)
 
         return _unpacked
 
