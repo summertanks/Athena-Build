@@ -747,13 +747,48 @@ class _ChrootMixin:
                     d.add(n)
             deps[pkg] = d
 
+        # Essential-toolchain bias (debootstrap-style): schedule the
+        # dependency closure of dpkg + dash FIRST.  _configure_packages
+        # runs chrootless (maintainer scripts execute on the HOST) until
+        # /usr/bin/dpkg and sh exist inside the chroot; a postinst that
+        # execs its own shipped interpreter (python3.11-minimal runs
+        # /usr/bin/python3.11 — no python3.11 on the host) can only
+        # configure in-chroot, and its dependents' Pre-Depends then fail
+        # to unpack (python3-minimal → python3, live 2026-06-11).
+        # Emitting the dpkg+dash closure in the earliest waves flips
+        # every later batch to in-chroot configure mode, so such
+        # postinsts succeed in their own batch and no unpack ever sees
+        # an unconfigurable pre-dep.  The closure is dep-closed within
+        # the graph (deps[] edges only point in-scope), so core nodes
+        # are never blocked by non-core ones and topo order holds.
+        # coreutils/sed/grep ride along: once the probe flips to
+        # in-chroot mode (dpkg + sh present), maintainer scripts run
+        # against the CHROOT's tools — give them the basic userland
+        # before the big lib batches configure, or their postinsts
+        # defer to the sweep en masse.
+        _core: set = set()
+        _work = [p for p in ('dpkg', 'dash', 'coreutils', 'sed', 'grep')
+                 if p in in_scope]
+        while _work:
+            _p = _work.pop()
+            if _p in _core:
+                continue
+            _core.add(_p)
+            _work.extend(deps[_p])
+
         # Kahn: each round, pull every node with zero remaining in-scope
         # deps into a batch; remove them from `remaining`; repeat.
+        # While core (dpkg+dash closure) nodes remain, emit ONLY ready
+        # core nodes so the essential toolchain lands first.
         # Sorted output for deterministic batches across runs.
         batches: list = []
         remaining = set(all_pkgs)
         while remaining:
             ready = sorted(p for p in remaining if not (deps[p] & remaining))
+            if ready and (_core & remaining):
+                _core_ready = [p for p in ready if p in _core]
+                if _core_ready:
+                    ready = _core_ready
             if not ready:
                 # Cycle remains in the Pre-Depends ∪ Depends graph.
                 # Split the SCC by Pre-Depends order alone (Depends
