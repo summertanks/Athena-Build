@@ -31689,6 +31689,41 @@ def test_disk_surface_plumbing():
     assert 'chroot_disk_ready' in _disk_fn
 
 
+def test_iso_pool_manifest_excludes_unreachable_pool_roots():
+    """SURFACES-01 Chunk 5: the pool manifest = closure(base ∪ task groups
+    ∪ installer-defaults).  A pool-rooted package reachable by NOTHING on
+    the ISO (asgard-meta/residue style) is excluded; a d-i root
+    (grub/microcode style) is included with its deps."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import surfaces as _sf
+    _pkgs = {
+        'base-a':    _SurfPkg('base-a'),
+        'task-b':    _SurfPkg('task-b', depends=['libshared']),
+        'libshared': _SurfPkg('libshared'),
+        'grub-x':    _SurfPkg('grub-x', depends=['grub-common-x']),
+        'grub-common-x': _SurfPkg('grub-common-x'),
+        'residue':   _SurfPkg('residue', depends=['residue-lib']),
+        'residue-lib': _SurfPkg('residue-lib'),
+    }
+    _dt = _surf_tree(_pkgs)
+    # manifest roots: base group + task group + d-i defaults — NOT residue
+    _manifest = _sf.surface_closure(
+        _dt, {'base-a', 'task-b', 'grub-x'},
+        include_recommends_extras=True)
+    assert 'grub-x' in _manifest and 'grub-common-x' in _manifest
+    assert 'libshared' in _manifest
+    assert 'residue' not in _manifest and 'residue-lib' not in _manifest
+    # the wiring composes manifest seeds from groups + _di_roots + req/imp
+    import inspect
+    import commands.cmd_build as _cb
+    _src = inspect.getsource(_cb)
+    _blk = _src[_src.index('SURFACES-01 manifest-driven pool'):]
+    _blk = _blk[:2500]
+    assert '_manifest_seeds.update(_di_roots)' in _blk
+    assert 'self.config.installerlist_path' in _blk   # efibootmgr-class roots
+    assert 'surface_closure' in _blk
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32395,6 +32430,8 @@ def main() -> int:
         test_compute_install_batches_install_set_param,
         # SURFACES-01 Chunk 4 — disk chroot decoupling
         test_disk_surface_plumbing,
+        # SURFACES-01 Chunk 5 — manifest-driven ISO pool
+        test_iso_pool_manifest_excludes_unreachable_pool_roots,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
