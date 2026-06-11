@@ -196,24 +196,6 @@ class _ChrootMixin:
                     _unpack_failed |= {p for p in _failed
                                        if p not in _retry_ok}
 
-            # Cross-batch stragglers: one last unpack+configure attempt
-            # now that every batch's deps are configured.
-            if _unpack_failed:
-                tui.console.print(
-                    f"Retrying {len(_unpack_failed)} package(s) that "
-                    "failed to unpack in their batch...")
-                logger.warning(
-                    f"global unpack retry: {sorted(_unpack_failed)}")
-                _retry_ok = self._unpack_packages(sorted(_unpack_failed))
-                if _retry_ok:
-                    configured |= self._configure_packages(sorted(_retry_ok))
-                _still = _unpack_failed - _retry_ok
-                if _still:
-                    tui.console.print(
-                        f"ERROR: {len(_still)} package(s) NEVER unpacked: "
-                        f"{', '.join(sorted(_still))}", )
-                    logger.error(f"unpacked never: {sorted(_still)}")
-
             # Final defensive sweep.  Many Debian postinst scripts
             # invoke helper tools from packages they do not formally
             # Depend on (udev calls update-rc.d from
@@ -224,8 +206,8 @@ class _ChrootMixin:
             # -a` retries every half-configured package — by this
             # point all batches are unpacked + their declared deps
             # configured, so the implicit helpers are present and
-            # the postinst succeeds.  The dpkg --get-selections
-            # check below is the authoritative pass/fail gate.
+            # the postinst succeeds.  The dpkg-query Status check
+            # below is the authoritative pass/fail gate.
             tui.console.print(
                 "Final configure sweep — "
                 "retrying any postinst-deferred packages..."
@@ -233,6 +215,51 @@ class _ChrootMixin:
             logger.info("final configure sweep: dpkg --configure -a")
             _final_configured = self._configure_chroot(is_final=True)
             configured |= _final_configured
+
+            # Cross-batch stragglers — retried AFTER the sweep, in
+            # rounds.  A straggler's Pre-Depends may itself be a
+            # postinst that only succeeds in the in-chroot sweep:
+            # batches before dpkg+sh exist configure in chrootless
+            # mode, where a postinst exec'ing its own shipped binary
+            # resolves on the HOST (python3.11-minimal's postinst runs
+            # /usr/bin/python3.11 — no python3.11 on the host →
+            # half-configured until the sweep; caught live 2026-06-11).
+            # Rounds, because pre-dep chains unblock one level per
+            # round: python3.11-minimal → python3-minimal → python3.
+            _still = set(_unpack_failed)
+            _progress = False
+            if _still:
+                tui.console.print(
+                    f"Retrying {len(_still)} package(s) that "
+                    "failed to unpack in their batch...")
+                logger.warning(
+                    f"post-sweep unpack retry: {sorted(_still)}")
+            for _round in range(1, 6):
+                if not _still:
+                    break
+                _retry_ok = self._unpack_packages(sorted(_still))
+                if not _retry_ok:
+                    break
+                _progress = True
+                configured |= self._configure_packages(sorted(_retry_ok))
+                _still -= _retry_ok
+                logger.info(
+                    f"unpack retry round {_round}: "
+                    f"+{len(_retry_ok)}, {len(_still)} remaining")
+            if _still:
+                tui.console.print(
+                    f"ERROR: {len(_still)} package(s) NEVER unpacked: "
+                    f"{', '.join(sorted(_still))}", )
+                logger.error(f"unpacked never: {sorted(_still)}")
+            if _progress:
+                # Re-sweep: packages whose postinst failed for want of
+                # a straggler heal now (gnome-menus' postinst needs the
+                # /usr/bin/python3 that the python3 retry just placed).
+                tui.console.print(
+                    "Re-running final configure sweep after "
+                    "unpack retries...")
+                logger.info("final configure sweep #2 (post unpack retries)")
+                configured |= self._configure_chroot(is_final=True)
         except RuntimeError as e:
             tui.console.print(f"ERROR: chroot install aborted — {e}")
             logger.error(f"build_chroot install loop: {e}")
