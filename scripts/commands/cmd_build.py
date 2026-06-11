@@ -142,6 +142,85 @@ class BuildCommandsMixin(SessionState):
             build_system.scrub_password()
 
 
+    def cmd_build_chroot_disk(self, *args):
+        """SURFACES-01: assemble the DISK surface chroot — the minimal
+        pre-installed system ([Disk] Groups closure, hard deps only, no
+        Recommends extras) into buildroot/disk.  Decoupled from the live
+        chroot so live (GNOME) and disk (console) can diverge.
+
+        Usage: chroot build disk [with_debug] [no-gate]
+
+        `iso build disk` then packages buildroot/disk into the qcow2.
+        """
+        if self._refuse_in_build_mode("chroot build disk"):
+            return
+        if not self.flags.source_build_ready:
+            console.print("Run 'source build' first")
+            return
+        self.flags.chroot_disk_ready = False
+        if not self._ensure_signing_key_verified():
+            return
+        _no_gate = 'no-gate' in args or '--no-gate' in args
+        if not _no_gate:
+            if not self._preflight_audit_source():
+                console.print("Aborted by source audit pre-flight")
+                return
+            if not self._preflight_audit_repo():
+                console.print("Aborted by repo audit pre-flight")
+                return
+        else:
+            console.print(
+                "chroot build disk: pre-flight audits BYPASSED (no-gate)",
+                tui.COLOR_WARNING)
+        self._ensure_repo_indexed_for_chroot()
+        _debug = 'with_debug' in args
+
+        console.print("Initialising build system (disk surface)...")
+        try:
+            build_system = buildsystem.BuildSystem(
+                self.dep_tree, self.config,
+                dir_chroot=self.config.dir_chroot_disk)
+        except RuntimeError as e:
+            console.print(f"ERROR: build system initialisation failed — {e}")
+            logger.error(f"BuildSystem(disk) raised: {e}")
+            return
+
+        # The disk surface = closure([Disk] Groups seeds ∪ required/
+        # important), hard deps only — a minimal console system (ssh
+        # rides [base]).  No live.list (not a live boot), no Recommends.
+        import surfaces
+        _disk_seeds = surfaces.group_seed_names(
+            self.config.pkglist_path, self.config.disk_groups)
+        _disk_seeds |= set(self.cache.required) | set(self.cache.important)
+        _disk_set = surfaces.surface_closure(self.dep_tree, _disk_seeds)
+        console.print(
+            f"Disk surface: groups {sorted(self.config.disk_groups)} → "
+            f"{len(_disk_set)} package(s) (hard closure)", tui.COLOR_INFO)
+
+        try:
+            console.print("Building disk chroot environment...")
+            _result = build_system.build_chroot(
+                debug=_debug, install_set=_disk_set)
+            if not _result:
+                console.print(
+                    "ERROR: disk chroot build failed — check logs")
+                logger.error("build_chroot(disk) returned False")
+                return
+            self.flags.chroot_disk_ready = True
+            # Informational verify — does NOT gate (chroot_verified is the
+            # live surface's gate); failures logged for the operator.
+            _passed, _failed = self._verify_chroot(
+                build_system.password, self.config.dir_chroot_disk)
+            if _failed > 0:
+                logger.error(
+                    f"disk chroot verification: {_failed} of "
+                    f"{_passed + _failed} checks failed")
+            console.print(
+                f"Disk chroot ready at {self.config.dir_chroot_disk}",
+                tui.COLOR_HIGHLIGHT)
+        finally:
+            build_system.scrub_password()
+
     def cmd_build_chroot_installer(self, *args):
         """Build the d-i installer chroot from the udeb closure.
 
@@ -671,7 +750,9 @@ class BuildCommandsMixin(SessionState):
 
     def cmd_build_iso_disk(self, *args):
         """COMP-09 — Build a pre-installed bootable qcow2 disk image
-        from the LIVE chroot.
+        from the DISK surface chroot (SURFACES-01: buildroot/disk, the
+        minimal [Disk] Groups closure — decoupled from the live/GNOME
+        chroot).
 
         Usage: iso build disk [size_gb] [force]
 
@@ -679,8 +760,7 @@ class BuildCommandsMixin(SessionState):
                     `[Build] DiskImageSizeGB`, fallback 5).  Sparse
                     qcow2 — actual on-disk footprint depends on the
                     chroot's payload, not this number.
-          force   — bypass chroot_verified gate, same semantics as
-                    `iso build live force`.
+          force   — bypass the chroot_disk_ready gate.
 
         Output: image/<distribution>-<version>-<arch>.qcow2
 
@@ -688,7 +768,7 @@ class BuildCommandsMixin(SessionState):
         Suitable for VM / cloud deployment.
 
         Prerequisites:
-          - Chroot built + verified (chroot_verified flag).
+          - Disk chroot built (`chroot build disk`, chroot_disk_ready).
           - Host packages: rsync, dosfstools (mkfs.fat), qemu-utils
             (qemu-img).  Plus losetup/sfdisk/mkfs.ext4/grub-install/
             blkid from util-linux + grub-* (all in default Debian
@@ -719,14 +799,9 @@ class BuildCommandsMixin(SessionState):
                     f"integer or `force`)"
                 )
 
-        if not _force and not self.flags.chroot_verified:
-            if self.flags.chroot_ready:
-                console.print(
-                    "Chroot built but verification failed — re-run "
-                    "`chroot verify` after fixing, or pass `force`"
-                )
-            else:
-                console.print("Run `chroot build` first")
+        if not _force and not self.flags.chroot_disk_ready:
+            console.print("Run `chroot build disk` first (the disk image "
+                          "packages buildroot/disk, not the live chroot)")
             return
 
         self.flags.iso_disk_ready = False  # reset before work; set True only on success
@@ -781,7 +856,7 @@ class BuildCommandsMixin(SessionState):
                 f"{_out_path}"
             )
             _ok = disk_image.build_disk_image(
-                dir_chroot=self.config.dir_chroot,
+                dir_chroot=self.config.dir_chroot_disk,
                 output_qcow2=_out_path,
                 size_gb=_size_gb,
                 password=_password,

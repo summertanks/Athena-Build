@@ -23,11 +23,16 @@ from iso import _IsoMixin
 
 
 class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
-    def __init__(self, dependency_tree: dependencytree.DependencyTree, config: BuildConfig):
+    def __init__(self, dependency_tree: dependencytree.DependencyTree,
+                 config: BuildConfig,
+                 dir_chroot: 'str | None' = None):
+        """`dir_chroot` (SURFACES-01): override the chroot target dir —
+        the disk surface builds into config.dir_chroot_disk while the
+        live surface keeps the default config.dir_chroot."""
         self._dependencytree = dependency_tree
         self._config = config
         self._dir_image = config.dir_image
-        self._dir_chroot = config.dir_chroot
+        self._dir_chroot = dir_chroot or config.dir_chroot
         self._dir_repo = config.dir_repo
         # CONF-01 Stage D: the new apt-repo layout nests .debs under
         # dists/<codename>/main/binary-<arch>/.  Mixins (chroot, dep-

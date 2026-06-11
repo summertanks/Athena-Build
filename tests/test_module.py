@@ -12185,29 +12185,29 @@ def test_autorun_installer_chains_iso_build_after_chroot():
     )
 
 
-def test_autorun_disk_reuses_live_chroot_then_builds_disk():
-    """`autorun disk` shares the live early stages (it masters the disk
-    image from the verified LIVE chroot), then ends with `iso build disk`
-    gated on iso_disk_ready — not `iso build live`."""
+def test_autorun_disk_builds_its_own_disk_chroot():
+    """SURFACES-01: `autorun disk` builds the DISK surface's OWN chroot
+    (`chroot build disk`, gated on chroot_disk_ready — decoupled from the
+    live/GNOME chroot) then ends with `iso build disk` on iso_disk_ready."""
     import sys, inspect
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     from build import BuildSession
     src = inspect.getsource(BuildSession.cmd_auto_run_disk)
-    _i_live   = src.find("'source build live'")
-    _i_chroot = src.find("'chroot build'")
+    _i_chroot = src.find("'chroot build disk'")
     _i_iso    = src.find("'iso build disk'")
-    assert _i_live > 0,   "_steps missing 'source build live' (live extras)"
-    assert _i_chroot > 0, "_steps missing 'chroot build' (live chroot)"
+    assert _i_chroot > 0, "_steps missing 'chroot build disk' stage"
     assert _i_iso > 0,    "_steps missing 'iso build disk' terminal stage"
-    assert _i_live < _i_chroot < _i_iso, (
-        f"stage order wrong: live @ {_i_live}, chroot @ {_i_chroot}, "
-        f"iso disk @ {_i_iso}"
-    )
+    assert _i_chroot < _i_iso, (
+        f"stage order wrong: chroot disk @ {_i_chroot}, iso disk @ {_i_iso}")
+    assert "cmd_build_chroot_disk" in src
+    assert "'chroot_disk_ready'" in src
     assert "cmd_build_iso_disk" in src, "autorun disk must call cmd_build_iso_disk"
     assert "'iso_disk_ready'" in src, "autorun disk must gate on iso_disk_ready"
-    # Must NOT terminate on the live ISO — that would be the wrong artifact.
+    # Must NOT terminate on the live ISO, nor build the LIVE chroot.
     assert "cmd_build_iso_live" not in src, (
         "autorun disk must end on the disk image, not the live ISO")
+    assert "cmd_build_chroot_live" not in src, (
+        "autorun disk must not build the live chroot (decoupled surface)")
 
 
 def test_buildflags_carry_iso_ready_state():
@@ -31664,6 +31664,31 @@ def test_compute_install_batches_install_set_param():
     assert [p for batch, _f in _b2 for p in batch] == ['gnome-b']
 
 
+def test_disk_surface_plumbing():
+    """SURFACES-01 Chunk 4: dir_chroot_disk exists + is distinct;
+    chroot_disk_ready is a real flag field; BuildSystem accepts a
+    dir_chroot override; iso disk gates on the disk chroot."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    import inspect
+    _cfg = _u.BuildConfig()
+    assert _cfg.dir_chroot_disk.endswith('buildroot/disk')
+    assert _cfg.dir_chroot_disk != _cfg.dir_chroot
+    assert os.path.isdir(_cfg.dir_chroot_disk)
+    from build import BuildFlags
+    assert 'chroot_disk_ready' in BuildFlags._FIELDS
+    import buildsystem
+    _sig = inspect.signature(buildsystem.BuildSystem.__init__)
+    assert 'dir_chroot' in _sig.parameters
+    # iso disk command sources the DISK chroot, not the live one
+    import commands.cmd_build as _cb
+    _src = inspect.getsource(_cb)
+    _disk_fn = _src[_src.index('def cmd_build_iso_disk'):]
+    _disk_fn = _disk_fn[:_disk_fn.index('def cmd_', 10)]
+    assert 'dir_chroot=self.config.dir_chroot_disk' in _disk_fn
+    assert 'chroot_disk_ready' in _disk_fn
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32078,7 +32103,7 @@ def main() -> int:
         test_autorun_installer_runs_source_build_then_source_build_installer,
         test_autorun_live_chains_iso_build_after_chroot,
         test_autorun_installer_chains_iso_build_after_chroot,
-        test_autorun_disk_reuses_live_chroot_then_builds_disk,
+        test_autorun_disk_builds_its_own_disk_chroot,
         test_buildflags_carry_iso_ready_state,
         test_autorun_dispatcher_routes_bare_to_live_and_explicit_to_each,
         test_autorun_live_runs_source_build_then_source_build_live,
@@ -32368,6 +32393,8 @@ def main() -> int:
         test_buildconfig_surface_group_knobs,
         # SURFACES-01 Chunk 3 — live chroot composition
         test_compute_install_batches_install_set_param,
+        # SURFACES-01 Chunk 4 — disk chroot decoupling
+        test_disk_surface_plumbing,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
