@@ -1340,6 +1340,98 @@ def test_compute_install_batches_external_deps_filtered():
     assert batches == [(['A', 'B'], False)], batches
 
 
+def test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds():
+    """A package whose unpack fails on a same-batch Pre-Depends must be
+    retried AFTER the final configure sweep, in rounds, with a re-sweep
+    once retries make progress.  The pre-dep may itself be a postinst
+    only the in-chroot sweep can configure: early batches run chrootless
+    (no dpkg/sh in the chroot yet), so a postinst exec'ing its own
+    shipped binary resolves on the HOST and defers to the sweep —
+    python3.11-minimal → python3-minimal → python3 chain, live
+    2026-06-11.  A pre-sweep-only retry leaves the chain dead."""
+    import types
+    import chroot as chroot_module
+    import tui as _tui
+
+    # A's configure only succeeds in the sweep (chrootless-deferred
+    # postinst stand-in); B pre-depends A, C pre-depends B.
+    bs = _bare_buildsystem_with_deps(
+        [('A', [], []), ('B', ['A'], []), ('C', ['B'], [])])
+    bs._dir_chroot = '/nonexistent-chroot'
+    bs._password = 'pw'
+    _tui.console = _StubConsole()
+
+    _calls = []
+    bs._setup_chroot_env = lambda: None
+    bs._init_dpkg_database = lambda: None
+    bs._mount_chroot_fs = lambda: None
+    bs._umount_chroot_fs = lambda: None
+    bs._ensure_initramfs = lambda: None
+    bs.post_install = lambda: None
+    bs.generate_system_configs = lambda debug=False: None
+    bs._compute_install_batches = (
+        lambda libc_seed_set, install_set=None: [(['A', 'B', 'C'], True)])
+
+    _full: set = set()       # truly-configured packages
+    _unpacked: set = set()   # truly-unpacked packages
+    _sweeps = []
+
+    def _unpack(pkgs):
+        _ok = {p for p in pkgs
+               if (p == 'B' and 'A' in _full)
+               or (p == 'C' and 'B' in _full)
+               or p not in ('B', 'C')}
+        _calls.append(('unpack', tuple(sorted(pkgs)), tuple(sorted(_ok))))
+        _unpacked.update(_ok)
+        return _ok
+
+    def _configure(pkgs, force_deps=False):
+        _ok = {p for p in pkgs
+               if p in _unpacked and (p != 'A' or _sweeps)}
+        _calls.append(('configure', tuple(sorted(pkgs))))
+        _full.update(_ok)
+        return _ok
+
+    def _sweep(is_final=False):
+        _calls.append(('sweep', is_final))
+        _sweeps.append(is_final)
+        _full.add('A')
+        return {'A'}
+
+    bs._unpack_packages = _unpack
+    bs._configure_packages = _configure
+    bs._configure_chroot = _sweep
+
+    class _QProc:
+        returncode = 0
+        stdout = ''.join(
+            f'{p} install ok installed\n'
+            for p in ('libc6', 'libgcc-s1', 'libcrypt1', 'A', 'B', 'C'))
+        stderr = ''
+    _orig_subprocess = chroot_module.subprocess
+    chroot_module.subprocess = types.SimpleNamespace(
+        run=lambda *a, **k: _QProc())
+    try:
+        _ok = bs.build_chroot()
+    finally:
+        chroot_module.subprocess = _orig_subprocess
+
+    assert _ok is True
+    # Everything ends unpacked + configured: the chain converged.
+    assert {'A', 'B', 'C'} <= _unpacked, _calls
+    assert {'A', 'B', 'C'} <= _full, _calls
+    # The retry rounds for B/C come strictly BETWEEN the two sweeps:
+    # pre-sweep retries cannot succeed (A unconfigurable until the
+    # sweep), and the re-sweep heals sweep-1 stragglers.
+    _sweep_idx = [i for i, c in enumerate(_calls) if c[0] == 'sweep']
+    assert len(_sweep_idx) == 2, _calls
+    _b_round = next(i for i, c in enumerate(_calls)
+                    if c[0] == 'unpack' and c[2] == ('B',))
+    _c_round = next(i for i, c in enumerate(_calls)
+                    if c[0] == 'unpack' and c[2] == ('C',))
+    assert _sweep_idx[0] < _b_round < _c_round < _sweep_idx[1], _calls
+
+
 def test_configure_chroot_final_pass_counts_stderr_failures():
     """The final `dpkg --configure -a` failure summary must (a) read dpkg's
     'error processing package' lines from STDERR — dpkg writes them there;
@@ -31912,6 +32004,7 @@ def main() -> int:
         test_compute_install_batches_cycle_with_pre_depends_chain_splits,
         test_compute_install_batches_acyclic_then_cycle,
         test_compute_install_batches_external_deps_filtered,
+        test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds,
         test_configure_chroot_final_pass_counts_stderr_failures,
         test_buildsystem_password_readable_before_scrub,
         test_buildsystem_scrub_password_clears_field,
