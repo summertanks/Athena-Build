@@ -31605,6 +31605,29 @@ def test_surfaces_group_seed_names_and_flat_roots():
         assert _sf.read_flat_roots(_flat + '.missing') == []
 
 
+def test_buildconfig_surface_group_knobs():
+    """[Live]/[Disk] Groups parse comma/space lists; absent sections default
+    to {'base'}; installer_defaults_path points under config/."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils as _u
+    _cfg = _u.BuildConfig()
+    assert isinstance(_cfg.live_groups, set) and _cfg.live_groups
+    assert isinstance(_cfg.disk_groups, set) and _cfg.disk_groups
+    assert 'base' in _cfg.disk_groups
+    assert _cfg.installer_defaults_path.endswith(
+        'config/installer-defaults.list')
+    # the authored defaults file parses + carries the d-i roots
+    import surfaces as _sf
+    _roots = _sf.read_flat_roots(_cfg.installer_defaults_path)
+    for _must in ('grub-pc', 'grub-efi-amd64', 'console-setup',
+                  'intel-microcode', 'open-vm-tools'):
+        assert _must in _roots, f'{_must} missing from installer-defaults'
+    # every root is also a pool.list build/publish root (sync invariant)
+    _pool = set(_sf.read_flat_roots(_cfg.poollist_path))
+    _missing = [_r for _r in _roots if _r not in _pool]
+    assert not _missing, f'installer-defaults not in pool.list: {_missing}'
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32305,6 +32328,8 @@ def main() -> int:
         test_surface_closure_credit_trap_and_or_groups,
         test_surface_closure_extras_fixpoint,
         test_surfaces_group_seed_names_and_flat_roots,
+        # SURFACES-01 Chunk 2 — config knobs + installer-defaults
+        test_buildconfig_surface_group_knobs,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,

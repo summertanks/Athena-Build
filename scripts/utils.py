@@ -2021,6 +2021,25 @@ class BuildConfig:
             self.disk_image_size_gb = config_parser.getint(
                 'Build', 'DiskImageSizeGB', fallback=5,
             )
+
+            # SURFACES-01: per-surface pkg.list group composition.
+            # [Live] Groups / [Disk] Groups — comma/space-separated group
+            # names whose closure (surfaces.surface_closure) gets installed
+            # in that surface's chroot.  'base' is the minimal default;
+            # the shipped build.conf sets Live to `base, gnome-desktop`.
+            # Validated against pkg.list groups by the iso/chroot pre-flight.
+            def _parse_groups(_section: str) -> 'set[str]':
+                _raw = config_parser.get(_section, 'Groups', fallback='base')
+                return {_g for _g in _raw.replace(',', ' ').split() if _g}
+            self.live_groups = _parse_groups('Live')
+            self.disk_groups = _parse_groups('Disk')
+            # config/installer-defaults.list — the d-i install ROOTS
+            # (grub metas, microcode, firmware, console-setup, VM tools):
+            # packages d-i hooks apt-install onto /target at install time.
+            # Feeds the installer-ISO pool manifest (with the tasksel
+            # groups); pool.list keeps feeding build/publish roots.
+            self.installer_defaults_path = os.path.join(
+                working_dir, 'config/installer-defaults.list')
             # CONF-02: identity for the project's signing key — used by
             # generate_signing_key / verify_signing_key / print signing.
             # Format 'Name <email>'.  See [Repo] section in build.conf.

@@ -1,0 +1,41 @@
+# Installer-default install roots (SURFACES-01) — packages the d-i
+# machinery itself apt-installs onto /target at install time, OUTSIDE
+# the tasksel menu.  Together with the pkg.list groups (the tasksel
+# tasks) these are the ROOTS of the installer-ISO pool manifest:
+#
+#   /cdrom/pool = closure( [base] ∪ all task groups ∪ THIS LIST )
+#
+# A package on neither path ships on the mirror but NOT on the ISO —
+# install it post-boot via apt from the network mirror.
+#
+# Keep entries in sync with the d-i hooks that install them:
+#   grub-installer  → grub-pc | grub-efi-amd64 (per firmware mode)
+#   base-installer  → console-setup (separate /target apt-install step)
+#   hw-detect       → microcode per CPU vendor; firmware per NIC/GPU;
+#                     open-vm-tools(-desktop) on VMware
+# Every entry must be in the build selection (pool.list keeps them as
+# build/publish roots); the iso pre-flight fails loud on an entry that
+# is not selected.
+
+# Bootloader metas (grub-installer picks one at install time)
+grub-pc
+grub-efi-amd64
+
+# Console keymap (base-installer apt-installs onto /target)
+console-setup
+
+# CPU microcode (hw-detect, per vendor)
+intel-microcode
+amd64-microcode
+
+# NIC / GPU / misc firmware (hw-detect)
+firmware-iwlwifi
+firmware-realtek
+firmware-atheros
+firmware-brcm80211
+firmware-amd-graphics
+firmware-misc-nonfree
+
+# VMware guest tooling (hw-detect on VMware targets)
+open-vm-tools
+open-vm-tools-desktop
