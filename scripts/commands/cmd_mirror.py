@@ -834,15 +834,50 @@ class MirrorCommandsMixin(SessionState):
         # Resolve InRelease (the local copy we sign + push verbatim).
         # MIRROR-01 Phase 8: auto-index when InRelease is missing —
         # `repo index` is no longer an operator-visible command, so
-        # mirror publish owns the side-effect.  When InRelease exists,
-        # we trust it (no forced re-index — caller can clean repo +
-        # re-run if a stale index is suspected).
+        # mirror publish owns the side-effect.
+        #
+        # STALE-INDEX guard (2026-06-11): missing is not the only bad
+        # state.  Publish pushes dists/ verbatim AND coord-head PINS its
+        # sha, so a stale local index publishes "cleanly" and every
+        # downstream verification passes while apt clients keep
+        # resolving superseded metadata — caught live when a Jun-9
+        # index shipped alongside the fixed e2fsprogs +asg1u2 pool and
+        # the mirror kept serving the broken +asg1u1 Pre-Depends.
+        # Re-index whenever any pool artifact OR pool directory (covers
+        # deletion-only changes) is newer than the local InRelease.
         _codename = str(self.config.build_codename).strip('"').strip("'")
         _inrelease = os.path.join(
             self.config.dir_repo, 'dists', _codename, 'InRelease')
-        if not os.path.isfile(_inrelease):
+        _need_index = not os.path.isfile(_inrelease)
+        _why = 'missing'
+        if not _need_index:
+            _inrel_mtime = os.path.getmtime(_inrelease)
+            _dist_root = os.path.join(
+                self.config.dir_repo, 'dists', _codename)
+            for _root, _dirs, _files in os.walk(_dist_root):
+                _cands = [_f for _f in _files
+                          if _f.endswith(('.deb', '.udeb'))]
+                # Dir mtime checked ONLY for dirs holding pool artifacts
+                # (catches deletion-only changes).  Index-only dirs are
+                # excluded: InRelease lands via temp-write + mv (mv
+                # preserves the file's older mtime but bumps the dir),
+                # so checking them would flag stale on every publish.
+                _paths = [_root] if _cands else []
+                _paths += [os.path.join(_root, _f) for _f in _cands]
+                for _p in _paths:
+                    try:
+                        if os.path.getmtime(_p) > _inrel_mtime:
+                            _need_index = True
+                            _why = (f'stale — {os.path.basename(_p)} '
+                                    f'newer than InRelease')
+                            break
+                    except OSError:
+                        continue
+                if _need_index:
+                    break
+        if _need_index:
             console.print(
-                "mirror publish: local InRelease missing — auto-indexing "
+                f"mirror publish: local InRelease {_why} — auto-indexing "
                 "repo (folded `repo index full`)…", tui.COLOR_INFO)
             if not self.cmd_index_repo():
                 console.print(

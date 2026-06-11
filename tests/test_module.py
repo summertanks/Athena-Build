@@ -17460,6 +17460,86 @@ def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
         )
 
 
+def test_mirror_publish_reindexes_stale_local_index():
+    """mirror publish must re-index when any pool artifact is newer than
+    the local InRelease, not only when InRelease is missing.  Publish
+    pushes dists/ verbatim and coord-head PINS its sha, so a stale index
+    publishes 'cleanly' and every downstream check passes while apt
+    clients keep resolving superseded metadata — caught live 2026-06-11
+    (Jun-9 index served broken e2fsprogs +asg1u1 Pre-Depends alongside a
+    fixed +asg1u2 pool)."""
+    import sys as _sys
+    import tempfile
+    import time as _time
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    class _Stop(Exception):
+        pass
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _dist = os.path.join(
+            _tmp, 'repo', 'dists', 'thor', 'main', 'binary-amd64')
+        os.makedirs(_dist)
+        _inrel = os.path.join(_tmp, 'repo', 'dists', 'thor', 'InRelease')
+        _deb = os.path.join(_dist, 'foo_1.0_amd64.deb')
+        open(_inrel, 'w').write('x')
+        open(_deb, 'w').write('y')
+        _now = _time.time()
+        # fresh state: deb (and its dir) older than InRelease
+        os.utime(_deb, (_now - 500, _now - 500))
+        os.utime(_dist, (_now - 500, _now - 500))
+        os.utime(_inrel, (_now - 100, _now - 100))
+
+        class _Cfg:
+            dir_repo = os.path.join(_tmp, 'repo')
+            build_codename = 'thor'
+
+        def _mk_session(_calls):
+            _sess = BuildSession.__new__(BuildSession)
+            _sess.config = _Cfg()
+            _sess._coord_self_keys = lambda: ('bid', 'priv', 'pub')
+            _sess.cmd_index_repo = (
+                lambda: (_calls.append('index'), False)[1])
+            def _stop():
+                raise _Stop()
+            _sess._snapshot_current = _stop
+            return _sess
+
+        _orig = build.console.print
+        build.console.print = lambda *a, **k: None
+        try:
+            # CASE 1 — fresh index: no re-index, proceeds to the next
+            # pipeline step (our _Stop sentinel).
+            _calls: 'list[str]' = []
+            try:
+                _mk_session(_calls).cmd_mirror_publish()
+                raise AssertionError("expected _Stop past the index block")
+            except _Stop:
+                pass
+            assert _calls == [], _calls
+
+            # CASE 2 — pool artifact newer than InRelease: re-index
+            # fires (our stub returns False → publish aborts).
+            os.utime(_deb, (_now + 100, _now + 100))
+            _calls = []
+            _r = _mk_session(_calls).cmd_mirror_publish()
+            assert _calls == ['index'], _calls
+            assert _r is False, _r
+
+            # CASE 3 — deletion-only change (dir newer, no newer file):
+            # re-index fires via the pool-dir mtime.
+            os.utime(_deb, (_now - 500, _now - 500))
+            os.utime(_dist, (_now + 100, _now + 100))
+            _calls = []
+            _r = _mk_session(_calls).cmd_mirror_publish()
+            assert _calls == ['index'], _calls
+            assert _r is False, _r
+        finally:
+            build.console.print = _orig
+
+
 def test_preflight_repo_audit_blocks_on_stale_artifacts():
     """The chroot pre-flight repo audit includes the stale-file scan and
     GATES on it: a superseded .deb lingering in repo/ is silently
@@ -32690,6 +32770,7 @@ def main() -> int:
         test_print_wrapped_names_keeps_lines_under_wrap_width,
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_preflight_repo_audit_blocks_on_stale_artifacts,
+        test_mirror_publish_reindexes_stale_local_index,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
         test_cmd_source_fork_enable_removes_marker,
         test_fork_mirror_discover_skips_disabled_trees,
