@@ -1340,6 +1340,32 @@ def test_compute_install_batches_external_deps_filtered():
     assert batches == [(['A', 'B'], False)], batches
 
 
+def test_compute_install_batches_dpkg_dash_closure_scheduled_first():
+    """The dpkg+dash dependency closure must be emitted in the earliest
+    Kahn waves, ahead of other ready leaves.  Configure runs chrootless
+    (host-side maintainer scripts) until dpkg+sh exist in the chroot; a
+    postinst exec'ing its own shipped interpreter (python3.11-minimal)
+    can only configure in-chroot, and its dependents' Pre-Depends then
+    fail to unpack — the essential toolchain must land first so every
+    later batch configures in-chroot (live 2026-06-11)."""
+    bs = _bare_buildsystem_with_deps([
+        ('aaa-leaf', [], []),            # alphabetically-first decoy leaf
+        ('dash', [], []),
+        ('dpkg', [], ['libzstd1']),
+        ('libzstd1', [], []),
+        ('app', [], ['dpkg']),
+    ])
+    batches = bs._compute_install_batches(libc_seed_set=set())
+    # Core waves first: {dash, libzstd1} then {dpkg}; only afterwards
+    # the decoy leaf + app.  Without the bias, wave 1 would have been
+    # ['aaa-leaf', 'dash', 'libzstd1'].
+    assert batches == [
+        (['dash', 'libzstd1'], False),
+        (['dpkg'], False),
+        (['aaa-leaf', 'app'], False),
+    ], batches
+
+
 def test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds():
     """A package whose unpack fails on a same-batch Pre-Depends must be
     retried AFTER the final configure sweep, in rounds, with a re-sweep
@@ -32004,6 +32030,7 @@ def main() -> int:
         test_compute_install_batches_cycle_with_pre_depends_chain_splits,
         test_compute_install_batches_acyclic_then_cycle,
         test_compute_install_batches_external_deps_filtered,
+        test_compute_install_batches_dpkg_dash_closure_scheduled_first,
         test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds,
         test_configure_chroot_final_pass_counts_stderr_failures,
         test_buildsystem_password_readable_before_scrub,
