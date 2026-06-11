@@ -2294,6 +2294,10 @@ class BuildConfig:
             self.dir_buildroot        = os.path.join(self.working_dir, config_parser.get('Directories', 'Chroot'))
             self.dir_chroot           = os.path.join(self.dir_buildroot, 'live')
             self.dir_chroot_installer = os.path.join(self.dir_buildroot, 'installer')
+            # SURFACES-01: the DISK image's own minimal chroot ([Disk]
+            # Groups closure) — decoupled from the live chroot so the two
+            # surfaces can diverge (live = GNOME, disk = console).
+            self.dir_chroot_disk      = os.path.join(self.dir_buildroot, 'disk')
 
             self.dir_patch = os.path.join(self.working_dir, config_parser.get('Directories', 'Patch'))
             self.dir_patch_source = os.path.join(self.dir_patch, 'source')
@@ -2423,6 +2427,7 @@ class BuildConfig:
             pathlib.Path(self.dir_buildroot).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_chroot_installer).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.dir_chroot_disk).mkdir(parents=True, exist_ok=True)
 
             # gpg refuses any homedir whose mode is broader than 0700,
             # so create with mode 0700 directly.  os.makedirs respects
@@ -2438,7 +2443,7 @@ class BuildConfig:
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,
                 self.dir_fork, self.dir_fork_source, self.dir_fork_source_repo,
                 self.dir_image, self.dir_publish, self.dir_buildroot, self.dir_chroot,
-                self.dir_chroot_installer, self.dir_gnupg,
+                self.dir_chroot_installer, self.dir_chroot_disk, self.dir_gnupg,
                 self.dir_coord, self.dir_coord_identity,
                 self.dir_coord_claims, self.dir_coord_fetched,
             ):

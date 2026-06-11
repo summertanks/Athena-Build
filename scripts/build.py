@@ -116,6 +116,7 @@ class BuildFlags:
     chroot_ready:            bool
     chroot_verified:         bool
     chroot_installer_ready:  bool
+    chroot_disk_ready:       bool
     iso_live_ready:          bool
     iso_installer_ready:     bool
     iso_disk_ready:          bool
@@ -126,6 +127,7 @@ class BuildFlags:
         'build_container_ready', 'source_build_ready',
         'signing_key_verified',
         'chroot_ready', 'chroot_verified', 'chroot_installer_ready',
+        'chroot_disk_ready',
         'iso_live_ready', 'iso_installer_ready', 'iso_disk_ready',
     )
 
@@ -564,11 +566,16 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         _ok_inst = self._wipe_dir_contents(
             'buildroot/installer', self.config.dir_chroot_installer,
             sudo=True, password=_password, skip_prompt=_force)
+        _ok_disk = self._wipe_dir_contents(
+            'buildroot/disk', self.config.dir_chroot_disk,
+            sudo=True, password=_password, skip_prompt=_force)
         if _ok_live:
             self.flags.chroot_ready = False
             self.flags.chroot_verified = False
         if _ok_inst:
             self.flags.chroot_installer_ready = False
+        if _ok_disk:
+            self.flags.chroot_disk_ready = False
 
     def cmd_clean_image(self, *args):
         """Wipe built ISOs (and their staging dirs).  Resets iso_*_ready
@@ -1195,19 +1202,22 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
 
     def cmd_chroot(self, action: str = '', *args):
         _table = {
-            'build [live]':    'install built .debs into buildroot/live (default sub-action)',
+            'build [live]':    'install the [Live] Groups closure into buildroot/live (default)',
             'build installer': 'unpack udeb closure into buildroot-installer/ (no postinst configure)',
+            'build disk':      'install the [Disk] Groups closure into buildroot/disk (minimal)',
             'verify':          '8-check chroot health verifier',
         }
         if action == 'build':
-            # Default to live; explicit `live`/`installer` consumes the
-            # next token as the sub-action.  Anything else is treated as
+            # Default to live; explicit `live`/`installer`/`disk` consumes
+            # the next token as the sub-action.  Anything else is treated as
             # args to the live build (preserves `chroot build with_debug`).
-            if args and args[0] in ('live', 'installer'):
+            if args and args[0] in ('live', 'installer', 'disk'):
                 _sub = args[0]
                 _rest = args[1:]
                 if _sub == 'installer':
                     return self.cmd_build_chroot_installer(*_rest)
+                if _sub == 'disk':
+                    return self.cmd_build_chroot_disk(*_rest)
                 return self.cmd_build_chroot_live(*_rest)
             return self.cmd_build_chroot_live(*args)
         if action == 'verify':
@@ -1219,7 +1229,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             'build live':      'wrap live chroot into bootable hybrid BIOS/EFI ISO',
             'build installer': 'wrap installer chroot + kernel + pool into hybrid BIOS+EFI ISO',
             'build disk':      'pre-installed bootable qcow2 disk image from '
-                               'live chroot (`iso build disk [size_gb]`)',
+                               'the disk chroot (`iso build disk [size_gb]`)',
         }
         if action == 'build':
             if not args:

@@ -240,10 +240,9 @@ class ConfigRunCommandsMixin(SessionState):
         """Run the full pipeline through to a pre-installed bootable qcow2
         disk image (COMP-09).
 
-        Shares every early stage with cmd_auto_run_live and reuses the same
-        verified LIVE chroot — the disk image is mastered from buildroot/live,
-        not a distinct chroot.  Only the terminal step differs: iso build disk
-        instead of iso build live.  Gates the final step on iso_disk_ready.
+        SURFACES-01: the disk image is mastered from its OWN minimal chroot
+        (buildroot/disk, the [Disk] Groups closure) — decoupled from the
+        live/GNOME chroot.  Gates the final step on iso_disk_ready.
         """
         _steps = [
             (self.cmd_build_cache,       'cache_ready',           'cache build'),
@@ -252,9 +251,7 @@ class ConfigRunCommandsMixin(SessionState):
             (self.cmd_init_container,    'build_container_ready', 'container init'),
             (self.cmd_source_build,                                  # bare = pkg
                                           'source_build_ready',    'source build'),
-            (lambda: self.cmd_source_build('live'),                  # live extras
-                                          'source_build_ready',    'source build live'),
-            (self.cmd_build_chroot_live, 'chroot_verified',       'chroot build'),
+            (self.cmd_build_chroot_disk, 'chroot_disk_ready',     'chroot build disk'),
             (self.cmd_build_iso_disk,    'iso_disk_ready',        'iso build disk'),
         ]
         self._run_autorun_steps('autorun disk', _steps)
