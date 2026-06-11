@@ -60,8 +60,9 @@ class _ChrootMixin:
         `dpkg --unpack` followed by one `dpkg --configure pkg1 pkg2 ...`.
         A final `dpkg --configure -a` retries any package whose postinst
         was deferred by an undeclared helper-tool dependency (e.g. udev
-        calling update-rc.d from init-system-helpers); the dpkg
-        --get-selections summary at the end is the authoritative gate.
+        calling update-rc.d from init-system-helpers); the dpkg-query
+        Status summary at the end (broken + never-installed vs the
+        install plan) is the authoritative gate.
 
         Args:
             debug: When True, generate_system_configs() also writes a
@@ -158,6 +159,18 @@ class _ChrootMixin:
             # The terminal batch may be a "cycle batch" (force_deps=True)
             # that contains a real SCC; in that case dpkg gets
             # --force-depends scoped to that batch only.
+            #
+            # UNPACK-RETRY (SURFACES-01 live debug, 2026-06-11): inside a
+            # forced cycle batch dpkg processes archives in argv order,
+            # and a package whose Pre-Depends sits LATER in the same
+            # batch fails to unpack ("pre-dependency problem") — caught
+            # live when python3 (Pre-Depends: python3-minimal, same SCC
+            # region) never installed and every #!/usr/bin/python3
+            # postinst (gnome-menus) cascaded into half-configured.
+            # After each batch's configure pass the pre-dep IS
+            # configured, so retrying the failed unpacks then succeeds.
+            # Any survivors get one more retry before the final sweep.
+            _unpack_failed: 'set[str]' = set()
             for _i, (_batch, _force) in enumerate(batches, start=1):
                 _label = f"Batch {_i}/{len(batches)} — {len(_batch)} package(s)"
                 if _force:
@@ -167,8 +180,39 @@ class _ChrootMixin:
                     f"batch {_i}/{len(batches)}: {len(_batch)} pkg(s)"
                     f"{' [cycle, --force-depends]' if _force else ''}"
                 )
-                self._unpack_packages(_batch)
+                _unpacked = self._unpack_packages(_batch)
                 configured |= self._configure_packages(_batch, force_deps=_force)
+                _failed = [p for p in _batch if p not in _unpacked]
+                if _failed:
+                    logger.info(
+                        f"batch {_i}: retrying {len(_failed)} failed "
+                        f"unpack(s) post-configure: "
+                        f"{', '.join(_failed[:5])}"
+                        f"{'…' if len(_failed) > 5 else ''}")
+                    _retry_ok = self._unpack_packages(_failed)
+                    if _retry_ok:
+                        configured |= self._configure_packages(
+                            sorted(_retry_ok), force_deps=_force)
+                    _unpack_failed |= {p for p in _failed
+                                       if p not in _retry_ok}
+
+            # Cross-batch stragglers: one last unpack+configure attempt
+            # now that every batch's deps are configured.
+            if _unpack_failed:
+                tui.console.print(
+                    f"Retrying {len(_unpack_failed)} package(s) that "
+                    "failed to unpack in their batch...")
+                logger.warning(
+                    f"global unpack retry: {sorted(_unpack_failed)}")
+                _retry_ok = self._unpack_packages(sorted(_unpack_failed))
+                if _retry_ok:
+                    configured |= self._configure_packages(sorted(_retry_ok))
+                _still = _unpack_failed - _retry_ok
+                if _still:
+                    tui.console.print(
+                        f"ERROR: {len(_still)} package(s) NEVER unpacked: "
+                        f"{', '.join(sorted(_still))}", )
+                    logger.error(f"unpacked never: {sorted(_still)}")
 
             # Final defensive sweep.  Many Debian postinst scripts
             # invoke helper tools from packages they do not formally
@@ -204,29 +248,53 @@ class _ChrootMixin:
         # installed' state.  Should be empty after a successful run; if
         # not, surface the names so the operator can investigate without
         # parsing 80k lines of the unified run log.
+        # `dpkg --get-selections` only reports SELECTION states (install/
+        # hold/…), never half-configured — the old check here was always
+        # empty and the success banner always printed (caught live
+        # 2026-06-11: gnome-menus half-configured + python3 never unpacked
+        # under "all packages fully configured").  Use dpkg-query Status
+        # and ALSO diff against the install plan so a never-unpacked
+        # package (python3 class) is surfaced, not just broken ones.
         _status_cmd = ['sudo', '-S', 'chroot', self._dir_chroot,
-                       'dpkg', '--get-selections']
+                       'dpkg-query', '-W', '-f', '${Package} ${Status}\\n']
         _status = subprocess.run(_status_cmd, input=self._password + '\n',
                                  capture_output=True, text=True)
-        _not_installed = [
-            l.split()[0] for l in _status.stdout.splitlines()
-            if l.endswith(('\thalf-configured', '\tunpacked'))
-        ] if _status.returncode == 0 else []
+        _present_ok: set = set()
+        _broken: list = []
+        if _status.returncode == 0:
+            for _l in _status.stdout.splitlines():
+                _parts = _l.split(' ', 1)
+                if len(_parts) != 2:
+                    continue
+                if _parts[1] == 'install ok installed':
+                    _present_ok.add(_parts[0].split(':')[0])
+                elif not _parts[1].endswith(('not-installed',
+                                             'config-files')):
+                    _broken.append(_parts[0].split(':')[0])
+        _planned: set = set(libc_seed)
+        for _b, _f in batches:
+            _planned.update(_b)
+        _missing = sorted(_planned - _present_ok - set(_broken))
+        _not_installed = sorted(_broken) + _missing
 
         if _not_installed:
             tui.console.print(
-                f"Chroot build done — {len(configured)} packages configured, "
-                f"{len(_not_installed)} incomplete: {', '.join(_not_installed[:8])}"
-                f"{'…' if len(_not_installed) > 8 else ''}"
+                f"Chroot build done — {len(_present_ok)} packages installed, "
+                f"{len(_broken)} broken ({', '.join(sorted(_broken)[:5])}"
+                f"{'…' if len(_broken) > 5 else ''}), "
+                f"{len(_missing)} never installed "
+                f"({', '.join(_missing[:5])}"
+                f"{'…' if len(_missing) > 5 else ''})"
             )
             logger.warning(
-                f"build_chroot: {len(_not_installed)} packages not fully configured: "
-                f"{_not_installed}"
+                f"build_chroot: incomplete — broken={sorted(_broken)} "
+                f"missing={_missing}"
             )
         else:
             tui.console.print(
-                f"Chroot build complete — {len(configured)} packages installed "
-                f"in {len(batches) + 1} batches — all packages fully configured"
+                f"Chroot build complete — {len(_present_ok)} packages "
+                f"installed in {len(batches) + 1} batches — all packages "
+                "fully configured"
             )
 
         # Ensure every installed kernel has an initramfs.  Defence-in-depth
@@ -405,10 +473,17 @@ class _ChrootMixin:
             _mode = 'chroot' if _dpkg_in_chroot else 'chrootless'
             if is_final:
                 # Final pass failures are real — surface them immediately.
-                _failed = [
-                    l.split()[-1] for l in _proc.stdout.splitlines()
-                    if l.startswith('dpkg: error processing package')
-                ]
+                # dpkg writes the error lines to STDERR (parsing stdout
+                # reported "0 failed" while gnome-menus was half-configured
+                # — caught live 2026-06-11), and the package name is the
+                # regex group, not the last token ("(--configure):").
+                _failed = sorted({
+                    _m.group(1).split(':')[0]
+                    for _stream in (_proc.stdout, _proc.stderr)
+                    for l in _stream.splitlines()
+                    if (_m := re.match(
+                        r'dpkg: error processing package (\S+)', l))
+                })
                 tui.console.print(
                     f'Final configure had errors — {len(_failed)} package(s) failed: '
                     f'{", ".join(_failed[:5])}{"…" if len(_failed) > 5 else ""}'
@@ -922,6 +997,11 @@ class _ChrootMixin:
         # binary-<arch>/, not repo/main/.  Mixin reads it from the
         # composer (BuildSystem).
         _main = self._dir_repo_main
+        # SURFACES-01: a surface closure with Recommends extras can include
+        # -doc binaries, which the repo segregates into the sibling doc/
+        # component (live-boot-doc, live-config-doc caught live).  Search
+        # main first, then the doc component.
+        _doc = _main.replace(f'{os.sep}main{os.sep}', f'{os.sep}doc{os.sep}')
         for pkg in pkg_list:
             _filename = os.path.basename(
                 self._dependencytree.selected_pkgs[pkg]['Filename']
@@ -933,6 +1013,8 @@ class _ChrootMixin:
             # variant — without it, every stamped .deb (openssl, glibc, … from a
             # security delta) is "not found" and dropped from the chroot.
             _filepath = utils.find_matching_artifact(_main, _filename)
+            if not _filepath and _doc != _main:
+                _filepath = utils.find_matching_artifact(_doc, _filename)
             if not _filepath:
                 tui.console.print(f"WARNING: .deb not found, skipping: {_filename}")
                 logger.warning(
