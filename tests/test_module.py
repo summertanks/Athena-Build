@@ -1340,6 +1340,58 @@ def test_compute_install_batches_external_deps_filtered():
     assert batches == [(['A', 'B'], False)], batches
 
 
+def test_configure_chroot_final_pass_counts_stderr_failures():
+    """The final `dpkg --configure -a` failure summary must (a) read dpkg's
+    'error processing package' lines from STDERR — dpkg writes them there;
+    the old stdout-only parse printed "0 package(s) failed" while
+    gnome-menus was half-configured (caught live 2026-06-11) — and
+    (b) extract the package NAME, not the line's last token, which is
+    the '(--configure):' suffix."""
+    import types
+    import chroot as chroot_module
+    import tui as _tui
+
+    bs = _bare_buildsystem_with_deps([])
+    bs._dir_chroot = '/nonexistent-chroot'
+    bs._password = 'pw'
+    bs._chroot_dpkg_available = lambda: True
+
+    _printed = []
+
+    class _RecConsole(_StubConsole):
+        def print(s, m, *a, **k):
+            _printed.append(str(m))
+    _tui.console = _RecConsole()
+
+    class _Proc:
+        returncode = 1
+        stdout = 'Setting up libfoo:amd64 (1.0-1) ...\n'
+        stderr = (
+            'dpkg: error processing package gnome-menus (--configure):\n'
+            ' installed gnome-menus package post-installation script '
+            'subprocess returned error exit status 127\n'
+            'dpkg: error processing package python3:amd64 (--configure):\n'
+            'Errors were encountered while processing:\n'
+            ' gnome-menus\n'
+        )
+
+    _orig_subprocess = chroot_module.subprocess
+    chroot_module.subprocess = types.SimpleNamespace(
+        run=lambda *a, **k: _Proc())
+    try:
+        _configured = bs._configure_chroot(is_final=True)
+    finally:
+        chroot_module.subprocess = _orig_subprocess
+
+    # Setting-up parse unaffected (arch suffix stripped).
+    assert _configured == {'libfoo'}, _configured
+    # Both stderr failures counted, names extracted, deduped + sorted.
+    _msg = next((m for m in _printed if 'package(s) failed' in m), '')
+    assert '2 package(s) failed' in _msg, _printed
+    assert 'gnome-menus, python3' in _msg, _msg
+    assert '(--configure)' not in _msg, _msg
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # InRelease GPG verification
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31860,6 +31912,7 @@ def main() -> int:
         test_compute_install_batches_cycle_with_pre_depends_chain_splits,
         test_compute_install_batches_acyclic_then_cycle,
         test_compute_install_batches_external_deps_filtered,
+        test_configure_chroot_final_pass_counts_stderr_failures,
         test_buildsystem_password_readable_before_scrub,
         test_buildsystem_scrub_password_clears_field,
         test_buildsystem_password_property_raises_after_scrub,
