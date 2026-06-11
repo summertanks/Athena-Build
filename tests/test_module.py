@@ -31724,6 +31724,62 @@ def test_iso_pool_manifest_excludes_unreachable_pool_roots():
     assert 'surface_closure' in _blk
 
 
+def test_tasksel_desc_generator_shape_and_sanitization():
+    """SURFACES-01 Chunk 6: makedesc-shaped stanzas; cdebconf-fragile
+    characters (non-ASCII, commas, parens, em-dashes) sanitized; [base]
+    skipped; Keys == the group seed lists."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import tasksel_desc as _td
+    _groups = {
+        'base': ['a'],                       # skipped — debootstrapped
+        'gnome-desktop': ['gnome-shell', 'gdm3'],
+        'ssh-server': ['openssh-server'],
+        'empty-group': [],                   # skipped — no seeds
+    }
+    _meta = {'gnome-desktop': {
+        'description': 'GNOME désktop — env, (shell, apps)'}}
+    _out = _td.generate_desc(_groups, _meta)
+    assert 'Task: base' not in _out and 'empty-group' not in _out
+    assert 'Task: gnome-desktop' in _out and 'Task: ssh-server' in _out
+    # stanza shape
+    _stanza = _out[_out.index('Task: gnome-desktop'):]
+    _stanza = _stanza.split('\n\n')[0]
+    assert 'Section: user' in _stanza
+    assert 'Key: ' in _stanza
+    assert '\n gnome-shell' in _stanza and '\n gdm3' in _stanza
+    # sanitization: ASCII-only, no commas/parens/em-dash survive
+    _desc_line = [l for l in _stanza.split('\n')
+                  if l.startswith('Description:')][0]
+    assert _desc_line.isascii(), _desc_line
+    for _bad in (',', '(', ')', '—'):
+        assert _bad not in _desc_line, _desc_line
+    assert 'GNOME d sktop' in _desc_line  # é dropped, words preserved
+    # fallback title when no meta
+    assert 'Description: Ssh Server' in _out
+    # whole output is ASCII (encodable for the staging write)
+    _out.encode('ascii')
+
+
+def test_iso_installer_accepts_tasks_desc_text():
+    """build_installer_iso takes tasks_desc_text and the staging writer
+    targets .disk/athena-tasks.desc; cmd_build generates from the signed
+    lockfile with pkg.list fallback."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import inspect
+    import iso_installer as _ii
+    _sig = inspect.signature(_ii.build_installer_iso)
+    assert 'tasks_desc_text' in _sig.parameters
+    _src = inspect.getsource(_ii.build_installer_iso)
+    assert "athena-tasks.desc" in _src
+    import commands.cmd_build as _cb
+    _cbsrc = inspect.getsource(_cb)
+    assert 'tasks_desc_text=self._generate_tasks_desc()' in _cbsrc
+    _gen = _cbsrc[_cbsrc.index('def _generate_tasks_desc'):]
+    _gen = _gen[:_gen.index('def cmd_', 10)]
+    assert 'read_selection_state' in _gen        # lockfile is the source
+    assert 'parse_pkg_list_groups' in _gen       # fallback path
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32432,6 +32488,9 @@ def main() -> int:
         test_disk_surface_plumbing,
         # SURFACES-01 Chunk 5 — manifest-driven ISO pool
         test_iso_pool_manifest_excludes_unreachable_pool_roots,
+        # SURFACES-01 Chunk 6 — tasksel desc generator + staging
+        test_tasksel_desc_generator_shape_and_sanitization,
+        test_iso_installer_accepts_tasks_desc_text,
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
