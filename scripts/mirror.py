@@ -1393,12 +1393,101 @@ def audit_own_claims_on_disk(
             disagrees with both the claim AND any local build record
             we can find (or no build record found at all)
     """
+    _findings: 'list[tuple[str, str, str]]' = []
+    for _row in _own_claims_disk_walk(
+            by_builder, our_builder_id, local_repo_dir, buildlog_dir):
+        _kind = _row['kind']
+        _fn = _row['filename']
+        if _kind == 'missing':
+            _findings.append((
+                'CRITICAL', 'own_claim_disk_missing',
+                f"{_fn} (our claim) not in {local_repo_dir} — our own "
+                "pool diverges from our sidecar"))
+        elif _kind == 'unreadable':
+            _findings.append((
+                'CRITICAL', 'own_claim_disk_unreadable',
+                f"{_fn}: cannot read {_row['path']}: {_row['error']}"))
+        elif _kind == 'local_ahead':
+            _findings.append((
+                'WARNING', 'own_claim_local_ahead_of_remote',
+                f"{_fn}: on-disk sha={_row['local_sha'][:12]} matches "
+                f"local build.json; remote claim "
+                f"sha={_row['remote_sha'][:12]} is older — bump + "
+                "publish, or `mirror reclaim <source|file>` if this "
+                "content change is deliberately version-less"))
+        elif _kind == 'sha_mismatch':
+            _findings.append((
+                'CRITICAL', 'own_claim_disk_sha_mismatch',
+                f"{_fn}: on-disk sha={_row['local_sha'][:12]} disagrees "
+                f"with claim sha={_row['remote_sha'][:12]} and no "
+                "matching local build record — bitrot or corruption"))
+    return _findings
+
+
+def local_ahead_candidates(
+    by_builder: 'dict[str, list[dict]]',
+    our_builder_id: 'Optional[str]', local_repo_dir: str,
+    buildlog_dir: 'Optional[str]' = None,
+) -> 'list[dict]':
+    """RECLAIM-01: structured view of every own-claim file whose on-disk
+    bytes are AHEAD of the remote claim (local sha matches our
+    build.json, remote claim's sha is older) — the exact candidate set
+    `mirror reclaim` operates on.  Each entry::
+
+      {filename, package, component, old_seq, remote_sha, local_sha,
+       size, intended_version, built_version, path}
+
+    `old_seq`/`remote_sha` identify the published claim a reclaim would
+    supersede (and let the publish-side validation detect remote drift
+    between listing and execution); the rest seeds new_reclaim().
+    Superseded/marker claims and tunneled claims are excluded by the
+    same fold the audit uses."""
+    import os as _os
+    _out: 'list[dict]' = []
+    for _row in _own_claims_disk_walk(
+            by_builder, our_builder_id, local_repo_dir, buildlog_dir):
+        if _row['kind'] != 'local_ahead':
+            continue
+        _c = _row['claim']
+        try:
+            _size = _os.path.getsize(_row['path'])
+        except OSError:
+            continue
+        _out.append({
+            'filename':         _row['filename'],
+            'package':          str(_c.get('package') or ''),
+            'component':        str(_c.get('component') or 'main'),
+            'old_seq':          int(_c.get('seq', 0)),
+            'remote_sha':       _row['remote_sha'],
+            'local_sha':        _row['local_sha'],
+            'size':             _size,
+            'intended_version': str(_c.get('intended_version') or ''),
+            'built_version':    str(_c.get('built_version') or ''),
+            'path':             _row['path'],
+        })
+    _out.sort(key=lambda _r: _r['filename'])
+    return _out
+
+
+def _own_claims_disk_walk(
+    by_builder: 'dict[str, list[dict]]',
+    our_builder_id: 'Optional[str]', local_repo_dir: str,
+    buildlog_dir: 'Optional[str]' = None,
+) -> 'list[dict]':
+    """Shared core for audit_own_claims_on_disk +
+    local_ahead_candidates: walk OUR live claims, compare each against
+    the on-disk pool file, classify.  Returns rows::
+
+      {kind, claim, filename, remote_sha, local_sha, path, error}
+
+    kind ∈ {'missing', 'unreadable', 'local_ahead', 'sha_mismatch'} —
+    matching rows are omitted entirely."""
     import hashlib as _hashlib
     import os as _os
 
-    _findings: 'list[tuple[str, str, str]]' = []
+    _rows: 'list[dict]' = []
     if not our_builder_id:
-        return _findings
+        return _rows
     _claims = by_builder.get(our_builder_id) or []
     # Walk the local pool dir once to build {basename: full_path}.
     _by_name: 'dict[str, str]' = {}
@@ -1440,8 +1529,9 @@ def audit_own_claims_on_disk(
     for _c in _claims:
         if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
             continue
-        # Skip claims a later deprecation/obsolescence superseded — the
-        # old file may legitimately be pruned from the local repo.
+        # Skip claims a later deprecation/obsolescence/reclaim
+        # superseded — the old file may legitimately be pruned from the
+        # local repo (or its bytes replaced under the same filename).
         if int(_c.get('seq', 0)) in _superseded:
             continue
         if _c.get('republished_from'):
@@ -1452,34 +1542,28 @@ def audit_own_claims_on_disk(
             continue
         _path = _by_name.get(_fn)
         if _path is None:
-            _findings.append((
-                'CRITICAL', 'own_claim_disk_missing',
-                f"{_fn} (our claim) not in {local_repo_dir} — our own "
-                "pool diverges from our sidecar"))
+            _rows.append({'kind': 'missing', 'claim': _c, 'filename': _fn,
+                          'remote_sha': _claim_sha, 'local_sha': '',
+                          'path': '', 'error': ''})
             continue
         try:
             with open(_path, 'rb') as _fh:
                 _actual = _hashlib.sha256(_fh.read()).hexdigest()
         except OSError as _e:
-            _findings.append((
-                'CRITICAL', 'own_claim_disk_unreadable',
-                f"{_fn}: cannot read {_path}: {_e}"))
+            _rows.append({'kind': 'unreadable', 'claim': _c,
+                          'filename': _fn, 'remote_sha': _claim_sha,
+                          'local_sha': '', 'path': _path,
+                          'error': str(_e)})
             continue
         if _actual == _claim_sha:
             continue
-        if _local_build_has_sha(_c, _actual):
-            _findings.append((
-                'WARNING', 'own_claim_local_ahead_of_remote',
-                f"{_fn}: on-disk sha={_actual[:12]} matches local "
-                f"build.json; remote claim sha={_claim_sha[:12]} is "
-                "older — run `mirror publish` to re-sync"))
-        else:
-            _findings.append((
-                'CRITICAL', 'own_claim_disk_sha_mismatch',
-                f"{_fn}: on-disk sha={_actual[:12]} disagrees with "
-                f"claim sha={_claim_sha[:12]} and no matching local "
-                "build record — bitrot or corruption"))
-    return _findings
+        _rows.append({
+            'kind': ('local_ahead' if _local_build_has_sha(_c, _actual)
+                     else 'sha_mismatch'),
+            'claim': _c, 'filename': _fn, 'remote_sha': _claim_sha,
+            'local_sha': _actual, 'path': _path, 'error': '',
+        })
+    return _rows
 
 
 def all_mirror_neighbour_records(config) -> 'list[dict]':

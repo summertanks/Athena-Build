@@ -27874,6 +27874,72 @@ def test_audit_own_claims_on_disk_ahead_of_remote_is_warning_not_critical():
         assert _findings[0][0] == 'WARNING'
 
 
+def test_local_ahead_candidates_structured_and_hint_mentions_reclaim():
+    """RECLAIM-01 Chunk 3: local_ahead_candidates returns the structured
+    reclaim-candidate view (filename/package/component/old_seq/
+    remote_sha/local_sha/size/versions/path); marker-superseded claims
+    are excluded by the shared fold; the audit's local-ahead hint
+    points at `mirror reclaim` instead of the (wrong) publish advice."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import hashlib as _hashlib
+    import mirror as _mir
+    import utils as _u
+
+    with tempfile.TemporaryDirectory() as _td:
+        _repo = os.path.join(_td, 'repo')
+        _buildlog = os.path.join(_td, 'log', 'build')
+        os.makedirs(_buildlog)
+        _file_path = os.path.join(_repo, 'main', 'a', 'a_1.0_amd64.deb')
+        os.makedirs(os.path.dirname(_file_path))
+        with open(_file_path, 'wb') as _fh:
+            _fh.write(b'new-bytes')
+        _new_sha = _hashlib.sha256(b'new-bytes').hexdigest()
+        _rec = _u.new_build_record(
+            package='a', intended_version='1.0', patch_set_hash='')
+        _rec['output_hashes'] = {'a_1.0_amd64.deb': _new_sha}
+        _u.write_build_record(_buildlog, _rec)
+        _by_builder = {
+            'athena-ours': [
+                # local-ahead candidate
+                {'package': 'a', 'filename': 'a_1.0_amd64.deb',
+                 'sha256': 'd' * 64, 'claim_state': 'published',
+                 'seq': 11, 'component': 'main',
+                 'intended_version': '1.0', 'built_version': '1.0'},
+                # deprecated marker pair — its target must NOT appear
+                {'package': 'z', 'filename': 'z_1.0_all.deb',
+                 'sha256': 'e' * 64, 'claim_state': 'published',
+                 'seq': 12},
+                {'package': 'z', 'filename': 'z_1.0_all.deb',
+                 'sha256': 'e' * 64, 'claim_state': 'deprecated',
+                 'seq': 13, 'deprecates_seq': 12},
+            ],
+        }
+        _cands = _mir.local_ahead_candidates(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_repo, buildlog_dir=_buildlog)
+        assert len(_cands) == 1, _cands
+        _c = _cands[0]
+        assert _c['filename'] == 'a_1.0_amd64.deb'
+        assert _c['package'] == 'a' and _c['component'] == 'main'
+        assert _c['old_seq'] == 11
+        assert _c['remote_sha'] == 'd' * 64
+        assert _c['local_sha'] == _new_sha
+        assert _c['size'] == len(b'new-bytes')
+        assert _c['intended_version'] == '1.0'
+        assert _c['built_version'] == '1.0'
+        assert _c['path'] == _file_path
+        # The audit finding for the same state names the reclaim path.
+        _findings = _mir.audit_own_claims_on_disk(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_repo, buildlog_dir=_buildlog)
+        _ahead = [_m for _s, _k, _m in _findings
+                  if _k == 'own_claim_local_ahead_of_remote']
+        assert len(_ahead) == 1, _findings
+        assert 'mirror reclaim' in _ahead[0], _ahead
+        assert 'bump + publish' in _ahead[0], _ahead
+
+
 def test_audit_own_claims_on_disk_real_bitrot_still_critical():
     """Disk sha matches neither remote claim NOR local build.json →
     real bitrot, CRITICAL stays."""
@@ -33515,6 +33581,7 @@ def main() -> int:
         test_audit_own_claims_on_disk_match_disk_silent_mismatch_critical,
         test_audit_own_claims_on_disk_no_our_builder_id_is_noop,
         test_audit_own_claims_on_disk_ahead_of_remote_is_warning_not_critical,
+        test_local_ahead_candidates_structured_and_hint_mentions_reclaim,
         test_audit_own_claims_on_disk_real_bitrot_still_critical,
         # MIRROR-01 audit gap (6) — cross-mirror head drift
         test_audit_cross_mirror_head_drift_silent_when_aligned,
