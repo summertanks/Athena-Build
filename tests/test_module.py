@@ -31721,6 +31721,40 @@ def test_claim_schema_obsolete_state_and_new_obsolescence():
     assert _sch.claim_from_jsonl(_sch.claim_to_jsonl(_obs)) is not None
 
 
+def test_claim_schema_reclaim_shape_and_jsonl_roundtrip():
+    """RECLAIM-01 Chunk 1: new_reclaim is a LIVE claim (not a marker) —
+    claim_state starts PENDING (pipeline stamps PUBLISHED at append),
+    carries reclaims_seq + full file identity; schema v4; round-trips
+    through claim_to_jsonl/claim_from_jsonl with reclaims_seq preserved
+    (v3-reader tolerance: state is a known value, unknown keys ride
+    along)."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    assert _sch.CLAIM_RECORD_SCHEMA_VERSION >= 4
+    _rc = _sch.new_reclaim(
+        builder='b1', seq=20, package='athena-setup',
+        intended_version='0.182', built_version='0.182+athena1',
+        filename='athena-setup-udeb_0.182+athena1_amd64.udeb',
+        sha256='3baa4783798a', size=42, snapshot='s', built_at='t',
+        reclaims_seq=7, component='main')
+    # LIVE claim semantics: a known state, NOT a new marker state.
+    assert _rc['claim_state'] == _sch.CLAIM_STATE_PENDING
+    assert _rc['claim_state'] in _sch.CLAIM_STATES
+    assert _rc['reclaims_seq'] == 7
+    assert _rc['filename'] == 'athena-setup-udeb_0.182+athena1_amd64.udeb'
+    assert _rc['sha256'] == '3baa4783798a' and _rc['size'] == 42
+    assert _rc['component'] == 'main'
+    # Round-trip: reclaims_seq survives serialization; the published
+    # form (post-append stamp) parses too.
+    _rc['sig'] = 'deadbeef'
+    _back = _sch.claim_from_jsonl(_sch.claim_to_jsonl(_rc))
+    assert _back is not None and _back['reclaims_seq'] == 7
+    _rc['claim_state'] = _sch.CLAIM_STATE_PUBLISHED
+    _back = _sch.claim_from_jsonl(_sch.claim_to_jsonl(_rc))
+    assert _back is not None and _back['claim_state'] == 'published'
+    assert _back['reclaims_seq'] == 7
+
+
 def test_project_owners_obsolete_retains_ownership():
     """An obsolescence (higher seq) supersedes the old version's published
     claim for that filename, and the winner KEEPS its builder — unlike a
@@ -32989,6 +33023,7 @@ def main() -> int:
         test_lifecycle_deprecate_then_reselect_round_trip,
         # LEDGER-01 Chunk 4 — claim schema v3 obsolete state
         test_claim_schema_obsolete_state_and_new_obsolescence,
+        test_claim_schema_reclaim_shape_and_jsonl_roundtrip,
         test_project_owners_obsolete_retains_ownership,
         # LEDGER-01 Chunk 5 — obsolete cascade across consumers
         test_obsolete_cascade_audits_skip_and_no_findings,

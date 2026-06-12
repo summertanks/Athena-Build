@@ -45,7 +45,20 @@ from typing import Any, Dict, Optional
 # their own older-version claims at publish (Step 6c).  Same degrade: a v2
 # peer rejects only the 'obsolete' lines and keeps treating the old file as
 # published — stale, not corrupt, until it upgrades.
-CLAIM_RECORD_SCHEMA_VERSION = 3
+# v3 → v4 (RECLAIM-01): adds the optional `reclaims_seq` field on a normal
+# 'published' claim — the sanctioned exception to the INVARIANT that a
+# published filename's bytes are frozen forever.  A reclaim is a NEW live
+# claim for the SAME filename with a NEW sha256 (same-version rebuild:
+# Position-X OOB normalization, disaster-recovery rebuilds — builds are not
+# bit-reproducible); the claim it back-references is folded everywhere a
+# retraction/deprecation/obsolescence target would be.  Emitted ONLY by the
+# explicit `mirror reclaim` operator command, never by
+# generate_pending_claims.  Degrade caveat: a v3 reader ACCEPTS the reclaim
+# line (state 'published' is known; unknown keys preserved) but its folds
+# don't know `reclaims_seq`, so it sees two live claims for one filename
+# with different shas → its hash-conflict scan halts publish.  Peers must
+# upgrade BEFORE the federation's first reclaim.
+CLAIM_RECORD_SCHEMA_VERSION = 4
 COORD_HEAD_SCHEMA_VERSION = 3
 # v1 → v2 (MIRROR-01 Phase 2): adds `neighbours: list[str]` — the
 # federation membership list (every mirror's coord-head carries the
@@ -295,6 +308,55 @@ def new_obsolescence(
         'built_at':          built_at,
         'claim_state':       CLAIM_STATE_OBSOLETE,
         'obsoletes_seq':     obsoletes_seq,
+        'component':         component,
+    }
+    return _rec
+
+
+def new_reclaim(
+    *,
+    builder: str,
+    seq: int,
+    package: str,
+    intended_version: str,
+    built_version: str,
+    filename: str,
+    sha256: str,
+    size: int,
+    snapshot: str,
+    built_at: str,
+    reclaims_seq: int,
+    component: str = 'main',
+) -> dict:
+    """RECLAIM-01: the sanctioned exception to the published-filename-
+    is-frozen-bytes invariant.  A NEW live claim for the SAME filename
+    with a NEW sha256 — a same-version rebuild whose content
+    legitimately changed without a version bump (Position-X OOB
+    normalization; disaster-recovery rebuilds).  `reclaims_seq` is the
+    seq of the superseded published claim, folded everywhere a
+    retraction/deprecation/obsolescence target would be — after the
+    fold this claim is the filename's single live assertion.
+
+    Unlike the marker shapes (retraction/deprecation/obsolescence),
+    the reclaim record itself is the LIVE claim: claim_state starts
+    PENDING and the publish pipeline stamps PUBLISHED at append, same
+    as a normal new_claim.  Emitted only by the explicit
+    `mirror reclaim` operator command — generate_pending_claims never
+    re-claims a known filename."""
+    _rec: Dict[str, Any] = {
+        'v':                 CLAIM_RECORD_SCHEMA_VERSION,
+        'builder':           builder,
+        'seq':                seq,
+        'package':           package,
+        'intended_version':  intended_version,
+        'built_version':     built_version,
+        'filename':          filename,
+        'sha256':            sha256,
+        'size':              size,
+        'snapshot':          snapshot,
+        'built_at':          built_at,
+        'claim_state':       CLAIM_STATE_PENDING,
+        'reclaims_seq':      reclaims_seq,
         'component':         component,
     }
     return _rec
