@@ -3637,13 +3637,14 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
 
 
 def test_cmd_repo_dispatcher_routes_index_action():
-    """Stage B: `repo index` action must dispatch to cmd_index_repo.
-    Pin via code inspection so a future dispatcher refactor doesn't
-    silently drop the routing (which would make `repo index` print a
-    help table instead of doing the index)."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    """`repo index` was RETIRED as an operator command (MIRROR-01
+    Phase 8): chroot build + mirror publish auto-index when needed
+    (incl. the 2026-06-11 stale-index guard).  The dispatcher must
+    KEEP the 'index' action as a deprecation hint (so operators with
+    muscle memory get pointed at the new flow) and must NOT dispatch
+    to cmd_index_repo — which still exists for the auto-index paths.
+    Pin via code inspection."""
+    _body = _session_source()
     import re
     _m = re.search(
         r'def cmd_repo\(self.*?(?=\n    def )',
@@ -3652,22 +3653,19 @@ def test_cmd_repo_dispatcher_routes_index_action():
     assert _m, 'cmd_repo dispatcher not found'
     _fn = _m.group(0)
     assert "action == 'index'" in _fn, _fn
-    assert 'return self.cmd_index_repo' in _fn, _fn
+    assert 'no longer operator-visible' in _fn, (
+        "the 'index' action must carry the retirement hint")
+    assert 'return self.cmd_index_repo' not in _fn, (
+        "'index' must NOT dispatch — the command is retired; "
+        "auto-index owns the side-effect")
+    # cmd_index_repo itself must still exist (auto-index entry point).
+    assert 'def cmd_index_repo(' in _body
 
     # And the `repo` command MUST be registered in the tui dispatch
-    # table at the bottom of build.py so the operator can actually type it.
+    # table so the operator can reach `repo audit` / `repo repair`.
     assert "register_command('repo'" in _body, (
-        "`repo` command not wired into tui dispatch — operator can't "
-        "invoke `repo index` from the prompt"
+        "`repo` command not wired into tui dispatch"
     )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONF-01 Stage D — consumer refactor anti-regression
-# ─────────────────────────────────────────────────────────────────────────────
-
 
 def test_stage_d_no_old_repo_subdir_paths_in_production_code():
     """CONF-01 Stage D regression pin: no production code path should
@@ -8110,10 +8108,12 @@ def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
     with open(_bc) as fh:
         _body = fh.read()
     import re
+    # Renamed _strip_nmu_from_built_artifacts → _normalize_built_artifacts
+    # (strip + asg-stamp folded into one just-emitted-artifacts pass).
     _m = re.search(
-        r'def _strip_nmu_from_built_artifacts\(.*?(?=\n    def )',
+        r'def _normalize_built_artifacts\(.*?(?=\n    def )',
         _body, re.DOTALL)
-    assert _m, "_strip_nmu_from_built_artifacts not found"
+    assert _m, "_normalize_built_artifacts not found"
     _fn_body = _m.group(0)
     # Strip docstrings + comments so anti-pattern checks don't match
     # the explanatory text describing the OLD bug.  Crude but adequate
@@ -8147,10 +8147,10 @@ def test_strip_nmu_from_built_artifacts_does_not_scan_repo():
     )
     # And the new signature must accept the file list.
     assert re.search(
-        r'def _strip_nmu_from_built_artifacts\(self,\s*src_pkg,\s*\n?\s*built_files',
+        r'def _normalize_built_artifacts\(self,\s*src_pkg,\s*\n?\s*built_files',
         _fn_body
     ), (
-        "_strip_nmu_from_built_artifacts must accept `built_files` as "
+        "_normalize_built_artifacts must accept `built_files` as "
         "its second positional arg (the list from segregate)."
     )
 
@@ -8184,6 +8184,10 @@ def test_buildcontainer_run_grub_mkrescue_constructs_correct_docker_call():
     # run_grub_mkrescue reads.
     _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
     _bc._image_tag = 'athenalinux:build-test'
+    _bc._container_labels = {}  # set by __init__ (bypassed here)
+    import threading as _threading
+    _bc._live_lock = _threading.Lock()
+    _bc._live = {}
     _bc.mirrors = []   # empty → empty sources.list; OK for argv-shape pin
     _bc.client = MagicMock()
     _fake_container = MagicMock()
@@ -8238,6 +8242,10 @@ def test_buildcontainer_run_grub_mkrescue_propagates_failure():
 
     _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
     _bc._image_tag = 'athenalinux:build-test'
+    _bc._container_labels = {}  # set by __init__ (bypassed here)
+    import threading as _threading
+    _bc._live_lock = _threading.Lock()
+    _bc._live = {}
     _bc.mirrors = []
     _bc.client = MagicMock()
     _fake_container = MagicMock()
@@ -8314,9 +8322,7 @@ def test_build_py_threads_container_into_iso_callsites():
     """COMP-14: build.py's cmd_build_iso_live + cmd_build_iso_installer
     must pass self.container through to the ISO builders.  Pin via
     code inspection so the wiring can't silently drop."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     # Live ISO: build_system.build_iso(container=self.container)
     assert 'build_system.build_iso(container=self.container)' in _body, (
         "cmd_build_iso_live must pass container=self.container to "
@@ -8563,9 +8569,7 @@ def test_package_audit_includes_stale_files_warning_section():
     where stale base-files_12.4_amd64.deb sat next to the new
     base-files_12.4+deb12u14+athena1_amd64.deb and neither audit nor
     dep-parse complained until source-build looped."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r"\n    def cmd_audit\b.*?(?=\n    def \w)",
@@ -8593,9 +8597,10 @@ def test_package_audit_includes_stale_files_warning_section():
         "helper must surface a STALE FILES section header"
     )
     # NOT a hard gate — must point operator to cleanup, not abort.
-    assert 'repo cleanup' in _helper, (
-        "warn-only path must point operator at `repo cleanup` for "
-        "the actual action"
+    # (Command renamed `repo cleanup` → `repo repair cleanup` in P1.)
+    assert 'repo repair cleanup' in _helper, (
+        "warn-only path must point operator at `repo repair cleanup` "
+        "for the actual action"
     )
     # Helper must NOT call os.remove — warn-only.
     assert 'os.remove' not in _helper, (
@@ -13511,9 +13516,7 @@ def test_cache_build_wraps_cache_construction_in_spinner():
     TUI.  Source-text inspection — exercising the full cache build
     needs network access + the actual snapshot.
     """
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r"\n    def cmd_build_cache\b.*?(?=\n    def \w)",
@@ -13536,9 +13539,7 @@ def test_repo_index_prints_post_run_summary():
     state + per-component file counts + total payload — quick at-a-
     glance confirmation the index landed completely.
     """
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     # The summary helper is defined as a method.
     assert 'def _print_repo_index_summary(' in _body, (
@@ -13560,9 +13561,7 @@ def test_source_audit_uses_per_source_progress_bar():
     """`cmd_source_audit` wraps its per-cohort selected_srcs walk in
     a ProgressBar — 500+ sources × multi-file ar-validity checks each
     is enough to look frozen without progress feedback."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     _m = re.search(
         r"\n    def cmd_source_audit\b.*?(?=\n    def \w)",
@@ -13883,13 +13882,13 @@ def test_cmd_iso_dispatcher_routes_disk_action():
     ), "disk subcommand not dispatched"
 
 
-def test_cmd_build_iso_disk_gates_on_chroot_verified_and_reads_size():
-    """cmd_build_iso_disk: chroot_verified gate (with force bypass)
-    + size_gb arg parsing (default from config, override via first
-    non-flag positional)."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+def test_cmd_build_iso_disk_gates_on_chroot_disk_ready_and_reads_size():
+    """cmd_build_iso_disk (SURFACES-01): gates on chroot_disk_ready
+    (the dedicated disk-surface chroot, NOT the live chroot_verified
+    flag), force-mode re-verifies dir_chroot_disk with the live-boot
+    check skipped, reads the configured default size, and calls
+    disk_image.build_disk_image against dir_chroot_disk."""
+    _body = _session_source()
     import re
     _m = re.search(
         r"\n    def cmd_build_iso_disk\b.*?(?=\n    def \w)",
@@ -13897,18 +13896,28 @@ def test_cmd_build_iso_disk_gates_on_chroot_verified_and_reads_size():
     )
     assert _m, "cmd_build_iso_disk body not found"
     _method = _m.group(0)
-    # Gate on chroot_verified with force bypass.
-    assert "self.flags.chroot_verified" in _method, (
-        "cmd_build_iso_disk must check chroot_verified flag"
+    # Gate on the DISK surface flag, with force bypass.
+    assert "self.flags.chroot_disk_ready" in _method, (
+        "cmd_build_iso_disk must gate on chroot_disk_ready"
     )
     assert "_force" in _method
-    # Size resolution: default from config, parsed from args.
+    # Force-mode verify runs against the disk chroot, live-boot skipped.
+    assert "dir_chroot_disk" in _method, (
+        "force verify + image build must target the disk-surface chroot"
+    )
+    assert "require_live_boot=False" in _method, (
+        "disk-surface verify must skip the live-boot check"
+    )
+    # Must NOT refresh the LIVE surface's verified flag from a disk verify.
+    assert "self.flags.chroot_verified = True" not in _method, (
+        "disk verify must not set the live chroot_verified flag"
+    )
+    # Size resolution: default from config.
     assert "self.config.disk_image_size_gb" in _method, (
         "cmd_build_iso_disk must read the configured default size"
     )
     # Calls into disk_image.build_disk_image
     assert "disk_image.build_disk_image(" in _method
-
 
 def test_iso_build_uses_spinner_for_mksquashfs_and_grub_mkrescue():
     """Live ISO build wraps mksquashfs + grub-mkrescue in Spinners so
@@ -14021,9 +14030,7 @@ def test_repo_dispatcher_advertises_merged_package_actions():
     alongside its own (repair/index).  audit_nmu was absorbed into
     'audit' itself in P3 (2026-05-23).  strip/cleanup moved under
     'repair' (P1)."""
-    _bc = os.path.join(_ROOT, 'scripts', 'build.py')
-    with open(_bc) as fh:
-        _body = fh.read()
+    _body = _session_source()
     import re
     # Body of cmd_repo.
     _m = re.search(
@@ -32786,6 +32793,26 @@ def test_athena_pkgsel_pre_pkgsel_hook_installs_generated_desc():
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
+def test_every_defined_test_is_registered():
+    """Policy enforcer: every `def test_*` in this file must appear in
+    main()'s explicit tests list.  58 tests sat defined-but-never-
+    registered (so they never ran) until a 2026-06-12 sweep — 11 of
+    them had silently rotted against renamed code in the meantime.
+    Registration is manual by convention; this pin makes forgetting it
+    a test failure instead of a silent coverage hole."""
+    import re as _re
+    with open(__file__) as _fh:
+        _src = _fh.read()
+    _defined = set(_re.findall(r'^def (test_\w+)\(', _src, _re.M))
+    _registered = set(_re.findall(r'^\s+(test_\w+),\s*$', _src, _re.M))
+    _missing = sorted(_defined - _registered)
+    assert not _missing, (
+        f"{len(_missing)} test(s) defined but never registered in "
+        f"main(): {_missing[:10]}")
+    _ghosts = sorted(_registered - _defined)
+    assert not _ghosts, f"registered but not defined: {_ghosts}"
+
+
 def main() -> int:
     tests = [
         # v0.2 step 1
@@ -33928,6 +33955,68 @@ def main() -> int:
         test_audit_federation_walk_unreachable_peer_is_critical,
         test_audit_federation_walk_unverified_peer_is_critical,
         test_audit_federation_walk_asymmetric_membership_is_critical,
+        test_every_defined_test_is_registered,
+        # ── registration sweep 2026-06-12: tests that were defined but
+        # never added to this list (so they never ran).  Pinned against
+        # recurrence by test_every_defined_test_is_registered.
+        test_build_depends_prefix_matched_provider_sorts_first,
+        test_apt_repo_generate_repo_indexes_walks_all_suites_and_components,
+        test_apt_repo_generate_repo_indexes_skips_when_binary_dir_missing,
+        test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others,
+        test_cmd_repo_dispatcher_routes_index_action,
+        test_stage_d_no_old_repo_subdir_paths_in_production_code,
+        test_stage_d_buildconfig_paths_use_new_nested_layout,
+        test_iso_installer_stage_grub_cfg_copies_background_when_present,
+        test_iso_installer_stage_grub_cfg_tolerates_missing_background,
+        test_installer_grub_cfg_wires_background_image,
+        test_installer_smoke_scan_log_returns_empty_on_clean_log,
+        test_installer_smoke_scan_log_catches_each_fatal_pattern,
+        test_installer_smoke_scan_log_distinguishes_warn_from_fatal,
+        test_installer_smoke_scan_log_handles_missing_file,
+        test_installer_smoke_known_bad_extends_with_extra_patterns,
+        test_installer_smoke_run_module_has_required_modes,
+        test_athena_installer_data_ships_templates_override,
+        test_athena_installer_data_ships_value_overrides,
+        test_athena_installer_data_branding_hook_applies_both_mechanisms,
+        test_athena_installer_data_no_broken_palette_mechanism,
+        test_athena_installer_data_no_branding_patches_in_repo,
+        test_athena_branding_ships_target_grub_background,
+        test_strip_nmu_from_built_artifacts_does_not_scan_repo,
+        test_buildcontainer_run_grub_mkrescue_constructs_correct_docker_call,
+        test_buildcontainer_run_grub_mkrescue_propagates_failure,
+        test_iso_installer_run_grub_mkrescue_routes_through_container,
+        test_iso_py_build_iso_routes_through_container,
+        test_build_py_threads_container_into_iso_callsites,
+        test_package_audit_includes_stale_files_warning_section,
+        test_sta18_version_for_constraint_target_real_pkg,
+        test_sta18_version_for_constraint_target_versioned_provides_with_epoch,
+        test_sta18_version_for_constraint_target_unversioned_provides_returns_none,
+        test_sta18_validate_selection_resolves_epoch_aliased_alt_dep,
+        test_sta18_validate_selection_unversioned_provides_cannot_satisfy_versioned_dep,
+        test_audit_dep_closure_invokes_progress_cb_per_pkg,
+        test_audit_conflict_cohort_invokes_progress_cb_per_pkg,
+        test_audit_nmu_residue_invokes_progress_cb_per_pkg,
+        test_cache_build_wraps_cache_construction_in_spinner,
+        test_repo_index_prints_post_run_summary,
+        test_source_audit_uses_per_source_progress_bar,
+        test_scan_packages_with_progress_writes_output_via_subprocess_run,
+        test_disk_image_module_exposes_build_disk_image_signature,
+        test_build_system_sh_checks_disk_image_tools,
+        test_disk_image_has_bios_modules_probes_chroot_dir,
+        test_disk_image_grub_install_uses_absolute_path_and_env_path,
+        test_disk_image_writes_minimal_grub_cfg_unconditionally,
+        test_disk_image_efi_only_fallback_when_no_bios_modules,
+        test_disk_image_minimal_grub_cfg_writes_uuid_kernel_line,
+        test_disk_image_minimal_grub_cfg_fails_clean_when_no_kernel,
+        test_disk_image_sfdisk_script_lays_out_three_partitions,
+        test_cmd_iso_dispatcher_routes_disk_action,
+        test_cmd_build_iso_disk_gates_on_chroot_disk_ready_and_reads_size,
+        test_iso_build_uses_spinner_for_mksquashfs_and_grub_mkrescue,
+        test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
+        test_progress_bar_show_rate_false_omits_rate_column,
+        test_progress_bar_label_width_pins_column_so_label_updates_dont_shift,
+        test_repo_dispatcher_advertises_merged_package_actions,
+        test_fork_mirror_arch_any_filename_uses_build_arch,
     ]
     failures = 0
     for t in tests:
