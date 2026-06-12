@@ -157,8 +157,9 @@ Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
   `dir_repo_main_source`, `dir_repo_doc`, `dir_repo_dbgsym`,
   `dir_repo_tests`, `dir_repo_contrib`, `dir_repo_non_free`,
   `dir_repo_non_free_firmware`), `dir_image`, `dir_buildroot` and its
-  two sibling chroots (`dir_chroot` for live, `dir_chroot_installer`
-  for d-i), `dir_patch` and its children, `dir_fork` and its source
+  three sibling chroots (`dir_chroot` for live, `dir_chroot_disk` for
+  the disk surface, `dir_chroot_installer` for d-i), `dir_patch` and
+  its children, `dir_fork` and its source
   and built-output children, `dir_gnupg` (mode 0700), `dir_coord` (the
   signed-sidecar tree for federation claims), and `dir_publish`.
 - mkdir+writability-checks every directory it owns. Auto-cleans empty
@@ -170,6 +171,13 @@ Living under `config/` rather than `cache/` so `clean cache` can't wipe it.
   `IncludeRecommends`, `MaxParallelBuilds`, `DiskImageSizeGB`, and
   `Mode` (`'distribution'` or `'build'`; default `distribution`;
   unknown values rejected with a clear `error_str`).
+- `[Live] Groups` / `[Disk] Groups` (SURFACES-01) — comma/space-
+  separated pkg.list group names seeding that surface's closure
+  (`live_groups` / `disk_groups`, default `base`; the shipped
+  build.conf sets Live to `base, gnome-desktop`).  Validated against
+  real pkg.list groups by the iso/chroot pre-flight.  Also computes
+  `installer_defaults_path` = `config/installer-defaults.list` (the
+  d-i install roots that feed the installer-ISO pool manifest).
 - `[Source]` knobs: `SkipTest`, `Tunneled` (comma-separated source
   names), `BuildProfiles`, `BuildOptions`.
 - `[Security]` knobs: `Keyring` (defaults to host debian-archive-keyring),
@@ -454,6 +462,71 @@ producing source. Record source → list-of-predicted-binary-filenames in
 the per-tree `src_pkg_files` map (post-normalized for NMU stripping, so
 the predictor produces pristine names that match what the source-build
 pipeline actually emits).
+
+---
+
+## surfaces.py — SURFACES-01 per-surface package-set composition
+
+**Purpose:** decide what each shipped surface (live image, disk image,
+installer ISO pool) actually contains. A surface is the **reachability
+closure of a seed set over the resolved dependency graph** — never a
+union of per-group package-name deltas. The deltas
+(`pkg_group_pkg_names`) are credit-based: a dep shared by two groups
+is credited to whichever group resolved first (declaration-order
+dependent), so unioning credited deltas silently drops shared deps
+from any surface that includes the later group. The closure walks the
+edges the resolver actually chose, so it is order-independent and
+self-contained.
+
+### `surface_closure(dep_tree, seed_names, include_recommends_extras=False)`
+BFS from the seeds over hard-dependency edges (Depends ∪ Pre-Depends)
+within the selected universe. OR groups contribute the FIRST
+alternative present in `selected_pkgs` — the resolver's actual choice;
+virtual names are canonicalized to the real Package (edge semantics
+mirror the chroot's `_resolve_depends` / `_resolve_pre_depends`).
+Seeds that are virtual get canonicalized; seeds absent from the
+selection are silently skipped (callers validate seed resolution
+separately — the iso build pre-flight). With
+`include_recommends_extras=True`, additionally pull every
+`extras_pkg_names` member that is RECOMMENDED BY a closure member,
+plus that extra's own hard closure — iterated to fixpoint. Extras
+nobody in the surface recommends stay out.
+
+### `group_seed_names(pkglist_path, groups)`
+Union of pkg.list seed names for the requested `[group]`s. Unknown
+group names yield nothing here — the cmd_build pre-flight validates
+group existence loudly.
+
+### `read_flat_roots(path)`
+Seed names from a flat list file (one per line, `#` comments) — used
+for `config/installer-defaults.list` and `live.list` roots. Missing or
+unreadable → empty (callers validate).
+
+---
+
+## tasksel_desc.py — generate the tasksel `.desc` from the selection groups
+
+**Purpose:** derive the installer's software-selection menu from the
+signed selection lockfile's pkg.list groups AT ISO-MASTERING TIME. The
+menu used to be a static `.desc` compiled into the athena-tasksel fork
+(tasks/* → makedesc.pl), manually mirrored from pkg.list — a menu
+change needed a fork rebuild + new ISO. Now the ISO stages the
+generated text at `/.disk/athena-tasks.desc` and athena-pkgsel's
+`pre-pkgsel.d/05athena-tasks` hook copies it onto /target before
+tasksel renders the menu. One source of truth, no fork rebuild for
+menu edits; the fork's packaged desc remains as a fallback.
+
+### `generate_desc(groups, meta=None)`
+Emit one makedesc-shaped task stanza per non-`[base]` group (`[base]`
+is debootstrapped, never a task). `groups` maps group → SEED name list
+(the lockfile's `seeds.pkg` — the tasksel Key vocabulary, NOT the
+credited per-group deltas); `meta` carries each group's
+`## Description:` line from pkg.list, falling back to a title-cased
+group name. Every emitted field goes through `_sanitize` (ASCII only,
+no commas / parens / em-dashes, collapsed whitespace) because cdebconf
+silently drops a task from the dialog when its Section isn't a known
+value or its Description carries those characters. Stanzas pin
+`Section: user` and `Relevance: 5`.
 
 ---
 
@@ -869,37 +942,95 @@ the container's GRUB toolchain (snapshot-pinned), not the host's.
 
 ---
 
-## chroot.py — live chroot orchestration (mixins for BuildSystem)
+## chroot.py — chroot install orchestration (mixin for BuildSystem)
 
-**Purpose:** install built `.deb`s into `buildroot/live/` in topo-sorted
-batches, bootstrap dpkg + libc, run post-install patch overlays, run
-the 8-check chroot verifier. Composed into `BuildSystem` via mixin.
+**Purpose:** install built `.deb`s into a surface's chroot
+(`buildroot/live` or `buildroot/disk`) in topo-sorted batches with a
+debootstrap-style essential bootstrap, recover from the known dpkg
+ordering hazards via retry rounds, and finish with an honest
+dpkg-query completion gate. Also writes the Asgard system configs and
+applies the post-install overlay. Composed into `BuildSystem` via mixin.
 
-### `_ChrootMixin.build_chroot(chroot, dependency_tree, dir_repo_main, ...)`
-- Wipe + recreate the chroot dir (sudo for root-owned remnants; mkdir
-  user-owned).
-- `_init_dpkg_database`: create minimal /var/lib/dpkg structure so
-  `dpkg --root` accepts the chroot before any packages are unpacked.
-  Also writes a minimal `/etc/debconf.conf` so debconf takes defaults.
-- libc seed: unpack libc6 (+ libc6-udeb's deps if any) before
-  configuring anything — solves the bootstrap circularity.
-- Topo-sort the install corpus via the install-batches computer.
-- For each batch: `dpkg --unpack` the .debs, then `chroot <dir> dpkg
-  --configure -a` to configure them. Track failures per batch.
-- After every batch: apply post-install patches from
-  `patch/post-install/` that match installed packages.
-- Generate system configs (hostname, motd, /etc/issue, /etc/os-release,
-  /etc/fstab, etc.) via `_generate_system_configs`.
-- Install the signing pubkey at
-  `/usr/share/keyrings/athena-archive-keyring.gpg` (if generated).
-- If `[Repo] AptSourceURL` is set, write
-  `/etc/apt/sources.list.d/athena.list` with `[signed-by=...]`.
+### `_ChrootMixin.build_chroot(debug=False, install_set=None)`
+- `install_set` (SURFACES-01) is the explicit canonical package set
+  for THIS surface — a `surfaces.surface_closure` result passed in by
+  `chroot build live` / `chroot build disk`. When given it replaces
+  the legacy internal exclusion math (extras / group-extras /
+  pool-extras subtraction); None keeps the historic [base]-only
+  behaviour.
+- Batch 0 seed: gcc-NN-base + libc6 + libgcc-s1 + libcrypt1 — the libc
+  Pre-Depends cycle Kahn cannot break on its own.
+- Compute the whole batch plan up front (`_compute_install_batches`);
+  failure means an unbreakable cycle, surfaced before touching the
+  chroot.
+- Mount /proc /sys /dev /dev/pts (two-step verification per mount);
+  init the dpkg database + a minimal `/etc/debconf.conf`.
+- Per batch: one `dpkg --unpack`, one `dpkg --configure pkg1 pkg2 …`
+  (`--force-depends` scoped to forced cycle batches only). Then a
+  **per-batch unpack retry**: inside a forced cycle batch dpkg
+  processes archives in argv order, so a package whose Pre-Depends
+  sits LATER in the same batch fails to unpack; after that batch's
+  configure pass the pre-dep IS configured, so retrying the failed
+  unpacks succeeds (caught live with python3, whose Pre-Depends
+  python3-minimal shared its SCC region).
+- Final defensive sweep: `dpkg --configure -a` retries every
+  half-configured package (Debian postinsts routinely invoke helper
+  tools from packages they don't declare — udev → update-rc.d).
+- **Post-sweep retry rounds** (up to 5): cross-batch unpack stragglers
+  are retried in rounds because a pre-dep chain unblocks one level per
+  round (python3.11-minimal → python3-minimal → python3) — batches
+  before dpkg+sh exist configure in chrootless mode, where a postinst
+  exec'ing its own shipped interpreter resolves on the HOST and can
+  only succeed in-chroot after the sweep. Any round progress triggers
+  a re-sweep so dependents' postinsts heal. Retry-attempt failures are
+  log-only (expected transients); the loud console signal is the final
+  NEVER-unpacked error.
+- **Honest completion gate**: `dpkg-query -W -f '${Package} ${Status}'`
+  diffed against the install plan. (`dpkg --get-selections` only
+  reports selection states and can never show half-configured — the
+  old check always printed success while gnome-menus sat
+  half-configured and python3 never unpacked.) Broken AND
+  never-installed packages are surfaced by name; the final sweep's
+  failure parser reads stderr, where dpkg actually writes its error
+  lines.
+- Then `_ensure_initramfs` (regenerate any missing initrd),
+  `post_install()` overlay files/patches, and
+  `generate_system_configs`.
 
-### `_compute_install_batches(canonical_pkgs)`
-Topological sort of dependency edges into install batches: each batch
-contains pkgs whose unmet deps are all in earlier batches. Detects and
-handles canonical libdevmapper/dmsetup/systemd cycles via a terminal
-force-depends batch.
+### `_compute_install_batches(libc_seed_set, install_set=None)`
+Kahn over Depends ∪ Pre-Depends restricted to canonical in-scope
+names (canonical ∩ install_set when a surface closure is given).
+**Essential-toolchain bias** (debootstrap-style): the dependency
+closure of dpkg, dash, coreutils, sed, grep is emitted in the EARLIEST
+waves — while core nodes remain, each Kahn round emits only ready core
+nodes. Why: configure runs "chrootless" (maintainer scripts on the
+HOST) until dpkg + sh exist inside the chroot; landing the essential
+closure first flips every later batch to in-chroot configure mode, so
+a postinst that execs its own shipped interpreter succeeds in its own
+batch and no unpack ever sees an unconfigurable pre-dep. A residual
+Depends cycle (libdevmapper ↔ dmsetup class) is split into
+Pre-Depends-ordered forced sub-batches (`_pre_depends_subbatches`).
+
+### `_configure_chroot` / `_configure_packages` / `_unpack_packages`
+Mode probe per call: in-chroot dpkg once `/usr/bin/dpkg` AND sh exist
+in the chroot, chrootless (`dpkg --root --force-script-chrootless`)
+before that. Non-final configure failures are tolerated and logged —
+the sweep is the recovery; `quiet=True` on retry call sites downgrades
+a total unpack failure to a log warning so a recovered build doesn't
+read as failed.
+
+### `generate_system_configs(debug=False)`
+Writes os-release / issue / hostname / hosts / fstab / machine-id /
+apt sources with the ASGARD identity (three-layer rule). Hostname =
+lowercased distribution id (`asgard`) — including the
+`systemd-firstboot --hostname` call, which used to hardcode the
+toolchain name `athena` and silently overwrote the correct
+/etc/hostname (caught on the disk image's serial log). sources.list
+is a header-only template (self-contained-pool policy); real network
+sources are one `athena-<name>.list` per registered mirror. Installs
+the signing pubkey at
+`/usr/share/keyrings/athena-archive-keyring.gpg` (if generated);
+`debug=True` adds the journald console-forwarding drop-in.
 
 ### `_write_chroot_file(rel_path, content)`
 Atomic write into the (root-owned) chroot via a host tempfile + `sudo cp`.
@@ -957,6 +1088,11 @@ GRUB into a hybrid BIOS+EFI bootable ISO via `grub-mkrescue`.
 - Sign the Release files (detached `.gpg` + clearsigned `InRelease`).
 - Export the pubkey to `.disk/archive-key.gpg` for the installer's
   base-installer hook to copy into `/target/etc/apt/trusted.gpg.d/`.
+- Stage the generated tasksel menu (`tasks_desc_text`, produced by the
+  caller from the signed lockfile via `tasksel_desc.generate_desc`) at
+  `/.disk/athena-tasks.desc` — athena-pkgsel's
+  `pre-pkgsel.d/05athena-tasks` hook copies it onto /target before
+  tasksel renders the menu.
 - Stage `installer/disk/{info, base_components, base_installable}`,
   `installer/boot/{grub.cfg, grub-background.png}`, the kernel /
   initrd, etc.
@@ -973,7 +1109,10 @@ ramdisk, no pool indexing.
 
 ### `build_live_iso(chroot, dir_image, container, password, ...)`
 - Stage the squashfs root + a minimal grub.cfg with the live-boot
-  kernel cmdline.
+  kernel cmdline. The default entry does NOT pass `nomodeset` — GNOME
+  requires KMS (with nomodeset there is no DRM device, so gdm's
+  Wayland and Xorg paths both fail); a "safe graphics — console only"
+  fallback menu entry keeps `nomodeset` for hardware that needs it.
 - Run mksquashfs over the chroot.
 - Run grub-mkrescue inside the container to emit the hybrid ISO.
 
@@ -982,18 +1121,25 @@ ramdisk, no pool indexing.
 ## disk_image.py — qcow2 disk image
 
 **Purpose:** master a pre-installed bootable qcow2 disk image from the
-verified live chroot. Same gate as live ISO; output is a single qcow2
-instead of an ISO.
+DISK-surface chroot (`buildroot/disk` — SURFACES-01: the minimal
+`[Disk] Groups` closure, decoupled from the live/GNOME chroot). Gated
+by `chroot_disk_ready`; output is a single qcow2 instead of an ISO.
 
-### `build_disk_image(chroot, dir_image, password, size_gb, ...)`
-- `qemu-img create` a sparse qcow2 of the requested size.
-- Format (ESP + ext4); mount via loopback.
-- rsync the chroot tree into the ext4 root.
-- chroot in via `mount --bind` + `chroot ... grub-install`; install
-  GRUB to the ESP.
-- Generate `/etc/fstab` (with the ESP at fs_passno=0 — never 1, only
-  / is 1, to avoid racing fsck.vfat vs fsck.ext4).
-- Unmount; the qcow2 is ready to boot.
+### `build_disk_image(dir_chroot, output_qcow2, size_gb, password, ...)`
+- Allocate a sparse raw image; `losetup -P` attach (waiting for the
+  async partition device nodes).
+- `sfdisk` a GPT label: 1 MB BIOS-boot, 100 MB vfat ESP, ext4 root.
+- mkfs + mount root (ESP under root/boot/efi).
+- rsync the disk chroot tree into the ext4 root.
+- Generate `/etc/fstab` from blkid UUIDs — fs_passno convention: only
+  `/` may be 1; the ESP gets 2 (checked after the root pass — the
+  previous value 1 ran fsck.vfat in parallel with the root fsck on
+  every boot).
+- Bind-mount /proc /sys /dev /dev/pts; `grub-install` (BIOS + EFI) +
+  `update-grub` via chroot. (Known v1 limitation: grub-install runs on
+  the build host, so the image's GRUB reflects the host's version.)
+- Unmount, losetup -d, `qemu-img convert -O qcow2`; the qcow2 is ready
+  to boot.
 
 ---
 
@@ -1296,16 +1442,16 @@ Exit, register_command, tui_instance).
 
 ## build.py — top-level orchestrator (BuildFlags + BuildSession + cmd_* + main)
 
-**Purpose:** the entry point. Owns BuildFlags (12 pipeline-stage gates)
+**Purpose:** the entry point. Owns BuildFlags (13 pipeline-stage gates)
 and BuildSession (cache / dep_tree / udeb_dep_tree / container / flags
 references). Registers every cmd_* handler with the TUI/CLI backend.
 
 ### `BuildFlags`
-Twelve boolean milestones: cache_ready, dep_check_ready, download_ready,
+Thirteen boolean milestones: cache_ready, dep_check_ready, download_ready,
 build_container_ready, source_build_ready, signing_key_verified,
-chroot_ready, chroot_verified, chroot_installer_ready, iso_live_ready,
-iso_installer_ready, iso_disk_ready. Each `cmd_*` sets its flag on
-success and gates on prerequisites.
+chroot_ready, chroot_verified, chroot_disk_ready, chroot_installer_ready,
+iso_live_ready, iso_installer_ready, iso_disk_ready. Each `cmd_*` sets
+its flag on success and gates on prerequisites.
 
 ### `BuildSession(config, tui_inst)`
 - `config`, `tui`, `cache`, `dep_tree`, `udeb_dep_tree`, `container`,
@@ -1321,7 +1467,7 @@ success and gates on prerequisites.
 - repo: index / publish / audit / repair / refresh / external
 - snapshot: list / advance / workload / base
 - container: init / purge
-- chroot: build (live | installer) / verify
+- chroot: build (live | disk | installer) / verify
 - iso: build (live | installer | disk)
 - key: generate / verify
 - autorun: live / installer / disk / build
@@ -1426,12 +1572,32 @@ hash drift). Sets build_container_ready.
   produce a closed runtime set.
 - Gate on source_build_ready + signing key verified.
 - Pre-flight: `_preflight_audit_source` (build state of every selected
-  source — gates on hard findings, soft findings just warn); 
-  `_preflight_audit_repo` (the consolidated repo audit's three install-
-  correctness checks).
+  source — gates on hard findings, soft findings just warn);
+  `_preflight_audit_repo` (unresolved hard deps, install-cohort
+  conflicts, build.json↔disk hash drift, AND stale artifacts in
+  `repo/` — version-drift / orphan-source / malformed.  A superseded
+  same-name `.deb` is silently consumable by the chroot installer, so
+  obsolete files BLOCK until `repo repair cleanup`).
+- SURFACES-01: compute the LIVE surface as
+  `surfaces.surface_closure(seeds, include_recommends_extras=True)`
+  where seeds = `[Live] Groups` from build.conf (default
+  `base, gnome-desktop`) ∪ `live.list` roots ∪ required/important
+  (~1105 pkgs); pass it to `build_chroot(install_set=…)` — the closure,
+  not the credit-based group deltas, decides membership.
 - Compose BuildSystem(dep_tree, config); call build_chroot.
 - Run verify_chroot automatically (the 8 checks). Sets chroot_ready and
   chroot_verified on success.
+
+**cmd_build_chroot_disk:**
+SURFACES-01 — the DISK surface gets its OWN chroot at
+`buildroot/disk`, decoupled from the live chroot so live (GNOME) and
+disk (console) can diverge. Same gates and pre-flights as live, then
+seeds = `[Disk] Groups` (default `base`) ∪ required/important and a
+HARD closure only (no live.list, no Recommends — ~245 pkgs, console +
+ssh). BuildSystem is constructed with `dir_chroot=dir_chroot_disk`.
+Verify runs informationally with `require_live_boot=False` (the
+live-boot check reports SKIP — live-boot is live-ISO machinery) and
+does NOT gate; sets chroot_disk_ready.
 
 **cmd_build_chroot_installer:**
 Parallel but against udeb_dep_tree and `build_installer_chroot`. Same
@@ -1441,7 +1607,29 @@ doesn't have a configured-state to verify). Sets chroot_installer_ready.
 **cmd_build_iso_live / cmd_build_iso_installer / cmd_build_iso_disk:**
 Drive `iso.build_live_iso`, `iso_installer.build_installer_iso`,
 `disk_image.build_disk_image` respectively. All three start with the
-build-mode refuse. Sets the corresponding flag.
+build-mode refuse; sets the corresponding flag. Particulars:
+- live + installer gate on the build container UP FRONT —
+  grub-mkrescue (the final mastering step) runs in-container, and
+  failing there used to cost ~10 minutes of pool staging first.
+- installer refuses to master when the resolved selection disagrees
+  with the signed selection.state (SELECT-LOCK coherence), validates
+  `[Live]`/`[Disk] Groups` against real pkg.list groups and every
+  installer-defaults root against the selection, then computes the
+  SURFACES-01 manifest-driven pool whitelist:
+  closure([base] ∪ every non-base task group ∪
+  installer-defaults.list roots ∪ installer.list roots ∪
+  required/important, WITH Recommends extras) — ~1252 pkgs vs the
+  legacy formula's 1569. pool.list entries reachable by nothing on
+  the ISO stay built/published but don't stage (mirror-only,
+  installed post-boot over the network); udebs are unaffected.
+  Also generates the tasksel `.desc` from the signed lockfile's
+  groups (`_generate_tasks_desc` → `tasksel_desc.generate_desc`,
+  pkg.list fallback with a warning) and passes it for staging at
+  `/.disk/athena-tasks.desc`.
+- disk masters `buildroot/disk` (NOT the live chroot), gated by
+  chroot_disk_ready; `force` re-verifies THAT chroot with
+  `require_live_boot=False` and deliberately does not touch the
+  live surface's chroot_verified flag.
 
 **cmd_audit [verbose|strict|refresh|quick|<target>]:**
 Six sections in order: DEP GATE / LIVE CONFLICTS / INSTALLER CONFLICTS /
@@ -1470,9 +1658,10 @@ suites_spec. `minimal` produces a runtime-only subset (excludes `-dbg`,
 **autorun (live | installer | disk | build):**
 Walk the shared early stages (cache → cache parse → source sync →
 container init → source build pkg → subset-specific source build),
-then the divergent terminal stages (chroot build {live|installer} →
-chroot verify if live → iso build {live|installer|disk}). Bails on
-first failure. Emits the autorun summary at the end.
+then the divergent terminal stages (chroot build {live|disk|installer}
+→ chroot verify if live → iso build {live|installer|disk}; `autorun
+disk` chains chroot build disk → iso build disk). Bails on first
+failure. Emits the autorun summary at the end.
 
 `autorun build` is the build-mode variant: chain is cache →
 cache parse (build-mode branch) → source sync → container init → source
@@ -1679,11 +1868,12 @@ or module writes it), and the consumer (what depends on it).
 
 | Path | Format | Producer | Consumer | Notes |
 |------|--------|----------|----------|-------|
-| `config/build.conf` | INI | operator | `utils.BuildConfig.__init__` | The canonical input. Defines upstream mirrors, snapshot, [Build] identity, signing-key uid. |
+| `config/build.conf` | INI | operator | `utils.BuildConfig.__init__` | The canonical input. Defines upstream mirrors, snapshot, [Build] identity, [Live]/[Disk] surface groups, signing-key uid. |
 | `config/pkg.list` | INI-groups | operator | `cmd_parse_dependency` Pass III | Drives the pkg-tier corpus. |
 | `config/live.list` | flat | operator | Pass IV | Live ISO extras. |
 | `config/installer.list` | flat | operator | Pass V + Pass VI | Mixed deb / udeb installer corpus. |
-| `config/pool.list` | flat | operator | Pass VII | Conflicts-skip pool extras. |
+| `config/pool.list` | flat | operator | Pass VII | Conflicts-skip pool extras. Entries unreachable on the ISO are mirror-only (SURFACES-01). |
+| `config/installer-defaults.list` | flat | operator | `surfaces.read_flat_roots` (iso build installer pre-flight + pool manifest) | d-i install roots (grub metas, console-setup, microcode, firmware, VM tools) that d-i hooks apt-install onto /target; seeds the ISO pool manifest. |
 | `config/snapshot.state` | JSON | `snapshot select`, `snapshot advance` | `utils.resolve_snapshot_timestamp`, `repo_audit.published_ledger` | Operator pin, durable across `clean cache`. Single field today: `current`. |
 | `config/mirror.<name>.state` | JSON | `mirror add`, `mirror remove`, `mirror publish` (last_publish_at, neighbours_known) | `mirror.read_mirror_state`, `cmd_mirror_publish`, `cmd_mirror_audit` | Per-mirror durable state — one file per configured publish target. Fields: url, type, ssh_key, base, current, last_publish_at, neighbours_known. |
 | `config/published.manifest` (+ `.sig`) | Packages text + ASCII-armored gpg detached sig | `mirror publish` via `repo_audit._write_signed_manifest` (union of all enabled mirrors' Packages) | `repo_audit.published_ledger` → `utils.highest_asg_update` | Authority for +asg uN bump-N derivation. Read by every subsequent publish to pick the next N. |
@@ -1850,10 +2040,11 @@ To trace a typical build end-to-end:
    `BuildContainer.build` which sets up a per-package container, applies
    patches + token-substitutions, runs `dpkg-buildpackage`, segregates
    the outputs to component dirs, and runs NMU strip + asg stamp.
-9. `cmd_build_chroot_live` composes `BuildSystem(dep_tree, config)` and
-   runs the chroot build — topo-sorted install batches with libc seed,
-   post-install patches, system-configs, signing keyring install. Auto-
-   runs the 8-check verify at the end.
+9. `cmd_build_chroot_live` computes the live surface closure
+   (SURFACES-01), composes `BuildSystem(dep_tree, config)` and runs the
+   chroot build — topo-sorted install batches with libc seed +
+   essential bootstrap, post-install patches, system-configs, signing
+   keyring install. Auto-runs the 8-check verify at the end.
 10. `cmd_build_iso_live` calls `iso.build_live_iso` — squashfs over the
     chroot + grub-mkrescue (in container) → hybrid BIOS/EFI ISO under
     `image/`.

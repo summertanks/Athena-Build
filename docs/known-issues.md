@@ -1,9 +1,9 @@
 # Known issues
 
 Live tracker of latent bugs and cosmetic warnings observed in current
-builds.  Every entry links to the COMP-02 phase that addresses it.  When
-an issue is fixed, move its entry to the bottom under "Fixed" with the
-commit hash that closed it.
+builds.  Every entry links to the COMP-02 phase or the `TODO.md` ticket
+that addresses it.  When an issue is fixed, move its entry to the
+bottom under "Fixed" with the commit hash that closed it.
 
 The reference run is the installer log at `log/athena.log` from a
 working install captured 2026-05-13 on VMware BIOS-mode VM (post
@@ -49,6 +49,64 @@ shipped bin-only `grub-pc-bin` + `grub-efi-amd64-bin` so
 `grub-installer` picks the right meta-package at install time.
 Phase D follow-up 2026-05-14: shipped `config/pool.list` to inject
 the meta `.deb`s into the cdrom pool — see Fixed below.)*
+
+### Dep-drift check is silent when a dependency *disappears*
+
+- **Symptom**: a built `.deb` can lose a dependency it used to declare
+  and nothing in the pipeline warns — the broken metadata flows
+  straight into the chroot/ISO closures.  Observed 2026-06-11:
+  e2fsprogs `+asg1u1` shipped **missing** its `libext2fs2` /
+  `libcom-err2` / `libss2` deps (a patch dropped the `-L shlibs.local`
+  mapping — see `docs/build-quirks.md` § 3.4) and the SURFACES-01 disk
+  closure faithfully followed the bad metadata; the disk image
+  boot-looped (fsck exec failure, quirk 9.1).  The legacy
+  ship-everything pool had masked the gap.
+- **Cause**: dep-drift verification compares constraint *versions*
+  between cache record and on-disk artifact; a dep that is simply
+  *absent* on the built side (for a package that is itself selected)
+  raises nothing.
+- **Severity**: Medium — only bites when a patch or toolchain quirk
+  eats a dependency, but when it does the failure shows up at *boot*,
+  far from the cause.
+- **Fix**: TODO `STA-24` — WARN at drift-check time when a dep present
+  on the upstream record is missing from the built artifact.
+
+### `repo repair cleanup` can delete files that still have live remote claims
+
+- **Symptom**: the local prune of superseded/obsolete `.deb`s does not
+  check the remote claim ledger first — an operator can delete bytes
+  locally that a published claim on a mirror still names as live.
+  The receiving side of `mirror publish` is protected since 2026-06-11
+  (commit `b356e56` stops `rsync --delete` from reaping remote pool
+  files — a local prune had propagated and deleted 17
+  obsolete/deprecated files from the append-only remote pool), but the
+  local deletion itself is still silent.
+- **Cause**: cleanup walks local repo state only; UPD-01's
+  publish-before-prune discipline is documented, not enforced.
+- **Severity**: Low-medium — `mirror pull` can re-fetch peer-owned
+  bytes, but own-claim bytes deleted before deprecation/obsolescence
+  is published are gone.
+- **Fix**: TODO `STA-25` — warn (and require confirmation) when a
+  cleanup target filename matches a live published claim.
+
+### Initramfs ships no fsck tools — chroot fstab is empty at `update-initramfs` time
+
+- **Symptom**: the generated initramfs carries no `fsck.ext4` /
+  `fsck.vfat`, so the root filesystem is never checked from the
+  initramfs; checking falls through to `systemd-fsck` running off the
+  real root.  Noticed while debugging the 2026-06-11 disk-image
+  reboot loop (it was *not* the cause — but it removed a layer of
+  diagnosis).
+- **Cause**: `initramfs-tools` decides which fsck binaries to copy by
+  reading `/etc/fstab`; the kernel postinst runs `update-initramfs`
+  during the chroot build, *before* our fstab is generated, so fstab
+  is empty at that moment.
+- **Severity**: Low — systemd-fsck on the real root works for healthy
+  filesystems; the gap matters when the root fs needs repair before
+  it can be mounted read-write.
+- **Fix**: TODO `STA-26` — write fstab (or a minimal stub) before the
+  kernel configures, or re-run `update-initramfs -u` as a late chroot
+  step after fstab generation.
 
 ---
 
@@ -209,26 +267,57 @@ as "tech debt" without re-reading the decision.
   server config; we don't ship X.
 - **Fix**: None needed — expected for a server install.
 
-### `Unable to locate package intel-microcode`
-
-- **Evidence in log**: lines 1922-1940.  `finish-install`'s `hw-detect`
-  probes for hypervisor-specific tools and CPU-microcode packages and
-  apt-installs them on the target.
-- **Cause**: Not in our pool — `intel-microcode` lives in
-  `non-free-firmware`, which our cache snapshot doesn't index.
-- **Fix**: COMP-02 phase E — enable `non-free-firmware` in the cache
-  mirror config and add `intel-microcode` to `config/pool.list` (or
-  `config/pkg.list` if we want it pre-installed on every Intel
-  target).  Tracked under `docs/plans/comp-02-robust-build.md`
-  § Phase E Deferred.
+*(`Unable to locate package intel-microcode` moved to Fixed 2026-05-28
+— non-free / contrib / non-free-firmware became real repo components
+and a curated microcode + firmware set is tunneled into the pool.
+See Fixed below.)*
 
 *(`open-vm-tools` moved to Fixed 2026-05-14 — added to `config/pool.list`
 so `hw-detect`'s `apt-install open-vm-tools` succeeds on VMware
 targets.  Verification pending next install on a VMware host.)*
 
+### Fresh disk images carry a benign ext4 orphan list
+
+- **Symptom**: the first boot of a freshly-built qcow2 disk image logs
+  the kernel/e2fsck cleaning a small ext4 orphan-inode list on the
+  root filesystem.  Harmless — the cleanup succeeds and never recurs.
+- **Cause**: files deleted inside the chroot while the image's loop
+  mount is live leave entries on the ext4 orphan list when
+  `disk_image.py` unmounts; nothing replays the journal/orphans on the
+  artifact before it ships.  Both the root fs and the ESP otherwise
+  verify clean via `e2fsck` / `fsck.fat` against the shipped artifact
+  (checked 2026-06-11 during the disk-image first-boot debugging).
+- **Fix**: TODO `HK-06` — add a post-umount `e2fsck -f -p` pass in
+  `disk_image.py` so the shipped image is pristine.
+
 ---
 
 ## Fixed
+
+### ~~`Unable to locate package intel-microcode`~~ — 2026-05-28
+
+- **Was**: `finish-install`'s `hw-detect` probes for CPU-microcode
+  packages and apt-installs them on the target; `intel-microcode`
+  lives in `non-free-firmware`, which our cache didn't index and our
+  pool didn't carry — the apt-install failed with "Unable to locate"
+  (reference log lines 1922-1940).
+- **Fix shipped** (commit `3bf61d7`): `non-free` / `contrib` /
+  `non-free-firmware` became real repo components, and
+  `config/pool.list` now carries a curated tunneled set —
+  `intel-microcode`, `amd64-microcode`, plus the common Wi-Fi/NIC/GPU
+  firmware packages (`firmware-iwlwifi`, `firmware-realtek`,
+  `firmware-atheros`, `firmware-brcm80211`, `firmware-amd-graphics`,
+  `firmware-misc-nonfree`).  These are prebuilt non-free binaries, so
+  they tunnel rather than build from source; they ship in
+  `/cdrom/pool` only, never pre-installed in any chroot.
+- **Note**: the cdrom-disable finish-install hook had to be numbered
+  *after* `08hw-detect` (11, not 06) or the offline apt-install of
+  microcode / `open-vm-tools-desktop` would fail — see memory
+  `feedback_iso_pool_and_finish_install_ordering`.  These packages are
+  also kept as installer-default roots under the SURFACES-01
+  manifest-driven pool (`config/installer-defaults.list`), so the
+  2026-06-11 pool shrink did not drop them — verified present in the
+  staged manifest.
 
 ### ~~Installer ISO is BIOS-only~~ — 2026-05-13 *(verification pending)*
 

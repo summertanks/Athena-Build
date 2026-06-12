@@ -41,9 +41,9 @@ cache build → cache parse → source sync → container init
 | 2. Dep parse | `cache parse` | Walk required + important + manual + recommends closures; build the parallel **deb** + **udeb** dep trees over a single source corpus. | `dependencytree.py`, `package.py` |
 | 3. Source sync | `source sync` | Download every selected source's tarball/dsc/diff to `source/` via its origin mirror's pool URL.  SHA256 + `.verified` sidecar per file. | `utils.download_source` |
 | 4. Container init | `container init` | Build the `athenalinux:build-<release>` Docker image with the toolchain layer (dpkg-dev, devscripts, build-essential, etc.). | `buildcontainer.py:BuildContainer.__init__` |
-| 5. Source build | `source build [all\|live\|installer\|recommended\|<pkg>…] [profile,…]` | Per-source: extract → patch → `dpkg-buildpackage` → strip NMU → segregate `.deb`/`.udeb` outputs to `repo/`.  Parallel via `ThreadPoolExecutor` (COMP-03; `[Build] MaxParallelBuilds`). | `buildcontainer.py:build`, `build.py:_build_one_source` |
-| 6. Chroot build | `chroot build {live\|installer}` | Bootstrap a real chroot from `repo/` using `dpkg --unpack` + `dpkg --configure -a`.  Live = full system payload; installer = udeb-only initrd content. | `chroot.py`, `installer_chroot.py`, `buildsystem.py` |
-| 7. Chroot verify | `chroot verify` (auto after build) | 8-check verifier: filesystem layout, configured packages, signing keyring present, no Debian residue, etc.  Gates ISO build. | `build.py:_verify_chroot` |
+| 5. Source build | `source build [all\|live\|installer\|recommended\|<pkg>…] [profile,…]` | Per-source: extract → patch → `dpkg-buildpackage` → strip NMU → segregate `.deb`/`.udeb` outputs to `repo/`.  Parallel via `ThreadPoolExecutor` (COMP-03; `[Build] MaxParallelBuilds`). | `buildcontainer.py:build`, `commands/cmd_source.py:_build_one_source` |
+| 6. Chroot build | `chroot build {live\|disk\|installer}` | Bootstrap a real chroot from `repo/` using `dpkg --unpack` + `dpkg --configure -a`.  Live (`buildroot/live`) and disk (`buildroot/disk`) each install their own surface closure (SURFACES-01, below); installer = udeb-only initrd content. | `chroot.py`, `installer_chroot.py`, `buildsystem.py`, `surfaces.py` |
+| 7. Chroot verify | `chroot verify` (auto after build) | 8-check verifier: filesystem layout, configured packages, signing keyring present, no Debian residue, etc.  Surface-aware: the live-boot check is SKIPped for the disk surface (live-boot is live-ISO machinery).  Gates ISO build. | `commands/cmd_build.py:_verify_chroot` |
 | 8. ISO build | `iso build {live\|installer\|disk}` | Master the chroot into a hybrid BIOS+EFI ISO (`grub-mkrescue` inside the build container, COMP-14) or a sparse qcow2 (`iso build disk`, COMP-09). | `iso.py`, `iso_installer.py`, `disk_image.py` |
 
 After the artifact lands, two more stages handle distribution:
@@ -58,10 +58,50 @@ source delta, +asg-stamp, publish additively to every configured
 mirror): walk `source sync → source build all → mirror publish` and
 see memory entry `project_upd01_update_architecture.md`.
 
+## Surface composition (SURFACES-01)
+
+A **surface** is one shipped artifact: the live image, the disk image,
+or the installer ISO's `/cdrom/pool`.  In plain terms: each surface
+gets exactly the packages something on that surface can actually
+reach, computed fresh from the resolved dependency graph — never
+assembled from per-group package-name deltas.  The deltas
+(`pkg_group_pkg_names`) are *credit*-based: a dependency shared by two
+groups is credited to whichever group resolved first, so unioning them
+silently drops shared deps from any surface that includes the later
+group.
+
+Mechanically, `scripts/surfaces.py:surface_closure` is a BFS from a
+seed set over the edges the resolver actually chose (Depends ∪
+Pre-Depends; OR groups follow the first selected alternative; virtual
+names canonicalized), optionally extended by a Recommends-extras
+fixpoint (only extras some closure member actually recommends).
+
+| Surface | Seeds | Closure | Size |
+|---|---|---|---|
+| Live chroot | `[Live] Groups` from build.conf (default `base, gnome-desktop`) ∪ `config/live.list` ∪ required/important | with Recommends extras | ~1105 pkgs |
+| Disk chroot | `[Disk] Groups` (default `base`) ∪ required/important | hard deps only | ~245 pkgs (console + ssh) |
+| Installer ISO pool | `[base]` ∪ every pkg.list task group ∪ `config/installer-defaults.list` (grub metas, console-setup, microcode, firmware, VM tools) ∪ `installer.list` roots ∪ required/important | with Recommends extras | ~1252 pkgs (legacy formula shipped 1569) |
+
+The disk surface gets its **own chroot** at `buildroot/disk`
+(`chroot build disk`, gated by `chroot_disk_ready`); `iso build disk`
+masters that chroot, fully decoupled from the live/GNOME chroot.
+`pool.list` entries unreachable by anything on the ISO stay
+selected/built/published but are **mirror-only** — installed post-boot
+over the network.
+
+The installer's tasksel menu is generated **at ISO mastering** from the
+signed selection lockfile (`scripts/tasksel_desc.py`,
+cdebconf-sanitized), staged as `/.disk/athena-tasks.desc`, and copied
+onto /target by athena-pkgsel's `pre-pkgsel.d/05athena-tasks` hook.  A
+pkg.list group edit reaches the menu via `cache parse` + `iso build
+installer` — no fork rebuild; the desc packaged in athena-tasksel-data
+is only a fallback (fork versions: athena-pkgsel `0.79+athena2`,
+athena-tasksel `3.73+athena3`).
+
 ## BuildFlags — the stage gate
 
 Each stage produces a flag on `BuildSession.flags` (a `BuildFlags` instance,
-`build.py:75`).  A later stage checks the prior flag; missing flags abort
+`build.py:94`).  A later stage checks the prior flag; missing flags abort
 with an actionable message instead of running on stale state.  Clean
 operations (`clean cache`, `clean source`, etc.) reset the corresponding
 flag so the next run re-does the work.
@@ -74,7 +114,8 @@ flag so the next run re-does the work.
 | `build_container_ready` | `container init` | `source build` |
 | `source_build_ready` | `source build` (whole-run completion) | `chroot build` |
 | `signing_key_verified` | `_ensure_signing_key_verified` (top of `chroot build`) | `chroot build`, ISO sign step |
-| `chroot_ready` / `chroot_verified` | `chroot build live` (verify gates `_verified`) | `iso build live`, `iso build disk` |
+| `chroot_ready` / `chroot_verified` | `chroot build live` (verify gates `_verified`) | `iso build live` |
+| `chroot_disk_ready` | `chroot build disk` | `iso build disk` |
 | `chroot_installer_ready` | `chroot build installer` | `iso build installer` |
 | `iso_live_ready` / `iso_installer_ready` / `iso_disk_ready` | `iso build *` | Final autorun gate; surfaced in `print state` |
 
@@ -86,9 +127,10 @@ The state machine is rendered in [`docs/diagrams/build-fsm.png`](diagrams/build-
 
 ## Module overview
 
-The toolchain is 25 top-level Python modules under `scripts/`, plus a
-9-file `scripts/coord/` MIRROR-01 federation-sidecar package and an
-11-file `scripts/tui/` curses package.  Grouped by role:
+The toolchain is 31 top-level Python modules under `scripts/`, plus a
+`scripts/commands/` package (the `cmd_*` handler mixins BuildSession
+composes), a 9-file `scripts/coord/` MIRROR-01 federation-sidecar
+package and an 11-file `scripts/tui/` curses package.  Grouped by role:
 
 ### Foundation
 - **`utils.py`** — `BuildConfig` (the canonical config the rest of the
@@ -111,16 +153,22 @@ The toolchain is 25 top-level Python modules under `scripts/`, plus a
   + manual + recommends closures over the deb world; `udeb_dep_tree` does
   the parallel udeb resolution; `parse_sources` walks both for the union
   source corpus; `selected_pkgs` / `selected_srcs` / `extras_*` / `pool_extras_*`.
+- **`surfaces.py`** — SURFACES-01 per-surface composition:
+  `surface_closure` (reachability BFS over the resolved dep graph,
+  optional Recommends-extras fixpoint), `group_seed_names`,
+  `read_flat_roots`.  See "Surface composition" above for why
+  closures and never credit-based group deltas.
 
 ### Orchestrator
-- **`build.py`** — `BuildSession` owns the full pipeline state and the
-  `cmd_*` handlers the TUI dispatches.  Hosts `BuildFlags`, the autorun
-  chains (`cmd_auto_run_live`/`_installer`/`_disk`), `_build_one_source`
-  (COMP-03 worker), the `cmd_mirror_*` umbrella (MIRROR-01 federation:
+- **`build.py`** — `BuildSession` owns the full pipeline state; the
+  `cmd_*` handlers the TUI dispatches live in the `scripts/commands/`
+  mixin package it composes (`cmd_build`, `cmd_cache`, `cmd_source`,
+  `cmd_audit`, `cmd_repo`, `cmd_mirror` — MIRROR-01 federation:
   `add`/`remove`/`list`/`summary`/`status`/`publish`/`pull`/`audit`/
-  `query`/`reconcile-neighbours`/`builders`/`conflict`), and `cmd_repo_*`
-  (LOCAL pool lifecycle: `tunnel`/`audit`/`repair`/`index`).  ~9k LOC;
-  biggest module by far.
+  `query`/`reclaim`/`reconcile-neighbours`/`builders`/`conflict` —
+  `cmd_run`, `cmd_snapshot`, `cmd_tunnel`, `cmd_virtual`,
+  `cmd_supply_chain`).  `build.py` itself hosts `BuildFlags`, session
+  wiring, and `main()`.
 - **`mirror.py`** — per-mirror durable state CRUD and the non-network
   helpers behind the `mirror` umbrella: `add_mirror` / `remove_mirror` /
   `read_mirror_state` / `update_mirror_state` (one
@@ -128,7 +176,10 @@ The toolchain is 25 top-level Python modules under `scripts/`, plus a
   federation source-of-truth), `neighbours_drift` (consistency tag for
   `mirror list`), `reconcile_neighbours` (fan-out federation propagation).
 - **`scripts/coord/`** — MIRROR-01 federation sidecar (9 modules):
-  `schema` (claim + coord-head schemas, `canonicalize_neighbours`),
+  `schema` (claim + coord-head schemas, `canonicalize_neighbours`;
+  claim schema v4 adds `reclaims_seq` — RECLAIM-01 `mirror reclaim`,
+  the sanctioned same-filename/new-sha re-publish; see
+  [`docs/mirror-setup.md`](mirror-setup.md)),
   `identity` (Ed25519 keypair + keyring), `store` (per-builder JSONL
   claim ledger), `policy` (BLOCK on hash conflict, PUBLISH_HALT
   sentinel), `head` (read/write tier-1-signed `coord-head.json`),
@@ -143,11 +194,16 @@ The toolchain is 25 top-level Python modules under `scripts/`, plus a
   worker scratch dir, then `strip_nmu_from_deb` + `_segregate_built_artifacts`
   (under `_REPO_DEST_LOCK`).  Live container registry + label-based reap
   for orphan cleanup (COMP-03 Phase 2/3).
-- **`buildsystem.py`** — chrootless dpkg helpers for the libc bootstrap
-  round; `compute_install_batches` (topological packing).
-- **`chroot.py`** — `_ChrootMixin` (mount/umount procfs, sysfs, devpts;
-  generate `/etc/{os-release,hostname,hosts,fstab,…}`; install signing
-  keyring; pre-install + post-install patch overlay).
+- **`buildsystem.py`** — `BuildSystem` composer (chroot + iso +
+  dep-drift mixins); sudo-password lifecycle; `for_iso` factory.
+- **`chroot.py`** — `_ChrootMixin`: `build_chroot` (Kahn-batched
+  `dpkg --unpack`/`--configure` with a debootstrap-style essential
+  bootstrap — the dpkg+dash+coreutils closure lands in the earliest
+  waves — plus unpack-retry rounds and a dpkg-query completion gate);
+  mount/umount procfs, sysfs, devpts; generate
+  `/etc/{os-release,hostname,hosts,fstab,…}` (Asgard identity —
+  hostname = `asgard`, not the toolchain name); install signing
+  keyring; pre-install + post-install patch overlay.
 - **`installer_chroot.py`** — parallel chroot path that unpacks the udeb
   closure into `buildroot/installer/` (no `dpkg --configure`).
 - **`dep_drift.py`** — sync per-package `.shlibs`/`Depends:` constraints
@@ -158,10 +214,17 @@ The toolchain is 25 top-level Python modules under `scripts/`, plus a
   hybrid BIOS+EFI ISO via `grub-mkrescue` inside the build container
   (COMP-14).
 - **`iso_installer.py`** — `build_installer_iso` masters the installer
-  chroot to a cpio.gz initrd, stages the `.disk/` tree, signs the
-  installer's apt-repo, copies pubkey to `.disk/archive-key.gpg`.
+  chroot to a cpio.gz initrd, stages the `.disk/` tree (including the
+  generated `/.disk/athena-tasks.desc`), signs the installer's
+  apt-repo, copies pubkey to `.disk/archive-key.gpg`.
+- **`tasksel_desc.py`** — SURFACES-01: derive the tasksel `.desc`
+  stanzas from the signed lockfile's pkg.list groups at ISO mastering;
+  every field is cdebconf-sanitized (ASCII, no commas/parens —
+  cdebconf silently drops non-conforming tasks).
 - **`disk_image.py`** — `build_disk_image` produces a sparse qcow2 of
-  a pre-installed Asgard system (COMP-09).
+  a pre-installed Asgard system from the disk-surface chroot
+  (`buildroot/disk`, COMP-09); generated fstab keeps fs_passno 1 for
+  `/` only (ESP gets 2).
 - **`apt_repo.py`** — `dpkg-scanpackages` orchestration; `apt-ftparchive
   release`; sign helpers; `remote_reindex_and_sign` /
   `local_reindex_and_sign` close over `_reindex_and_sign_via` and feed
@@ -228,6 +291,15 @@ invariants you'll see referenced across the code:
 - **Identity strip** — every shipped artifact is audited for `Debian` /
   `debian.org` / `report-bug` residue.  Memory entry:
   `project_filter_debian_specific_installer_hooks.md`.
+- **Pre-flight gates fire early** — `chroot build {live|disk|installer}`
+  runs the source + repo audits up front; the repo audit BLOCKS on
+  unresolved deps, install-cohort conflicts, record↔disk hash drift,
+  and STALE artifacts in `repo/` (version-drift / orphan-source /
+  malformed — a superseded same-name `.deb` is silently consumable by
+  the chroot installer; remedy: `repo repair cleanup`).  `iso build
+  live|installer` gates on the build container up front, because
+  grub-mkrescue (the final mastering step) runs in-container and a
+  late failure costs ~10 minutes of pool staging first.
 
 ## Where to read next
 
