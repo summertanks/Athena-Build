@@ -52,6 +52,8 @@ class MirrorCommandsMixin(SessionState):
             return self.cmd_mirror_publish(*args)
         if action == 'pull':
             return self.cmd_mirror_pull(*args)
+        if action == 'reclaim':
+            return self.cmd_mirror_reclaim(*args)
         if action == 'audit':
             return self.cmd_mirror_audit(*args)
         if action == 'query':
@@ -79,6 +81,11 @@ class MirrorCommandsMixin(SessionState):
             'pull [<name>]':               'fetch + verify peer sidecar, then '
                                            'download claim .debs missing locally '
                                            '(skip-own; SHA-256 verified)',
+            'reclaim [<src>|<file>] [<name>] [force]':
+                                           'supersede OUR published claim for the '
+                                           'SAME filename with the local rebuild '
+                                           '(sanctioned filename-immutability '
+                                           'exception; no target = list candidates)',
             'audit [<name>]':              'federation consistency, claim sigs, '
                                            'hash conflicts, cross-mirror pool drift',
             'query <pkg> [<name>]':        'show claims matching <pkg> from '
@@ -831,7 +838,7 @@ class MirrorCommandsMixin(SessionState):
             return None
         return {_l.strip() for _l in _r.stdout.splitlines() if _l.strip()}
 
-    def cmd_mirror_publish(self, *args):
+    def cmd_mirror_publish(self, *args, reclaim_intents=None):
         """mirror publish [<name>] — publish to one mirror, or all when no name.
 
         Per mirror:
@@ -1073,6 +1080,7 @@ class MirrorCommandsMixin(SessionState):
                     on_status=_on_status,
                     install_corpus=_install_corpus or None,
                     on_published=_stamp_published,
+                    reclaim_intents=reclaim_intents,
                 )
             finally:
                 _bar.close()
@@ -1310,6 +1318,144 @@ class MirrorCommandsMixin(SessionState):
                 else tui.COLOR_ERROR)
             if _mismatch or _failed:
                 _all_ok = False
+        return _all_ok
+
+    def cmd_mirror_reclaim(self, *args):
+        """mirror reclaim [<source>|<file.deb|.udeb>] [<name>] [force]
+
+        RECLAIM-01 — the sanctioned exception to the published-filename-
+        is-frozen-bytes INVARIANT.  Supersedes OUR live published claim
+        for the SAME filename with the local rebuild's sha and pushes
+        the new bytes (overwriting the remote pool copy) — for content
+        changes that are deliberately version-less: Position-X OOB
+        normalization, disaster-recovery rebuilds.  Normal content
+        changes bump the version and publish forward instead.
+
+        With no target: LIST the local-ahead candidates per mirror and
+        exit (dry-run).  With a target (source name, or an exact
+        .deb/.udeb filename): confirm per-file old→new shas (YESNO;
+        `force` skips), then run the full publish transaction with the
+        resolved intents — flock, federation gate, hash-conflict scan,
+        stale-index guard all apply, and each intent is re-validated
+        against the just-fetched view inside the transaction
+        (validate_reclaim_intents) so remote drift between listing and
+        execution skips loudly instead of superseding the wrong claim.
+        """
+        import mirror as _mirror
+        import signing
+        import coord.head as _head_mod
+        import coord.identity as _id
+        import coord.store as _store
+        import coord.transport as _transport
+        _keys = self._coord_self_keys()
+        if _keys is None:
+            return False
+        _bid, _, _pub_key = _keys
+        _force = 'force' in args
+        _pos = [_a for _a in args if _a != 'force']
+        _target = _pos[0] if _pos else None
+        _mirror_name = _pos[1] if len(_pos) > 1 else None
+        # `mirror reclaim <mirror-name>` (no reclaim target): a single
+        # arg naming a configured mirror means "list candidates there".
+        if (_target is not None and _mirror_name is None
+                and _mirror.read_mirror_state(
+                    self.config, _target) is not None):
+            _mirror_name, _target = _target, None
+        if _mirror_name is not None:
+            if _mirror.read_mirror_state(self.config, _mirror_name) is None:
+                console.print(
+                    f"mirror reclaim: unknown mirror {_mirror_name!r}",
+                    tui.COLOR_ERROR)
+                return False
+            _names = [_mirror_name]
+        else:
+            _names = _mirror.list_mirrors(self.config)
+        if not _names:
+            console.print(
+                "mirror reclaim: no mirrors configured (use `mirror add`)",
+                tui.COLOR_WARNING)
+            return False
+        _signing_home = signing.signing_home(self.config)
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        _all_ok = True
+        for _n in _names:
+            _st = _mirror.read_mirror_state(self.config, _n)
+            assert _st is not None
+            _url = _st.get('url', '')
+            _ssh_key = _st.get('ssh_key') or None
+            _coord_url = _mirror.coord_root_for(_url)
+            _coord_spec, _ = _mirror.rsync_spec_for_url(_coord_url)
+            console.print(
+                f"mirror reclaim {_n}: ← {_url}", tui.COLOR_HIGHLIGHT)
+            _fetched = os.path.join(
+                self.config.dir_cache, 'mirror', _n, 'fetched')
+            os.makedirs(_fetched, exist_ok=True)
+            _ok, _detail = _transport.pull_remote_coord(
+                local_dest=_fetched, remote_spec=_coord_spec,
+                ssh_key=_ssh_key)
+            if not _ok:
+                console.print(
+                    f"  pull coord tree failed: {_detail}", tui.COLOR_ERROR)
+                _all_ok = False
+                continue
+            _head = _head_mod.read_coord_head(_fetched, _signing_home)
+            if _head is None:
+                console.print(
+                    "  coord-head verify failed or absent — refusing to "
+                    "trust the fetched tree.", tui.COLOR_ERROR)
+                _all_ok = False
+                continue
+            _keyring = _id.load_keyring(
+                os.path.join(_fetched, 'keyring', 'builders'))
+            _by_builder = _store.read_all_claims(
+                os.path.join(_fetched, 'claims'), _keyring,
+                _head.get('revoked_builders') or {})
+            _cands = _mirror.local_ahead_candidates(
+                _by_builder, _bid, self.config.dir_repo, _buildlog)
+            if not _cands:
+                console.print(
+                    "  no local-ahead candidates — local pool and remote "
+                    "claims agree.")
+                continue
+            if _target is None:
+                console.print(
+                    f"  {len(_cands)} reclaim candidate(s) — re-run with "
+                    "a <source>/<file> target to execute:")
+                for _c in _cands:
+                    console.print(
+                        f"    {_c['filename']}  {_c['remote_sha'][:12]} → "
+                        f"{_c['local_sha'][:12]}  (source: {_c['package']})")
+                continue
+            _sel = [_c for _c in _cands
+                    if _c['filename'] == _target
+                    or _c['package'] == _target]
+            if not _sel:
+                console.print(
+                    f"  no candidate matches {_target!r} — bare "
+                    "`mirror reclaim` lists them; a file qualifies only "
+                    "when its on-disk sha matches the local build.json "
+                    "and the remote claim is older.", tui.COLOR_WARNING)
+                _all_ok = False
+                continue
+            console.print(
+                f"  reclaiming {len(_sel)} file(s) — published bytes "
+                "will be REWRITTEN under unchanged filenames:",
+                tui.COLOR_WARNING)
+            for _c in _sel:
+                console.print(
+                    f"    {_c['filename']}  {_c['remote_sha'][:12]} → "
+                    f"{_c['local_sha'][:12]}")
+            if not _force:
+                _resp = Prompt(
+                    PROMPT_YESNO,
+                    f"Reclaim {len(_sel)} file(s) on {_n}?  This is the "
+                    "sanctioned filename-immutability exception",
+                ).get_response()
+                if _resp.lower() not in ('y', 'yes'):
+                    console.print("  aborted by operator")
+                    continue
+            _r = self.cmd_mirror_publish(_n, reclaim_intents=_sel)
+            _all_ok = bool(_r) and _all_ok
         return _all_ok
 
     def _mirror_remote_has_coord_head(

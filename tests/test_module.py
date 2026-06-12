@@ -30569,6 +30569,129 @@ def test_cmd_mirror_dispatch_routes_audit_and_query():
         _body)
 
 
+def test_cmd_mirror_dispatch_routes_reclaim():
+    """RECLAIM-01 Chunk 5: `mirror reclaim` is dispatched and the
+    handler + help-table row exist."""
+    import re
+    _body = _session_source()
+    assert 'def cmd_mirror_reclaim(' in _body
+    assert re.search(
+        r"if action == 'reclaim':\s*\n\s+return self\.cmd_mirror_reclaim",
+        _body)
+    assert 'reclaim [<src>|<file>] [<name>] [force]' in _body
+
+
+def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
+    """RECLAIM-01 Chunk 5 behavior: no target → list candidates, never
+    publish; source target + force → publish called with exactly the
+    matching intents; unmatched target → False, no publish; YESNO 'n'
+    → no publish."""
+    import sys as _sys
+    import types as _types
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    import commands.cmd_mirror as _cm
+
+    _cands = [
+        {'filename': 'a_1.0_amd64.deb', 'package': 'srca',
+         'component': 'main', 'old_seq': 1, 'remote_sha': 'a' * 64,
+         'local_sha': 'b' * 64, 'size': 5, 'intended_version': '1.0',
+         'built_version': '1.0', 'path': '/x/a_1.0_amd64.deb'},
+        {'filename': 'b_1.0_amd64.deb', 'package': 'srcb',
+         'component': 'main', 'old_seq': 2, 'remote_sha': 'c' * 64,
+         'local_sha': 'd' * 64, 'size': 5, 'intended_version': '1.0',
+         'built_version': '1.0', 'path': '/x/b_1.0_amd64.deb'},
+    ]
+
+    class _Cfg:
+        dir_cache = tempfile.gettempdir()
+        dir_repo = '/nonexistent-repo'
+        dir_log = '/nonexistent-log'
+
+    _fake_mirror = _types.SimpleNamespace(
+        read_mirror_state=lambda cfg, n: (
+            {'url': 'ssh://u@h/pool', 'ssh_key': ''} if n == 'm1' else None),
+        list_mirrors=lambda cfg: ['m1'],
+        coord_root_for=lambda url: url + '-coord',
+        rsync_spec_for_url=lambda url: ('u@h:/pool-coord', None),
+        local_ahead_candidates=(
+            lambda bb, bid, repo, blog: list(_cands)),
+    )
+    _fake_transport = _types.SimpleNamespace(
+        pull_remote_coord=lambda **k: (True, ''))
+    _fake_head = _types.SimpleNamespace(
+        read_coord_head=lambda fetched, home: {'revoked_builders': {}})
+    _fake_id = _types.SimpleNamespace(load_keyring=lambda d: {})
+    _fake_store = _types.SimpleNamespace(
+        read_all_claims=lambda d, k, r: {'bid': []})
+    _fake_signing = _types.SimpleNamespace(signing_home=lambda cfg: '/s')
+
+    _published: 'list' = []
+
+    def _mk():
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess._coord_self_keys = lambda: ('bid', 'priv', 'pub')
+        _sess.cmd_mirror_publish = (
+            lambda *a, reclaim_intents=None:
+            (_published.append((a, reclaim_intents)), True)[1])
+        return _sess
+
+    class _FakePrompt:
+        _answer = 'y'
+
+        def __init__(self, *a, **k):
+            pass
+
+        def get_response(self):
+            return _FakePrompt._answer
+
+    _mods = {
+        'mirror': _fake_mirror, 'signing': _fake_signing,
+        'coord.head': _fake_head, 'coord.identity': _fake_id,
+        'coord.store': _fake_store, 'coord.transport': _fake_transport,
+    }
+    _saved = {_k: _sys.modules.get(_k) for _k in _mods}
+    _orig_prompt = _cm.Prompt
+    _orig_print = build.console.print
+    _lines: 'list[str]' = []
+    build.console.print = lambda *a, **k: _lines.append(
+        ' '.join(str(x) for x in a))
+    _cm.Prompt = _FakePrompt
+    try:
+        _sys.modules.update(_mods)
+        # 1. no target → listing only, no publish
+        _published.clear()
+        _r = _mk().cmd_mirror_reclaim()
+        assert _r is True and _published == [], (_r, _published)
+        assert any('a_1.0_amd64.deb' in _l for _l in _lines), _lines
+        # 2. source target + force → publish with the matching intent
+        _published.clear()
+        _r = _mk().cmd_mirror_reclaim('srcb', 'force')
+        assert _r is True and len(_published) == 1, (_r, _published)
+        _a, _intents = _published[0]
+        assert _a == ('m1',)
+        assert [_i['filename'] for _i in _intents] == ['b_1.0_amd64.deb']
+        # 3. unmatched target → False, no publish
+        _published.clear()
+        _r = _mk().cmd_mirror_reclaim('nope.deb', 'force')
+        assert _r is False and _published == []
+        # 4. confirmation declined → no publish
+        _published.clear()
+        _FakePrompt._answer = 'n'
+        _r = _mk().cmd_mirror_reclaim('srca')
+        assert _r is True and _published == []
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                _sys.modules.pop(_k, None)
+            else:
+                _sys.modules[_k] = _v
+        _cm.Prompt = _orig_prompt
+        build.console.print = _orig_print
+
+
 def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
     """Phase 8 publish gate: BLOCK when build snapshot.current < mirror.base.
     Surfaces an actionable error + leaves no state change."""
@@ -33663,6 +33786,8 @@ def main() -> int:
         test_remote_publish_drops_claim_when_push_fails,
         # MIRROR-01 Phase 4 — audit + query + multi-mirror UPD-01 wiring
         test_cmd_mirror_dispatch_routes_audit_and_query,
+        test_cmd_mirror_dispatch_routes_reclaim,
+        test_cmd_mirror_reclaim_lists_resolves_and_confirms,
         test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
         test_mirror_audit_disk_vs_claims_flags_missing_and_orphan,
         test_cmd_mirror_summary_we_own_counts_non_retracted_claims,
