@@ -151,6 +151,26 @@ to bootstrap config).
 **Rule:** the `.buildlog` DELTA section is the ground truth for what a
 source actually emits; declared-set reasoning is only an upper bound.
 
+### 3.4 dpkg-shlibdeps emits NO dependency for libs it resolves via a private `-l` dir
+A library found only through `dpkg-shlibdeps -l<dir>` (a package's own
+in-tree build dir) produces **no** `shlibs:Depends` entry — silently, by
+design; the `-L shlibs.local` mapping is what turns those lookups into
+real dependencies.
+**Incident (2026-06-11, e2fsprogs):** our
+`9001-fix-shlibdeps-symbolfile-crash.patch` dropped upstream's
+`-- -L debian/e2fsprogs.shlibs.local` args (to dodge the dpkg-dev
+1.21.x SymbolFile.pm crash) and with them the sibling-lib deps:
+`e2fsprogs`/`fuse2fs`/`e2fsprogs-udeb` shipped **missing**
+`libext2fs2`/`libcom-err2`/`libss2`.  The SURFACES-01 disk closure
+faithfully followed the broken metadata (the legacy ship-everything
+pool had masked it for weeks) → root fsck exec-failed at boot → reboot
+loop (see 9.1).  Fixed by injecting the deps into the `.substvars`
+files inside the same patch; rebuilt as `+asg1u2` (commit `00d45f9`).
+**Rule:** any patch that drops a `-L shlibs.local` mapping must
+re-inject the equivalent deps via substvars, mirroring upstream's
+resolved constraints; dpkg-shlibdeps' silence here is documented
+behaviour, not an error you'll see in a log.
+
 ---
 
 ## 4. Architecture & version semantics
@@ -243,6 +263,40 @@ minimal `/etc/debconf.conf` into the chroot before the first
 `dpkg --configure` (`_init_dpkg_database`), or maintainer scripts hang
 on prompts.
 
+### 7.3 Chrootless dpkg configure runs maintainer scripts on the HOST
+Until `dpkg` and `sh` exist *inside* the chroot, our bring-up configures
+packages chrootless — which means every postinst executes against the
+host's filesystem.  A postinst that execs a binary the package itself
+ships fails with exit 127 (the binary is in the chroot, not on the
+host), leaving the package half-configured.
+**Incident (2026-06-11, python3.11-minimal, SURFACES-01 first live
+build):** its postinst runs its own shipped `/usr/bin/python3.11` —
+absent on the host — so it sat half-configured; `python3-minimal`'s
+Pre-Depends then couldn't unpack, the failure cascaded to `python3` and
+`gnome-menus`, and only the in-chroot final sweep healed the chain.
+**Rule:** Kahn schedules the dependency closure of
+`dpkg, dash, coreutils, sed, grep` in the earliest batches
+(debootstrap-style essential bootstrap, commit `8a388ab`) so every
+later batch configures in-chroot; the post-sweep unpack-retry rounds
+(`d41de39`) stay as defence-in-depth, not as the primary mechanism.
+
+### 7.4 `dpkg --get-selections` can NEVER show a half-configured package
+`--get-selections` reports the *selection* state (install/hold/
+deinstall), not the *configuration* state — a completion gate built on
+it prints success unconditionally.  Two adjacent traps in the same
+incident: dpkg's `error processing package` lines go to **stderr**, and
+the package name is **not** the line's last token (the last token is
+`(--configure):`).
+**Incident (2026-06-11, SURFACES-01 first live build):** the chroot
+build printed "all packages fully configured" while `gnome-menus` was
+half-configured and `python3` was never installed; the final-pass
+summary parsed stdout for error lines and grabbed the last token, so it
+also reported "0 package(s) failed" (commit `9ad420d`).
+**Rule:** the authoritative completion gate is `dpkg-query -W
+-f '${Package} ${Status}'` diffed against the install plan (broken vs
+never-installed classified separately); parse both output streams with
+a real regex when extracting failing package names.
+
 ---
 
 ## 8. d-i / cdebconf surfaces (build-adjacent)
@@ -262,6 +316,51 @@ problem.  Sibling rule: a task whose `Key:` names anything that fails
 **Rule:** when a consumer "doesn't see" data we ship correctly, read the
 consumer's source for env/config filters FIRST; keep `Key:` lists to
 real package names (test-enforced against `config/pkg.list` groups).
+
+---
+
+## 9. Boot & runtime surfaces (artifact verification)
+
+### 9.1 fsck exit codes are a bitmask — exec failure (127) reads as "reboot required"
+systemd-fsck interprets fsck's exit status bit-by-bit; bit 2 means
+"system should be rebooted".  Exit 127 ("command found but could not be
+executed", e.g. a missing shared library) has bit 2 set, so a fsck
+binary that can't even *start* triggers an immediate, irreversible
+reboot — on **every** boot.
+**Incident (2026-06-11, disk image, SURFACES-01):** e2fsprogs shipped
+missing its `libext2fs2` dep (quirk 3.4) → `fsck.ext4` exec-failed with
+127 → systemd-fsck rebooted the machine seconds into every boot, before
+any login.  Debug recipe that cracked it: serial console +
+`systemd.log_level=debug systemd.log_target=kmsg` on the kernel
+cmdline.
+**Rule:** a first-boot reboot loop means "check that fsck can EXEC"
+before suspecting filesystem corruption; keep the serial+kmsg recipe at
+hand — the loop kills the journal before it persists anything.
+
+### 9.2 `nomodeset` kills GNOME — no KMS means no `/dev/dri`
+Without kernel modesetting there is no DRM device, so gdm's Wayland
+attempt and the Xorg modesetting fallback both fail; the session
+restart loop burns out and leaves the VT in a dead graphics state.
+**Incident (2026-06-11, first GNOME live boot, SURFACES-01):** the live
+grub.cfg still carried `nomodeset` from the console-only era — screen
+flashed a few times, no GUI, console switching looked broken too
+(commit `53e9225`).  VMs are fine with KMS (virtio-gpu/qxl/vmwgfx/
+bochs-simpledrm all provide it).
+**Rule:** the default boot entry boots with KMS; `nomodeset` lives only
+on an explicit "safe graphics — console only" fallback entry.
+
+### 9.3 systemd-firstboot silently overwrites identity files written earlier
+`systemd-firstboot --hostname=X` wins over an `/etc/hostname` written
+by an earlier build step — no warning, last writer wins.
+**Incident (2026-06-11, disk image):** `generate_system_configs` wrote
+the correct `asgard` hostname, then the firstboot call two steps later
+carried a hardcoded `--hostname=athena` (toolchain name — a three-layer
+identity violation) and overwrote it; caught only on the serial log's
+"Hostname set to <athena>" (commit `ebdbc2d`).
+**Rule:** every firstboot/identity argument derives from the same
+config source as the file writes (never a literal); audit shipped
+identity against `project_three_layer_identity` — Athena is the
+toolchain, Asgard is what boots.
 
 ---
 

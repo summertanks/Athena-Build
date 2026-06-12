@@ -2,7 +2,7 @@
 
 How to register, redo, and verify a publish-target mirror under the
 MIRROR-01 federation surface (`mirror add` / `publish` / `pull` /
-`reconcile-neighbours` / `audit`).
+`reclaim` / `reconcile-neighbours` / `audit`).
 
 Supersedes the pre-MIRROR-01 `repo publish ssh` / `repo publish local`
 command group, which was removed in commit `8cc803b` along with its
@@ -401,6 +401,139 @@ and `repo audit` runs see them as already-built:
 Means a builder can pull from a mirror and immediately drive
 `chroot build` against the pulled tree, no `source build` step.
 
+## LEDGER-01: claim lifecycle — how published files age out
+
+The pool on a mirror is append-only, but selections change and
+versions move forward.  LEDGER-01 makes that ageing explicit: instead
+of inferring "this file is old" from absence, the signed claim ledger
+records an end-of-life state per file, and the local `build.json`
+records a per-source lifecycle.
+
+### Three end-of-life claim states (claim schema v4)
+
+| State | Written when | Ownership | Pool file |
+|---|---|---|---|
+| `retracted` | owner withdraws the claim (`mirror conflict resolve`) | — (tombstone; file metadata stripped) | withdrawn |
+| `deprecated` | publish **Step 6b** — the file dropped out of our selection | RELEASED — `project_owners` reports no owner; any builder may take it over by republishing | stays in the append-only pool, adoptable |
+| `obsolete` | publish **Step 6c** — this old version was superseded by a newer version from the SAME owner | RETAINED | stays in the pool as a labelled prune candidate (UPD-01 publish-before-prune) |
+
+Steps 6b and 6c run automatically inside every `mirror publish` — no
+operator action needed.  6b's authority is the signed
+`selection.state` closure (not `build.json`, which lingers after a
+drop).
+
+Presence/index audits skip all three states
+(`PRESENCE_SKIP_CLAIM_STATES` in `coord/schema.py`): a legitimately
+pruned old file never fires a false `missing_on_disk` /
+`claim_not_in_apt_index` CRITICAL.  Likewise, every audit folds out
+claims that a later retraction / deprecation / obsolescence / reclaim
+supersedes via its `*_seq` back-reference — only each filename's
+current live assertion is audited.
+
+### The local counterpart: `build.json` schema v4
+
+Each `log/build/<pkg>.build.json` is now a per-source lifecycle
+document: `selection ∈ selected | deprecated | retracted`, with
+`selected_at` / `deprecated_at` / `retracted_at` / `published_at`
+timestamps and a `history[]` of rolled episodes.  Lifecycle tracking
+starts at `cache parse` — the moment a source enters the selection —
+not at first build.
+
+## RECLAIM-01: `mirror reclaim` — same-version rebuilds
+
+**INVARIANT: a published filename's bytes are frozen forever.**  A
+normal content change bumps the version and publishes forward.
+`mirror reclaim` is the explicit operator-only exception for content
+changes that are deliberately version-less — dep-strip normalisation
+(Position-X), disaster-recovery rebuilds (builds are NOT
+bit-reproducible, so a rebuilt `.deb` never byte-matches the
+published copy).
+
+```
+mirror reclaim [<source>|<file.deb|.udeb>] [<mirror-name>] [force]
+```
+
+- **Bare `mirror reclaim`** — dry-run.  Lists the "local-ahead"
+  candidates per mirror: files whose on-disk sha matches the local
+  `build.json` `output_hashes` but whose remote claim pins an older
+  sha.  A single argument naming a configured mirror scopes the
+  listing to that mirror.
+- **With a target** (a source name, or an exact `.deb`/`.udeb`
+  filename) — shows each candidate's old→new sha pair, prompts YESNO
+  (`force` skips the prompt), then runs the normal publish
+  transaction with the reclaim claims injected: flock, federation
+  gate, hash-conflict scan and the stale-index guard all apply
+  unchanged.
+
+A reclaim claim is not a marker like the lifecycle states above — it
+is itself a LIVE `published` claim carrying `reclaims_seq`, a
+back-reference to the superseded claim.  That back-reference is
+folded at every supersession site, including the hash-conflict scan
+(so old and new shas for one filename never read as a conflict).
+
+Safety properties:
+
+- Each intent is **re-validated inside the transaction** against the
+  just-fetched remote view (`validate_reclaim_intents`): the
+  back-referenced claim must still exist, still be ours, still be the
+  filename's live post-fold assertion, and still carry the sha the
+  operator confirmed.  Any drift between listing and execution skips
+  that intent loudly instead of superseding the wrong claim.
+- The pool push **overwrites** the remote file for reclaim claims
+  only — normal pushes keep rsync `--ignore-existing`, so the
+  append-only discipline stays intact for everything else.
+- The publish status line appends "N reclaim(s)" when reclaims ride
+  along.
+- On the consuming side, `mirror pull` sha-rechecks a present local
+  file ONLY when its claim carries `reclaims_seq`, and re-downloads
+  on mismatch — reported as `refreshed=N` in the pull summary.
+
+The audit finding that points here is
+`own_claim_local_ahead_of_remote` (WARNING): "bump + publish, or
+`mirror reclaim <source|file>` if this content change is deliberately
+version-less".
+
+## `mirror pull` boundary semantics
+
+`mirror pull` fills in what OTHER builders published; it is not a
+backup of your own work.  Two rules worth internalising:
+
+- **Skip-own (security rule).**  Pull NEVER downloads a claim signed
+  by our own builder id — the local build is the authority for our
+  packages.  Consequence: pull is NOT a restore path for our own lost
+  files.  Recovery from a wiped local pool is rebuild + `mirror
+  reclaim` (the rebuilt bytes won't match the published claim), or a
+  deliberate manual copy off the mirror.
+- **End-of-life states are skipped.**  Claims in `retracted` /
+  `deprecated` / `obsolete` are never downloaded.
+
+## Publish hardening (2026-06-11)
+
+Two failure modes observed live, both now closed inside
+`mirror publish`:
+
+- **Stale-index auto-reindex.**  Publish pushes `dists/` verbatim and
+  the coord-head pins its sha, so a stale local index used to publish
+  "cleanly" while apt clients kept resolving superseded metadata.
+  Publish now re-indexes not only when the local `InRelease` is
+  missing but whenever it is STALE — any pool artifact (or pool
+  directory, which catches deletion-only changes) newer than the
+  InRelease triggers a fresh index before the push.  Operators no
+  longer need to delete `InRelease` manually after touching the pool.
+- **Append-only pool protected from `--delete`.**  The dist-tree push
+  (rsync `--delete` over `dists/<codename>/`) now PROTECTS pool
+  artifacts (`*.deb` / `*.udeb`) from receiver-side deletion.  The
+  pool lives INSIDE the dists tree, so a local prune used to
+  propagate to the remote on the next publish — violating the
+  append-only invariant.  `--delete` still reaps stale index files
+  and removed-component dirs.  Remote pruning is an explicit operator
+  action, never a push side effect.
+
+Related local-cleanup ordering: publish FIRST, then
+`repo repair cleanup`.  Pruning before publishing leaves
+`own_claim_disk_missing` CRITICALs in `mirror audit` until the next
+publish reconciles them.
+
 ## Migrating from the legacy `[Repo]` keys
 
 If `config/build.conf` still carries the pre-MIRROR-01 keys, they're
@@ -509,15 +642,19 @@ tunneled `build.json` claim, and the .deb round-trips through
 the README.
 
 `repo index` was retired from the operator surface in Phase 8 —
-`chroot build` and `mirror publish` auto-index when the local
-`InRelease` is missing.  Use `repo repair` if you suspect a stale
-index.
+`chroot build` auto-indexes when the local `InRelease` is missing,
+and `mirror publish` additionally re-indexes when the InRelease is
+STALE (any pool artifact newer than it; see "Publish hardening"
+above).  Use `repo repair` for the remaining repo-state fixups
+(`strip`, `cleanup`, `backfill-hashes`).
 
 ## `mirror summary` per-mirror `we_own` count
 
-The summary now lists `we_own: N pkg(s)` per mirror — counts
-non-retracted claims this builder owns on each mirror, sourced from
-the most-recently-fetched `cache/mirror/<name>/fetched/claims/<our-id>.jsonl`.
+The summary now lists `we_own: N pkg(s)` per mirror — counts the live
+claims this builder owns on each mirror, with an end-of-life
+breakdown appended when present (e.g. `42 pkg(s) (3 obsolete,
+2 deprecated, 1 retracted)`), sourced from the most-recently-fetched
+`cache/mirror/<name>/fetched/claims/<our-id>.jsonl`.
 
 If you've never run `mirror pull` or `mirror publish` against the
 mirror, the line says `(no claims jsonl fetched yet — run mirror pull)`
@@ -541,6 +678,29 @@ mirrors.  Network/permission failure on the listing surfaces a
 single `INFO pool_listing_unavailable` line and the cross-check is
 skipped (other audit checks still run).
 
+### Findings vocabulary
+
+The full set of per-claim findings `mirror audit` can emit, beyond
+the federation-gate and signature checks:
+
+| Finding | Sev | Meaning |
+|---|---|---|
+| `own_claim_disk_missing` | CRITICAL | our claim references a file absent from the local repo — our pool diverges from our sidecar (typical cause: pruned before publishing) |
+| `own_claim_local_ahead_of_remote` | WARNING | on-disk sha matches our local `build.json` but the remote claim pins an older sha — bump + publish, or `mirror reclaim <source\|file>` if the content change is deliberately version-less |
+| `own_claim_disk_sha_mismatch` | CRITICAL | file disagrees with both the claim AND any local build record — real bitrot / corruption |
+| `claim_not_in_apt_index` | CRITICAL | claim's filename is in no Packages file under the verified InRelease |
+| `claim_apt_sha_mismatch` | CRITICAL | claim sha and Packages sha disagree for the same filename |
+| `missing_on_disk` | CRITICAL | sidecar claim references a file not in the mirror's pool |
+| `orphan_on_disk` | WARNING | pool file with no claim backing it |
+| `hash_conflict` | CRITICAL | two builders claim the same filename with different shas → PUBLISH_HALT |
+| `reproducible_duplicate` | INFO | two builders claim the same filename with the SAME sha |
+
+Superseded claims are folded out of ALL of these: a claim targeted by
+a later retraction / deprecation / obsolescence / reclaim
+back-reference (`retracts_seq` / `deprecates_seq` / `obsoletes_seq` /
+`reclaims_seq`) is never audited as a live assertion, so pruned old
+versions and reclaimed files don't fire false findings.
+
 ## Subcommand quick reference
 
 ```
@@ -552,8 +712,10 @@ mirror list                     name, type, federation-consistency tag, url
 mirror summary [<name>]         per-mirror state + we_own count + neighbours_known list
 mirror status [<name>]          builder identity + halt sentinel + per-mirror PUBLISHED/NEVER PUBLISHED
 mirror reconcile-neighbours     fan-out: align every peer's coord-head.neighbours with local config
-mirror publish [<name>]         per-file .deb push + sign claims + re-sign coord-head (federation-gated + snapshot-base-gated)
-mirror pull [<name>]            fetch peer sidecar, download missing claim .debs (skip-own; SHA verified)
+mirror publish [<name>]         per-file .deb push + sign claims + re-sign coord-head (federation-gated + snapshot-base-gated; auto-reindexes a missing/stale local InRelease)
+mirror pull [<name>]            fetch peer sidecar, download missing claim .debs (skip-own; SHA verified; retracted/deprecated/obsolete skipped; reclaimed files refreshed)
+mirror reclaim [<src>|<file>] [<name>] [force]
+                                same-version rebuild: bare = list local-ahead candidates; with target = overwrite published bytes under unchanged filename (sanctioned invariant exception)
 mirror audit [<name>]           federation consistency, claim sigs, hash conflicts, cross-mirror pool drift, on-disk pool ↔ claims integrity
 mirror query <pkg> [<name>]     show claims matching <pkg> from last fetched view of each mirror
 mirror builders                 list registered builders (local + fetched keyring)

@@ -141,6 +141,16 @@ Two independent gates before publishing:
    integrity + NMU residue across `repo/`.  Optional `quick` to skip the
    ~30s integrity scan.
 
+The same checks run as a `chroot build` pre-flight gate, and that gate
+now BLOCKS on stale artifacts in `repo/` (version-drift /
+orphan-source / malformed).  Why: a superseded `.deb` lingering
+locally is silently consumable by the chroot installer — a stale
+e2fsprogs with broken Pre-Depends poisoned a disk image (2026-06-11)
+while the fixed build sat right beside it.  Remedy:
+`repo repair cleanup` (dry-run by default; add `force` to delete) —
+but only AFTER publishing; see the ordering note in step 7.
+`no-gate` bypasses the pre-flight for emergencies.
+
 For installer-ISO smoke-testing locally:
 
 ```
@@ -153,18 +163,24 @@ COMP-01h in TODO.md).
 
 ## 6. Index and sign the repo
 
-```
-repo index full     # apt-ftparchive + GPG-sign Release/InRelease for every suite
-```
+Indexing is automatic — `repo index` is no longer an operator command.
+`chroot build` auto-indexes when the local `InRelease` is missing, and
+`mirror publish` re-indexes when it is missing OR stale (any pool
+artifact, or pool directory, newer than the InRelease).  You no longer
+need to delete `InRelease` manually to force a re-index after touching
+the pool — a stale index used to publish "cleanly" and pin itself into
+the coord-head; the stale-index guard closed that.
 
-`repo index full` runs `dpkg-scanpackages` over `repo/dists/<codename>{,-debug}/`,
-writes per-subdir `Release`, generates the top-level `Release` via
-`apt-ftparchive release`, then signs `Release` (detached `Release.gpg`) and
-produces clearsigned `InRelease` using the project key.
+Under the hood the auto-index runs `dpkg-scanpackages` over
+`repo/dists/<codename>{,-debug}/`, writes per-subdir `Release`,
+generates the top-level `Release` via `apt-ftparchive release`, then
+signs `Release` (detached `Release.gpg`) and produces clearsigned
+`InRelease` using the project key.
 
-For an offline release (no remote transport ever), this is sufficient —
-the local signed manifest reflects the indexed pool and operators can
-manually move the tree to wherever they need it.
+For an offline release (no remote transport ever), any index-consuming
+stage (`chroot build` is the usual one) materialises the signed index —
+the local signed tree reflects the pool and operators can manually move
+it wherever they need it.
 
 ## 7. Publish
 
@@ -184,8 +200,37 @@ mirror publish primary                   # or push to one mirror by name
 `.deb`s, signs each as a claim, re-signs the destination's `coord-head`
 with the current `InRelease` SHA, and (on a fresh peer) bootstraps the
 federation by uploading our pubkey + initialising `neighbours` from the
-local mirror set.  Full operator guide:
+local mirror set.  The dist-tree push protects pool artifacts
+(`*.deb`/`*.udeb`) from receiver-side deletion, so a local prune never
+propagates to the remote — the mirror pool stays append-only; remote
+pruning is an explicit operator action, never a push side effect.
+Lifecycle bookkeeping rides along automatically: files we dropped from
+the selection are marked `deprecated` (ownership released), our
+superseded old versions are marked `obsolete` (ownership retained,
+labelled prune candidates), and the status line counts any reclaims
+(`N reclaim(s)`).  Full operator guide:
 [`docs/mirror-setup.md`](mirror-setup.md).
+
+**Publish-before-prune ordering.**  If you want to clean stale
+artifacts out of the local `repo/` (`repo repair cleanup` — also the
+remedy when the `chroot build` pre-flight blocks on them), publish
+FIRST, then prune.  Pruning before publishing makes `mirror audit`
+fire `own_claim_disk_missing` CRITICALs (your sidecar claims files
+your pool no longer has) until the next publish reconciles them.
+
+### Same-version rebuilds: `mirror reclaim` vs bump-and-publish
+
+A published filename's bytes are frozen forever — the normal path for
+ANY content change is: modify the fork → bump `debian/changelog` →
+build → `mirror publish` (the new version supersedes, the old one is
+labelled `obsolete`).  `mirror reclaim <source|file>` is the explicit
+exception for rebuilds that deliberately carry no version bump
+(dep-strip normalisation, disaster recovery — builds are not
+bit-reproducible): it overwrites the published bytes under the
+unchanged filename, with per-file sha confirmation.  Rule of thumb:
+reclaim only when an already-published filename was rebuilt without a
+bump; everything else bumps and publishes forward.  Details in
+[`docs/mirror-setup.md`](mirror-setup.md) § RECLAIM-01.
 
 The installed system reads its `/etc/apt/sources.list.d/athena-<name>.list`
 file per configured mirror, populated from each `config/mirror.<name>.state`
@@ -242,6 +287,9 @@ release boundary.  Memory: `project_upd01_update_architecture`.
 For the update flow specifically, see memory entry
 `project_upd01_update_architecture` — it's the canonical reference for
 the append-only / publish-before-prune / per-file N derivation rules.
+The publish-before-prune ordering note in step 7 applies doubly here:
+update cycles produce superseded local artifacts every round, and the
+`chroot build` pre-flight blocks on them until `repo repair cleanup`.
 
 ## Common pitfalls
 
@@ -253,6 +301,8 @@ the append-only / publish-before-prune / per-file N derivation rules.
 | Update mode lists more packages than `source audit` does | Expected — `source audit` reports needs_build via filename match; update mode adds bump-targets whose pristine filename collides with a prior build.  See `docs/pseudocode.md` "source audit vs source build all". |
 | `mirror publish` fails at the remote re-index step | `dpkg-dev` not installed on the mirror host.  `sudo apt-get install -y dpkg-dev`. |
 | `mirror publish` BLOCKs with "federation gate" | A peer's `coord-head.neighbours` differs from local config.  Run `mirror reconcile-neighbours` to align peers, then retry. |
+| `chroot build` aborts: "Repo audit found install-time risks … STALE artifacts" | Superseded / orphan-source / malformed `.deb`s in `repo/` — silently consumable by the chroot installer.  Publish first, then `repo repair cleanup force`, retry. |
+| `mirror audit` warns `own_claim_local_ahead_of_remote` | A local rebuild was never republished.  Bump + `mirror publish`; only `mirror reclaim <source\|file>` when the rebuild is deliberately version-less (see step 7). |
 | Real-hardware install fails where VMware succeeds | Firmware (microcode / wifi / video).  Check `installer/finish-install/` ordering and `pool.list` firmware entries; COMP-01h is the umbrella ticket. |
 
 ## Cross-references
