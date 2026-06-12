@@ -731,7 +731,7 @@ class MirrorCommandsMixin(SessionState):
             _dead_seqs: set = set()
             for _c in _claims:
                 for _k in ('retracts_seq', 'deprecates_seq',
-                           'obsoletes_seq'):
+                           'obsoletes_seq', 'reclaims_seq'):
                     _s = _c.get(_k)
                     if isinstance(_s, int):
                         _dead_seqs.add(_s)
@@ -1397,6 +1397,11 @@ class MirrorCommandsMixin(SessionState):
                     _o = _c.get('obsoletes_seq')
                     if isinstance(_o, int):
                         _retracted_seqs.add(_o)
+                # RECLAIM-01: live published claim with a back-ref —
+                # collected unconditionally (no state branch).
+                _rc = _c.get('reclaims_seq')
+                if isinstance(_rc, int):
+                    _retracted_seqs.add(_rc)
             for _c in _claims:
                 if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
                     continue

@@ -31755,6 +31755,64 @@ def test_claim_schema_reclaim_shape_and_jsonl_roundtrip():
     assert _back['reclaims_seq'] == 7
 
 
+def test_reclaim_pair_folds_across_conflict_owner_and_disk_audits():
+    """RECLAIM-01 Chunk 2: a reclaim pair (old published seq N + live
+    reclaim carrying reclaims_seq=N, SAME filename, different shas)
+    folds everywhere:
+      - detect_hash_conflicts: NO finding (without the fold the pair
+        reads as a same-filename hash conflict → publish halt)
+      - project_owners: the reclaim claim wins the filename
+      - project_live_claims: (pkg, ver) maps to the reclaim claim
+      - audit_own_claims_on_disk: only the reclaim is audited — a file
+        at the NEW sha yields no findings (without the fold the old
+        claim CRITICALs own_claim_disk_sha_mismatch)
+    """
+    import sys as _sys
+    import hashlib as _hashlib
+    import tempfile
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    from coord import store as _store
+    from coord import reconcile as _rec
+    import mirror as _mirror
+
+    _fn = 'athena-setup-udeb_0.182+athena1_amd64.udeb'
+    _new_sha = _hashlib.sha256(b'new-bytes').hexdigest()
+    _old = _sch.new_claim(
+        builder='b1', seq=5, package='athena-setup',
+        intended_version='0.182', built_version='0.182+athena1',
+        filename=_fn, sha256='aa' * 32, size=1, snapshot='s',
+        built_at='t', claim_state=_sch.CLAIM_STATE_PUBLISHED)
+    _new = _sch.new_reclaim(
+        builder='b1', seq=9, package='athena-setup',
+        intended_version='0.182', built_version='0.182+athena1',
+        filename=_fn, sha256=_new_sha, size=9, snapshot='s',
+        built_at='t', reclaims_seq=5)
+    _new['claim_state'] = _sch.CLAIM_STATE_PUBLISHED
+    _bb = {'b1': [_old, _new]}
+
+    # 1. hash-conflict scan stays silent (no CRITICAL, no INFO dup).
+    _f = _rec.detect_hash_conflicts(_bb)
+    assert _f == [], [getattr(_x, 'message', _x) for _x in _f]
+
+    # 2. ownership: the reclaim wins the filename with the new sha.
+    _own = _store.project_owners(_bb)
+    assert _own[_fn]['seq'] == 9 and _own[_fn]['sha256'] == _new_sha
+    assert _own[_fn]['builder'] == 'b1'
+
+    # 3. live (pkg, ver) map carries the reclaim claim.
+    _live = _store.project_live_claims(_bb)
+    _lc = _live[('athena-setup', '0.182+athena1')]
+    assert _lc['seq'] == 9 and _lc.get('reclaims_seq') == 5
+
+    # 4. disk audit: pool file at the NEW sha → completely clean.
+    with tempfile.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, _fn), 'wb') as _fh:
+            _fh.write(b'new-bytes')
+        _findings = _mirror.audit_own_claims_on_disk(_bb, 'b1', _td)
+        assert _findings == [], _findings
+
+
 def test_project_owners_obsolete_retains_ownership():
     """An obsolescence (higher seq) supersedes the old version's published
     claim for that filename, and the winner KEEPS its builder — unlike a
@@ -33024,6 +33082,7 @@ def main() -> int:
         # LEDGER-01 Chunk 4 — claim schema v3 obsolete state
         test_claim_schema_obsolete_state_and_new_obsolescence,
         test_claim_schema_reclaim_shape_and_jsonl_roundtrip,
+        test_reclaim_pair_folds_across_conflict_owner_and_disk_audits,
         test_project_owners_obsolete_retains_ownership,
         # LEDGER-01 Chunk 5 — obsolete cascade across consumers
         test_obsolete_cascade_audits_skip_and_no_findings,
