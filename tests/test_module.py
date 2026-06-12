@@ -30696,6 +30696,112 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
         build.console.print = _orig_print
 
 
+def test_cmd_mirror_pull_redownloads_stale_reclaimed_file():
+    """RECLAIM-01 Chunk 6: the pull skip-present fast path stays
+    hash-free for normal claims, but a claim carrying reclaims_seq
+    sha-checks the present local file and re-downloads on mismatch
+    (the publisher rewrote the bytes under the same filename) —
+    counted as refreshed."""
+    import sys as _sys
+    import hashlib as _hashlib
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    import mirror as _mirror_mod
+    import signing as _signing_mod
+    import coord.head as _head_mod
+    import coord.identity as _id_mod
+    import coord.store as _store_mod
+    import coord.transport as _transport_mod
+
+    with tempfile.TemporaryDirectory() as _td:
+        _pool = os.path.join(_td, 'pool')
+        os.makedirs(_pool)
+        # plain claim: file present, content does NOT match claim sha —
+        # must still be skipped without any sha check
+        with open(os.path.join(_pool, 'plain_1.0_amd64.deb'), 'wb') as _f:
+            _f.write(b'whatever')
+        # reclaimed claim: present file holds the SUPERSEDED bytes
+        with open(os.path.join(_pool, 'recl_1.0_amd64.deb'), 'wb') as _f:
+            _f.write(b'old-bytes')
+        _new_sha = _hashlib.sha256(b'new-bytes').hexdigest()
+        _claims = {'peer': [
+            {'builder': 'peer', 'seq': 1, 'package': 'plain',
+             'filename': 'plain_1.0_amd64.deb', 'sha256': 'f' * 64,
+             'claim_state': 'published', 'component': 'main',
+             'snapshot': ''},
+            {'builder': 'peer', 'seq': 9, 'package': 'recl',
+             'filename': 'recl_1.0_amd64.deb', 'sha256': _new_sha,
+             'claim_state': 'published', 'component': 'main',
+             'snapshot': '', 'reclaims_seq': 3},
+        ]}
+
+        _pulled: 'list[str]' = []
+
+        def _fake_pull_single(*, remote_spec, local_path, ssh_key=None):
+            _pulled.append(os.path.basename(local_path))
+            with open(local_path, 'wb') as _fh:
+                _fh.write(b'new-bytes')
+            return True, ''
+
+        class _Cfg:
+            dir_cache = _td
+            dir_repo = _pool
+            build_codename = 'thor'
+
+            def deb_dest_for_filename(self, fn, comp):
+                return _pool
+
+        _patches = [
+            (_mirror_mod, 'read_mirror_state',
+             lambda cfg, n: {'url': 'ssh://u@h/pool', 'ssh_key': ''}),
+            (_mirror_mod, 'list_mirrors', lambda cfg: ['m1']),
+            (_mirror_mod, 'coord_root_for', lambda url: url + '-coord'),
+            (_mirror_mod, 'rsync_spec_for_url',
+             lambda url: ('u@h:/x', None)),
+            (_signing_mod, 'signing_home', lambda cfg: '/s'),
+            (_head_mod, 'read_coord_head',
+             lambda fetched, home: {'revoked_builders': {}}),
+            (_id_mod, 'load_keyring', lambda d: {}),
+            (_store_mod, 'read_all_claims', lambda d, k, r: _claims),
+            (_transport_mod, 'pull_remote_coord',
+             lambda **k: (True, '')),
+            (_transport_mod, 'pull_single_file', _fake_pull_single),
+        ]
+        _saved = [(_m, _a, getattr(_m, _a)) for _m, _a, _ in _patches]
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess._coord_self_keys = lambda: ('us', 'priv', 'pub')
+        _sess._snapshot_current = lambda: ''
+        _recorded: 'list' = []
+        _sess._mirror_pull_write_build_records = (
+            lambda n, d: _recorded.append(d))
+        _lines: 'list[str]' = []
+        _orig_print = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            for _m, _a, _f2 in _patches:
+                setattr(_m, _a, _f2)
+            _r = _sess.cmd_mirror_pull('m1')
+            assert _r is True, (_r, _lines[-4:])
+        finally:
+            for _m, _a, _orig in _saved:
+                setattr(_m, _a, _orig)
+            build.console.print = _orig_print
+        # Only the reclaimed file was re-downloaded.
+        assert _pulled == ['recl_1.0_amd64.deb'], _pulled
+        with open(os.path.join(_pool, 'recl_1.0_amd64.deb'), 'rb') as _fh:
+            assert _fh.read() == b'new-bytes'
+        # plain file untouched despite sha disagreement (no hash check).
+        with open(os.path.join(_pool, 'plain_1.0_amd64.deb'), 'rb') as _fh:
+            assert _fh.read() == b'whatever'
+        _summary = [_l for _l in _lines if 'downloaded=' in _l]
+        assert _summary and 'refreshed=1' in _summary[-1], _lines
+        assert 'skipped_present=1' in _summary[-1], _summary
+        assert 'downloaded=1' in _summary[-1], _summary
+
+
 def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
     """Phase 8 publish gate: BLOCK when build snapshot.current < mirror.base.
     Surfaces an actionable error + leaves no state change."""
@@ -33792,6 +33898,7 @@ def main() -> int:
         test_cmd_mirror_dispatch_routes_audit_and_query,
         test_cmd_mirror_dispatch_routes_reclaim,
         test_cmd_mirror_reclaim_lists_resolves_and_confirms,
+        test_cmd_mirror_pull_redownloads_stale_reclaimed_file,
         test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
         test_mirror_audit_disk_vs_claims_flags_missing_and_orphan,
         test_cmd_mirror_summary_we_own_counts_non_retracted_claims,
