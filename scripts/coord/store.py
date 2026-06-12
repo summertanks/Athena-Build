@@ -232,6 +232,13 @@ def project_live_claims(
                 if isinstance(_obs, int):
                     _retracted_seqs.add(_obs)
                 continue
+            # RECLAIM-01: a reclaim is a LIVE claim (no continue) that
+            # erases the superseded same-(pkg,ver) claim via its back-ref;
+            # the trailing post-filter drops the earlier-processed old
+            # claim (reclaims always carry the higher seq).
+            _rcl = _c.get('reclaims_seq')
+            if isinstance(_rcl, int):
+                _retracted_seqs.add(_rcl)
             _seq = _c.get('seq')
             if isinstance(_seq, int) and _seq in _retracted_seqs:
                 continue
@@ -301,6 +308,13 @@ def iter_live_claims_by_filename(
                 _o = _c.get('obsoletes_seq')
                 if isinstance(_o, int):
                     _retracted.add(_o)
+            # RECLAIM-01: a reclaim is itself a LIVE published claim, so
+            # its back-ref is collected unconditionally (no state branch);
+            # the superseded same-filename claim is erased and the reclaim
+            # is yielded as the filename's single live assertion.
+            _rc = _c.get('reclaims_seq')
+            if isinstance(_rc, int):
+                _retracted.add(_rc)
         for _c in _claims:
             if _c.get('claim_state') == _schema.CLAIM_STATE_RETRACTED:
                 continue

@@ -349,6 +349,14 @@ def detect_hash_conflicts(
                 _o = _c.get('obsoletes_seq')
                 if isinstance(_o, int):
                     _retracted.add(_o)
+            # RECLAIM-01: a reclaim is a LIVE published claim (not a
+            # marker state), so collect its back-ref unconditionally —
+            # without this fold, the same-filename old/new pair the
+            # reclaim deliberately creates reads as a hash conflict and
+            # CRITICAL-halts every subsequent publish.
+            _rc = _c.get('reclaims_seq')
+            if isinstance(_rc, int):
+                _retracted.add(_rc)
         for _c in _claims:
             # PRESENCE_SKIP: an obsolete (old-version) file may be pruned —
             # don't scan an identity nobody asserts anymore.
