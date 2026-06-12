@@ -90,6 +90,7 @@ def pull_remote_coord(
 def push_single_deb(
     *, local_path: str, remote_spec: str,
     ssh_key: 'Optional[str]' = None,
+    overwrite: bool = False,
 ) -> Tuple[bool, str]:
     """Rsync one local `.deb` (or `.udeb`) → `remote_spec` (a remote FILE
     path, not a directory).
@@ -99,11 +100,18 @@ def push_single_deb(
     version, arch), so name-match is the right key.  Single-file
     semantics so MIRROR-01 Phase 3b can tick a ProgressBar one notch
     per .deb and report failures precisely.
+
+    overwrite=True (RECLAIM-01): drop --ignore-existing so the
+    transfer REPLACES the remote bytes — used exclusively for reclaim
+    claims, the sanctioned exception to filename immutability (the
+    remote file exists by definition and skipping it would publish a
+    claim whose bytes never shipped).
     """
     if not os.path.isfile(local_path):
         return False, f"local file missing: {local_path}"
     _argv = list(_RSYNC_BASE)
-    _argv += ['--ignore-existing']
+    if not overwrite:
+        _argv += ['--ignore-existing']
     _ssh = _ssh_arg(ssh_key)
     if _ssh is not None:
         _argv += _ssh
