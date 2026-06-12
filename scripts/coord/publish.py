@@ -271,6 +271,103 @@ def emit_obsolescence_claims(
     return _out
 
 
+def validate_reclaim_intents(
+    *,
+    builder_id: str,
+    by_builder: Dict[str, List[dict]],
+    intents: List[dict],
+    snapshot_pin: str,
+) -> Tuple[List[dict], List[str]]:
+    """RECLAIM-01 — re-validate operator-resolved reclaim intents
+    against the freshly fetched remote view and construct the pending
+    reclaim claims (seq=0; caller assigns + stamps published at
+    append, same as any pending claim).
+
+    Each intent is a ``mirror.local_ahead_candidates`` row: filename,
+    package, component, old_seq, remote_sha, local_sha, size,
+    intended_version, built_version.
+
+    Returns ``(claims, skip_reasons)``.  An intent is SKIPPED (loud,
+    never fatal — the rest of the publish proceeds) when, on the
+    just-fetched view, the back-referenced claim:
+      - doesn't exist at old_seq / names a different filename
+      - isn't a live published assertion (marker state, or already
+        superseded by any *_seq back-ref — e.g. a concurrent reclaim)
+      - carries a different sha than the operator confirmed at listing
+        time (remote drift)
+      - already matches the local sha (nothing to reclaim)
+    """
+    _ok: List[dict] = []
+    _skipped: List[str] = []
+    _ours = by_builder.get(builder_id) or []
+    _dead: set = set()
+    for _c in _ours:
+        for _f in ('retracts_seq', 'deprecates_seq', 'obsoletes_seq',
+                   'reclaims_seq'):
+            _t = _c.get(_f)
+            if isinstance(_t, int):
+                _dead.add(_t)
+    _by_seq = {int(_c.get('seq', 0)): _c for _c in _ours}
+    for _i in intents:
+        _fn = str(_i.get('filename') or '')
+        _old_seq = int(_i.get('old_seq', 0))
+        _old = _by_seq.get(_old_seq)
+        if _old is None:
+            _skipped.append(
+                f"{_fn}: back-referenced claim seq={_old_seq} not in "
+                "our remote jsonl")
+            continue
+        if str(_old.get('filename') or '') != _fn:
+            _skipped.append(
+                f"{_fn}: claim seq={_old_seq} names "
+                f"{_old.get('filename')!r} — stale intent")
+            continue
+        if _old.get('claim_state') != _schema.CLAIM_STATE_PUBLISHED:
+            _skipped.append(
+                f"{_fn}: claim seq={_old_seq} is "
+                f"{_old.get('claim_state')!r} — only a live published "
+                "claim can be reclaimed")
+            continue
+        if _old_seq in _dead:
+            _skipped.append(
+                f"{_fn}: claim seq={_old_seq} already superseded on "
+                "remote")
+            continue
+        _remote_sha = str(_old.get('sha256') or '')
+        if _remote_sha != str(_i.get('remote_sha') or ''):
+            _skipped.append(
+                f"{_fn}: remote sha drifted since listing "
+                f"(claim {_remote_sha[:12]} vs confirmed "
+                f"{str(_i.get('remote_sha') or '')[:12]}) — re-run "
+                "`mirror reclaim`")
+            continue
+        _local_sha = str(_i.get('local_sha') or '')
+        if not _local_sha or _local_sha == _remote_sha:
+            _skipped.append(f"{_fn}: already in sync — nothing to "
+                            "reclaim")
+            continue
+        _ok.append(_schema.new_reclaim(
+            builder=builder_id,
+            seq=0,  # caller assigns before signing
+            package=str(_i.get('package') or _old.get('package') or ''),
+            intended_version=str(
+                _i.get('intended_version')
+                or _old.get('intended_version') or ''),
+            built_version=str(
+                _i.get('built_version')
+                or _old.get('built_version') or ''),
+            filename=_fn,
+            sha256=_local_sha,
+            size=int(_i.get('size', 0)),
+            snapshot=snapshot_pin,
+            built_at=_utc_now(),
+            reclaims_seq=_old_seq,
+            component=str(
+                _i.get('component') or _old.get('component') or 'main'),
+        ))
+    return _ok, _skipped
+
+
 def filter_pending_by_ownership(
     builder_id: str,
     candidates: List[dict],
@@ -466,9 +563,17 @@ def remote_publish(
     on_status: 'Optional[Callable[[str], None]]' = None,
     install_corpus: 'Optional[frozenset[str]]' = None,
     on_published: 'Optional[Callable[[set], None]]' = None,
+    reclaim_intents: 'Optional[List[dict]]' = None,
 ) -> Tuple[bool, str]:
     """11-step publish transaction (see module docstring).  Returns
     (ok, detail).  On failure detail explains the step that aborted.
+
+    `reclaim_intents` (RECLAIM-01) — operator-resolved
+    `mirror.local_ahead_candidates` rows from `mirror reclaim`; each is
+    re-validated against the just-fetched remote view
+    (validate_reclaim_intents) and, when still sound, rides the normal
+    pending path: file pushed in 5b (overwriting the remote bytes —
+    the sanctioned invariant exception), claim signed published in 6.
 
     `inrelease_local_path` MUST be a local copy of the same InRelease
     that's published at the remote — typically the InRelease produced
@@ -650,10 +755,31 @@ def remote_publish(
                     f"ownership_blocked: {_b['filename']} owned by "
                     f"{_b['owner']!r} at {_b['owner_version']!r}; "
                     f"our {_b['our_version']!r} not strictly higher")
+        # RECLAIM-01 — inject operator-resolved reclaim intents AFTER
+        # the _remote_known filter (their filenames are by definition
+        # already on the remote) and AFTER the ownership filter (the
+        # same-filename owner is us).  Each intent is re-validated
+        # against the JUST-FETCHED remote view: the back-referenced
+        # claim must still exist, be ours, be the filename's live
+        # post-fold assertion, and carry the remote_sha the operator
+        # confirmed — any drift between listing and execution skips
+        # that intent loudly rather than superseding the wrong claim.
+        _reclaims_ok, _reclaims_skipped = validate_reclaim_intents(
+            builder_id=builder_id,
+            by_builder=_by_builder,
+            intents=reclaim_intents or [],
+            snapshot_pin=snapshot_pin,
+        )
+        for _why in _reclaims_skipped:
+            logger.warning(f"reclaim intent skipped: {_why}")
+            _status(f"reclaim intent SKIPPED: {_why}")
+        _pending.extend(_reclaims_ok)
         _status(
             f"pending claims: {len(_pending)} to publish "
-            f"({_pending_total - len(_pending) - len(_ownership_blocked)} "
-            f"already on remote, {len(_ownership_blocked)} ownership-blocked)")
+            f"({_pending_total - len(_pending) + len(_reclaims_ok) - len(_ownership_blocked)} "
+            f"already on remote, {len(_ownership_blocked)} ownership-blocked"
+            + (f", {len(_reclaims_ok)} reclaim(s)" if _reclaims_ok else '')
+            + ")")
         # MIRROR-02 chunk 11: post-publish installability gate.
         # Project the union state (mirror's existing claims + our
         # pending) and walk audit_dep_closure with consumer_set =
@@ -754,6 +880,11 @@ def remote_publish(
                 _ok_push, _detail_push = _transport.push_single_deb(
                     local_path=_local_path, remote_spec=_remote_file,
                     ssh_key=ssh_key,
+                    # RECLAIM-01: a reclaim's remote file exists with the
+                    # OLD bytes — --ignore-existing would silently skip
+                    # the transfer and publish a claim whose bytes never
+                    # shipped.  Overwrite for reclaim claims only.
+                    overwrite=isinstance(_claim.get('reclaims_seq'), int),
                 )
                 if on_progress is not None:
                     on_progress(_i, _total_to_push, _fn, _ok_push)

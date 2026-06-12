@@ -30100,7 +30100,7 @@ def test_remote_publish_bootstrap_uploads_pubkey_when_no_head():
 
         # Capture push_jsonl calls + the head dict passed to write_coord_head
         _pushed: 'list[dict]' = []
-        def _fake_push(*, local_path, remote_spec, ssh_key=None):
+        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False):
             _pushed.append({'local': local_path, 'remote': remote_spec})
             return True, ''
         _written_head: 'list[dict]' = []
@@ -30496,7 +30496,7 @@ def test_remote_publish_pushes_debs_per_file_and_calls_progress():
         # Track push calls + progress callback observations
         _pushed: 'list[str]' = []
         _progress_events: 'list[tuple]' = []
-        def _fake_push(*, local_path, remote_spec, ssh_key=None):
+        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False):
             _pushed.append(remote_spec)
             return True, ''
         def _fake_write_head(coord_dir, head, signing_home):
@@ -30897,7 +30897,7 @@ def test_remote_publish_drops_claim_when_push_fails():
              'claim_state': 'pending', 'seq': 0, 'v': 1}
             for _n in _names
         ]
-        def _fake_push(*, local_path, remote_spec, ssh_key=None):
+        def _fake_push(*, local_path, remote_spec, ssh_key=None, overwrite=False):
             if 'bad' in remote_spec:
                 return False, 'simulated rsync failure'
             return True, ''
@@ -31877,6 +31877,103 @@ def test_reclaim_pair_folds_across_conflict_owner_and_disk_audits():
             _fh.write(b'new-bytes')
         _findings = _mirror.audit_own_claims_on_disk(_bb, 'b1', _td)
         assert _findings == [], _findings
+
+
+def test_validate_reclaim_intents_constructs_and_skips():
+    """RECLAIM-01 Chunk 4: validate_reclaim_intents re-checks each
+    intent against the just-fetched remote view — happy path yields a
+    pending new_reclaim (seq=0, reclaims_seq=old_seq, local sha);
+    every drift/staleness mode is SKIPPED with a reason, never fatal:
+    missing back-ref seq, filename mismatch, non-published state,
+    already-superseded, remote sha drift, already-in-sync."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from coord import schema as _sch
+    from coord import publish as _pub
+
+    def _claim(seq, fn, sha, state='published', **kw):
+        _c = {'builder': 'b1', 'seq': seq, 'package': 'src',
+              'intended_version': '1.0', 'built_version': '1.0',
+              'filename': fn, 'sha256': sha, 'claim_state': state,
+              'component': 'main'}
+        _c.update(kw)
+        return _c
+
+    def _intent(fn, old_seq, remote_sha, local_sha):
+        return {'filename': fn, 'package': 'src', 'component': 'main',
+                'old_seq': old_seq, 'remote_sha': remote_sha,
+                'local_sha': local_sha, 'size': 5,
+                'intended_version': '1.0', 'built_version': '1.0'}
+
+    _bb = {'b1': [
+        _claim(1, 'good_1.0_amd64.deb', 'aa' * 32),
+        _claim(2, 'depr_1.0_amd64.deb', 'bb' * 32),
+        _claim(3, 'depr_1.0_amd64.deb', 'bb' * 32, state='deprecated',
+               deprecates_seq=2),
+        _claim(4, 'drift_1.0_amd64.deb', 'cc' * 32),
+        _claim(5, 'sync_1.0_amd64.deb', 'dd' * 32),
+        # already reclaimed once: seq 6 superseded by seq 7
+        _claim(6, 'twice_1.0_amd64.deb', 'ee' * 32),
+        _claim(7, 'twice_1.0_amd64.deb', 'ff' * 32, reclaims_seq=6),
+    ]}
+    _intents = [
+        _intent('good_1.0_amd64.deb', 1, 'aa' * 32, '11' * 32),   # OK
+        _intent('gone_1.0_amd64.deb', 99, 'aa' * 32, '11' * 32),  # no seq
+        _intent('good_1.0_amd64.deb', 4, 'cc' * 32, '11' * 32),   # fn mismatch
+        _intent('depr_1.0_amd64.deb', 2, 'bb' * 32, '11' * 32),   # superseded
+        _intent('drift_1.0_amd64.deb', 4, '99' * 32, '11' * 32),  # sha drift
+        _intent('sync_1.0_amd64.deb', 5, 'dd' * 32, 'dd' * 32),   # in sync
+        _intent('twice_1.0_amd64.deb', 6, 'ee' * 32, '22' * 32),  # superseded
+    ]
+    _ok, _skipped = _pub.validate_reclaim_intents(
+        builder_id='b1', by_builder=_bb, intents=_intents,
+        snapshot_pin='snap')
+    assert len(_ok) == 1, (_ok, _skipped)
+    _rc = _ok[0]
+    assert _rc['filename'] == 'good_1.0_amd64.deb'
+    assert _rc['reclaims_seq'] == 1 and _rc['seq'] == 0
+    assert _rc['sha256'] == '11' * 32 and _rc['size'] == 5
+    assert _rc['claim_state'] == _sch.CLAIM_STATE_PENDING
+    assert _rc['snapshot'] == 'snap'
+    assert len(_skipped) == 6, _skipped
+    # not-ours: intents against a different builder's view yield nothing
+    _ok2, _skipped2 = _pub.validate_reclaim_intents(
+        builder_id='other', by_builder=_bb,
+        intents=[_intents[0]], snapshot_pin='snap')
+    assert _ok2 == [] and len(_skipped2) == 1
+
+
+def test_push_single_deb_overwrite_drops_ignore_existing():
+    """RECLAIM-01 Chunk 4: push_single_deb keeps --ignore-existing by
+    default (immutable filenames make re-publish cheap) and drops it
+    under overwrite=True — a reclaim's remote file exists with the OLD
+    bytes, and skipping the transfer would publish a claim whose bytes
+    never shipped."""
+    import sys as _sys
+    import types as _types
+    import tempfile
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _tr
+
+    _argvs = []
+
+    def _fake_run(argv, **k):
+        _argvs.append(argv)
+        return _types.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    _orig = _tr.subprocess
+    _tr.subprocess = _types.SimpleNamespace(run=_fake_run)
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.deb') as _f:
+            _ok, _ = _tr.push_single_deb(
+                local_path=_f.name, remote_spec='u@h:/p/x.deb')
+            assert _ok and '--ignore-existing' in _argvs[-1]
+            _ok, _ = _tr.push_single_deb(
+                local_path=_f.name, remote_spec='u@h:/p/x.deb',
+                overwrite=True)
+            assert _ok and '--ignore-existing' not in _argvs[-1]
+    finally:
+        _tr.subprocess = _orig
 
 
 def test_project_owners_obsolete_retains_ownership():
@@ -33149,6 +33246,8 @@ def main() -> int:
         test_claim_schema_obsolete_state_and_new_obsolescence,
         test_claim_schema_reclaim_shape_and_jsonl_roundtrip,
         test_reclaim_pair_folds_across_conflict_owner_and_disk_audits,
+        test_validate_reclaim_intents_constructs_and_skips,
+        test_push_single_deb_overwrite_drops_ignore_existing,
         test_project_owners_obsolete_retains_ownership,
         # LEDGER-01 Chunk 5 — obsolete cascade across consumers
         test_obsolete_cascade_audits_skip_and_no_findings,
