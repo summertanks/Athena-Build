@@ -1230,6 +1230,7 @@ class MirrorCommandsMixin(SessionState):
                 f"{len(_by_builder)} builder(s)")
             # 3. Walk claims; download per-file for our current snapshot
             _dl = _skip_own = _skip_present = _mismatch = _failed = 0
+            _refreshed = 0
             # MIRROR-02 chunk 10: collect successfully-downloaded
             # claims per package so we can write a single local
             # build.json record per source.  Indexed by package name;
@@ -1259,17 +1260,35 @@ class MirrorCommandsMixin(SessionState):
                     _dst_dir = self.config.deb_dest_for_filename(_fn, _comp)
                     _local_path = os.path.join(_dst_dir, _fn)
                     if os.path.isfile(_local_path):
-                        _skip_present += 1
-                        # Even when already present, record the claim
-                        # for the per-package build.json write below —
-                        # the on-disk file is the same SHA, so we want
-                        # the record to reflect our provenance even if
-                        # we didn't have to download it now.
-                        _pkg_name = str(_c.get('package') or '')
-                        if _pkg_name:
-                            _per_pkg_downloads.setdefault(_pkg_name, []).append(
-                                (_c, _builder))
-                        continue
+                        # RECLAIM-01: a claim carrying reclaims_seq means
+                        # the publisher REWROTE the bytes under this
+                        # filename (sanctioned invariant exception) — a
+                        # present local file may hold the superseded
+                        # bytes.  Sha-check ONLY these claims (reclaims
+                        # are rare; the general present-file fast path
+                        # stays hash-free) and fall through to the
+                        # download below on mismatch.
+                        _stale_reclaim = False
+                        if isinstance(_c.get('reclaims_seq'), int):
+                            _have = utils.get_sha256(
+                                _local_path, use_cache=False)
+                            _stale_reclaim = _have != _c.get('sha256')
+                        if not _stale_reclaim:
+                            _skip_present += 1
+                            # Even when already present, record the claim
+                            # for the per-package build.json write below —
+                            # the on-disk file is the same SHA, so we want
+                            # the record to reflect our provenance even if
+                            # we didn't have to download it now.
+                            _pkg_name = str(_c.get('package') or '')
+                            if _pkg_name:
+                                _per_pkg_downloads.setdefault(
+                                    _pkg_name, []).append((_c, _builder))
+                            continue
+                        console.print(
+                            f"  {_fn}: reclaimed upstream — local bytes "
+                            "superseded, re-downloading")
+                        _refreshed += 1
                     # Source path on the mirror = same relative layout
                     # under <pool_root>/dists/<codename>/<comp>/...
                     _rel = os.path.relpath(_local_path, self.config.dir_repo)
@@ -1313,7 +1332,8 @@ class MirrorCommandsMixin(SessionState):
             console.print(
                 f"  downloaded={_dl} skipped_own={_skip_own} "
                 f"skipped_present={_skip_present} "
-                f"verify_mismatch={_mismatch} failed={_failed}",
+                f"verify_mismatch={_mismatch} failed={_failed}"
+                + (f" refreshed={_refreshed}" if _refreshed else ''),
                 tui.COLOR_HIGHLIGHT if (_mismatch + _failed) == 0
                 else tui.COLOR_ERROR)
             if _mismatch or _failed:
