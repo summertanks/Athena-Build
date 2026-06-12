@@ -30587,7 +30587,6 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
     matching intents; unmatched target → False, no publish; YESNO 'n'
     → no publish."""
     import sys as _sys
-    import types as _types
     _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import build
     from build import BuildSession
@@ -30609,23 +30608,36 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
         dir_repo = '/nonexistent-repo'
         dir_log = '/nonexistent-log'
 
-    _fake_mirror = _types.SimpleNamespace(
-        read_mirror_state=lambda cfg, n: (
-            {'url': 'ssh://u@h/pool', 'ssh_key': ''} if n == 'm1' else None),
-        list_mirrors=lambda cfg: ['m1'],
-        coord_root_for=lambda url: url + '-coord',
-        rsync_spec_for_url=lambda url: ('u@h:/pool-coord', None),
-        local_ahead_candidates=(
-            lambda bb, bid, repo, blog: list(_cands)),
-    )
-    _fake_transport = _types.SimpleNamespace(
-        pull_remote_coord=lambda **k: (True, ''))
-    _fake_head = _types.SimpleNamespace(
-        read_coord_head=lambda fetched, home: {'revoked_builders': {}})
-    _fake_id = _types.SimpleNamespace(load_keyring=lambda d: {})
-    _fake_store = _types.SimpleNamespace(
-        read_all_claims=lambda d, k, r: {'bid': []})
-    _fake_signing = _types.SimpleNamespace(signing_home=lambda cfg: '/s')
+    # Patch ATTRIBUTES on the real modules (not sys.modules): the
+    # command does `import coord.transport as _t` at call time, which
+    # binds via the coord package attribute when the real submodule was
+    # already imported by an earlier test — a sys.modules swap is
+    # silently ignored in that case.
+    import mirror as _mirror_mod
+    import signing as _signing_mod
+    import coord.head as _head_mod
+    import coord.identity as _id_mod
+    import coord.store as _store_mod
+    import coord.transport as _transport_mod
+    _patches = [
+        (_mirror_mod, 'read_mirror_state',
+         lambda cfg, n: ({'url': 'ssh://u@h/pool', 'ssh_key': ''}
+                         if n == 'm1' else None)),
+        (_mirror_mod, 'list_mirrors', lambda cfg: ['m1']),
+        (_mirror_mod, 'coord_root_for', lambda url: url + '-coord'),
+        (_mirror_mod, 'rsync_spec_for_url',
+         lambda url: ('u@h:/pool-coord', None)),
+        (_mirror_mod, 'local_ahead_candidates',
+         lambda bb, bid, repo, blog: list(_cands)),
+        (_signing_mod, 'signing_home', lambda cfg: '/s'),
+        (_head_mod, 'read_coord_head',
+         lambda fetched, home: {'revoked_builders': {}}),
+        (_id_mod, 'load_keyring', lambda d: {}),
+        (_store_mod, 'read_all_claims', lambda d, k, r: {'bid': []}),
+        (_transport_mod, 'pull_remote_coord',
+         lambda **k: (True, '')),
+    ]
+    _saved_attrs = [(_m, _a, getattr(_m, _a)) for _m, _a, _ in _patches]
 
     _published: 'list' = []
 
@@ -30647,12 +30659,6 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
         def get_response(self):
             return _FakePrompt._answer
 
-    _mods = {
-        'mirror': _fake_mirror, 'signing': _fake_signing,
-        'coord.head': _fake_head, 'coord.identity': _fake_id,
-        'coord.store': _fake_store, 'coord.transport': _fake_transport,
-    }
-    _saved = {_k: _sys.modules.get(_k) for _k in _mods}
     _orig_prompt = _cm.Prompt
     _orig_print = build.console.print
     _lines: 'list[str]' = []
@@ -30660,11 +30666,12 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
         ' '.join(str(x) for x in a))
     _cm.Prompt = _FakePrompt
     try:
-        _sys.modules.update(_mods)
+        for _m, _a, _f in _patches:
+            setattr(_m, _a, _f)
         # 1. no target → listing only, no publish
         _published.clear()
         _r = _mk().cmd_mirror_reclaim()
-        assert _r is True and _published == [], (_r, _published)
+        assert _r is True and _published == [], (_r, _published, _lines[-6:])
         assert any('a_1.0_amd64.deb' in _l for _l in _lines), _lines
         # 2. source target + force → publish with the matching intent
         _published.clear()
@@ -30683,11 +30690,8 @@ def test_cmd_mirror_reclaim_lists_resolves_and_confirms():
         _r = _mk().cmd_mirror_reclaim('srca')
         assert _r is True and _published == []
     finally:
-        for _k, _v in _saved.items():
-            if _v is None:
-                _sys.modules.pop(_k, None)
-            else:
-                _sys.modules[_k] = _v
+        for _m, _a, _orig in _saved_attrs:
+            setattr(_m, _a, _orig)
         _cm.Prompt = _orig_prompt
         build.console.print = _orig_print
 
