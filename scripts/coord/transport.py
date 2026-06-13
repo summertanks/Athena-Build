@@ -294,26 +294,30 @@ def remote_flock_acquire(
     ssh_key: 'Optional[str]' = None,
 ) -> 'Optional[subprocess.Popen]':
     """Open an SSH session that holds `lock_path` via flock(1) for the
-    duration of the session.  Returns the Popen handle — caller must
-    .terminate() / .wait() to release the lock.
+    duration of the session.  Returns the Popen handle ONLY once the lock
+    is CONFIRMED held — caller must .terminate() / .wait() to release.
+    Returns None if the lock can't be acquired (spawn failure, `flock -w`
+    timeout because a peer holds it, or the SSH session dies).
 
-    Uses `flock -n -w <timeout>` so the wait is bounded; rc=0 means
-    "got the lock", rc!=0 means timeout / file missing.  The inner
-    shell `cat` blocks forever; closing stdin from our side via
-    .terminate() releases flock as the shell exits.
-
-    Lands in P3 with the publish state machine — this is just the
-    primitive, exercised in tests.
+    STA-30(c): the flock'd shell echoes `COORD_LOCK_ACQUIRED` BEFORE its
+    blocking `cat`, and we block reading stdout for that token (bounded by
+    `flock -w` + a margin) before returning.  Previously the Popen was
+    returned immediately and no caller read it, so publish raced ahead
+    while flock was still WAITING, and proceeded UNLOCKED after a timeout —
+    the lock was decorative.
     """
+    import select as _select
     _ssh_cmd = ['ssh']
     if ssh_key:
         _ssh_cmd += ['-i', ssh_key]
     _ssh_cmd += ['-o', 'StrictHostKeyChecking=accept-new', ssh_host]
-    # flock -w blocks up to <secs> waiting; -n returns immediately if
-    # busy.  Combine: try non-blocking; if that fails, fall back to
-    # bounded wait.  We use the bounded-wait form: `flock -w <s>`.
+    # flock -w blocks up to <secs> waiting; on success it runs `-c`, which
+    # announces the lock is held (ACQUIRED) then `cat` holds it open until
+    # we close stdin (release).  On timeout flock exits non-zero, the `&&`
+    # short-circuits, the shell exits → stdout EOF with no token.
     _inner = (
-        f"flock -w {int(timeout_sec)} {lock_path} -c 'cat' "
+        f"flock -w {int(timeout_sec)} {lock_path} -c "
+        f"'echo COORD_LOCK_ACQUIRED; cat' "
         f"&& echo COORD_LOCK_RELEASED")
     _ssh_cmd.append(_inner)
     try:
@@ -326,6 +330,28 @@ def remote_flock_acquire(
         )
     except OSError as _e:
         logger.error(f"coord.transport.flock: spawn failed: {_e}")
+        return None
+    # Block until the ACQUIRED token arrives or the wait elapses.  flock's
+    # own `-w` bounds the lock wait; add a margin for ssh round-trip.
+    _deadline = float(int(timeout_sec)) + 10.0
+    _stdout = _proc.stdout
+    try:
+        assert _stdout is not None  # stdout=PIPE above
+        _ready, _, _ = _select.select([_stdout], [], [], _deadline)
+        _line = _stdout.readline() if _ready else ''
+    except (OSError, ValueError) as _e:
+        logger.error(f"coord.transport.flock: read failed: {_e}")
+        _line = ''
+    if 'COORD_LOCK_ACQUIRED' not in (_line or ''):
+        # Timeout / busy / dead session — never hold a phantom lock.
+        logger.error(
+            f"coord.transport.flock: lock NOT acquired on {ssh_host} "
+            f"({lock_path}) within {timeout_sec}s (held by a peer?)")
+        try:
+            _proc.terminate()
+            _proc.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
         return None
     return _proc
 

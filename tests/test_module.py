@@ -31080,6 +31080,213 @@ def test_remote_publish_refuses_on_closure_break():
         assert _pushed == [], "must refuse before pushing bytes"
 
 
+def test_remote_flock_acquire_confirms_lock_token():
+    """STA-30(c): remote_flock_acquire returns the Popen ONLY after the
+    flock'd shell echoes COORD_LOCK_ACQUIRED; on timeout/busy (no token)
+    it terminates the session and returns None — never a phantom lock."""
+    import sys as _sys, io as _io
+    from unittest.mock import patch, MagicMock
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _tr
+
+    # success: stdout yields the ACQUIRED token, select reports it ready
+    _proc = MagicMock()
+    _proc.stdout = _io.StringIO("COORD_LOCK_ACQUIRED\n")
+    with patch.object(_tr.subprocess, 'Popen', return_value=_proc), \
+         patch('select.select',
+               return_value=([_proc.stdout], [], [])):
+        _r = _tr.remote_flock_acquire(
+            ssh_host='u@h', lock_path='/l', timeout_sec=1)
+    assert _r is _proc, "must return the held-lock session"
+    _proc.terminate.assert_not_called()
+
+    # failure: select times out (lock busy / dead session), no token
+    _proc2 = MagicMock()
+    _proc2.stdout = _io.StringIO("")
+    with patch.object(_tr.subprocess, 'Popen', return_value=_proc2), \
+         patch('select.select', return_value=([], [], [])):
+        _r2 = _tr.remote_flock_acquire(
+            ssh_host='u@h', lock_path='/l', timeout_sec=1)
+    assert _r2 is None, "must NOT return a phantom lock on timeout"
+    _proc2.terminate.assert_called()
+
+
+def _sta30_publish_cfg(_td):
+    """Minimal config for a remote_publish drive (STA-30 a/b tests)."""
+    import os as _os
+
+    class _Cfg:
+        dir_coord = _td
+        dir_coord_fetched = _os.path.join(_td, 'fetched')
+        dir_coord_claims = _os.path.join(_td, 'claims')
+        dir_log = _td
+        dir_repo = _td
+        dir_gnupg = _td
+    _os.makedirs(_Cfg.dir_coord_fetched, exist_ok=True)
+    _os.makedirs(_Cfg.dir_coord_claims, exist_ok=True)
+    _os.makedirs(_os.path.join(_Cfg.dir_coord_fetched, 'claims'),
+                 exist_ok=True)
+    return _Cfg
+
+
+def test_remote_publish_refuses_verify_failed_head():
+    """STA-30(b): a coord-head present on the remote but failing GPG verify
+    (read_coord_head → None while the file exists) must REFUSE — NOT be
+    treated as first-publish bootstrap (which would rebuild the head from
+    our local view, dropping revoked_builders + peers' last_seqs)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.identity as _identity
+    import coord.store as _store
+    import coord.reconcile as _reconcile
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        _cfg = _sta30_publish_cfg(_td)
+        # The head FILE exists on the fetched tree, but read_coord_head
+        # returns None (verify failed).
+        _head_path = _head_mod.coord_head_path(_cfg.dir_coord_fetched)
+        os.makedirs(os.path.dirname(_head_path), exist_ok=True)
+        with open(_head_path, 'wb') as _fh:
+            _fh.write(b'{"v":2}')
+        _inrelease = os.path.join(_td, 'InRelease')
+        with open(_inrelease, 'wb') as _fh:
+            _fh.write(b'Date: 2026-06-01\n')
+        _lock = object()
+        with patch.object(_transport, 'remote_flock_acquire',
+                          return_value=_lock), \
+             patch.object(_transport, 'remote_flock_release'), \
+             patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head', return_value=None), \
+             patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims', return_value={}), \
+             patch.object(_reconcile, 'publish_halt_reason',
+                          return_value=None):
+            _ok, _detail = _publish.remote_publish(
+                builder_id='alice', config=_cfg,
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='20260601T000000Z',
+                remote_coord_spec='user@h:/asgard',
+                inrelease_local_path=_inrelease,
+                read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+                ssh_host='user@h',
+            )
+        assert _ok is False
+        assert 'FAILED to verify' in _detail, _detail
+
+
+def test_remote_publish_refuses_stale_local_jsonl():
+    """STA-30(a): when our LOCAL jsonl max seq is behind what the remote
+    knows about us (wiped/restored working dir), publishing would re-seq
+    low and overwrite the remote's append-only history → REFUSE before any
+    push."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.identity as _identity
+    import coord.store as _store
+    import coord.reconcile as _reconcile
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        _cfg = _sta30_publish_cfg(_td)
+        # Local claims dir is EMPTY (max_seq → 0), but the remote view of
+        # us carries claims up to seq 7.
+        _remote_view = {'alice': [
+            {'builder': 'alice', 'seq': 7, 'claim_state': 'published',
+             'filename': 'foo_1_amd64.deb'},
+        ]}
+        _existing_head = {
+            'v': 2, 'inrelease_sha256': 'a' * 64, 'snapshot': {},
+            'last_seqs': {'alice': 7}, 'head_time': 'T',
+            'neighbours': ['user@h:/asgard'],
+        }
+        _inrelease = os.path.join(_td, 'InRelease')
+        with open(_inrelease, 'wb') as _fh:
+            _fh.write(b'Date: 2026-06-01\n')
+        _lock = object()
+        _pushed: 'list' = []
+        with patch.object(_transport, 'remote_flock_acquire',
+                          return_value=_lock), \
+             patch.object(_transport, 'remote_flock_release'), \
+             patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=_existing_head), \
+             patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims',
+                          return_value=_remote_view), \
+             patch.object(_transport, 'push_single_deb',
+                          side_effect=lambda **k: _pushed.append(1) or (True, '')), \
+             patch.object(_reconcile, 'publish_halt_reason',
+                          return_value=None):
+            _ok, _detail = _publish.remote_publish(
+                builder_id='alice', config=_cfg,
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='20260601T000000Z',
+                remote_coord_spec='user@h:/asgard',
+                inrelease_local_path=_inrelease,
+                read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+                ssh_host='user@h',
+            )
+        assert _ok is False
+        assert 'stale local claims ledger' in _detail, _detail
+        assert _pushed == [], "must refuse before pushing bytes"
+
+
+def test_local_publish_no_seq_gap_on_append_failure():
+    """STA-30(d): a transient append failure must NOT consume a seq — the
+    counter advances only on success, so the ledger stays contiguous (no
+    permanent sidecar_seq_gap CRITICAL)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.store as _store
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_coord = _td
+            dir_log = _td
+            dir_repo = _td
+            dir_coord_claims = os.path.join(_td, 'claims')
+        os.makedirs(_Cfg.dir_coord_claims, exist_ok=True)
+
+        _pending = [
+            {'package': 'a', 'filename': 'a_1_amd64.deb', 'sha256': 'a' * 64},
+            {'package': 'b', 'filename': 'b_1_amd64.deb', 'sha256': 'b' * 64},
+            {'package': 'c', 'filename': 'c_1_amd64.deb', 'sha256': 'c' * 64},
+        ]
+        _appended_seqs: 'list[int]' = []
+
+        def _fake_append(claims_dir, builder_id, claim, priv):
+            if claim.get('package') == 'b':
+                raise OSError("disk hiccup")   # transient failure on b
+            _appended_seqs.append(claim['seq'])
+
+        with patch.object(_publish, 'generate_pending_claims',
+                          return_value=_pending), \
+             patch.object(_publish, 'fill_sizes_from_pool'), \
+             patch.object(_store, 'append_claim', side_effect=_fake_append):
+            _created, _skipped = _publish.local_publish(
+                builder_id='alice', config=_Cfg(),
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='S', read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+            )
+        assert (_created, _skipped) == (2, 1), (_created, _skipped)
+        # a→1, b fails (seq 2 NOT consumed), c reuses 2 → contiguous, no gap.
+        assert _appended_seqs == [1, 2], _appended_seqs
+
+
 def test_cmd_mirror_dispatch_routes_audit_and_query():
     """`cmd_mirror` routes audit + query subcommands; both handlers exist."""
     import re
@@ -34587,6 +34794,10 @@ def main() -> int:
         test_transport_push_dist_tree_missing_local_dir_fails_clean,
         test_remote_publish_pushes_debs_per_file_and_calls_progress,
         test_remote_publish_refuses_on_closure_break,
+        test_remote_flock_acquire_confirms_lock_token,
+        test_remote_publish_refuses_verify_failed_head,
+        test_remote_publish_refuses_stale_local_jsonl,
+        test_local_publish_no_seq_gap_on_append_failure,
         test_remote_publish_drops_claim_when_push_fails,
         # MIRROR-01 Phase 4 — audit + query + multi-mirror UPD-01 wiring
         test_cmd_mirror_dispatch_routes_audit_and_query,

@@ -529,8 +529,11 @@ def local_publish(
     _skipped = 0
     _seq = _store.max_seq(config.dir_coord_claims, builder_id)
     for _claim in _pending:
-        _seq += 1
-        _claim['seq'] = _seq
+        # STA-30(d): commit the seq counter only on a successful append —
+        # advancing before the try left a permanent sidecar_seq_gap on a
+        # transient failure.
+        _candidate_seq = _seq + 1
+        _claim['seq'] = _candidate_seq
         # local_publish flips straight to published — no remote handoff
         _claim['claim_state'] = _schema.CLAIM_STATE_PUBLISHED
         try:
@@ -538,6 +541,7 @@ def local_publish(
                 config.dir_coord_claims, builder_id, _claim,
                 private_key_path,
             )
+            _seq = _candidate_seq
             _created += 1
         except (OSError, ValueError) as _e:
             logger.warning(
@@ -671,7 +675,10 @@ def remote_publish(
             timeout_sec=flock_timeout, ssh_key=ssh_key,
         )
         if _lock_proc is None:
-            return False, f"failed to spawn flock SSH for {ssh_host}"
+            return False, (
+                f"could not acquire remote flock on {ssh_host} "
+                f"({flock_path}) — held by a peer, or SSH failed; "
+                "retry shortly")
 
     try:
         # Step 2 — fetch remote coord tree (under lock)
@@ -689,6 +696,24 @@ def remote_publish(
         import signing
         _signing_home = signing.signing_home(config)
         _head_dict = _head.read_coord_head(_fetched, _signing_home)
+        # STA-30(b): read_coord_head returns None for BOTH "no head on the
+        # remote" (legit first-publish bootstrap) AND "head present but GPG
+        # verify FAILED / sig missing / homedir broken" (tamper or local
+        # signing breakage).  Treating the latter as bootstrap would skip
+        # the federation gate AND rebuild the head from our local view,
+        # silently dropping the remote's revoked_builders + every peer's
+        # last_seqs — exactly the authority rollback the signed head exists
+        # to defeat.  Distinguish by the file's presence: if the head file
+        # is on disk but didn't verify, REFUSE.
+        if _head_dict is None and os.path.isfile(
+                _head.coord_head_path(_fetched)):
+            return False, (
+                "coord-head present on the remote but FAILED to verify "
+                "(bad signature, missing .sig, or unreadable tier-1 "
+                "signing homedir) — refusing to publish (would overwrite "
+                "the federation's signed authority with a fresh local "
+                "view).  Check the tier-1 key / homedir, or investigate "
+                "tampering, then retry.")
         _keyring_dir = os.path.join(_fetched, 'keyring', 'builders')
         _keyring = _identity.load_keyring(_keyring_dir)
         _revoked = (_head_dict or {}).get('revoked_builders') or {}
@@ -698,6 +723,35 @@ def remote_publish(
             f"loaded {len(_keyring)} peer pubkey(s), "
             f"{sum(len(v) for v in _by_builder.values())} prior claim(s) "
             f"across {len(_by_builder)} builder(s)")
+
+        # Step 3a — STA-30(a): stale-local-jsonl guard.  Step 6 assigns new
+        # seqs from max_seq(our LOCAL jsonl) and Step 7 wholesale-replaces
+        # the remote jsonl with it.  If our working dir was wiped/restored
+        # (same BUILDER_ID, empty/short local file) max_seq is BEHIND the
+        # remote → we'd re-seq from a low number and the push would ERASE
+        # the remote's claim history (and its retraction/obsolescence/
+        # reclaim lineage).  The signed coord-head documents this exact
+        # defense ("stale JSONL is detected by reading a max(seq) lower
+        # than last_seqs") but nothing enforced it.  Refuse when our local
+        # max is below what the remote already knows about us — checked
+        # BEFORE any byte/claim is pushed.
+        _our_remote_claims = _by_builder.get(builder_id, [])
+        _remote_self_max = max(
+            [int(_c.get('seq', 0)) for _c in _our_remote_claims
+             if isinstance(_c.get('seq'), int)] or [0])
+        _head_last_seq = int(
+            ((_head_dict or {}).get('last_seqs') or {}).get(builder_id, 0) or 0)
+        _remote_known_max = max(_remote_self_max, _head_last_seq)
+        _local_max = _store.max_seq(config.dir_coord_claims, builder_id)
+        if _local_max < _remote_known_max:
+            return False, (
+                f"stale local claims ledger: local max seq {_local_max} is "
+                f"behind the remote's record of us ({_remote_known_max}) — "
+                f"publishing would re-seq from {_local_max + 1} and "
+                f"OVERWRITE the remote's append-only history for "
+                f"{builder_id!r}.  Restore the local "
+                f"{builder_id}.jsonl from the remote (it was just fetched "
+                f"to {os.path.join(_fetched, 'claims')}) before publishing.")
 
         # Step 3b — MIRROR-01 Phase 3: federation gate.
         # If remote head exists, its neighbours must match local config's
@@ -970,14 +1024,22 @@ def remote_publish(
         _seq = _store.max_seq(config.dir_coord_claims, builder_id)
         _appended = 0
         for _claim in _pending:
-            _seq += 1
-            _claim['seq'] = _seq
+            # STA-30(d): commit the seq counter ONLY on a successful append.
+            # The old code did `_seq += 1` before the try, so a transient
+            # append failure CONSUMED a seq that never landed → a permanent
+            # hole that `audit_sidecar_seq_integrity` flags as a CRITICAL
+            # `sidecar_seq_gap` forever.  Assign a candidate; advance only
+            # when it actually lands so seqs stay contiguous (the dropped
+            # claim's number is reused by the next one).
+            _candidate_seq = _seq + 1
+            _claim['seq'] = _candidate_seq
             _claim['claim_state'] = _schema.CLAIM_STATE_PUBLISHED
             try:
                 _store.append_claim(
                     config.dir_coord_claims, builder_id, _claim,
                     private_key_path,
                 )
+                _seq = _candidate_seq
                 _appended += 1
             except (OSError, ValueError) as _e:
                 logger.warning(
@@ -1008,12 +1070,18 @@ def remote_publish(
                 )
                 _dep_appended = 0
                 for _dc in _dep_claims:
-                    _seq = max(_seq, int(_dc.get('seq', _seq)))
+                    # STA-30(d): re-assign the seq sequentially and commit
+                    # only on success — the emit pre-assigns contiguous
+                    # seqs, but `_seq = max(...)` before the append left a
+                    # gap when one append failed.
+                    _candidate_seq = _seq + 1
+                    _dc['seq'] = _candidate_seq
                     try:
                         _store.append_claim(
                             config.dir_coord_claims, builder_id, _dc,
                             private_key_path,
                         )
+                        _seq = _candidate_seq
                         _dep_appended += 1
                     except (OSError, ValueError) as _e:
                         logger.warning(
@@ -1043,12 +1111,15 @@ def remote_publish(
             )
             _obs_appended = 0
             for _oc in _obs_claims:
-                _seq = max(_seq, int(_oc.get('seq', _seq)))
+                # STA-30(d): re-assign sequentially, commit only on success.
+                _candidate_seq = _seq + 1
+                _oc['seq'] = _candidate_seq
                 try:
                     _store.append_claim(
                         config.dir_coord_claims, builder_id, _oc,
                         private_key_path,
                     )
+                    _seq = _candidate_seq
                     _obs_appended += 1
                 except (OSError, ValueError) as _e:
                     logger.warning(
