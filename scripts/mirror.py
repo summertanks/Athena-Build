@@ -1002,20 +1002,12 @@ def audit_packages_chain(
 
 
 def _superseded_seqs(claims: 'list[dict]') -> 'set[int]':
-    """Per-builder supersession fold: the seqs that a retraction /
-    deprecation / obsolescence / reclaim line TARGETS.  A claim whose seq
-    is in this set has been replaced by its successor record and must not
-    be audited as a live assertion (its file may legitimately be gone —
-    or, for a reclaim, its bytes were superseded under the same
-    filename, RECLAIM-01)."""
-    _out: 'set[int]' = set()
-    for _c in claims:
-        for _field in ('retracts_seq', 'deprecates_seq', 'obsoletes_seq',
-                       'reclaims_seq'):
-            _t = _c.get(_field)
-            if isinstance(_t, int):
-                _out.add(_t)
-    return _out
+    """Per-builder supersession fold — thin alias for the canonical
+    `coord.schema.superseded_seqs` (STA-29 centralised the fold so every
+    consumer applies identical semantics).  Kept as a name for this
+    module's callers."""
+    from coord import schema as _schema
+    return _schema.superseded_seqs(claims)
 
 
 def audit_claims_vs_packages(

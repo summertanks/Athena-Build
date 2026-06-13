@@ -335,34 +335,15 @@ def detect_hash_conflicts(
     # Index: filename → list of (builder, sha256, package_source_name)
     _by_fn: 'Dict[str, List[Tuple[str, str, str]]]' = {}
     for _bid, _claims in by_builder.items():
-        _retracted: set = set()
+        # STA-29: the canonical supersession fold.  Folds marker states
+        # (retracted/deprecated/obsolete) AND seqs named by a back-ref —
+        # including a reclaim's reclaims_seq (a LIVE published claim, not a
+        # marker): without that fold the same-filename old/new pair a
+        # reclaim deliberately creates reads as a hash conflict and
+        # CRITICAL-halts every subsequent publish.
+        _dead = _schema.superseded_seqs(_claims)
         for _c in _claims:
-            if _c.get('claim_state') == _schema.CLAIM_STATE_RETRACTED:
-                _r = _c.get('retracts_seq')
-                if isinstance(_r, int):
-                    _retracted.add(_r)
-            elif _c.get('claim_state') == _schema.CLAIM_STATE_DEPRECATED:
-                _d = _c.get('deprecates_seq')
-                if isinstance(_d, int):
-                    _retracted.add(_d)
-            elif _c.get('claim_state') == _schema.CLAIM_STATE_OBSOLETE:
-                _o = _c.get('obsoletes_seq')
-                if isinstance(_o, int):
-                    _retracted.add(_o)
-            # RECLAIM-01: a reclaim is a LIVE published claim (not a
-            # marker state), so collect its back-ref unconditionally —
-            # without this fold, the same-filename old/new pair the
-            # reclaim deliberately creates reads as a hash conflict and
-            # CRITICAL-halts every subsequent publish.
-            _rc = _c.get('reclaims_seq')
-            if isinstance(_rc, int):
-                _retracted.add(_rc)
-        for _c in _claims:
-            # PRESENCE_SKIP: an obsolete (old-version) file may be pruned —
-            # don't scan an identity nobody asserts anymore.
-            if _c.get('claim_state') in _schema.PRESENCE_SKIP_CLAIM_STATES:
-                continue
-            if int(_c.get('seq', 0)) in _retracted:
+            if _schema.is_superseded_claim(_c, _dead):
                 continue
             _fn = str(_c.get('filename') or '')
             if not _fn:
