@@ -29811,6 +29811,11 @@ def _cmd_mirror_add_session(tmp_dir, codename='thor', distribution='Asgard',
         _sess._reconcile_called += 1
         return True
     _sess.cmd_mirror_reconcile_neighbours = _stub_reconcile  # type: ignore[method-assign]
+    # Stage 3: the prepared-mirror gate probes mirror-info.json over HTTP.
+    # Default the stub to "prepared" so the existing add scenarios keep
+    # testing their own behaviour; the gate itself has a dedicated test.
+    _sess._mirror_is_prepared = lambda _url: (  # type: ignore[method-assign]
+        True, '2026-06-13T00:00:00Z')
 
     _sess.lines: 'list[str]' = []
     _orig = _build.console.print
@@ -29857,6 +29862,57 @@ def _patch_mirror_add_primitives(*, sidecar_head_return,
             _mirror, 'discover_federation_peers',
             return_value=discover_peers_return))
     return _stack
+
+
+def test_cmd_mirror_add_refuses_unprepared_mirror():
+    """Stage 3: mirror add gates on the prep marker — an ssh mirror whose
+    host isn't prepared (no mirror-info.json) is REFUSED with a pointer to
+    prep-mirror.sh, before any state is written."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mirror
+    with tempfile.TemporaryDirectory() as _td:
+        _sess, _restore = _cmd_mirror_add_session(_td)
+        # Override the default "prepared" stub → NOT prepared.
+        _sess._mirror_is_prepared = lambda _url: (  # type: ignore
+            False, 'marker unreachable')
+        try:
+            _stack = _patch_mirror_add_primitives(
+                sidecar_head_return=(True, 'no head yet', None),
+                discover_peers_return=[])
+            with _stack:
+                _ok = _sess.cmd_mirror_add(
+                    'ip',
+                    'ssh://ubuntu@140.245.198.222/home/ubuntu/asgard',
+                    '--ssh-key', 'config/repo.key', '--proto', 'http',
+                    '--yes')
+        finally:
+            _restore()
+        _joined = '\n'.join(_sess.lines)
+        assert _ok is False, _joined
+        assert 'NOT prepared' in _joined and 'prep-mirror.sh' in _joined, _joined
+        # nothing registered
+        assert _mirror.list_mirrors(_sess.config) == [], _joined
+
+
+def test_prep_mirror_script_contract():
+    """Stage 3: prep-mirror.sh exists, is executable, syntactically valid,
+    and codifies the idempotent state machine (prepared / adopt / fresh /
+    unexpected) + the mirror-info.json marker + a --check dry-run."""
+    import subprocess as _sub
+    _p = os.path.join(_ROOT, 'prep-mirror.sh')
+    assert os.path.isfile(_p), "prep-mirror.sh missing"
+    assert os.access(_p, os.X_OK), "prep-mirror.sh not executable"
+    # bash -n: parse without running
+    _r = _sub.run(['bash', '-n', _p], capture_output=True, text=True)
+    assert _r.returncode == 0, _r.stderr
+    _src = open(_p).read()
+    for _tok in ('mirror-info.json', 'asgard-mirror', '--check',
+                 'PREPARED', 'ADOPT', 'FRESH', 'UNEXPECTED',
+                 'StrictHostKeyChecking'):
+        assert _tok in _src, f"prep-mirror.sh missing {_tok!r}"
+    # never clobbers: the unexpected/abort paths must exit non-zero
+    assert 'Refusing to modify' in _src or 'refusing' in _src.lower(), _src
 
 
 def test_cmd_mirror_add_new_mirror_empty_config():
@@ -35166,6 +35222,8 @@ def main() -> int:
         test_probe_http_inrelease_handles_200_404_and_error,
         test_probe_sidecar_head_no_head_verified_and_fail,
         test_discover_federation_peers_classifies_each_neighbour,
+        test_cmd_mirror_add_refuses_unprepared_mirror,
+        test_prep_mirror_script_contract,
         test_cmd_mirror_add_new_mirror_empty_config,
         test_cmd_mirror_add_old_mirror_no_neighbours_empty_config,
         test_cmd_mirror_add_old_mirror_with_neighbours_empty_config,
