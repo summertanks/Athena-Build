@@ -28,6 +28,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger('athena.cache')
 
 
+def _dep_target_names(_obj) -> 'set[str]':
+    """Every dependency-target NAME across a Package's hard + alternative
+    dep fields (depends / pre_depends / alt_depends / alt_pre_depends).
+
+    Names only — version constraints are intentionally ignored, so an
+    NMU-strip that rewrites `(= 1.47.0-2)` → `(>= …)` is NOT seen as a
+    removal (STA-24 diffs on dep PRESENCE, not on constraints)."""
+    _names: 'set[str]' = set()
+    for _f in ('depends', 'pre_depends'):
+        for _t in getattr(_obj, _f, None) or ():
+            if _t and _t[0]:
+                _names.add(_t[0])
+    for _f in ('alt_depends', 'alt_pre_depends'):
+        for _grp in getattr(_obj, _f, None) or ():
+            for _alt in _grp:
+                if _alt and _alt[0]:
+                    _names.add(_alt[0])
+    return _names
+
+
 class _DepDriftMixin:
     # Instance attributes set by `BuildSystem.__init__` (the composer
     # that mixes this in).  Type-only stubs for mypy; no runtime
@@ -95,6 +115,10 @@ class _DepDriftMixin:
             f"canonical pkg(s) for cache↔disk skew"
         )
         import package as _pkg_module
+        # STA-24: accumulate built packages that DROPPED a dependency edge
+        # on a selected package vs the upstream record (the dangerous
+        # dep-loss case — see the summary below).
+        _dep_loss: 'list[tuple[str, list[str]]]' = []
         for _pkg_name, _pkg_obj in self._dependencytree.canonical_pkgs.items():
             _filename = os.path.basename(_pkg_obj.get('Filename', ''))
             if not _filename:
@@ -134,6 +158,22 @@ class _DepDriftMixin:
                 for _field, _cache_val, _disk_val in _drift:
                     logger.info(f"  {_field}: from {_cache_val} to {_disk_val}")
 
+            # STA-24: a dep present on the upstream cache record but ABSENT
+            # on the built .deb is a LOST dependency.  If its target is a
+            # package we SELECT, the minimal SURFACES-01 closure won't pull
+            # it in and it silently won't be installed — the e2fsprogs case
+            # (built binaries lost libext2fs2/libcom-err2/libss2 when the
+            # patch dropped `-L shlibs.local`), where the disk image's root
+            # fsck then exec-failed (127) → boot loop.  Checked BEFORE the
+            # sync below overwrites _pkg_obj's deps with the (broken) disk
+            # truth, where the lost edge would already be invisible.
+            _lost = _dep_target_names(_pkg_obj) - _dep_target_names(_deb_pkg)
+            _lost_selected = sorted(
+                _n for _n in _lost
+                if _n in self._dependencytree.selected_pkgs)
+            if _lost_selected:
+                _dep_loss.append((_pkg_name, _lost_selected))
+
             _pkg_obj.depends         = _deb_pkg.depends
             _pkg_obj.alt_depends     = _deb_pkg.alt_depends
             _pkg_obj.pre_depends     = _deb_pkg.pre_depends
@@ -152,6 +192,33 @@ class _DepDriftMixin:
                 # the .version attr update above is the load-bearing
                 # one for _verify_dep_resolution.
                 pass
+
+        # STA-24: surface dep-loss prominently — it never reaches
+        # _verify_dep_resolution (that pass runs on the post-sync deps,
+        # where the lost edge is already gone) and the legacy ship-
+        # everything pool used to mask it; minimal closures make a lost
+        # edge load-bearing.  Loud WARNING (both surfaces), not a hard gate
+        # — a fork may intentionally drop a dep — but never silent.
+        if _dep_loss:
+            _total = sum(len(_v) for _, _v in _dep_loss)
+            logger.warning(
+                f"DEP-LOSS drift: {len(_dep_loss)} built package(s) dropped "
+                f"{_total} dependency edge(s) on SELECTED packages vs the "
+                f"upstream record — the minimal closure may NOT install "
+                f"those targets (boot/runtime failure far from the cause; "
+                f"cf. e2fsprogs→libext2fs2 2026-06-11).  Suspect a lost "
+                f"`-L shlibs.local` mapping or a dropped Depends; verify "
+                f"the build before shipping.")
+            tui.console.print(
+                f"WARNING: dep-loss drift — {len(_dep_loss)} built "
+                f"package(s) lost dependency edges on selected packages:",
+                tui.COLOR_WARNING)
+            for _pkg_name, _lost_selected in _dep_loss:
+                logger.warning(
+                    f"  {_pkg_name} lost: {', '.join(_lost_selected)}")
+                tui.console.print(
+                    f"  {_pkg_name} → lost {', '.join(_lost_selected)}",
+                    tui.COLOR_WARNING)
 
         self._verify_dep_resolution()
 

@@ -171,6 +171,18 @@ re-inject the equivalent deps via substvars, mirroring upstream's
 resolved constraints; dpkg-shlibdeps' silence here is documented
 behaviour, not an error you'll see in a log.
 
+**Workaround still required (checked 2026-06-13):** the underlying
+SymbolFile.pm crash is *fixed in dpkg-dev 1.22.x* (per the patch
+header), but our build base is **bookworm** with `dpkg-dev 1.21.23`
+(still the broken 1.21 series), so the patch — drop `-L shlibs.local`
++ inject the deps — remains load-bearing.  It becomes removable (revert
+to the plain `-- -L debian/e2fsprogs.shlibs.local` form, which provides
+the deps automatically) once the base moves to **trixie** (dpkg-dev
+1.22.x) under COMP-07/COMP-11, or the container's dpkg-dev is upgraded
+to ≥ 1.22.  **STA-24** now WARNs at dep-drift time on exactly this
+class — a built `.deb` that lost a `Depends` edge on a selected package
+— so a future recurrence is loud instead of a silent boot loop.
+
 ---
 
 ## 4. Architecture & version semantics
