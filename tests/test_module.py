@@ -29913,6 +29913,17 @@ def test_prep_mirror_script_contract():
         assert _tok in _src, f"prep-mirror.sh missing {_tok!r}"
     # never clobbers: the unexpected/abort paths must exit non-zero
     assert 'Refusing to modify' in _src or 'refusing' in _src.lower(), _src
+    # dist-id + root are DERIVED, not typed: reads build.conf DISTRIBUTION,
+    # serves /<dist-id>, resolves $HOME for the default root.
+    assert 'build.conf' in _src and 'DISTRIBUTION' in _src, _src
+    assert 'EXPLICIT_ROOT' in _src and 'CANON_URL' in _src, _src
+    # Q2 — reports a per-component inventory (fills only the gaps)
+    assert 'Inventory' in _src and 'INV_dists' in _src and 'INV_marker' in _src, _src
+    # Q3 — nginx serves the release index at root, detected by its marker
+    assert 'index index.html;' in _src and 'asgard-release-index' in _src, _src
+    # permission gate: needs sudo to install the web server, write perms to
+    # the root — and we run non-interactively
+    assert 'SUDO' in _src and 'WRITABLE' in _src, _src
 
 
 def test_cmd_mirror_add_new_mirror_empty_config():

@@ -131,6 +131,10 @@ def render_index_html(manifest: dict) -> str:
 
     return (
         "<!DOCTYPE html>\n"
+        # Stable detection token: lets tooling (prep-mirror.sh's serving
+        # probe, monitors) tell a served release page from an autoindex
+        # directory listing without parsing the body.
+        "<!-- asgard-release-index -->\n"
         "<html lang=\"en\"><head><meta charset=\"utf-8\">\n"
         f"<title>{_distro} {_ver}</title>\n"
         "<meta name=\"viewport\" content=\"width=device-width, "
