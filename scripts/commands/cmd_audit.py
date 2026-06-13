@@ -719,6 +719,15 @@ class AuditCommandsMixin(SessionState):
         operator runs `repo repair cleanup` when they want to act.
         """
         _orphan, _drift, _malformed, _total = self._scan_stale_files()
+        # Orphaned `.verified` sidecars (binary gone, sha-cache left behind).
+        # Non-gating — harmless cruft, NOT a stale-artifact gate risk — but
+        # surfaced so the operator knows `repo repair cleanup` has work.
+        _sidecars = self._scan_orphaned_sidecars()
+        if _sidecars:
+            self._audit_row(
+                "orphan sidecars",
+                f"{len(_sidecars)} `.verified` with no .deb/.udeb — "
+                f"`repo repair cleanup` sweeps them", ok=True)
         _n_stale = len(_orphan) + len(_drift)
         if _n_stale == 0 and not _malformed:
             self._audit_row(f"stale files ({_total} files)",
