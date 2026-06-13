@@ -47,6 +47,15 @@ class BuildCommandsMixin(SessionState):
         """
         if self._refuse_in_build_mode("chroot build live"):
             return
+        # STA-39: dep_check_ready is in-memory-only — set exclusively by
+        # a successful `cache parse` THIS session, which also populates
+        # self.cache / self.dep_tree.  Without it the command would pass
+        # the persisted source_build_ready gate, collect the sudo
+        # password, then crash on the None session state (and the repo
+        # audit's stale-file gate runs blind).  Gate up front.
+        if not self.flags.dep_check_ready:
+            console.print("Run 'cache parse' first")
+            return
         if not self.flags.source_build_ready:
             console.print("Run 'source build' first")
             return
@@ -182,6 +191,10 @@ class BuildCommandsMixin(SessionState):
         `iso build disk` then packages buildroot/disk into the qcow2.
         """
         if self._refuse_in_build_mode("chroot build disk"):
+            return
+        # STA-39: same up-front gate as chroot build live — see there.
+        if not self.flags.dep_check_ready:
+            console.print("Run 'cache parse' first")
             return
         if not self.flags.source_build_ready:
             console.print("Run 'source build' first")
@@ -494,6 +507,15 @@ class BuildCommandsMixin(SessionState):
                 "Run 'chroot build installer' first (need "
                 "buildroot/installer/ populated with the udeb closure)"
             )
+            return
+        # STA-39: dep_check_ready is in-memory-only (a successful
+        # `cache parse` this session, which populates dep_tree/cache).
+        # chroot_installer_ready PERSISTS across sessions, so without
+        # this gate a fresh session would silently skip the SELECT-LOCK
+        # coherence check below (its `dep_tree is not None` wrapper) and
+        # later crash on None session state after collecting sudo.
+        if not self.flags.dep_check_ready:
+            console.print("Run 'cache parse' first")
             return
 
         # grub-mkrescue — the FINAL mastering step — runs inside the

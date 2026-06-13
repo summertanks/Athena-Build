@@ -625,6 +625,7 @@ def test_iso_builds_gate_on_container_up_front():
         chroot_verified = True
         chroot_ready = True
         chroot_installer_ready = True
+        dep_check_ready = True  # STA-39 gate sits before the container gate
 
     for _method_name in ('cmd_build_iso_live', 'cmd_build_iso_installer'):
         _sess = BuildSession.__new__(BuildSession)
@@ -643,6 +644,51 @@ def test_iso_builds_gate_on_container_up_front():
         assert 'container init' in _joined, (_method_name, _joined)
         assert 'grub-mkrescue' in _joined, (_method_name, _joined)
         # None / False both signal "did not proceed"
+        assert _r in (None, False), (_method_name, _r)
+
+
+def test_surface_builds_gate_on_dep_check_ready():
+    """STA-39: chroot build live/disk and iso build installer must
+    refuse up front when dep_check_ready is False.  The flag is
+    in-memory-only (set by a successful `cache parse` this session,
+    which also populates self.cache/self.dep_tree); the OTHER gates
+    (source_build_ready, chroot_installer_ready) PERSIST across
+    sessions, so before this gate a fresh session passed them,
+    collected the sudo password, then crashed AttributeError on the
+    None session state — and the SELECT-LOCK / stale-file gates were
+    silently skipped (hit live 2026-06-13: chroot build live in a
+    fresh session reached the proceed prompt with the stale gate
+    blind)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+
+    class _Cfg:
+        build_mode = 'distribution'
+
+    class _Flags:
+        dep_check_ready = False          # fresh session
+        source_build_ready = True        # persisted from a prior run
+        chroot_installer_ready = True    # persisted from a prior run
+        chroot_ready = True
+        chroot_verified = True
+
+    for _method_name in ('cmd_build_chroot_live', 'cmd_build_chroot_disk',
+                         'cmd_build_iso_installer'):
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess.flags = _Flags()
+        _lines: 'list[str]' = []
+        _orig = build.console.print
+        build.console.print = lambda *a, _buf=_lines, **k: _buf.append(
+            ' '.join(str(x) for x in a))
+        try:
+            _r = getattr(_sess, _method_name)()
+        finally:
+            build.console.print = _orig
+        _joined = '\n'.join(_lines)
+        assert 'cache parse' in _joined, (_method_name, _joined)
         assert _r in (None, False), (_method_name, _r)
 
 
@@ -32897,6 +32943,7 @@ def main() -> int:
         test_source_audit_naturally_scopes_to_indl_in_build_mode,
         test_chroot_iso_builds_refuse_in_build_mode,
         test_iso_builds_gate_on_container_up_front,
+        test_surface_builds_gate_on_dep_check_ready,
         test_verify_chroot_disk_surface_skips_live_boot,
         test_refuse_in_build_mode_is_a_no_op_in_distribution,
         test_cache_parse_build_mode_resolves_named_pkgs_only,
