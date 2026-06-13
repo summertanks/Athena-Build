@@ -289,6 +289,26 @@ class MirrorCommandsMixin(SessionState):
             console.print(
                 "  probes skipped (--no-probe)", tui.COLOR_WARNING)
 
+        # ── Step 5b: prepared-mirror gate ──────────────────────────
+        # A publish target must be PREPARED (prep-mirror.sh: web server +
+        # dir layout + the mirror-info.json marker) before we register it —
+        # registering an unprepared host invites every "remote dir missing
+        # / not serving" boundary case at publish time.  Probe the HTTP
+        # marker (ssh mirrors with a public_url only; skippable --no-probe).
+        if _is_ssh and _public_url and not _parsed['no_probe']:
+            _prep_ok, _prep_detail = self._mirror_is_prepared(_public_url)
+            if not _prep_ok:
+                console.print(
+                    f"mirror add: {_host} is NOT prepared as an Asgard "
+                    f"mirror ({_prep_detail}).  Prepare it first:\n"
+                    f"    ./prep-mirror.sh {_normalised} <ssh-key>\n"
+                    "(or pass `--no-probe` to skip this check).",
+                    tui.COLOR_ERROR)
+                return False
+            console.print(
+                f"  mirror prepared (since {_prep_detail or '?'})",
+                tui.COLOR_HIGHLIGHT)
+
         # ── Step 6: sidecar discovery (ssh mirrors only) ───────────
         _peer_head: 'Optional[dict]' = None
         _discovered: 'list[dict]' = []
@@ -848,6 +868,27 @@ class MirrorCommandsMixin(SessionState):
         if _r.returncode != 0:
             return None
         return {_l.strip() for _l in _r.stdout.splitlines() if _l.strip()}
+
+    def _mirror_is_prepared(self, public_url: str) -> 'tuple[bool, str]':
+        """Probe ``<public_url>/mirror-info.json`` for the marker that
+        ``prep-mirror.sh`` writes once a host is set up to receive a
+        publish (web server + dir layout).  Returns ``(prepared, detail)``
+        — detail is the prepared-at stamp on success, else the reason."""
+        import json as _json
+        _url = public_url.rstrip('/') + '/mirror-info.json'
+        try:
+            _r = utils._http_session().get(_url, timeout=10)
+        except Exception as _e:   # network layer — any failure = not reachable
+            return False, f"marker unreachable at {_url} ({type(_e).__name__})"
+        if _r.status_code != 200:
+            return False, f"HTTP {_r.status_code} for {_url}"
+        try:
+            _m = _json.loads(_r.text)
+        except ValueError:
+            return False, "mirror-info.json is not valid JSON"
+        if not (isinstance(_m, dict) and _m.get('marker') == 'asgard-mirror'):
+            return False, "mirror-info.json is not an asgard-mirror marker"
+        return True, str(_m.get('prepared_at') or '')
 
     def _release_iso_descriptors(self) -> 'tuple[list[dict], list[str]]':
         """Scan `image/` for the install media matching the CURRENT
