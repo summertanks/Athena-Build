@@ -660,10 +660,7 @@ class MirrorCommandsMixin(SessionState):
             return "(no claims jsonl fetched yet — run `mirror pull`)"
         import json
         import coord.schema as _schema
-        _live = 0
-        _retracted = 0
-        _deprecated = 0
-        _obsolete = 0
+        _claims: 'list[dict]' = []
         try:
             with open(_claims_path) as _fh:
                 for _line in _fh:
@@ -674,19 +671,32 @@ class MirrorCommandsMixin(SessionState):
                         _c = json.loads(_s)
                     except ValueError:
                         continue
-                    if not isinstance(_c, dict):
-                        continue
-                    _cs = _c.get('claim_state')
-                    if _cs == _schema.CLAIM_STATE_RETRACTED:
-                        _retracted += 1
-                    elif _cs == _schema.CLAIM_STATE_DEPRECATED:
-                        _deprecated += 1
-                    elif _cs == _schema.CLAIM_STATE_OBSOLETE:
-                        _obsolete += 1
-                    else:
-                        _live += 1
+                    if isinstance(_c, dict):
+                        _claims.append(_c)
         except OSError as _e:
             return f"(unreadable: {_e})"
+        # STA-29: a published claim folded by a later reclaim/obsolescence
+        # (its seq is a back-ref target) is NO LONGER live — the old code's
+        # `else: _live += 1` double-counted the superseded original as live
+        # (we_own showed "5 (1 obsolete)" when the truth was 4 live).
+        _dead = _schema.superseded_seqs(_claims)
+        _live = 0
+        _retracted = 0
+        _deprecated = 0
+        _obsolete = 0
+        _superseded = 0
+        for _c in _claims:
+            _cs = _c.get('claim_state')
+            if _cs == _schema.CLAIM_STATE_RETRACTED:
+                _retracted += 1
+            elif _cs == _schema.CLAIM_STATE_DEPRECATED:
+                _deprecated += 1
+            elif _cs == _schema.CLAIM_STATE_OBSOLETE:
+                _obsolete += 1
+            elif isinstance(_c.get('seq'), int) and _c['seq'] in _dead:
+                _superseded += 1
+            else:
+                _live += 1
         _extra = []
         if _obsolete:
             _extra.append(f"{_obsolete} obsolete")
@@ -694,6 +704,8 @@ class MirrorCommandsMixin(SessionState):
             _extra.append(f"{_deprecated} deprecated")
         if _retracted:
             _extra.append(f"{_retracted} retracted")
+        if _superseded:
+            _extra.append(f"{_superseded} superseded")
         _extra_str = f" ({', '.join(_extra)})" if _extra else ''
         return f"{_live} pkg(s){_extra_str}"
 
@@ -732,24 +744,16 @@ class MirrorCommandsMixin(SessionState):
         # Filenames under marker claims land in _state_marked instead:
         # those bytes may be pruned (no finding) or retained
         # (prune-candidate, not an orphan).
+        import coord.schema as _schema
         _claimed: set = set()
         _state_marked: set = set()
         for _bid, _claims in by_builder.items():
-            _dead_seqs: set = set()
-            for _c in _claims:
-                for _k in ('retracts_seq', 'deprecates_seq',
-                           'obsoletes_seq', 'reclaims_seq'):
-                    _s = _c.get(_k)
-                    if isinstance(_s, int):
-                        _dead_seqs.add(_s)
+            _dead_seqs = _schema.superseded_seqs(_claims)  # STA-29
             for _c in _claims:
                 _fn = _c.get('filename')
                 if not (isinstance(_fn, str) and _fn):
                     continue
-                _seq = _c.get('seq')
-                if (_c.get('claim_state') in
-                        ('retracted', 'deprecated', 'obsolete')
-                        or (isinstance(_seq, int) and _seq in _dead_seqs)):
+                if _schema.is_superseded_claim(_c, _dead_seqs):
                     _state_marked.add(_fn)
                     continue
                 _claimed.add(_fn)
@@ -1163,6 +1167,7 @@ class MirrorCommandsMixin(SessionState):
         import coord.identity as _id
         import coord.store as _store
         import coord.transport as _transport
+        import coord.schema as _schema
         _keys = self._coord_self_keys()
         if _keys is None:
             return False
@@ -1237,8 +1242,18 @@ class MirrorCommandsMixin(SessionState):
             # each entry holds the list of (claim, owner_builder).
             _per_pkg_downloads: 'dict[str, list[tuple[dict, str]]]' = {}
             for _builder, _claims in _by_builder.items():
+                _dead = _schema.superseded_seqs(_claims)
                 for _c in _claims:
-                    if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
+                    # STA-29: fold supersession back-refs, not just marker
+                    # states.  After a reclaim the OLD published claim
+                    # (state 'published', old sha) is superseded by the new
+                    # reclaim claim under the same filename — without this
+                    # fold the pull walks the old claim first, downloads the
+                    # REWRITTEN remote bytes, sha-mismatches the old claim,
+                    # unlinks the file + fails.  Same for a deprecated /
+                    # obsoleted file's original published line (re-importing
+                    # withdrawn/superseded content).
+                    if _schema.is_superseded_claim(_c, _dead):
                         continue
                     if _c.get('builder') == _bid:
                         _skip_own += 1
@@ -1525,7 +1540,7 @@ class MirrorCommandsMixin(SessionState):
         """
         import coord.identity as _id
         import coord.store as _store
-        import signing
+        import coord.schema as _schema
         _fetched = os.path.join(
             self.config.dir_cache, 'mirror', mirror_name, 'fetched')
         _claims_dir = os.path.join(_fetched, 'claims')
@@ -1540,38 +1555,14 @@ class MirrorCommandsMixin(SessionState):
             _by_builder = _store.read_all_claims(_claims_dir, _keyring, {})
         except OSError:
             return ''
-        del signing  # only imported for parity with other call sites
         _oldest: 'Optional[str]' = None
         for _bid, _claims in _by_builder.items():
-            # Per-builder retraction fold: collect seqs that retraction
-            # lines target; skip both the retraction record itself and
-            # the claim it retracts.
-            _retracted_seqs: set = set()
+            # STA-29 / LEDGER-01: fold supersession back-refs so the base
+            # advances past retracted/deprecated/obsoleted (and reclaimed)
+            # snapshots — only LIVE claims pin the oldest snapshot floor.
+            _dead = _schema.superseded_seqs(_claims)
             for _c in _claims:
-                if _c.get('claim_state') == 'retracted':
-                    _r = _c.get('retracts_seq')
-                    if isinstance(_r, int):
-                        _retracted_seqs.add(_r)
-                elif _c.get('claim_state') == 'deprecated':
-                    _d = _c.get('deprecates_seq')
-                    if isinstance(_d, int):
-                        _retracted_seqs.add(_d)
-                elif _c.get('claim_state') == 'obsolete':
-                    # LEDGER-01 payoff: erasing the obsoleted published
-                    # claim's snapshot from the fold lets mirror.base
-                    # advance past obsoleted (old-version) snapshots.
-                    _o = _c.get('obsoletes_seq')
-                    if isinstance(_o, int):
-                        _retracted_seqs.add(_o)
-                # RECLAIM-01: live published claim with a back-ref —
-                # collected unconditionally (no state branch).
-                _rc = _c.get('reclaims_seq')
-                if isinstance(_rc, int):
-                    _retracted_seqs.add(_rc)
-            for _c in _claims:
-                if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
-                    continue
-                if int(_c.get('seq', 0)) in _retracted_seqs:
+                if _schema.is_superseded_claim(_c, _dead):
                     continue
                 _ts = str(_c.get('snapshot') or '').strip()
                 if not _ts:
@@ -1987,13 +1978,22 @@ class MirrorCommandsMixin(SessionState):
                     console.print(f"    {_label:<14}{_result}")
         # Cross-mirror pool-SHA consistency
         if len(_per_mirror) > 1:
+            import coord.schema as _schema
             console.print("\ncross-mirror pool-SHA consistency:",
                           tui.COLOR_HIGHLIGHT)
             _seen: 'dict[str, list[tuple]]' = {}
             for _m in _per_mirror:
                 for _bid, _claims in _m['by_builder'].items():
+                    # STA-29: fold supersession back-refs.  Without it, ONE
+                    # mirror's jsonl contributes both the old published
+                    # claim (old sha) and the new reclaim claim (new sha)
+                    # for the same filename → a permanent false
+                    # cross_mirror_pool_drift CRITICAL after any reclaim,
+                    # contradicting the per-mirror detect_hash_conflicts
+                    # (which DOES fold) on identical data.
+                    _dead = _schema.superseded_seqs(_claims)
                     for _c in _claims:
-                        if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
+                        if _schema.is_superseded_claim(_c, _dead):
                             continue
                         _fn = _c.get('filename')
                         _sha = _c.get('sha256') or ''
@@ -2089,6 +2089,7 @@ class MirrorCommandsMixin(SessionState):
         import mirror as _mirror
         import coord.identity as _id
         import coord.store as _store
+        import coord.schema as _schema
         _names = _mirror.list_mirrors(self.config)
         if _name_filter:
             if _name_filter not in _names:
@@ -2108,10 +2109,14 @@ class MirrorCommandsMixin(SessionState):
             _keyring = _id.load_keyring(_keyring_dir)
             _by_builder = _store.read_all_claims(_claims_dir, _keyring, {})
             for _bid, _claims in _by_builder.items():
+                # STA-29: fold supersession back-refs so a superseded
+                # original published claim isn't shown as a current claim
+                # alongside its successor (reclaim / obsolescence).
+                _dead = _schema.superseded_seqs(_claims)
                 for _c in _claims:
                     if _c.get('package') != _pkg:
                         continue
-                    if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
+                    if _schema.is_superseded_claim(_c, _dead):
                         continue
                     if _hits == 0:
                         console.print(

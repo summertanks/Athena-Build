@@ -31327,6 +31327,105 @@ def test_cmd_mirror_pull_redownloads_stale_reclaimed_file():
         assert 'downloaded=1' in _summary[-1], _summary
 
 
+def test_cmd_mirror_pull_folds_superseded_old_claim():
+    """STA-29: the pull walk must FOLD supersession back-refs, not skip
+    only marker states.  After a peer's reclaim the jsonl carries the OLD
+    published claim (state 'published', old sha) AND the new reclaim claim
+    (reclaims_seq → old, new sha) for the same filename.  Without the fold
+    the walk processes the OLD claim first, downloads the REWRITTEN remote
+    bytes, sha-mismatches the old claim, unlinks + fails (and re-downloads
+    under the reclaim claim).  With the fold the old claim is skipped and
+    only the reclaim drives a single, sha-correct download."""
+    import sys as _sys
+    import hashlib as _hashlib
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import build
+    from build import BuildSession
+    import mirror as _mirror_mod
+    import signing as _signing_mod
+    import coord.head as _head_mod
+    import coord.identity as _id_mod
+    import coord.store as _store_mod
+    import coord.transport as _transport_mod
+
+    with tempfile.TemporaryDirectory() as _td:
+        _pool = os.path.join(_td, 'pool')
+        os.makedirs(_pool)
+        # recl file is ABSENT locally → the walk takes the download path.
+        _old_sha = _hashlib.sha256(b'old-bytes').hexdigest()
+        _new_sha = _hashlib.sha256(b'new-bytes').hexdigest()
+        # OLD published claim FIRST (lower seq), then the reclaim — file order
+        # matters: the fold must skip the old one regardless.
+        _claims = {'peer': [
+            {'builder': 'peer', 'seq': 3, 'package': 'recl',
+             'filename': 'recl_1.0_amd64.deb', 'sha256': _old_sha,
+             'claim_state': 'published', 'component': 'main', 'snapshot': ''},
+            {'builder': 'peer', 'seq': 9, 'package': 'recl',
+             'filename': 'recl_1.0_amd64.deb', 'sha256': _new_sha,
+             'claim_state': 'published', 'component': 'main', 'snapshot': '',
+             'reclaims_seq': 3},
+        ]}
+
+        _pulled: 'list[str]' = []
+
+        def _fake_pull_single(*, remote_spec, local_path, ssh_key=None):
+            _pulled.append(os.path.basename(local_path))
+            with open(local_path, 'wb') as _fh:
+                _fh.write(b'new-bytes')   # remote serves the REWRITTEN bytes
+            return True, ''
+
+        class _Cfg:
+            dir_cache = _td
+            dir_repo = _pool
+            build_codename = 'thor'
+
+            def deb_dest_for_filename(self, fn, comp):
+                return _pool
+
+        _patches = [
+            (_mirror_mod, 'read_mirror_state',
+             lambda cfg, n: {'url': 'ssh://u@h/pool', 'ssh_key': ''}),
+            (_mirror_mod, 'list_mirrors', lambda cfg: ['m1']),
+            (_mirror_mod, 'coord_root_for', lambda url: url + '-coord'),
+            (_mirror_mod, 'rsync_spec_for_url', lambda url: ('u@h:/x', None)),
+            (_signing_mod, 'signing_home', lambda cfg: '/s'),
+            (_head_mod, 'read_coord_head',
+             lambda fetched, home: {'revoked_builders': {}}),
+            (_id_mod, 'load_keyring', lambda d: {}),
+            (_store_mod, 'read_all_claims', lambda d, k, r: _claims),
+            (_transport_mod, 'pull_remote_coord', lambda **k: (True, '')),
+            (_transport_mod, 'pull_single_file', _fake_pull_single),
+        ]
+        _saved = [(_m, _a, getattr(_m, _a)) for _m, _a, _ in _patches]
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+        _sess._coord_self_keys = lambda: ('us', 'priv', 'pub')
+        _sess._snapshot_current = lambda: ''
+        _sess._mirror_pull_write_build_records = lambda n, d: None
+        _lines: 'list[str]' = []
+        _orig_print = build.console.print
+        build.console.print = lambda *a, **k: _lines.append(
+            ' '.join(str(x) for x in a))
+        try:
+            for _m, _a, _f2 in _patches:
+                setattr(_m, _a, _f2)
+            _r = _sess.cmd_mirror_pull('m1')
+        finally:
+            for _m, _a, _orig in _saved:
+                setattr(_m, _a, _orig)
+            build.console.print = _orig_print
+        # The old claim was folded → exactly ONE download (the reclaim),
+        # sha-correct, no mismatch failure.
+        assert _r is True, (_r, _lines[-5:])
+        assert _pulled == ['recl_1.0_amd64.deb'], _pulled
+        with open(os.path.join(_pool, 'recl_1.0_amd64.deb'), 'rb') as _fh:
+            assert _fh.read() == b'new-bytes'
+        _summary = [_l for _l in _lines if 'downloaded=' in _l]
+        assert _summary and 'downloaded=1' in _summary[-1], _lines
+        assert 'mismatch=0' in _summary[-1] or 'mismatch' not in _summary[-1], \
+            _summary
+
+
 def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
     """Phase 8 publish gate: BLOCK when build snapshot.current < mirror.base.
     Surfaces an actionable error + leaves no state change."""
@@ -32543,6 +32642,46 @@ def test_claim_schema_obsolete_state_and_new_obsolescence():
     assert _obs['sha256'] == 'aa' and _obs['size'] == 42
     _obs['sig'] = 'deadbeef'
     assert _sch.claim_from_jsonl(_sch.claim_to_jsonl(_obs)) is not None
+
+
+def test_schema_superseded_seqs_and_is_superseded_claim():
+    """STA-29: the canonical supersession fold.  superseded_seqs collects
+    every seq named by a *_seq back-ref (retracts/deprecates/obsoletes/
+    reclaims) across one builder's claims; is_superseded_claim folds a
+    claim that is either a presence-skip marker OR whose seq is superseded
+    — including a still-'published' claim a reclaim/obsolescence replaced."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.schema as _schema
+
+    _claims = [
+        # the live current claims
+        {'seq': 10, 'claim_state': 'published', 'filename': 'live_2_amd64.deb'},
+        # an OLD published claim superseded by the reclaim below
+        {'seq': 3, 'claim_state': 'published', 'filename': 'recl_1_amd64.deb'},
+        # the reclaim — a LIVE published claim carrying reclaims_seq=3
+        {'seq': 9, 'claim_state': 'published', 'filename': 'recl_1_amd64.deb',
+         'reclaims_seq': 3},
+        # an obsolete marker superseding seq 4
+        {'seq': 50, 'claim_state': 'obsolete', 'obsoletes_seq': 4,
+         'filename': 'old_1_amd64.deb'},
+        {'seq': 4, 'claim_state': 'published', 'filename': 'old_1_amd64.deb'},
+    ]
+    _dead = _schema.superseded_seqs(_claims)
+    assert _dead == {3, 4}, _dead
+
+    # The reclaim itself (seq 9) is LIVE; the old published claim (seq 3),
+    # though state 'published', is folded by the back-ref.
+    _by_seq = {_c['seq']: _c for _c in _claims}
+    assert _schema.is_superseded_claim(_by_seq[3], _dead) is True
+    assert _schema.is_superseded_claim(_by_seq[9], _dead) is False
+    assert _schema.is_superseded_claim(_by_seq[10], _dead) is False
+    # marker states fold regardless of dead_seqs
+    assert _schema.is_superseded_claim(_by_seq[50], _dead) is True
+    assert _schema.is_superseded_claim(_by_seq[4], _dead) is True
+    # empty / seq-less claims don't crash and aren't dead by seq
+    assert _schema.superseded_seqs([]) == set()
+    assert _schema.is_superseded_claim(
+        {'claim_state': 'published'}, _dead) is False
 
 
 def test_claim_schema_reclaim_shape_and_jsonl_roundtrip():
@@ -34029,6 +34168,7 @@ def main() -> int:
         test_lifecycle_deprecate_then_reselect_round_trip,
         # LEDGER-01 Chunk 4 — claim schema v3 obsolete state
         test_claim_schema_obsolete_state_and_new_obsolescence,
+        test_schema_superseded_seqs_and_is_superseded_claim,
         test_claim_schema_reclaim_shape_and_jsonl_roundtrip,
         test_reclaim_pair_folds_across_conflict_owner_and_disk_audits,
         test_validate_reclaim_intents_constructs_and_skips,
@@ -34453,6 +34593,7 @@ def main() -> int:
         test_cmd_mirror_dispatch_routes_reclaim,
         test_cmd_mirror_reclaim_lists_resolves_and_confirms,
         test_cmd_mirror_pull_redownloads_stale_reclaimed_file,
+        test_cmd_mirror_pull_folds_superseded_old_claim,
         test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base,
         test_mirror_audit_disk_vs_claims_flags_missing_and_orphan,
         test_cmd_mirror_summary_we_own_counts_non_retracted_claims,

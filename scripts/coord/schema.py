@@ -29,7 +29,7 @@ mental model is one rule across the codebase.
 """
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 # Pinned at v1; bump on any breaking field change.  Readers tolerate
 # unknown future keys (preserve in dict; ignore semantics they don't
@@ -126,6 +126,49 @@ INACTIVE_CLAIM_STATES = frozenset({
 PRESENCE_SKIP_CLAIM_STATES = frozenset({
     CLAIM_STATE_RETRACTED, CLAIM_STATE_DEPRECATED, CLAIM_STATE_OBSOLETE,
 })
+
+# The back-ref fields a superseding record carries to name the seq it
+# replaces.  A retraction/deprecation/obsolescence marker, AND a reclaim
+# (a LIVE published claim, not a marker — RECLAIM-01), all point at the
+# prior claim's seq.  Collected unconditionally: a `*_seq` field only ever
+# appears on the record that owns it, so no state-gating is needed.
+SUPERSESSION_BACKREF_FIELDS = (
+    'retracts_seq', 'deprecates_seq', 'obsoletes_seq', 'reclaims_seq',
+)
+
+
+def superseded_seqs(claims: 'Iterable[dict]') -> 'set[int]':
+    """The set of claim seqs that have been SUPERSEDED — named by a
+    back-ref (`SUPERSESSION_BACKREF_FIELDS`) on any claim in `claims`.
+
+    Per-builder fold: pass ONE builder's claim list (seqs are per-builder).
+    A claim whose own `seq` is in this set is no longer the live assertion
+    for its filename — even when its `claim_state` is still 'published'
+    (the reclaim/obsolescence case: the new record lives, the old published
+    claim is folded).  This is the single canonical fold; every consumer
+    that walks claims as "live" MUST apply it, or a reclaim's old/new pair
+    reads as two live claims for one filename (spurious hash conflicts,
+    pull sha-mismatch, double-counted ownership).
+    """
+    _out: 'set[int]' = set()
+    for _c in claims:
+        for _k in SUPERSESSION_BACKREF_FIELDS:
+            _s = _c.get(_k)
+            if isinstance(_s, int):
+                _out.add(_s)
+    return _out
+
+
+def is_superseded_claim(claim: dict, dead_seqs: 'set[int]') -> bool:
+    """True if `claim` is NOT the live assertion for its filename: either
+    its state is a presence-skip marker (retracted/deprecated/obsolete) OR
+    its `seq` is in `dead_seqs` (a `superseded_seqs(...)` result for the
+    same builder).  The inverse — "treat as live" — is ``not
+    is_superseded_claim(...)``."""
+    if claim.get('claim_state') in PRESENCE_SKIP_CLAIM_STATES:
+        return True
+    _seq = claim.get('seq')
+    return isinstance(_seq, int) and _seq in dead_seqs
 
 # Required keys on every well-formed claim line.  `republished_from`
 # is OPTIONAL — present only for tunneled (passthrough) packages,
