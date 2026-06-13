@@ -712,6 +712,42 @@ class RepoCommandsMixin(SessionState):
 
         return _orphan, _drift, _malformed, _total
 
+    def _scan_orphaned_sidecars(self) -> 'list[tuple[str, str]]':
+        """Find `.verified` sha-cache sidecars whose `.deb`/`.udeb` is gone.
+
+        A `.verified` (utils.get_sha256's cache) lives next to a binary
+        and is meaningless once that binary is removed.  Several removal
+        paths drop the binary but NOT its sidecar — source-build output
+        replacement (`+asg1u1` → `+asg1u2`), pre-STA-38 cleanups, lifecycle
+        pruning — so orphans accumulate (15 found 2026-06-13 after the
+        e2fsprogs/keyring rebuilds + the reportbug deprecation).
+
+        Unconditionally safe to delete: pure filesystem garbage, regenerated
+        on demand if the binary ever returns.  Needs NO dep tree (unlike
+        _scan_stale_files) — this is filesystem consistency, not a stale-vs-
+        selected judgement, so it is deliberately NOT part of the chroot
+        pre-flight gate (orphan sidecars are harmless and must not block a
+        build).  Read-only.
+
+        Returns [(subdir-label, sidecar-filename), ...] over the
+        build-output components (_STALE_SCAN_SUBDIRS).
+        """
+        _orphans: 'list[tuple[str, str]]' = []
+        for _sub in utils._STALE_SCAN_SUBDIRS:
+            try:
+                _dir = self.config.deb_dir_for(_sub)
+            except ValueError:
+                continue
+            if not os.path.isdir(_dir):
+                continue
+            for _f in os.listdir(_dir):
+                if not _f.endswith('.verified'):
+                    continue
+                _base = _f[:-len('.verified')]
+                if not os.path.exists(os.path.join(_dir, _base)):
+                    _orphans.append((_sub, _f))
+        return _orphans
+
     def cmd_package_cleanup(self, *args):
         """Identify and delete obsolete .debs/.udebs in repo/.
 
@@ -763,6 +799,7 @@ class RepoCommandsMixin(SessionState):
         _spin = Spinner("Scanning repo/ for obsolete artifacts")
         try:
             _orphan, _drift, _malformed, _total_files = self._scan_stale_files()
+            _sidecar_orphans = self._scan_orphaned_sidecars()
         finally:
             _spin.done()
 
@@ -787,13 +824,19 @@ class RepoCommandsMixin(SessionState):
                 f"  malformed       : {len(_malformed)} file(s) "
                 f"(skipped — can't read control)"
             )
-        if _n_obsolete == 0:
+        if _sidecar_orphans:
+            console.print(
+                f"  orphan sidecars : {len(_sidecar_orphans)} `.verified` "
+                f"file(s) whose .deb/.udeb is gone (always safe to drop)"
+            )
+        if _n_obsolete == 0 and not _sidecar_orphans:
             console.print("repo/ is clean — no obsolete files found")
             return
-        console.print(
-            f"  TOTAL OBSOLETE  : {_n_obsolete} file(s), "
-            f"{_bytes_obsolete / 1024 / 1024:.1f} MB"
-        )
+        if _n_obsolete:
+            console.print(
+                f"  TOTAL OBSOLETE  : {_n_obsolete} file(s), "
+                f"{_bytes_obsolete / 1024 / 1024:.1f} MB"
+            )
 
         # Group orphan by source so the operator sees the shape (e.g.
         # 222 task-* from a single removed source is one line, not 222).
@@ -848,12 +891,16 @@ class RepoCommandsMixin(SessionState):
             )
             return
 
-        # Force mode: final confirmation prompt.
+        # Force mode: final confirmation prompt.  _n_to_delete counts the
+        # obsolete .deb/.udeb plus the orphaned `.verified` sidecars.
+        _n_to_delete = _n_obsolete + len(_sidecar_orphans)
         _resp = Prompt(
             PROMPT_YESNO,
             f"DELETE {_n_obsolete} obsolete file(s) "
-            f"({_bytes_obsolete / 1024 / 1024:.1f} MB)?  "
-            f"This is IRREVERSIBLE.",
+            f"({_bytes_obsolete / 1024 / 1024:.1f} MB)"
+            + (f" + {len(_sidecar_orphans)} orphan sidecar(s)"
+               if _sidecar_orphans else "")
+            + "?  This is IRREVERSIBLE.",
         ).get_response()
         if _resp.lower() not in ('y', 'yes'):
             console.print("Aborted — no files deleted")
@@ -863,7 +910,7 @@ class RepoCommandsMixin(SessionState):
         _deleted = 0
         _delete_failed = 0
         _bar = ProgressBar(
-            label='Cleanup', maxvalue=_n_obsolete, show_rate=False,
+            label='Cleanup', maxvalue=_n_to_delete, show_rate=False,
         )
         # STA-38: resolve the on-disk dir from the SCANNED label `_sub`
         # via deb_dir_for — the scan found the file in exactly that dir.
@@ -892,6 +939,17 @@ class RepoCommandsMixin(SessionState):
         for _sub, _f, *_ in _drift:
             _bar.step(1)
             _remove_artifact(_sub, _f)
+        # Orphaned `.verified` sidecars — remove directly (the binary they
+        # cached is already gone; nothing to thread through _remove_artifact).
+        for _sub, _f in _sidecar_orphans:
+            _bar.step(1)
+            _sp = os.path.join(self.config.deb_dir_for(_sub), _f)
+            try:
+                os.remove(_sp)
+                _deleted += 1
+            except OSError as e:
+                _delete_failed += 1
+                logger.error(f"cleanup: cannot remove sidecar {_sp}: {e}")
         _bar.close()
 
         # repo state changed — audit's Packages snapshot is stale.

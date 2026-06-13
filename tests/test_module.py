@@ -8810,6 +8810,75 @@ def test_scan_stale_files_prunes_superseded_unselected_sibling():
             f"current production sibling wrongly flagged orphan: {_orphan}")
 
 
+def test_scan_orphaned_sidecars_detects_and_cleanup_sweeps():
+    """STA-54 follow-up: `.verified` sha-cache sidecars whose .deb/.udeb is
+    gone (left by source-build output replacement, pre-STA-38 cleanups,
+    lifecycle pruning) accumulate as harmless cruft.  `_scan_orphaned_
+    sidecars` finds them (read-only, no dep tree) and `repo repair cleanup`
+    sweeps them.  A sidecar whose binary still exists must be preserved."""
+    import sys, tempfile, os
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        _md = cfg.dir_repo_main
+        os.makedirs(_md, exist_ok=True)
+        # live binary + its sidecar (must be kept)
+        open(os.path.join(_md, 'foo_1_amd64.deb'), 'w').close()
+        open(os.path.join(_md, 'foo_1_amd64.deb.verified'), 'w').close()
+        # orphan sidecars (binary gone)
+        open(os.path.join(_md, 'gone_2_amd64.deb.verified'), 'w').close()
+        open(os.path.join(_md, 'e2fsprogs_1.47.0-2+asg1u1_amd64.deb.verified'),
+             'w').close()
+        # a sidecar in the udeb component too
+        _di = cfg.dir_repo_main_udeb
+        os.makedirs(_di, exist_ok=True)
+        open(os.path.join(_di, 'bar-udeb_3_amd64.udeb.verified'), 'w').close()
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = cfg
+        _orphans = _sess._scan_orphaned_sidecars()
+        _names = sorted(_f for _sub, _f in _orphans)
+        assert _names == [
+            'bar-udeb_3_amd64.udeb.verified',
+            'e2fsprogs_1.47.0-2+asg1u1_amd64.deb.verified',
+            'gone_2_amd64.deb.verified',
+        ], _names
+        # The live binary's sidecar is NOT flagged.
+        assert not any('foo' in _f for _sub, _f in _orphans), _orphans
+
+        # Simulate the cleanup sweep (the same os.remove the command runs).
+        for _sub, _f in _orphans:
+            os.remove(os.path.join(cfg.deb_dir_for(_sub), _f))
+        assert _sess._scan_orphaned_sidecars() == [], "sweep incomplete"
+        assert os.path.exists(os.path.join(_md, 'foo_1_amd64.deb.verified')), \
+            "live sidecar wrongly removed"
+
+
+def test_cmd_package_cleanup_sweeps_orphan_sidecars_source_pin():
+    """STA-54 follow-up: cmd_package_cleanup must scan + delete orphaned
+    sidecars (the systematic sweep), not only the per-deleted-binary drop."""
+    _body = _session_source()
+    import re
+    _m = re.search(
+        r"\n    def cmd_package_cleanup\b.*?(?=\n    def \w)", _body, re.DOTALL)
+    assert _m, "cmd_package_cleanup not found"
+    _fn = _m.group(0)
+    assert 'self._scan_orphaned_sidecars()' in _fn, (
+        "cleanup must scan for orphaned sidecars")
+    assert 'orphan sidecar' in _fn.lower(), (
+        "cleanup must report orphaned sidecars in its summary")
+
+
 def test_cmd_package_cleanup_deletes_via_subdir_label_and_drops_sidecar():
     """STA-38: cleanup resolves the on-disk path from the SCANNED `_sub`
     label via deb_dir_for (not deb_dest_for_filename, which defaulted
@@ -33352,6 +33421,8 @@ def main() -> int:
         test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source,
         test_scan_stale_files_covers_main_udeb_and_recovers_malformed,
         test_scan_stale_files_prunes_superseded_unselected_sibling,
+        test_scan_orphaned_sidecars_detects_and_cleanup_sweeps,
+        test_cmd_package_cleanup_sweeps_orphan_sidecars_source_pin,
         test_cmd_package_cleanup_deletes_via_subdir_label_and_drops_sidecar,
         test_audit_nmu_residue_detects_layered_versions,
         # apply_distro_suffix — bump bumped binaries with `+thor1`
