@@ -13273,31 +13273,31 @@ def test_live_chroot_sources_list_is_self_contained():
     Caught 2026-06-01 live ISO test: every cfg.mirrors entry was
     being written as an active `deb` line → apt-update on the
     booted live system hit deb.debian.org.  Self-contained
-    invariant violated."""
+    invariant violated.
+
+    FORK-02 (2026-06-13): tightened further — the chroot
+    sources.list must carry NO mirror-URL interpolation at all,
+    not even commented `# deb {…}` reference lines.  On a
+    Debian-upstream build those rendered as literal
+    `deb http://deb.debian.org/debian …` strings (and disclosed
+    the upstream codename) inside the shipped system file — found
+    in the live ISO residue audit."""
     import inspect, re, sys
     sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
     import chroot
-    # Source-level check: the loop that previously wrote `deb …`
-    # lines from cfg.mirrors into the chroot's sources.list must be
-    # gone.  An active deb-line template would re-introduce the
-    # regression.
     _src = inspect.getsource(chroot._ChrootMixin.generate_system_configs)
-    # No active deb-line writes from the mirror loop.
-    _active_deb_lines = re.findall(
-        r"^\s*['\"]?deb \{[^#]*\}", _src, re.MULTILINE,
-    )
-    assert not _active_deb_lines, (
-        f"generate_system_configs still composes active `deb` "
-        f"lines: {_active_deb_lines}.  Per self-contained policy, "
-        f"the chroot sources.list must be comment-only by default; "
-        f"the network apt source goes through "
+    # No `deb` URL line composed for sources.list — neither an
+    # interpolated `deb {…}` nor a literal `deb scheme://…`, active
+    # OR commented (FORK-02).  Either re-introduces upstream URLs into
+    # the shipped image.  `deb\s+` (whitespace required) deliberately
+    # does NOT match the policy prose "never default to deb.debian.org".
+    _deb_lines = re.findall(r"deb\s+(?:\{|[a-z]+://)\S*", _src)
+    assert not _deb_lines, (
+        f"generate_system_configs composes `deb` URL lines for "
+        f"sources.list: {_deb_lines}.  Per FORK-02 the chroot "
+        f"sources.list must carry no upstream `deb` lines at all "
+        f"(active or commented); the network apt source goes through "
         f"sources.list.d/athena.list (see _write_athena_apt_source)."
-    )
-    # The comment-only reference template uses `# deb {…}` for
-    # operator awareness — that's allowed.
-    assert "'# deb {" in _src or '"# deb {' in _src, (
-        "expected commented-deb reference template lines listing "
-        "build-time mirrors (operator-facing context)"
     )
     # The header must call out the self-contained policy so a
     # future contributor doesn't reintroduce the bug.

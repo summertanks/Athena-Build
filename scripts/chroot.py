@@ -1446,29 +1446,24 @@ class _ChrootMixin:
         # network source — apt-install fails loud rather than silently
         # pulling from upstream Debian.
         #
-        # If the operator wants upstream Debian back on the running
-        # system (off-policy, but their machine), they can uncomment
-        # the example lines in the template — derived from the
-        # configured [Mirror.*] sections of the build's build.conf so
-        # the URLs match what the cache was built against.
-        _example_lines = ''.join(
-            f'# deb {_m.url} {_m.suite} {_m.component}\n'
-            for _m in cfg.mirrors
-        )
+        # FORK-02: the shipped sources.list carries NO upstream example
+        # lines.  An earlier version emitted the build's [Mirror.*] URLs
+        # as commented `# deb …` references "for operator convenience" —
+        # but on an upstream-mirror build those render as literal
+        # upstream `deb …` URLs in the installed system's sources.list,
+        # violating the never-default-to-upstream invariant above (and
+        # disclosing the upstream base codename).  The build provenance
+        # lives in the build host's build.conf, not on the shipped image.
         _sources_list = (
             '# /etc/apt/sources.list — Asgard self-contained policy.\n'
             '#\n'
-            '# This file is intentionally empty.  The Asgard apt pool\n'
-            '# ships on the installer ISO + (optionally) one network\n'
-            '# source per registered mirror at /etc/apt/sources.list.d/\n'
-            '# athena-<name>.list.  Live images that need apt access at\n'
-            '# boot should either have a mirror registered at build time\n'
-            '# (`mirror add` on the build host) or have the operator mount\n'
-            '# the installation media and `apt-cdrom add` it.\n'
-            '#\n'
-            '# For reference, the build pulled upstream packages from\n'
-            '# these mirrors at cache-build time (NOT enabled here):\n'
-            f'{_example_lines}'
+            '# Intentionally empty.  The Asgard apt pool ships on the\n'
+            '# installer ISO + (optionally) one network source per\n'
+            '# registered mirror at /etc/apt/sources.list.d/athena-<name>.list.\n'
+            '# Live images that need apt access at boot should either have a\n'
+            '# mirror registered at build time (`mirror add` on the build\n'
+            '# host) or have the operator mount the installation media and\n'
+            '# `apt-cdrom add` it.\n'
         )
         self._write_chroot_file('/etc/apt/sources.list', _sources_list)
 

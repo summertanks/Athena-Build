@@ -1,0 +1,37 @@
+Description: don't ship Debian's archive trust anchors into the running system
+ Upstream's `debian/debian-archive-keyring.install` installs both the
+ inert keyrings and the ACTIVE trust anchors:
+ .
+   usr/share/keyrings/*
+   etc/apt/trusted.gpg.d/*
+ .
+ The second line drops nine `debian-archive-*.asc` files into
+ `/etc/apt/trusted.gpg.d/`, which apt consults at runtime as global
+ trust anchors.  On Asgard that means the installed/live system would
+ trust packages signed by Debian's bullseye/bookworm/trixie archive
+ keys — a trust surface beyond the self-contained "apt pool = our repo
+ only" policy (our mirror line already pins
+ `[signed-by=athena-archive-keyring.gpg]`, so the Debian anchors are
+ never needed for our pool, only a liability if any unscoped `deb`
+ line were ever added).
+ .
+ Drop the `etc/apt/trusted.gpg.d/*` install line so dpkg never owns
+ those paths (no ship-then-delete; the files are simply not packaged).
+ The inert `usr/share/keyrings/*` .gpg files are KEPT — they are not
+ auto-trusted by apt (only consulted via explicit `signed-by=`), and
+ the `-udeb` binary + debootstrap reference them by path.  Compat 10
+ does not run `dh_missing`, so the now-unpackaged generated `.asc`
+ files do not fail the build.
+ .
+ Filed as FORK-03 from the 2026-06-13 live-ISO residue audit.
+Author: Harkirat S Virk <harkiratsvirk@gmail.com>
+Origin: local
+Forwarded: no
+Last-Update: 2026-06-13
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/debian/debian-archive-keyring.install
++++ b/debian/debian-archive-keyring.install
+@@ -1,2 +1 @@
+ usr/share/keyrings/*
+-etc/apt/trusted.gpg.d/*
