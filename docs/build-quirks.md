@@ -27,6 +27,17 @@ exit 2, deterministic across retries.
 **Rule:** expand a dep name to provider alternatives **only when no real
 package exists under that name** (`_expand_virtual_alternatives`,
 `scripts/package.py`).
+**Second victim, now resolved (xorg-server):** the same mis-pick disabled
+libunwind in xserver — but *silently*, because xorg's configure treats
+libunwind as optional (LLVM's `libunwind-14-dev` shipped `libunwind-14.pc`
+not `libunwind.pc`, the pkg-config probe failed, the feature auto-disabled).
+A workaround patch (`9001-rules-disable-libunwind.patch`) forced
+`--disable-libunwind` to unblock the build.  Once the resolver fix above
+landed (real `libunwind-dev 1.6.2-3` resolved verbatim — it *does* ship
+`libunwind.pc`), the workaround became obsolete and was removed; the loss
+showed up as STA-24 dep-loss drift (xserver-xorg-core/xephyr → libunwind8).
+Re-enabling restores upstream parity (native crash backtraces in
+`Xorg.0.log`).  **Needs an xorg-server rebuild to take effect.**
 
 ### 1.2 Multi-provider purely-virtual names can't be apt-installed non-interactively
 `apt-get install libcurl4-dev` fails with "has no installation candidate"
