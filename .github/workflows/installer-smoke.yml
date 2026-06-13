@@ -1,0 +1,120 @@
+name: installer-smoke
+
+# Boots the latest PUBLISHED installer ISO under QEMU (quick mode — "does
+# d-i boot cleanly?") and scans the serial log for known-bad patterns.
+# Reuses tests/installer_smoke/run.py wholesale; the only new code is this
+# workflow + the ISO-fetch step (CI-01).
+#
+# ISO source (priority order):
+#   1. the workflow_dispatch `iso_url` input — on-demand: paste a URL, or
+#   2. ${{ vars.ASGARD_MIRROR_URL }}/releases.json — the static release
+#      manifest that `mirror publish` writes at the pool root (the
+#      `installer` ISO entry, with its sha256).  Set the ASGARD_MIRROR_URL
+#      repo variable (e.g. http://<mirror>/asgard) to enable the nightly.
+# If neither is available the job no-ops (green) — the nightly gate lights
+# up the moment ASGARD_MIRROR_URL is set.
+#
+# GitHub-hosted runners have no /dev/kvm, so QEMU runs under TCG.  That's
+# fine for --quick (boot to the first d-i dialog).  --full is deferred
+# (too slow under TCG) until quick-mode has been stable a week.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # nightly ~04:17 UTC
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: 'Installer ISO URL (overrides the mirror releases.json)'
+        required: false
+        default: ''
+      timeout:
+        description: 'Quick-mode serial-capture timeout in seconds (TCG is slow)'
+        required: false
+        default: '300'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: installer smoke (quick, BIOS + EFI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve installer ISO + sha256
+        id: resolve
+        env:
+          MIRROR_URL: ${{ vars.ASGARD_MIRROR_URL }}
+          INPUT_ISO_URL: ${{ inputs.iso_url }}
+        run: |
+          set -euo pipefail
+          ISO_URL=''
+          ISO_SHA=''
+          if [ -n "${INPUT_ISO_URL:-}" ]; then
+            ISO_URL="${INPUT_ISO_URL}"
+            echo "Using dispatch-provided ISO URL: ${ISO_URL}"
+          elif [ -n "${MIRROR_URL:-}" ]; then
+            REL="${MIRROR_URL%/}/releases.json"
+            echo "Fetching ${REL}"
+            curl -fsSL "${REL}" -o releases.json
+            ISO_URL="$(jq -r '.isos[] | select(.kind=="installer") | .url' releases.json | head -n1)"
+            ISO_SHA="$(jq -r '.isos[] | select(.kind=="installer") | .sha256' releases.json | head -n1)"
+            echo "Resolved installer ISO from manifest: ${ISO_URL}"
+          else
+            echo "::notice::No iso_url input and ASGARD_MIRROR_URL is not set — nothing to smoke; skipping."
+          fi
+          echo "iso_url=${ISO_URL}" >> "$GITHUB_OUTPUT"
+          echo "iso_sha=${ISO_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Install QEMU + OVMF
+        if: steps.resolve.outputs.iso_url != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              qemu-system-x86 qemu-utils ovmf
+
+      - name: Download + verify installer ISO
+        if: steps.resolve.outputs.iso_url != ''
+        env:
+          ISO_URL: ${{ steps.resolve.outputs.iso_url }}
+          ISO_SHA: ${{ steps.resolve.outputs.iso_sha }}
+        run: |
+          set -euo pipefail
+          echo "Downloading ${ISO_URL}"
+          curl -fSL --retry 3 "${ISO_URL}" -o installer.iso
+          if [ -n "${ISO_SHA:-}" ] && [ "${ISO_SHA}" != 'null' ]; then
+            echo "${ISO_SHA}  installer.iso" | sha256sum -c -
+          else
+            echo "::warning::No sha256 in manifest — skipping integrity check"
+          fi
+          ls -la installer.iso
+
+      - name: Smoke (quick, BIOS)
+        if: steps.resolve.outputs.iso_url != ''
+        run: |
+          python3 tests/installer_smoke/run.py \
+            --iso installer.iso --quick --mode bios \
+            --output-dir /tmp/smoke-bios \
+            --timeout "${{ inputs.timeout || '300' }}"
+
+      - name: Smoke (quick, EFI)
+        # Run even if the BIOS leg failed, for full signal; the job still
+        # fails if either leg exits non-zero.
+        if: ${{ !cancelled() && steps.resolve.outputs.iso_url != '' }}
+        run: |
+          python3 tests/installer_smoke/run.py \
+            --iso installer.iso --quick --mode efi \
+            --output-dir /tmp/smoke-efi \
+            --timeout "${{ inputs.timeout || '300' }}"
+
+      - name: Upload serial logs
+        if: ${{ always() && steps.resolve.outputs.iso_url != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-serial-logs
+          path: |
+            /tmp/smoke-bios/serial.log
+            /tmp/smoke-efi/serial.log
+          if-no-files-found: ignore

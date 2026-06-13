@@ -27350,6 +27350,34 @@ def test_release_index_manifest_and_html():
     assert release_index.render_releases_json(_m) == _jsons
 
 
+def test_installer_smoke_workflow_contract():
+    """CI-01 stage 2: the installer-smoke workflow exists and wires the
+    harness — scheduled + manual triggers, resolves the ISO from the
+    mirror's releases.json (or a dispatch input), and gates on
+    `run.py --quick` for both BIOS and EFI.  String pins (no PyYAML dep —
+    the CI test job doesn't install it)."""
+    _wf_path = os.path.join(
+        _ROOT, '.github', 'workflows', 'installer-smoke.yml')
+    assert os.path.isfile(_wf_path), "installer-smoke.yml missing"
+    with open(_wf_path) as _fh:
+        _wf = _fh.read()
+    # triggers: nightly schedule + manual dispatch
+    assert 'schedule:' in _wf and 'cron:' in _wf, _wf
+    assert 'workflow_dispatch:' in _wf, _wf
+    # ISO source: the mirror's static manifest, or a dispatch URL
+    assert 'releases.json' in _wf, _wf
+    assert 'ASGARD_MIRROR_URL' in _wf and 'iso_url' in _wf, _wf
+    # sha-verify the download
+    assert 'sha256sum -c' in _wf, _wf
+    # runs the harness, quick mode, both firmware modes
+    assert 'tests/installer_smoke/run.py' in _wf, _wf
+    assert '--quick' in _wf, _wf
+    assert '--mode bios' in _wf and '--mode efi' in _wf, _wf
+    # no continue-on-error escape hatch on the gate (the run.py exit code
+    # must fail the job)
+    assert 'continue-on-error' not in _wf, _wf
+
+
 def test_release_iso_descriptors_finds_and_reports_missing():
     """_release_iso_descriptors discovers the current version+snapshot
     live/installer ISOs in image/ and reports which REQUIRED kinds are
@@ -35084,6 +35112,7 @@ def main() -> int:
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
         test_release_index_manifest_and_html,
+        test_installer_smoke_workflow_contract,
         test_release_iso_descriptors_finds_and_reports_missing,
         test_mirror_publish_release_gate_and_push_wired,
         test_cmd_mirror_publish_refuses_indl_to_fresh_mirror,
