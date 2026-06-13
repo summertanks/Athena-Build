@@ -88,6 +88,23 @@ _DEFAULT_SECURITY_KEYRING = '/usr/share/keyrings/debian-archive-keyring.gpg'
 # Each subdir has its own Packages index.  `repo audit` scopes repo/main.
 _REPO_SUBDIRS = ('main', 'doc', 'dbgsym', 'tests')
 
+# STA-38: the BUILD-OUTPUT component labels (deb_dir_for keys) that the
+# maintenance walks — strip (all_deb_dirs) AND stale-artifact detection
+# (_scan_stale_files, feeding cleanup + the chroot pre-flight gate) — must
+# both cover.  Single canon so the two walks can't drift apart: the bug
+# was `_scan_stale_files` walking only _REPO_SUBDIRS (missing `main-udeb`),
+# so a superseded `+asg<R>u<N>` udeb in main/debian-installer/ (our built
+# e2fsprogs-udeb / debian-archive-keyring-udeb) survived BOTH cleanup and
+# the gate — exactly the silent-stale-consumption the gate exists to block.
+#
+# Deliberately EXCLUDES the non-main components (contrib / non-free /
+# non-free-firmware): those hold PRISTINE TUNNELED binaries that the
+# maintenance walks must not touch (don't re-strip pristine; the stale
+# classifier also can't predict tunneled filenames, so it would KEEP both
+# current and superseded tunneled copies anyway).  Tunneled-component
+# stale detection is a separate problem (needs tunnel-aware expected-files).
+_STALE_SCAN_SUBDIRS = ('main', 'main-udeb', 'doc', 'dbgsym', 'tests')
+
 
 # User-Agent for every outbound HTTP request.  snapshot.debian.org rate-
 # limits aggressively against the default `python-requests/X.Y.Z` UA — to
@@ -2536,15 +2553,15 @@ class BuildConfig:
 
         Replaces the pre-CONF-01 idiom of `for sub in _REPO_SUBDIRS:
         join(dir_repo, sub)`.  Order is stable (binaries first, udebs
-        next, then doc/dbgsym/tests in alphabetical order).
+        next, then doc/dbgsym/tests).
+
+        STA-38: derived from the single `_STALE_SCAN_SUBDIRS` canon so
+        this (strip) walk and `_scan_stale_files` (cleanup / gate) cover
+        exactly the same build-output components and can't drift apart.
+        Pristine tunneled binaries (contrib / non-free / non-free-firmware)
+        stay excluded — maintenance walks must not touch them.
         """
-        return [
-            self.dir_repo_main,
-            self.dir_repo_main_udeb,
-            self.dir_repo_doc,
-            self.dir_repo_dbgsym,
-            self.dir_repo_tests,
-        ]
+        return [self.deb_dir_for(_label) for _label in _STALE_SCAN_SUBDIRS]
 
     def build_options_for(self, pkg_name: str) -> 'frozenset[str]':
         """Return the effective DEB_BUILD_OPTIONS set for a source pkg.

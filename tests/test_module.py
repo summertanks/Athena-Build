@@ -8662,6 +8662,105 @@ def test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source():
     )
 
 
+def test_scan_stale_files_covers_main_udeb_and_recovers_malformed():
+    """STA-38: _scan_stale_files must walk `main-udeb`
+    (main/debian-installer/) — our built udebs — not just _REPO_SUBDIRS.
+    A superseded +asg<R>u<N> udeb there was invisible to BOTH cleanup and
+    the chroot stale gate (the e2fsprogs-udeb / keyring-udeb drift that
+    survived `repo repair cleanup force` 2026-06-13).  Also pins the
+    recovered `malformed` bucket: an on-disk binary the index didn't emit
+    (unscannable) is reported."""
+    import sys, tempfile, os
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils, repo_audit
+    import build
+    from build import BuildSession
+
+    assert 'main-udeb' in utils._STALE_SCAN_SUBDIRS, (
+        "STA-38: main-udeb must be in the stale-scan canon")
+
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+
+        # Drop three udebs on disk in main/debian-installer/: current +
+        # superseded e2fsprogs-udeb, plus one the index won't list.
+        _di = cfg.dir_repo_main_udeb
+        os.makedirs(_di, exist_ok=True)
+        _cur = 'e2fsprogs-udeb_1.47.0-2+asg1u2_amd64.udeb'
+        _old = 'e2fsprogs-udeb_1.47.0-2+asg1u1_amd64.udeb'
+        _bad = 'corrupt-thing_1_amd64.udeb'   # not in index → malformed
+        for _fn in (_cur, _old, _bad):
+            open(os.path.join(_di, _fn), 'w').close()
+
+        class _Tree:
+            def __init__(self):
+                self.selected_srcs = {'e2fsprogs': object()}
+                self.src_pkg_files = {'e2fsprogs': [_cur]}  # current is expected
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = cfg
+        _sess.dep_tree = _Tree()
+        _sess.udeb_dep_tree = _Tree()
+        _sess._superseded_binary_names = lambda: set()
+
+        def _fake_iter(config, subdir, refresh=False):
+            if subdir == 'main-udeb':
+                for _v in ('+asg1u1', '+asg1u2'):
+                    _fn = f'e2fsprogs-udeb_1.47.0-2{_v}_amd64.udeb'
+                    yield (_fn, {
+                        'Package': 'e2fsprogs-udeb', 'Source': 'e2fsprogs',
+                        'Version': f'1.47.0-2{_v}',
+                        'Filename': f'pool/{_fn}', 'Size': '100'})
+            # corrupt-thing deliberately NOT emitted (unscannable)
+            return
+
+        with patch.object(repo_audit, 'iter_packages_all_versions',
+                          side_effect=_fake_iter):
+            _orphan, _drift, _malformed, _total = _sess._scan_stale_files()
+
+        # main-udeb WAS walked → the superseded +asg1u1 is drift.
+        assert any('+asg1u1' in _fn for _sub, _fn, *_ in _drift), (
+            f"superseded main-udeb +asg1u1 not flagged as drift: {_drift}")
+        # current +asg1u2 is NOT drift.
+        assert not any('+asg1u2' in _fn for _sub, _fn, *_ in _drift), _drift
+        # The drift carries the 'main-udeb' label (so deletion resolves the dir).
+        assert all(_sub == 'main-udeb' for _sub, _fn, *_ in _drift), _drift
+        # corrupt-thing on disk but absent from the index → malformed.
+        assert any('corrupt-thing' in _m for _m in _malformed), (
+            f"unscannable on-disk udeb not reported malformed: {_malformed}")
+
+
+def test_cmd_package_cleanup_deletes_via_subdir_label_and_drops_sidecar():
+    """STA-38: cleanup resolves the on-disk path from the SCANNED `_sub`
+    label via deb_dir_for (not deb_dest_for_filename, which defaulted
+    component='main' and mis-routed a non-free-firmware .deb to main/ →
+    delete failure), and removes the orphaned `.verified` sidecar with
+    each binary."""
+    _body = _session_source()
+    import re
+    _m = re.search(
+        r"\n    def cmd_package_cleanup\b.*?(?=\n    def \w)", _body, re.DOTALL)
+    assert _m, "cmd_package_cleanup not found"
+    _fn = _m.group(0)
+    assert 'deb_dir_for(_sub)' in _fn, (
+        "deletion must resolve the dir from the scanned label _sub via "
+        "deb_dir_for, not re-derive from the filename")
+    assert "deb_dest_for_filename(_f)" not in _fn, (
+        "deletion must NOT use deb_dest_for_filename (defaults "
+        "component='main' → mis-routes non-main binaries)")
+    assert ".verified" in _fn, (
+        "cleanup must drop the orphaned .verified sidecar alongside the binary")
+
+
 def test_package_audit_includes_stale_files_warning_section():
     """`repo audit` must call _scan_stale_files (via the
     _report_stale_files_warning helper) so the operator sees orphan-
@@ -33180,6 +33279,8 @@ def main() -> int:
         test_cmd_package_cleanup_registered_in_repo_dispatcher,
         test_cmd_package_cleanup_dry_run_default_force_flag_required,
         test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source,
+        test_scan_stale_files_covers_main_udeb_and_recovers_malformed,
+        test_cmd_package_cleanup_deletes_via_subdir_label_and_drops_sidecar,
         test_audit_nmu_residue_detects_layered_versions,
         # apply_distro_suffix — bump bumped binaries with `+thor1`
         test_production_build_conf_has_noautodbgsym_in_build_options,
