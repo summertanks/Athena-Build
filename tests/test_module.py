@@ -12400,6 +12400,104 @@ def test_verify_dep_resolution_still_catches_real_violations():
     )
 
 
+def test_sta24_dep_target_names_extracts_all_fields_names_only():
+    """STA-24: _dep_target_names returns the dep-target NAMES across all
+    four fields, ignoring version constraints (so an NMU-strip rewriting a
+    constraint version is NOT seen as a removal)."""
+    import dep_drift
+
+    class _P:
+        depends = [('libc6', '2.34', '>='), ('libfoo', '', '')]
+        pre_depends = [('dpkg', '', '')]
+        alt_depends = [[('a', '', ''), ('b', '1', '=')]]
+        alt_pre_depends = [[('init', '', '')]]
+    assert dep_drift._dep_target_names(_P()) == {
+        'libc6', 'libfoo', 'dpkg', 'a', 'b', 'init'}
+    # version-only change → same name set (no false "removal")
+    class _Q:
+        depends = [('libc6', '2.36', '>=')]   # constraint bumped
+        pre_depends = []
+        alt_depends = []
+        alt_pre_depends = []
+    class _R:
+        depends = [('libc6', '', '')]          # constraint stripped
+        pre_depends = []
+        alt_depends = []
+        alt_pre_depends = []
+    assert (dep_drift._dep_target_names(_Q())
+            == dep_drift._dep_target_names(_R()) == {'libc6'})
+
+
+def test_sta24_check_dep_drift_warns_on_lost_selected_dep():
+    """STA-24: a built .deb that DROPPED a dep on a SELECTED package (vs
+    the upstream cache record) must raise a prominent WARNING — the
+    e2fsprogs/libext2fs2 class that the minimal closure silently follows
+    into a boot loop.  A constraint-version-only drift must NOT warn."""
+    import sys as _sys, subprocess as _subprocess
+    from unittest.mock import patch
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dep_drift, utils, tui, package
+
+    class _CachePkg:
+        def __init__(self, depends):
+            self._fields = {
+                'Package': 'e2fsprogs', 'Version': '1.47.0-2',
+                'Filename': 'pool/e2fsprogs_1.47.0-2_amd64.deb'}
+            self.version = '1.47.0-2'
+            self.pre_depends = []
+            self.alt_pre_depends = []
+            self.alt_depends = []
+            self.depends = list(depends)
+
+        def __getitem__(self, k): return self._fields[k]
+        def __setitem__(self, k, v): self._fields[k] = v
+        def get(self, k, d=''): return self._fields.get(k, d)
+
+    class _DT:
+        def __init__(self, _cache):
+            self.canonical_pkgs = {'e2fsprogs': _cache}
+            self.selected_pkgs = {
+                'e2fsprogs': _cache,
+                'libext2fs2': object(), 'libc6': object()}
+            self.extras_pkg_names: set = set()
+
+    def _run(_cache, _disk_depends_line):
+        _disk_ctrl = (f"Package: e2fsprogs\nVersion: 1.47.0-2\n"
+                      f"Architecture: amd64\n{_disk_depends_line}")
+        _proc = _subprocess.CompletedProcess([], 0, _disk_ctrl, '')
+
+        class _Mixin(dep_drift._DepDriftMixin):
+            def __init__(self):
+                self._dependencytree = _DT(_cache)
+                self._dir_repo_main = '/repo/main'
+                self.normalize_repo_filename = lambda f: f
+
+            def _verify_dep_resolution(self):  # not under test here
+                pass
+
+        _printed: 'list[str]' = []
+        with patch.object(utils, 'find_matching_artifact',
+                          return_value='/repo/main/e2fsprogs.deb'), \
+             patch.object(dep_drift.subprocess, 'run', return_value=_proc), \
+             patch.object(tui.console, 'print',
+                          side_effect=lambda *a, **k: _printed.append(
+                              ' '.join(str(x) for x in a))):
+            _Mixin()._check_dep_drift()
+        return '\n'.join(_printed)
+
+    # LOST a selected dep (libext2fs2) → WARN
+    _cache = _CachePkg([('libext2fs2', '', ''), ('libc6', '', '')])
+    _out = _run(_cache, "Depends: libc6")
+    assert 'dep-loss' in _out.lower(), _out
+    assert 'e2fsprogs' in _out and 'libext2fs2' in _out, _out
+
+    # constraint-version-only change (same names) → NO warn
+    _cache2 = _CachePkg([('libext2fs2', '1.47.0-2', '='),
+                         ('libc6', '', '')])
+    _out2 = _run(_cache2, "Depends: libext2fs2 (>= 1.43.9), libc6")
+    assert 'dep-loss' not in _out2.lower(), _out2
+
+
 def test_print_extras_lists_recommended_packages():
     """`print extras` enumerates the entries with their source
     classification (extras-only vs mixed)."""
@@ -34269,6 +34367,8 @@ def main() -> int:
         test_compute_install_batches_excludes_extras_pkg_names,
         test_verify_dep_resolution_skips_extras,
         test_verify_dep_resolution_still_catches_real_violations,
+        test_sta24_dep_target_names_extracts_all_fields_names_only,
+        test_sta24_check_dep_drift_warns_on_lost_selected_dep,
         test_print_extras_lists_recommended_packages,
         test_print_extras_handles_empty_extras_set,
         # source build args parsing (+ subset selectors)
