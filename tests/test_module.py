@@ -17812,12 +17812,16 @@ def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
         )
 
 
-def test_push_dist_tree_protects_pool_artifacts_from_delete():
-    """push_dist_tree rsyncs dists/<codename>/ with --delete, and since
-    CONF-01 the pool .debs live INSIDE that tree — a bare --delete
-    mirrors local prunes onto the remote (17 obsolete/deprecated files
-    vanished from the append-only pool, 2026-06-11).  The rsync argv
-    must protect .deb/.udeb from receiver-side deletion."""
+def test_push_dist_tree_excludes_pool_artifacts():
+    """STA-28: push_dist_tree rsyncs dists/<codename>/ with --delete, and
+    since CONF-01 the pool .debs live INSIDE that tree.  Pool artifacts
+    must be EXCLUDED (not merely `--filter=P` protected): a protect rule
+    only stops receiver-side DELETION, but rsync -aH still transfers/
+    OVERWRITES a .deb whose bytes differ — so a local-ahead rebuild
+    silently rewrote frozen remote bytes (bypassing RECLAIM-01).
+    `--exclude` removes pool artifacts from the transfer set entirely,
+    so this pass neither overwrites NOR deletes them; the pool is owned
+    solely by push_single_deb.  --delete still reaps stale index files."""
     import sys as _sys
     import types as _types
     import tempfile
@@ -17842,8 +17846,11 @@ def test_push_dist_tree_protects_pool_artifacts_from_delete():
     assert _ok, _detail
     _argv = _captured['argv']
     assert '--delete' in _argv, _argv
-    assert '--filter=P *.deb' in _argv, _argv
-    assert '--filter=P *.udeb' in _argv, _argv
+    assert '--exclude=*.deb' in _argv, _argv
+    assert '--exclude=*.udeb' in _argv, _argv
+    # The old protect-only rules (which allowed overwrite) must be gone.
+    assert '--filter=P *.deb' not in _argv, _argv
+    assert '--filter=P *.udeb' not in _argv, _argv
 
 
 def test_mirror_audit_disk_vs_claims_folds_superseded_claims():
@@ -27664,7 +27671,7 @@ def test_filter_pending_by_ownership_own_claim_keeps():
     _c = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
     _existing = {
         'foo.deb': {
-            'builder': 'alice', 'version': '1.0', 'sha256': 'a' * 64,
+            'builder': 'alice', 'version': '1.0', 'sha256': 'f' * 64,
             'claim_state': 'published', 'seq': 5,
             'republished_from': None, 'claim': {},
         }
@@ -27687,7 +27694,7 @@ def test_filter_pending_by_ownership_tunneled_keeps_takes_ownership():
         'vlc.deb': {
             'builder': None,            # tunneled
             'version': '3.0-1',
-            'sha256': 'b' * 64,
+            'sha256': 'f' * 64,
             'claim_state': 'published',
             'seq': 2,
             'republished_from': {'url': 'http://x', 'upstream_sha256': 'b' * 64},
@@ -27709,7 +27716,7 @@ def test_filter_pending_by_ownership_higher_version_transfers_ownership():
     _c = _new_pending_claim('alice', 'foo', 'foo.deb', '2.0')
     _existing = {
         'foo.deb': {
-            'builder': 'bob', 'version': '1.0', 'sha256': 'b' * 64,
+            'builder': 'bob', 'version': '1.0', 'sha256': 'f' * 64,
             'claim_state': 'published', 'seq': 3,
             'republished_from': None, 'claim': {},
         }
@@ -27729,7 +27736,7 @@ def test_filter_pending_by_ownership_same_version_other_owner_blocks():
     _c = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
     _existing = {
         'foo.deb': {
-            'builder': 'bob', 'version': '1.0', 'sha256': 'b' * 64,
+            'builder': 'bob', 'version': '1.0', 'sha256': 'f' * 64,
             'claim_state': 'published', 'seq': 3,
             'republished_from': None, 'claim': {},
         }
@@ -27755,7 +27762,7 @@ def test_filter_pending_by_ownership_lower_version_blocks():
     _c = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
     _existing = {
         'foo.deb': {
-            'builder': 'bob', 'version': '2.0', 'sha256': 'b' * 64,
+            'builder': 'bob', 'version': '2.0', 'sha256': 'f' * 64,
             'claim_state': 'published', 'seq': 3,
             'republished_from': None, 'claim': {},
         }
@@ -27778,7 +27785,7 @@ def test_filter_pending_by_ownership_partial_publish_continues():
     _c3 = _new_pending_claim('alice', 'baz', 'baz.deb', '1.0')
     _existing = {
         'bar.deb': {
-            'builder': 'bob', 'version': '1.0', 'sha256': 'b' * 64,
+            'builder': 'bob', 'version': '1.0', 'sha256': 'f' * 64,
             'claim_state': 'published', 'seq': 3,
             'republished_from': None, 'claim': {},
         }
@@ -27790,6 +27797,71 @@ def test_filter_pending_by_ownership_partial_publish_continues():
     assert _kept_fns == {'foo.deb', 'baz.deb'}
     assert len(_blocked) == 1
     assert _blocked[0]['filename'] == 'bar.deb'
+
+
+def test_filter_pending_by_ownership_blocks_frozen_byte_mismatch():
+    """STA-47: an existing owner record means the remote pool already
+    holds FROZEN bytes under this filename.  If our rebuilt bytes differ
+    (builds aren't bit-reproducible) and this isn't a sanctioned reclaim,
+    publishing must be BLOCKED — push_single_deb(--ignore-existing) would
+    skip the upload, so the remote keeps the old bytes while our new claim
+    pins a sha the pool doesn't serve (claim_apt_sha_mismatch + peer
+    delete-on-mismatch).  Covers the keep-despite-existing-owner cases:
+    owner-is-us and tunneled.  A reclaim (reclaims_seq set) is exempt."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+
+    # candidate default sha = 'f'*64; owners below carry a DIFFERENT sha.
+    for _owner_builder, _label in (('alice', 'owner-is-us'),
+                                   (None, 'tunneled')):
+        _c = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
+        _existing = {
+            'foo.deb': {
+                'builder': _owner_builder, 'version': '1.0',
+                'sha256': 'd' * 64,      # frozen remote bytes differ
+                'claim_state': 'published', 'seq': 5,
+                'republished_from': ({'url': 'http://x'} if _owner_builder
+                                     is None else None),
+                'claim': {},
+            }
+        }
+        _kept, _blocked = _publish.filter_pending_by_ownership(
+            'alice', [_c], existing_owners=_existing)
+        assert _kept == [], f"{_label}: must block frozen-byte mismatch"
+        assert len(_blocked) == 1, _label
+        assert 'frozen pool copy' in _blocked[0]['reason'], _blocked
+        assert 'mirror reclaim' in _blocked[0]['reason'], _blocked
+
+    # A reclaim (reclaims_seq set) is the sanctioned same-filename path —
+    # NOT blocked even though the sha differs.
+    _rc = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0')
+    _rc['reclaims_seq'] = 5
+    _existing = {
+        'foo.deb': {
+            'builder': 'alice', 'version': '1.0', 'sha256': 'd' * 64,
+            'claim_state': 'published', 'seq': 5,
+            'republished_from': None, 'claim': {},
+        }
+    }
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_rc], existing_owners=_existing)
+    assert _kept == [_rc], "reclaim must pass the frozen-byte guard"
+    assert _blocked == []
+
+    # Matching bytes (reproducible rebuild) → NOT blocked by this guard.
+    _same = _new_pending_claim('alice', 'foo', 'foo.deb', '1.0',
+                               sha='f' * 64)
+    _existing = {
+        'foo.deb': {
+            'builder': 'alice', 'version': '1.0', 'sha256': 'f' * 64,
+            'claim_state': 'published', 'seq': 5,
+            'republished_from': None, 'claim': {},
+        }
+    }
+    _kept, _blocked = _publish.filter_pending_by_ownership(
+        'alice', [_same], existing_owners=_existing)
+    assert _kept == [_same] and _blocked == []
 
 
 def test_coord_store_project_owners_single_owner_per_filename():
@@ -33829,7 +33901,7 @@ def main() -> int:
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_preflight_repo_audit_blocks_on_stale_artifacts,
         test_mirror_publish_reindexes_stale_local_index,
-        test_push_dist_tree_protects_pool_artifacts_from_delete,
+        test_push_dist_tree_excludes_pool_artifacts,
         test_mirror_audit_disk_vs_claims_folds_superseded_claims,
         test_cmd_source_fork_disable_writes_marker_and_invalidates_state,
         test_cmd_source_fork_enable_removes_marker,
@@ -34293,6 +34365,7 @@ def main() -> int:
         test_filter_pending_by_ownership_same_version_other_owner_blocks,
         test_filter_pending_by_ownership_lower_version_blocks,
         test_filter_pending_by_ownership_partial_publish_continues,
+        test_filter_pending_by_ownership_blocks_frozen_byte_mismatch,
         test_coord_store_project_owners_single_owner_per_filename,
         test_coord_store_project_owners_tunneled_has_no_owner,
         test_coord_store_project_owners_picks_latest_by_seq,
