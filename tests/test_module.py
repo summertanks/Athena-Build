@@ -3244,30 +3244,27 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
                     fh.write("Package: stub\nVersion: 1.0\n")
             except OSError:
                 pass
+        # SEC-07: the per-subdir Release writer installs a user-owned
+        # tempfile via `sudo install -m 644 <tmp> <dst>` — the password
+        # never shares stdin with file content.  Mirror the copy so the
+        # Release actually lands for downstream existence checks.
+        elif cmd[0] == 'install' and len(cmd) >= 5:
+            try:
+                with open(cmd[3]) as _s, open(cmd[4], 'w') as _d:
+                    _d.write(_s.read())
+            except OSError:
+                pass
         _r = MagicMock()
         _r.returncode = 0
         _r.stderr = ''
         return _r
 
-    # The per-subdir Release writer uses subprocess.run directly (with
-    # stdin), not _sudo — patch it separately.
     def _fake_subprocess_run(cmd, *a, **kw):
         _calls.append(tuple(cmd))
-        # cat > /path writes stdin to file (the _write_subdir_release path).
-        if cmd[:2] == ['sudo', '-S'] and 'cat >' in (cmd[3] if len(cmd) > 3 else ''):
-            _path = cmd[3].split('cat >')[1].strip()
-            try:
-                _input = kw.get('input', '')
-                # input is "password\n<content>"
-                _, _, _content = _input.partition('\n')
-                with open(_path, 'w') as fh:
-                    fh.write(_content)
-            except OSError:
-                pass
         # apt-ftparchive release: real apt-ftparchive writes to stdout;
         # the helper redirects via stdout=<file handle> kwarg.  Mirror
         # by writing a stub Release to that handle so size > 0 check passes.
-        elif (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
+        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
               cmd[2] == 'apt-ftparchive'):
             _stdout = kw.get('stdout')
             if _stdout is not None and hasattr(_stdout, 'write'):
@@ -3331,6 +3328,65 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
     )
 
 
+def test_write_subdir_release_never_mixes_password_with_content():
+    """SEC-07 regression pin: _write_subdir_release must deliver the
+    file content via a user-owned tempfile + `sudo install -m 644`,
+    NEVER on the same stdin as the sudo password.  The previous
+    `sudo -S bash -c "cat > path"` + `input=password+'\\n'+content`
+    pattern wrote the password as line 1 of every per-component
+    Release whenever the sudo credential was already cached (`sudo -S`
+    consumes the stdin line only when it actually authenticates) —
+    found leaked in published artifacts 2026-06-12.
+
+    Drives the REAL _sudo helper with subprocess.run mocked, so the
+    pin covers the full stdin composition, not just the argv shape."""
+    import sys, tempfile
+    from unittest.mock import patch, MagicMock
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import apt_repo
+
+    _password = 'hunter2-secret'
+    _inputs = []
+
+    def _fake_run(argv, *a, **kw):
+        _inputs.append((tuple(argv), kw.get('input', '')))
+        if (isinstance(argv, (list, tuple)) and len(argv) >= 7
+                and argv[:3] == ['sudo', '-S', 'install']):
+            with open(argv[5]) as _s, open(argv[6], 'w') as _d:
+                _d.write(_s.read())
+        _r = MagicMock()
+        _r.returncode = 0
+        _r.stderr = ''
+        return _r
+
+    with tempfile.TemporaryDirectory() as _dir:
+        with patch.object(apt_repo.subprocess, 'run', side_effect=_fake_run):
+            _ok = apt_repo._write_subdir_release(
+                _dir, 'thor', 'thor', 'main', 'amd64', _password)
+        assert _ok is True
+        _release = os.path.join(_dir, 'Release')
+        assert os.path.isfile(_release), "Release file not written"
+        with open(_release) as _fh:
+            _text = _fh.read()
+        assert _text.startswith('Origin: '), (
+            f"Release must start with a deb822 field, got first line "
+            f"{_text.splitlines()[0]!r}"
+        )
+        assert _password not in _text, (
+            "sudo password leaked into the Release file content"
+        )
+    # Every subprocess stdin must be the bare password line (sudo -S
+    # consumption) — file content must never ride the same stdin.
+    for _argv, _input in _inputs:
+        assert _input == _password + '\n', (
+            f"stdin for {_argv[:4]} carries more than the password: "
+            f"{_input!r}"
+        )
+        assert 'bash' not in _argv, (
+            f"shell wrapper crept back into the Release writer: {_argv}"
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONF-01 Stage B — generate_repo_indexes() multi-suite orchestrator
 # + cmd_index_repo dispatcher
@@ -3370,6 +3426,13 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
                     fh.write("Package: stub\nVersion: 1.0\n")
             except OSError:
                 pass
+        # SEC-07: per-subdir Release lands via `install -m 644 <tmp> <dst>`.
+        elif cmd[0] == 'install' and len(cmd) >= 5:
+            try:
+                with open(cmd[3]) as _s, open(cmd[4], 'w') as _d:
+                    _d.write(_s.read())
+            except OSError:
+                pass
         _r = type('R', (), {})()
         _r.returncode = 0
         _r.stderr = ''
@@ -3377,13 +3440,8 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
 
     def _fake_subprocess_run(cmd, *_a, **kw):
         _calls.append(tuple(cmd))
-        if cmd[:2] == ['sudo', '-S'] and len(cmd) > 3 and 'cat >' in (cmd[3] if len(cmd) > 3 else ''):
-            _path = cmd[3].split('cat >')[1].strip()
-            _input = kw.get('input', '')
-            _, _, _content = _input.partition('\n')
-            with open(_path, 'w') as fh: fh.write(_content)
-        elif (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
-              cmd[2] == 'apt-ftparchive'):
+        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
+                cmd[2] == 'apt-ftparchive'):
             _stdout = kw.get('stdout')
             if _stdout is not None and hasattr(_stdout, 'write'):
                 _stdout.write(b'Suite: stub\nCodename: stub\n')
@@ -3539,6 +3597,13 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
                     fh.write("Package: stub\nVersion: 1.0\n")
             except OSError:
                 pass
+        # SEC-07: per-subdir Release lands via `install -m 644 <tmp> <dst>`.
+        elif cmd[0] == 'install' and len(cmd) >= 5:
+            try:
+                with open(cmd[3]) as _s, open(cmd[4], 'w') as _d:
+                    _d.write(_s.read())
+            except OSError:
+                pass
         _r = type('R', (), {})()
         _r.returncode = 0
         _r.stderr = ''
@@ -3546,13 +3611,8 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
 
     def _fake_subprocess_run(cmd, *_a, **kw):
         _calls.append(tuple(cmd))
-        if cmd[:2] == ['sudo', '-S'] and len(cmd) > 3 and 'cat >' in cmd[3]:
-            _path = cmd[3].split('cat >')[1].strip()
-            _input = kw.get('input', '')
-            _, _, _content = _input.partition('\n')
-            with open(_path, 'w') as fh: fh.write(_content)
-        elif (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
-              cmd[2] == 'apt-ftparchive'):
+        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
+                cmd[2] == 'apt-ftparchive'):
             _stdout = kw.get('stdout')
             if _stdout is not None and hasattr(_stdout, 'write'):
                 _stdout.write(b'Components: stub\n')
@@ -32961,6 +33021,7 @@ def main() -> int:
         test_iso_installer_kernel_pkg_regex_matches_real_kernels_only,
         test_iso_installer_count_records_zero_one_many,
         test_iso_installer_generate_apt_repo_invokes_correct_pipeline,
+        test_write_subdir_release_never_mixes_password_with_content,
         test_iso_installer_stage_grub_cfg_errors_when_data_layer_missing,
         test_iso_installer_stage_grub_cfg_copies_when_present,
         test_iso_installer_stage_disk_info_errors_when_dir_missing,
