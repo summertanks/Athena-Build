@@ -964,14 +964,24 @@ def _write_subdir_release(
         f"Description: Athena installer media — {component}/{arch_label}\n"
     )
     _path = os.path.join(target_dir, 'Release')
-    # Write via sudo tee so the file lands root-owned next to the other
-    # root-owned index files in this subdir.
-    _shell = f"cat > {_path}"
-    _r = subprocess.run(
-        ['sudo', '-S', 'bash', '-c', _shell],
-        input=password + '\n' + _content,
-        capture_output=True, text=True,
-    )
+    # SEC-07: write a user-owned tempfile, then `sudo install -m 644`
+    # it into place (root-owned next to the other index files) — the
+    # same atomic-move pattern _run_dpkg_scan uses.  The previous
+    # `sudo -S bash -c "cat > path"` with `input=password+content`
+    # LEAKED the sudo password as line 1 of the Release file whenever
+    # the credential was already cached: `sudo -S` consumes the stdin
+    # line only when it actually needs to authenticate, so the rest of
+    # stdin — password included — flowed straight into `cat`.
+    _fd, _tmp_path = tempfile.mkstemp(prefix='.release-sub-')
+    try:
+        with os.fdopen(_fd, 'w') as _fh:
+            _fh.write(_content)
+        _r = _sudo(['install', '-m', '644', _tmp_path, _path], password)
+    finally:
+        try:
+            os.unlink(_tmp_path)
+        except OSError:
+            pass
     if _r.returncode != 0:
         tui.console.print(
             f"ERROR: write {_path}: {_r.stderr.strip()[:200]}"
