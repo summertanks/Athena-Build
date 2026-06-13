@@ -74,10 +74,12 @@ class MirrorCommandsMixin(SessionState):
             'reconcile-neighbours [<n>]':  'fan-out: align every peer\'s '
                                            'coord-head.neighbours with local '
                                            'config; re-sign + push',
-            'publish [<name>]':            'per-file .deb push + sign + push '
-                                           'claims + re-sign coord-head '
-                                           '(federation-gated; bootstraps a '
-                                           'fresh mirror on first contact)',
+            'publish [<name>] [--no-iso]':  'per-file .deb push + sign + push '
+                                           'claims + re-sign coord-head + '
+                                           'publish release index/ISOs '
+                                           '(federation-gated; requires '
+                                           'current-snapshot ISOs unless '
+                                           '--no-iso)',
             'pull [<name>]':               'fetch + verify peer sidecar, then '
                                            'download claim .debs missing locally '
                                            '(skip-own; SHA-256 verified)',
@@ -847,8 +849,110 @@ class MirrorCommandsMixin(SessionState):
             return None
         return {_l.strip() for _l in _r.stdout.splitlines() if _l.strip()}
 
+    def _release_iso_descriptors(self) -> 'tuple[list[dict], list[str]]':
+        """Scan `image/` for the install media matching the CURRENT
+        version + snapshot.  Returns ``(found, missing_required)`` where
+        `found` is a list of ``{kind, file, path, size, sha256, built_at}``
+        (kinds: live / installer / disk) and `missing_required` lists the
+        REQUIRED kinds (live + installer) absent for this snapshot — the
+        disk qcow2 is optional and not snapshot-tagged, so it's included
+        when present but never gates."""
+        import datetime
+        _ver = str(self.config.build_version).strip('"').strip("'")
+        _snap = utils.snapshot_iso_tag(self.config)
+        _distro = str(self.config.build_distribution).strip('"').strip("'")
+        _img = self.config.dir_image
+        _suffix = f"-{_snap}-amd64.iso" if _snap else "-amd64.iso"
+        _candidates = [
+            ('live',      f"athena-{_ver}{_suffix}"),
+            ('installer', f"athena-installer-{_ver}{_suffix}"),
+            ('disk',      f"{_distro.lower()}-{_ver}-amd64.qcow2"),
+        ]
+        _found: 'list[dict]' = []
+        for _kind, _fname in _candidates:
+            _path = os.path.join(_img, _fname)
+            if not os.path.isfile(_path):
+                continue
+            _stat = os.stat(_path)
+            _found.append({
+                'kind': _kind, 'file': _fname, 'path': _path,
+                'size': _stat.st_size,
+                'sha256': utils.get_sha256(_path),
+                'built_at': datetime.datetime.fromtimestamp(
+                    _stat.st_mtime,
+                    datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            })
+        _found_kinds = {_d['kind'] for _d in _found}
+        _missing = [_k for _k in ('live', 'installer')
+                    if _k not in _found_kinds]
+        return _found, _missing
+
+    def _push_release_assets(
+        self, public_url: str, pool_spec: str,
+        ssh_key: 'Optional[str]', isos: 'list[dict]',
+    ) -> bool:
+        """Generate index.html + releases.json and push them + the ISOs to
+        the mirror's pool root.  ISOs push by name (--ignore-existing —
+        immutable per filename); the index files OVERWRITE (they change
+        every publish).  Returns True on full success."""
+        import release_index
+        import coord.transport as _transport
+        import coord.publish as _publish
+        _ver = str(self.config.build_version).strip('"').strip("'")
+        _codename = str(self.config.build_codename).strip('"').strip("'")
+        _distro = str(self.config.build_distribution).strip('"').strip("'")
+        _manifest = release_index.build_release_manifest(
+            distribution=_distro, version=_ver,
+            snapshot=utils.snapshot_iso_tag(self.config),
+            codename=_codename, component='main', arch='amd64',
+            public_url=public_url,
+            signed_by_keyring=(
+                '/usr/share/keyrings/athena-archive-keyring.gpg'),
+            isos=[{_k: _d[_k] for _k in
+                   ('kind', 'file', 'size', 'sha256', 'built_at')}
+                  for _d in isos],
+            generated_at=_publish._utc_now(),
+        )
+        _html, _json = release_index.render_release_files(_manifest)
+        _root = pool_spec.rstrip('/')
+        _ok = True
+        # ISOs first (immutable by name — never overwrite a published one).
+        for _d in isos:
+            _r, _detail = _transport.push_single_deb(
+                local_path=_d['path'],
+                remote_spec=f"{_root}/iso/{_d['file']}",
+                ssh_key=ssh_key, overwrite=False)
+            if not _r:
+                logger.error(f"release push: ISO {_d['file']}: {_detail}")
+                _ok = False
+        # Then the index pair (overwrite — they reflect the current state).
+        for _name, _content in (('index.html', _html),
+                                ('releases.json', _json)):
+            _local = os.path.join(self.config.dir_temp, _name)
+            try:
+                with open(_local, 'w') as _fh:
+                    _fh.write(_content)
+            except OSError as _e:
+                logger.error(f"release push: write {_local}: {_e}")
+                _ok = False
+                continue
+            _r, _detail = _transport.push_single_deb(
+                local_path=_local, remote_spec=f"{_root}/{_name}",
+                ssh_key=ssh_key, overwrite=True)
+            if not _r:
+                logger.error(f"release push: {_name}: {_detail}")
+                _ok = False
+        return _ok
+
     def cmd_mirror_publish(self, *args, reclaim_intents=None):
-        """mirror publish [<name>] — publish to one mirror, or all when no name.
+        """mirror publish [<name>] [--no-iso] — publish to one mirror, or all.
+
+        A publish ships a COHERENT release: the apt repo + the install
+        media (live + installer ISOs) + a static `index.html` /
+        `releases.json` at the pool root.  It REFUSES unless the current
+        version+snapshot ISOs exist in image/; `--no-iso` bypasses that for
+        an incremental publish (reclaim / hotfix / stale-index re-push),
+        and the index then carries whatever ISO set is present.
 
         Per mirror:
           1. Pull peer's coord-head, keyring, claims (under remote flock)
@@ -941,8 +1045,26 @@ class MirrorCommandsMixin(SessionState):
         # remote_publish still works on the URL projection — back-compat
         # `canonicalize_neighbours` does the dict-→-str collapse.
         _local_urls = _mirror.all_mirror_neighbour_records(self.config)
+        # Release-media gate (gate-with-escape): a publish ships a coherent
+        # release — repo + install media + a static index — so by default
+        # it REFUSES unless the current version+snapshot live & installer
+        # ISOs exist in image/.  `--no-iso` bypasses for an incremental
+        # publish (reclaim / single-package hotfix / stale-index re-push);
+        # the index then carries whatever ISO set is present.
+        _no_iso = '--no-iso' in args or 'no-iso' in args
+        _pos_args = [_a for _a in args if _a not in ('--no-iso', 'no-iso')]
+        _release_isos, _missing_isos = self._release_iso_descriptors()
+        if _missing_isos and not _no_iso:
+            console.print(
+                "mirror publish: REFUSED — missing current-snapshot install "
+                f"media: {', '.join(_missing_isos)}.  Build them "
+                "(`iso build live` / `iso build installer`) so the mirror "
+                "ships a coherent release, or `mirror publish --no-iso` to "
+                "publish the repo only (the index keeps the prior ISO set).",
+                tui.COLOR_ERROR)
+            return False
         # Target selection
-        _target = args[0] if args else None
+        _target = _pos_args[0] if _pos_args else None
         if _target is not None:
             if _mirror.read_mirror_state(self.config, _target) is None:
                 console.print(
@@ -1121,6 +1243,29 @@ class MirrorCommandsMixin(SessionState):
             if _new_base:
                 _base_update['base'] = _new_base
             _mirror.update_mirror_state(self.config, _n, **_base_update)
+
+            # Stage 1: publish the static release index + ISOs to the pool
+            # root (served at the mirror's public_url).  The installer-smoke
+            # CI job reads releases.json to find + sha-verify the ISO.  Push
+            # AFTER the repo/coord transaction so the index never references
+            # a release the repo hasn't caught up to.
+            _public = (_st.get('public_url') or '').strip()
+            if _public:
+                if not self._push_release_assets(
+                        _public, _pool_spec, _ssh_key, _release_isos):
+                    console.print(
+                        f"  {_n}: release index/ISO push had errors "
+                        "(see log) — repo published OK", tui.COLOR_WARNING)
+                else:
+                    _kinds = ', '.join(_d['kind'] for _d in _release_isos)
+                    console.print(
+                        f"  {_n}: published release index"
+                        + (f" + {_kinds} image(s)" if _release_isos else "")
+                        + f" → {_public}/", tui.COLOR_HIGHLIGHT)
+            else:
+                logger.info(
+                    f"release index: mirror {_n} has no public_url — "
+                    "skipping index/ISO push")
 
         # Refresh the local +asg uN authority from the just-published index.
         # The published.manifest is the bump ledger (published_ledger reads
