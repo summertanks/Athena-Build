@@ -512,8 +512,12 @@ class RepoCommandsMixin(SessionState):
         return _superseded - _selected_names
 
     def _scan_stale_files(self) -> 'tuple[list, list, list, int]':
-        """Walk repo/{main,doc,dbgsym,tests} for .deb/.udeb files that
-        shouldn't be there given the current selected_srcs + src_pkg_files.
+        """Walk the build-output components (main, main-udeb, doc, dbgsym,
+        tests — `utils._STALE_SCAN_SUBDIRS`; STA-38 added `main-udeb`) for
+        .deb/.udeb files that shouldn't be there given the current
+        selected_srcs + src_pkg_files.  Pristine tunneled binaries in the
+        non-main components are intentionally out of scope (the classifier
+        can't predict their filenames — see _STALE_SCAN_SUBDIRS).
 
         Returns (orphan, drift, malformed, total):
           orphan    — list of (sub, filename, source_name, size) where
@@ -606,7 +610,16 @@ class RepoCommandsMixin(SessionState):
         # remote, so deleting it locally is safe (publish-before-prune).
         from collections import defaultdict
         _by_key: 'dict[tuple, list]' = defaultdict(list)
-        for _sub in utils._REPO_SUBDIRS:
+        # STA-38: walk the build-output components via _STALE_SCAN_SUBDIRS
+        # (the same canon all_deb_dirs uses), NOT the narrower _REPO_SUBDIRS
+        # that was missing `main-udeb` — so a superseded +asg<R>u<N> udeb in
+        # main/debian-installer/ (our built e2fsprogs-udeb / keyring-udeb)
+        # survived both cleanup and the chroot stale gate.
+        for _sub in utils._STALE_SCAN_SUBDIRS:
+            # _index_seen: filenames dpkg-scanpackages emitted for this
+            # subdir — used below to recover the malformed bucket (on-disk
+            # files the scanner couldn't parse are absent from the index).
+            _index_seen: 'set[str]' = set()
             # refresh=True: re-scan repo/ fresh so the keep/delete decision
             # reflects the CURRENT on-disk artifacts (not a stale cached
             # Packages snapshot) — deleting on stale data is dangerous, and a
@@ -615,6 +628,7 @@ class RepoCommandsMixin(SessionState):
             for _filename, _ctrl in repo_audit.iter_packages_all_versions(
                     self.config, subdir=_sub, refresh=True):
                 _total += 1
+                _index_seen.add(_filename)
                 _pkg = (_ctrl.get('Package') or '').strip()
                 _src_field = (_ctrl.get('Source') or '').strip()
                 # Source field is "name" or "name (version)" — drop the
@@ -629,6 +643,22 @@ class RepoCommandsMixin(SessionState):
                 _ver = (_ctrl.get('Version') or '').strip()
                 _by_key[(_sub, _file_key(_filename))].append(
                     (_filename, _ver, _src_name, _size))
+
+            # STA-38: recover the malformed bucket.  dpkg-scanpackages
+            # silently omits a .deb/.udeb it can't parse (truncated /
+            # corrupt control), so any binary on disk in this subdir that
+            # the index didn't emit is unscannable.  Diff on-disk files
+            # against _index_seen (filename-keyed; .verified sidecars and
+            # non-binary files ignored).
+            try:
+                _dir = self.config.deb_dir_for(_sub)
+            except ValueError:
+                _dir = None
+            if _dir and os.path.isdir(_dir):
+                for _ondisk in os.listdir(_dir):
+                    if (_ondisk.endswith(('.deb', '.udeb'))
+                            and _ondisk not in _index_seen):
+                        _malformed.append(f"{_sub}/{_ondisk}")
 
         for (_sub, _key), _entries in _by_key.items():
             # Highest version in this (subdir, name, base, arch) group.
@@ -815,28 +845,33 @@ class RepoCommandsMixin(SessionState):
         _bar = ProgressBar(
             label='Cleanup', maxvalue=_n_obsolete, show_rate=False,
         )
-        # CONF-01 Stage D: _sub is the classify_repo_subdir label; map
-        # to the on-disk dir via config.deb_dest_for_filename (which
-        # handles the udeb → debian-installer/binary-<arch>/ special
-        # case for us).
+        # STA-38: resolve the on-disk dir from the SCANNED label `_sub`
+        # via deb_dir_for — the scan found the file in exactly that dir.
+        # (The previous filename-derived routing defaulted component to
+        # 'main', which mis-routed a non-free-firmware .deb to main/ →
+        # delete failure.)  Also drop the orphaned `.verified` sidecar
+        # alongside each removed binary.
+        def _remove_artifact(_sub, _f):
+            nonlocal _deleted, _delete_failed
+            _p = os.path.join(self.config.deb_dir_for(_sub), _f)
+            try:
+                os.remove(_p)
+                _deleted += 1
+            except OSError as e:
+                _delete_failed += 1
+                logger.error(f"cleanup: cannot remove {_p}: {e}")
+                return
+            try:
+                os.remove(_p + '.verified')
+            except OSError:
+                pass  # sidecar may legitimately not exist
+
         for _sub, _f, *_ in _orphan:
             _bar.step(1)
-            _p = os.path.join(self.config.deb_dest_for_filename(_f), _f)
-            try:
-                os.remove(_p)
-                _deleted += 1
-            except OSError as e:
-                _delete_failed += 1
-                logger.error(f"cleanup: cannot remove {_p}: {e}")
+            _remove_artifact(_sub, _f)
         for _sub, _f, *_ in _drift:
             _bar.step(1)
-            _p = os.path.join(self.config.deb_dest_for_filename(_f), _f)
-            try:
-                os.remove(_p)
-                _deleted += 1
-            except OSError as e:
-                _delete_failed += 1
-                logger.error(f"cleanup: cannot remove {_p}: {e}")
+            _remove_artifact(_sub, _f)
         _bar.close()
 
         # repo state changed — audit's Packages snapshot is stale.
