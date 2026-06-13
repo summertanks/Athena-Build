@@ -12456,9 +12456,17 @@ def test_sta24_check_dep_drift_warns_on_lost_selected_dep():
     class _DT:
         def __init__(self, _cache):
             self.canonical_pkgs = {'e2fsprogs': _cache}
+            # libgcc-s1 is the real package that `Provides: libgcc1` — the
+            # generic signal STA-24 uses to clear the transitional rename.
+            class _Prov:
+                def __init__(self, provides):
+                    self.provides = provides
             self.selected_pkgs = {
                 'e2fsprogs': _cache,
-                'libext2fs2': object(), 'libc6': object()}
+                'libext2fs2': object(), 'libc6': object(),
+                'libgcc1': object(),
+                'libgcc-s1': _Prov([[('libgcc1', '', '')]]),
+                'libunwind8': object()}
             self.extras_pkg_names: set = set()
 
     def _run(_cache, _disk_depends_line):
@@ -12496,6 +12504,21 @@ def test_sta24_check_dep_drift_warns_on_lost_selected_dep():
                          ('libc6', '', '')])
     _out2 = _run(_cache2, "Depends: libext2fs2 (>= 1.43.9), libc6")
     assert 'dep-loss' not in _out2.lower(), _out2
+
+    # transitional rename, GENERIC: cache says libgcc1, the built .deb now
+    # depends on libgcc-s1 which `Provides: libgcc1` → apt still satisfies
+    # the edge → NOT a loss.  No package name is special-cased; suppression
+    # falls straight out of the new dep's Provides.
+    _cache3 = _CachePkg([('libgcc1', '', ''), ('libc6', '', '')])
+    _out3 = _run(_cache3, "Depends: libgcc-s1 (>= 3.0), libc6")
+    assert 'dep-loss' not in _out3.lower(), _out3
+
+    # genuinely dropped a selected dep whose name nothing in the new deps
+    # Provides (xorg→libunwind8 class) → still WARN; Provides-suppression
+    # must not mask it
+    _cache4 = _CachePkg([('libunwind8', '', ''), ('libc6', '', '')])
+    _out4 = _run(_cache4, "Depends: libc6")
+    assert 'dep-loss' in _out4.lower() and 'libunwind8' in _out4, _out4
 
 
 def test_print_extras_lists_recommended_packages():
