@@ -833,18 +833,25 @@ def remote_publish(
                 _breaks = []
         else:
             _breaks = []
-            if _breaks:
-                _detail_lines = [
-                    f"{_pkg}: {_field} {_rel} ({_why})"
-                    for _pkg, _field, _rel, _why in _breaks[:5]
-                ]
-                _summary = "; ".join(_detail_lines)
-                if len(_breaks) > 5:
-                    _summary += f" (+ {len(_breaks) - 5} more)"
-                return False, (
-                    f"mirror_closure_break: {_summary} — refusing "
-                    "to publish (would leave the mirror in a "
-                    "non-installable state)")
+        # STA-27: act on _breaks AFTER the if/elif/else chain.  This block
+        # was previously nested inside the `else:` above (the no-pending
+        # branch, where _breaks is unconditionally []), so the refusal was
+        # unreachable — the `elif _pending:` branch computed the breaks and
+        # then silently discarded them, and a publish that would leave the
+        # mirror non-installable proceeded.  The installability invariant
+        # is not negotiable (docstring above); enforce it here.
+        if _breaks:
+            _detail_lines = [
+                f"{_pkg}: {_field} {_rel} ({_why})"
+                for _pkg, _field, _rel, _why in _breaks[:5]
+            ]
+            _summary = "; ".join(_detail_lines)
+            if len(_breaks) > 5:
+                _summary += f" (+ {len(_breaks) - 5} more)"
+            return False, (
+                f"mirror_closure_break: {_summary} — refusing "
+                "to publish (would leave the mirror in a "
+                "non-installable state)")
         fill_sizes_from_pool(_pending, _pool)
 
         # Step 5b — MIRROR-01 Phase 3b: per-file .deb push.  For each

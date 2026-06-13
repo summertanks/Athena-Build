@@ -757,7 +757,16 @@ def project_post_publish_state(local_state, remote_by_builder: dict):
         for _c in _claims:
             if _c.get('claim_state') in ('retracted', 'deprecated', 'obsolete'):
                 continue
-            _pkg = str(_c.get('package') or '')
+            # STA-27: claim.package is the SOURCE name, but RepoState.packages
+            # (and audit_dep_closure's Depends resolution) is keyed by BINARY
+            # name.  A source emits N binaries → N claims, each with its own
+            # filename — derive the binary name from filename (name_ver_arch
+            # .(u)deb), the same rsplit('_', 2)[0] parse detect_hash_conflicts
+            # / emit_obsolescence_claims use.  Keying by the source name made
+            # remote-only binaries unfindable (false closure breaks) and let a
+            # dep on a name that happened to equal a source name resolve wrong.
+            _fn = str(_c.get('filename') or '')
+            _pkg = _fn.rsplit('_', 2)[0] if '_' in _fn else ''
             _ver = str(_c.get('built_version') or '')
             if not _pkg or not _ver:
                 continue

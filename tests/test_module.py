@@ -30907,6 +30907,107 @@ def test_remote_publish_pushes_debs_per_file_and_calls_progress():
         assert 'pushed 3 .deb' in _detail
 
 
+def test_remote_publish_refuses_on_closure_break():
+    """STA-27: the publish-time installability gate must REFUSE a publish
+    whose pending set would leave the mirror with an unresolved hard
+    Depends.  Regression for the indentation bug where the `if _breaks:`
+    refusal lived inside the no-pending `else:` branch (where _breaks is
+    always []), so the `elif _pending:` branch computed the breaks and
+    silently discarded them — a broken closure published clean.  Drives
+    the real `remote_publish` end-to-end (a unit test of
+    find_publish_closure_breaks would NOT have caught the dead wiring —
+    which is exactly how it shipped)."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.publish as _publish
+    import coord.transport as _transport
+    import coord.head as _head_mod
+    import coord.store as _store
+    import coord.identity as _identity
+    import coord.reconcile as _reconcile
+    import mirror as _mirror_mod
+    import repo_audit as _repo_audit
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as _td:
+        class _Cfg:
+            dir_coord = _td
+            dir_coord_fetched = os.path.join(_td, 'fetched')
+            dir_coord_claims = os.path.join(_td, 'claims')
+            dir_log = _td
+            dir_repo = _td
+            dir_gnupg = _td
+        os.makedirs(_Cfg.dir_coord_fetched)
+        os.makedirs(_Cfg.dir_coord_claims)
+        _inrelease = os.path.join(_td, 'InRelease')
+        with open(_inrelease, 'wb') as _fh:
+            _fh.write(b'Date: 2026-06-01\nFake: contents\n')
+
+        _existing_head = {
+            'v': 2, 'inrelease_sha256': 'a' * 64,
+            'snapshot': {}, 'last_seqs': {}, 'head_time': 'T',
+            'neighbours': ['file:///srv/m1'],
+        }
+        # One pending claim — enough to reach the `elif _pending:` branch.
+        _pending = [{
+            'builder': 'alice', 'package': 'foo', 'intended_version': '1',
+            'built_version': '1', 'filename': 'foo_1_amd64.deb',
+            'sha256': 'x' * 64, 'size': 0, 'snapshot': 'S', 'built_at': 'T',
+            'claim_state': 'pending', 'seq': 0, 'v': 1,
+        }]
+        # The closure check reports a break (foo Depends an unsatisfiable
+        # name).  With the bug this is computed then discarded; with the
+        # fix remote_publish must return False before any push.
+        _pushed: 'list[str]' = []
+        _lock = object()
+        with patch.object(_transport, 'remote_flock_acquire',
+                          return_value=_lock), \
+             patch.object(_transport, 'remote_flock_release'), \
+             patch.object(_transport, 'pull_remote_coord',
+                          return_value=(True, '')), \
+             patch.object(_head_mod, 'read_coord_head',
+                          return_value=_existing_head), \
+             patch.object(_identity, 'load_keyring', return_value={}), \
+             patch.object(_store, 'read_all_claims', return_value={}), \
+             patch.object(_store, 'max_seq', return_value=0), \
+             patch.object(_store, 'append_claim'), \
+             patch.object(_reconcile, 'publish_halt_reason',
+                          return_value=None), \
+             patch.object(_publish, 'generate_pending_claims',
+                          return_value=_pending), \
+             patch.object(_repo_audit, 'scan_repo_state', return_value=None), \
+             patch.object(_mirror_mod, 'find_publish_closure_breaks',
+                          return_value=[('foo', 'Depends', 'libmissing',
+                                         'not satisfiable on mirror')]), \
+             patch.object(_transport, 'push_single_deb',
+                          side_effect=lambda **kw: _pushed.append(1) or (True, '')), \
+             patch.object(_transport, 'push_jsonl', return_value=(True, '')), \
+             patch.object(_head_mod, 'write_coord_head', return_value=True), \
+             patch.object(_transport, 'push_coord_head',
+                          return_value=(True, '')):
+            # write_coord_head mocked too: with the bug the publish would
+            # sail PAST the gate to a clean success — so `_ok is False`
+            # below is caused by the gate alone, not a downstream stub gap.
+            _ok, _detail = _publish.remote_publish(
+                builder_id='alice', config=_Cfg(),
+                private_key_path='/fake/priv', public_key_path='/fake/pub',
+                snapshot_pin='20260601T000000Z',
+                remote_coord_spec='file:///srv/m1-coord',
+                pool_remote_spec='file:///srv/m1',
+                inrelease_local_path=_inrelease,
+                read_build_record=lambda *_: None,
+                get_sha256=lambda *_: '',
+                local_mirror_urls=['file:///srv/m1'],
+                ssh_host=None,
+                install_corpus=frozenset({'foo'}),
+            )
+        assert _ok is False, "publish must be refused on a closure break"
+        assert 'mirror_closure_break' in _detail, _detail
+        assert 'libmissing' in _detail, _detail
+        # Refused BEFORE any .deb was pushed to the remote pool.
+        assert _pushed == [], "must refuse before pushing bytes"
+
+
 def test_cmd_mirror_dispatch_routes_audit_and_query():
     """`cmd_mirror` routes audit + query subcommands; both handlers exist."""
     import re
@@ -34272,6 +34373,7 @@ def main() -> int:
         test_transport_push_dist_tree_roundtrip_with_local_fs,
         test_transport_push_dist_tree_missing_local_dir_fails_clean,
         test_remote_publish_pushes_debs_per_file_and_calls_progress,
+        test_remote_publish_refuses_on_closure_break,
         test_remote_publish_drops_claim_when_push_fails,
         # MIRROR-01 Phase 4 — audit + query + multi-mirror UPD-01 wiring
         test_cmd_mirror_dispatch_routes_audit_and_query,
