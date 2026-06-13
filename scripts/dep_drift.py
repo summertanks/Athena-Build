@@ -48,6 +48,23 @@ def _dep_target_names(_obj) -> 'set[str]':
     return _names
 
 
+def _provided_names(_obj) -> 'set[str]':
+    """Every package NAME the Package satisfies via its `Provides:` field.
+
+    apt treats `Depends: X` as satisfied by the real package X OR by any
+    installed package that `Provides: X`.  STA-24 uses this to tell a real
+    dropped edge from a benign modernisation: when shlibdeps emits a renamed
+    library (libgcc-s1, which `Provides: libgcc1`) in place of a virtual /
+    transitional name (libgcc1), the dependency is still satisfied — no
+    package names are special-cased, it falls straight out of Provides."""
+    _names: 'set[str]' = set()
+    for _grp in getattr(_obj, 'provides', None) or ():
+        for _p in _grp:
+            if _p and _p[0]:
+                _names.add(_p[0])
+    return _names
+
+
 class _DepDriftMixin:
     # Instance attributes set by `BuildSystem.__init__` (the composer
     # that mixes this in).  Type-only stubs for mypy; no runtime
@@ -167,7 +184,24 @@ class _DepDriftMixin:
             # fsck then exec-failed (127) → boot loop.  Checked BEFORE the
             # sync below overwrites _pkg_obj's deps with the (broken) disk
             # truth, where the lost edge would already be invisible.
-            _lost = _dep_target_names(_pkg_obj) - _dep_target_names(_deb_pkg)
+            # A dropped edge isn't a real loss when apt still satisfies it
+            # through the NEW dep set: some package the built .deb now
+            # depends on PROVIDES the dropped name.  Plain Debian dependency
+            # semantics (a Depends is met by the real package OR a provider)
+            # — this generically covers transitional renames (shlibdeps
+            # emits libgcc-s1, which `Provides: libgcc1`, instead of the
+            # virtual libgcc1) with NO package names special-cased.  A drop
+            # with no provider in the new deps (xorg → libunwind8, nothing
+            # Provides libunwind8) stays a real loss.
+            _disk_names = _dep_target_names(_deb_pkg)
+            _provided_by_new: 'set[str]' = set()
+            for _dn in _disk_names:
+                _dobj = (self._dependencytree.selected_pkgs.get(_dn)
+                         or self._dependencytree.canonical_pkgs.get(_dn))
+                if _dobj is not None:
+                    _provided_by_new |= _provided_names(_dobj)
+            _lost = (_dep_target_names(_pkg_obj) - _disk_names
+                     - _provided_by_new)
             _lost_selected = sorted(
                 _n for _n in _lost
                 if _n in self._dependencytree.selected_pkgs)
