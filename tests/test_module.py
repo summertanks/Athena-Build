@@ -27315,6 +27315,99 @@ def test_coord_store_project_live_claims_collapses_retraction():
     assert _proj == {}, f"retracted claim must vanish from projection; got {_proj}"
 
 
+def test_release_index_manifest_and_html():
+    """The release-index generator: releases.json carries the apt deb-line
+    + resolved ISO URLs; index.html renders the same data; both derive from
+    one manifest so they can't disagree."""
+    import sys as _sys, json as _json
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import release_index
+
+    _m = release_index.build_release_manifest(
+        distribution='Asgard', version='1', snapshot='20260602T173733Z',
+        codename='thor', component='main', arch='amd64',
+        public_url='http://mirror.example/asgard/',   # trailing slash trimmed
+        signed_by_keyring='/usr/share/keyrings/athena-archive-keyring.gpg',
+        isos=[{'kind': 'installer',
+               'file': 'athena-installer-1-20260602T173733Z-amd64.iso',
+               'size': 1082880000, 'sha256': 'a' * 64,
+               'built_at': '2026-06-13T08:27:00Z'}],
+        generated_at='2026-06-13T18:00:00Z')
+    assert _m['apt']['deb_line'] == (
+        'deb [signed-by=/usr/share/keyrings/athena-archive-keyring.gpg] '
+        'http://mirror.example/asgard thor main')
+    assert _m['isos'][0]['url'] == (
+        'http://mirror.example/asgard/iso/'
+        'athena-installer-1-20260602T173733Z-amd64.iso')
+    _html, _jsons = release_index.render_release_files(_m)
+    # JSON round-trips and matches the manifest
+    assert _json.loads(_jsons) == _m
+    # HTML carries the ISO link + the deb line
+    assert 'athena-installer-1-20260602T173733Z-amd64.iso' in _html
+    assert 'http://mirror.example/asgard/iso/' in _html
+    assert 'releases.json' in _html        # link to the machine manifest
+    # deterministic JSON (sorted keys) so consecutive publishes diff clean
+    assert release_index.render_releases_json(_m) == _jsons
+
+
+def test_release_iso_descriptors_finds_and_reports_missing():
+    """_release_iso_descriptors discovers the current version+snapshot
+    live/installer ISOs in image/ and reports which REQUIRED kinds are
+    absent (the gate's input)."""
+    import sys as _sys, tempfile
+    from unittest.mock import patch
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    import utils
+
+    with tempfile.TemporaryDirectory() as _img:
+        class _Cfg:
+            dir_image = _img
+            build_version = '1'
+            build_distribution = 'asgard'
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = _Cfg()
+
+        _snap = '20260602T173733Z'
+        with patch.object(utils, 'snapshot_iso_tag', return_value=_snap):
+            # nothing present → both required kinds missing
+            _found, _missing = _sess._release_iso_descriptors()
+            assert _found == [] and sorted(_missing) == ['installer', 'live']
+            # plant the two ISOs
+            for _name in (f'athena-1-{_snap}-amd64.iso',
+                          f'athena-installer-1-{_snap}-amd64.iso'):
+                with open(os.path.join(_img, _name), 'wb') as _fh:
+                    _fh.write(b'iso')
+            _found, _missing = _sess._release_iso_descriptors()
+            _kinds = {_d['kind'] for _d in _found}
+            assert _kinds == {'live', 'installer'}, _kinds
+            assert _missing == []
+            assert all(_d['sha256'] and _d['size'] == 3 for _d in _found)
+            # removing the installer → reported missing
+            os.remove(os.path.join(
+                _img, f'athena-installer-1-{_snap}-amd64.iso'))
+            _found, _missing = _sess._release_iso_descriptors()
+            assert _missing == ['installer'], _missing
+
+
+def test_mirror_publish_release_gate_and_push_wired():
+    """STA/CI-01 Stage 1 source pins: cmd_mirror_publish gates on the
+    current-snapshot ISOs (bypassable via --no-iso) and pushes the static
+    index + ISOs after a successful repo publish."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _pub = inspect.getsource(BuildSession.cmd_mirror_publish)
+    assert '_release_iso_descriptors()' in _pub, _pub
+    assert "'--no-iso'" in _pub and '_missing_isos' in _pub, _pub
+    assert '_push_release_assets(' in _pub, _pub
+    _push = inspect.getsource(BuildSession._push_release_assets)
+    assert 'release_index' in _push and 'releases.json' in _push, _push
+    assert '/iso/' in _push, _push
+    # ISOs immutable (no overwrite); index files overwrite
+    assert 'overwrite=False' in _push and 'overwrite=True' in _push, _push
+
+
 def test_cmd_mirror_publish_refuses_indl_to_fresh_mirror():
     """MIRROR-02 chunk 13: build-mode publish to a mirror with no
     coord-head on remote is REFUSED with a hint pointing at dist-mode
@@ -27339,7 +27432,10 @@ def test_cmd_mirror_publish_refuses_indl_to_fresh_mirror():
             dir_config = _cfg_dir
             dir_cache  = _cache_dir
             dir_repo   = _repo_dir
+            dir_image  = _cfg_dir   # no ISOs here → the --no-iso path
             build_codename = 'thor'
+            build_version = '1'
+            build_distribution = 'asgard'
             build_mode = 'build'
 
         _mirror.add_mirror(
@@ -27361,7 +27457,7 @@ def test_cmd_mirror_publish_refuses_indl_to_fresh_mirror():
         build.console.print = lambda *a, **k: _lines.append(
             ' '.join(str(x) for x in a))
         try:
-            _ok = _sess.cmd_mirror_publish('primary')
+            _ok = _sess.cmd_mirror_publish('primary', '--no-iso')
         finally:
             build.console.print = _orig
         _joined = '\n'.join(_lines)
@@ -31940,7 +32036,10 @@ def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
             dir_config = _cfg_dir
             dir_cache  = _cache_dir
             dir_repo   = _repo_dir
+            dir_image  = _cfg_dir   # no ISOs here → the --no-iso path
             build_codename = 'thor'
+            build_version = '1'
+            build_distribution = 'asgard'
 
         # Add mirror with a base FROM THE FUTURE relative to the build pin
         _mirror.add_mirror(
@@ -31960,7 +32059,7 @@ def test_cmd_mirror_publish_refuses_when_snapshot_older_than_mirror_base():
         build.console.print = lambda *a, **k: _lines.append(
             ' '.join(str(x) for x in a))
         try:
-            _ok = _sess.cmd_mirror_publish('primary')
+            _ok = _sess.cmd_mirror_publish('primary', '--no-iso')
         finally:
             build.console.print = _orig
         _joined = '\n'.join(_lines)
@@ -34984,6 +35083,9 @@ def main() -> int:
         test_coord_store_rejects_builder_mismatch,
         test_coord_store_tamper_drops_line_on_read,
         test_coord_store_project_live_claims_collapses_retraction,
+        test_release_index_manifest_and_html,
+        test_release_iso_descriptors_finds_and_reports_missing,
+        test_mirror_publish_release_gate_and_push_wired,
         test_cmd_mirror_publish_refuses_indl_to_fresh_mirror,
         test_cmd_mirror_publish_indl_to_initialised_mirror_proceeds,
         test_mirror_recompute_base_returns_oldest_snapshot_across_claims,
