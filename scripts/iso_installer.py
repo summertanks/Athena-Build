@@ -28,6 +28,7 @@ import subprocess
 from typing import Optional, TYPE_CHECKING
 
 import tui
+import utils
 
 if TYPE_CHECKING:
     import buildcontainer   # forward-reference target for type hints
@@ -306,11 +307,14 @@ def _find_kernel(dir_repo: str, dir_chroot_installer: str,
         f"find kernel: chroot={dir_chroot_installer}/boot, repo={dir_repo}, "
         f"expected={expected_kernel_pkg or '-'}"
     )
-    # Strategy 1: chroot's boot dir
-    _candidates = sorted(glob.glob(
-        os.path.join(dir_chroot_installer, 'boot', 'vmlinuz-*')))
+    # Strategy 1: chroot's boot dir.  STA-31: version-aware pick (the
+    # installer ramdisk's own initrd is built separately by cpio, so only
+    # the vmlinuz matters here).
+    _candidates = glob.glob(
+        os.path.join(dir_chroot_installer, 'boot', 'vmlinuz-*'))
     if _candidates:
-        _k = _candidates[-1]
+        _k = utils.latest_kernel_name(_candidates)
+        assert _k is not None  # _candidates is non-empty
         tui.console.print(
             f"Kernel found in installer chroot: {os.path.basename(_k)}"
         )
@@ -374,11 +378,13 @@ def _find_kernel(dir_repo: str, dir_chroot_installer: str,
                 tui.COLOR_INFO,
             )
 
-    # Pick the highest ABI version.  Sort key extracts the ABI tuple from
-    # the package name so '6.1.0-47' > '6.1.0-9' lexicographically wrong
-    # would otherwise be a hazard — but with consistent numeric padding
-    # in Debian's ABI naming, sort-on-name is fine.  Use the last entry.
-    _deb = (_preferred or _linux_debs)[-1]
+    # Pick the highest ABI version.  STA-31: version-aware — a plain
+    # sorted()[-1] on the .deb names is lexicographic, so '6.1.0-9' beat
+    # '6.1.0-47' ('9' > '4'); apt_pkg.version_compare on the extracted ABI
+    # gets it right (the docstring's "numeric padding makes sort-on-name
+    # fine" claim was false — Debian ABIs are NOT zero-padded).
+    _deb = utils.latest_kernel_name(_preferred or _linux_debs)
+    assert _deb is not None  # _linux_debs is non-empty (guarded above)
     tui.console.print(f"Extracting kernel from {os.path.basename(_deb)}...")
 
     # Extract under a /tmp work dir.  dpkg-deb -x is non-destructive and

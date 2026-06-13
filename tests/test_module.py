@@ -9058,6 +9058,49 @@ def test_version_no_epoch_only_strips_first_colon():
     assert version_no_epoch('1:2.0:beta-1') == '2.0:beta-1'
 
 
+def test_select_latest_kernel_version_aware_and_paired():
+    """STA-31: kernel selection is version-aware (apt_pkg ABI compare),
+    NOT lexicographic, and the initrd is paired to the chosen kernel by
+    its exact suffix.  A plain sorted()[-1] picks 6.1.0-9 over 6.1.0-47
+    ('9' > '4') and 6.9 over 6.10 — both wrong."""
+    import tempfile
+    import utils
+
+    # latest_kernel_name: the two classic lexicographic traps
+    assert utils.latest_kernel_name([
+        'vmlinuz-6.1.0-9-amd64', 'vmlinuz-6.1.0-47-amd64',
+    ]) == 'vmlinuz-6.1.0-47-amd64'
+    assert utils.latest_kernel_name([
+        'vmlinuz-6.9.0-1-amd64', 'vmlinuz-6.10.0-1-amd64',
+    ]) == 'vmlinuz-6.10.0-1-amd64'
+    # works on linux-image .deb filenames (ABI, not the deb-version)
+    assert utils.latest_kernel_name([
+        'linux-image-6.1.0-9-amd64_6.1.174-1_amd64.deb',
+        'linux-image-6.1.0-47-amd64_6.1.174-1_amd64.deb',
+    ]).startswith('linux-image-6.1.0-47-amd64')
+    assert utils.kernel_abi_of(
+        'linux-image-6.1.0-47-amd64_6.1.174-1+asg1u2_amd64.deb'
+    ) == '6.1.0-47-amd64'
+    assert utils.latest_kernel_name([]) is None
+
+    with tempfile.TemporaryDirectory() as _d:
+        _boot = os.path.join(_d, 'boot')
+        os.makedirs(_boot)
+        for _f in ('vmlinuz-6.1.0-9-amd64', 'vmlinuz-6.1.0-47-amd64',
+                   'initrd.img-6.1.0-9-amd64', 'initrd.img-6.1.0-47-amd64'):
+            open(os.path.join(_boot, _f), 'w').close()
+        # highest ABI chosen, initrd PAIRED to it (not an independent sort)
+        assert utils.select_latest_kernel(_boot) == (
+            'vmlinuz-6.1.0-47-amd64', 'initrd.img-6.1.0-47-amd64')
+        # remove the matching initrd → hard failure (None), never a mismatch
+        os.remove(os.path.join(_boot, 'initrd.img-6.1.0-47-amd64'))
+        assert utils.select_latest_kernel(_boot) is None
+        # no vmlinuz at all → None
+        _empty = os.path.join(_d, 'empty')
+        os.makedirs(_empty)
+        assert utils.select_latest_kernel(_empty) is None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # get_sha256 — sidecar (size, mtime_ns) cache
 # ─────────────────────────────────────────────────────────────────────────────
@@ -33964,6 +34007,7 @@ def main() -> int:
         test_version_no_epoch_accepts_string_input,
         test_version_no_epoch_handles_multidigit_epoch,
         test_version_no_epoch_only_strips_first_colon,
+        test_select_latest_kernel_version_aware_and_paired,
         # get_sha256 — sidecar (size, mtime_ns) cache
         test_get_sha256_writes_sidecar_on_first_call,
         test_get_sha256_returns_cached_value_on_size_mtime_match,
