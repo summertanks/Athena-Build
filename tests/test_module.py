@@ -19763,6 +19763,69 @@ def test_docker_wait_for_exit_survives_read_timeouts():
     assert _propagated, "NotFound should propagate, not be swallowed"
 
 
+def test_sta32_wait_for_exit_tolerates_transient_reload():
+    """STA-32(b): the recovery container.reload() is another HTTP GET — in
+    the same daemon hiccup that timed out wait() it can raise a TRANSIENT
+    (requests ConnectionError/Timeout), NOT an APIError.  The old guard
+    caught only APIError, so that escaped _wait_for_exit and recorded a
+    still-running build as failed.  reload() raising a transient must be
+    tolerated and the loop must return the real exit code."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import requests.exceptions as _rexc
+    import buildcontainer
+
+    class _ReloadHiccup:
+        short_id = 'r1'
+        # already exited; the loop just needs to read this after reload
+        attrs = {'State': {'Status': 'exited', 'Running': False,
+                           'ExitCode': 0}}
+
+        def wait(self):
+            raise _rexc.Timeout('read timeout=1800')
+
+        def reload(self):
+            raise _rexc.ConnectionError('daemon hiccup during reload')
+
+    _bc = buildcontainer.BuildContainer.__new__(buildcontainer.BuildContainer)
+    # Must NOT propagate the ConnectionError from reload().
+    assert _bc._wait_for_exit(_ReloadHiccup()) == {'StatusCode': 0}
+
+
+def test_sta32_pid_alive_and_connect_error_tuples():
+    """STA-32(a)/(c): _pid_alive probes process existence (signal 0); the
+    connect-error tuple includes the BASE DockerException (which an
+    unreachable daemon raises) — `except APIError` alone would miss it."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import os as _os
+    import docker
+    import buildcontainer
+    # our own pid is alive; a very high pid almost certainly is not
+    assert buildcontainer._pid_alive(_os.getpid()) is True
+    assert buildcontainer._pid_alive(2 ** 22 - 1) is False
+    # the connect tuple catches the base DockerException + transients
+    assert docker.errors.DockerException in buildcontainer._DOCKER_CONNECT_ERRORS
+    assert issubclass(docker.errors.APIError, docker.errors.DockerException)
+    # the reload tuple tolerates a transient (not just APIError)
+    import requests.exceptions as _rexc
+    assert _rexc.ConnectionError in buildcontainer._DOCKER_RELOAD_ERRORS
+
+
+def test_sta32_connect_and_reap_use_widened_handling():
+    """STA-32 source pins: both connect paths catch _DOCKER_CONNECT_ERRORS
+    (not bare APIError), and the startup orphan reap is PID-aware (skips
+    containers a live concurrent session owns)."""
+    import inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _init = inspect.getsource(buildcontainer.BuildContainer.__init__)
+    # Both connect except clauses widened.
+    assert _init.count('except _DOCKER_CONNECT_ERRORS') >= 2, _init
+    # Reap consults the owner pid + liveness and skips live-owned.
+    assert '_pid_alive(' in _init and 'com.athena.pid' in _init, _init
+    assert 'owned by a live concurrent' in _init.lower() or \
+           'live concurrent session' in _init.lower(), _init
+
+
 def test_docker_stream_and_wait_backfills_log_on_timeout():
     """Log streaming is best-effort: a read timeout mid-stream must NOT
     fail the build — _stream_and_wait stops tailing, waits for exit, then
@@ -34537,6 +34600,9 @@ def main() -> int:
         test_verify_output_hashes_flags_only_present_drift_not_pruned_absent,
         # docker read-timeout robustness on multi-hour builds
         test_docker_wait_for_exit_survives_read_timeouts,
+        test_sta32_wait_for_exit_tolerates_transient_reload,
+        test_sta32_pid_alive_and_connect_error_tuples,
+        test_sta32_connect_and_reap_use_widened_handling,
         test_docker_stream_and_wait_backfills_log_on_timeout,
         # UPD-01 step 2: append-only enforcement
         test_segregate_never_deletes_existing_published_deb,
