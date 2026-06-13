@@ -206,6 +206,12 @@ def push_dist_tree(
     Idempotent (rsync -aH); files already on the remote with matching
     mtimes are skipped.  Uses ``--delete`` so stale per-arch dirs
     from a removed component don't accumulate on the remote.
+
+    This pass syncs INDEX files only (Release/InRelease/Packages/
+    Sources/by-hash).  Pool ``.deb``/``.udeb`` artifacts — which live
+    inside dists/<codename>/ since CONF-01 Stage D — are owned solely
+    by ``push_single_deb`` (additive, ``--ignore-existing``, or
+    ``overwrite=True`` for a sanctioned reclaim) and are EXCLUDED here.
     """
     if not os.path.isdir(local_dist_dir):
         return False, (
@@ -214,19 +220,24 @@ def push_dist_tree(
             "before pushing")
     _src = local_dist_dir.rstrip('/') + '/'
     _dst = remote_dir_spec.rstrip('/') + '/'
-    # Append-only pool guard (2026-06-11): the pool .debs live INSIDE
-    # dists/<codename>/ (CONF-01 Stage D — this docstring's "under
-    # pool/..." predates that), so a bare --delete mirrors any local
-    # prune onto the remote: 17 obsolete/deprecated files vanished from
-    # the append-only pool on publish.  Protect pool artifacts from
-    # receiver-side deletion; --delete still reaps stale index files
-    # and removed-component dirs.  Remote pruning, when it comes, is an
-    # explicit operator action (UPD-01 publish-before-prune), never a
-    # dist-tree push side effect.
+    # STA-28: EXCLUDE pool artifacts (not merely `--filter=P` protect).
+    # The pool .debs live INSIDE dists/<codename>/ (CONF-01 Stage D), so
+    # this whole-subtree rsync would otherwise touch them.  A `--filter=P`
+    # only stops receiver-side DELETION — rsync -aH still TRANSFERS/
+    # overwrites any .deb whose size/mtime differs, so a local-ahead
+    # rebuild (same filename, new bytes) silently rewrote the FROZEN
+    # remote bytes on every publish, with no reclaim claim (the whole
+    # RECLAIM-01 invariant bypassed; STA-47 masked).  `--exclude` removes
+    # pool artifacts from the transfer set entirely AND (since they're
+    # excluded, not just protected) keeps `--delete` from reaping them —
+    # so this pass never overwrites NOR deletes a pool file.  Pool bytes
+    # are pushed only by push_single_deb; pruning stays an explicit
+    # operator action (UPD-01 publish-before-prune).  `--delete` still
+    # reaps stale index files + removed-component dirs.
     _argv = list(_RSYNC_BASE) + [
         '--delete',
-        '--filter=P *.deb',
-        '--filter=P *.udeb',
+        '--exclude=*.deb',
+        '--exclude=*.udeb',
     ]
     _ssh = _ssh_arg(ssh_key)
     if _ssh is not None:

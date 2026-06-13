@@ -384,6 +384,8 @@ def filter_pending_by_ownership(
 
     Decision matrix (per filename):
       - No existing owner record         → KEEP (we become owner)
+      - Existing owner, different sha256  → BLOCK (`frozen_bytes_blocked`,
+                                            STA-47) unless a reclaim
       - Owner is us                      → KEEP (re-claim is no-op)
       - Tunneled (no owner)              → KEEP (we take ownership)
       - Owner is other, our_ver > theirs → KEEP (ownership transfers)
@@ -402,6 +404,34 @@ def filter_pending_by_ownership(
         _owner = existing_owners.get(_fn)
         if _owner is None:
             _kept.append(_c)
+            continue
+        # STA-47: an existing owner record means the remote pool already
+        # holds bytes under this filename (frozen).  If our rebuilt bytes
+        # differ and this isn't a sanctioned reclaim, we must NOT publish:
+        # Step 5b's push_single_deb uses --ignore-existing for non-reclaim
+        # files, so the remote keeps the OLD bytes while our new claim
+        # would pin a sha the pool doesn't serve → claim_apt_sha_mismatch
+        # CRITICAL + delete-on-mismatch in every peer's pull.  (Reclaims
+        # are injected AFTER this filter and carry reclaims_seq; the guard
+        # is belt-and-suspenders for them.)  Frozen-filename invariant:
+        # same filename = same bytes; a deliberate version-less change
+        # goes through `mirror reclaim`, a content change bumps the version.
+        _our_sha = str(_c.get('sha256') or '')
+        _their_sha = str(_owner.get('sha256') or '')
+        _is_reclaim = isinstance(_c.get('reclaims_seq'), int)
+        if (not _is_reclaim and _our_sha and _their_sha
+                and _our_sha != _their_sha):
+            _blocked.append({
+                'filename':       _fn,
+                'owner':          _owner.get('builder'),
+                'our_version':    str(_c.get('built_version') or ''),
+                'owner_version':  str(_owner.get('version') or ''),
+                'reason':         (
+                    f'bytes differ from the frozen pool copy '
+                    f'(sha {_our_sha[:12]} != {_their_sha[:12]}) — use '
+                    f'`mirror reclaim` for a deliberate version-less '
+                    f'change, or bump the version for a content change'),
+            })
             continue
         _owner_builder = _owner.get('builder')
         if _owner_builder is None:
@@ -752,9 +782,9 @@ def remote_publish(
         if _ownership_blocked:
             for _b in _ownership_blocked:
                 logger.warning(
-                    f"ownership_blocked: {_b['filename']} owned by "
-                    f"{_b['owner']!r} at {_b['owner_version']!r}; "
-                    f"our {_b['our_version']!r} not strictly higher")
+                    f"publish blocked: {_b['filename']} "
+                    f"(owner {_b['owner']!r} at {_b['owner_version']!r}, "
+                    f"ours {_b['our_version']!r}) — {_b['reason']}")
         # RECLAIM-01 — inject operator-resolved reclaim intents AFTER
         # the _remote_known filter (their filenames are by definition
         # already on the remote) and AFTER the ownership filter (the
