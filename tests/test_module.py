@@ -430,6 +430,85 @@ def test_cmd_auto_run_build_refuses_in_dist_mode():
     assert 'autorun live' in _joined or 'autorun live`/' in _joined, _joined
 
 
+def test_sta34_autorun_build_calls_source_build_bare_not_invalid_token():
+    """STA-34: the final autorun-build step must call cmd_source_build with
+    NO args (the 'pkg' subset, relabelled 'indl' in build mode) — never
+    cmd_source_build('build'), which is not a valid subset token and gets
+    classified as a package name ("Unknown package: build"), aborting the
+    pipeline at the last step."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _src = inspect.getsource(BuildSession.cmd_auto_run_build)
+    # Must NOT pass the invalid 'build' subset token...
+    assert "cmd_source_build('build')" not in _src, (
+        "autorun build must NOT pass the invalid 'build' subset token")
+    assert 'cmd_source_build("build")' not in _src, _src
+    # ...and the step must reference cmd_source_build BARE (no-arg call →
+    # 'pkg' subset, relabelled 'indl' in build mode).
+    assert '(self.cmd_source_build,' in _src, (
+        "the final step must be a bare cmd_source_build reference, not a "
+        "lambda passing a subset token")
+
+
+def test_sta36_mirror_add_confirmation_declines_on_no():
+    """STA-36: the `mirror add` confirmation must DECLINE on "n"/"no".  A
+    YESNO get_response() returns a truthy string for every answer, so the
+    old `if not _resp` only caught a missing backend and "n" fell through
+    to registration."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _src = inspect.getsource(BuildSession.cmd_mirror_add)
+    # The confirmation must test for an explicit yes, not truthiness.
+    import re
+    _m = re.search(r"\.get_response\(\)\s*\n\s*(.+?)\n", _src)
+    assert _m, "confirmation get_response() not found"
+    # No `if not _resp:` style truthiness check guarding the abort.
+    assert 'if not _resp' not in _src, (
+        "STA-36: abort must not key off truthiness (every YESNO answer is "
+        "truthy) — use `_resp.lower() not in ('y', 'yes')`")
+    assert "not in ('y', 'yes')" in _src or 'not in ("y", "yes")' in _src, _src
+
+
+def test_sta35_standalone_tunnel_loads_published_ledger():
+    """STA-35: when no container ledger is present (standalone
+    `source tunnel`), _do_tunnel must fall back to
+    repo_audit.published_ledger so a delta source still gets its asg
+    stamp instead of regressing to pristine."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from build import BuildSession
+    _src = inspect.getsource(BuildSession._do_tunnel)
+    assert 'published_ledger' in _src, (
+        "_do_tunnel must load published_ledger when the container ledger "
+        "is absent (STA-35)")
+    # The fallback is gated on the container ledger being None.
+    assert 'if _ledger is None' in _src, _src
+
+
+def test_sta33_build_depends_serialises_apt_pkg_profile_global():
+    """STA-33: the apt_pkg Build-Profiles global set + every parse that
+    reads it must run under a module lock so concurrent build workers
+    can't swap the profile set out from under each other's parse."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import package
+    assert hasattr(package, '_BUILD_PROFILES_LOCK'), (
+        "module-level _BUILD_PROFILES_LOCK missing")
+    _src = inspect.getsource(package.Source.build_depends)
+    # The global-set and the parse CALL must be inside the `with` lock
+    # block.  (rindex for the parse: the docstring also names
+    # parse_src_depends, so take the last/code occurrence.)
+    assert 'with _BUILD_PROFILES_LOCK:' in _src, _src
+    _lock_at = _src.index('with _BUILD_PROFILES_LOCK:')
+    _set_at = _src.index("apt_pkg.config['APT::Build-Profiles'] =")
+    _parse_at = _src.rindex('apt_pkg.parse_src_depends(')
+    assert _lock_at < _set_at < _parse_at, (
+        "the profile-global set AND parse_src_depends must both be inside "
+        "the lock block")
+
+
 def test_parse_source_build_args_recognises_indl_subset():
     """`_parse_source_build_args` accepts 'indl' as a recognised
     subset name (mode-gating happens at dispatch time, not in the
@@ -33739,6 +33818,10 @@ def main() -> int:
         test_print_state_shows_mode_header,
         test_cmd_auto_run_dispatch_routes_build_mode,
         test_cmd_auto_run_build_refuses_in_dist_mode,
+        test_sta34_autorun_build_calls_source_build_bare_not_invalid_token,
+        test_sta36_mirror_add_confirmation_declines_on_no,
+        test_sta35_standalone_tunnel_loads_published_ledger,
+        test_sta33_build_depends_serialises_apt_pkg_profile_global,
         test_parse_source_build_args_recognises_indl_subset,
         test_cmd_source_build_indl_subset_rejected_in_dist_mode,
         test_source_audit_naturally_scopes_to_indl_in_build_mode,

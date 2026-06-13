@@ -279,8 +279,12 @@ class ConfigRunCommandsMixin(SessionState):
             (self.cmd_parse_dependency,  'dep_check_ready',       'cache parse'),
             (self.cmd_source_sync,       'download_ready',        'source sync'),
             (self.cmd_init_container,    'build_container_ready', 'container init'),
-            (lambda: self.cmd_source_build('build'),
-                                          'source_build_ready',    'source build indl'),
+            # STA-34: call cmd_source_build BARE.  'build' is not a valid
+            # _SOURCE_SUBSETS token, so it was classified as a package NAME
+            # → "Unknown package: build" → source_build_ready never set →
+            # autorun aborted at the last step.  Bare → the 'pkg' subset,
+            # relabelled 'indl' in build mode (the intended whole-set build).
+            (self.cmd_source_build,      'source_build_ready',    'source build indl'),
         ]
         self._run_autorun_steps('autorun build', _steps)
 

@@ -3,11 +3,20 @@ from debian.deb822 import Packages, Sources
 from debian.debian_support import Version
 
 import logging
+import threading
 import apt_pkg
 import tui
 import utils
 
 from typing import List, Dict, Any, Optional, Tuple
+
+# STA-33: `apt_pkg.config['APT::Build-Profiles']` is a PROCESS-GLOBAL that
+# `Source.build_depends` sets and then reads via `parse_src_depends`.
+# Under COMP-03 parallel builds (per-package profile overrides, ARCH-16),
+# worker A's set could be overwritten by worker B before A's parse ran,
+# filtering A's `<!nocheck>`-style build-deps under B's profiles — a
+# silently wrong build-dep install set.  Serialise the set+parse pair.
+_BUILD_PROFILES_LOCK = threading.Lock()
 
 logger = logging.getLogger('athena.cache')
 
@@ -630,16 +639,21 @@ class Source(Sources):
         candidate".  Without `cache`, no expansion happens (caller-driven
         opt-in, keeps the dep-tree-time parse a pure transform).
         """
-        apt_pkg.config['APT::Build-Profiles'] = ' '.join(active_profiles)  # type: ignore[index]
+        # STA-33: hold the lock across the global set AND every parse that
+        # reads it, so a concurrent worker can't swap the profile set out
+        # from under this source's parse.  parse is microseconds; the lock
+        # is uncontended in the common single-build case.
         all_deps: List[List[Tuple]] = []
-        for field in ('Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch'):
-            raw = (self.get(field) or '').strip()
-            if raw:
-                try:
-                    all_deps.extend(apt_pkg.parse_src_depends(raw, architecture=arch))
-                except (SystemError, ValueError) as e:
-                    # apt_pkg.Error inherits from SystemError.
-                    logger.warning(f"parse_src_depends({field}) for '{self.package}': {e}")
+        with _BUILD_PROFILES_LOCK:
+            apt_pkg.config['APT::Build-Profiles'] = ' '.join(active_profiles)  # type: ignore[index]
+            for field in ('Build-Depends', 'Build-Depends-Indep', 'Build-Depends-Arch'):
+                raw = (self.get(field) or '').strip()
+                if raw:
+                    try:
+                        all_deps.extend(apt_pkg.parse_src_depends(raw, architecture=arch))
+                    except (SystemError, ValueError) as e:
+                        # apt_pkg.Error inherits from SystemError.
+                        logger.warning(f"parse_src_depends({field}) for '{self.package}': {e}")
         if cache is None:
             return all_deps
         return [self._expand_virtual_alternatives(grp, cache) for grp in all_deps]
