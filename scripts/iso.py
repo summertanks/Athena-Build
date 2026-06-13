@@ -86,21 +86,20 @@ class _IsoMixin:
         # ── Step 1: locate kernel and initramfs ───────────────────────────────
         logger.info("step 1/6: locate kernel + initramfs in chroot/boot/")
         _boot = os.path.join(self._dir_chroot, 'boot')
-        _kernels = sorted(glob.glob(os.path.join(_boot, 'vmlinuz-*')))
-        _initrds = sorted(glob.glob(os.path.join(_boot, 'initrd.img-*')))
-
-        if not _kernels:
-            tui.console.print("ERROR: no kernel found in chroot/boot/ — is linux-image installed?")
-            logger.error("build_iso: no vmlinuz-* in chroot/boot/")
+        # STA-31: version-aware selection + initrd paired to the chosen
+        # kernel by suffix (a lexicographic sorted()[-1] picks 6.1.0-9 over
+        # 6.1.0-47, and independent vmlinuz/initrd sorts can mismatch).
+        _pair = utils.select_latest_kernel(_boot)
+        if _pair is None:
+            if not glob.glob(os.path.join(_boot, 'vmlinuz-*')):
+                tui.console.print("ERROR: no kernel found in chroot/boot/ — is linux-image installed?")
+                logger.error("build_iso: no vmlinuz-* in chroot/boot/")
+            else:
+                tui.console.print("ERROR: no initramfs matching the latest kernel in chroot/boot/ — is initramfs-tools installed?")
+                logger.error("build_iso: no paired initrd.img-* for the latest vmlinuz in chroot/boot/")
             return False
-        if not _initrds:
-            tui.console.print("ERROR: no initramfs found in chroot/boot/ — is initramfs-tools installed?")
-            logger.error("build_iso: no initrd.img-* in chroot/boot/")
-            return False
-
-        # Use the latest kernel version (highest sort order).
-        _kernel = _kernels[-1]
-        _initrd = _initrds[-1]
+        _kernel = os.path.join(_boot, _pair[0])
+        _initrd = os.path.join(_boot, _pair[1])
         tui.console.print(f"Kernel  : {os.path.basename(_kernel)}")
         tui.console.print(f"Initrd  : {os.path.basename(_initrd)}")
 

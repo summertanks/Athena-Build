@@ -42,6 +42,7 @@ import tempfile
 from typing import TYPE_CHECKING, Optional
 
 import tui
+import utils
 
 if TYPE_CHECKING:
     from buildcontainer import BuildContainer   # noqa: F401
@@ -533,24 +534,27 @@ def _write_minimal_grub_cfg(mnt: str, root_uuid: str,
       - os-prober errors out under chroot's restricted view of /dev
       - mkconfig assumes a specific filesystem layout we don't have
     """
-    # Discover the kernel — glob /boot/vmlinuz-* in the mounted target.
+    # Discover the kernel — version-aware, with the initrd PAIRED to the
+    # chosen kernel by suffix (STA-31: the old code sorted vmlinuz and
+    # initrd INDEPENDENTLY and took [-1] of each — lexicographic, so
+    # 6.1.0-9 beat 6.1.0-47, and two co-resident ABIs could pair a kernel
+    # with a DIFFERENT ABI's initrd → unbootable grub menuentry).
     _boot = os.path.join(mnt, 'boot')
-    try:
-        _vmlinuz = sorted(_f for _f in os.listdir(_boot)
-                          if _f.startswith('vmlinuz-'))
-        _initrd  = sorted(_f for _f in os.listdir(_boot)
-                          if _f.startswith('initrd.img-'))
-    except OSError as e:
-        logger.error(f"list {_boot} for kernel: {e}")
+    _pair = utils.select_latest_kernel(_boot)
+    if _pair is None:
+        try:
+            _have_vmlinuz = any(
+                _f.startswith('vmlinuz-') for _f in os.listdir(_boot))
+        except OSError as e:
+            logger.error(f"list {_boot} for kernel: {e}")
+            return False
+        if not _have_vmlinuz:
+            logger.error(f"no vmlinuz-* in {_boot}")
+        else:
+            logger.error(
+                f"no initrd.img matching the latest vmlinuz in {_boot}")
         return False
-    if not _vmlinuz:
-        logger.error(f"no vmlinuz-* in {_boot}")
-        return False
-    if not _initrd:
-        logger.error(f"no initrd.img-* in {_boot}")
-        return False
-    _k_name  = _vmlinuz[-1]
-    _i_name  = _initrd[-1]
+    _k_name, _i_name = _pair
 
     # `insmod all_video` is REQUIRED.  Without it grub's `linux`
     # command can't allocate a framebuffer for the EFI handover and

@@ -793,11 +793,15 @@ class BuildCommandsMixin(SessionState):
             _kernel_pat = _re.compile(
                 r'^linux-image-\d+\.\d+\.\d+-\d+-amd64$'
             )
-            _kernel_candidates = sorted(
+            _kernel_candidates = [
                 _n for _n in self.cache.package_hashtable.keys()
                 if _kernel_pat.match(_n)
-            )
-            _expected_kernel = _kernel_candidates[-1] if _kernel_candidates else None
+            ]
+            # STA-31: version-aware — the prediction that feeds
+            # expected_kernel_pkg must pick the true highest ABI (47 > 9),
+            # not the lexicographic last, or the picker steers _find_kernel
+            # to the wrong kernel.
+            _expected_kernel = utils.latest_kernel_name(_kernel_candidates)
             if _expected_kernel:
                 console.print(
                     f"Cache predicts kernel binary: {_expected_kernel}",
@@ -1047,16 +1051,20 @@ class BuildCommandsMixin(SessionState):
                else f'{len(_incomplete)} incomplete: {", ".join(_incomplete[:4])}')
 
         # ── Check 3: kernel ──────────────────────────────────────────────────────
-        _kernels = sorted(glob.glob(os.path.join(chroot, 'boot', 'vmlinuz-*')))
+        # STA-31: version-aware display (matches what the ISO/disk builders
+        # actually pick).
+        _kernels = glob.glob(os.path.join(chroot, 'boot', 'vmlinuz-*'))
+        _kname = utils.latest_kernel_name(_kernels)
         _check('Kernel present in /boot/',
                bool(_kernels),
-               os.path.basename(_kernels[-1]) if _kernels else 'no vmlinuz-* found')
+               os.path.basename(_kname) if _kname else 'no vmlinuz-* found')
 
         # ── Check 4: initramfs ───────────────────────────────────────────────────
-        _initrds = sorted(glob.glob(os.path.join(chroot, 'boot', 'initrd.img-*')))
+        _initrds = glob.glob(os.path.join(chroot, 'boot', 'initrd.img-*'))
+        _iname = utils.latest_kernel_name(_initrds)
         _check('Initramfs present in /boot/',
                bool(_initrds),
-               os.path.basename(_initrds[-1]) if _initrds else 'no initrd.img-* found')
+               os.path.basename(_iname) if _iname else 'no initrd.img-* found')
 
         # ── Check 5: bash ────────────────────────────────────────────────────────
         _r = _chroot_run('bash', '--version')

@@ -15,7 +15,8 @@ import argparse
 import requests
 import tui
 from tui import Prompt, Spinner, ProgressBar
-from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
+from typing import (
+    Any, Callable, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING)
 
 # Re-exported from bump (the versioning module).  Explicit `as` aliases
 # mark these as intentional re-exports so `utils.<name>` call sites keep
@@ -250,6 +251,81 @@ def version_no_epoch(version: object) -> str:
     if _colon < 0:
         return _s
     return _s[_colon + 1:]
+
+
+# STA-31: version-aware kernel selection.  A plain `sorted(...)[-1]` over
+# kernel artifacts orders LEXICALLY, so `6.1.0-9` sorts ABOVE `6.1.0-47`
+# ('9' > '4') and `6.9` above `6.10` — picking the OLDER kernel.  Two
+# co-resident ABIs (stale pre-rollback .deb, kernel refresh) then ship the
+# wrong vmlinuz, and independently-sorted vmlinuz/initrd can MISMATCH →
+# unbootable image.  These helpers sort by the kernel ABI via
+# apt_pkg.version_compare and pair the initrd to the chosen kernel by its
+# exact suffix.
+_KERNEL_ABI_RE = re.compile(r'(\d+\.\d+\.\d+-\d+-[a-z][a-z0-9-]*)')
+
+
+def kernel_abi_of(name: str) -> str:
+    """Extract the kernel ABI (e.g. ``6.1.0-47-amd64``) from a
+    ``vmlinuz-`` / ``initrd.img-`` boot artifact, a ``linux-image-…``
+    package name, or a ``linux-image-…_<ver>_<arch>.deb`` filename.
+    Returns '' when no numeric-ABI kernel version is present (meta /
+    flavor packages).  The leading ``\\d+\\.\\d+\\.\\d+-\\d+`` anchors on
+    the ABI, not the trailing deb-version, so the .deb filename case picks
+    the package ABI."""
+    _m = _KERNEL_ABI_RE.search(os.path.basename(name))
+    return _m.group(1) if _m else ''
+
+
+def _kernel_sort_key() -> 'Callable[[str], Any]':
+    """functools sort key ordering kernel names by ABI (apt_pkg version
+    semantics); non-ABI names sort below ABI ones, ties broken lexically."""
+    import apt_pkg
+    import functools
+    apt_pkg.init_system()
+
+    def _cmp(a: str, b: str) -> int:
+        _va, _vb = kernel_abi_of(a), kernel_abi_of(b)
+        if _va and _vb:
+            return apt_pkg.version_compare(_va, _vb)
+        if _va:
+            return 1
+        if _vb:
+            return -1
+        return -1 if a < b else (1 if a > b else 0)
+    return functools.cmp_to_key(_cmp)
+
+
+def latest_kernel_name(names: 'list[str]') -> 'Optional[str]':
+    """Highest-ABI entry from a list of kernel artifact / package / .deb
+    names, version-aware (STA-31).  None if the list is empty."""
+    if not names:
+        return None
+    return max(names, key=_kernel_sort_key())
+
+
+def select_latest_kernel(boot_dir: str) -> 'Optional[Tuple[str, str]]':
+    """Return ``(vmlinuz_basename, initrd_basename)`` for the
+    highest-version kernel in ``boot_dir``, with the initrd PAIRED to the
+    chosen kernel by its exact version suffix (NOT an independent sort).
+
+    Returns None if ``boot_dir`` is unreadable, has no ``vmlinuz-*``, or
+    the matching ``initrd.img-<suffix>`` is absent — callers MUST treat
+    None as a hard failure rather than ship a kernel without its initrd
+    (or a mismatched pair).  STA-31."""
+    try:
+        _names = os.listdir(boot_dir)
+    except OSError:
+        return None
+    _vmlinuz = [_n for _n in _names if _n.startswith('vmlinuz-')]
+    if not _vmlinuz:
+        return None
+    _best = latest_kernel_name(_vmlinuz)
+    assert _best is not None  # _vmlinuz is non-empty
+    _suffix = _best[len('vmlinuz-'):]
+    _initrd = 'initrd.img-' + _suffix
+    if _initrd not in _names:
+        return None
+    return (_best, _initrd)
 
 
 def _strip_quotes(s: str) -> str:
