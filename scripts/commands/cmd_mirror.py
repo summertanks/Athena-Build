@@ -342,7 +342,12 @@ class MirrorCommandsMixin(SessionState):
                    if _dropped else "")
                 + "?",
             ).get_response()
-            if not _resp:
+            # STA-36: a YESNO get_response() returns 'y'/'n'/'yes'/'no' —
+            # ALL truthy, so a bare truthiness check only caught a missing
+            # TUI backend (empty string); answering "n" fell straight
+            # through to registration.  Decline on anything that isn't an
+            # explicit yes (matches every other YESNO site).
+            if _resp.lower() not in ('y', 'yes'):
                 console.print(
                     "mirror add: aborted by operator.", tui.COLOR_WARNING)
                 return False

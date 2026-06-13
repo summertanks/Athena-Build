@@ -340,6 +340,20 @@ class TunnelCommandsMixin(SessionState):
 
             _ledger = (getattr(self.container, 'asg_ledger', None)
                        if self.container is not None else None)
+            if _ledger is None:
+                # STA-35: standalone `source tunnel` runs container-less, so
+                # the asg ledger that `cmd_source_build` loads onto the
+                # container (`asg_ledger = published_ledger(config)`) is
+                # absent — without it a delta source tunnels with strip-only
+                # normalisation and NO +asg<R>u<N> stamp, regressing a
+                # published +asgRuN binary to its pristine name.  Load it
+                # directly (memoised on the session — published_ledger reads
+                # the signed manifest, so do it once per command).
+                if getattr(self, '_standalone_tunnel_ledger', None) is None:
+                    import repo_audit as _repo_audit
+                    self._standalone_tunnel_ledger = (
+                        _repo_audit.published_ledger(self.config))
+                _ledger = self._standalone_tunnel_ledger
             _src_is_delta = (
                 utils.strip_nmu_suffix(str(src_pkg.version))
                 != str(src_pkg.version))
