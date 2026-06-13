@@ -526,13 +526,18 @@ class RepoCommandsMixin(SessionState):
                       the dep tree (e.g. upstream `tasksel` replaced by
                       `athena-tasksel` fork → leaves 222 task-*
                       binaries orphaned).
-          drift     — list of (sub, filename, source_name, size) where
-                      the source IS selected but this specific filename
-                      isn't in any predicted-files list.  Most common
-                      cause: source rebuilt at a new version, old .deb
-                      lingers (e.g. base-files_12.4_amd64.deb left over
-                      after the same-name fork bumped to
-                      base-files_12.4+deb12u14+athena1_amd64.deb).
+          drift     — list of (sub, filename, source_name, size): a
+                      SUPERSEDED artifact that should be pruned.  Two
+                      cases, both = "a newer version of this exact
+                      (name, pristine-base, arch) exists on disk":
+                      (a) the source is selected and the current build
+                      predicts the higher version (base-files_12.4 left
+                      over after the fork bumped to +deb12u14+athena1);
+                      (b) ANY lower version in a pristine-base group,
+                      selected or not — single-snapshot local repo keeps
+                      only the highest, so a superseded production sibling
+                      (e2fsprogs comerr-dev +asg1u1 vs +asg1u2) is drift
+                      too, not a permanent pool resident.
           malformed — list of 'sub/filename' where dpkg control couldn't
                       be parsed (truncated/corrupt .deb).
           total     — total .deb/.udeb files scanned across all subdirs.
@@ -670,11 +675,25 @@ class RepoCommandsMixin(SessionState):
                     _hi_fn, _hi_ver = _fn, _ver
             _is_expected = _key is not None and _key in _expected_keys
             for _fn, _ver, _src_name, _size in _entries:
-                if _is_expected:
-                    if _fn == _hi_fn:
-                        continue                        # current version — KEEP
+                # Single-snapshot local repo (UPD-01): within any
+                # pristine-base group ONLY the highest version is current —
+                # every lower version is superseded drift, SELECTED OR NOT.
+                # This is what prunes superseded PRODUCTION SIBLINGS (e.g.
+                # e2fsprogs comerr-dev / ss-dev / fuse2fs +asg1u1 left
+                # behind by the +asg1u2 rebuild) that the per-selection
+                # branch below would otherwise KEEP forever — unbounded
+                # pool accumulation that also violates one-version-per-
+                # package locally and rides onto the installer ISO's
+                # /cdrom/pool.  Safe to delete: the superseded version is
+                # already on the additive remote (publish-before-prune).
+                # (_key is None ⇒ filename not name_ver_arch-parseable —
+                # those skip the version compare and fall through unchanged.)
+                if _key is not None and _fn != _hi_fn:
                     _drift.append((_sub, _fn, _src_name, _size))   # superseded
                     continue
+                # _fn is the current (highest) version of its group.
+                if _is_expected:
+                    continue                        # current expected — KEEP
                 _file_pkg = _fn.split('_', 1)[0]
                 if _file_pkg in _superseded:
                     # Upstream binary a selected fork Conflicts/Replaces
@@ -687,8 +706,9 @@ class RepoCommandsMixin(SessionState):
                 elif _file_pkg in _selected_pkg_names:
                     _drift.append((_sub, _fn, _src_name, _size))
                 # else: pkg name not predicted but source IS selected —
-                # production sibling (lib*-i386, lib*-l10n, etc.) that
-                # ships in /cdrom/pool but isn't an install target.  KEEP.
+                # CURRENT production sibling (lib*-i386, lib*-l10n, etc.)
+                # that ships in /cdrom/pool but isn't an install target.
+                # KEEP (only its superseded lower versions were pruned above).
 
         return _orphan, _drift, _malformed, _total
 

@@ -8739,6 +8739,77 @@ def test_scan_stale_files_covers_main_udeb_and_recovers_malformed():
             f"unscannable on-disk udeb not reported malformed: {_malformed}")
 
 
+def test_scan_stale_files_prunes_superseded_unselected_sibling():
+    """STA-38 follow-up: a superseded lower version is drift even when the
+    binary is NOT selected (a production sibling).  Single-snapshot local
+    repo (UPD-01) keeps exactly one version per (name, pristine-base, arch);
+    the previous classifier only deduped EXPECTED keys, so a superseded
+    production sibling (e2fsprogs comerr-dev / ss-dev / fuse2fs +asg1u1
+    after the +asg1u2 rebuild) accumulated forever and rode onto the
+    installer ISO's /cdrom/pool.  The CURRENT (highest) sibling is still
+    kept."""
+    import sys, tempfile, os
+    from unittest.mock import patch
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import repo_audit
+    from build import BuildSession
+
+    mirror_block = """
+    [Mirror.main]
+    Suffix =
+    Component = main
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = _write_test_config(
+            tmp, _BASE_CONF_BODY.format(mirror_block=mirror_block))
+        cfg = _build_config_from(tmp, cfg_path)
+        assert cfg.is_valid, cfg.error_str
+        _md = cfg.dir_repo_main
+        os.makedirs(_md, exist_ok=True)
+        _old = 'comerr-dev_2.1-1.47.0-2+asg1u1_amd64.deb'
+        _cur = 'comerr-dev_2.1-1.47.0-2+asg1u2_amd64.deb'
+        for _f in (_old, _cur):
+            open(os.path.join(_md, _f), 'w').close()
+
+        class _Tree:
+            def __init__(self):
+                # e2fsprogs source IS selected, but comerr-dev (a -dev
+                # sibling) is NOT a predicted install target.
+                self.selected_srcs = {'e2fsprogs': object()}
+                self.src_pkg_files = {
+                    'e2fsprogs': ['e2fsprogs_1.47.0-2+asg1u2_amd64.deb']}
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = cfg
+        _sess.dep_tree = _Tree()
+        _sess.udeb_dep_tree = _Tree()
+        _sess._superseded_binary_names = lambda: set()
+
+        def _fake_iter(config, subdir, refresh=False):
+            if subdir == 'main':
+                for _v in ('+asg1u1', '+asg1u2'):
+                    _fn = f'comerr-dev_2.1-1.47.0-2{_v}_amd64.deb'
+                    yield (_fn, {
+                        'Package': 'comerr-dev', 'Source': 'e2fsprogs',
+                        'Version': f'2.1-1.47.0-2{_v}',
+                        'Filename': f'pool/{_fn}', 'Size': '100'})
+            return
+
+        with patch.object(repo_audit, 'iter_packages_all_versions',
+                          side_effect=_fake_iter):
+            _orphan, _drift, _malformed, _total = _sess._scan_stale_files()
+
+        _drift_fns = [_fn for _sub, _fn, *_ in _drift]
+        assert _old in _drift_fns, (
+            f"superseded unselected sibling not pruned: {_drift_fns}")
+        assert _cur not in _drift_fns, (
+            f"current sibling must be kept, not flagged: {_drift_fns}")
+        # Current sibling is KEEP — not mis-flagged as orphan (source IS
+        # selected) and not drift.
+        assert not _orphan, (
+            f"current production sibling wrongly flagged orphan: {_orphan}")
+
+
 def test_cmd_package_cleanup_deletes_via_subdir_label_and_drops_sidecar():
     """STA-38: cleanup resolves the on-disk path from the SCANNED `_sub`
     label via deb_dir_for (not deb_dest_for_filename, which defaulted
@@ -33280,6 +33351,7 @@ def main() -> int:
         test_cmd_package_cleanup_dry_run_default_force_flag_required,
         test_cmd_package_cleanup_keeps_expected_files_drops_orphan_source,
         test_scan_stale_files_covers_main_udeb_and_recovers_malformed,
+        test_scan_stale_files_prunes_superseded_unselected_sibling,
         test_cmd_package_cleanup_deletes_via_subdir_label_and_drops_sidecar,
         test_audit_nmu_residue_detects_layered_versions,
         # apply_distro_suffix — bump bumped binaries with `+thor1`
