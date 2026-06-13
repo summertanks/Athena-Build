@@ -35,6 +35,36 @@ _DOCKER_TIMEOUT_DEFAULT = 1800   # 30 min
 # (reap_all_live) which deliberately propagates.
 _DOCKER_TRANSIENT = (_req_exc.Timeout, _req_exc.ConnectionError)
 
+# STA-32: docker-py's `DockerException` is the BASE class; `APIError` is a
+# subclass, so `except docker.errors.APIError` MISSES a raw
+# DockerException — which is exactly what `DockerClient()` / `from_env()`
+# raise against an unreachable daemon (the server-version probe wraps the
+# requests ConnectionError in a DockerException).  Connect paths must
+# catch the base + the requests-layer transients.
+_DOCKER_CONNECT_ERRORS = (docker.errors.DockerException,) + _DOCKER_TRANSIENT
+# A best-effort `container.reload()` / `container.logs()` issued during the
+# SAME daemon hiccup that produced a transient can itself raise a transient
+# (it's another HTTP GET), NOT an APIError — tolerate both so the
+# keep-polling loop / OOM probe / post-exit log read never escapes and
+# records a still-running (or already-finished) build as failed.
+_DOCKER_RELOAD_ERRORS = (docker.errors.APIError,) + _DOCKER_TRANSIENT
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a process with `pid` currently exists (signal-0 probe).
+    PermissionError ⇒ the process exists but is owned by another user.
+    Used by the startup orphan-reap so it never force-removes a container
+    a DIFFERENT live Athena process (a concurrent session) owns."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True  # unknown — be conservative, don't reap
+    return True
+
 if TYPE_CHECKING:
     # Type-only import — verify_pkg_artifact takes an optional RepoState
     # parameter, resolved at call time via a lazy `import repo_audit`
@@ -147,14 +177,21 @@ class BuildContainer:
                     base_url=docker_server, timeout=self._docker_timeout)
                 _client.ping()
                 self.client = _client
-            except docker.errors.APIError:
+            except _DOCKER_CONNECT_ERRORS:
+                # STA-32: catch the base DockerException + transients, not
+                # just APIError, so an unreachable external daemon actually
+                # falls back to local instead of escaping __init__.
                 tui.console.print("Athena Build Docker: Couldn't connect to external server, reverting to local")
 
         if self.client is None:
             try:
                 self.client = docker.from_env(timeout=self._docker_timeout)
                 self.client.ping()
-            except docker.errors.APIError as e:
+            except _DOCKER_CONNECT_ERRORS as e:
+                # STA-32: the most common failure (daemon not running) raises
+                # a bare DockerException — wrap ALL connect failures in
+                # RuntimeError so cmd_init_container's handler shows the
+                # designed message instead of a raw traceback.
                 logger.error(f"Athena Build Docker: Error {e}")
                 tui.console.print(f"Athena Build Docker: Error {e}")
                 raise RuntimeError(f"Cannot connect to local Docker daemon: {e}") from e
@@ -337,25 +374,48 @@ class BuildContainer:
         except OSError:
             pass
 
-        # COMP-03 Phase 2: sweep any leftover docker containers from a
-        # prior run that didn't reach its build()/run_grub_mkrescue/
-        # capture finally-block (kill -9 / SIGSEGV / daemon restart).
-        # Filter by our owner label so we never touch unrelated
-        # containers running on the host.  Best-effort.
+        # COMP-03 Phase 2: sweep leftover docker containers from a prior run
+        # that didn't reach its build()/run_grub_mkrescue/capture
+        # finally-block (kill -9 / SIGSEGV / daemon restart).  STA-32: reap
+        # ONLY containers whose owner (com.athena.pid) is GONE — never one a
+        # DIFFERENT live Athena process owns.  The old code force-removed
+        # every com.athena.build=1 container, so a second session (or an
+        # --api instance) killed the first session's in-flight multi-hour
+        # builds, which then recorded as failed.  (Containers tagged with
+        # OUR pid can only be leftovers — this process hasn't spawned any
+        # yet — so they're reapable; same for missing/unparseable labels.)
         try:
             assert self.client is not None
-            _orphans = self.client.containers.list(
+            _my_pid = os.getpid()
+            _all = self.client.containers.list(
                 all=True, filters={'label': 'com.athena.build=1'})
-            for _c in _orphans:
+            _reaped = 0
+            _skipped = 0
+            for _c in _all:
+                _owner = (getattr(_c, 'labels', None) or {}).get(
+                    'com.athena.pid', '')
+                try:
+                    _owner_pid: 'Optional[int]' = int(_owner)
+                except (TypeError, ValueError):
+                    _owner_pid = None
+                if (_owner_pid is not None and _owner_pid != _my_pid
+                        and _pid_alive(_owner_pid)):
+                    _skipped += 1
+                    continue  # owned by a live concurrent session — leave it
                 try:
                     _c.remove(force=True)
+                    _reaped += 1
                 except docker.errors.APIError as e:
                     logger.warning(
                         f"orphan-reap: cannot remove {_c.short_id}: {e}")
-            if _orphans:
+            if _reaped:
                 tui.console.print(
-                    f"BuildContainer: reaped {len(_orphans)} orphan "
+                    f"BuildContainer: reaped {_reaped} orphan "
                     f"container(s) from previous run")
+            if _skipped:
+                logger.info(
+                    f"orphan-reap: left {_skipped} container(s) owned by a "
+                    f"live concurrent Athena process untouched")
         except docker.errors.APIError as e:
             logger.warning(f"orphan-reap: docker error: {e}")
 
@@ -736,7 +796,11 @@ class BuildContainer:
             except _DOCKER_TRANSIENT as _e:
                 try:
                     container.reload()
-                except docker.errors.APIError:
+                except _DOCKER_RELOAD_ERRORS:
+                    # STA-32: reload() is another HTTP GET — during the same
+                    # hiccup it can raise a transient, NOT an APIError.
+                    # Tolerate both so the keep-polling loop never escapes
+                    # and records a still-running build as failed.
                     pass
                 _state = container.attrs.get('State', {}) or {}
                 if (_state.get('Status') in ('exited', 'dead')
@@ -1115,7 +1179,9 @@ class BuildContainer:
                 container.reload()
                 _oom_killed = bool(
                     container.attrs.get('State', {}).get('OOMKilled', False))
-            except docker.errors.APIError as _e:
+            except _DOCKER_RELOAD_ERRORS as _e:
+                # STA-32: a transient here must not escape — the build is
+                # already done; we're only reading the OOM flag.
                 logger.warning(
                     f"container.reload failed for {src_pkg.package}: {_e}")
 
@@ -1579,10 +1645,20 @@ class BuildContainer:
             )
             _result = self._wait_for_exit(container)
             _exit_code = _result.get('StatusCode', -1)
-            _stdout = container.logs(stdout=True,  stderr=False).decode(
-                'utf-8', errors='replace')
-            _stderr = container.logs(stdout=False, stderr=True).decode(
-                'utf-8', errors='replace')
+            # STA-32: the container has EXITED (_wait_for_exit is
+            # transient-resilient); a hiccup reading its now-complete logs
+            # must not turn a finished ISO master into a failure.  Fall
+            # back to empty log text — _exit_code is the source of truth.
+            try:
+                _stdout = container.logs(stdout=True,  stderr=False).decode(
+                    'utf-8', errors='replace')
+                _stderr = container.logs(stdout=False, stderr=True).decode(
+                    'utf-8', errors='replace')
+            except _DOCKER_TRANSIENT as _e:
+                logger.warning(
+                    f"grub-mkrescue: log read hiccup ({_e}); "
+                    f"using exit code {_exit_code}")
+                _stdout, _stderr = '', ''
             if _exit_code != 0:
                 logger.error(
                     f"grub-mkrescue container {container.short_id} "

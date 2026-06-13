@@ -980,7 +980,12 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             self.flags.build_container_ready = True
             spin.done()
             console.print("  Build container ready")
-        except RuntimeError as e:
+        except (RuntimeError,
+                buildcontainer.docker.errors.DockerException) as e:
+            # STA-32: connect failures are wrapped in RuntimeError, but a
+            # later init step (image build) can raise a bare DockerException
+            # — catch the base too so the operator sees this message instead
+            # of a raw traceback.
             spin.done()
             console.print(f"  ERROR: build container initialisation failed — {e}")
             logger.error(f"BuildContainer() raised: {e}")
