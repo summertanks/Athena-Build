@@ -259,12 +259,31 @@ class Tui:
 
     # ─── Status monitor (psutil sampling) ────────────────────────────────
     def _status_pump(self) -> None:
+        _net0 = None
+        try:
+            _net0 = psutil.net_io_counters()
+        except Exception:
+            _net0 = None
         while not self.dispatcher.state.quit:
             try:
+                # cpu_percent(interval=2) blocks ~2s and is our sample
+                # window; bracket the network counters around it so up/down
+                # are bytes/s over that same window.
+                _t0 = time.monotonic()
                 cpu  = psutil.cpu_percent(interval=2)
                 mem  = psutil.virtual_memory().percent
                 disk = psutil.disk_usage('/').percent
-                self.dispatcher.post(StatusEvent(cpu, mem, disk))
+                up = down = 0.0
+                try:
+                    _net1 = psutil.net_io_counters()
+                    _dt = max(0.5, time.monotonic() - _t0)
+                    if _net0 is not None:
+                        up   = max(0.0, (_net1.bytes_sent - _net0.bytes_sent) / _dt)
+                        down = max(0.0, (_net1.bytes_recv - _net0.bytes_recv) / _dt)
+                    _net0 = _net1
+                except Exception:
+                    pass
+                self.dispatcher.post(StatusEvent(cpu, mem, disk, up, down))
             except Exception:
                 time.sleep(2)
 

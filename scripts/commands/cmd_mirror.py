@@ -958,14 +958,35 @@ class MirrorCommandsMixin(SessionState):
         _root = pool_spec.rstrip('/')
         _ok = True
         # ISOs first (immutable by name — never overwrite a published one).
+        # Drive a byte-valued ProgressBar off rsync's progress stream so a
+        # multi-GB push shows MB transferred + rate (ProgressBar auto-scales
+        # value/total/rate to K/M/G) instead of looking hung during a silent
+        # transfer.  itr_label 'B/s' → the rate column reads e.g. "30.0MB/s".
+        _total_bytes = sum(int(_d.get('size') or 0) for _d in isos)
+        _bar = ProgressBar(
+            label='push ISOs', itr_label='B/s',
+            maxvalue=max(1, _total_bytes), show_rate=True, label_width=20)
+        _sent = 0   # bytes from already-completed files (bar base offset)
         for _d in isos:
+            def _on_bytes(_cum, *, _base=_sent, _bar=_bar):
+                # _cum = cumulative bytes for THIS file; advance the bar to
+                # base+cum (step takes a delta and caps at max).
+                _target = _base + _cum
+                if _target > _bar.value:
+                    _bar.step(_target - _bar.value)
             _r, _detail = _transport.push_single_deb(
                 local_path=_d['path'],
                 remote_spec=f"{_root}/iso/{_d['file']}",
-                ssh_key=ssh_key, overwrite=False)
+                ssh_key=ssh_key, overwrite=False, on_bytes=_on_bytes)
+            # top up to the full file size: a skipped (already-present) file
+            # emits no progress line, so advance the bar by its whole size.
+            _sent += int(_d.get('size') or 0)
+            if _bar.value < _sent:
+                _bar.step(_sent - _bar.value)
             if not _r:
                 logger.error(f"release push: ISO {_d['file']}: {_detail}")
                 _ok = False
+        _bar.close()
         # Then the index pair (overwrite — they reflect the current state).
         for _name, _content in (('index.html', _html),
                                 ('releases.json', _json)):
