@@ -58,10 +58,16 @@ class StatusEvent:
     """Resource-monitor update (psutil sample).
 
     Posted ~every 2s by the status_pump thread.  Dispatcher updates
-    State.status; renderer reads it for the footer status bar."""
+    State.status; renderer reads it for the footer status bar.
+
+    `up`/`down` are network throughput in BYTES PER SECOND over the sample
+    window (default 0.0 keeps back-compat for callers that don't sample
+    the network)."""
     cpu: float
     mem: float
     disk: float
+    up: float = 0.0
+    down: float = 0.0
 
 
 @dataclass(frozen=True)

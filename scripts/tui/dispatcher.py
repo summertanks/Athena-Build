@@ -458,9 +458,20 @@ class Dispatcher:
         tab.append(lines, self._renderer.width())
         self.state.dirty = True
 
+    @staticmethod
+    def _fmt_rate(_bps: float) -> str:
+        """Bytes/sec → compact human rate (e.g. '2.4M', '12K', '0')."""
+        _v = float(_bps)
+        for _u in ('', 'K', 'M'):
+            if _v < 1024:
+                return f'{_v:.0f}{_u}' if _u == '' else f'{_v:.1f}{_u}'
+            _v /= 1024
+        return f'{_v:.1f}G'
+
     def _on_status(self, e: StatusEvent) -> None:
         self.state.status_text = (
-            f'CPU:{e.cpu:.0f}%  MEM:{e.mem:.0f}%  DISK:{e.disk:.0f}%'
+            f'CPU:{e.cpu:.0f}%  MEM:{e.mem:.0f}%  DISK:{e.disk:.0f}%  '
+            f'NET:↑{self._fmt_rate(e.up)} ↓{self._fmt_rate(e.down)}'
         )
         self.state.dirty = True
 

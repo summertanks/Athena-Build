@@ -14868,6 +14868,33 @@ def test_v2_dispatcher_key_events_gated_without_prompt():
     t.join(timeout=1)
 
 
+def test_v2_dispatcher_status_bar_includes_network():
+    """The footer status bar now carries network throughput (NET:↑/↓)
+    alongside CPU/MEM/DISK.  StatusEvent gained up/down (bytes/s) with
+    back-compat defaults; _fmt_rate renders compact human rates."""
+    import sys
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from tui.dispatcher import Dispatcher
+    from tui.events import StatusEvent
+
+    # rate formatter scales B/K/M/G
+    assert Dispatcher._fmt_rate(0) == '0'
+    assert Dispatcher._fmt_rate(900) == '900'
+    assert Dispatcher._fmt_rate(2 * 1024 * 1024).endswith('M')
+    assert Dispatcher._fmt_rate(3 * 1024 ** 3).endswith('G')
+
+    # back-compat: 3-arg StatusEvent still constructs (up/down default 0)
+    _e0 = StatusEvent(10.0, 20.0, 30.0)
+    assert _e0.up == 0.0 and _e0.down == 0.0
+
+    d = Dispatcher(_v2_fake_renderer())
+    d._on_status(StatusEvent(12.0, 34.0, 56.0,
+                             up=2 * 1024 * 1024, down=512 * 1024))
+    _txt = d.state.status_text
+    assert 'CPU:12%' in _txt and 'MEM:34%' in _txt and 'DISK:56%' in _txt, _txt
+    assert 'NET:' in _txt and '↑2.0M' in _txt and '↓512.0K' in _txt, _txt
+
+
 def test_v2_dispatcher_prompt_future_round_trip():
     """request_prompt blocks caller, dispatcher fulfills via Enter."""
     import sys, threading, time
@@ -31315,6 +31342,34 @@ def test_transport_push_single_deb_roundtrip_with_local_fs():
             assert _fh.read() == b'fake-deb-bytes'
 
 
+def test_transport_push_single_deb_on_bytes_streams_progress():
+    """push_single_deb(on_bytes=...) streams rsync --info=progress2 and
+    reports the cumulative transferred-byte count — the byte-granular
+    progress the ISO push drives its MB ProgressBar from.  The file still
+    lands intact and the final reported count reaches the file size."""
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.transport as _t
+    with tempfile.TemporaryDirectory() as _td:
+        _src = os.path.join(_td, 'big.iso')
+        _dst = os.path.join(_td, 'dest_dir', 'big.iso')
+        os.makedirs(os.path.dirname(_dst), exist_ok=True)
+        # multi-MB so progress2 emits a measurable transfer
+        _size = 6 * 1024 * 1024
+        with open(_src, 'wb') as _fh:
+            _fh.write(b'\x5a' * _size)
+        _seen: 'list[int]' = []
+        _ok, _detail = _t.push_single_deb(
+            local_path=_src, remote_spec=_dst,
+            on_bytes=lambda _n: _seen.append(_n))
+        assert _ok, _detail
+        with open(_dst, 'rb') as _fh:
+            assert len(_fh.read()) == _size
+        # at least one progress callback, monotonic, reaching the size
+        assert _seen, "on_bytes never fired"
+        assert _seen == sorted(_seen), _seen
+        assert max(_seen) >= _size * 0.9, (max(_seen), _size)
+
+
 def test_transport_push_dist_tree_roundtrip_with_local_fs():
     """push_dist_tree rsyncs the WHOLE dists/<codename>/ subtree to a
     local-fs destination.  Verifies InRelease + Packages + by-hash
@@ -34669,6 +34724,7 @@ def main() -> int:
         test_v2_state_append_and_scroll,
         test_v2_cmdline_edit_and_history,
         test_v2_dispatcher_key_events_gated_without_prompt,
+        test_v2_dispatcher_status_bar_includes_network,
         test_v2_dispatcher_prompt_future_round_trip,
         test_v2_dispatcher_tab_switch_by_index,
         test_v2_dispatcher_progressbar_widget_lifecycle,
@@ -35306,6 +35362,7 @@ def main() -> int:
         test_coord_root_for_appends_suffix_to_last_path_component,
         test_transport_push_single_deb_primitive_exists,
         test_transport_push_single_deb_roundtrip_with_local_fs,
+        test_transport_push_single_deb_on_bytes_streams_progress,
         test_transport_push_dist_tree_roundtrip_with_local_fs,
         test_transport_push_dist_tree_missing_local_dir_fails_clean,
         test_remote_publish_pushes_debs_per_file_and_calls_progress,

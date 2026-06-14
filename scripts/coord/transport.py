@@ -26,7 +26,7 @@ in cmd_repo_publish has its own ProgressBar that wraps this).
 import logging
 import os
 import subprocess
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger('athena')
 
@@ -87,10 +87,56 @@ def pull_remote_coord(
     return True, ''
 
 
+def _run_rsync_streaming(
+    argv: 'List[str]', on_bytes: 'Callable[[int], None]',
+) -> 'Tuple[int, str]':
+    """Run rsync streaming its `--info=progress2` output, calling
+    `on_bytes(cumulative)` with the running transferred-byte count parsed
+    from each progress update.  stderr is merged into stdout so error text
+    can't deadlock on a full pipe; non-numeric lines are kept as the
+    failure tail.  Returns (returncode, detail-tail)."""
+    try:
+        _proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as _e:
+        return 1, str(_e)
+    _tail: 'List[str]' = []
+    _buf = b''
+    assert _proc.stdout is not None
+    _fd = _proc.stdout.fileno()
+    while True:
+        try:
+            _chunk = os.read(_fd, 4096)
+        except OSError:
+            break
+        if not _chunk:
+            break
+        # progress2 redraws the same line with \r; the final stats line
+        # ends with \n.  Normalise both to \n, parse complete lines, keep
+        # the incomplete tail for the next read.
+        _buf += _chunk.replace(b'\r', b'\n')
+        *_lines, _buf = _buf.split(b'\n')
+        for _ln in _lines:
+            _s = _ln.strip()
+            if not _s:
+                continue
+            _first = _s.split()[0].replace(b',', b'')
+            if _first.isdigit():
+                try:
+                    on_bytes(int(_first))
+                except Exception:
+                    pass
+            else:
+                _tail.append(_s.decode('utf-8', 'replace'))
+    _proc.wait()
+    return _proc.returncode, ' | '.join(_tail[-5:])
+
+
 def push_single_deb(
     *, local_path: str, remote_spec: str,
     ssh_key: 'Optional[str]' = None,
     overwrite: bool = False,
+    on_bytes: 'Optional[Callable[[int], None]]' = None,
 ) -> Tuple[bool, str]:
     """Rsync one local `.deb` (or `.udeb`) → `remote_spec` (a remote FILE
     path, not a directory).
@@ -115,6 +161,18 @@ def push_single_deb(
     _ssh = _ssh_arg(ssh_key)
     if _ssh is not None:
         _argv += _ssh
+    # on_bytes wants live byte progress (large-file pushes — ISOs); stream
+    # --info=progress2.  Without it, keep the cheap blocking run (per-file
+    # ticks at the .deb push layer don't need byte granularity).
+    if on_bytes is not None:
+        _argv += ['--info=progress2']
+        _argv += [local_path, remote_spec]
+        _rc, _detail = _run_rsync_streaming(_argv, on_bytes)
+        if _rc != 0:
+            logger.error(
+                f"coord.transport.push_single_deb: rc={_rc}: {_detail}")
+            return False, _detail
+        return True, ''
     _argv += [local_path, remote_spec]
     _r = subprocess.run(_argv, capture_output=True, text=True)
     if _r.returncode != 0:
