@@ -1579,6 +1579,66 @@ def test_compute_install_batches_dpkg_dash_closure_scheduled_first():
     ], batches
 
 
+def test_sta37_build_chroot_gates_on_incomplete_set():
+    """STA-37: build_chroot must RETURN FALSE when a planned package is
+    broken or never-installed (the authoritative pass/fail gate the docstring
+    promises) so chroot_*_ready isn't set on an incomplete surface — unless
+    `no-gate` (gate_complete=False) overrides."""
+    import types
+    import chroot as chroot_module
+    import tui as _tui
+
+    def _run(status_lines, gate_complete):
+        bs = _bare_buildsystem_with_deps([('A', [], []), ('B', [], [])])
+        bs._dir_chroot = '/nonexistent-chroot'
+        bs._password = 'pw'
+        _tui.console = _StubConsole()
+        bs._setup_chroot_env = lambda: None
+        bs._init_dpkg_database = lambda: None
+        bs._mount_chroot_fs = lambda: None
+        bs._umount_chroot_fs = lambda: None
+        bs._ensure_initramfs = lambda: None
+        bs.post_install = lambda: None
+        bs.generate_system_configs = lambda debug=False: None
+        bs._compute_install_batches = (
+            lambda seed, install_set=None: [(['A', 'B'], True)])
+        bs._unpack_packages = lambda pkgs, quiet=False: set(pkgs)
+        bs._configure_packages = lambda pkgs, force_deps=False: set(pkgs)
+        bs._configure_chroot = lambda is_final=False: set()
+
+        class _QProc:
+            returncode = 0
+            stdout = status_lines
+            stderr = ''
+        _orig = chroot_module.subprocess
+        chroot_module.subprocess = types.SimpleNamespace(
+            run=lambda *a, **k: _QProc())
+        try:
+            return bs.build_chroot(gate_complete=gate_complete)
+        finally:
+            chroot_module.subprocess = _orig
+
+    _seed = ('libc6', 'libgcc-s1', 'libcrypt1')
+    _ok = lambda pkgs: ''.join(f'{p} install ok installed\n' for p in pkgs)
+    # complete (seed + A + B all installed) → True
+    assert _run(_ok(_seed + ('A', 'B')), gate_complete=True) is True
+    # B never installed (missing) → gate → False
+    assert _run(_ok(_seed + ('A',)), gate_complete=True) is False
+    # B half-configured (broken) → gate → False
+    _broken = _ok(_seed + ('A',)) + 'B half-configured\n'
+    assert _run(_broken, gate_complete=True) is False
+    # same incomplete set, no-gate escape hatch → proceeds → True
+    assert _run(_ok(_seed + ('A',)), gate_complete=False) is True
+
+    # cmd_build threads the no-gate escape hatch into the gate
+    import inspect as _inspect
+    from build import BuildSession
+    for _m in (BuildSession.cmd_build_chroot_live,
+               BuildSession.cmd_build_chroot_disk):
+        assert 'gate_complete=not _no_gate' in _inspect.getsource(_m), \
+            f"{_m.__name__} must gate build_chroot on no-gate"
+
+
 def test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds():
     """A package whose unpack fails on a same-batch Pre-Depends must be
     retried AFTER the final configure sweep, in rounds, with a re-sweep
@@ -34683,6 +34743,7 @@ def main() -> int:
         test_compute_install_batches_acyclic_then_cycle,
         test_compute_install_batches_external_deps_filtered,
         test_compute_install_batches_dpkg_dash_closure_scheduled_first,
+        test_sta37_build_chroot_gates_on_incomplete_set,
         test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds,
         test_configure_chroot_final_pass_counts_stderr_failures,
         test_buildsystem_password_readable_before_scrub,

@@ -139,7 +139,8 @@ class BuildCommandsMixin(SessionState):
         try:
             console.print("Building chroot environment...")
             _result = build_system.build_chroot(
-                debug=_debug, install_set=_live_set)
+                debug=_debug, install_set=_live_set,
+                gate_complete=not _no_gate)
             if not _result:
                 console.print("ERROR: chroot build failed — check logs for details")
                 logger.error("build_chroot() returned False")
@@ -251,16 +252,19 @@ class BuildCommandsMixin(SessionState):
         try:
             console.print("Building disk chroot environment...")
             _result = build_system.build_chroot(
-                debug=_debug, install_set=_disk_set)
+                debug=_debug, install_set=_disk_set,
+                gate_complete=not _no_gate)
             if not _result:
                 console.print(
                     "ERROR: disk chroot build failed — check logs")
                 logger.error("build_chroot(disk) returned False")
                 return
             self.flags.chroot_disk_ready = True
-            # Informational verify — does NOT gate (chroot_verified is the
-            # live surface's gate); failures logged for the operator.
-            # No live-boot on this surface by design.
+            # STA-37: completeness IS now gated — build_chroot returns False
+            # (above) on a broken / never-installed set, so chroot_disk_ready
+            # is only set on a complete chroot.  This _verify_chroot is the
+            # separate BOOT-readiness check; it stays informational on the
+            # disk surface (no live-boot by design) — failures logged only.
             _passed, _failed = self._verify_chroot(
                 build_system.password, self.config.dir_chroot_disk,
                 require_live_boot=False)
