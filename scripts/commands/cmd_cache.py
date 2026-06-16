@@ -156,6 +156,11 @@ class CacheCommandsMixin(SessionState):
         # downstream guards trip cleanly until cache build runs again.
         self.cache = None
         self.dep_tree = None
+        # The udeb (installer) dep-tree is built off the same cache — drop
+        # it too, or `cache purge` leaves a stale tree pointing at deleted
+        # files (`clean all` nulls it explicitly; standalone purge didn't —
+        # STA-49).
+        self.udeb_dep_tree = None
         self.flags.cache_ready = False
         self.flags.dep_check_ready = False
 
