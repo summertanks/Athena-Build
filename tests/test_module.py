@@ -6121,6 +6121,28 @@ def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
         "SNAPSHOT_TS must be self.snapshot_ts (the resolved pin), not a literal")
 
 
+def test_sta48_cve_report_path_never_overwrites_input_sbom():
+    """STA-48: the cve report path must never equal the input SBOM.  The old
+    `sbom_path.replace('.cdx.json', '.cve.json')` was a no-op on any name not
+    ending `.cdx.json` (e.g. sbom.json), so the grype report clobbered the
+    operator's SBOM via open('w')."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from commands.cmd_supply_chain import SupplyChainCommandsMixin
+    _f = SupplyChainCommandsMixin._cve_report_path
+    # canonical .cdx.json double-suffix strip (unchanged behaviour)
+    assert _f('/x/athena-1-snap-amd64.cdx.json') == \
+        '/x/athena-1-snap-amd64.cve.json'
+    # the regression cases — NOT a no-op, distinct from the input
+    assert _f('/tmp/sbom.json') == '/tmp/sbom.cve.json'
+    assert _f('/tmp/sbom') == '/tmp/sbom.cve.json'
+    assert _f('/a/b.cve.json') == '/a/b.cve.cve.json'
+    # invariant: the report path never collides with the input SBOM
+    for _p in ('/x/foo.cdx.json', '/tmp/sbom.json', '/tmp/sbom',
+               '/a/b.cve.json', 'relative.json'):
+        assert os.path.abspath(_f(_p)) != os.path.abspath(_p), _p
+
+
 def test_sta46_was_patched_keys_on_patch_files_not_dir_existence():
     """STA-46: _was_patched (→ _was_delta → asg-stamp) must derive from the
     ACTUAL applied .patch files (_live_patch_list), not the patch-dir's mere
@@ -34746,6 +34768,7 @@ def main() -> int:
         test_conf15_dockerfile_pins_toolchain_to_snapshot,
         test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
+        test_sta48_cve_report_path_never_overwrites_input_sbom,
         test_sta46_was_patched_keys_on_patch_files_not_dir_existence,
         test_sta51_snapshot_pin_origin_tracks_baseurl_host,
         test_conf15_per_build_dist_upgrade_workaround_removed,
