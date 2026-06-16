@@ -2106,14 +2106,29 @@ class MirrorCommandsMixin(SessionState):
             # `buildlog_dir` lets the helper distinguish
             # "local build ahead of remote" (WARNING) from real bitrot
             # (CRITICAL).
+            # STA-25 follow-up: pass the signed selection's source set so the
+            # auditor can downgrade a missing own-claim file to INFO when the
+            # next `mirror publish` will RELEASE it (deprecate dropped sources
+            # / obsolete superseded versions) instead of flagging CRITICAL —
+            # so an operator who pruned-before-publishing (or forgot the
+            # cleanup message) sees a calm "will be …d on next publish".
+            _closure_srcs = None
+            if _our_bid:
+                import selection_lock as _sl0
+                _lk0, _ls0 = _sl0.read_selection_state(self.config)
+                if _ls0 == _sl0.STATUS_OK and _lk0 is not None:
+                    _closure_srcs = set(
+                        (_lk0.get('closure') or {}).get('srcs', {}))
             _own_disk_findings = _mirror.audit_own_claims_on_disk(
                 _by_builder, _our_bid,
                 local_repo_dir=self.config.dir_repo,
-                buildlog_dir=os.path.join(self.config.dir_log, 'build'))
+                buildlog_dir=os.path.join(self.config.dir_log, 'build'),
+                closure_srcs=_closure_srcs)
             _own_disk_crit = [_f for _f in _own_disk_findings
                               if _f[0] == 'CRITICAL']
             for _sev, _kind, _msg in _own_disk_findings:
                 _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
+                          else tui.COLOR_INFO if _sev == 'INFO'
                           else tui.COLOR_WARNING)
                 console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
             if _own_disk_crit:
