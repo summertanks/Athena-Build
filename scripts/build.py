@@ -600,7 +600,7 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         if not _force:
             _resp = Prompt(PROMPT_YESNO,
                 "clean all: wipes cache/, source/, repo/, "
-                "image/, buildroot/{live,installer}, and athenalinux "
+                "image/, buildroot/{live,installer,disk}, and athenalinux "
                 "Docker containers + images.  gnupg/ + log/ + patch/ "
                 "preserved.  Continue?"
             ).get_response()
@@ -622,6 +622,11 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
             self.config.dir_chroot, sudo=True, password=_password, skip_prompt=True)
         self._wipe_dir_contents('buildroot/installer',
             self.config.dir_chroot_installer, sudo=True, password=_password, skip_prompt=True)
+        # STA-49: the disk chroot (its own minimal SURFACES-01 root) is
+        # root-owned too — wipe it, else buildroot/disk survives while the
+        # flag reset below clears chroot_disk_ready (claiming it's gone).
+        self._wipe_dir_contents('buildroot/disk',
+            self.config.dir_chroot_disk, sudo=True, password=_password, skip_prompt=True)
         # Docker side: kills running athenalinux containers + removes
         # images so next `container init` rebuilds from Dockerfile.
         self.cmd_container_purge('force')

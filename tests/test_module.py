@@ -18113,6 +18113,33 @@ def test_print_wrapped_names_keeps_lines_under_wrap_width():
         )
 
 
+def test_sta49_clean_all_wipes_disk_chroot_and_purge_nulls_udeb_tree():
+    """STA-49: `cache purge` must null the udeb (installer) dep-tree — it's
+    built off the same cache, so leaving it strands a tree pointing at
+    deleted files.  `clean all` must wipe the disk chroot (root-owned), or
+    buildroot/disk survives while the flag reset clears chroot_disk_ready,
+    claiming it's gone (and the space isn't reclaimed)."""
+    _body = _session_source()
+    import re
+    # cache purge drops ALL THREE in-memory trees built off the cache
+    _purge = re.search(
+        r'def cmd_cache_purge\(self.*?(?=\n    def \w)', _body, re.DOTALL)
+    assert _purge, 'cmd_cache_purge body not found'
+    _p = _purge.group(0)
+    for _attr in ('self.cache = None', 'self.dep_tree = None',
+                  'self.udeb_dep_tree = None'):
+        assert _attr in _p, f'cmd_cache_purge must do `{_attr}` (STA-49)'
+    # clean all wipes all THREE buildroot chroots (live + installer + disk)
+    _all = re.search(
+        r'def cmd_clean_all\(self.*?(?=\n    def \w)', _body, re.DOTALL)
+    assert _all, 'cmd_clean_all body not found'
+    _a = _all.group(0)
+    for _expr in ('self.config.dir_chroot,',           # live (bare, trailing ,)
+                  'self.config.dir_chroot_installer',
+                  'self.config.dir_chroot_disk'):
+        assert _expr in _a, f'clean all must wipe {_expr} (STA-49)'
+
+
 def test_sta43_durable_state_writes_atomic_and_preserve_mode():
     """STA-43: snapshot.state / build.conf / SBOM route through
     `_atomic_write_bytes` (temp + fsync + os.replace) so a crash mid-write
@@ -34966,6 +34993,7 @@ def main() -> int:
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_sta50_chroot_build_gates_on_repo_auto_index,
         test_sta43_durable_state_writes_atomic_and_preserve_mode,
+        test_sta49_clean_all_wipes_disk_chroot_and_purge_nulls_udeb_tree,
         test_preflight_repo_audit_blocks_on_stale_artifacts,
         test_mirror_publish_reindexes_stale_local_index,
         test_push_dist_tree_excludes_pool_artifacts,
