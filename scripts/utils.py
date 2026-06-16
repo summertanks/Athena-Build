@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 import datetime
 import hashlib
@@ -16,7 +17,8 @@ import requests
 import tui
 from tui import Prompt, Spinner, ProgressBar
 from typing import (
-    Any, Callable, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING)
+    Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple,
+    TYPE_CHECKING)
 
 # Re-exported from bump (the versioning module).  Explicit `as` aliases
 # mark these as intentional re-exports so `utils.<name>` call sites keep
@@ -910,6 +912,33 @@ def _verify_record(record: dict, key: bytes) -> bool:
         key, _canonical_record_bytes(record), hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(_sig, _expected)
+
+
+@contextlib.contextmanager
+def sudo_askpass_env(password: str) -> 'Iterator[Dict[str, str]]':
+    """Yield an environment dict for `sudo -A <cmd>` so the password comes
+    from a short-lived 0700 askpass helper instead of the command's stdin —
+    freeing stdin for the command's OWN data (a partition script piped to
+    sfdisk, a `find | cpio` pipeline) and dropping the `sudo -S bash -c
+    "… < file"` / `"… > file"` shell interpolation entirely (STA-40).
+
+    Robust regardless of the operator's sudo `timestamp_timeout` (no
+    credential-cache dependency, unlike a pre-`sudo -v` then bare `sudo`).
+    The helper reads the password from an env var so a shell metacharacter
+    in the password can't break it.  The script + env entry live only for
+    the `with` body."""
+    _fd, _path = tempfile.mkstemp(prefix='.athena-askpass-', suffix='.sh')
+    try:
+        os.write(_fd, b'#!/bin/sh\nprintf %s "$ATHENA_SUDO_ASKPASS_PW"\n')
+        os.close(_fd)
+        os.chmod(_path, 0o700)
+        yield dict(os.environ, SUDO_ASKPASS=_path,
+                   ATHENA_SUDO_ASKPASS_PW=password)
+    finally:
+        try:
+            os.remove(_path)
+        except OSError:
+            pass
 
 
 def _existing_mode(path: str, default: int = 0o644) -> int:

@@ -789,19 +789,19 @@ def _run_dpkg_scan(
     os.close(_tmp_fd)   # subprocess shell opens it via `>`
 
     try:
-        _shell = (
-            f'cd {cwd or "."} && '
-            f'{" ".join(argv)} 2>/dev/null > {_tmp_path}'
-        )
-        if password is not None:
-            # Route through `_sudo` so the module-wide sudo wrapper owns
-            # password handling (consistent with every other sudo call
-            # in apt_repo + lets tests mock one surface).
-            _r = _sudo(['bash', '-c', _shell], password)
-        else:
+        # STA-40: argv form, no shell.  cwd= replaces `cd`, the tempfile
+        # handle replaces `> _tmp_path`, and stderr is CAPTURED — the old
+        # `2>/dev/null` discarded the very stderr the failure handler below
+        # claims to report.  dpkg-scan* doesn't read stdin, so under
+        # `sudo -S` the password line is consumed by sudo (or, when the
+        # credential is cached, ignored by the scanner) — never leaks.
+        with open(_tmp_path, 'wb') as _out_fh:
+            _argv = (['sudo', '-S', *argv] if password is not None
+                     else list(argv))
             _r = subprocess.run(
-                ['bash', '-c', _shell],
-                capture_output=True, text=True,
+                _argv, cwd=(cwd or '.'),
+                input=(password + '\n') if password is not None else None,
+                stdout=_out_fh, stderr=subprocess.PIPE, text=True,
             )
     finally:
         if _spin is not None:
