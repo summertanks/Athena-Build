@@ -18147,6 +18147,27 @@ def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
         )
 
 
+def test_sta50_chroot_build_gates_on_repo_auto_index():
+    """STA-50: both chroot-build entry points must GATE on
+    `_ensure_repo_indexed_for_chroot()` — it returns False on auto-index
+    failure, and a bare (unchecked) call falls straight through into a
+    multi-minute chroot bring-up guaranteed to die later on the missing
+    InRelease.  Pin the `if not …: return` shape in both methods."""
+    _body = _session_source()
+    import re
+    for _entry in ('cmd_build_chroot_live', 'cmd_build_chroot_disk'):
+        _m = re.search(
+            rf'def {_entry}\(self.*?(?=\n    def \w)', _body, re.DOTALL)
+        assert _m, f"{_entry} body not found"
+        _fn = _m.group(0)
+        assert 'if not self._ensure_repo_indexed_for_chroot():' in _fn, (
+            f"{_entry} must GATE on _ensure_repo_indexed_for_chroot() "
+            f"(return on False), not call it bare")
+    # the helper still advertises the False-on-failure contract the gate relies on
+    assert 'Returns True on success or skip; False on auto-index failure.' \
+        in _body, "the _ensure_repo_indexed_for_chroot contract changed"
+
+
 def test_push_dist_tree_excludes_pool_artifacts():
     """STA-28: push_dist_tree rsyncs dists/<codename>/ with --delete, and
     since CONF-01 the pool .debs live INSIDE that tree.  Pool artifacts
@@ -34874,6 +34895,7 @@ def main() -> int:
         test_repo_audit_closure_handles_conflicts_and_provides,
         test_print_wrapped_names_keeps_lines_under_wrap_width,
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
+        test_sta50_chroot_build_gates_on_repo_auto_index,
         test_preflight_repo_audit_blocks_on_stale_artifacts,
         test_mirror_publish_reindexes_stale_local_index,
         test_push_dist_tree_excludes_pool_artifacts,
