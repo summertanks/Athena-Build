@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import secrets
+import subprocess
 import tempfile
 import configparser
 import argparse
@@ -912,6 +913,21 @@ def _verify_record(record: dict, key: bytes) -> bool:
         key, _canonical_record_bytes(record), hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(_sig, _expected)
+
+
+def sudo(
+    cmd_args: 'List[str]', password: str, capture: bool = True,
+) -> 'subprocess.CompletedProcess':
+    """Run `sudo -S <cmd_args>`, feeding `password` on stdin — the single
+    canonical sudo wrapper (ARCH-19), replacing the four byte-near-identical
+    module-local `_sudo` copies (apt_repo / iso_installer / installer_chroot /
+    disk_image).  `capture=False` lets the child inherit the parent's
+    stdout/stderr for commands whose output should stream live."""
+    return subprocess.run(
+        ['sudo', '-S', *cmd_args],
+        input=password + '\n',
+        capture_output=capture, text=True,
+    )
 
 
 @contextlib.contextmanager

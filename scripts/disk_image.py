@@ -75,14 +75,10 @@ UUID={efi_uuid}   /boot/efi  vfat    umask=0077                  0  2
 """
 
 
-def _sudo(argv: list, password: str,
-          capture: bool = True) -> subprocess.CompletedProcess:
-    """sudo -S helper; mirrors iso_installer._sudo's shape."""
-    return subprocess.run(
-        ['sudo', '-S'] + argv,
-        input=password + '\n',
-        capture_output=capture, text=True,
-    )
+# ARCH-19: canonical wrapper in utils.sudo (carries the `capture` param);
+# module-local `_sudo` kept as an alias so call sites + test monkeypatching
+# stay unchanged.
+_sudo = utils.sudo
 
 
 def _wait_partitions(loop_dev: str, password: str,

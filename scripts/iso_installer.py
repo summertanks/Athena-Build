@@ -240,13 +240,9 @@ def build_installer_iso(
 # ---------------------------------------------------------------------------
 
 
-def _sudo(cmd_args: 'list[str]', password: str) -> subprocess.CompletedProcess:
-    """Run `sudo -S <cmd>` with the cached password.  Captured output."""
-    return subprocess.run(
-        ['sudo', '-S'] + cmd_args,
-        input=password + '\n',
-        capture_output=True, text=True,
-    )
+# ARCH-19: canonical wrapper in utils.sudo; module-local `_sudo` kept as an
+# alias so call sites + test monkeypatching stay unchanged.
+_sudo = utils.sudo
 
 
 def _prepare_staging(staging: str, password: str) -> bool:

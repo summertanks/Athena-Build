@@ -32,19 +32,17 @@ import tempfile
 from typing import Optional
 
 import tui
+import utils
 
 logger = logging.getLogger('athena')
 
 
-def _sudo(cmd_args, password: str) -> subprocess.CompletedProcess:
-    """sudo -S <cmd> with cached password.  Local copy (vs importing
-    from iso_installer) to avoid a cross-module import cycle once
-    iso_installer starts pulling helpers FROM here."""
-    return subprocess.run(
-        ['sudo', '-S'] + cmd_args,
-        input=password + '\n',
-        capture_output=True, text=True,
-    )
+# ARCH-19: the canonical sudo wrapper lives in utils.sudo now.  Keep the
+# module-local `_sudo` NAME as an alias so call sites + test monkeypatching
+# (patch.object(apt_repo, '_sudo', …)) stay unchanged.  (utils is a low-level
+# module that does NOT import apt_repo, so no cycle — the old "local copy to
+# avoid a cycle" concern was about importing FROM iso_installer, not utils.)
+_sudo = utils.sudo
 
 
 def deb_excluded_from_minimal(filename: str) -> bool:
