@@ -714,12 +714,11 @@ class BuildContainer:
 
     @staticmethod
     def _hash_dockerfile(config_dir: str) -> str:
-        dockerfile = os.path.join(config_dir, 'Dockerfile')
-        try:
-            with open(dockerfile, 'rb') as fh:
-                return hashlib.sha256(fh.read()).hexdigest()
-        except OSError:
-            return ''
+        # ARCH-19: route through utils.get_sha256 (chunked file_digest, '' on
+        # missing/unreadable).  use_cache=False so no `.verified` sidecar is
+        # dropped next to the operator's Dockerfile in config/.
+        return utils.get_sha256(
+            os.path.join(config_dir, 'Dockerfile'), use_cache=False)
 
     def _write_snapshot_sources_cmd(self) -> str:
         """Shell snippet that REPLACES the container's apt sources with

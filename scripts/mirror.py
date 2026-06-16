@@ -1517,8 +1517,8 @@ def _own_claims_disk_walk(
 
     kind ∈ {'missing', 'unreadable', 'local_ahead', 'sha_mismatch'} —
     matching rows are omitted entirely."""
-    import hashlib as _hashlib
     import os as _os
+    import utils as _utils
 
     _rows: 'list[dict]' = []
     if not our_builder_id:
@@ -1581,14 +1581,16 @@ def _own_claims_disk_walk(
                           'remote_sha': _claim_sha, 'local_sha': '',
                           'path': '', 'error': ''})
             continue
-        try:
-            with open(_path, 'rb') as _fh:
-                _actual = _hashlib.sha256(_fh.read()).hexdigest()
-        except OSError as _e:
+        # ARCH-19: stream via utils.get_sha256 (hashlib.file_digest, chunked)
+        # — this claims-verify path hashes multi-hundred-MB .debs and the old
+        # sha256(fh.read()) slurped each fully into RAM.  use_cache=False so
+        # silent bitrot (no size/mtime change) is still caught.
+        _actual = _utils.get_sha256(_path, use_cache=False)
+        if not _actual:
             _rows.append({'kind': 'unreadable', 'claim': _c,
                           'filename': _fn, 'remote_sha': _claim_sha,
                           'local_sha': '', 'path': _path,
-                          'error': str(_e)})
+                          'error': 'read failed (see log)'})
             continue
         if _actual == _claim_sha:
             continue
