@@ -386,18 +386,34 @@ class BuildSession(AuditCommandsMixin, BuildCommandsMixin, CacheCommandsMixin,
         )
         return True
 
-    def _refresh_sudo(self, password: str) -> bool:
+    def _refresh_sudo(self, password: str, context: str = 'clean') -> bool:
         """Validate the sudo password without consuming any other input.
         Returns True iff `sudo -v` succeeds.  Used by clean handlers
-        that need root before doing the actual `sudo find ... -exec rm`.
+        that need root before doing the actual `sudo find ... -exec rm`,
+        and by `_collect_validated_sudo_password` (ARCH-19) — the single
+        `sudo -v` subprocess in the codebase.  `context` tags the log line.
         """
         _r = subprocess.run(['sudo', '-S', '-v'],
             input=password + '\n', capture_output=True, text=True)
         if _r.returncode != 0:
             console.print("ERROR: incorrect sudo password")
-            logger.error("clean: sudo -v failed")
+            logger.error(f"{context}: sudo -v failed")
             return False
         return True
+
+    def _collect_validated_sudo_password(self, context: str = 'sudo') -> 'Optional[str]':
+        """ARCH-19: prompt for a sudo password and validate it via
+        `_refresh_sudo` (`sudo -v`).  Returns the validated password, or
+        None when the credential is rejected — in which case the local
+        copy is scrubbed and the caller must return.  Every command
+        handler that gates privileged work funnels through here so the
+        prompt -> validate -> scrub sequence lives in exactly one place.
+        """
+        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        if not self._refresh_sudo(_password, context):
+            _password = '*' * len(_password)
+            return None
+        return _password
 
     def cmd_clean_source(self, *args):
         """Wipe downloaded source tarballs.  Resets download_ready so

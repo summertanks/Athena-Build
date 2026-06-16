@@ -18,7 +18,7 @@ import iso_installer
 import tui
 import utils
 from cache import Cache
-from tui import console, Prompt, PROMPT_PASSWORD
+from tui import console
 
 from commands.base import SessionState
 
@@ -347,18 +347,10 @@ class BuildCommandsMixin(SessionState):
 
         self.flags.chroot_installer_ready = False  # reset before work
 
-        # Sudo password — same pattern as cmd_build_chroot_live's BuildSystem.
-        # Collect once + validate via `sudo -v`; scrub on every exit path.
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-        _r = subprocess.run(
-            ['sudo', '-S', '-v'],
-            input=_password + '\n',
-            capture_output=True, text=True,
-        )
-        if _r.returncode != 0:
-            console.print("ERROR: incorrect sudo password")
-            logger.error("chroot build installer: sudo -v failed")
-            _password = '*' * len(_password)
+        # Sudo password — collect once + validate via `sudo -v`; scrub on
+        # every exit path.  Single copy in _collect_validated_sudo_password.
+        _password = self._collect_validated_sudo_password('chroot build installer')
+        if _password is None:
             return
 
         try:
@@ -578,17 +570,9 @@ class BuildCommandsMixin(SessionState):
 
         self.flags.iso_installer_ready = False  # reset before work; set True only on success
 
-        # Sudo password — same pattern as cmd_build_chroot_installer.
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
-        _r = subprocess.run(
-            ['sudo', '-S', '-v'],
-            input=_password + '\n',
-            capture_output=True, text=True,
-        )
-        if _r.returncode != 0:
-            console.print("ERROR: incorrect sudo password")
-            logger.error("iso build installer: sudo -v failed")
-            _password = '*' * len(_password)
+        # Sudo password — single copy in _collect_validated_sudo_password.
+        _password = self._collect_validated_sudo_password('iso build installer')
+        if _password is None:
             return
 
         try:
@@ -929,19 +913,9 @@ class BuildCommandsMixin(SessionState):
 
         self.flags.iso_disk_ready = False  # reset before work; set True only on success
 
-        # Cache sudo password — same pattern as cmd_build_iso_live.
-        _password = Prompt(
-            PROMPT_PASSWORD, "Enter sudo password",
-        ).get_response()
-        _r = subprocess.run(
-            ['sudo', '-S', '-v'],
-            input=_password + '\n',
-            capture_output=True, text=True,
-        )
-        if _r.returncode != 0:
-            console.print("ERROR: incorrect sudo password")
-            logger.error("cmd_build_iso_disk: sudo -v failed")
-            _password = '*' * len(_password)
+        # Cache sudo password — single copy in _collect_validated_sudo_password.
+        _password = self._collect_validated_sudo_password('cmd_build_iso_disk')
+        if _password is None:
             return
 
         try:
@@ -1171,15 +1145,10 @@ class BuildCommandsMixin(SessionState):
             console.print("Run 'chroot build' first")
             return
 
-        _password = Prompt(PROMPT_PASSWORD, "Enter sudo password").get_response()
+        _password = self._collect_validated_sudo_password('verify_chroot')
+        if _password is None:
+            return
         try:
-            _proc = subprocess.run(['sudo', '-S', '-v'],
-                                   input=_password + '\n', capture_output=True, text=True)
-            if _proc.returncode != 0:
-                console.print("ERROR: incorrect sudo password")
-                logger.error("verify_chroot: sudo -v failed")
-                return
-
             _passed, _failed = self._verify_chroot(_password, self.config.dir_chroot)
             self.flags.chroot_verified = (_failed == 0)
         finally:

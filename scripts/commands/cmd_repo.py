@@ -11,14 +11,13 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 
 import apt_pkg
 import repo_audit
 import tui
 import utils
 from cache import Cache
-from tui import console, Prompt, PROMPT_YESNO, PROMPT_PASSWORD, Spinner, ProgressBar
+from tui import console, Prompt, PROMPT_YESNO, Spinner, ProgressBar
 
 from commands.base import SessionState
 
@@ -61,18 +60,8 @@ class RepoCommandsMixin(SessionState):
             f'{_codename}-debug': 'Asgard Linux — debug symbols',
         }
 
-        _password = Prompt(
-            PROMPT_PASSWORD, "Enter sudo password",
-        ).get_response()
-        _r = subprocess.run(
-            ['sudo', '-S', '-v'],
-            input=_password + '\n',
-            capture_output=True, text=True,
-        )
-        if _r.returncode != 0:
-            console.print("ERROR: incorrect sudo password")
-            logger.error("cmd_index_repo: sudo -v failed")
-            _password = '*' * len(_password)
+        _password = self._collect_validated_sudo_password('cmd_index_repo')
+        if _password is None:
             return False
 
         try:
