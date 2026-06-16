@@ -37,6 +37,7 @@ from bump import (
     match_pristine_base as match_pristine_base,
     normalize_repo_filename as normalize_repo_filename,
     parse_asg_suffix as parse_asg_suffix,
+    parse_deb_filename as parse_deb_filename,
     pristine_base as pristine_base,
     restamp_asg_deb as restamp_asg_deb,
     strip_build_version as strip_build_version,

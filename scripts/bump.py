@@ -33,6 +33,37 @@ import re
 from typing import Dict, List, Optional
 
 
+def parse_deb_filename(filename: str) -> 'Optional[tuple]':
+    """Split a Debian binary package filename into (name, version, arch, ext).
+
+    Convention: ``<name>_<version>_<arch>.{deb,udeb}`` — no underscore inside
+    any of the three fields (Debian policy).  The single structural splitter
+    in the codebase (ARCH-19); every strict ``name_version_arch`` parse routes
+    here.  Two deliberate contract points:
+
+    * *name* keeps any directory prefix the caller passed, so a pool
+      ``Filename`` (``pool/main/f/foo/foo_1-2_amd64.deb``) round-trips and the
+      callers that reconstruct a path stay byte-exact.
+    * *version* is the RAW filename form — an epoch stays encoded as ``%3a``,
+      again so filename reconstruction is lossless.  Decode with
+      ``.replace('%3a', ':')`` when the control-file form is wanted.
+
+    Returns None when *filename* is not a .deb/.udeb or does not split into
+    exactly three underscore-separated parts; each caller maps the miss to its
+    own convention (skip / raise / status dict / sentinel).
+    """
+    for _ext in ('.udeb', '.deb'):
+        if filename.endswith(_ext):
+            _base = filename[:-len(_ext)]
+            break
+    else:
+        return None
+    _parts = _base.split('_')
+    if len(_parts) != 3:
+        return None
+    return _parts[0], _parts[1], _parts[2], _ext
+
+
 def strip_build_version(file: str) -> str:
     """Remove a Debian binNMU rebuild suffix `+bN` from a `.deb` filename.
 
@@ -54,11 +85,10 @@ def strip_build_version(file: str) -> str:
     Raises:
         ValueError: filename is not in `name_version_arch.ext` shape.
     """
-    _name, _ext = os.path.splitext(file)
-    _parts = _name.split('_')
-    if len(_parts) != 3:
+    _r = parse_deb_filename(file)
+    if _r is None:
         raise ValueError(f"Incorrectly formatted package filename: {file!r}")
-    _pkg_name, _version, _arch = _parts
+    _pkg_name, _version, _arch, _ext = _r
     _version = re.sub(r"\+b\d+$", "", _version)
     return f"{_pkg_name}_{_version}_{_arch}{_ext}"
 
@@ -130,13 +160,10 @@ def normalize_repo_filename(filename: str) -> str:
     Malformed filenames (not in `name_version_arch.ext` shape) are
     returned unchanged — best-effort, doesn't raise.
     """
-    if not (filename.endswith(('.deb', '.udeb'))):
+    _r = parse_deb_filename(filename)
+    if _r is None:
         return filename
-    _name, _ext = os.path.splitext(filename)
-    _parts = _name.split('_')
-    if len(_parts) != 3:
-        return filename
-    _pkg, _ver, _arch = _parts
+    _pkg, _ver, _arch, _ext = _r
     _new_ver = strip_nmu_suffix(_ver)   # regex includes +bN, +debNuN, etc.
     return f'{_pkg}_{_new_ver}_{_arch}{_ext}'
 
@@ -209,13 +236,10 @@ def asg_filename(filename: str, release: int, n: int) -> str:
     """Map a pristine repo filename to its +asg<R>u<N> stamped form
     (name_base_arch.ext → name_base+asgRuN_arch.ext).  No-op on a filename
     not in name_version_arch shape."""
-    if not (filename.endswith(('.deb', '.udeb'))):
+    _r = parse_deb_filename(filename)
+    if _r is None:
         return filename
-    _name, _ext = os.path.splitext(filename)
-    _parts = _name.split('_')
-    if len(_parts) != 3:
-        return filename
-    _pkg, _ver, _arch = _parts
+    _pkg, _ver, _arch, _ext = _r
     return f'{_pkg}_{apply_asg_suffix(_ver, release, n)}_{_arch}{_ext}'
 
 
@@ -232,24 +256,19 @@ def match_pristine_base(predicted_fn: str, ondisk_fn: str) -> bool:
     """
     if predicted_fn == ondisk_fn:
         return True
-    if not (predicted_fn.endswith(('.deb', '.udeb'))
-            and ondisk_fn.endswith(('.deb', '.udeb'))):
+    _p = parse_deb_filename(predicted_fn)
+    _o = parse_deb_filename(ondisk_fn)
+    if _p is None or _o is None:
         return False
-    _pn, _pext = os.path.splitext(predicted_fn)
-    _on, _oext = os.path.splitext(ondisk_fn)
-    if _pext != _oext:
+    if _p[3] != _o[3]:                                 # ext must match
         return False
-    _pp = _pn.split('_')
-    _op = _on.split('_')
-    if len(_pp) != 3 or len(_op) != 3:
+    if _p[0] != _o[0] or _p[2] != _o[2]:               # name, arch must match
         return False
-    if _pp[0] != _op[0] or _pp[2] != _op[2]:          # name, arch must match
-        return False
-    if _op[1] == _pp[1]:                               # exact (pristine) match
+    if _o[1] == _p[1]:                                 # exact (pristine) match
         return True
-    if parse_asg_suffix(_op[1]) is None:               # on-disk has no asg layer
+    if parse_asg_suffix(_o[1]) is None:                # on-disk has no asg layer
         return False
-    return ASG_SUFFIX_RE.sub('', _op[1]) == _pp[1]     # base equals prediction
+    return ASG_SUFFIX_RE.sub('', _o[1]) == _p[1]       # base equals prediction
 
 
 def find_matching_artifact(dst_dir: str,
@@ -688,12 +707,11 @@ def strip_nmu_from_deb(deb_path: str) -> dict:
     if not (_base.endswith(('.deb', '.udeb'))):
         _result['status'] = 'skipped'
         return _result
-    _name, _ext = os.path.splitext(_base)
-    _parts = _name.split('_')
-    if len(_parts) != 3:
+    _r = parse_deb_filename(_base)
+    if _r is None:
         _result['status'] = 'malformed'
         return _result
-    _pkg, _old_filename_ver, _arch = _parts
+    _pkg, _old_filename_ver, _arch, _ext = _r
 
     try:
         with DebFile(deb_path) as _deb:
@@ -786,12 +804,11 @@ def restamp_asg_deb(deb_path: str, release: int, n: int) -> dict:
     _base = os.path.basename(deb_path)
     if not (_base.endswith(('.deb', '.udeb'))):
         return _result
-    _name, _ext = os.path.splitext(_base)
-    _parts = _name.split('_')
-    if len(_parts) != 3:
+    _r = parse_deb_filename(_base)
+    if _r is None:
         _result['status'] = 'malformed'
         return _result
-    _pkg, _file_ver, _arch = _parts
+    _pkg, _file_ver, _arch, _ext = _r
 
     try:
         with DebFile(deb_path) as _deb:

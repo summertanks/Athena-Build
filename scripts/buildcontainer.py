@@ -1797,11 +1797,10 @@ class BuildContainer:
         # linux-signed-amd64 metas still pinned `(= 6.1.174-1+asg1u1)`.
         if not _was_delta and _ledger is not None:
             for _path in _current_paths:
-                _name, _ext = os.path.splitext(os.path.basename(_path))
-                _parts = _name.split('_')
-                if len(_parts) != 3:
+                _df = utils.parse_deb_filename(os.path.basename(_path))
+                if _df is None:
                     continue
-                _pkg, _ver, _arch = _parts
+                _pkg, _ver, _arch, _ext = _df
                 _base = utils.pristine_base(_ver)
                 for _prev in _ledger.get(_pkg, []):
                     if (utils.pristine_base(_prev) == _base
@@ -1842,12 +1841,10 @@ class BuildContainer:
         _per_file_n: 'list[int]' = []
         _stampable_idx: 'list[int]' = []   # indices into _current_paths
         for _i, _path in enumerate(_current_paths):
-            _b = os.path.basename(_path)
-            _name, _ext = os.path.splitext(_b)
-            _parts = _name.split('_')
-            if len(_parts) != 3:
+            _df = utils.parse_deb_filename(os.path.basename(_path))
+            if _df is None:
                 continue
-            _pkg, _ver, _arch = _parts
+            _pkg, _ver, _arch, _ext = _df
             _base = utils.pristine_base(_ver)
             _per_file_n.append(utils.asg_next_n(
                 _ledger.get(_pkg, []), _base, _release))
@@ -2144,14 +2141,10 @@ class BuildContainer:
 
         # Parse expected_filename: pkg_VERSION_arch.{deb,udeb}
         _base = os.path.basename(expected_filename)
-        for _ext in ('.deb', '.udeb'):
-            if _base.endswith(_ext):
-                _base = _base[:-len(_ext)]
-                break
-        _parts = _base.split('_')
-        if len(_parts) != 3:
+        _r = utils.parse_deb_filename(_base)
+        if _r is None:
             return (False, f'bad-filename-shape:{_base}')
-        _exp_pkg, _exp_ver, _exp_arch = _parts
+        _exp_pkg, _exp_ver, _exp_arch, _exp_ext = _r
 
         # Read .deb's internal control area
         try:

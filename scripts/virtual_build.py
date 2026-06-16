@@ -861,11 +861,10 @@ def _reconstruct_historical_ledger(
     #   {binary_name: (pristine_no_epoch, highest_built_N, release)}
     _per_binary: 'Dict[str, Tuple[str, int, int]]' = {}
     for _fn in output_hashes:
-        _bn = _fn.rsplit('.', 1)[0]
-        _parts = _bn.split('_')
-        if len(_parts) != 3:
+        _df = utils.parse_deb_filename(_fn)
+        if _df is None:
             continue
-        _name, _ver, _arch = _parts
+        _name, _ver, _arch, _ext = _df
         _pristine = _no_epoch(utils.pristine_base(_ver))
         _asg = utils.parse_asg_suffix(_ver)
         _n = _asg[1] if _asg is not None else 0
@@ -929,13 +928,10 @@ def _index_repo_emissions(repo_dir: str) -> 'Dict[str, set]':
         return _idx
     for _root, _dirs, _files in os.walk(repo_dir):
         for _f in _files:
-            if not _f.endswith(('.deb', '.udeb')):
+            _r = utils.parse_deb_filename(_f)
+            if _r is None:
                 continue
-            _base = _f.rsplit('.', 1)[0]
-            _parts = _base.split('_')
-            if len(_parts) != 3:
-                continue
-            _idx.setdefault(_parts[0], set()).add(_f)
+            _idx.setdefault(_r[0], set()).add(_f)
     return _idx
 
 
@@ -1050,13 +1046,12 @@ def validate_against_build_records(
         _src_pristine_at_build = ''
         _at_build_delta = False
         for _fn in _real_files:
-            _bn = _fn.rsplit('.', 1)[0]
-            _parts = _bn.split('_')
-            if len(_parts) != 3:
+            _pr = utils.parse_deb_filename(_fn)
+            if _pr is None:
                 continue
             if not _src_pristine_at_build:
-                _src_pristine_at_build = utils.pristine_base(_parts[1])
-            if utils.parse_asg_suffix(_parts[1]) is not None:
+                _src_pristine_at_build = utils.pristine_base(_pr[1])
+            if utils.parse_asg_suffix(_pr[1]) is not None:
                 _at_build_delta = True
         _virt = synthesize_source_binaries(
             source=_src, package_universe=package_universe,
@@ -1092,11 +1087,10 @@ def validate_against_build_records(
             for cross-checking.  Eliminates asg-suffix from comparison
             while keeping arch + pristine base — those ARE
             synthesizer-controlled and any mismatch IS a real bug."""
-            _base = _fn.rsplit('.', 1)[0]
-            _parts = _base.split('_')
-            if len(_parts) != 3:
+            _pr = utils.parse_deb_filename(_fn)
+            if _pr is None:
                 return (_fn, '', '')
-            _name, _ver, _arch = _parts
+            _name, _ver, _arch, _ext = _pr
             return (_name, _strip_asg(utils.pristine_base(_ver)), _arch)
 
         _real_names: 'set[str]' = {_binary_name(_f) for _f in _real_files}
