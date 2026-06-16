@@ -18113,6 +18113,19 @@ def test_print_wrapped_names_keeps_lines_under_wrap_width():
         )
 
 
+def test_sta41_write_chroot_file_ships_world_readable_mode():
+    """STA-41: _write_chroot_file must set an explicit 0644 mode via `sudo
+    install -m 644`, not `cp` — cp propagates the tempfile's 0600 mode when
+    the destination doesn't pre-exist, shipping root-only /etc/machine-id,
+    /etc/hostname, /etc/fstab, and apt sources into the live image."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import chroot
+    _src = inspect.getsource(chroot._ChrootMixin._write_chroot_file)
+    assert "'install', '-m', '644'" in _src, _src
+    assert "'cp', _tmp_path" not in _src, "still uses cp (propagates 0600)"
+
+
 def test_sta49_clean_all_wipes_disk_chroot_and_purge_nulls_udeb_tree():
     """STA-49: `cache purge` must null the udeb (installer) dep-tree — it's
     built off the same cache, so leaving it strands a tree pointing at
@@ -34993,6 +35006,7 @@ def main() -> int:
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_sta50_chroot_build_gates_on_repo_auto_index,
         test_sta43_durable_state_writes_atomic_and_preserve_mode,
+        test_sta41_write_chroot_file_ships_world_readable_mode,
         test_sta49_clean_all_wipes_disk_chroot_and_purge_nulls_udeb_tree,
         test_preflight_repo_audit_blocks_on_stale_artifacts,
         test_mirror_publish_reindexes_stale_local_index,

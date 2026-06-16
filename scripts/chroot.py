@@ -1643,10 +1643,15 @@ class _ChrootMixin:
     def _write_chroot_file(self, rel_path: str, content: str):
         """Write content to rel_path inside the chroot as root.
 
-        Uses a NamedTemporaryFile + sudo cp rather than sudo tee with stdin,
-        because when sudo's credential is already cached it does NOT consume the
-        password line from stdin, so tee would receive and write the raw password
-        as the first line of the file.
+        Uses a NamedTemporaryFile + `sudo install -m 644` rather than sudo
+        tee with stdin, because when sudo's credential is already cached it
+        does NOT consume the password line from stdin, so tee would receive
+        and write the raw password as the first line of the file.  `install
+        -m 644` (not `cp`) sets an explicit world-readable mode: cp would
+        propagate the tempfile's 0600 mode when the destination doesn't
+        pre-exist, shipping root-only /etc/{machine-id,hostname,fstab} and
+        apt sources into the image (STA-41).  Every file written here is
+        world-readable config, so 0644 is always correct.
 
         Args:
             rel_path: Path relative to the chroot root (e.g. '/etc/hostname').
@@ -1666,7 +1671,7 @@ class _ChrootMixin:
 
         try:
             _proc = subprocess.run(
-                ['sudo', '-S', 'cp', _tmp_path, _dest],
+                ['sudo', '-S', 'install', '-m', '644', _tmp_path, _dest],
                 input=self._password + '\n', capture_output=True, text=True
             )
             if _proc.returncode != 0:
