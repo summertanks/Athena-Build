@@ -103,8 +103,19 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         # rm -rf the contents (not the directory itself) so dir_chroot remains.
         if _wipe_chroot:
             tui.console.print("Wiping chroot...")
-            _proc = subprocess.run(['sudo', '-S', 'find', self._dir_chroot,
-                 '-mindepth', '1', '-delete'], input=self._password + '\n',
+            # STA-42: a SIGKILL'd / OOM-killed prior run can leave
+            # <chroot>/dev still BIND-MOUNTED to the host's real /dev (same
+            # inodes).  Two independent guards so the recursive wipe can
+            # never delete host device nodes as root:
+            #   1. unmount first (idempotent; peels stacked layers), and
+            #   2. `-xdev` so `find -delete` never descends across a
+            #      surviving mount boundary into host /dev/{null,sda,…}.
+            # Either alone closes the hole; together they're belt-and-braces.
+            self._umount_chroot_fs()
+            _proc = subprocess.run(
+                ['sudo', '-S', 'find', self._dir_chroot, '-xdev',
+                 '-mindepth', '1', '-delete'],
+                input=self._password + '\n',
                 capture_output=True, text=True
             )
 
