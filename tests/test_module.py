@@ -18113,6 +18113,75 @@ def test_print_wrapped_names_keeps_lines_under_wrap_width():
         )
 
 
+def test_sta43_durable_state_writes_atomic_and_preserve_mode():
+    """STA-43: snapshot.state / build.conf / SBOM route through
+    `_atomic_write_bytes` (temp + fsync + os.replace) so a crash mid-write
+    can't truncate them, and an operator-set mode (e.g. group-writable
+    0o664) survives the rewrite rather than being forced to 0o644."""
+    import sys as _sys, json as _json, inspect as _inspect
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils, sbom
+
+    # _existing_mode: real mode when present, default when absent
+    with tempfile.TemporaryDirectory() as _td:
+        assert utils._existing_mode(
+            os.path.join(_td, 'nope'), default=0o600) == 0o600
+        _f = os.path.join(_td, 'f')
+        with open(_f, 'w') as _fh:
+            _fh.write('x')
+        os.chmod(_f, 0o664)
+        assert utils._existing_mode(_f) == 0o664
+        # _atomic_write_bytes honours mode + leaves no temp behind
+        _g = os.path.join(_td, 'g')
+        utils._atomic_write_bytes(_g, b'data', mode=0o664)
+        assert open(_g).read() == 'data'
+        assert (os.stat(_g).st_mode & 0o777) == 0o664
+        assert not [n for n in os.listdir(_td) if n.endswith('.tmp')], \
+            os.listdir(_td)
+
+    # write_snapshot_state: valid JSON written, operator mode preserved
+    with tempfile.TemporaryDirectory() as _td:
+        _cfgdir = os.path.join(_td, 'config')
+        os.makedirs(_cfgdir)
+        _statef = os.path.join(_cfgdir, 'snapshot.state')
+        with open(_statef, 'w') as _fh:
+            _fh.write('{"current": "OLD"}\n')
+        os.chmod(_statef, 0o664)
+        _cfg = type('C', (), {'dir_config': _cfgdir})()
+        utils.write_snapshot_state(_cfg, current='20260101T000000Z')
+        assert _json.load(open(_statef))['current'] == '20260101T000000Z'
+        assert (os.stat(_statef).st_mode & 0o777) == 0o664, \
+            "write_snapshot_state must preserve the operator's mode"
+
+    # reconcile_snapshot_pin: build.conf rewritten in place, mode preserved
+    with tempfile.TemporaryDirectory() as _td:
+        _cfgdir = os.path.join(_td, 'config')
+        os.makedirs(_cfgdir)
+        with open(os.path.join(_cfgdir, 'snapshot.state'), 'w') as _fh:
+            _json.dump({'current': 'NEWTS'}, _fh)
+        _confp = os.path.join(_td, 'build.conf')
+        with open(_confp, 'w') as _fh:
+            _fh.write("[Snapshot]\n    Timestamp = OLDTS\n")
+        os.chmod(_confp, 0o664)
+        _c = type('C', (), {
+            'dir_config': _cfgdir, 'config_path': _confp,
+            'snapshot_timestamp_config': 'OLDTS'})()
+        assert utils.reconcile_snapshot_pin(_c) == ('OLDTS', 'NEWTS')
+        assert 'Timestamp = NEWTS' in open(_confp).read()
+        assert (os.stat(_confp).st_mode & 0o777) == 0o664, \
+            "build.conf rewrite must preserve mode (was 0o664)"
+        assert _c.snapshot_timestamp_config == 'NEWTS'
+
+    # source pins: all three writers route through the atomic helper
+    assert "open(_path, 'w')" not in _inspect.getsource(
+        utils.write_snapshot_state)
+    assert '_atomic_write_bytes' in _inspect.getsource(
+        utils.write_snapshot_state)
+    assert '_atomic_write_bytes' in _inspect.getsource(
+        utils.reconcile_snapshot_pin)
+    assert '_atomic_write_bytes' in _inspect.getsource(sbom.generate_cdx)
+
+
 def test_chroot_build_wires_both_audit_gates_with_no_gate_bypass():
     """P5 (2026-05-23): both chroot build live + installer must
     pre-flight `source audit` AND `repo audit`, and both must honour
@@ -34896,6 +34965,7 @@ def main() -> int:
         test_print_wrapped_names_keeps_lines_under_wrap_width,
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_sta50_chroot_build_gates_on_repo_auto_index,
+        test_sta43_durable_state_writes_atomic_and_preserve_mode,
         test_preflight_repo_audit_blocks_on_stale_artifacts,
         test_mirror_publish_reindexes_stale_local_index,
         test_push_dist_tree_excludes_pool_artifacts,

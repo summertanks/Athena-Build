@@ -205,9 +205,13 @@ def generate_cdx(buildconfig: Any,
         _parent = os.path.dirname(out_path)
         if _parent:
             os.makedirs(_parent, exist_ok=True)
-        with open(out_path, 'w', encoding='utf-8') as fh:
-            json.dump(_bom, fh, indent=2)
-            fh.write('\n')
+        # Atomic write so a crash mid-write can't leave a truncated SBOM
+        # (STA-43; low stakes — the SBOM is a regenerable artifact).
+        utils._atomic_write_bytes(
+            out_path,
+            (json.dumps(_bom, indent=2) + '\n').encode('utf-8'),
+            mode=utils._existing_mode(out_path),
+        )
     except OSError as e:
         logger.error(f"sbom: cannot write {out_path}: {e}")
         return ''
