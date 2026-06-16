@@ -8085,6 +8085,29 @@ def test_strip_build_version_rejects_malformed_filename():
         raise AssertionError(f"expected ValueError for {bad!r}")
 
 
+def test_parse_deb_filename_splits_raw_components():
+    """ARCH-19 shared splitter → (name, raw-version, arch, ext).  The version
+    stays RAW (epoch encoded %3a) and any directory prefix is preserved so the
+    callers that reconstruct a filename/pool path round-trip byte-exactly."""
+    from utils import parse_deb_filename
+    assert parse_deb_filename('foo_1.0-2_amd64.deb') == ('foo', '1.0-2', 'amd64', '.deb')
+    assert parse_deb_filename('bar_1%3a2.3-4_arm64.udeb') == (
+        'bar', '1%3a2.3-4', 'arm64', '.udeb')          # epoch NOT decoded
+    assert parse_deb_filename('pool/main/f/foo/foo_1-2_amd64.deb') == (
+        'pool/main/f/foo/foo', '1-2', 'amd64', '.deb')  # path prefix kept
+
+
+def test_parse_deb_filename_returns_none_on_mismatch():
+    """None on a non-.deb/.udeb or a wrong part-count — each caller maps the
+    miss to its own convention (skip / raise / status dict / sentinel)."""
+    from utils import parse_deb_filename
+    assert parse_deb_filename('Packages.gz') is None
+    assert parse_deb_filename('foo_1_amd64') is None        # no .deb/.udeb ext
+    assert parse_deb_filename('not-a-deb.deb') is None      # 1 part
+    assert parse_deb_filename('one_two.deb') is None        # 2 parts
+    assert parse_deb_filename('a_b_c_d_amd64.deb') is None  # 5 parts
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # strip_nmu_suffix + strip_nmu_from_control_text + strip_nmu_from_deb
 # — normalise NMU/binNMU/backport suffixes off Debian version strings
@@ -35028,6 +35051,8 @@ def main() -> int:
         test_strip_build_version_handles_udeb_extension,
         test_strip_build_version_no_change_when_no_binNMU,
         test_strip_build_version_rejects_malformed_filename,
+        test_parse_deb_filename_splits_raw_components,
+        test_parse_deb_filename_returns_none_on_mismatch,
         test_classify_repo_subdir_routes_dev_to_main,
         test_repack_deb_clamps_to_source_date_epoch_for_reproducibility,
         test_bump_is_canonical_home_for_version_logic,

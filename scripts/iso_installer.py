@@ -756,20 +756,17 @@ def _parse_deb_filename(filename: str) -> tuple:
 
     For files that don't match (e.g. `Packages.gz` accidentally in
     pool/), returns `('', '')` so the caller can skip them.
+
+    Thin decoding wrapper over the shared `utils.parse_deb_filename`
+    (ARCH-19): that splitter returns the RAW version; here we decode the
+    `%3a` epoch into the control-file form callers expect.
     """
-    _base = filename
-    if _base.endswith('.udeb'):
-        _base = _base[:-len('.udeb')]
-    elif _base.endswith('.deb'):
-        _base = _base[:-len('.deb')]
-    else:
+    _r = utils.parse_deb_filename(filename)
+    if _r is None:
         return '', ''
-    _parts = _base.split('_')
-    if len(_parts) < 3:
-        return '', ''
+    _name, _ver, _arch, _ext = _r
     # filename version → control-file version: decode the epoch.
-    _ver = _parts[1].replace('%3a', ':')
-    return _parts[0], _ver
+    return _name, _ver.replace('%3a', ':')
 
 
 def _debian_version_cmp(a: str, b: str) -> int:
