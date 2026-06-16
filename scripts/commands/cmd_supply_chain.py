@@ -90,6 +90,20 @@ class SupplyChainCommandsMixin(SessionState):
             tui.COLOR_HIGHLIGHT,
         )
 
+    @staticmethod
+    def _cve_report_path(sbom_path: str) -> str:
+        """Derive the `.cve.json` report path from an SBOM path, stripping a
+        `.cdx.json` double-suffix (`foo.cdx.json` → `foo.cve.json`).
+
+        STA-48: the old `sbom_path.replace('.cdx.json', '.cve.json')` was a
+        no-op on any name not ending `.cdx.json` (e.g. `sbom.json`), so the
+        report path equalled the input and the write clobbered the operator's
+        SBOM.  splitext-based derivation never collides with the input."""
+        _root, _ = os.path.splitext(sbom_path)
+        if _root.endswith('.cdx'):
+            _root = _root[:-len('.cdx')]
+        return _root + '.cve.json'
+
     def cmd_cve(self, *args):
         """CVE-01: scan the latest SBOM against Grype's vulnerability
         databases (NVD + GHSA + Debian Security Tracker).
@@ -162,7 +176,15 @@ class SupplyChainCommandsMixin(SessionState):
             console.print(f"cve: SBOM not found: {_sbom_path}")
             return
 
-        _report_path = _sbom_path.replace('.cdx.json', '.cve.json')
+        _report_path = self._cve_report_path(_sbom_path)
+        # Defence in depth: never write the report over the input SBOM
+        # (refuse BEFORE the multi-second grype scan).
+        if os.path.abspath(_report_path) == os.path.abspath(_sbom_path):
+            console.print(
+                f"cve: refusing to overwrite the input SBOM ({_sbom_path}) "
+                "with the report — rename it or move it aside",
+                tui.COLOR_ERROR)
+            return
         _cmd = [_grype, f'sbom:{_sbom_path}', '-o', 'json']
         logger.info(f"cve: {' '.join(_shlex.quote(_p) for _p in _cmd)}")
 
