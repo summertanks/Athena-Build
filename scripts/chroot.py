@@ -52,7 +52,8 @@ class _ChrootMixin:
     normalize_repo_filename: Callable[[str], str]
 
     def build_chroot(self, debug: bool = False,
-                     install_set: 'Optional[set]' = None) -> bool:
+                     install_set: 'Optional[set]' = None,
+                     gate_complete: bool = True) -> bool:
         """Install all selected packages into the chroot in dependency order.
 
         Computes a topo-sorted batch sequence over Pre-Depends ∪ Depends
@@ -317,6 +318,25 @@ class _ChrootMixin:
                 f"build_chroot: incomplete — broken={sorted(_broken)} "
                 f"missing={_missing}"
             )
+            # STA-37: the dpkg-query Status diff is the "authoritative
+            # pass/fail gate" the docstring promises — make it actually GATE.
+            # A broken or never-installed PLANNED package means the surface
+            # is incomplete (the 2026-06-11 python3-never-unpacked /
+            # gnome-menus-half-configured class); the live `_verify_chroot`
+            # only partially compensates and the disk surface has no boot
+            # verify at all, so an incomplete chroot otherwise flowed straight
+            # into the squashfs / qcow2.  Refuse unless the operator passed
+            # `no-gate` (the same escape hatch the pre-flight audits use).
+            if gate_complete:
+                tui.console.print(
+                    "ERROR: chroot INCOMPLETE — refusing to proceed "
+                    "(broken / never-installed packages above).  Fix the "
+                    "build, or re-run with `no-gate` to override.",
+                    tui.COLOR_ERROR)
+                return False
+            tui.console.print(
+                "WARNING: chroot incomplete but proceeding anyway (no-gate)",
+                tui.COLOR_WARNING)
         else:
             tui.console.print(
                 f"Chroot build complete — {len(_present_ok)} packages "
