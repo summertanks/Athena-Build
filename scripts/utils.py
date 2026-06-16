@@ -912,11 +912,24 @@ def _verify_record(record: dict, key: bytes) -> bool:
     return hmac.compare_digest(_sig, _expected)
 
 
-def _atomic_write_bytes(path: str, data: bytes) -> None:
+def _existing_mode(path: str, default: int = 0o644) -> int:
+    """The file's current permission bits, or `default` when it doesn't
+    exist — so an atomic rewrite preserves operator-set perms (e.g. a
+    group-writable build.conf) instead of forcing 0o644."""
+    try:
+        return os.stat(path).st_mode & 0o777
+    except OSError:
+        return default
+
+
+def _atomic_write_bytes(path: str, data: bytes, mode: int = 0o644) -> None:
     """Write `data` to `path` via temp-file + fsync + os.replace so a
     crash mid-write leaves the prior file intact (POSIX rename(2)
     atomicity).  fsync the data before rename so an OS crash post-rename
-    can't surface an empty file."""
+    can't surface an empty file.
+
+    `mode` is the final permission (mkstemp makes the temp 0o600); pass
+    `_existing_mode(path)` to preserve an operator-set mode on rewrite."""
     _dir = os.path.dirname(path) or '.'
     _fd, _tmp = tempfile.mkstemp(
         prefix='.' + os.path.basename(path) + '.', suffix='.tmp', dir=_dir,
@@ -926,7 +939,7 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
             _fh.write(data)
             _fh.flush()
             os.fsync(_fh.fileno())
-        os.chmod(_tmp, 0o644)
+        os.chmod(_tmp, mode)
         os.replace(_tmp, path)
     except OSError:
         try:
@@ -1754,8 +1767,13 @@ def reconcile_snapshot_pin(config: 'BuildConfig') -> 'Optional[tuple[str, str]]'
     if not _done:
         return None
     try:
-        with open(config.config_path, 'w', encoding='utf-8') as _fh:
-            _fh.writelines(_lines)
+        # Atomic rewrite of the operator's master build.conf — a crash
+        # mid-write must not truncate it (STA-43).  Preserve its existing
+        # mode (e.g. group-writable 0o664) rather than forcing 0o644.
+        _atomic_write_bytes(
+            config.config_path, ''.join(_lines).encode('utf-8'),
+            mode=_existing_mode(config.config_path),
+        )
     except OSError:
         return None
     config.snapshot_timestamp_config = _cur
@@ -1788,9 +1806,14 @@ def write_snapshot_state(config: 'BuildConfig',
         _state['current'] = _new_current
     _path = snapshot_state_path(config)
     os.makedirs(os.path.dirname(_path), exist_ok=True)
-    with open(_path, 'w') as fh:
-        json.dump(_state, fh, indent=2)
-        fh.write('\n')
+    # Atomic write: a crash mid-write must not truncate the pin —
+    # read_snapshot_state swallows the resulting ValueError and the next
+    # build silently falls back to [Snapshot] Timestamp (STA-43).
+    _atomic_write_bytes(
+        _path,
+        (json.dumps(_state, indent=2) + '\n').encode('utf-8'),
+        mode=_existing_mode(_path),
+    )
     _SNAPSHOT_TS_CACHE.clear()
 
 
