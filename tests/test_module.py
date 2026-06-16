@@ -14320,6 +14320,27 @@ def test_disk_image_module_exposes_build_disk_image_signature():
     )
 
 
+def test_hk06_disk_image_e2fsck_clears_orphan_list():
+    """HK-06: the disk build runs `e2fsck -f -p` on the root partition after
+    the root umount and before the loop detach, so the shipped qcow2 is
+    pristine (first boot otherwise logs e2fsck cleaning a benign ext4
+    orphan-inode list).  Source pin (the privileged disk path can't run in
+    CI)."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    _src = inspect.getsource(disk_image.build_disk_image)
+    _i = _src.find("'e2fsck'")
+    assert _i != -1, "no e2fsck pass in the disk image build"
+    _call = _src[_i:_i + 70]
+    assert "'-f'" in _call and "'-p'" in _call and '_root_part' in _call, _call
+    # ordering: AFTER the root umount, BEFORE the loop detach (happy path —
+    # first occurrence of each precedes the finally-block copies)
+    _u = _src.find("umount', _mnt")
+    _d = _src.find("losetup', '-d', _loop_dev")
+    assert _u != -1 and _d != -1 and _u < _i < _d, (_u, _i, _d)
+
+
 def test_disk_image_regenerates_initramfs_for_fsck_tools():
     """STA-26: after writing the real fstab (ext4 root + vfat ESP, step 7),
     the disk build re-runs `update-initramfs -u` inside the chroot so
@@ -35713,6 +35734,7 @@ def main() -> int:
         test_scan_packages_with_progress_writes_output_via_subprocess_run,
         test_disk_image_module_exposes_build_disk_image_signature,
         test_disk_image_regenerates_initramfs_for_fsck_tools,
+        test_hk06_disk_image_e2fsck_clears_orphan_list,
         test_build_system_sh_checks_disk_image_tools,
         test_disk_image_has_bios_modules_probes_chroot_dir,
         test_disk_image_grub_install_uses_absolute_path_and_env_path,
