@@ -1295,7 +1295,15 @@ class BuildContainer:
                 #    POST-NORMALIZE paths — strip + asg-stamp rename the
                 #    files in place, so `_emitted` (pre-normalize paths)
                 #    no longer points at real files post-normalize.
-                _was_patched = (src_patch_path != self.patch_empty)
+                # STA-46: key off the ACTUAL applied .patch files, not the
+                # patch-dir's mere existence — an empty dir (operator removed
+                # the last .patch but left the dir, or a stray README) would
+                # else set _was_delta=True and asg-stamp byte-pristine
+                # artifacts, violating Position-X and diverging from the three
+                # bool(patch_list) sites (bump.compute_post_build_versions,
+                # cmd_source validate, virtual_build) — so `virtual validate`
+                # would flag the real build as drift.
+                _was_patched = bool(_live_patch_list)
                 _final_paths = self._normalize_built_artifacts(
                     src_pkg, _emitted, _was_patched, events=_seg_events)
                 if not _final_paths:
