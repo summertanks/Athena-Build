@@ -158,18 +158,9 @@ def build_installer_chroot(
 # ---------------------------------------------------------------------------
 
 
-def _sudo(cmd_args: List[str], password: str) -> subprocess.CompletedProcess:
-    """Run `sudo -S <cmd_args>` with the cached password.
-
-    Captured stdout/stderr returned to caller.  Caller checks returncode.
-    Single source of truth for the sudo invocation pattern so tests can
-    monkeypatch this one function.
-    """
-    return subprocess.run(
-        ['sudo', '-S'] + cmd_args,
-        input=password + '\n',
-        capture_output=True, text=True,
-    )
+# ARCH-19: canonical wrapper in utils.sudo; module-local `_sudo` kept as an
+# alias so call sites + test monkeypatching stay unchanged.
+_sudo = utils.sudo
 
 
 def _wipe_and_create(dir_chroot_installer: str, password: str) -> bool:
