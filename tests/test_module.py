@@ -18278,6 +18278,33 @@ def test_print_wrapped_names_keeps_lines_under_wrap_width():
         )
 
 
+def test_sta42_chroot_wipe_cannot_delete_host_dev_nodes():
+    """STA-42: <chroot>/dev is `mount --bind /dev` — the HOST's /dev.  A
+    crashed prior run can leave it (stacked) mounted, so the recursive chroot
+    wipe must (1) unmount first, peeling ALL stacked layers, and (2) pass
+    `-xdev` so `find -delete` never descends across a surviving mount into
+    host /dev/{null,sda,console,…}.  Source pin (privileged path)."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import chroot, buildsystem
+
+    # _umount_chroot_fs peels every stacked layer (bounded loop on ismount)
+    _um = inspect.getsource(chroot._ChrootMixin._umount_chroot_fs)
+    assert 'if not os.path.ismount' in _um, \
+        "_umount_chroot_fs must loop until the layer is gone (peel stacks)"
+    assert ('for _' in _um or 'while' in _um) and 'umount' in _um, _um
+
+    # the chroot wipe unmounts first AND uses -xdev on the find -delete
+    _init = inspect.getsource(buildsystem.BuildSystem.__init__)
+    _i = _init.find("'find', self._dir_chroot")
+    assert _i != -1, "chroot wipe `find -delete` not found"
+    _wipe = _init[_i:_i + 120]
+    assert "'-xdev'" in _wipe and "'-delete'" in _wipe, _wipe
+    _u = _init.find('self._umount_chroot_fs()')
+    assert _u != -1 and _u < _i, \
+        "wipe must call _umount_chroot_fs() BEFORE find -delete"
+
+
 def test_sta41_write_chroot_file_ships_world_readable_mode():
     """STA-41: _write_chroot_file must set an explicit 0644 mode via `sudo
     install -m 644`, not `cp` — cp propagates the tempfile's 0600 mode when
@@ -35170,6 +35197,7 @@ def main() -> int:
         test_chroot_build_wires_both_audit_gates_with_no_gate_bypass,
         test_sta50_chroot_build_gates_on_repo_auto_index,
         test_sta43_durable_state_writes_atomic_and_preserve_mode,
+        test_sta42_chroot_wipe_cannot_delete_host_dev_nodes,
         test_sta41_write_chroot_file_ships_world_readable_mode,
         test_sta49_clean_all_wipes_disk_chroot_and_purge_nulls_udeb_tree,
         test_preflight_repo_audit_blocks_on_stale_artifacts,

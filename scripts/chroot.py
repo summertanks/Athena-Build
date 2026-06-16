@@ -417,8 +417,21 @@ class _ChrootMixin:
             f'{_chroot}/proc',
         ]:
             _was_mounted = os.path.ismount(_dst)
-            subprocess.run(['sudo', '-S', 'umount', '-lf', _dst],
-                           input=self._password + '\n', capture_output=True, text=True)
+            # STA-42: peel EVERY stacked layer.  A SIGKILL'd / OOM-killed
+            # prior run can leave the host /dev bind-mounted MULTIPLE times
+            # (each _mount_chroot_fs adds a layer when the prior finally
+            # didn't run); a single umount removes only the top one, leaving
+            # lower layers — still the host's /dev — attached for the
+            # recursive chroot wipe to delete through.  Bounded so a target
+            # that refuses to unmount can't spin forever.  When _dst isn't a
+            # mount point at all (the common case) the loop body never runs.
+            for _ in range(64):
+                if not os.path.ismount(_dst):
+                    break
+                subprocess.run(
+                    ['sudo', '-S', 'umount', '-lf', _dst],
+                    input=self._password + '\n',
+                    capture_output=True, text=True)
             if _was_mounted:
                 logger.info(f'_umount_chroot_fs: unmounted {_dst}')
 
