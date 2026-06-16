@@ -296,8 +296,14 @@ targets.  Verification pending next install on a VMware host.)*
   artifact before it ships.  Both the root fs and the ESP otherwise
   verify clean via `e2fsck` / `fsck.fat` against the shipped artifact
   (checked 2026-06-11 during the disk-image first-boot debugging).
-- **Fix**: TODO `HK-06` — add a post-umount `e2fsck -f -p` pass in
-  `disk_image.py` so the shipped image is pristine.
+- **Fix**: RESOLVED (`HK-06`) — `disk_image.build_disk_image` runs
+  `e2fsck -f -p <root-part>` on the now-unmounted root, after the root
+  umount and before the loop detach, so the shipped qcow2 is pristine.
+  rc 1/2 ("errors corrected" — the expected orphan-cleanup) logs at INFO;
+  rc ≥ 4 (serious uncorrected) warns loud but doesn't fail the build (the
+  image still boots; deeper corruption would be a separate bug).  No new
+  dependency — e2fsck ships with e2fsprogs, already required for the
+  `mkfs.ext4` root.
 
 ---
 

@@ -515,6 +515,28 @@ def build_disk_image(
                 )
                 return False
             _root_mounted = False
+        # HK-06: clear the ext4 orphan-inode list on the now-unmounted root
+        # so the shipped image is pristine — otherwise first boot logs e2fsck
+        # cleaning a small orphan list (files deleted in the chroot while the
+        # loop mount was live; nothing replays it on the artifact).  Force
+        # (-f) + preen (-p, non-interactive); must run after umount, before
+        # loop detach.  rc 1/2 = "errors corrected" (the expected
+        # orphan-cleanup case); >= 4 = serious uncorrected → warn loud but
+        # don't fail (the image still boots; deeper corruption is a separate
+        # bug).  Cosmetic (docs/known-issues.md § Cosmetic).
+        if _root_part is not None:
+            _fsck = _sudo(['e2fsck', '-f', '-p', _root_part],
+                          password, capture=True)
+            if _fsck.returncode in (1, 2):
+                logger.info(
+                    f"e2fsck cleaned the root fs (rc={_fsck.returncode})")
+            elif _fsck.returncode >= 4:
+                tui.console.print(
+                    "W: e2fsck reported uncorrected errors on the root fs "
+                    f"(rc={_fsck.returncode}) — image may be unclean")
+                logger.warning(
+                    f"e2fsck {_root_part}: rc={_fsck.returncode} "
+                    f"out={_fsck.stdout.strip()[:300]}")
         if _loop_dev is not None:
             _sudo(['losetup', '-d', _loop_dev], password, capture=True)
             _loop_dev = None
