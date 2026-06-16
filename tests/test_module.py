@@ -6121,6 +6121,40 @@ def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
         "SNAPSHOT_TS must be self.snapshot_ts (the resolved pin), not a literal")
 
 
+def test_sta51_snapshot_pin_origin_tracks_baseurl_host():
+    """STA-51: the apt Pin-Priority 1001 `origin` must be the HOST of
+    `[Snapshot] BaseUrl`, not a hardcoded snapshot.debian.org — otherwise a
+    custom snapshot mirror's sources don't match the pin, priority falls back
+    to 500, and the downgrade-refusal loop the pin exists to break returns."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+
+    class _M:
+        suite = 'bookworm'
+        component = 'main'
+        def __init__(self, base):
+            self.url = f'{base}/20260101T000000Z'
+
+    def _gen(baseurl):
+        _stub = type('S', (), {
+            'config': type('C', (), {'snapshot_baseurl': baseurl})(),
+            'mirrors': [_M(baseurl)],
+        })()
+        return buildcontainer.BuildContainer._write_snapshot_sources_cmd(_stub)
+
+    # custom snapshot mirror → pin tracks its host
+    _custom = _gen('http://snap.example.com/archive')
+    assert 'Pin: origin snap.example.com' in _custom, _custom
+    assert 'Pin: origin snapshot.debian.org' not in _custom, _custom
+    # default Debian service → unchanged behaviour
+    _default = _gen('https://snapshot.debian.org/archive')
+    assert 'Pin: origin snapshot.debian.org' in _default, _default
+    # empty/odd baseurl → safe fallback (no bare `Pin: origin\n`)
+    _fallback = _gen('')
+    assert 'Pin: origin snapshot.debian.org' in _fallback, _fallback
+
+
 def test_conf15_per_build_dist_upgrade_workaround_removed():
     """CONF-15: the per-build `apt-get --allow-downgrades dist-upgrade`
     step in cmd_str was the workaround for the toolchain-layer-not-pinned
@@ -8374,6 +8408,10 @@ def test_buildcontainer_run_grub_mkrescue_constructs_correct_docker_call():
     _bc._live_lock = _threading.Lock()
     _bc._live = {}
     _bc.mirrors = []   # empty → empty sources.list; OK for argv-shape pin
+    # _write_snapshot_sources_cmd (called by run_grub_mkrescue) reads
+    # config.snapshot_baseurl for the apt pin origin (STA-51).
+    _bc.config = type('C', (), {
+        'snapshot_baseurl': 'https://snapshot.debian.org/archive'})()
     _bc.client = MagicMock()
     _fake_container = MagicMock()
     _fake_container.short_id = 'fakecid'
@@ -8432,6 +8470,10 @@ def test_buildcontainer_run_grub_mkrescue_propagates_failure():
     _bc._live_lock = _threading.Lock()
     _bc._live = {}
     _bc.mirrors = []
+    # run_grub_mkrescue → _write_snapshot_sources_cmd reads
+    # config.snapshot_baseurl for the apt pin origin (STA-51).
+    _bc.config = type('C', (), {
+        'snapshot_baseurl': 'https://snapshot.debian.org/archive'})()
     _bc.client = MagicMock()
     _fake_container = MagicMock()
     _fake_container.short_id = 'failcid'
@@ -34539,6 +34581,7 @@ def main() -> int:
         test_conf15_dockerfile_pins_toolchain_to_snapshot,
         test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
+        test_sta51_snapshot_pin_origin_tracks_baseurl_host,
         test_conf15_per_build_dist_upgrade_workaround_removed,
         # version_no_epoch — patch dir lookup must match Debian filename convention
         test_version_no_epoch_strips_epoch_from_debian_version,

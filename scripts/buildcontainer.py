@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 import uuid
+from urllib.parse import urlparse
 from typing import TYPE_CHECKING, Optional, Tuple
 import utils
 from utils import BuildConfig, version_no_epoch
@@ -757,13 +758,21 @@ class BuildContainer:
             f'deb [check-valid-until=no] {_m.url} {_m.suite} {_m.component}\n'
             for _m in self.mirrors
         )
-        # `origin snapshot.debian.org` matches the host of the mirror's
-        # URL.  Distinct from the Origin: header inside InRelease (which
-        # is `Origin: Debian` / `Origin: Debian-Security`).  This pin is
-        # broad — every pkg from a snapshot.debian.org URL wins.
+        # The pin's `origin` is the HOST of the snapshot mirror URL — derive
+        # it from [Snapshot] BaseUrl (the same host the sources above use, via
+        # `_m.url = {baseurl}/{baseid}`) so a CUSTOM snapshot mirror still
+        # pins.  Hardcoding snapshot.debian.org silently dropped the pin to
+        # Priority 500 on any non-default mirror, re-opening the 2026-05-23
+        # downgrade-refusal loop (STA-51).  Distinct from the Origin: header
+        # inside InRelease (`Origin: Debian` / `Origin: Debian-Security`).
+        # This pin is broad — every pkg from that host wins.
+        _snap_host = (
+            urlparse(self.config.snapshot_baseurl).hostname
+            or 'snapshot.debian.org'
+        )
         _apt_pin = (
             "Package: *\n"
-            "Pin: origin snapshot.debian.org\n"
+            f"Pin: origin {_snap_host}\n"
             "Pin-Priority: 1001\n"
         )
         return (
