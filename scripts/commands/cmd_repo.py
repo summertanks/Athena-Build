@@ -748,6 +748,44 @@ class RepoCommandsMixin(SessionState):
                     _orphans.append((_sub, _f))
         return _orphans
 
+    def _live_published_claim_filenames(self) -> 'set[str]':
+        """STA-25: filenames currently covered by a LIVE published claim in
+        our local coord ledger (`config/coord/claims/<builder>.jsonl`).
+
+        These are bytes a published claim on a mirror still names as live —
+        pruning them locally before the mirror is told (deprecate / obsolete
+        via `mirror publish`, or `mirror reclaim`) violates UPD-01's
+        publish-before-prune discipline: the mirror keeps serving a sha we no
+        longer hold, so a later reclaim/audit can't reproduce it.
+
+        Reads our own append-only jsonl WITHOUT signature verification (our
+        local record, not an attack surface) and applies the standard
+        supersession fold via `iter_live_claims_by_filename`, keeping only
+        genuinely-published claims (deprecate/obsolete/retract markers are
+        already release/prune signals, so excluded).  Returns the empty set
+        when there's no coord ledger (non-federated operator → cleanup
+        unaffected)."""
+        import coord.store as _store
+        import coord.schema as _schema
+        _dir = getattr(self.config, 'dir_coord_claims', None)
+        if not _dir or not os.path.isdir(_dir):
+            return set()
+        _by_builder: 'dict[str, list]' = {}
+        try:
+            _entries = sorted(os.listdir(_dir))
+        except OSError:
+            return set()
+        for _e in _entries:
+            if not _e.endswith('.jsonl'):
+                continue
+            _claims = _store.read_builder_claims(_dir, _e[:-len('.jsonl')])
+            if _claims:
+                _by_builder[_e[:-len('.jsonl')]] = _claims
+        return {
+            _fn for _fn, _c in _store.iter_live_claims_by_filename(_by_builder)
+            if _c.get('claim_state') == _schema.CLAIM_STATE_PUBLISHED
+        }
+
     def cmd_package_cleanup(self, *args):
         """Identify and delete obsolete .debs/.udebs in repo/.
 
@@ -802,6 +840,15 @@ class RepoCommandsMixin(SessionState):
             _sidecar_orphans = self._scan_orphaned_sidecars()
         finally:
             _spin.done()
+
+        # STA-25: which obsolete targets are still named by a LIVE published
+        # claim?  Deleting their bytes before the mirror is told (publish-
+        # before-prune) strands a sha the mirror keeps serving.
+        _live_fns = self._live_published_claim_filenames()
+        _claimed = sorted(
+            {_f for _sub, _f, *_ in _orphan if _f in _live_fns}
+            | {_f for _sub, _f, *_ in _drift if _f in _live_fns}
+        )
 
         # ------ Report ------
         _n_obsolete = len(_orphan) + len(_drift)
@@ -883,6 +930,22 @@ class RepoCommandsMixin(SessionState):
                     f"pass `verbose` for full list)"
                 )
 
+        if _claimed:
+            console.print(
+                f"\n  ⚠ PUBLISH-BEFORE-PRUNE: {len(_claimed)} of these are "
+                "still named by a LIVE published claim on a mirror:",
+                tui.COLOR_WARNING)
+            for _f in _claimed[:15]:
+                console.print(f"      {_f}", tui.COLOR_WARNING)
+            if len(_claimed) > 15:
+                console.print(
+                    f"      … (+{len(_claimed) - 15} more)", tui.COLOR_WARNING)
+            console.print(
+                "    Deprecate/obsolete them on the mirror first "
+                "(`mirror publish`), or `mirror reclaim` to refresh the bytes "
+                "— deleting now strands a sha the mirror still serves.",
+                tui.COLOR_WARNING)
+
         if not _force:
             console.print(
                 "\nDRY-RUN — no files were deleted.  "
@@ -890,6 +953,23 @@ class RepoCommandsMixin(SessionState):
                 tui.COLOR_INFO,
             )
             return
+
+        # STA-25: a dedicated publish-before-prune gate — when any target is
+        # still live on a mirror, require an explicit acknowledgement BEFORE
+        # the generic delete prompt (the operator should normally
+        # `mirror publish` the supersession first).
+        if _claimed:
+            _resp = Prompt(
+                PROMPT_YESNO,
+                f"{len(_claimed)} file(s) are still named by a LIVE published "
+                "claim on a mirror (publish-before-prune).  Delete locally "
+                "anyway?",
+            ).get_response()
+            if _resp.lower() not in ('y', 'yes'):
+                console.print(
+                    "Aborted — `mirror publish` the supersession first, "
+                    "then re-run cleanup")
+                return
 
         # Force mode: final confirmation prompt.  _n_to_delete counts the
         # obsolete .deb/.udeb plus the orphaned `.verified` sidecars.

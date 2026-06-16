@@ -86,8 +86,15 @@ the meta `.deb`s into the cdrom pool — see Fixed below.)*
 - **Severity**: Low-medium — `mirror pull` can re-fetch peer-owned
   bytes, but own-claim bytes deleted before deprecation/obsolescence
   is published are gone.
-- **Fix**: TODO `STA-25` — warn (and require confirmation) when a
-  cleanup target filename matches a live published claim.
+- **Fix**: RESOLVED (`STA-25`) — `cmd_package_cleanup` now cross-references
+  every obsolete target filename against `_live_published_claim_filenames()`
+  (the live, non-superseded `published`-state claims in our local
+  `config/coord/claims/*.jsonl`, via the standard supersession fold).
+  Matches are flagged in the dry-run report and require a dedicated
+  publish-before-prune confirmation BEFORE the generic delete prompt in
+  `force` mode (declining points the operator at `mirror publish` /
+  `mirror reclaim`).  Deprecated/obsoleted claims are prune signals, so
+  excluded; a non-federated operator (no coord ledger) is unaffected.
 
 ### Initramfs ships no fsck tools — chroot fstab is empty at `update-initramfs` time
 
