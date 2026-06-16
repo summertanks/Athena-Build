@@ -14572,6 +14572,26 @@ def test_cmd_build_iso_disk_gates_on_chroot_disk_ready_and_reads_size():
     # Calls into disk_image.build_disk_image
     assert "disk_image.build_disk_image(" in _method
 
+def test_sta52_live_iso_wipes_staging_and_wildcards_exclude_fallback():
+    """STA-52: the live ISO build must wipe its staging tree between runs
+    (grub-mkrescue images the whole tree, so a since-removed file ships
+    forever), and the mksquashfs `-e dir/*` PermissionError fallback must
+    pass `-wildcards` or mksquashfs treats the glob literally and silently
+    ships the unlistable dir's contents.  Source pin (full build needs
+    sudo + the real pipeline)."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import iso
+    _src = inspect.getsource(iso._IsoMixin.build_iso)
+    # staging is wiped (sudo rm -rf) before recreation
+    import re
+    assert re.search(r"rm['\"],\s*['\"]-rf['\"],\s*_staging", _src), \
+        "live staging tree is not wiped before reuse (STA-52)"
+    # the glob fallback enables -wildcards
+    assert '_used_glob' in _src and "'-wildcards'" in _src, _src
+    assert "os.path.join(_dir_path, '*')" in _src, _src
+
+
 def test_iso_build_uses_spinner_for_mksquashfs_and_grub_mkrescue():
     """Live ISO build wraps mksquashfs + grub-mkrescue in Spinners so
     the long subprocesses don't look like a hung TUI.  Source-text
@@ -35664,6 +35684,7 @@ def main() -> int:
         test_disk_image_sfdisk_script_lays_out_three_partitions,
         test_cmd_iso_dispatcher_routes_disk_action,
         test_cmd_build_iso_disk_gates_on_chroot_disk_ready_and_reads_size,
+        test_sta52_live_iso_wipes_staging_and_wildcards_exclude_fallback,
         test_iso_build_uses_spinner_for_mksquashfs_and_grub_mkrescue,
         test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue,
         test_progress_bar_show_rate_false_omits_rate_column,

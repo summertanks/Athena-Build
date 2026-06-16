@@ -110,6 +110,24 @@ class _IsoMixin:
         _staging_grub = os.path.join(_staging, 'boot', 'grub')
         _staging_live = os.path.join(_staging, 'live')
 
+        # STA-52: wipe the staging tree first so an asset removed since the
+        # last run (a dropped background/test file) doesn't ship forever —
+        # grub-mkrescue images the WHOLE tree.  sudo: a prior run's
+        # live/filesystem.squashfs is root-owned (mksquashfs ran as root).
+        # Mirrors iso_installer._prepare_staging.
+        if os.path.isdir(_staging):
+            _wipe = subprocess.run(
+                ['sudo', '-S', 'rm', '-rf', _staging],
+                input=self._password + '\n', capture_output=True, text=True)
+            if _wipe.returncode != 0:
+                tui.console.print(
+                    f"ERROR: failed to wipe staging {_staging} — "
+                    "stale files may ship")
+                logger.error(
+                    f"build_iso: wipe staging rc={_wipe.returncode}: "
+                    f"{_wipe.stderr.strip()[:200]}")
+                return False
+
         for _d in [_staging_boot, _staging_grub, _staging_live]:
             os.makedirs(_d, exist_ok=True)
 
@@ -227,6 +245,7 @@ class _IsoMixin:
         # Collect any actual files inside the runtime dirs to exclude (normally
         # empty after unmounting, but defensive in case something was left).
         _exclude_args = []
+        _used_glob = False
         for _d in ['proc', 'sys', 'dev', 'run', 'tmp']:
             _dir_path = os.path.join(self._dir_chroot, _d)
             if not os.path.isdir(_dir_path):
@@ -238,10 +257,18 @@ class _IsoMixin:
                 # dev/* may have root-owned nodes — exclude the whole dir's
                 # contents via a glob pattern as a fallback
                 _exclude_args += ['-e', os.path.join(_dir_path, '*')]
+                _used_glob = True
 
+        # STA-52: mksquashfs treats `-e dir/*` literally without -wildcards,
+        # so the glob fallback above would match nothing and silently ship
+        # the unlistable dir's contents.  Enable wildcards only when the
+        # fallback fired (the flag governs all following -e patterns, which
+        # are plain paths otherwise — harmless either way, but keep it tight).
         _cmd = (
             ['sudo', '-S', 'mksquashfs', self._dir_chroot, _squashfs,
-             '-comp', 'xz', '-noappend'] + _exclude_args
+             '-comp', 'xz', '-noappend']
+            + (['-wildcards'] if _used_glob else [])
+            + _exclude_args
         )
         # Subprocess transcript routed through logger.debug — the file
         # handler attached by setup_file_logging() captures it in the
