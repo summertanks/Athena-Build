@@ -1381,9 +1381,7 @@ def _classify_missing_claim(
     _fn = _row['filename']
     _src = str((_row.get('claim') or {}).get('package') or '')
     if closure_srcs is not None and _src and _src not in closure_srcs:
-        return ('INFO', 'own_claim_disk_pending_release',
-                f"{_fn} → deprecated on next `mirror publish` "
-                f"(source {_src} left the selection)")
+        return ('INFO', 'own_claim_disk_pending_release', f"{_fn} → deprecated")
     if closure_srcs is not None and _src in closure_srcs and buildlog_dir:
         try:
             import utils as _utils
@@ -1393,11 +1391,9 @@ def _classify_missing_claim(
         _outputs = set((_rec.get('output_hashes') or {}).keys())
         if _outputs and _fn not in _outputs:
             return ('INFO', 'own_claim_disk_pending_release',
-                    f"{_fn} → obsoleted on next `mirror publish` "
-                    f"(newer build of {_src})")
+                    f"{_fn} → obsoleted")
     return ('CRITICAL', 'own_claim_disk_missing',
-            f"{_fn} (our claim) not in {local_repo_dir} — current artifact "
-            "missing (publish will NOT fix; closure-incomplete)")
+            f"{_fn} not found in local repo, closure impact")
 
 
 def audit_own_claims_on_disk(
