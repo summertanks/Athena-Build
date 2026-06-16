@@ -6121,6 +6121,21 @@ def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
         "SNAPSHOT_TS must be self.snapshot_ts (the resolved pin), not a literal")
 
 
+def test_sta46_was_patched_keys_on_patch_files_not_dir_existence():
+    """STA-46: _was_patched (→ _was_delta → asg-stamp) must derive from the
+    ACTUAL applied .patch files (_live_patch_list), not the patch-dir's mere
+    existence — an empty dir would else asg-stamp byte-pristine artifacts
+    (violating Position-X) and diverge from the bool(patch_list) sites, so
+    `virtual validate` would flag the real build as drift."""
+    import inspect, sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import buildcontainer
+    _src = inspect.getsource(buildcontainer.BuildContainer.build)
+    assert '_was_patched = bool(_live_patch_list)' in _src, _src
+    assert '_was_patched = (src_patch_path != self.patch_empty)' not in _src, \
+        "still keys _was_patched off patch-dir existence (STA-46)"
+
+
 def test_sta51_snapshot_pin_origin_tracks_baseurl_host():
     """STA-51: the apt Pin-Priority 1001 `origin` must be the HOST of
     `[Snapshot] BaseUrl`, not a hardcoded snapshot.debian.org — otherwise a
@@ -34731,6 +34746,7 @@ def main() -> int:
         test_conf15_dockerfile_pins_toolchain_to_snapshot,
         test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
+        test_sta46_was_patched_keys_on_patch_files_not_dir_existence,
         test_sta51_snapshot_pin_origin_tracks_baseurl_host,
         test_conf15_per_build_dist_upgrade_workaround_removed,
         # version_no_epoch — patch dir lookup must match Debian filename convention
