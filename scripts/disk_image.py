@@ -184,12 +184,16 @@ def build_disk_image(
         try:
             with os.fdopen(_sf_fd, 'w') as _fh:
                 _fh.write(_SFDISK_SCRIPT_TEMPLATE)
-            _r = subprocess.run(
-                ['sudo', '-S', 'bash', '-c',
-                 f'sfdisk --wipe always {_loop_dev} < {_sf_path}'],
-                input=password + '\n',
-                capture_output=True, text=True,
-            )
+            # STA-40: argv form, no shell.  `sudo -S` would want the password
+            # on the SAME stdin sfdisk needs for its partition script, so use
+            # `sudo -A` (askpass) and hand sfdisk the script file as its stdin.
+            with utils.sudo_askpass_env(password) as _env, \
+                    open(_sf_path) as _sf_in:
+                _r = subprocess.run(
+                    ['sudo', '-A', 'sfdisk', '--wipe', 'always', _loop_dev],
+                    stdin=_sf_in, env=_env,
+                    capture_output=True, text=True,
+                )
         finally:
             try:
                 os.unlink(_sf_path)

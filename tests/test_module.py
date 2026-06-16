@@ -3389,11 +3389,15 @@ def test_iso_installer_generate_apt_repo_invokes_correct_pipeline():
         # apt-ftparchive release: real apt-ftparchive writes to stdout;
         # the helper redirects via stdout=<file handle> kwarg.  Mirror
         # by writing a stub Release to that handle so size > 0 check passes.
-        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
-              cmd[2] == 'apt-ftparchive'):
+        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and cmd[2] in (
+              'apt-ftparchive', 'dpkg-scanpackages', 'dpkg-scansources')):
+            # STA-40: apt-ftparchive + dpkg-scan* now run argv-form with the
+            # output going to the stdout=<handle> kwarg.
             _stdout = kw.get('stdout')
             if _stdout is not None and hasattr(_stdout, 'write'):
-                _stdout.write(b'Suite: stub\nCodename: stub\n')
+                _stdout.write(b'Package: stub\nVersion: 1.0\n\n'
+                              if 'scan' in cmd[2] else
+                              b'Suite: stub\nCodename: stub\n')
         _r = MagicMock()
         _r.returncode = 0
         _r.stderr = b''
@@ -3565,11 +3569,15 @@ def test_apt_repo_generate_repo_indexes_walks_all_suites_and_components():
 
     def _fake_subprocess_run(cmd, *_a, **kw):
         _calls.append(tuple(cmd))
-        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
-                cmd[2] == 'apt-ftparchive'):
+        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and cmd[2] in (
+                'apt-ftparchive', 'dpkg-scanpackages', 'dpkg-scansources')):
+            # STA-40: apt-ftparchive + dpkg-scan* now run argv-form with the
+            # output going to the stdout=<handle> kwarg.
             _stdout = kw.get('stdout')
             if _stdout is not None and hasattr(_stdout, 'write'):
-                _stdout.write(b'Suite: stub\nCodename: stub\n')
+                _stdout.write(b'Package: stub\nVersion: 1.0\n\n'
+                              if 'scan' in cmd[2] else
+                              b'Suite: stub\nCodename: stub\n')
         _r = type('R', (), {})()
         _r.returncode = 0
         _r.stderr = b''
@@ -3736,11 +3744,14 @@ def test_apt_repo_generate_repo_indexes_skips_empty_component_but_indexes_others
 
     def _fake_subprocess_run(cmd, *_a, **kw):
         _calls.append(tuple(cmd))
-        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and
-                cmd[2] == 'apt-ftparchive'):
+        if (cmd[:2] == ['sudo', '-S'] and len(cmd) > 2 and cmd[2] in (
+                'apt-ftparchive', 'dpkg-scanpackages', 'dpkg-scansources')):
+            # STA-40: apt-ftparchive + dpkg-scan* run argv-form, output via
+            # the stdout=<handle> kwarg.
             _stdout = kw.get('stdout')
             if _stdout is not None and hasattr(_stdout, 'write'):
-                _stdout.write(b'Components: stub\n')
+                _stdout.write(b'Package: stub\nVersion: 1.0\n\n'
+                              if 'scan' in cmd[2] else b'Components: stub\n')
         _r = type('R', (), {})()
         _r.returncode = 0
         _r.stderr = b''
@@ -6119,6 +6130,40 @@ def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
         "ARCHIVE_NAME should be the primary 'debian' archive")
     assert 'self.snapshot_ts' in _kwargs, (
         "SNAPSHOT_TS must be self.snapshot_ts (the resolved pin), not a literal")
+
+
+def test_sta40_no_shell_interpolation_in_sudo_sites():
+    """STA-40: the live `sudo bash -c f"…"` sites are argv-form now —
+    _run_dpkg_scan (argv + stdout handle, stderr CAPTURED not 2>/dev/null'd),
+    sfdisk + the cpio initrd pipeline (askpass + argv).  utils.sudo_askpass_env
+    supplies the password via a 0700 helper so the command's stdin stays free."""
+    import sys as _sys, subprocess as _sp, inspect as _inspect
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import utils, apt_repo, disk_image, iso_installer
+
+    # sudo_askpass_env yields a usable askpass helper; cleaned up after
+    with utils.sudo_askpass_env('s3cr3t! $x`') as _env:
+        _ap = _env['SUDO_ASKPASS']
+        assert os.path.isfile(_ap)
+        assert (os.stat(_ap).st_mode & 0o777) == 0o700
+        # the helper echoes the password VERBATIM (metachars survive — that's
+        # the whole point vs interpolating into a shell)
+        _out = _sp.run([_ap], env=_env, capture_output=True, text=True).stdout
+        assert _out == 's3cr3t! $x`', repr(_out)
+    assert not os.path.exists(_ap), "askpass helper not cleaned up"
+
+    # live sites are de-shelled (no `bash -c`)
+    _scan = _inspect.getsource(apt_repo._run_dpkg_scan)
+    assert "'bash', '-c'" not in _scan, _scan
+    # stderr CAPTURED (PIPE), no longer redirected to /dev/null in a shell
+    assert 'stderr=subprocess.PIPE' in _scan, "_run_dpkg_scan must capture stderr"
+    assert "'2>/dev/null'" not in _scan and '2>/dev/null > ' not in _scan, \
+        "stderr is captured now, not discarded via a shell redirect"
+    _di = _inspect.getsource(disk_image.build_disk_image)
+    assert "'bash', '-c'" not in _di and 'sudo_askpass_env' in _di, _di
+    _initrd = _inspect.getsource(iso_installer._build_initrd)
+    assert "'bash', '-c'" not in _initrd and 'sudo_askpass_env' in _initrd, \
+        "cpio initrd pipeline still shells out"
 
 
 def test_sta44_index_verified_against_release_sha():
@@ -14305,16 +14350,14 @@ def test_scan_packages_with_progress_writes_output_via_subprocess_run():
     )
 
     def _fake_run(argv, *_a, **kw):
-        # Identify the `bash -c '… > <tempfile>'` call and write the
-        # stub stanzas to that tempfile so subsequent move + checks
-        # see real content.  Anything else (the `sudo install` follow-
-        # up in the sudo path) just returns rc=0.
-        if (isinstance(argv, (list, tuple)) and len(argv) >= 3
-                and argv[0] == 'bash' and argv[1] == '-c'
-                and '> ' in argv[2]):
-            _target = argv[2].split('> ')[1].strip().split()[0]
-            with open(_target, 'w') as fh:
-                fh.write(_stub_packages)
+        # STA-40: argv form — the scanner's stdout is the kw['stdout'] handle
+        # (binary).  Write the stub stanzas there so the move + checks see
+        # content.  Anything else (the `sudo install` follow-up) returns rc=0.
+        if (isinstance(argv, (list, tuple))
+                and any('dpkg-scan' in str(_x) for _x in argv)):
+            _stdout = kw.get('stdout')
+            if _stdout is not None and hasattr(_stdout, 'write'):
+                _stdout.write(_stub_packages.encode())
         _r = MagicMock()
         _r.returncode = 0
         _r.stderr = ''
@@ -14726,7 +14769,7 @@ def test_iso_installer_uses_spinner_for_initrd_and_grub_mkrescue():
         _body = fh.read()
     import re
     _initrd = re.search(
-        r"tui\.Spinner\([^)]*initrd[^)]*\).*?_sudo\(\['bash'",
+        r"tui\.Spinner\([^)]*initrd[^)]*\).*?sudo_askpass_env",
         _body, re.DOTALL,
     )
     assert _initrd, (
@@ -25043,15 +25086,10 @@ def test_sta22_run_dpkg_scan_honours_allow_empty():
     _orig_run = apt_repo.subprocess.run
 
     def _fake_run_empty(argv, **kw):
-        # Simulate a successful scan that produces an empty output file.
-        # The shell command opens the tempfile via `> path`; mimic by
-        # creating an empty file at the path embedded in the shell.
-        if isinstance(argv, list) and argv and argv[0] == 'bash':
-            _shell = argv[-1]
-            # Extract the `> /path/to/tmp` redirect target
-            _tmp = _shell.rsplit('> ', 1)[-1].strip()
-            with open(_tmp, 'w'):
-                pass
+        # STA-40: argv form — the scanner writes to the kw['stdout'] handle.
+        # Model an EMPTY scan: return rc=0 without writing (leave 0 bytes),
+        # so the real code's open(_tmp,'wb') stays empty.
+        if isinstance(argv, list) and any('dpkg-scan' in str(_a) for _a in argv):
             return _real_sp.CompletedProcess(argv, 0, '', '')
         return _orig_run(argv, **kw)
 
@@ -34833,6 +34871,7 @@ def main() -> int:
         test_conf15_dockerfile_pins_toolchain_to_snapshot,
         test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
+        test_sta40_no_shell_interpolation_in_sudo_sites,
         test_sta44_index_verified_against_release_sha,
         test_sta48_cve_report_path_never_overwrites_input_sbom,
         test_sta46_was_patched_keys_on_patch_files_not_dir_existence,

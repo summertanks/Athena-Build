@@ -460,35 +460,59 @@ def _build_initrd(dir_chroot_installer: str, staging: str,
     """
     logger.info(f"build initrd: cpio | gzip {dir_chroot_installer} → boot/initrd.gz")
     _initrd = os.path.join(staging, 'boot', 'initrd.gz')
-    # `find . -print0 | cpio --null -o -H newc | gzip > initrd.gz`
-    # Run as a single shell pipeline under sudo so cpio can read the
-    # root-owned files.  cd into the chroot so paths inside the cpio are
-    # relative to /.
-    _shell_cmd = (
-        f"cd {dir_chroot_installer} && "
-        f"find . -print0 | cpio --null -o -H newc --quiet | "
-        f"gzip -9 > {_initrd}"
-    )
-    # Spinner — cpio|gzip on a 200-300 MB installer chroot takes
-    # 30-60s with no per-file output (--quiet).  Without a spinner
-    # the TUI looks frozen mid-iso-build.
+    # STA-40: argv pipeline, no shell.  `find . -print0 | cpio -o | gzip`.
+    # `sudo -A` (askpass) reads the root-owned chroot files for find + cpio;
+    # gzip runs as the current user (no root needed — it just compresses
+    # cpio's stdout) and writes the user-owned initrd.gz directly.  cwd= on
+    # BOTH find and cpio replaces the shared `cd` (cpio resolves the relative
+    # `./…` paths find emits against its OWN cwd); the output handle replaces
+    # `> initrd.gz`.  `--quiet` keeps the stderr pipes near-empty so cpio
+    # can't block on a full stderr pipe before gzip drains stdout.
+    # Spinner — cpio|gzip on a 200-300 MB installer chroot takes 30-60s with
+    # no per-file output; without it the TUI looks frozen mid-iso-build.
     _spin = tui.Spinner(f"Packing initrd (cpio | gzip) → {_initrd}")
     try:
-        _r = _sudo(['bash', '-c', _shell_cmd], password)
+        with utils.sudo_askpass_env(password) as _env, \
+                open(_initrd, 'wb') as _out:
+            _find = subprocess.Popen(
+                ['sudo', '-A', 'find', '.', '-print0'],
+                cwd=dir_chroot_installer, env=_env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            _cpio = subprocess.Popen(
+                ['sudo', '-A', 'cpio', '--null', '-o', '-H', 'newc',
+                 '--quiet'],
+                cwd=dir_chroot_installer, stdin=_find.stdout, env=_env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert _find.stdout is not None
+            _find.stdout.close()   # let find see SIGPIPE if cpio dies
+            _gzip = subprocess.Popen(
+                ['gzip', '-9'], stdin=_cpio.stdout, stdout=_out,
+                stderr=subprocess.PIPE)
+            assert _cpio.stdout is not None
+            _cpio.stdout.close()
+            _gzip_err = (_gzip.communicate()[1] or b'').decode(
+                'utf-8', 'replace')
+            _cpio_err = ((_cpio.stderr.read() if _cpio.stderr else b'')
+                         .decode('utf-8', 'replace'))
+            _cpio.wait()
+            _find_err = ((_find.stderr.read() if _find.stderr else b'')
+                         .decode('utf-8', 'replace'))
+            _find.wait()
     finally:
         _spin.done()
-    if _r.returncode != 0:
+    _rc = _gzip.returncode or _cpio.returncode or _find.returncode
+    _err = ' | '.join(_e for _e in (_find_err.strip(), _cpio_err.strip(),
+                                    _gzip_err.strip()) if _e)
+    if _rc != 0:
         tui.console.print(
-            f"ERROR: cpio|gzip pipeline failed (rc={_r.returncode}): "
-            f"{_r.stderr.strip()[:200]}"
+            f"ERROR: cpio|gzip pipeline failed (rc={_rc}): {_err[:200]}"
         )
-        logger.error(
-            f"_build_initrd cpio|gzip: rc={_r.returncode}, "
-            f"stderr={_r.stderr.strip()}"
-        )
+        logger.error(f"_build_initrd cpio|gzip: rc={_rc}, stderr={_err}")
         return False
-    # cpio writes the file as root; chown back to the running user so
-    # later operations (grub-mkrescue) can read without sudo.
+    # gzip now writes initrd.gz as the current user (it's no longer in the
+    # sudo'd part of the pipeline), so this chown is a harmless no-op —
+    # retained as a belt so the file is operator-readable regardless of who
+    # gzip ran as (and for a future change that moves gzip back under sudo).
     _r = _sudo(['chown', f'{os.getuid()}:{os.getgid()}', _initrd], password)
     if _r.returncode != 0:
         logger.warning(
