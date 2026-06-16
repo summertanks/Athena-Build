@@ -100,7 +100,12 @@ class BuildCommandsMixin(SessionState):
         # chroot build (and mirror publish) own the side-effect.
         # The chroot bring-up needs a signed InRelease so apt under
         # `--no-check-valid-until` can install built packages.
-        self._ensure_repo_indexed_for_chroot()
+        if not self._ensure_repo_indexed_for_chroot():
+            # Auto-index failed → chroot bring-up would die minutes later on
+            # the missing InRelease.  Abort now (the helper already printed
+            # the cause).
+            console.print("Aborted by repo auto-index")
+            return
 
         _debug = 'with_debug' in args
         if _debug:
@@ -214,7 +219,11 @@ class BuildCommandsMixin(SessionState):
             console.print(
                 "chroot build disk: pre-flight audits BYPASSED (no-gate)",
                 tui.COLOR_WARNING)
-        self._ensure_repo_indexed_for_chroot()
+        if not self._ensure_repo_indexed_for_chroot():
+            # Auto-index failed → abort before the multi-minute disk-chroot
+            # bring-up that would die on the missing InRelease.
+            console.print("Aborted by repo auto-index")
+            return
         _debug = 'with_debug' in args
 
         console.print("Initialising build system (disk surface)...")
