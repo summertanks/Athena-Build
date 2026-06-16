@@ -841,14 +841,21 @@ class RepoCommandsMixin(SessionState):
         finally:
             _spin.done()
 
-        # STA-25: which obsolete targets are still named by a LIVE published
-        # claim?  Deleting their bytes before the mirror is told (publish-
-        # before-prune) strands a sha the mirror keeps serving.
+        # STA-25: which obsolete targets still have a LIVE published claim on
+        # a mirror?  `mirror publish` RELEASES every one of them automatically
+        # — superseded versions get obsoleted (publish Step 6c), dropped
+        # sources deprecated (Step 6b) — so the clean order is publish-before-
+        # prune.  Deleting first loses NO bytes (the mirror is append-only and
+        # keeps them), but leaves a transient `own_claim_disk_missing` in
+        # `mirror audit` until the next publish.  Cleanup only ever targets
+        # orphan/drift (never closure files), so this can never break the
+        # closure — it's purely an ordering nudge.
         _live_fns = self._live_published_claim_filenames()
-        _claimed = sorted(
-            {_f for _sub, _f, *_ in _orphan if _f in _live_fns}
-            | {_f for _sub, _f, *_ in _drift if _f in _live_fns}
-        )
+        _claimed_drift = sorted({_f for _sub, _f, *_ in _drift
+                                 if _f in _live_fns})
+        _claimed_orphan = sorted({_f for _sub, _f, *_ in _orphan
+                                  if _f in _live_fns})
+        _claimed = _claimed_drift + _claimed_orphan
 
         # ------ Report ------
         _n_obsolete = len(_orphan) + len(_drift)
@@ -931,20 +938,24 @@ class RepoCommandsMixin(SessionState):
                 )
 
         if _claimed:
+            _what = []
+            if _claimed_drift:
+                _what.append(f"{len(_claimed_drift)} superseded → obsoleted")
+            if _claimed_orphan:
+                _what.append(
+                    f"{len(_claimed_orphan)} dropped-source → deprecated")
             console.print(
-                f"\n  ⚠ PUBLISH-BEFORE-PRUNE: {len(_claimed)} of these are "
-                "still named by a LIVE published claim on a mirror:",
+                f"\n  ⚠ {len(_claimed)} of these still have a LIVE published "
+                "claim on a mirror — run `mirror publish` FIRST and they "
+                f"release automatically ({'; '.join(_what)}); then cleanup + "
+                "`mirror audit` stay clean.  This is about ORDER, not safety: "
+                "the append-only mirror keeps the bytes regardless.",
                 tui.COLOR_WARNING)
             for _f in _claimed[:15]:
                 console.print(f"      {_f}", tui.COLOR_WARNING)
             if len(_claimed) > 15:
                 console.print(
                     f"      … (+{len(_claimed) - 15} more)", tui.COLOR_WARNING)
-            console.print(
-                "    Deprecate/obsolete them on the mirror first "
-                "(`mirror publish`), or `mirror reclaim` to refresh the bytes "
-                "— deleting now strands a sha the mirror still serves.",
-                tui.COLOR_WARNING)
 
         if not _force:
             console.print(
@@ -961,14 +972,14 @@ class RepoCommandsMixin(SessionState):
         if _claimed:
             _resp = Prompt(
                 PROMPT_YESNO,
-                f"{len(_claimed)} file(s) are still named by a LIVE published "
-                "claim on a mirror (publish-before-prune).  Delete locally "
-                "anyway?",
+                f"{len(_claimed)} file(s) still have a LIVE mirror claim — "
+                "`mirror publish` releases them first (the clean order).  "
+                "Delete locally now anyway?",
             ).get_response()
             if _resp.lower() not in ('y', 'yes'):
                 console.print(
-                    "Aborted — `mirror publish` the supersession first, "
-                    "then re-run cleanup")
+                    "Aborted — run `mirror publish` (it releases these "
+                    "claims), then re-run cleanup")
                 return
 
         # Force mode: final confirmation prompt.  _n_to_delete counts the
