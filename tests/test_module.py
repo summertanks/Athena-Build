@@ -29148,6 +29148,62 @@ def test_audit_sidecar_seq_integrity_flags_dup_gap_and_missing_one():
     assert all(_t[0] == 'CRITICAL' for _t in _f)
 
 
+def test_sta25_audit_downgrades_missing_claim_when_publish_will_release():
+    """STA-25 follow-up: `mirror audit` marks a missing own-claim file INFO
+    (`own_claim_disk_pending_release`) when the next `mirror publish` will
+    release it — DEPRECATE (source left the signed selection) or OBSOLETE
+    (newer build emits a different filename) — and keeps CRITICAL for a
+    genuinely-missing current artifact.  Helps the operator who pruned before
+    publishing or forgot the cleanup message / came back later."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import mirror as _mir, utils as _u
+
+    with tempfile.TemporaryDirectory() as _td:
+        _repo = os.path.join(_td, 'repo')          # empty → every claim missing
+        os.makedirs(_repo)
+        _buildlog = os.path.join(_td, 'log', 'build')
+        os.makedirs(_buildlog)
+        # `foo` still selected, current build emits foo_2 (NOT foo_1)
+        _rec = _u.new_build_record(package='foo', intended_version='2',
+                                   patch_set_hash='')
+        _rec['output_hashes'] = {'foo_2_amd64.deb': 'a' * 64}
+        _u.write_build_record(_buildlog, _rec)
+        # `cur` still selected, current build STILL emits cur_1
+        _rec2 = _u.new_build_record(package='cur', intended_version='1',
+                                    patch_set_hash='')
+        _rec2['output_hashes'] = {'cur_1_amd64.deb': 'b' * 64}
+        _u.write_build_record(_buildlog, _rec2)
+
+        _by_builder = {'athena-ours': [
+            {'package': 'dropped', 'filename': 'dropped_1_amd64.deb',
+             'sha256': 'c' * 64, 'claim_state': 'published'},
+            {'package': 'foo', 'filename': 'foo_1_amd64.deb',
+             'sha256': 'd' * 64, 'claim_state': 'published'},
+            {'package': 'cur', 'filename': 'cur_1_amd64.deb',
+             'sha256': 'e' * 64, 'claim_state': 'published'},
+        ]}
+        _closure = {'foo', 'cur'}   # `dropped` left the selection
+
+        _f = _mir.audit_own_claims_on_disk(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_repo, buildlog_dir=_buildlog,
+            closure_srcs=_closure)
+        _by_fn = {_t[2].split()[0]: (_t[0], _t[1]) for _t in _f}
+        assert _by_fn['dropped_1_amd64.deb'] == (
+            'INFO', 'own_claim_disk_pending_release'), _f   # → deprecated
+        assert _by_fn['foo_1_amd64.deb'] == (
+            'INFO', 'own_claim_disk_pending_release'), _f   # → obsoleted
+        assert _by_fn['cur_1_amd64.deb'] == (
+            'CRITICAL', 'own_claim_disk_missing'), _f       # genuine
+
+        # back-compat: no closure info → conservative, all CRITICAL
+        _f2 = _mir.audit_own_claims_on_disk(
+            _by_builder, our_builder_id='athena-ours',
+            local_repo_dir=_repo, buildlog_dir=_buildlog)
+        assert all(_t[0] == 'CRITICAL' for _t in _f2), _f2
+
+
 def test_audit_own_claims_on_disk_match_disk_silent_mismatch_critical():
     """Our own claim referencing a present-on-disk .deb whose sha
     matches → silent.  Same filename with a different on-disk byte
@@ -35898,6 +35954,7 @@ def main() -> int:
         # MIRROR-01 audit gap (3) — sidecar JSONL integrity + own-disk rehash
         test_audit_sidecar_seq_integrity_clean_run_is_silent,
         test_audit_sidecar_seq_integrity_flags_dup_gap_and_missing_one,
+        test_sta25_audit_downgrades_missing_claim_when_publish_will_release,
         test_audit_own_claims_on_disk_match_disk_silent_mismatch_critical,
         test_audit_own_claims_on_disk_no_our_builder_id_is_noop,
         test_audit_own_claims_on_disk_ahead_of_remote_is_warning_not_critical,

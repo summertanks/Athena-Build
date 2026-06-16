@@ -1361,10 +1361,50 @@ def audit_sidecar_seq_integrity(
     return _findings
 
 
+def _classify_missing_claim(
+    _row: dict, local_repo_dir: str, buildlog_dir: 'Optional[str]',
+    closure_srcs: 'Optional[set]',
+) -> 'tuple[str, str, str]':
+    """STA-25 follow-up: a live own-claim file missing on disk is CRITICAL —
+    UNLESS the next `mirror publish` will RELEASE the claim, in which case it
+    is a benign INFO (the operator just pruned before publishing).  Two
+    CONFIRMABLE release paths (remote_publish Steps 6b/6c):
+
+      - source left the signed selection  → next publish DEPRECATES it
+      - source still selected but the current build no longer emits this exact
+        filename (newer version) → next publish OBSOLETES it
+
+    Either downgrades to INFO `own_claim_disk_pending_release`.  When release
+    can't be confirmed (no closure info, or the current build still emits this
+    file) it stays CRITICAL — a genuinely-missing current artifact (the
+    closure-incomplete case)."""
+    _fn = _row['filename']
+    _src = str((_row.get('claim') or {}).get('package') or '')
+    if closure_srcs is not None and _src and _src not in closure_srcs:
+        return ('INFO', 'own_claim_disk_pending_release',
+                f"{_fn} → deprecated on next `mirror publish` "
+                f"(source {_src} left the selection)")
+    if closure_srcs is not None and _src in closure_srcs and buildlog_dir:
+        try:
+            import utils as _utils
+            _rec = _utils.read_build_record(buildlog_dir, _src) or {}
+        except Exception:
+            _rec = {}
+        _outputs = set((_rec.get('output_hashes') or {}).keys())
+        if _outputs and _fn not in _outputs:
+            return ('INFO', 'own_claim_disk_pending_release',
+                    f"{_fn} → obsoleted on next `mirror publish` "
+                    f"(newer build of {_src})")
+    return ('CRITICAL', 'own_claim_disk_missing',
+            f"{_fn} (our claim) not in {local_repo_dir} — current artifact "
+            "missing (publish will NOT fix; closure-incomplete)")
+
+
 def audit_own_claims_on_disk(
     by_builder: 'dict[str, list[dict]]',
     our_builder_id: 'Optional[str]', local_repo_dir: str,
     buildlog_dir: 'Optional[str]' = None,
+    closure_srcs: 'Optional[set]' = None,
 ) -> 'list[tuple[str, str, str]]':
     """Rehash every .deb we ourselves published and compare with the
     claim's ``sha256``.  Catches pool bitrot on OUR side independent
@@ -1400,10 +1440,8 @@ def audit_own_claims_on_disk(
         _kind = _row['kind']
         _fn = _row['filename']
         if _kind == 'missing':
-            _findings.append((
-                'CRITICAL', 'own_claim_disk_missing',
-                f"{_fn} (our claim) not in {local_repo_dir} — our own "
-                "pool diverges from our sidecar"))
+            _findings.append(_classify_missing_claim(
+                _row, local_repo_dir, buildlog_dir, closure_srcs))
         elif _kind == 'unreadable':
             _findings.append((
                 'CRITICAL', 'own_claim_disk_unreadable',
