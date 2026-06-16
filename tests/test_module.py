@@ -1579,6 +1579,58 @@ def test_compute_install_batches_dpkg_dash_closure_scheduled_first():
     ], batches
 
 
+def test_sta25_cleanup_guards_live_published_claims():
+    """STA-25: `repo repair cleanup` must flag obsolete files still named by a
+    LIVE published claim (publish-before-prune) — deleting them locally before
+    the mirror is told strands a sha the mirror still serves.  A deprecated /
+    obsoleted claim is itself a prune signal, so its filename is NOT flagged."""
+    import sys as _sys, json as _json, inspect as _inspect
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import coord.schema as _schema
+    from build import BuildSession
+
+    def _claim(**kw):
+        _base = {
+            'builder': 'b1', 'seq': 1, 'package': 'foo',
+            'intended_version': '1', 'built_version': '1',
+            'filename': 'foo_1_amd64.deb', 'sha256': 'a' * 64,
+            'size': 10, 'snapshot': 'S', 'built_at': 't',
+        }
+        _base.update(kw)
+        _c = _schema.new_claim(**_base)
+        _c['sig'] = 'test-signature'   # claim_from_jsonl requires the sig key
+        return _c
+
+    with tempfile.TemporaryDirectory() as _td:
+        _claims = os.path.join(_td, 'claims')
+        os.makedirs(_claims)
+        _jp = os.path.join(_claims, 'b1.jsonl')
+        with open(_jp, 'w') as _fh:
+            _fh.write(_json.dumps(
+                _claim(claim_state=_schema.CLAIM_STATE_PUBLISHED)) + '\n')
+
+        _sess = BuildSession.__new__(BuildSession)
+        _sess.config = type('C', (), {'dir_coord_claims': _claims})()
+        # a live published claim → its filename is flagged
+        assert _sess._live_published_claim_filenames() == {'foo_1_amd64.deb'}
+
+        # deprecate it → folded out (prune signal, not flagged)
+        _dep = _claim(seq=2, claim_state=_schema.CLAIM_STATE_DEPRECATED)
+        _dep['deprecates_seq'] = 1
+        with open(_jp, 'a') as _fh:
+            _fh.write(_json.dumps(_dep) + '\n')
+        assert _sess._live_published_claim_filenames() == set()
+
+        # no coord ledger → empty (non-federated operator, cleanup unaffected)
+        _sess.config = type('C', (), {'dir_coord_claims': '/nonexistent'})()
+        assert _sess._live_published_claim_filenames() == set()
+
+    # source pin: cleanup computes _claimed + gates the force-delete on it
+    _src = _inspect.getsource(BuildSession.cmd_package_cleanup)
+    assert '_live_published_claim_filenames()' in _src and '_claimed' in _src
+    assert 'publish-before-prune' in _src.lower(), _src
+
+
 def test_sta37_build_chroot_gates_on_incomplete_set():
     """STA-37: build_chroot must RETURN FALSE when a planned package is
     broken or never-installed (the authoritative pass/fail gate the docstring
@@ -34743,6 +34795,7 @@ def main() -> int:
         test_compute_install_batches_acyclic_then_cycle,
         test_compute_install_batches_external_deps_filtered,
         test_compute_install_batches_dpkg_dash_closure_scheduled_first,
+        test_sta25_cleanup_guards_live_published_claims,
         test_sta37_build_chroot_gates_on_incomplete_set,
         test_build_chroot_retries_failed_unpacks_after_final_sweep_in_rounds,
         test_configure_chroot_final_pass_counts_stderr_failures,
