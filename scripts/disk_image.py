@@ -341,6 +341,44 @@ def build_disk_image(
                 return False
         _bind_mounted = True
 
+        # Absolute PATH + explicit env to insulate chroot commands against
+        # a sudo secure_path lacking /usr/sbin or an unset chroot PATH (both
+        # bit the operator 2026-05-22).  Shared by update-initramfs +
+        # grub-install below.
+        _chroot_env = (
+            'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:'
+            '/usr/bin:/sbin:/bin'
+        )
+
+        # STA-26: regenerate the initramfs now that /etc/fstab (step 7) holds
+        # the real root (ext4) + ESP (vfat) entries.  The kernel's postinst
+        # ran update-initramfs during the chroot build, when fstab carried
+        # only the virtual filesystems (chroot.py), so initramfs-tools' fsck
+        # hook copied NO fsck.ext4/fsck.vfat — leaving the shipped image
+        # unable to check/repair its root fs from the initramfs (it falls
+        # through to systemd-fsck on the already-mounted root).  With the
+        # bind-mounts (/proc /sys /dev) up and the real fstab in place,
+        # `update-initramfs -u` reads the correct fstypes and pulls the fsck
+        # binaries in.  The initrd FILENAME is unchanged, so the hand-written
+        # grub.cfg below still resolves it.  Non-fatal on failure: the image
+        # still boots (systemd-fsck on the real root still runs).
+        _spin_initrd = tui.Spinner("update-initramfs (fsck tools) in chroot")
+        try:
+            _r = _sudo(
+                ['env', _chroot_env, 'chroot', _mnt,
+                 'update-initramfs', '-u', '-k', 'all'],
+                password,
+            )
+        finally:
+            _spin_initrd.done()
+        if _r.returncode != 0:
+            logger.warning(
+                f"update-initramfs -u (STA-26 fsck tools) rc={_r.returncode}: "
+                f"{_r.stderr.strip()[:200]}")
+            tui.console.print(
+                "W: update-initramfs -u failed — image initramfs may lack "
+                "fsck tools (root fs won't be checked from the initramfs)")
+
         _spin = tui.Spinner(
             f"grub-install EFI{' + BIOS' if _has_bios_modules(_mnt) else ''} "
             f"into chroot ({_loop_dev})"
@@ -353,14 +391,6 @@ def build_disk_image(
             # writes (we're building an image, not configuring the
             # host's boot order).
             #
-            # Absolute path + explicit env PATH to insulate against:
-            # (a) sudo configs whose secure_path doesn't include /usr/
-            # sbin, and (b) the chroot's own PATH being unset.  Both
-            # bit operator on first run (2026-05-22).
-            _chroot_env = (
-                'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:'
-                '/usr/bin:/sbin:/bin'
-            )
             _r = _sudo(
                 ['env', _chroot_env, 'chroot', _mnt,
                  '/usr/sbin/grub-install', '--target=x86_64-efi',

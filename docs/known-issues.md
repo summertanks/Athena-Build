@@ -104,9 +104,18 @@ the meta `.deb`s into the cdrom pool — see Fixed below.)*
 - **Severity**: Low — systemd-fsck on the real root works for healthy
   filesystems; the gap matters when the root fs needs repair before
   it can be mounted read-write.
-- **Fix**: TODO `STA-26` — write fstab (or a minimal stub) before the
-  kernel configures, or re-run `update-initramfs -u` as a late chroot
-  step after fstab generation.
+- **Fix**: RESOLVED (`STA-26`) — `disk_image.build_disk_image` re-runs
+  `update-initramfs -u -k all` inside the image chroot right after the
+  real fstab is written (step 7, ext4 root passno 1) and the bind-mounts
+  are up, so initramfs-tools' fsck hook reads the correct root fstype and
+  pulls `fsck.ext4` in.  Verified on the built qcow2 (2026-06-16):
+  `lsinitramfs … | grep fsck` → `usr/sbin/fsck.ext4`.  The ESP's
+  `fsck.vfat` is intentionally NOT in the initramfs — the initramfs only
+  mounts the root fs; `/boot/efi` (vfat, passno 2) is checked later by
+  `systemd-fsck` from the real root, where dosfstools lives.  Scoped to
+  the disk surface only — the live ISO boots a squashfs/live-boot root
+  that needs no fsck.  Non-fatal on failure (the image still boots via
+  systemd-fsck on the real root).
 
 ---
 

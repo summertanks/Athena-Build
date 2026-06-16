@@ -14241,6 +14241,29 @@ def test_disk_image_module_exposes_build_disk_image_signature():
     )
 
 
+def test_disk_image_regenerates_initramfs_for_fsck_tools():
+    """STA-26: after writing the real fstab (ext4 root + vfat ESP, step 7),
+    the disk build re-runs `update-initramfs -u` inside the chroot so
+    initramfs-tools' fsck hook copies fsck.ext4/fsck.vfat.  The kernel's
+    build-time update-initramfs ran against the virtual-only chroot fstab and
+    copied none.  Source pin (the privileged disk path can't run in CI)."""
+    import sys, inspect
+    sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import disk_image
+    _src = inspect.getsource(disk_image.build_disk_image)
+    _i = _src.find("'update-initramfs'")
+    assert _i != -1, "no update-initramfs call in the disk image build"
+    # runs as -u inside the chroot (env PATH + chroot _mnt)
+    _call = _src[_i - 80:_i + 80]
+    assert "'-u'" in _call and 'chroot' in _call, _call
+    # MUST run AFTER the fstab write — the fsck hook keys on fstab fstypes
+    _fstab_i = _src.find("'fstab'")
+    assert _fstab_i != -1 and _fstab_i < _i, \
+        "update-initramfs must run after the fstab write"
+    # non-fatal: warns, never aborts the image build
+    assert 'STA-26' in _src and 'image initramfs may lack' in _src, _src
+
+
 def test_build_system_sh_checks_disk_image_tools():
     """The disk-image host-tool pre-flight lives in build-system.sh
     (matches the iso-tools gate pattern).  Pin the tool list so a
@@ -35453,6 +35476,7 @@ def main() -> int:
         test_source_audit_uses_per_source_progress_bar,
         test_scan_packages_with_progress_writes_output_via_subprocess_run,
         test_disk_image_module_exposes_build_disk_image_signature,
+        test_disk_image_regenerates_initramfs_for_fsck_tools,
         test_build_system_sh_checks_disk_image_tools,
         test_disk_image_has_bios_modules_probes_chroot_dir,
         test_disk_image_grub_install_uses_absolute_path_and_env_path,
