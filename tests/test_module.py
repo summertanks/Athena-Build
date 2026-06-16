@@ -6121,6 +6121,50 @@ def test_conf15_buildcontainer_buildargs_pass_snapshot_triplet():
         "SNAPSHOT_TS must be self.snapshot_ts (the resolved pin), not a literal")
 
 
+def test_sta44_index_verified_against_release_sha():
+    """STA-44: a freshly downloaded Packages/Sources index is hash-verified
+    against the GPG-verified InRelease SHA256.  Previously the sha gated only
+    the re-download SKIP, so a corrupt/tampered transfer was decompressed and
+    ingested silently.  Verifies the uncompressed sha (what the skip-check
+    keys on), falling back to the compressed artifact's sha."""
+    import sys as _sys, hashlib as _hashlib, inspect as _inspect
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    from cache import Cache
+    _f = Cache._verify_index_against_release   # doesn't touch self
+    with tempfile.TemporaryDirectory() as _td:
+        _dst = os.path.join(_td, 'Packages')
+        with open(_dst, 'wb') as _fh:
+            _fh.write(b'index-bytes')
+        _good = _hashlib.sha256(b'index-bytes').hexdigest()
+        _comp = os.path.join(_td, 'Packages.xz')
+        with open(_comp, 'wb') as _fh:
+            _fh.write(b'compressed-bytes')
+        _good_comp = _hashlib.sha256(b'compressed-bytes').hexdigest()
+        _P = 'main/binary-amd64/Packages'
+        # uncompressed sha present + matches → ok
+        _ok, _d = _f(None, _path=_P, _chosen_ext='.xz',
+                     _rel_sha={_P: _good}, _compressed_dst=_comp, _dst=_dst)
+        assert _ok, _d
+        # uncompressed sha present + MISMATCH → fail with detail
+        _ok, _d = _f(None, _path=_P, _chosen_ext='.xz',
+                     _rel_sha={_P: 'deadbeef' * 8},
+                     _compressed_dst=_comp, _dst=_dst)
+        assert not _ok and 'sha256' in _d, _d
+        # only compressed sha present → verify the compressed artifact
+        _ok, _d = _f(None, _path=_P, _chosen_ext='.xz',
+                     _rel_sha={_P + '.xz': _good_comp},
+                     _compressed_dst=_comp, _dst=_dst)
+        assert _ok, _d
+        _ok, _d = _f(None, _path=_P, _chosen_ext='.xz',
+                     _rel_sha={_P + '.xz': 'beef' * 16},
+                     _compressed_dst=_comp, _dst=_dst)
+        assert not _ok, _d
+    # both download paths invoke the verifier (def + 2 call sites)
+    _csrc = _inspect.getsource(Cache)
+    assert _csrc.count('_verify_index_against_release(') >= 3, \
+        "a download path no longer verifies the index against InRelease"
+
+
 def test_sta48_cve_report_path_never_overwrites_input_sbom():
     """STA-48: the cve report path must never equal the input SBOM.  The old
     `sbom_path.replace('.cdx.json', '.cve.json')` was a no-op on any name not
@@ -34789,6 +34833,7 @@ def main() -> int:
         test_conf15_dockerfile_pins_toolchain_to_snapshot,
         test_conf15_buildcontainer_image_tag_carries_snapshot_ts,
         test_conf15_buildcontainer_buildargs_pass_snapshot_triplet,
+        test_sta44_index_verified_against_release_sha,
         test_sta48_cve_report_path_never_overwrites_input_sbom,
         test_sta46_was_patched_keys_on_patch_files_not_dir_existence,
         test_sta51_snapshot_pin_origin_tracks_baseurl_host,

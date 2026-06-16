@@ -380,6 +380,24 @@ class Cache:
                     return -1
                 _decompress_spinner.done()
 
+                # STA-44: the InRelease sha gated only the skip above — verify
+                # the freshly written index against it so a corrupt/tampered
+                # download fails LOUD instead of being parsed silently.
+                _vok, _vdetail = self._verify_index_against_release(
+                    _path=_path, _chosen_ext=_chosen_ext, _rel_sha=_rel_sha,
+                    _compressed_dst=_compressed_dst, _dst=_dst)
+                if not _vok:
+                    for _f in (_dst, _compressed_dst):
+                        try:
+                            os.remove(_f)
+                        except OSError:
+                            pass
+                    self.error_str = (
+                        f"[{_mirror.id}] index integrity check FAILED for "
+                        f"{_path}: {_vdetail} — corrupt or tampered download")
+                    logger.error(self.error_str)
+                    return -1
+
                 _mirror_files[_path.rsplit('/', 1)[-1]] = _dst
 
             self.mirror_cache_files[_mirror.id] = _mirror_files
@@ -403,6 +421,42 @@ class Cache:
                               f"{rel.get('Version','?')} {rel.get('Date','?')}", tui.COLOR_HIGHLIGHT)
 
         return 0
+
+    def _verify_index_against_release(
+        self, *, _path: str, _chosen_ext: str, _rel_sha: dict,
+        _compressed_dst: str, _dst: str,
+    ) -> 'tuple[bool, str]':
+        """STA-44: verify a freshly downloaded + decompressed index against
+        the GPG-verified InRelease SHA256.
+
+        The InRelease sha gates only the re-download SKIP (the cached-file
+        fast path); without this, a truncated / corrupted / tampered transfer
+        is decompressed and INGESTED with no check this run (and silently
+        re-fetched every subsequent run, since the corrupt bytes never match
+        the skip-sha).  Prefers the UNCOMPRESSED sha (the value the skip-check
+        keys on); falls back to the compressed artifact's sha when the mirror
+        lists only the compressed variant.  Returns (ok, detail).
+        `use_cache=False` forces a fresh hash of the just-written bytes (no
+        stale .verified sidecar)."""
+        _unc = _rel_sha.get(_path, '')
+        if _unc:
+            _got = utils.get_sha256(_dst, use_cache=False)
+            if _got == _unc:
+                return True, ''
+            return False, (f"{os.path.basename(_dst)} sha256 {_got[:12]}… != "
+                           f"InRelease {_unc[:12]}…")
+        _comp = _rel_sha.get(_path + _chosen_ext, '')
+        if _comp:
+            _got = utils.get_sha256(_compressed_dst, use_cache=False)
+            if _got == _comp:
+                return True, ''
+            return False, (
+                f"{os.path.basename(_compressed_dst)} sha256 {_got[:12]}… != "
+                f"InRelease {_comp[:12]}…")
+        # Reachable only if neither form has a sha in Release — but we only
+        # get here with a chosen (Release-listed) compressed variant, so this
+        # is defensive.
+        return True, 'no InRelease SHA256 entry to verify against'
 
     def _fetch_optional_index(self, _path: str, _base_url: str,
                               _rel_sha: dict, _mirror) -> Optional[str]:
@@ -487,6 +541,21 @@ class Cache:
             )
             return None
         _decompress_spinner.done()
+
+        # STA-44: verify against InRelease (same as the required-index path).
+        _vok, _vdetail = self._verify_index_against_release(
+            _path=_path, _chosen_ext=_chosen_ext, _rel_sha=_rel_sha,
+            _compressed_dst=_compressed_dst, _dst=_dst)
+        if not _vok:
+            for _f in (_dst, _compressed_dst):
+                try:
+                    os.remove(_f)
+                except OSError:
+                    pass
+            logger.error(
+                f"[{_mirror.id}] optional index integrity check FAILED for "
+                f"{_path}: {_vdetail} — corrupt or tampered download (skipped)")
+            return None
         return _dst
 
     def __build_cache(self, arch: str) -> bool:
