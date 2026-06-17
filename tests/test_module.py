@@ -13076,6 +13076,48 @@ def test_source_build_installer_subset_unions_udeb_tree_with_deb_arm():
     ]
 
 
+def test_obs02_build_history_ledger_append_and_read():
+    """OBS-02: append_build_history writes one JSONL line per completed run to
+    log/build-history.jsonl (sibling of log/build/), maps phase done/failed →
+    PASS/FAIL, falls back built_version → intended_version, and read_build_history
+    round-trips in chronological order while skipping malformed lines."""
+    import utils as _u
+    with tempfile.TemporaryDirectory() as _root:
+        _log_build = os.path.join(_root, 'log', 'build')
+        os.makedirs(_log_build)
+        _u.append_build_history(_log_build, {
+            'package': 'glibc', 'phase': 'done', 'built_version': '2.36-9',
+            'finished': '2026-06-16T10:00:00Z', 'elapsed_seconds': 420.1,
+            'exit_code': 0})
+        _u.append_build_history(_log_build, {
+            'package': 'gnome-shell', 'phase': 'failed',
+            'intended_version': '43-1', 'finished': '2026-06-16T11:00:00Z',
+            'exit_code': 1})
+        _u.append_build_history(_log_build, None)        # no-op, no line
+        # ledger lives one level up from log/build/
+        _ledger = os.path.join(_root, 'log', 'build-history.jsonl')
+        assert os.path.isfile(_ledger)
+        with open(_ledger, 'a') as _fh:
+            _fh.write('{not json\n\n')                    # malformed + blank
+        _rows = _u.read_build_history(_log_build)
+        assert len(_rows) == 2, _rows
+        assert [_r['status'] for _r in _rows] == ['PASS', 'FAIL']
+        assert _rows[0]['version'] == '2.36-9'            # built_version
+        assert _rows[1]['version'] == '43-1'             # intended_version fallback
+        assert _rows[0]['package'] == 'glibc'
+
+
+def test_obs02_record_phase_appends_terminal_runs_to_ledger():
+    """OBS-02: BuildContainer._record_phase must append to the cross-run ledger
+    on a terminal phase (done/failed) — the per-package record is overwritten
+    each run, so the hook is the only durable capture of run N."""
+    import inspect
+    import buildcontainer
+    _src = inspect.getsource(buildcontainer.BuildContainer._record_phase)
+    assert 'append_build_history' in _src
+    assert "fields.get('phase') in ('done', 'failed')" in _src
+
+
 def test_refresh_patches_invalidates_record_when_patch_newer():
     """COMP-02 phase C: _refresh_patches must drop the build.json record
     when the patch CONTENT has changed since the last successful build.
@@ -35585,6 +35627,8 @@ def main() -> int:
         test_select_packages_save_and_quit_apply_intent,
         test_select_packages_discard_intent_reverts_nothing_written_by_finish,
         # LEDGER-01 Chunk 1 — build.json super schema core
+        test_obs02_build_history_ledger_append_and_read,
+        test_obs02_record_phase_appends_terminal_runs_to_ledger,
         test_upsert_build_record_creates_selected_classified_missing,
         test_upsert_build_record_preserves_build_fields_on_existing,
         test_preserve_lifecycle_and_roll_history,

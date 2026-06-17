@@ -523,6 +523,14 @@ class BuildContainer:
                 utils.write_build_record(self.buildlog_path, initial)
             else:
                 utils.update_build_record(self.buildlog_path, package, **fields)
+                # OBS-02: a terminal phase = one completed build run; append a
+                # durable summary to the cross-run ledger (the per-package
+                # record is overwritten next run).  append_build_history is
+                # itself best-effort and never raises.
+                if fields.get('phase') in ('done', 'failed'):
+                    utils.append_build_history(
+                        self.buildlog_path,
+                        utils.read_build_record(self.buildlog_path, package))
         except (OSError, FileNotFoundError) as _e:
             logger.warning(
                 f"build-record write failed for {package} "
