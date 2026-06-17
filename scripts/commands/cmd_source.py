@@ -438,8 +438,11 @@ class SourceCommandsMixin(SessionState):
                     #   — on-disk artifacts can't be trusted.
                     # Same action: drop the signed record so the next
                     # source build rebuilds.
+                    # STA-53(f): `source repair` may run before `container
+                    # init`, so self.container is None — derive the buildlog
+                    # dir from config like the read-only siblings do.
                     _f = os.path.join(
-                        self.container.buildlog_path,
+                        self.config.dir_log, 'build',
                         _name + utils.BUILD_RECORD_SUFFIX)
                     try:
                         os.remove(_f)
@@ -530,15 +533,24 @@ class SourceCommandsMixin(SessionState):
         version compare (catches +debNuN; ignores binNMU).  A source absent
         from `from_ts` (new since) also counts.  Returns (sorted_names, None)
         or (None, error)."""
-        _from = repo_audit.fetch_source_versions_at(self.config, from_ts)
-        if _from is None:
-            return None, (f"could not fetch the published snapshot ({from_ts}) "
-                          f"Sources index — check network / the timestamp")
         assert self.dep_tree is not None
         _srcs = dict(self.dep_tree.selected_srcs)
         if self.udeb_dep_tree is not None:
             for _n, _s in self.udeb_dep_tree.selected_srcs.items():
                 _srcs.setdefault(_n, _s)
+        # STA-53(g): an empty floor means a mirror is configured but has never
+        # published (see _update_build_pending) — there is nothing to diff
+        # against, so the whole non-fork selected set IS the workload.  Skip
+        # the snapshot fetch, which would dead-end on an empty timestamp with
+        # a misleading network error.
+        if not from_ts:
+            return sorted(
+                _name for _name, _src in _srcs.items()
+                if not self._is_fork_source(_src)), None
+        _from = repo_audit.fetch_source_versions_at(self.config, from_ts)
+        if _from is None:
+            return None, (f"could not fetch the published snapshot ({from_ts}) "
+                          f"Sources index — check network / the timestamp")
         _out: 'list[str]' = []
         for _name, _src in _srcs.items():
             if self._is_fork_source(_src):

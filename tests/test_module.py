@@ -31283,6 +31283,14 @@ def test_rsync_spec_for_url_handles_every_form():
     for _url, _want in _cases:
         _got = _m.rsync_spec_for_url(_url)
         assert _got == _want, f"{_url}: got {_got}, want {_want}"
+    # STA-53(e): a non-default ssh port has no valid spec encoding — reject,
+    # don't silently mangle into `host:port:path`.
+    try:
+        _m.rsync_spec_for_url('ssh://ubuntu@host:2222/srv/asgard')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("ssh:// URL with a port must raise ValueError")
 
 
 def test_all_mirror_urls_returns_every_registered_url():

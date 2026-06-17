@@ -180,6 +180,19 @@ class BuildCommandsMixin(SessionState):
             except (OSError, ValueError) as _e:
                 logger.error(f"_generate_tasks_desc: {_e}")
                 return ''
+        # STA-53(l): the lockfile seeds are the raw pkg.list vocabulary, which
+        # may be VIRTUAL names — tasksel can't resolve a virtual Key entry and
+        # silently drops the whole task.  Canonicalise each seed to its real
+        # Package via the selection closure (fall back to the raw name when not
+        # selected, so nothing is dropped), deduping collisions.
+        if self.dep_tree is not None and self.dep_tree.selected_pkgs:
+            import surfaces
+            _sel = self.dep_tree.selected_pkgs
+            _groups = {
+                _g: list(dict.fromkeys(
+                    surfaces._canonical(_sel, _s) or _s for _s in _seeds))
+                for _g, _seeds in _groups.items()
+            }
         _text = tasksel_desc.generate_desc(_groups, _meta)
         console.print(
             f"Generated tasksel menu: {max(0, _text.count('Task: '))} "

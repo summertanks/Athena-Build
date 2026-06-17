@@ -1264,9 +1264,14 @@ def lifecycle_touch_selected(buildlog_dir: str, selected: 'Dict[str, str]',
                 continue
             _sel = _rec.get('selection')
             if _sel in (SELECTION_DEPRECATED, SELECTION_RETRACTED):
+                # STA-53(k): archive the timestamp that matches the episode's
+                # state — a retracted record must keep retracted_at, not
+                # deprecated_at, in its rolled history.
+                _ts_field = ('retracted_at' if _sel == SELECTION_RETRACTED
+                             else 'deprecated_at')
                 roll_lifecycle_history(
                     _rec, state=str(_sel), now=_now,
-                    extra={'deprecated_at': _rec.get('deprecated_at')})
+                    extra={_ts_field: _rec.get(_ts_field)})
                 _rec.update({
                     'selection': SELECTION_SELECTED,
                     'selected_version': _v, 'snapshot': snapshot,
@@ -2512,6 +2517,9 @@ class BuildConfig:
 
             pathlib.Path(self.dir_log).mkdir(parents=True, exist_ok=True)
 
+            # STA-53(d): five features write here (snapshot/selection/manifest/
+            # mirror state, api.key) — ensure + writability-check it like the rest.
+            pathlib.Path(self.dir_config).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_cache).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_temp).mkdir(parents=True, exist_ok=True)
             pathlib.Path(self.dir_build_stage).mkdir(parents=True, exist_ok=True)
@@ -2599,7 +2607,7 @@ class BuildConfig:
             os.chmod(self.dir_gnupg, 0o700)
 
             for _dir in (
-                self.dir_log, self.dir_cache, self.dir_temp,
+                self.dir_log, self.dir_config, self.dir_cache, self.dir_temp,
                 self.dir_build_stage,
                 self.dir_source, self.dir_repo, self.dir_patch, self.dir_patch_empty,
                 self.dir_patch_source, self.dir_patch_preinstall, self.dir_patch_postinstall,

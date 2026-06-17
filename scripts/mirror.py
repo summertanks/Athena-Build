@@ -1696,6 +1696,15 @@ def rsync_spec_for_url(url: str) -> 'tuple[str, Optional[str]]':
     acquisition) or None for local-fs mirrors.
     """
     if isinstance(url, str) and url.startswith('ssh://'):
+        # STA-53(e): a non-default ssh port is carried by rsync via
+        # `-e 'ssh -p N'`, never in the host:path spec — embedding it would
+        # mangle into an invalid `host:port:path`.  Reject loudly until the
+        # transport learns to thread the port (rather than silently break).
+        _m = _SSH_URL_RE.match(url)
+        if _m is not None and _m.group('port'):
+            raise ValueError(
+                "rsync-over-ssh with a non-default port is not supported "
+                f"(carry it via `-e 'ssh -p N'`, not the URL): {url}")
         _path = url[len('ssh://'):]
         if '/' in _path:
             _host, _rest = _path.split('/', 1)
