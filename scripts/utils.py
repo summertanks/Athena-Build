@@ -1077,6 +1077,26 @@ def _build_history_path(buildlog_dir: str) -> str:
         os.path.dirname(os.path.normpath(buildlog_dir)), 'build-history.jsonl')
 
 
+def _build_history_line(record: dict) -> dict:
+    """OBS-02: project a build record (live or on-disk <pkg>.build.json) down
+    to the compact history summary stored one-per-run in the ledger."""
+    _phase = record.get('phase')
+    _status = ('PASS' if _phase == 'done'
+               else 'FAIL' if _phase == 'failed'
+               else str(record.get('status') or _phase or 'unknown'))
+    return {
+        'ts': record.get('finished') or _utc_now_iso(),
+        'package': record.get('package'),
+        'status': _status,
+        'version': (record.get('built_version')
+                    or record.get('intended_version')),
+        'snapshot': record.get('snapshot'),
+        'elapsed_seconds': record.get('elapsed_seconds'),
+        'exit_code': record.get('exit_code'),
+        'oom_killed': record.get('oom_killed'),
+    }
+
+
 def append_build_history(buildlog_dir: str, record: 'Optional[dict]') -> None:
     """OBS-02: append a one-line summary of a COMPLETED build run to the
     append-only ledger ``log/build-history.jsonl`` (sibling of *buildlog_dir*).
@@ -1091,32 +1111,27 @@ def append_build_history(buildlog_dir: str, record: 'Optional[dict]') -> None:
     try:
         if not record:
             return
-        _phase = record.get('phase')
-        _status = ('PASS' if _phase == 'done'
-                   else 'FAIL' if _phase == 'failed'
-                   else str(record.get('status') or _phase or 'unknown'))
-        _line = {
-            'ts': record.get('finished') or _utc_now_iso(),
-            'package': record.get('package'),
-            'status': _status,
-            'version': (record.get('built_version')
-                        or record.get('intended_version')),
-            'snapshot': record.get('snapshot'),
-            'elapsed_seconds': record.get('elapsed_seconds'),
-            'exit_code': record.get('exit_code'),
-            'oom_killed': record.get('oom_killed'),
-        }
         with open(_build_history_path(buildlog_dir), 'a', encoding='utf-8') as _fh:
-            _fh.write(json.dumps(_line, sort_keys=True) + '\n')
+            _fh.write(json.dumps(_build_history_line(record), sort_keys=True) + '\n')
     except Exception as _e:
         logger.warning(f"append_build_history: {_e}")
 
 
 def read_build_history(buildlog_dir: str) -> 'list[dict]':
-    """OBS-02: parse the append-only build-run ledger in chronological
-    (append) order; malformed/non-dict lines are skipped.  Empty list when
-    the ledger doesn't exist yet."""
+    """OBS-02: the cross-run build-run history, oldest first.
+
+    Merges two sources so history is populated even before the ledger has
+    accumulated runs of its own:
+      1. the append-only ``log/build-history.jsonl`` ledger — one line per
+         run, the authoritative multi-run record (forward-looking);
+      2. each current ``<pkg>.build.json`` — one entry per package = its most
+         recent COMPLETED run, which covers builds that predate the ledger
+         (e.g. everything built before OBS-02 shipped).
+    De-duplicated by (package, ts) with ledger entries winning, so a run that
+    appears in both is counted once.  Malformed lines / records are skipped."""
+    _seen: set = set()
     _out: 'list[dict]' = []
+    # 1. ledger (authoritative)
     try:
         with open(_build_history_path(buildlog_dir), encoding='utf-8') as _fh:
             for _ln in _fh:
@@ -1129,8 +1144,35 @@ def read_build_history(buildlog_dir: str) -> 'list[dict]':
                     continue
                 if isinstance(_rec, dict):
                     _out.append(_rec)
+                    _seen.add((_rec.get('package'), _rec.get('ts')))
     except OSError:
         pass
+    # 2. fold in each build.json's last completed run, if not already present
+    try:
+        _entries = os.listdir(buildlog_dir)
+    except OSError:
+        _entries = []
+    for _fn in _entries:
+        if not _fn.endswith(BUILD_RECORD_SUFFIX):
+            continue
+        try:
+            with open(os.path.join(buildlog_dir, _fn), encoding='utf-8') as _fh:
+                _rec = json.loads(_fh.read())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(_rec, dict):
+            continue
+        # only COMPLETED runs (skip interrupted / in-flight phases)
+        if (_rec.get('phase') not in ('done', 'failed')
+                and _rec.get('status') not in ('PASS', 'FAIL')):
+            continue
+        _line = _build_history_line(_rec)
+        _key = (_line['package'], _line['ts'])
+        if _key in _seen:
+            continue
+        _seen.add(_key)
+        _out.append(_line)
+    _out.sort(key=lambda _r: str(_r.get('ts') or ''))
     return _out
 
 
