@@ -95,9 +95,7 @@ and an 8-check chroot verifier that gates ISO build.
 
 ## 1. Stability & correctness — P0 / P1
 
-| ID    | Sev | Status | Title |
-|-------|-----|--------|-------|
-| STA-45 | P2 | todo | **Provides-alias registration silently clobbers a canonical `selected_pkgs` entry — resolver-level guard for the 50mirror incident class.**  dependencytree.py:535-540: after recording the real package, every provided name is written unconditionally — if real package X is already selected and a later-resolved B `Provides: X`, the alias overwrites `selected_pkgs['X']` and X **vanishes from the closure** (all consumers filter `key != pkg['Package']`), order-dependently, with no warning.  This is the resolver-side mechanism behind the recorded athena-cdrom-setup/apt-mirror-setup incident (mitigated then by a fork-authoring rule only).  Fix: register the alias only if absent; if present and mapping to a different canonical package, keep the real-name entry (apt's real-beats-virtual rule) and WARN. |
+_All stability & correctness tickets are closed — see [`docs/done.md`](docs/done.md) § 1._
 
 ## 2. Conformity to Debian/Ubuntu process — P1
 
