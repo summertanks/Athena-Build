@@ -991,6 +991,48 @@ def test_sta45_provides_does_not_clobber_real_selected_package():
         assert _dt.selected_pkgs['foo'] is not _dt.selected_pkgs['bar']
 
 
+def test_sta45_replacement_fork_supersedes_real_package():
+    """STA-45 follow-up: a REPLACEMENT package (`Provides: X` + `Replaces: X`,
+    our same-name forks like athena-tasksel→tasksel) MUST take the name and
+    supersede the real X — unlike a genuine virtual provider, which the real
+    package beats.  Resolve `foo` (real) then `bar` (Provides+Replaces foo):
+    selected_pkgs['foo'] must now point at bar, so the real foo drops out of
+    the canonical set and the `Provides X + Conflicts X = "I am X"` self-skip
+    in the conflict pass holds (else the fork's Conflicts fires spuriously)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    _pkg_blob = (
+        "Package: foo\nSource: foo\nVersion: 1.0-1\nArchitecture: amd64\n"
+        "Filename: pool/main/f/foo/foo_1.0-1_amd64.deb\nSize: 1\n"
+        "SHA256: " + ("a" * 64) + "\n\n"
+        "Package: bar\nSource: bar\nVersion: 2.0-1\nArchitecture: amd64\n"
+        "Provides: foo (= 1.0-1)\nConflicts: foo\nReplaces: foo\n"
+        "Filename: pool/main/b/bar/bar_2.0-1_amd64.deb\nSize: 1\n"
+        "SHA256: " + ("b" * 64) + "\n"
+    )
+    _src_blob = (
+        "Package: foo\nBinary: foo\nVersion: 1.0-1\nArchitecture: any\n"
+        "Directory: pool/main/f/foo\nChecksums-Sha256:\n"
+        " " + ("a" * 64) + " 100 foo_1.0-1.dsc\n\n"
+        "Package: bar\nBinary: bar\nVersion: 2.0-1\nArchitecture: any\n"
+        "Directory: pool/main/b/bar\nChecksums-Sha256:\n"
+        " " + ("b" * 64) + " 100 bar_2.0-1.dsc\n"
+    )
+    with tempfile.TemporaryDirectory() as _td:
+        _cache = _make_offline_cache(
+            _td, packages={'main': _pkg_blob}, sources={'main': _src_blob})
+        assert _cache.is_valid, _cache.error_str
+        _dt = dependencytree.DependencyTree(
+            _cache, select_recommended=False, arch='amd64',
+            build_profiles=['nodoc', 'nocheck'])
+        _dt.resolve_packages(['foo', 'bar'])
+        # replacement fork wins the name; real foo superseded out of canonical set.
+        assert _dt.selected_pkgs['foo']['Package'] == 'bar', \
+            f"replacement fork lost: {_dt.selected_pkgs['foo']['Package']}"
+        assert _dt.selected_pkgs['bar']['Package'] == 'bar'
+
+
 def test_cache_parse_build_mode_warns_on_missing_pkg():
     """Names in build_pkg.list that aren't in the cache get a WARNING and
     are skipped — partial resolution still proceeds for the rest."""
@@ -19316,6 +19358,7 @@ class _ParseDepPkg:
         self.alt_depends  = list(alt_depends  or [])
         self.conflicts    = []
         self.breaks       = []
+        self.replaces     = []
         self._provides    = list(provides     or [])
         self.depends_on   = []
         self.depended_by  = []
@@ -34952,6 +34995,7 @@ def main() -> int:
         test_refuse_in_build_mode_is_a_no_op_in_distribution,
         test_cache_parse_build_mode_resolves_named_pkgs_only,
         test_sta45_provides_does_not_clobber_real_selected_package,
+        test_sta45_replacement_fork_supersedes_real_package,
         test_cache_parse_build_mode_warns_on_missing_pkg,
         test_cache_parse_build_mode_empty_indl_returns_false,
         test_buildconfig_parses_three_mirrors,
