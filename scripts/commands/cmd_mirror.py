@@ -21,6 +21,17 @@ from commands.base import SessionState
 logger = logging.getLogger('athena.build')
 
 
+def _print_audit_finding(_sev: str, _kind: str, _msg: str, _color) -> None:
+    """Render one `mirror audit` finding.  A newline in *_msg* starts a
+    structured multi-line body whose continuation lines align under the kind
+    (column 12), so a verbose finding reads as `field  value` rows instead of
+    one unreadable wrapped line."""
+    _lines = str(_msg).split('\n')
+    console.print(f"  {_sev:8s}  {_kind}: {_lines[0]}", _color)
+    for _cont in _lines[1:]:
+        console.print(f"            {_cont}", _color)
+
+
 class MirrorCommandsMixin(SessionState):
     # ─────────────────────────────────────────────────────────────────────
     # Mirror umbrella — remote-endpoint federation
@@ -2012,7 +2023,7 @@ class MirrorCommandsMixin(SessionState):
             for _sev, _kind, _msg in _disk_findings:
                 _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
                           else tui.COLOR_WARNING)
-                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+                _print_audit_finding(_sev, _kind, _msg, _color)
             if _disk_crit:
                 _all_ok = False
             # InRelease/Packages chain verification.  Pulls remote
@@ -2033,7 +2044,7 @@ class MirrorCommandsMixin(SessionState):
             for _sev, _kind, _msg in _ir_findings:
                 _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
                           else tui.COLOR_WARNING)
-                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+                _print_audit_finding(_sev, _kind, _msg, _color)
             if _ir_crit:
                 _all_ok = False
             _pkg_idx: 'dict[str, dict]' = {}
@@ -2055,7 +2066,7 @@ class MirrorCommandsMixin(SessionState):
             for _sev, _kind, _msg in _pkg_findings:
                 _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
                           else tui.COLOR_WARNING)
-                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+                _print_audit_finding(_sev, _kind, _msg, _color)
             if _pkg_crit:
                 _all_ok = False
             _claim_idx_crit: 'list' = []
@@ -2069,7 +2080,7 @@ class MirrorCommandsMixin(SessionState):
                 for _sev, _kind, _msg in _claim_idx_findings[:10]:
                     _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
                               else tui.COLOR_WARNING)
-                    console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+                    _print_audit_finding(_sev, _kind, _msg, _color)
                 if len(_claim_idx_findings) > 10:
                     console.print(
                         f"  …and {len(_claim_idx_findings) - 10} more "
@@ -2088,7 +2099,7 @@ class MirrorCommandsMixin(SessionState):
             for _sev, _kind, _msg in _seq_findings:
                 _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
                           else tui.COLOR_WARNING)
-                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+                _print_audit_finding(_sev, _kind, _msg, _color)
             if _seq_crit:
                 _all_ok = False
             # Ownership summary — surfaces who owns what across the
@@ -2130,7 +2141,7 @@ class MirrorCommandsMixin(SessionState):
                 _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
                           else tui.COLOR_INFO if _sev == 'INFO'
                           else tui.COLOR_WARNING)
-                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+                _print_audit_finding(_sev, _kind, _msg, _color)
             if _own_disk_crit:
                 _all_ok = False
             # SELECT-LOCK coherence: the signed selection.state ⟷ our published
@@ -2150,8 +2161,8 @@ class MirrorCommandsMixin(SessionState):
                             self.config.dir_log, 'build'),
                         read_build_record=utils.read_build_record)
                     for _sev, _kind, _msg in _coh_findings:
-                        console.print(
-                            f"  {_sev:8s}  {_kind}: {_msg}",
+                        _print_audit_finding(
+                            _sev, _kind, _msg,
                             tui.COLOR_ERROR if _sev == 'CRITICAL'
                             else tui.COLOR_WARNING)
                     # One crisp action line instead of repeating the remedy
@@ -2252,7 +2263,7 @@ class MirrorCommandsMixin(SessionState):
             for _sev, _kind, _msg in _head_drift:
                 _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
                           else tui.COLOR_WARNING)
-                console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+                _print_audit_finding(_sev, _kind, _msg, _color)
             if any(_f[0] == 'CRITICAL' for _f in _head_drift):
                 _all_ok = False
             elif _head_drift == []:
@@ -2285,7 +2296,7 @@ class MirrorCommandsMixin(SessionState):
         for _sev, _kind, _msg in _walk_findings:
             _color = (tui.COLOR_ERROR if _sev == 'CRITICAL'
                       else tui.COLOR_WARNING)
-            console.print(f"  {_sev:8s}  {_kind}: {_msg}", _color)
+            _print_audit_finding(_sev, _kind, _msg, _color)
         if any(_f[0] == 'CRITICAL' for _f in _walk_findings):
             _all_ok = False
         if _walked and not any(
