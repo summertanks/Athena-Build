@@ -8,10 +8,12 @@ BuildSession; see commands/base.py for how the mixin shares session state.
 """
 import datetime
 import logging
+import os
 import time
 from typing import Callable, Optional
 
 import tui
+import utils
 from tui import console
 
 from commands.base import SessionState
@@ -326,3 +328,88 @@ class ConfigRunCommandsMixin(SessionState):
             elapsed=_elapsed,
             aborted_at=_aborted_at,
         ))
+
+    # ─────────────────────────────────────────────────────────────────
+    # build — OBS-02 cross-run build-history ledger
+    # ─────────────────────────────────────────────────────────────────
+
+    def cmd_build(self, action: str = '', *args):
+        """`build <history>` — query the cross-run build ledger."""
+        if action == 'history':
+            return self.cmd_build_history(*args)
+        self._group_help('build', {
+            'history': 'per-package run pass/fail ledger: build history [pkg]',
+        }, action)
+
+    def cmd_build_history(self, *args) -> None:
+        """`build history [pkg]` — OBS-02.  No pkg: every package's run count
+        + rolling pass rate, flakiest first.  With pkg: that package's most
+        recent runs.  Reads the append-only log/build-history.jsonl ledger."""
+        _buildlog = os.path.join(self.config.dir_log, 'build')
+        _rows = utils.read_build_history(_buildlog)
+        if not _rows:
+            console.print(
+                "build history: no runs recorded yet "
+                "(log/build-history.jsonl is empty — run a `source build`)",
+                tui.COLOR_WARNING)
+            return
+
+        _pkg = args[0] if args else ''
+        if _pkg:
+            _runs = [_r for _r in _rows if _r.get('package') == _pkg]
+            if not _runs:
+                console.print(f"build history: no runs recorded for '{_pkg}'",
+                              tui.COLOR_WARNING)
+                return
+            _pass = sum(1 for _r in _runs if _r.get('status') == 'PASS')
+            _rate = round(100 * _pass / len(_runs))
+            console.print(
+                f"\nbuild history: {_pkg} — {len(_runs)} run(s), "
+                f"{_pass} pass / {len(_runs) - _pass} fail ({_rate}%)\n",
+                tui.COLOR_HIGHLIGHT)
+            console.print(f"  {'ts':<22}{'status':<8}{'version':<20}elapsed")
+            for _r in _runs[-20:][::-1]:
+                _el = _r.get('elapsed_seconds')
+                _color = (tui.COLOR_ERROR if _r.get('status') == 'FAIL'
+                          else tui.COLOR_NORMAL)
+                console.print(
+                    f"  {str(_r.get('ts', '-')):<22}"
+                    f"{str(_r.get('status', '-')):<8}"
+                    f"{str(_r.get('version') or '-'):<20}"
+                    f"{('-' if _el is None else f'{_el}s')}", _color)
+            return
+
+        # No package → per-package aggregate, flakiest first.
+        _agg: 'dict[str, dict]' = {}
+        for _r in _rows:
+            _p = _r.get('package')
+            if not _p:
+                continue
+            _a = _agg.setdefault(_p, {'runs': 0, 'pass': 0, 'last': None})
+            _a['runs'] += 1
+            if _r.get('status') == 'PASS':
+                _a['pass'] += 1
+            _a['last'] = _r          # ledger is chronological
+        _total = len(_rows)
+        _tpass = sum(1 for _r in _rows if _r.get('status') == 'PASS')
+        console.print(
+            f"\nbuild history — {_total} run(s) across {len(_agg)} package(s)\n",
+            tui.COLOR_HIGHLIGHT)
+        console.print(f"  {'package':<28}{'runs':>5}{'pass':>6}{'fail':>6}"
+                      f"{'rate':>6}  last")
+        for _p, _a in sorted(
+                _agg.items(),
+                key=lambda _kv: (_kv[1]['runs'] - _kv[1]['pass'], _kv[1]['runs']),
+                reverse=True):
+            _fail = _a['runs'] - _a['pass']
+            _rate = round(100 * _a['pass'] / _a['runs']) if _a['runs'] else 0
+            _last = _a['last'] or {}
+            _color = tui.COLOR_ERROR if _fail else tui.COLOR_NORMAL
+            console.print(
+                f"  {_p[:27]:<28}{_a['runs']:>5}{_a['pass']:>6}{_fail:>6}"
+                f"{_rate:>5}%  {str(_last.get('status', '-'))} "
+                f"{str(_last.get('ts', '-'))[:10]}", _color)
+        _orate = round(100 * _tpass / _total) if _total else 0
+        console.print(
+            f"\n  totals: {_total} run(s), {_tpass} pass, "
+            f"{_total - _tpass} fail ({_orate}% overall)\n", tui.COLOR_INFO)

@@ -1071,6 +1071,69 @@ def write_build_record(buildlog_dir: str, record: dict) -> None:
     )
 
 
+def _build_history_path(buildlog_dir: str) -> str:
+    """OBS-02: the cross-run ledger sits one level up from log/build/."""
+    return os.path.join(
+        os.path.dirname(os.path.normpath(buildlog_dir)), 'build-history.jsonl')
+
+
+def append_build_history(buildlog_dir: str, record: 'Optional[dict]') -> None:
+    """OBS-02: append a one-line summary of a COMPLETED build run to the
+    append-only ledger ``log/build-history.jsonl`` (sibling of *buildlog_dir*).
+
+    The per-package ``<pkg>.build.json`` is overwritten every run, so this
+    ledger is the only durable record of run N — it powers ``build history``
+    (per-package pass/fail frequency + rolling pass rate).  Append-only; no
+    auto-prune in v1 (~200 B/run, a full rebuild ≈ 1000 lines), rotation
+    deferred per the UPD-01 publish-before-prune discipline.
+
+    Best-effort and never raises: observability must never break a build."""
+    try:
+        if not record:
+            return
+        _phase = record.get('phase')
+        _status = ('PASS' if _phase == 'done'
+                   else 'FAIL' if _phase == 'failed'
+                   else str(record.get('status') or _phase or 'unknown'))
+        _line = {
+            'ts': record.get('finished') or _utc_now_iso(),
+            'package': record.get('package'),
+            'status': _status,
+            'version': (record.get('built_version')
+                        or record.get('intended_version')),
+            'snapshot': record.get('snapshot'),
+            'elapsed_seconds': record.get('elapsed_seconds'),
+            'exit_code': record.get('exit_code'),
+            'oom_killed': record.get('oom_killed'),
+        }
+        with open(_build_history_path(buildlog_dir), 'a', encoding='utf-8') as _fh:
+            _fh.write(json.dumps(_line, sort_keys=True) + '\n')
+    except Exception as _e:
+        logger.warning(f"append_build_history: {_e}")
+
+
+def read_build_history(buildlog_dir: str) -> 'list[dict]':
+    """OBS-02: parse the append-only build-run ledger in chronological
+    (append) order; malformed/non-dict lines are skipped.  Empty list when
+    the ledger doesn't exist yet."""
+    _out: 'list[dict]' = []
+    try:
+        with open(_build_history_path(buildlog_dir), encoding='utf-8') as _fh:
+            for _ln in _fh:
+                _ln = _ln.strip()
+                if not _ln:
+                    continue
+                try:
+                    _rec = json.loads(_ln)
+                except ValueError:
+                    continue
+                if isinstance(_rec, dict):
+                    _out.append(_rec)
+    except OSError:
+        pass
+    return _out
+
+
 def read_build_record(buildlog_dir: str, package: str) -> 'Optional[dict]':
     """Load and verify a record.  Returns the dict on success, None on:
 

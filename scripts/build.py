@@ -1516,6 +1516,7 @@ def main(banner: str) -> None:
     tui.register_command('sbom',      session.cmd_sbom,      'SBOM:       \tsbom [path] — emit CycloneDX 1.5 JSON')
     tui.register_command('cve',       session.cmd_cve,       'CVE:        \tcve [path] — scan latest SBOM via grype (optional)')
     tui.register_command('autorun',   session.cmd_auto_run,  'Autorun:    \tautorun [live|installer]')
+    tui.register_command('build',     session.cmd_build,     'Build hist: \tbuild history [pkg] — cross-run pass/fail ledger')
     tui.register_command('set',       session.cmd_set,       'Set:        \tset <param> <value> — session-local config change')
     tui.register_command('get',       session.cmd_get,       'Get:        \tget [param] — show current config value(s)')
     tui.register_command('print',     session.cmd_print,     'Print:      \tprint build state — try `print help`')
