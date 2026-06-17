@@ -931,6 +931,66 @@ def test_cache_parse_build_mode_resolves_named_pkgs_only():
         assert 'libdep' not in _sess.dep_tree.selected_srcs
 
 
+def test_sta45_provides_does_not_clobber_real_selected_package():
+    """STA-45: a virtual Provides must not overwrite an already-selected REAL
+    package of the same name.  Resolve `foo` (real) then `bar` (Provides: foo)
+    AFTER it — foo must survive as the canonical selected_pkgs['foo'] entry,
+    not be clobbered to point at bar (which made foo vanish from the closure,
+    order-dependently, under the old unconditional write)."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+    import dependencytree
+    _pkg_blob = (
+        "Package: foo\n"
+        "Source: foo\n"
+        "Version: 1.0-1\n"
+        "Architecture: amd64\n"
+        "Filename: pool/main/f/foo/foo_1.0-1_amd64.deb\n"
+        "Size: 1\n"
+        "SHA256: " + ("a" * 64) + "\n"
+        "\n"
+        "Package: bar\n"
+        "Source: bar\n"
+        "Version: 2.0-1\n"
+        "Architecture: amd64\n"
+        "Provides: foo\n"
+        "Filename: pool/main/b/bar/bar_2.0-1_amd64.deb\n"
+        "Size: 1\n"
+        "SHA256: " + ("b" * 64) + "\n"
+    )
+    _src_blob = (
+        "Package: foo\n"
+        "Binary: foo\n"
+        "Version: 1.0-1\n"
+        "Architecture: any\n"
+        "Directory: pool/main/f/foo\n"
+        "Checksums-Sha256:\n"
+        " " + ("a" * 64) + " 100 foo_1.0-1.dsc\n"
+        "\n"
+        "Package: bar\n"
+        "Binary: bar\n"
+        "Version: 2.0-1\n"
+        "Architecture: any\n"
+        "Directory: pool/main/b/bar\n"
+        "Checksums-Sha256:\n"
+        " " + ("b" * 64) + " 100 bar_2.0-1.dsc\n"
+    )
+    with tempfile.TemporaryDirectory() as _td:
+        _cache = _make_offline_cache(
+            _td, packages={'main': _pkg_blob}, sources={'main': _src_blob})
+        assert _cache.is_valid, _cache.error_str
+        _dt = dependencytree.DependencyTree(
+            _cache, select_recommended=False, arch='amd64',
+            build_profiles=['nodoc', 'nocheck'])
+        # foo first, then bar (Provides: foo) — the order that triggered the clobber.
+        _dt.resolve_packages(['foo', 'bar'])
+        # foo survives as its own canonical entry; bar registered under bar.
+        assert _dt.selected_pkgs['foo']['Package'] == 'foo', \
+            f"foo clobbered → {_dt.selected_pkgs['foo']['Package']}"
+        assert _dt.selected_pkgs['bar']['Package'] == 'bar'
+        assert _dt.selected_pkgs['foo'] is not _dt.selected_pkgs['bar']
+
+
 def test_cache_parse_build_mode_warns_on_missing_pkg():
     """Names in build_pkg.list that aren't in the cache get a WARNING and
     are skipped — partial resolution still proceeds for the rest."""
@@ -34849,6 +34909,7 @@ def main() -> int:
         test_verify_chroot_disk_surface_skips_live_boot,
         test_refuse_in_build_mode_is_a_no_op_in_distribution,
         test_cache_parse_build_mode_resolves_named_pkgs_only,
+        test_sta45_provides_does_not_clobber_real_selected_package,
         test_cache_parse_build_mode_warns_on_missing_pkg,
         test_cache_parse_build_mode_empty_indl_returns_false,
         test_buildconfig_parses_three_mirrors,

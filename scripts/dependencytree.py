@@ -536,7 +536,24 @@ class DependencyTree:
 
         # Also register every virtual name this package provides so that the L84 early-return
         # catches virtual-name lookups (e.g. 'awk' → gawk_pkg) without needing the L93 loop.
+        #
+        # STA-45: a virtual Provides must NEVER clobber a REAL selected package of the same
+        # name — apt's "real package beats virtual Provides" rule.  The old unconditional
+        # write let a later-resolved provider (B Provides: foo) overwrite an already-selected
+        # real `foo`; consumers that filter `key == selected_pkgs[key]['Package']` then drop
+        # the now-mismatched key, so `foo` vanished from the closure — silently and
+        # order-dependently (the athena-cdrom-setup / 50mirror loss class).
         for _provided_name, _ in _selected_pkg.get_provides():
+            _prior = self.selected_pkgs.get(_provided_name)
+            if (_prior is not None
+                    and _prior['Package'] == _provided_name
+                    and _prior is not _selected_pkg):
+                # _provided_name is occupied by a different REAL package — keep it, warn.
+                logger.warning(
+                    f"{_selected_pkg['Package']} Provides '{_provided_name}', which is "
+                    f"already a real selected package — keeping the real package, not "
+                    f"registering the virtual alias (apt real-beats-virtual)")
+                continue
             self.selected_pkgs[_provided_name] = _selected_pkg
 
         # list packages to get dependencies for (copy — the loop below mutates _depends,
