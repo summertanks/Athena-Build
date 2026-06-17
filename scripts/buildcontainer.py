@@ -197,6 +197,28 @@ class BuildContainer:
                 tui.console.print(f"Athena Build Docker: Error {e}")
                 raise RuntimeError(f"Cannot connect to local Docker daemon: {e}") from e
 
+        # Report which Docker endpoint we connected to + the daemon's identity,
+        # so on WSL / remote setups the operator can confirm at a glance whether
+        # it's the host Docker Desktop daemon (shared into the distro via WSL
+        # integration) or a local dockerd — and that we are NOT nesting daemons.
+        # Best-effort: a version() hiccup must never block container bring-up.
+        try:
+            _ver = self.client.version()
+            _endpoint = (docker_server
+                         or getattr(self.client.api, 'base_url', '')
+                         or 'default socket')
+            tui.console.print(
+                f"Docker: {_endpoint} — engine {_ver.get('Version', '?')} "
+                f"({_ver.get('Os', '?')}/{_ver.get('Arch', '?')}, "
+                f"API {_ver.get('ApiVersion', '?')})",
+                tui.COLOR_INFO)
+            logger.info(
+                f"Docker endpoint={_endpoint} engine={_ver.get('Version')} "
+                f"os={_ver.get('Os')} arch={_ver.get('Arch')} "
+                f"api={_ver.get('ApiVersion')}")
+        except Exception as _e:
+            logger.debug(f"Docker version probe failed: {_e}")
+
         # CONF-15: bake the snapshot TS into the image tag so a snapshot
         # advance ([Snapshot] Timestamp change in build.conf) invalidates
         # the image cache automatically — `docker images` lookup misses
