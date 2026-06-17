@@ -142,10 +142,12 @@ _HTTP_HEADERS = {'User-Agent': 'athena-build/0.1'}
 _HTTP_TIMEOUT_FAST = 60     # HEAD probes, JSON APIs, small files
 _HTTP_TIMEOUT_STREAM = 120  # streamed downloads (InRelease, .deb, …)
 
-# Retry budget for outbound HTTP.  snapshot.debian.org's CDN is
+# Retry budget for outbound HTTP.  snapshot.debian.org's CDN can be
 # intermittently slow on cold-cache files — same URL may return in
 # 300ms or stall past the timeout depending on whether the edge node
-# has the file cached.  A single retry is usually enough; we do 3
+# has the file cached.  (Note: the dominant stall we actually hit was
+# unrouted IPv6, not cold cache — see force_ipv4_http.)  A single retry
+# is usually enough; we do 3
 # attempts with exponential backoff (1s, 2s) to cover the rare
 # multi-stall case.  Retries fire on:
 #   - ReadTimeout       (server stalled mid-response)
@@ -154,6 +156,31 @@ _HTTP_TIMEOUT_STREAM = 120  # streamed downloads (InRelease, .deb, …)
 # Retries do NOT fire on HTTPError (4xx/5xx) — those are deterministic
 # and a retry would just hit the same response.
 _HTTP_RETRY_COUNT = 3
+
+
+def force_ipv4_http() -> None:
+    """Pin the requests/urllib3 HTTP stack to IPv4-only address resolution.
+
+    Python's urllib3 has no Happy-Eyeballs (RFC 8305): it walks ``getaddrinfo``
+    results sequentially — IPv6 first when a host publishes both — so a machine
+    with SLAAC-assigned but UNROUTED IPv6 (DHCP autoconf on a bridged/NAT VM
+    NIC: a global v6 address exists, but packets to it black-hole) stalls every
+    fresh connection on the dead v6 address until the connect timeout, then
+    falls back to IPv4.  Measured: a 0.3s snapshot.debian.org fetch became a
+    4-minute cache-build stall this way (curl avoids it via Happy-Eyeballs).
+
+    snapshot.debian.org and the Debian mirrors are all IPv4-reachable, so we
+    pin AF_INET process-wide at startup.  Opt out with ``ATHENA_ALLOW_IPV6=1``
+    once the host has working IPv6 routing.  No effect on the API server's
+    listen socket (that's not a urllib3 client connection)."""
+    if os.environ.get('ATHENA_ALLOW_IPV6') == '1':
+        return
+    try:
+        import socket as _socket
+        import urllib3.util.connection as _u3conn
+        _u3conn.allowed_gai_family = lambda: _socket.AF_INET
+    except Exception as _e:
+        logger.warning(f"force_ipv4_http: could not pin IPv4 ({_e})")
 
 
 # Module-level requests.Session — reuses TCP/TLS connections across

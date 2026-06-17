@@ -7877,6 +7877,33 @@ def test_setup_file_logging_filename_has_timestamp():
 # download_file surfaces HTTP status in its return value
 # ─────────────────────────────────────────────────────────────────────────────
 
+def test_force_ipv4_http_pins_af_inet_and_respects_optout():
+    """force_ipv4_http pins urllib3 to IPv4 (no Happy-Eyeballs → unrouted SLAAC
+    IPv6 stalls every connect); ATHENA_ALLOW_IPV6=1 opts out."""
+    import socket
+    import urllib3.util.connection as _u3
+    import utils as _u
+    _orig = _u3.allowed_gai_family
+    _prev = os.environ.get('ATHENA_ALLOW_IPV6')
+    try:
+        # default → pins AF_INET
+        _u3.allowed_gai_family = _orig
+        os.environ.pop('ATHENA_ALLOW_IPV6', None)
+        _u.force_ipv4_http()
+        assert _u3.allowed_gai_family() == socket.AF_INET
+        # opt-out → leaves resolution untouched
+        _u3.allowed_gai_family = _orig
+        os.environ['ATHENA_ALLOW_IPV6'] = '1'
+        _u.force_ipv4_http()
+        assert _u3.allowed_gai_family is _orig
+    finally:
+        _u3.allowed_gai_family = _orig
+        if _prev is None:
+            os.environ.pop('ATHENA_ALLOW_IPV6', None)
+        else:
+            os.environ['ATHENA_ALLOW_IPV6'] = _prev
+
+
 def test_download_file_returns_http_status_detail_on_404():
     """A non-200 GET → HTTPError → download_file returns (-1, 'HTTP 404 Not Found')
     so callers can include the actual status in their error_str instead of
@@ -35219,6 +35246,7 @@ def main() -> int:
         test_build_flags_carries_chroot_installer_ready_default_false,
         test_setup_file_logging_filename_has_timestamp,
         test_download_file_returns_http_status_detail_on_404,
+        test_force_ipv4_http_pins_af_inet_and_respects_optout,
         test_download_file_success_returns_size_and_empty_detail,
         test_download_file_zero_content_length_does_not_freeze_bar,
         test_shipped_build_conf_has_snapshot_enabled,

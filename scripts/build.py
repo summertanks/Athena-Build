@@ -1353,6 +1353,12 @@ def main(banner: str) -> None:
     so every existing facade (Console, Spinner, ProgressBar, Prompt) works
     unchanged.  See scripts/cli.py for the CLI backend's contract.
     """
+    # Pin the HTTP stack to IPv4 before any mirror fetch — a host with
+    # unrouted SLAAC IPv6 otherwise stalls every snapshot.debian.org connect
+    # on the dead v6 address (urllib3 has no Happy-Eyeballs).  ATHENA_ALLOW_IPV6=1
+    # opts out.  See utils.force_ipv4_http.
+    utils.force_ipv4_http()
+
     # UX-05 Path B: detect --headless before BuildConfig sees argv.  Strip
     # it after detection — BuildConfig uses argparse and would error on
     # unknown flags.
