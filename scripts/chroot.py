@@ -524,7 +524,7 @@ class _ChrootMixin:
             )
 
         _proc = subprocess.run(_cmd, input=self._password + '\n',
-                               capture_output=True, text=True, env=os.environ)
+                               capture_output=True, text=True, env=self._chroot_env)
         for _line in _proc.stdout.splitlines():
             logger.debug(_line)
         if _proc.returncode != 0:
@@ -944,7 +944,7 @@ class _ChrootMixin:
 
         logger.debug(f'Configure: {" ".join(pkg_list)}')
         _proc = subprocess.run(_cmd, input=self._password + '\n',
-                               capture_output=True, text=True, env=os.environ)
+                               capture_output=True, text=True, env=self._chroot_env)
         for _line in _proc.stdout.splitlines():
             logger.debug(_line)
 
@@ -1069,11 +1069,20 @@ class _ChrootMixin:
             )
 
     def _setup_chroot_env(self):
-        """Set environment variables required for non-interactive dpkg in a chroot."""
-        os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-        os.environ['DPKG_ROOT'] = self._dir_chroot
-        os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
-        os.environ['DEBCONF_NONINTERACTIVE_SEEN'] = 'true'
+        """Build the env for non-interactive dpkg in a chroot.
+
+        STA-53(c): a per-instance env dict (passed explicitly to the chroot
+        subprocess calls) rather than a permanent mutation of the process-wide
+        os.environ — the old global write clobbered the TUI session's PATH and
+        leaked DPKG_ROOT for the rest of the run (a later in-session dpkg could
+        silently re-target the chroot)."""
+        self._chroot_env = {
+            **os.environ,
+            'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+            'DPKG_ROOT': self._dir_chroot,
+            'DEBIAN_FRONTEND': 'noninteractive',
+            'DEBCONF_NONINTERACTIVE_SEEN': 'true',
+        }
 
     def _get_deb_files(self, pkg_list: list) -> list:
         """Resolve package names to absolute .deb paths in repo/main.
@@ -1163,7 +1172,7 @@ class _ChrootMixin:
 
         logger.debug(f'Unpack: {" ".join(pkg_list)}')
         _proc = subprocess.run(_cmd, input=self._password + '\n',
-                               capture_output=True, text=True, env=os.environ)
+                               capture_output=True, text=True, env=self._chroot_env)
         for _line in _proc.stdout.splitlines():
             logger.debug(_line)
 
@@ -1299,7 +1308,7 @@ class _ChrootMixin:
                     # Note: cp does not preserve all permissions — packages that
                     # need specific ownership must be handled in the cmd_list below.
                     _proc = subprocess.run(['sudo', '-S', 'cp', _orig_file, chroot_relative_dir],
-                                           input=self._password + '\n', capture_output=True, text=True, env=os.environ)
+                                           input=self._password + '\n', capture_output=True, text=True, env=self._chroot_env)
                     if _proc.returncode != 0:
                         tui.console.print(f'Error: Failed copying pre-install file — {_file}')
                         logger.error(f'pre_install cp {_file}: {_proc.stderr}')
@@ -1309,7 +1318,7 @@ class _ChrootMixin:
                     # redirect and is not valid as a subprocess argument.
                     _proc = subprocess.run(['patch', '-p1', '-i', _orig_file],
                                            cwd=chroot_relative_dir,
-                                           capture_output=True, text=True, env=os.environ)
+                                           capture_output=True, text=True, env=self._chroot_env)
                     if _proc.returncode != 0:
                         tui.console.print(f'Error: Failed applying pre-install patch — {_file}')
                         logger.error(f'pre_install patch {_file}: {_proc.stderr}')
@@ -1370,7 +1379,7 @@ class _ChrootMixin:
             chroot_relative_dir = root.replace(self._dir_postinstall_patch, self._dir_chroot)
             _mk = subprocess.run(
                 ['sudo', '-S', 'mkdir', '-p', chroot_relative_dir],
-                input=self._password + '\n', capture_output=True, text=True, env=os.environ
+                input=self._password + '\n', capture_output=True, text=True, env=self._chroot_env
             )
             if _mk.returncode != 0:
                 tui.console.print(f'Error: Failed creating post-install dir — {chroot_relative_dir}')
@@ -1382,7 +1391,7 @@ class _ChrootMixin:
                 if os.path.splitext(_file)[1] != '.patch':
                     _proc = subprocess.run(
                         ['sudo', '-S', 'cp', _orig_file, chroot_relative_dir],
-                        input=self._password + '\n', capture_output=True, text=True, env=os.environ
+                        input=self._password + '\n', capture_output=True, text=True, env=self._chroot_env
                     )
                     if _proc.returncode != 0:
                         tui.console.print(f'Error: Failed copying post-install file — {_file}')
@@ -1392,7 +1401,7 @@ class _ChrootMixin:
                         ['sudo', '-S', 'patch', '-p1', '-i', _orig_file],
                         cwd=chroot_relative_dir,
                         input=self._password + '\n',
-                        capture_output=True, text=True, env=os.environ
+                        capture_output=True, text=True, env=self._chroot_env
                     )
                     if _proc.returncode != 0:
                         tui.console.print(f'Error: Failed applying post-install patch — {_file}')
