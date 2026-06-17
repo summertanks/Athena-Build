@@ -1445,11 +1445,11 @@ def audit_own_claims_on_disk(
         elif _kind == 'local_ahead':
             _findings.append((
                 'WARNING', 'own_claim_local_ahead_of_remote',
-                f"{_fn}: on-disk sha={_row['local_sha'][:12]} matches "
-                f"local build.json; remote claim "
-                f"sha={_row['remote_sha'][:12]} is older — bump + "
-                "publish, or `mirror reclaim <source|file>` if this "
-                "content change is deliberately version-less"))
+                f"{_fn}\n"
+                f"local   {_row['local_sha'][:12]}  (matches build.json)\n"
+                f"remote  {_row['remote_sha'][:12]}  (older published claim)\n"
+                "fix     bump + publish, or `mirror reclaim <source|file>` "
+                "if this content change is deliberately version-less"))
         elif _kind == 'sha_mismatch':
             _findings.append((
                 'CRITICAL', 'own_claim_disk_sha_mismatch',
