@@ -1098,9 +1098,16 @@ class _ChrootMixin:
         # main first, then the doc component.
         _doc = _main.replace(f'{os.sep}main{os.sep}', f'{os.sep}doc{os.sep}')
         for pkg in pkg_list:
-            _filename = os.path.basename(
-                self._dependencytree.selected_pkgs[pkg]['Filename']
-            )
+            # STA-53(b): a hard-coded seed (e.g. the libc bootstrap) may be
+            # absent on a minimal selection — skip+warn like the installer
+            # counterpart rather than KeyError'ing after partial work.
+            _entry = self._dependencytree.selected_pkgs.get(pkg)
+            if not _entry or not _entry.get('Filename'):
+                logger.warning(
+                    f"_get_deb_files: {pkg} absent from selection or has no "
+                    f"Filename — skipping")
+                continue
+            _filename = os.path.basename(_entry['Filename'])
             _filename = self.normalize_repo_filename(_filename)
             # The index Filename is the PRISTINE name; the on-disk .deb may
             # carry a +asg<R>u<N> stamp (UPD-01 update layer).
@@ -1356,9 +1363,19 @@ class _ChrootMixin:
             if not files:
                 continue
 
-            # Mirror the source directory structure into the chroot.
+            # Mirror the source directory structure into the chroot.  STA-53(a):
+            # by post_install time the chroot is root-owned, so the dir-create
+            # and patch must run under sudo like the cp branch below — an
+            # unprivileged mkdir/patch raises PermissionError after the build.
             chroot_relative_dir = root.replace(self._dir_postinstall_patch, self._dir_chroot)
-            pathlib.Path(chroot_relative_dir).mkdir(parents=True, exist_ok=True)
+            _mk = subprocess.run(
+                ['sudo', '-S', 'mkdir', '-p', chroot_relative_dir],
+                input=self._password + '\n', capture_output=True, text=True, env=os.environ
+            )
+            if _mk.returncode != 0:
+                tui.console.print(f'Error: Failed creating post-install dir — {chroot_relative_dir}')
+                logger.error(f'post_install mkdir {chroot_relative_dir}: {_mk.stderr}')
+                continue
 
             for _file in files:
                 _orig_file = os.path.join(root, _file)
@@ -1372,8 +1389,9 @@ class _ChrootMixin:
                         logger.error(f'post_install cp {_file}: {_proc.stderr}')
                 else:
                     _proc = subprocess.run(
-                        ['patch', '-p1', '-i', _orig_file],
+                        ['sudo', '-S', 'patch', '-p1', '-i', _orig_file],
                         cwd=chroot_relative_dir,
+                        input=self._password + '\n',
                         capture_output=True, text=True, env=os.environ
                     )
                     if _proc.returncode != 0:

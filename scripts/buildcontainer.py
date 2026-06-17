@@ -1540,8 +1540,11 @@ class BuildContainer:
                 logger.warning(
                     f"SEC-05 preview {src_pkg.package}: container exited "
                     f"{_exit}; tail: {_text[-400:]}")
-                # Surface the partial output anyway — operator may still
-                # want to see what apt resolved before the failure.
+                # STA-53(j): honour the docstring contract — a non-zero exit
+                # with no useful output returns None (caller treats as a hard
+                # skip).  Non-empty output is still surfaced for diagnosis.
+                if not _text.strip():
+                    return None
             return _text
         except docker.errors.APIError as e:
             logger.error(
