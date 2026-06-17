@@ -10,7 +10,7 @@ Key:
  bash-completion
  bzip2
  ca-certificates
- dnsutils
+ bind9-dnsutils
  file
  gettext-base
  groff-base
