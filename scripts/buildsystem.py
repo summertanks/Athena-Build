@@ -33,6 +33,10 @@ class BuildSystem(_ChrootMixin, _IsoMixin, _DepDriftMixin):
         self._config = config
         self._dir_image = config.dir_image
         self._dir_chroot = dir_chroot or config.dir_chroot
+        # STA-53(c): seed the per-instance chroot env now (no global os.environ
+        # mutation) so methods invoked directly always find it; build_chroot
+        # refreshes it at install time.
+        self._setup_chroot_env()
         self._dir_repo = config.dir_repo
         # CONF-01 Stage D: the new apt-repo layout nests .debs under
         # dists/<codename>/main/binary-<arch>/.  Mixins (chroot, dep-

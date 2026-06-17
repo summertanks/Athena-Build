@@ -1413,6 +1413,10 @@ def _bare_buildsystem_with_deps(pkg_specs):
     _tui.console = _StubConsole()
     bs = buildsystem.BuildSystem.__new__(buildsystem.BuildSystem)
     bs._dependencytree = _StubDepTree(pkg_specs)
+    # STA-53(c): __init__ (bypassed here) seeds the per-instance chroot env;
+    # provide a default so methods that pass env=self._chroot_env don't
+    # AttributeError under bare construction.
+    bs._chroot_env = dict(os.environ)
     return bs
 
 
