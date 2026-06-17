@@ -13119,23 +13119,24 @@ def test_source_build_installer_subset_unions_udeb_tree_with_deb_arm():
 
 
 def test_obs02_build_history_ledger_append_and_read():
-    """OBS-02: append_build_history writes one JSONL line per completed run to
-    log/build-history.jsonl (sibling of log/build/), maps phase done/failed →
-    PASS/FAIL, falls back built_version → intended_version, and read_build_history
-    round-trips in chronological order while skipping malformed lines."""
+    """OBS-02: archive_build_record appends a full build record per line to
+    log/build-history.jsonl (sibling of log/build/), and read_build_history
+    projects journal + current build.json records to display summaries
+    (done/failed → PASS/FAIL, built_version → intended_version fallback),
+    oldest-first, skipping malformed records."""
     import utils as _u
     with tempfile.TemporaryDirectory() as _root:
         _log_build = os.path.join(_root, 'log', 'build')
         os.makedirs(_log_build)
-        _u.append_build_history(_log_build, {
+        _u.archive_build_record(_log_build, {
             'package': 'glibc', 'phase': 'done', 'built_version': '2.36-9',
             'finished': '2026-06-16T10:00:00Z', 'elapsed_seconds': 420.1,
             'exit_code': 0})
-        _u.append_build_history(_log_build, {
+        _u.archive_build_record(_log_build, {
             'package': 'gnome-shell', 'phase': 'failed',
             'intended_version': '43-1', 'finished': '2026-06-16T11:00:00Z',
             'exit_code': 1})
-        _u.append_build_history(_log_build, None)        # no-op, no line
+        _u.archive_build_record(_log_build, None)        # no-op, no line
         # ledger lives one level up from log/build/
         _ledger = os.path.join(_root, 'log', 'build-history.jsonl')
         assert os.path.isfile(_ledger)
@@ -13169,15 +13170,17 @@ def test_obs02_build_history_ledger_append_and_read():
         assert 'bar' not in _pkgs                                 # interrupted skipped
 
 
-def test_obs02_record_phase_appends_terminal_runs_to_ledger():
-    """OBS-02: BuildContainer._record_phase must append to the cross-run ledger
-    on a terminal phase (done/failed) — the per-package record is overwritten
-    each run, so the hook is the only durable capture of run N."""
+def test_obs02_record_phase_archives_prior_run_before_overwrite():
+    """OBS-02: _record_phase archives the PRIOR completed run to the journal at
+    entry — before write_build_record overwrites build.json — so each run is
+    stored exactly once (current in build.json, prior in the journal)."""
     import inspect
     import buildcontainer
     _src = inspect.getsource(buildcontainer.BuildContainer._record_phase)
-    assert 'append_build_history' in _src
-    assert "fields.get('phase') in ('done', 'failed')" in _src
+    assert 'archive_build_record' in _src
+    # archived from the prior record, before the overwriting write
+    assert _src.index('archive_build_record') < _src.index('write_build_record')
+    assert "_prior.get('phase') in ('done', 'failed')" in _src
 
 
 def test_refresh_patches_invalidates_record_when_patch_newer():
@@ -35692,7 +35695,7 @@ def main() -> int:
         test_select_packages_discard_intent_reverts_nothing_written_by_finish,
         # LEDGER-01 Chunk 1 — build.json super schema core
         test_obs02_build_history_ledger_append_and_read,
-        test_obs02_record_phase_appends_terminal_runs_to_ledger,
+        test_obs02_record_phase_archives_prior_run_before_overwrite,
         test_upsert_build_record_creates_selected_classified_missing,
         test_upsert_build_record_preserves_build_fields_on_existing,
         test_preserve_lifecycle_and_roll_history,
