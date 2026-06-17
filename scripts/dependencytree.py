@@ -543,12 +543,23 @@ class DependencyTree:
         # real `foo`; consumers that filter `key == selected_pkgs[key]['Package']` then drop
         # the now-mismatched key, so `foo` vanished from the closure — silently and
         # order-dependently (the athena-cdrom-setup / 50mirror loss class).
+        #
+        # EXEMPTION (STA-45 follow-up): a REPLACEMENT package declares the standard Debian
+        # idiom `Provides: X` + `Replaces: X` (+ usually `Conflicts: X`) — it deliberately
+        # supersedes X (our same-name forks: athena-tasksel→tasksel, athena-branding→
+        # desktop-base).  Such a package MUST take the name so the real X drops out of the
+        # canonical set and the `Provides X + Conflicts X = "I am X"` self-conflict skip in
+        # the Breaks/Conflicts pass holds.  Only block the clobber for a GENUINE virtual
+        # provider (Provides but does NOT Replace the name).
         for _provided_name, _ in _selected_pkg.get_provides():
             _prior = self.selected_pkgs.get(_provided_name)
+            _replaces_it = any(
+                _g and _g[0][0] == _provided_name for _g in _selected_pkg.replaces)
             if (_prior is not None
                     and _prior['Package'] == _provided_name
-                    and _prior is not _selected_pkg):
-                # _provided_name is occupied by a different REAL package — keep it, warn.
+                    and _prior is not _selected_pkg
+                    and not _replaces_it):
+                # genuine virtual provider colliding with a real package — real wins, warn.
                 logger.warning(
                     f"{_selected_pkg['Package']} Provides '{_provided_name}', which is "
                     f"already a real selected package — keeping the real package, not "
