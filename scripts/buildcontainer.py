@@ -517,20 +517,17 @@ class BuildContainer:
                 # LEDGER-01: the entry-phase write RECREATES the record;
                 # carry the lifecycle layer (selection/history/...) the
                 # parse stamped on the prior record through the rewrite.
-                initial = utils.preserve_lifecycle(
-                    utils.read_build_record(self.buildlog_path, package),
-                    initial)
+                _prior = utils.read_build_record(self.buildlog_path, package)
+                # OBS-02: archive the PRIOR completed run to the journal before
+                # this build overwrites build.json — each run lives in exactly
+                # one place (current in build.json, all prior in the journal),
+                # so there is no duplication.  Best-effort inside utils.
+                if _prior and _prior.get('phase') in ('done', 'failed'):
+                    utils.archive_build_record(self.buildlog_path, _prior)
+                initial = utils.preserve_lifecycle(_prior, initial)
                 utils.write_build_record(self.buildlog_path, initial)
             else:
                 utils.update_build_record(self.buildlog_path, package, **fields)
-                # OBS-02: a terminal phase = one completed build run; append a
-                # durable summary to the cross-run ledger (the per-package
-                # record is overwritten next run).  append_build_history is
-                # itself best-effort and never raises.
-                if fields.get('phase') in ('done', 'failed'):
-                    utils.append_build_history(
-                        self.buildlog_path,
-                        utils.read_build_record(self.buildlog_path, package))
         except (OSError, FileNotFoundError) as _e:
             logger.warning(
                 f"build-record write failed for {package} "

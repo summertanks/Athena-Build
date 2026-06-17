@@ -1097,41 +1097,55 @@ def _build_history_line(record: dict) -> dict:
     }
 
 
-def append_build_history(buildlog_dir: str, record: 'Optional[dict]') -> None:
-    """OBS-02: append a one-line summary of a COMPLETED build run to the
-    append-only ledger ``log/build-history.jsonl`` (sibling of *buildlog_dir*).
+def archive_build_record(buildlog_dir: str, record: 'Optional[dict]') -> None:
+    """OBS-02: append a COMPLETED build record to the append-only journal
+    ``log/build-history.jsonl`` (sibling of *buildlog_dir*) just before the
+    next build of the same source overwrites its ``<pkg>.build.json``.
 
-    The per-package ``<pkg>.build.json`` is overwritten every run, so this
-    ledger is the only durable record of run N — it powers ``build history``
-    (per-package pass/fail frequency + rolling pass rate).  Append-only; no
-    auto-prune in v1 (~200 B/run, a full rebuild ≈ 1000 lines), rotation
-    deferred per the UPD-01 publish-before-prune discipline.
+    The journal stores the SAME signed build.json records (one schema — the
+    existing build.json tooling reads them unchanged).  The current run lives
+    in ``<pkg>.build.json``; every PRIOR run lives in the journal — so each run
+    is stored exactly once, no duplication.  Append-only; rotation deferred per
+    the UPD-01 publish-before-prune discipline.
 
     Best-effort and never raises: observability must never break a build."""
     try:
         if not record:
             return
         with open(_build_history_path(buildlog_dir), 'a', encoding='utf-8') as _fh:
-            _fh.write(json.dumps(_build_history_line(record), sort_keys=True) + '\n')
+            _fh.write(json.dumps(record, sort_keys=True) + '\n')
     except Exception as _e:
-        logger.warning(f"append_build_history: {_e}")
+        logger.warning(f"archive_build_record: {_e}")
 
 
 def read_build_history(buildlog_dir: str) -> 'list[dict]':
-    """OBS-02: the cross-run build-run history, oldest first.
+    """OBS-02: the cross-run build history as display summaries, oldest first.
 
-    Merges two sources so history is populated even before the ledger has
-    accumulated runs of its own:
-      1. the append-only ``log/build-history.jsonl`` ledger — one line per
-         run, the authoritative multi-run record (forward-looking);
-      2. each current ``<pkg>.build.json`` — one entry per package = its most
-         recent COMPLETED run, which covers builds that predate the ledger
-         (e.g. everything built before OBS-02 shipped).
-    De-duplicated by (package, ts) with ledger entries winning, so a run that
-    appears in both is counted once.  Malformed lines / records are skipped."""
+    Merges the append-only journal (PRIOR runs — full build.json records moved
+    there at overwrite time) with the current ``<pkg>.build.json`` (the LATEST
+    run, not yet archived).  The two are disjoint by construction — a run is
+    archived only when the next build of that source overwrites build.json — so
+    each completed run appears exactly once.  Deduped by (package, finished-ts)
+    as a safety net; only completed runs (done/failed) are included; malformed
+    records skipped."""
     _seen: set = set()
     _out: 'list[dict]' = []
-    # 1. ledger (authoritative)
+
+    def _consider(_rec: object) -> None:
+        if not isinstance(_rec, dict):
+            return
+        # only COMPLETED runs (skip interrupted / in-flight phases)
+        if (_rec.get('phase') not in ('done', 'failed')
+                and _rec.get('status') not in ('PASS', 'FAIL')):
+            return
+        _line = _build_history_line(_rec)
+        _key = (_line['package'], _line['ts'])
+        if _key in _seen:
+            return
+        _seen.add(_key)
+        _out.append(_line)
+
+    # 1. journal — every prior run (full build.json records)
     try:
         with open(_build_history_path(buildlog_dir), encoding='utf-8') as _fh:
             for _ln in _fh:
@@ -1139,15 +1153,12 @@ def read_build_history(buildlog_dir: str) -> 'list[dict]':
                 if not _ln:
                     continue
                 try:
-                    _rec = json.loads(_ln)
+                    _consider(json.loads(_ln))
                 except ValueError:
                     continue
-                if isinstance(_rec, dict):
-                    _out.append(_rec)
-                    _seen.add((_rec.get('package'), _rec.get('ts')))
     except OSError:
         pass
-    # 2. fold in each build.json's last completed run, if not already present
+    # 2. current build.json records — the latest (not-yet-archived) run
     try:
         _entries = os.listdir(buildlog_dir)
     except OSError:
@@ -1157,21 +1168,9 @@ def read_build_history(buildlog_dir: str) -> 'list[dict]':
             continue
         try:
             with open(os.path.join(buildlog_dir, _fn), encoding='utf-8') as _fh:
-                _rec = json.loads(_fh.read())
+                _consider(json.loads(_fh.read()))
         except (OSError, ValueError):
             continue
-        if not isinstance(_rec, dict):
-            continue
-        # only COMPLETED runs (skip interrupted / in-flight phases)
-        if (_rec.get('phase') not in ('done', 'failed')
-                and _rec.get('status') not in ('PASS', 'FAIL')):
-            continue
-        _line = _build_history_line(_rec)
-        _key = (_line['package'], _line['ts'])
-        if _key in _seen:
-            continue
-        _seen.add(_key)
-        _out.append(_line)
     _out.sort(key=lambda _r: str(_r.get('ts') or ''))
     return _out
 
