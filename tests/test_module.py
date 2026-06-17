@@ -13148,6 +13148,26 @@ def test_obs02_build_history_ledger_append_and_read():
         assert _rows[1]['version'] == '43-1'             # intended_version fallback
         assert _rows[0]['package'] == 'glibc'
 
+        # OBS-02 fold: read_build_history also surfaces existing <pkg>.build.json
+        # records (builds that predate the ledger), deduped by (package, ts).
+        import json as _json
+        # a package NOT in the ledger → folded in
+        with open(os.path.join(_log_build, 'foo.build.json'), 'w') as _fh:
+            _json.dump({'package': 'foo', 'phase': 'done', 'built_version': '9-1',
+                        'finished': '2026-06-16T09:00:00Z', 'elapsed_seconds': 5.0}, _fh)
+        # a build.json matching the ledger glibc run (same package+ts) → NOT double-counted
+        with open(os.path.join(_log_build, 'glibc.build.json'), 'w') as _fh:
+            _json.dump({'package': 'glibc', 'phase': 'done', 'built_version': '2.36-9',
+                        'finished': '2026-06-16T10:00:00Z', 'elapsed_seconds': 420.1}, _fh)
+        # an interrupted record (no terminal phase/status) → skipped
+        with open(os.path.join(_log_build, 'bar.build.json'), 'w') as _fh:
+            _json.dump({'package': 'bar', 'phase': 'container_exited'}, _fh)
+        _rows2 = _u.read_build_history(_log_build)
+        _pkgs = [_r['package'] for _r in _rows2]
+        assert _pkgs == ['foo', 'glibc', 'gnome-shell'], _pkgs   # chronological, deduped
+        assert _pkgs.count('glibc') == 1                          # no double-count
+        assert 'bar' not in _pkgs                                 # interrupted skipped
+
 
 def test_obs02_record_phase_appends_terminal_runs_to_ledger():
     """OBS-02: BuildContainer._record_phase must append to the cross-run ledger
