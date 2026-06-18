@@ -230,17 +230,11 @@ class RepoCommandsMixin(SessionState):
 
         Remote-endpoint state (publish, audit-remote, federation
         membership) lives under `mirror`.  Source-producing operations
-        (sync, build, tunnel) live under `source`.  MIRROR-01 Phase 8
-        rationalised the surface:
+        (sync, build, tunnel) live under `source`.
 
-          - `tunnel` moved to `source tunnel` (endpoint is a built .deb)
-          - `index` is no longer operator-visible — `chroot build` and
-            `mirror publish` auto-index when InRelease is missing; the
-            handlers stay callable internally (and via
-            `repo repair refresh`).  This avoids an operator decision
-            point with no real user-facing output.
-
-        `repo` now exposes: audit + repair.
+        `repo` exposes: audit + repair.  Pool indexing is automatic —
+        `chroot build` and `mirror publish` index when the InRelease is
+        missing, so there is no operator-facing index action.
         """
         _table = {
             'audit':          'pre-ship gate: dep + conflict + stale-files + '
@@ -252,17 +246,20 @@ class RepoCommandsMixin(SessionState):
         }
         if action == 'tunnel':
             console.print(
-                "`repo tunnel` moved to `source tunnel` in MIRROR-01 "
-                "Phase 8 (tunnel's endpoint is a built .deb — same "
-                "shape as source build).  Use `source tunnel [pkg…]`.",
+                "`repo tunnel` moved to `source tunnel` (the endpoint is a "
+                "built .deb — same shape as source build).  Use "
+                "`source tunnel [pkg…]`.",
                 tui.COLOR_WARNING)
             return False
         if action == 'index':
+            # Retired as an operator command — kept as a redirect hint for
+            # muscle memory.  The handler still exists for the auto-index
+            # paths (chroot build / mirror publish); it just isn't dispatched
+            # here.  `repo audit`'s test pins this shape.
             console.print(
-                "`repo index` is no longer operator-visible (MIRROR-01 "
-                "Phase 8) — `chroot build` and `mirror publish` "
-                "auto-index when needed.  Use `repo repair` if you "
-                "suspect a stale index.",
+                "`repo index` is no longer operator-visible — `chroot build` "
+                "and `mirror publish` auto-index when needed.  Use "
+                "`repo repair` if you suspect a stale index.",
                 tui.COLOR_WARNING)
             return False
         if action == 'audit':
@@ -335,7 +332,7 @@ class RepoCommandsMixin(SessionState):
         for any .deb that arrived in repo/ via a path that bypasses
         BuildContainer (manual copy, ingestion, etc.).
 
-        Usage: package strip [force]
+        Usage: repo repair strip [force]
           force — skip the PROMPT_YESNO confirmation
         """
         _force = 'force' in args
@@ -778,8 +775,8 @@ class RepoCommandsMixin(SessionState):
     def cmd_package_cleanup(self, *args):
         """Identify and delete obsolete .debs/.udebs in repo/.
 
-        Usage: package cleanup [verbose]            — dry-run report
-               package cleanup force [verbose]      — actually delete
+        Usage: repo repair cleanup [verbose]          — dry-run report
+               repo repair cleanup force [verbose]    — actually delete
 
         Obsolete categories (BOTH selected_srcs and selected_pkgs from
         both deb + udeb trees are factored — base / live / installer /

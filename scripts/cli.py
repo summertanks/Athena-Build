@@ -276,9 +276,9 @@ class Cli:
     def wait(self) -> None:
         """REPL loop OR one-shot dispatcher.
 
-        UX-05e: when ``self.one_shot_cmds`` is non-empty, run each queued
-        command in order and exit — no REPL.  Useful for CI / scripted
-        installs (`./build-system.sh -c "cache build" -c "dep parse"`).
+        When ``self.one_shot_cmds`` is non-empty, run each queued command
+        in order and exit — no REPL.  Useful for CI / scripted installs
+        (`./build-system.sh -c "cache build" -c "cache parse"`).
         Exit code: 0 if all succeeded, 1 if any handler raised.
 
         Otherwise: REPL.  Reads one command per line from stdin,
