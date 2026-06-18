@@ -1328,9 +1328,6 @@ class _ChrootMixin:
             ['sudo', '-S', 'install', '-dv', '-m', '0750', f'{self._dir_chroot}/root'],
             ['sudo', '-S', 'install', '-dv', '-m', '1777',
              f'{self._dir_chroot}/tmp', f'{self._dir_chroot}/var/tmp'],
-            ['sudo', '-S', 'chgrp', '-v', 'utmp', f'{self._dir_chroot}/var/log/lastlog'],
-            ['sudo', '-S', 'chmod', '-v', '664',  f'{self._dir_chroot}/var/log/lastlog'],
-            ['sudo', '-S', 'chmod', '-v', '600',  f'{self._dir_chroot}/var/log/btmp'],
             ['sudo', '-S', 'chmod', '-R', '755',  f'{self._dir_chroot}/etc/'],
         ]
 

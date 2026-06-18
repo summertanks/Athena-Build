@@ -22,27 +22,6 @@ from commands.base import SessionState
 logger = logging.getLogger('athena.build')
 
 
-def _safe_filesize(path: str) -> int:
-    """os.path.getsize that returns 0 instead of raising on missing /
-    permission errors.  Used by status/summary printers that want to
-    sum a list of paths without partial failures interrupting output."""
-    try:
-        return os.path.getsize(path)
-    except OSError:
-        return 0
-
-
-def _humansize(n: int) -> str:
-    """Render a byte count as B / KiB / MiB / GiB with 1 decimal."""
-    if n < 1024:
-        return f"{n} B"
-    if n < 1024 * 1024:
-        return f"{n / 1024:.1f} KiB"
-    if n < 1024 * 1024 * 1024:
-        return f"{n / (1024 * 1024):.1f} MiB"
-    return f"{n / (1024 * 1024 * 1024):.1f} GiB"
-
-
 def _shorten_origin(url: str, max_len: int = 70) -> str:
     """Compact a long pool URL: keep the host and the last 5 path
     components, drop the middle.  No-op when under max_len."""
@@ -545,7 +524,7 @@ class TunnelCommandsMixin(SessionState):
             _upstream_ver = str(src_pkg.version)
             _pristine_ver = utils.strip_nmu_suffix(_upstream_ver)
             _total_bytes = sum(
-                _safe_filesize(_dst) for _dst in _final_paths.values())
+                max(safe_size(_dst), 0) for _dst in _final_paths.values())
             if _pristine_ver == _upstream_ver and _stamps_count == 0:
                 _ver_line = f"{_pristine_ver} (pristine)"
             else:
@@ -554,7 +533,7 @@ class TunnelCommandsMixin(SessionState):
                 f"  {src_pkg.package}  TUNNELED  {_ver_line}")
             console.print(
                 f"    files     {len(_outputs_sorted)}  "
-                f"({_humansize(_total_bytes)}, "
+                f"({human_size(_total_bytes)}, "
                 f"{_strips_count} stripped, "
                 f"{_stamps_count} asg-stamped)")
             _pool_dir: 'Optional[str]' = None

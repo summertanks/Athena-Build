@@ -890,23 +890,30 @@ def _print_groups(session, *_extras) -> None:
     # filename parser that _select_pool_files uses so the canonical
     # name lookup matches what ends up in the ISO pool.
     _size_by_pkg: 'dict[str, int]' = {}
-    _repo = getattr(session.config, 'dir_repo', None)
-    if _repo and os.path.isdir(_repo):
-        import iso_installer as _iso_inst
+    import iso_installer as _iso_inst
+    try:
+        _deb_dirs = session.config.all_deb_dirs()
+    except Exception:
+        _deb_dirs = []
+    for _dd in _deb_dirs:
+        # Post-CONF-01 the .debs live under dists/<codename>/<comp>/binary-*/,
+        # not at the repo root — walk the real binary dirs or the size
+        # column is permanently '?'.
+        if not os.path.isdir(_dd):
+            continue
         try:
-            for _fn in os.listdir(_repo):
+            for _fn in os.listdir(_dd):
                 if not _fn.endswith('.deb'):
                     continue
                 _pkg, _ = _iso_inst._parse_deb_filename(_fn)
                 if not _pkg:
                     continue
                 try:
-                    _sz = os.path.getsize(os.path.join(_repo, _fn))
+                    _sz = os.path.getsize(os.path.join(_dd, _fn))
                 except OSError:
                     continue
-                # When repo/ holds multiple versions of the same
-                # package, take the largest as the size estimate.
-                # Approximate, fine for an operator-facing report.
+                # Multiple versions of one package → take the largest as
+                # the estimate.  Approximate, fine for an operator report.
                 if _sz > _size_by_pkg.get(_pkg, 0):
                     _size_by_pkg[_pkg] = _sz
         except OSError:

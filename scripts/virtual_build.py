@@ -813,7 +813,7 @@ _PIN_RE = re.compile(r'\(\s*(<=|>=|<<|>>|=)\s*([^)]+?)\s*\)')
 
 
 def _reconstruct_historical_ledger(
-    source: 'Any', output_hashes: 'Dict[str, str]',
+    output_hashes: 'Dict[str, str]',
     current_ledger: 'Dict[str, List[str]]',
 ) -> 'Dict[str, List[str]]':
     """Reconstruct what `published_ledger()` saw at the time this
@@ -1026,7 +1026,7 @@ def validate_against_build_records(
         # udebs from the reconstruction's per-binary N detection.
         _emission_dict = dict.fromkeys(_real_files, '')
         _historical_ledger = _reconstruct_historical_ledger(
-            _src, _emission_dict, asg_ledger or {})
+            _emission_dict, asg_ledger or {})
         # Derive at-build-time SOURCE state from the same set — the
         # only authoritative record of what actually got built.
         #   _src_pristine_at_build: pristine_base of any output's
