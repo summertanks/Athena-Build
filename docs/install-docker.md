@@ -2,9 +2,19 @@
 
 Athena-Build's source-build stage runs each `dpkg-buildpackage` inside a
 Docker container so the build host stays clean and the build is hermetic
-against host-installed dev packages.  You need **Docker Engine** (not
-Docker Desktop — Desktop's VM doesn't expose the host filesystem the way
-the build pipeline expects).
+against host-installed dev packages.
+
+For a **native-Linux distribution-build host** (the full pipeline — chroot,
+ISO, disk image) use **Docker Engine**, not Docker Desktop: a full build
+also uses host-side privileged operations (loop devices, mounts, sudo) and
+Docker Desktop's VM doesn't expose the host filesystem the way those steps
+expect.
+
+For a **WSL build-mode peer** (`[Build] Mode = build` — see "WSL build-mode
+peer" below), **Docker Desktop's WSL integration is fine**: build mode only
+runs the Docker-based source build (chroot/ISO/disk steps are refused), and
+its bind-mounts are Linux paths *inside the WSL distro*, which WSL
+integration handles correctly. No native Engine required there.
 
 The distribution-repo Docker is usually too old.  Use Docker's own apt
 repository for an up-to-date Engine.
@@ -50,6 +60,42 @@ https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
 ```
 
 Everything else is identical.
+
+## WSL build-mode peer (Docker Desktop integration)
+
+A federation **build-mode peer** can run under WSL2 on Windows using
+**Docker Desktop with WSL integration enabled** — the host's Docker engine
+is shared into the distro, so `docker.from_env()` connects to it over the
+integrated socket. This is *not* docker-in-docker and *not* a VM-as-build-
+environment: WSL2 is the Linux userland, and Docker Desktop is the engine
+exposed into it.
+
+Setup:
+
+1. Install Docker Desktop on Windows and enable **Settings → Resources →
+   WSL integration** for your distro.
+2. In the WSL distro, confirm the engine is reachable:
+   ```bash
+   docker info        # should print the Docker Desktop engine, no sudo
+   ```
+3. Set `[Build] Mode = build` in `config/build.conf` and populate
+   `config/build_pkg.list` with the packages this peer owns.
+
+On startup Athena-Build logs the connected Docker endpoint + engine identity
+so you can confirm it's the host Docker Desktop daemon (shared via WSL
+integration) and that daemons aren't being nested. With `Mode = build`,
+`build-system.sh` also downgrades the ISO/disk host-tool checks from fatal
+to a note — a build-mode peer needs only Docker + the cache/source
+toolchain, not `mksquashfs` / `losetup` / `xorriso` / `mkfs.*`.
+
+What stays on the build-mode (Docker-only) path — and therefore works under
+WSL integration without host privileges: cache build, dep parse, source
+sync, container init, source build (strip + asg-stamp), and `mirror
+publish`. The privileged host operations (loop devices, `mkfs`, host sudo,
+mounts) only appear in the chroot/ISO/disk steps, which build mode refuses.
+
+> Note: `ATHENA_ALLOW_IPV6=1` is *not* needed under WSL — Athena pins HTTP
+> to IPv4 at startup, which also sidesteps WSL2's NAT-IPv6 stalls.
 
 ## Notes
 
